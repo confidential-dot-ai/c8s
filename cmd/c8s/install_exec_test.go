@@ -321,11 +321,12 @@ func TestDetectDistroExec(t *testing.T) {
 			t.Fatalf("detectDistro = (%q, %v), want (k8s, nil)", got, err)
 		}
 	})
-	t.Run("kubectl failure surfaces", func(t *testing.T) {
+	t.Run("kubectl failure surfaces its stderr", func(t *testing.T) {
 		f := newFakeBin(t)
-		f.tool(t, "kubectl", "exit 1")
-		if _, err := detectDistro(context.Background()); err == nil {
-			t.Fatal("want error when kubectl fails")
+		f.tool(t, "kubectl", "echo The connection to the server dead was refused >&2; exit 1")
+		_, err := detectDistro(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "The connection to the server dead was refused") {
+			t.Fatalf("want kubectl's own reason in the error, got %v", err)
 		}
 	})
 }
@@ -1110,6 +1111,189 @@ func TestInstallRequiresCLIsOnPath(t *testing.T) {
 		err := runC8s(t, "install", "--cvm-mode=node", "--force")
 		if err == nil || !strings.Contains(err.Error(), "kubectl CLI not found") {
 			t.Fatalf("want a kubectl-not-found error, got %v", err)
+		}
+	})
+}
+
+// helmValuesCapture re-stubs helm so an `upgrade` appends every -f file's
+// content (path header + payload) to captureFile, in argv order. It keeps the
+// installStubs `show values` answer.
+func helmValuesCapture(t *testing.T, s *installStubs, captureFile string) {
+	t.Helper()
+	s.f.tool(t, "helm", `case "$1" in
+show) /bin/cat "$3/values.yaml" ;;
+upgrade)
+  prev=; last=
+  for a in "$@"; do
+    if [ "$prev" = "-f" ]; then
+      echo "== $a" >> '`+captureFile+`'
+      /bin/cat "$a" >> '`+captureFile+`'
+      last="$a"
+    fi
+    prev="$a"
+  done
+  if [ -n "$last" ]; then /bin/cp "$last" '`+s.computed+`'; fi
+  ;;
+esac`)
+}
+
+// `c8s install -f -` pipes stdin into a real values file: the distro scan and
+// effectiveValues must read it, and helm must receive the piped bytes as a
+// -f file ahead of the computed values.
+func TestInstallValuesFromStdin(t *testing.T) {
+	payload := "volumed:\n  enabled: true\nkata:\n  distro: rke2\n"
+
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	capture := filepath.Join(s.f.dir, "values-stream.log")
+	helmValuesCapture(t, s, capture)
+
+	resetCLIState(t)
+	t.Cleanup(func() { rootCmd.SetIn(nil) })
+	rootCmd.SetIn(strings.NewReader(payload))
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "--wait=false", "-f", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	calls := s.f.calls(t)
+
+	// The piped kata.distro owns the distro, so detection never runs.
+	mustNotContainPrefix(t, calls, "kubectl get nodes -o jsonpath")
+
+	// The piped volumed.enabled=true is visible to the digest resolver, which
+	// reads effectiveValues — volumed is pinned only when enabled there.
+	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/volumed:main")
+
+	// Helm received the piped values as a real -f file, followed by the
+	// computed values file (which wins on shared keys).
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read values capture: %v", err)
+	}
+	sections := strings.Split(string(data), "== ")
+	if len(sections) != 3 { // leading empty + stdin file + computed file
+		t.Fatalf("helm received %d -f files, want 2:\n%s", len(sections)-1, data)
+	}
+	stdinSection := sections[1]
+	header, content, _ := strings.Cut(stdinSection, "\n")
+	if !strings.Contains(header, "c8s-install-stdin-") {
+		t.Errorf("first -f is %q, want the materialized stdin file", header)
+	}
+	if content != payload {
+		t.Errorf("helm's stdin-derived -f content = %q, want the piped %q", content, payload)
+	}
+	if got := treeAt(t, readYAMLTree(t, s.computed), "attestationApi", "cvmMode"); got != "node" {
+		t.Errorf("computed values cvmMode = %#v, want node (last -f still the computed file)", got)
+	}
+}
+
+// When stdin cannot be materialized, install fails before anything else runs.
+func TestInstallStdinValuesMaterializeFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("TMPDIR", missing)
+
+	f := newFakeBin(t)
+	resetCLIState(t)
+	t.Cleanup(func() { rootCmd.SetIn(nil) })
+	rootCmd.SetIn(strings.NewReader("tlsLb:\n  enabled: false\n"))
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "-f", "-"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "create stdin values file") {
+		t.Fatalf("want the temp-file error, got %v", err)
+	}
+	if got := f.calls(t); len(got) != 0 {
+		t.Errorf("materializing stdin precedes every exec, logged: %v", got)
+	}
+}
+
+// Flag-validation failures must precede every exec — a doc command that
+// stops parsing is exactly what the doc-parity gate keys on.
+func TestInstallFlagValidationPrecedesExec(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing cvm mode", []string{"install"}, "--cvm-mode is required"},
+		{"debug outside pod mode", []string{"install", "--cvm-mode=node", "--debug"}, "--debug selects the kata-guest-base debug image"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeBin(t)
+			err := runC8s(t, tc.args...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+			if got := f.calls(t); len(got) != 0 {
+				t.Errorf("validation must precede every exec, logged: %v", got)
+			}
+		})
+	}
+}
+
+// effectiveValues surfaces a broken chart, a missing -f file, and an
+// unparseable -f file rather than rendering on defaults the operator did not
+// ask for.
+func TestEffectiveValuesErrorPaths(t *testing.T) {
+	t.Run("unparseable chart values", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "helm", helmShowValuesBody)
+		if _, err := effectiveValues(context.Background(), writeChart(t, "	"), nil); err == nil {
+			t.Fatal("want the chart-values parse error")
+		}
+	})
+
+	t.Run("missing values file", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "helm", helmShowValuesBody)
+		prev := installValues
+		t.Cleanup(func() { installValues = prev })
+		installValues = []string{filepath.Join(t.TempDir(), "missing.yaml")}
+		_, err := effectiveValues(context.Background(), writeChart(t, "a: 1\n"), nil)
+		if err == nil || !strings.Contains(err.Error(), "read values file") {
+			t.Fatalf("want the read error, got %v", err)
+		}
+	})
+
+	t.Run("unparseable values file", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "helm", helmShowValuesBody)
+		prev := installValues
+		t.Cleanup(func() { installValues = prev })
+		bad := filepath.Join(t.TempDir(), "bad.yaml")
+		if err := os.WriteFile(bad, []byte("\t"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		installValues = []string{bad}
+		_, err := effectiveValues(context.Background(), writeChart(t, "a: 1\n"), nil)
+		if err == nil || !strings.Contains(err.Error(), "parse values file") {
+			t.Fatalf("want the parse error, got %v", err)
+		}
+	})
+}
+
+// --hardware-platform fails like --cvm-mode does: at flag validation, before
+// any helm/kubectl invocation.
+func TestInstallValidatesHardwarePlatformBeforeTheCluster(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		f := newFakeBin(t)
+		err := runC8s(t, "install", "--cvm-mode=node", "--hardware-platform=")
+		if err == nil || !strings.Contains(err.Error(), "--hardware-platform is required; one of sev-snp, tdx") {
+			t.Fatalf("want the required-platform error, got %v", err)
+		}
+		if got := f.calls(t); len(got) != 0 {
+			t.Errorf("validation must precede every exec, logged: %v", got)
+		}
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		f := newFakeBin(t)
+		err := runC8s(t, "install", "--cvm-mode=node", "--hardware-platform=power9")
+		if err == nil || !strings.Contains(err.Error(), `--hardware-platform must be one of sev-snp, tdx, got "power9"`) {
+			t.Fatalf("want the unknown-platform error, got %v", err)
+		}
+		if got := f.calls(t); len(got) != 0 {
+			t.Errorf("validation must precede every exec, logged: %v", got)
 		}
 	})
 }

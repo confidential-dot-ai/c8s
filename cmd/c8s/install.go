@@ -473,7 +473,7 @@ func clusterDistroNodes(ctx context.Context) (rke2, other []string, err error) {
 	out, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kubeletVersion}{"\n"}{end}`).Output()
 	if err != nil {
-		return nil, nil, fmt.Errorf("kubectl get nodes: %w", err)
+		return nil, nil, fmt.Errorf("kubectl get nodes: %w", withStderr(err))
 	}
 	rke2, other = classifyDistroNodes(strings.Split(strings.TrimSpace(string(out)), "\n"))
 	return rke2, other, nil
@@ -583,6 +583,47 @@ func valuesFilesSetDistro(files []string) (bool, error) {
 	return false, nil
 }
 
+// materializeStdinValues replaces each "-" entry (helm's -f - idiom) with a
+// temp file holding the piped values, so every values consumer — the distro
+// and TEE-selector scans, effectiveValues, and helm itself — reads the same
+// bytes. Stdin is drained once, so a repeated "-" gets an empty file, as does
+// helm's own repeated -f -. The returned cleanup removes the temp files.
+func materializeStdinValues(files []string, stdin io.Reader) ([]string, func(), error) {
+	out := make([]string, 0, len(files))
+	var temps []string
+	cleanup := func() {
+		for _, t := range temps {
+			os.Remove(t)
+		}
+	}
+	for _, f := range files {
+		if f != "-" {
+			out = append(out, f)
+			continue
+		}
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("read values from stdin: %w", err)
+		}
+		tmp, err := os.CreateTemp("", "c8s-install-stdin-*.yaml")
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("create stdin values file: %w", err)
+		}
+		_, werr := tmp.Write(data)
+		cerr := tmp.Close()
+		if err := errors.Join(werr, cerr); err != nil {
+			os.Remove(tmp.Name())
+			cleanup()
+			return nil, nil, fmt.Errorf("write stdin values file: %w", err)
+		}
+		temps = append(temps, tmp.Name())
+		out = append(out, tmp.Name())
+	}
+	return out, cleanup, nil
+}
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install the c8s operator, CRDs, attestation-api, and component charts via Helm",
@@ -654,9 +695,20 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err := validateCvmMode(installCvmMode); err != nil {
 			return err
 		}
+		if err := validateHardwarePlatform(installHardwarePlatform); err != nil {
+			return err
+		}
 		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
+		// Substitute any "-f -" before anything reads installValues, so the
+		// preflights and helm all see the piped values at a real path.
+		substituted, stdinCleanup, err := materializeStdinValues(installValues, cmd.InOrStdin())
+		if err != nil {
+			return err
+		}
+		defer stdinCleanup()
+		installValues = substituted
 		adoptions, err := collectWorkloadAdoptions(installWorkloadRefs)
 		if err != nil {
 			return err
@@ -1126,12 +1178,8 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
 	}
-	allowedPlatforms := []string{"sev-snp", "tdx"}
-	if hardwarePlatform == "" {
-		return nil, fmt.Errorf("--%s is required; one of %s", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "))
-	}
-	if !slices.Contains(allowedPlatforms, hardwarePlatform) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
+	if err := validateHardwarePlatform(hardwarePlatform); err != nil {
+		return nil, err
 	}
 	helmArgs = append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode)
 	// Device wiring:
@@ -1263,6 +1311,22 @@ func validateCvmMode(cvmMode string) error {
 	}
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
+	}
+	return nil
+}
+
+var allowedPlatforms = []string{"sev-snp", "tdx"}
+
+// validateHardwarePlatform enforces that --hardware-platform is set and known,
+// exactly like its sibling --cvm-mode. install checks it first in RunE, before
+// anything touches the cluster; appendCvmModeInstallArgs re-checks it on the
+// shared builder path so render-values is covered too.
+func validateHardwarePlatform(hardwarePlatform string) error {
+	if hardwarePlatform == "" {
+		return fmt.Errorf("--%s is required; one of %s", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "))
+	}
+	if !slices.Contains(allowedPlatforms, hardwarePlatform) {
+		return fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
 	}
 	return nil
 }
@@ -1807,13 +1871,7 @@ func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (m
 	if err := yaml.Unmarshal(out, &tree); err != nil {
 		return nil, fmt.Errorf("parse chart values: %w", err)
 	}
-	// A "-" (stdin) entry is skipped: stdin is already consumed by the caller,
-	// so a value set only there stays invisible here — a narrow edge next to a
-	// real file, which is the documented path.
 	for _, vf := range installValues {
-		if vf == "-" {
-			continue
-		}
 		raw, err := os.ReadFile(vf)
 		if err != nil {
 			return nil, fmt.Errorf("read values file %q: %w", vf, err)

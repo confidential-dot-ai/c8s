@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -1591,3 +1592,93 @@ func assertArgsEqual(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+func TestValuesFilesSetDistroErrorPaths(t *testing.T) {
+	if _, err := valuesFilesSetDistro([]string{filepath.Join(t.TempDir(), "missing.yaml")}); err == nil {
+		t.Fatal("want the read error surfaced")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(bad, []byte("\t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := valuesFilesSetDistro([]string{bad}); err == nil {
+		t.Fatal("want the parse error surfaced")
+	}
+}
+
+func TestMaterializeStdinValues(t *testing.T) {
+	t.Run("no dash passes files through untouched", func(t *testing.T) {
+		got, cleanup, err := materializeStdinValues([]string{"a.yaml", "b.yaml"}, strings.NewReader("ignored"))
+		if err != nil {
+			t.Fatalf("materializeStdinValues: %v", err)
+		}
+		defer cleanup()
+		if !reflect.DeepEqual(got, []string{"a.yaml", "b.yaml"}) {
+			t.Errorf("got %v, want the input unchanged", got)
+		}
+	})
+
+	t.Run("dash becomes a temp file holding the piped bytes, in order", func(t *testing.T) {
+		payload := "tlsLb:\n  enabled: false\n"
+		got, cleanup, err := materializeStdinValues([]string{"base.yaml", "-", "last.yaml"}, strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("materializeStdinValues: %v", err)
+		}
+		defer cleanup()
+		if len(got) != 3 || got[0] != "base.yaml" || got[2] != "last.yaml" || got[1] == "-" {
+			t.Fatalf("substitution broke ordering: %v", got)
+		}
+		data, err := os.ReadFile(got[1])
+		if err != nil {
+			t.Fatalf("read materialized file: %v", err)
+		}
+		if string(data) != payload {
+			t.Errorf("materialized content = %q, want the piped %q", data, payload)
+		}
+	})
+
+	t.Run("cleanup removes the temp files", func(t *testing.T) {
+		got, cleanup, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n"))
+		if err != nil {
+			t.Fatalf("materializeStdinValues: %v", err)
+		}
+		cleanup()
+		if _, err := os.Stat(got[0]); !os.IsNotExist(err) {
+			t.Errorf("temp file %s survives cleanup: %v", got[0], err)
+		}
+	})
+
+	t.Run("a stdin read failure aborts", func(t *testing.T) {
+		if _, _, err := materializeStdinValues([]string{"-"}, errReader{}); err == nil {
+			t.Fatal("want the read error surfaced")
+		}
+	})
+
+	t.Run("a temp-file write failure aborts", func(t *testing.T) {
+		// RLIMIT_FSIZE=0 fails the payload write (Go swallows the SIGXFSZ).
+		var orig syscall.Rlimit
+		if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &orig); err != nil {
+			t.Skipf("getrlimit: %v", err)
+		}
+		zero := orig
+		zero.Cur = 0
+		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &zero); err != nil {
+			t.Skipf("setrlimit: %v", err)
+		}
+		t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &orig) })
+		if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err == nil {
+			t.Fatal("want the write error surfaced")
+		}
+	})
+
+	t.Run("an uncreatable temp dir aborts", func(t *testing.T) {
+		t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+		if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err == nil {
+			t.Fatal("want the temp-file error surfaced")
+		}
+	})
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }

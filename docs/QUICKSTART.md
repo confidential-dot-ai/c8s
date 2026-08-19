@@ -24,13 +24,16 @@ This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
 webhook, attestation-api, and CDS.
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator-pub.pem \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 `--cvm-mode` is required — one of `pod` (per-pod kata CVMs), `node`
 (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here), `gke`, or
-`aks`. `--operator-keys` takes a PEM bundle of EC public keys that authorize
+`aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
+`tdx` (under `aks` it selects the Azure vTPM shape instead). `--operator-keys`
+takes a PEM bundle of EC public keys that authorize
 `c8s allowlist` writes; without it the install refuses to proceed (pass
 `--force` to install with allowlist writes disabled):
 
@@ -80,8 +83,9 @@ default image tag of its own, so the image tag above is supplied by
 To install without the advisory CRDs:
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem --install-crds=false \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator-pub.pem --install-crds=false \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 The cluster still runs without CRDs. CRDs only provide demo/status UX such as
@@ -102,9 +106,10 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-username=<user-or-x-access-token> \
   --docker-password="$GITHUB_TOKEN"
 
-c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
+c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 `scripts/deploy-image-pull-secret.sh` wraps the secret-creation step
@@ -112,9 +117,10 @@ idempotently (re-run it to rotate the credential in place):
 
 ```sh
 IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
-c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
+c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 Pass `NAMESPACE=c8s-system` explicitly — the script defaults to `default`,

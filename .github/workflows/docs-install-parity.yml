@@ -1,0 +1,40 @@
+name: docs install parity
+
+on:
+  pull_request:
+    paths: &parity-paths
+      - "docs/QUICKSTART.md"
+      - "docs/DEMO.md"
+      # The flag validation and preflights the gate exercises live here.
+      - "cmd/c8s/**"
+      - "scripts/check-doc-install-commands.sh"
+      - ".github/workflows/docs-install-parity.yml"
+  push:
+    branches: [main, "feat/**"]
+    paths: *parity-paths
+
+concurrency:
+  group: docs-install-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  doc-commands:
+    name: Doc install commands
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - name: Build the c8s CLI
+        run: go build -o "$GITHUB_WORKSPACE/bin/c8s" ./cmd/c8s
+
+      - name: Run the documented c8s commands to the cluster boundary
+        run: PATH="$GITHUB_WORKSPACE/bin:$PATH" scripts/check-doc-install-commands.sh

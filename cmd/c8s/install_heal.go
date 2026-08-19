@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -55,6 +56,17 @@ func runCommand(ctx context.Context, stdout, stderr io.Writer, name string, args
 	c.Stdout = stdout
 	c.Stderr = stderr
 	return c.Run()
+}
+
+// withStderr appends the stderr an exec failure captured (Cmd.Output records
+// it on ExitError when Cmd.Stderr is unset), so kubectl's own reason reaches
+// the operator instead of a bare "exit status 1".
+func withStderr(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return err
 }
 
 // looksLikeRolloutTimeout narrows the heal to the specific class of helm

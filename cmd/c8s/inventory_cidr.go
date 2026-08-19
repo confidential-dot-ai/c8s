@@ -36,7 +36,7 @@ func resolveInventoryCIDRs(ctx context.Context, explicit []string) ([]string, er
 func preflightNodeAddressBound(ctx context.Context) error {
 	out, err := fetchNodeJSON(ctx)
 	if err != nil {
-		return fmt.Errorf("kubectl get nodes: %w", err)
+		return fmt.Errorf("kubectl get nodes: %w", withStderr(err))
 	}
 	var nodes corev1.NodeList
 	if err := json.Unmarshal(out, &nodes); err != nil {

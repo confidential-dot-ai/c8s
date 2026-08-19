@@ -52,11 +52,10 @@ rke2). An install with `-f` values owns the distro instead: set
 doesn't fit — a mixed cluster cannot be detected and always needs that, plus
 nodeSelectors to partition the install.
 
-The kata-image-puller and node-taint sidecar are on by default under `--cvm-mode=pod`.
-A single-node / local build can switch either off, and pin the guest image
-tag, through a `-f` values file (`kata.guestImage.enabled=false` /
-`kata.nodeTaint.enabled=false` / `kata.guestImage.tag=<tag>`) — there is no
-dedicated CLI flag for these.
+The kata-image-puller is on by default under `--cvm-mode=pod`. A
+single-node / local build can switch it off, and pin the guest image tag,
+through a `-f` values file (`kata.guestImage.enabled=false` /
+`kata.guestImage.tag=<tag>`) — there is no dedicated CLI flag for these.
 
 `--cvm-mode=pod --debug` points the puller at the `<tag>-debug` guest image —
 identical except the baked guest policy allows host log/exec streams, so
@@ -83,13 +82,12 @@ not a cluster resource.
 | kata-deploy DaemonSet | ✗ | ✓ | host (privileged, hostPID/hostNetwork) |
 | kata RuntimeClasses | ✗ | ✓ | cluster |
 | kata-image-puller | ✗ | ✓¹ | host (privileged) |
-| node-taint | ✗ | ✓² | host (kata-deploy sidecar) |
 | kata-enforcement VAP | ✗ | ✓ | cluster |
 | RuntimeClass injection (workloads) | ✗ | ✓ | webhook (admission time) |
 | get-cert injection (`confidential.ai/cw` pods) | ✓ | ✓ | webhook (admission time) |
 | tls-lb (bundled workload) | ✓ | ✓ CVM | runc in base; `kata-qemu-snp` CVM under kata (pinned by the chart) |
 
-¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)  ² on by default; disable via `-f` values (`kata.nodeTaint.enabled=false`)
+¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)
 
 Under kata, **every host-side security component (attestation-service,
 ratls-mesh, nri-image-policy) moves *inside* the confidential guest**, where
@@ -161,7 +159,7 @@ sequenceDiagram
     participant Op as operator pod
     participant Pods as workloads
 
-    CLI->>K: kubectl apply Namespace (privileged label if --cvm-mode=pod)
+    CLI->>K: kubectl apply Namespace (labelled pod-security=privileged in every mode)
     CLI->>Helm: helm upgrade --install --wait
     Note over Helm: normal resources (kind-order)
     Helm->>K: create operator Deployment, kata-deploy, CDS, ...
@@ -337,25 +335,34 @@ already deleted. See [`kata.md`](kata.md#uninstalling).
 ## Quick reference
 
 ```bash
+# Every flow below also requires --hardware-platform (the nodes' CPU TEE:
+# sev-snp or tdx). --operator-keys authorizes `c8s allowlist` writes; a -f
+# values file may carry the keys instead, and --force installs without.
 # --upstream (with the port on its --workload-ref) points tls-lb at an adopted
-# workload's mesh-wrapped headless Service for every flow below
-# (see operator.md, "tls-lb upstream").
+# workload's mesh-wrapped headless Service (see operator.md, "tls-lb upstream").
 
 # Base — normal cluster, host-side components, no per-pod confidentiality.
-c8s install --cvm-mode=node --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --cvm-mode=node --hardware-platform=sev-snp --operator-keys operator-pub.pem \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # Kata (enforcing): every workload pod becomes a kata VM, non-kata pods
 # rejected, host-side mesh/attestation/image-policy replaced by their
-# in-guest counterparts.
-c8s install --cvm-mode=pod --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+# in-guest counterparts. --measurements pins the kata guest launch digest
+# (from `c8s kata measure`); without it no cw workload can start.
+c8s install --cvm-mode=pod --hardware-platform=sev-snp --operator-keys operator-pub.pem \
+  --measurements <kata-guest-digest> \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # RKE2 host — the distro is detected from the cluster, no extra flag.
-c8s install --cvm-mode=pod --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --cvm-mode=pod --hardware-platform=sev-snp --operator-keys operator-pub.pem \
+  --measurements <kata-guest-digest> \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # Single-node / local build (no registry artifact, don't starve the one node).
-# The puller + node-taint are on by default; switch them off via a values file:
-#   kata: {guestImage: {enabled: false}, nodeTaint: {enabled: false}}
-c8s install --cvm-mode=pod --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm -f single-node.values.yaml
+# The puller is on by default; switch it off via a values file:
+#   kata: {guestImage: {enabled: false}}
+c8s install --cvm-mode=pod --hardware-platform=sev-snp -f single-node.values.yaml \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # Uninstall: helm uninstall + sweep the kata artifacts off every node.
 c8s uninstall
