@@ -488,7 +488,10 @@ MRTD alone warns that they are unmeasured by that policy. To pin the whole
 image, pass `--image-manifest <file>` — a build-artifact manifest published
 with the guest image build, carrying `mrtd`, `rtmr1` and `rtmr2` (96
 lowercase hex chars each, each named once) under its `tdx` object, as a
-confos manifest publishes them; a flat top-level tuple is also accepted. The
+confos manifest publishes them; a flat top-level tuple is also accepted.
+The manifest ships as a `manifest.json` layer in the image's oras artifact
+(the tag the CDI ref carries without its `-cdi` suffix), so it can be
+fetched with `crane blob` for the exact build a node booted. The
 three registers are loaded atomically from that one provenanced manifest and
 all three are compared exactly, the same rule `c8s get-kubeconfig` applies to
 the same manifest — MRTD is deliberately not merged into the `--measurements`
