@@ -563,3 +563,70 @@ func TestVerifyServerCertSNPPropagatesVerifierError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+// The attest gate must accept bare-metal SNP evidence whose cert_chain is
+// null — the shape the guest attestation-api actually serves (c8s#415). It
+// used to go through attestation-go's offline path, which requires the VCEK
+// inline and fetches nothing, so every real SNP node failed the gate with
+// "evidence is missing cert_chain.vcek" while the RA-TLS dial arm (already on
+// localverify) would have accepted the same node.
+func TestAttestGateAcceptsSNPEvidenceWithoutInlineVCEK(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	params := stubSNPRATLS(t, snpResultFor(exp, 2), nil)
+
+	// Exactly what the guest serves: a raw report and cert_chain: null.
+	envelope := []byte(`{"platform":"snp","evidence":{"attestation_report":"AAAA","cert_chain":null}}`)
+	nonce := []byte("nonce-bound-to-this-request")
+
+	if _, err := verifyEvidence(envelope, nonce, exp); err != nil {
+		t.Fatalf("verifyEvidence on VCEK-less SNP evidence: %v", err)
+	}
+	// The gate must hand the collateral-fetching verifier the same two pins
+	// the dial arm passes, and the caller's nonce as the binding anchor.
+	if len(params.Measurements) != len(exp.snpPins.BySMP) {
+		t.Errorf("passed %d measurements, want %d", len(params.Measurements), len(exp.snpPins.BySMP))
+	}
+	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
+		t.Errorf("ExpectedInitDataHash = %x, want %x", params.ExpectedInitDataHash, exp.hostData)
+	}
+	if !bytes.Equal(params.ExpectedReportData, nonce) {
+		t.Errorf("ExpectedReportData = %q, want the caller's nonce %q", params.ExpectedReportData, nonce)
+	}
+}
+
+// The SNP gate keeps failing closed on every claim that contradicts the policy.
+func TestAttestGateSNPFailsClosed(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	other := snpTestPolicy(t, operatorPub(t))
+	envelope := []byte(`{"platform":"snp","evidence":{"attestation_report":"AAAA","cert_chain":null}}`)
+
+	cases := map[string]func() (*teetypes.VerificationResult, error){
+		"verifier refuses (bad evidence / KDS down)": func() (*teetypes.VerificationResult, error) {
+			return nil, fmt.Errorf("collateral unavailable")
+		},
+		"report_data not bound": func() (*teetypes.VerificationResult, error) {
+			r := snpResultFor(exp, 2)
+			r.ReportDataMatch = teetypes.Ptr(false)
+			return r, nil
+		},
+		"another operator key's HOSTDATA": func() (*teetypes.VerificationResult, error) {
+			r := snpResultFor(exp, 2)
+			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			return r, nil
+		},
+		"unpinned launch digest": func() (*teetypes.VerificationResult, error) {
+			r := snpResultFor(exp, 2)
+			r.Claims.LaunchDigest = strings.Repeat("ab", runtimemeasure.Size)
+			return r, nil
+		},
+	}
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			res, err := mk()
+			stubSNPRATLS(t, res, err)
+			if _, gotErr := verifyEvidence(envelope, []byte("nonce"), exp); gotErr == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
