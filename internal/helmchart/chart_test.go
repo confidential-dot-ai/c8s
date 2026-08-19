@@ -7685,3 +7685,60 @@ func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 			want, got, bakedPath)
 	}
 }
+
+// The root key set is closed, so a values file carried over from an older
+// release — or one with a typo above the sealed subtrees — is refused instead
+// of being silently dropped. This is the class that caused the incident the
+// schema was added for; sealing only four subtrees left it open everywhere else.
+func TestChartValuesSchemaRejectsUnknownRootKeys(t *testing.T) {
+	for _, key := range []string{"webhookk", "clusterName", "nriImagePolicyy"} {
+		t.Run(key, func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", key+".enabled=true")
+			if err == nil {
+				t.Fatalf("helm template accepted unknown root key %q\n%s", key, out)
+			}
+			// Wording differs across helm versions; match the shared stem.
+			if lower := strings.ToLower(out); !strings.Contains(lower, "additional propert") ||
+				!strings.Contains(lower, strings.ToLower(key)) {
+				t.Errorf("failure does not name %q as an unknown key:\n%s", key, out)
+			}
+		})
+	}
+}
+
+// teeProxy stays in the schema on purpose: validations.yaml answers it with a
+// migration message, which a generic unknown-key refusal would replace.
+func TestChartTeeProxyKeepsItsMigrationMessage(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "teeProxy.hostPort.enabled=true")
+	if err == nil {
+		t.Fatalf("helm template accepted teeProxy values\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "removed_component" {
+		t.Errorf("validation kind = %q, want removed_component (the schema swallowed it)", kind)
+	}
+}
+
+// A NodePort outside the service range, a mistyped service type, or a mistyped
+// policy mode were all accepted silently: nothing in the chart checked any of
+// the three, and the last one only surfaced when the plugin refused its config
+// on the node.
+func TestChartValuesSchemaConstrainsTheEnumsAndRanges(t *testing.T) {
+	for _, tc := range []struct{ name, set string }{
+		{"nodePort below the service range", "cds.service.nodePort=8443"},
+		{"nodePort above the service range", "cds.service.nodePort=40000"},
+		{"unknown service type", "cds.service.type=NodePortt"},
+		{"unknown policy mode", "nriImagePolicy.policy.mode=failclosed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if out, err := helmTemplate(t, "--set", tc.set); err == nil {
+				t.Fatalf("helm template accepted --set %s\n%s", tc.set, out)
+			}
+		})
+	}
+
+	// The in-range default and the other real mode still render.
+	if out, err := helmTemplate(t, "--set", "cds.service.nodePort=31234",
+		"--set-string", "nriImagePolicy.policy.mode=audit"); err != nil {
+		t.Fatalf("a valid nodePort and mode were refused: %v\n%s", err, out)
+	}
+}

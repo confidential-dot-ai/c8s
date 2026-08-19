@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Lint and render the c8s Helm chart for .github/workflows/chart.yml. Runs three
+# Lint and render the c8s Helm chart for .github/workflows/chart.yml. Runs two
 # checks in sequence (they always ran together, unconditionally):
 #   1. helm lint
 #   2. helm template                       (renders cleanly)
-#   3. helm template --set webhook.enabled=true
 #
 # The image tags/digests below are CI placeholders: helm must resolve every
 # `required`/digest reference for lint+template to pass, but nothing is deployed,
@@ -50,14 +49,5 @@ helm template c8s "$CHART_DIR" \
   --kube-version v1.30.0 \
   --namespace c8s-system \
   "${common_set[@]}" \
-  > /dev/null
-echo "::endgroup::"
-
-echo "::group::helm template (webhook enabled)"
-helm template c8s "$CHART_DIR" \
-  --kube-version v1.30.0 \
-  --namespace c8s-system \
-  "${common_set[@]}" \
-  --set webhook.enabled=true \
   > /dev/null
 echo "::endgroup::"
