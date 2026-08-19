@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -178,12 +179,9 @@ allowlist:
 	}
 }
 
-// A config written before the namespace exemption was removed still carries
-// exempt_namespaces. The loader is not field-strict, so the unknown key is
-// dropped and the plugin starts fail-closed; a strict loader would instead
-// refuse the config and wedge node-wide container creation via
-// required_plugins.
-func TestLoadConfig_StaleExemptNamespacesIgnored(t *testing.T) {
+// exempt_namespaces is parsed into the policy config alongside the snapshot
+// path the plugin persists its captured digest set to.
+func TestLoadConfig_ExemptNamespacesParsed(t *testing.T) {
 	const body = `
 allowlist:
   always_allow:
@@ -194,6 +192,7 @@ allowlist:
 policy:
   mode: fail-closed
   exempt_namespaces: [kube-system, local-path-storage]
+  exempt_snapshot_path: /var/lib/nri-image-policy/exempt-snapshot.json
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -201,10 +200,25 @@ policy:
 	}
 	cfg, err := loadConfig(path)
 	if err != nil {
-		t.Fatalf("a config still carrying exempt_namespaces must load: %v", err)
+		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.Policy.Mode != ModeFailClosed {
-		t.Errorf("Mode = %q, want fail-closed after loading a stale config", cfg.Policy.Mode)
+	if got, want := cfg.Policy.ExemptNamespaces, []string{"kube-system", "local-path-storage"}; !slices.Equal(got, want) {
+		t.Errorf("ExemptNamespaces = %v, want %v", got, want)
+	}
+	if cfg.Policy.ExemptSnapshotPath == "" {
+		t.Error("ExemptSnapshotPath not parsed")
+	}
+}
+
+// exempt_namespaces without a snapshot path is refused: the captured set must
+// have somewhere to persist, or it would silently recapture (and on a reboot
+// freeze empty) every restart.
+func TestValidate_ExemptNamespacesRequireSnapshotPath(t *testing.T) {
+	cfg := validConfig()
+	cfg.Policy.ExemptNamespaces = []string{"kube-system"}
+	cfg.Policy.ExemptSnapshotPath = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when exempt_namespaces is set without exempt_snapshot_path")
 	}
 }
 

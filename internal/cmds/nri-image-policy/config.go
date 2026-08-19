@@ -89,6 +89,14 @@ type policyConfig struct {
 	EnforceExisting       bool        `yaml:"enforce_existing"`        // kill non-allowlisted containers on startup
 	DenyMissingAnnotation bool        `yaml:"deny_missing_annotation"` // deny containers without image annotation
 	LabelRules            []labelRule `yaml:"label_rules"`
+
+	// ExemptNamespaces admits a namespace's containers by the digests captured
+	// running in it at first admission, not by a name the control plane picks.
+	// See exempt.go and docs/getcert-workload-binding.md — Corner 8.
+	ExemptNamespaces []string `yaml:"exempt_namespaces"`
+	// ExemptSnapshotPath persists the captured per-namespace digest set. Required
+	// when ExemptNamespaces is set; must sit on a filesystem that survives reboot.
+	ExemptSnapshotPath string `yaml:"exempt_snapshot_path"`
 }
 
 // labelRule defines a constraint on pod labels. Pods that do not satisfy
@@ -239,6 +247,9 @@ func (c *config) Validate() error {
 	}
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
 		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
+	}
+	if len(c.Policy.ExemptNamespaces) > 0 && c.Policy.ExemptSnapshotPath == "" {
+		return fmt.Errorf("policy.exempt_namespaces requires policy.exempt_snapshot_path: the captured digest set must persist across restarts")
 	}
 	return validateLabelRules(c.Policy.LabelRules)
 }

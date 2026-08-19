@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -104,6 +105,11 @@ type plugin struct {
 	logger     *slog.Logger
 	ready      atomic.Bool
 	containerd containerdOps
+
+	// exempt admits an exempt namespace's containers by the digest set captured
+	// running in it, not by the namespace name. nil ⇔ not opted in
+	// (policy.exempt_namespaces empty) or not yet captured. See exempt.go.
+	exempt atomic.Pointer[exemptSnapshot]
 
 	// inventory serves the sandbox-identity flow (docs/ratls.md). nil ⇔ the flow
 	// is disabled (no workload_claims.socket_dir) — configuration, not a
@@ -274,6 +280,24 @@ func (p *plugin) recordDigest(ctr *api.Container, digest string) {
 	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs())
 }
 
+// resolveDigest returns the canonical store digest for imageRef using the same
+// path checkImage admits on: the inline digest if present, else the containerd
+// content store. Empty on an unresolvable or absent reference. Quiet — the
+// callers that need an audit trail (checkImage) do their own logging.
+func (p *plugin) resolveDigest(ctx context.Context, imageRef string) string {
+	if d := extractDigest(imageRef); d != "" {
+		return d
+	}
+	if imageRef == "" {
+		return ""
+	}
+	resolved, err := p.containerd.Resolve(ctx, imageRef)
+	if err != nil {
+		return ""
+	}
+	return resolved
+}
+
 // evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.
 // Returns true if the pod satisfies the rule (i.e. should be allowed).
 func evaluateRule(rule labelRule, podLabels map[string]string) bool {
@@ -423,16 +447,46 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 // checkContainer runs the label rules and the image allowlist over a
 // container. Only the image digest (answered by the containerd content
 // store) admits; label rules can only deny.
+//
+// A denial in an exempt namespace is downgraded to skip when the container's
+// digest was captured running in that namespace (the frozen snapshot), and only
+// then. The exemption runs last, only downgrades, and is keyed on the resolved
+// digest — a local fact — not the namespace name the control plane chooses.
 func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
-	if verdict == verdictDeny {
-		return verdict, reason
+	if verdict != verdictDeny && cfg.AllowlistEnabled() {
+		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
 	}
 
-	if cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
+	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
+		digest := p.resolveDigest(ctx, imageRef)
+		if p.exempt.Load().admits(namespace, digest) {
+			p.logger.Info("exempt namespace: admitting a container whose digest was captured running here",
+				"namespace", namespace, "pod", podName, "container", ctrName, "digest", digest, "denial", reason)
+			p.audit.Log(audit.Event{
+				Action:    "allow",
+				Reason:    "namespace_exempt",
+				Overrides: reason,
+				Namespace: namespace,
+				Pod:       podName,
+				Container: ctrName,
+				Image:     imageRef,
+			})
+			return verdictSkip, ""
+		}
+		// Exempt namespace, digest not in the frozen snapshot: a drifted or
+		// newly-introduced image. Denied (and never killed — see checkExisting),
+		// audited under a distinct reason so drift is alertable from the log.
+		p.audit.Log(audit.Event{
+			Action:    "deny",
+			Reason:    "exempt_snapshot_miss",
+			Namespace: namespace,
+			Pod:       podName,
+			Container: ctrName,
+			Image:     imageRef,
+		})
 	}
 
 	return verdict, reason
@@ -442,6 +496,84 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 // inventory recovery, or both. See docs/getcert-workload-binding.md, Corner 4.
 func (p *plugin) shouldCheckExisting() bool {
 	return p.cfg.Policy.EnforceExisting || p.inventory != nil
+}
+
+// initExempt loads or captures the exempt-namespace digest snapshot from the
+// Synchronize state. A persisted file is authoritative and frozen: the
+// installer removes it on a boot config rewrite, so its presence means "already
+// captured". Absent, this is the first admission under this config, so it
+// captures what is running in the exempt namespaces now — the platform pods
+// that came up before containerd's required_plugins gate — and freezes that.
+// See exempt.go for why load must win on a reboot.
+func (p *plugin) initExempt(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) {
+	cfg := p.cfg
+	if len(cfg.Policy.ExemptNamespaces) == 0 {
+		return
+	}
+
+	loaded, err := loadExemptSnapshot(cfg.Policy.ExemptSnapshotPath)
+	if err != nil {
+		p.logger.Error("cannot read the exempt-namespace snapshot; exempt namespaces admit nothing until it is regenerated",
+			"path", cfg.Policy.ExemptSnapshotPath, "error", err)
+		return
+	}
+	if loaded != nil {
+		p.exempt.Store(loaded)
+		p.logger.Info("loaded exempt-namespace snapshot",
+			"path", cfg.Policy.ExemptSnapshotPath, "namespaces", loaded.Namespaces, "digests", loaded.count())
+		return
+	}
+
+	captured := p.captureExempt(ctx, pods, ctrs)
+	if captured.empty() {
+		// Freezing an empty capture would deny every platform pod. Leave the
+		// file absent so a later start — once containerd hands over the running
+		// set — captures instead. On a cold boot the file is present and loaded
+		// above, so this only guards a config-rewrite restart that momentarily
+		// saw nothing.
+		p.logger.Warn("no containers running in the exempt namespaces at first admission; snapshot not written",
+			"namespaces", cfg.Policy.ExemptNamespaces)
+		return
+	}
+	p.exempt.Store(captured)
+	if err := captured.persist(cfg.Policy.ExemptSnapshotPath); err != nil {
+		p.logger.Error("cannot persist the exempt-namespace snapshot; it will be recaptured on the next restart",
+			"path", cfg.Policy.ExemptSnapshotPath, "error", err)
+	}
+	p.logger.Info("captured exempt-namespace snapshot",
+		"path", cfg.Policy.ExemptSnapshotPath, "namespaces", captured.Namespaces, "digests", captured.count())
+}
+
+// captureExempt builds a snapshot of the image digests running in the exempt
+// namespaces, keyed by namespace. A container whose digest will not resolve is
+// skipped, not frozen: an unresolved image cannot be an admission key, and
+// admitting it later would need a resolvable digest anyway.
+func (p *plugin) captureExempt(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) *exemptSnapshot {
+	snap := newExemptSnapshot(p.cfg.Policy.ExemptNamespaces)
+
+	podByID := make(map[string]*api.PodSandbox, len(pods))
+	for _, pod := range pods {
+		podByID[pod.GetId()] = pod
+	}
+	for _, ctr := range ctrs {
+		pod := podByID[ctr.GetPodSandboxId()]
+		if pod == nil {
+			continue
+		}
+		namespace := pod.GetNamespace()
+		if !slices.Contains(p.cfg.Policy.ExemptNamespaces, namespace) {
+			continue
+		}
+		imageRef := ctr.GetAnnotations()[annotationImageName]
+		digest := p.resolveDigest(ctx, imageRef)
+		if digest == "" {
+			p.logger.Warn("exempt namespace: skipping a running container whose image digest will not resolve",
+				"namespace", namespace, "container", ctr.GetName(), "image", imageRef)
+			continue
+		}
+		snap.add(namespace, digest)
+	}
+	return snap
 }
 
 // Synchronize is called when the plugin connects to containerd. It records every
@@ -457,6 +589,10 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 			p.inventory.recordSandbox(pod.GetId())
 		}
 	}
+
+	// Load or capture the exempt-namespace snapshot from this connect-time set,
+	// before any container check reads it and regardless of readiness.
+	p.initExempt(ctx, pods, ctrs)
 
 	if !p.shouldCheckExisting() {
 		p.logger.Info("startup check disabled", "pods", len(pods), "containers", len(ctrs))
@@ -501,6 +637,15 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 			continue
 		}
 		if verdict, _ := p.checkContainer(ctx, cfg, pod, ctr, imageRef); verdict != verdictDeny {
+			continue
+		}
+		// A running container in an exempt namespace is never killed: stopping a
+		// platform container (kube-proxy, CoreDNS) can cut the node. A snapshot
+		// miss is denied at the next create and audited; it is not enforced
+		// retroactively against something already running.
+		if slices.Contains(cfg.Policy.ExemptNamespaces, pod.GetNamespace()) {
+			p.logger.Warn("exempt namespace: leaving a running container whose digest is not in the snapshot",
+				"namespace", pod.GetNamespace(), "container", ctr.GetName())
 			continue
 		}
 		// enforce_existing off: the check only feeds the inventory.

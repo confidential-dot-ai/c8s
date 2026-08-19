@@ -6176,7 +6176,9 @@ type installerBootConfig struct {
 		} `yaml:"push"`
 	} `yaml:"allowlist"`
 	Policy struct {
-		Mode string `yaml:"mode"`
+		Mode               string   `yaml:"mode"`
+		ExemptNamespaces   []string `yaml:"exempt_namespaces"`
+		ExemptSnapshotPath string   `yaml:"exempt_snapshot_path"`
 	} `yaml:"policy"`
 }
 
@@ -6229,9 +6231,9 @@ func TestChartBootConfigParsesAsPluginYAML(t *testing.T) {
 	}
 }
 
-// The rendered worker boot config admits by the digest floor alone: no
-// exempt_namespaces key. Mirrors the node-image lockstep pin in
-// image_policy_template_test.go.
+// By default the rendered worker boot config admits by the digest floor alone:
+// no exempt_namespaces key. Mirrors the node-image lockstep pin in
+// image_policy_template_test.go. The opt-in render is covered below.
 func TestChartBootConfigHasNoExemptNamespaces(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
@@ -6245,6 +6247,32 @@ func TestChartBootConfigHasNoExemptNamespaces(t *testing.T) {
 	}
 	if strings.Contains(m[1], "exempt_namespaces") {
 		t.Errorf("worker boot config still renders exempt_namespaces:\n%s", m[1])
+	}
+}
+
+// Setting nriImagePolicy.policy.exemptNamespaces renders the exempt_namespaces
+// list, a snapshot path under the cache dir, and the install-time rm that
+// re-captures on a boot config rewrite. Decoding through yaml.v3 also proves
+// the block does not collide with the rest of the boot config.
+func TestChartBootConfigRendersExemptNamespaces(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "nriImagePolicy.policy.exemptNamespaces={kube-system,gatekeeper-system}",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if got := cfg.Policy.ExemptNamespaces; !slices.Equal(got, []string{"kube-system", "gatekeeper-system"}) {
+		t.Errorf("exempt_namespaces = %v, want [kube-system gatekeeper-system]", got)
+	}
+	if !strings.HasSuffix(cfg.Policy.ExemptSnapshotPath, "/exempt-snapshot.json") {
+		t.Errorf("exempt_snapshot_path = %q, want a .../exempt-snapshot.json path", cfg.Policy.ExemptSnapshotPath)
+	}
+
+	ds := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	if !strings.Contains(script, "rm -f") || !strings.Contains(script, "exempt-snapshot.json") {
+		t.Error("install script must delete the exempt snapshot on a boot config change so it re-captures")
 	}
 }
 
