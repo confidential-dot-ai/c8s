@@ -83,6 +83,15 @@ const (
 // deployments. There is no default: the shape must be stated explicitly.
 var allowedCvmModes = []string{"pod", "node", "gke", "aks"}
 
+// hostedCvmModes are the lanes whose platform pods belong to the cluster
+// provider rather than to c8s, so they are absent from the allowlist the
+// install derives. cvmMode=node is not one: its baked floor already carries the
+// system digests.
+var hostedCvmModes = []string{"pod", "gke", "aks"}
+
+// platformExemptNamespace is the namespace those provider pods run in.
+const platformExemptNamespace = "kube-system"
+
 // cvmModeIsPod reports whether the mode selects the Kata per-pod-CVM stack.
 func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
 
@@ -462,6 +471,269 @@ func labelSelector(sel map[string]any) (string, bool) {
 	return strings.Join(pairs, ","), true
 }
 
+// policyModeFailClosed is the image-policy mode that denies. In `audit` the
+// plugin logs the would-be denial and creates the container anyway.
+const policyModeFailClosed = "fail-closed"
+
+// deniedImagesListed caps the images the refusal prints; the rest are counted.
+const deniedImagesListed = 20
+
+// preflightImagePolicy refuses an install whose rendered image policy would
+// deny the cluster's own platform pods. Registering the plugin restarts
+// containerd, which recreates those containers under the new policy: on a
+// self-managed control plane the static pods are denied and the API server
+// never returns, leaving nothing but out-of-band root to recover with.
+//
+// It reads the EFFECTIVE values (chart defaults + -f + computed), so it runs on
+// every install including -f ones — whoever wrote the policy, a cluster whose
+// own pods it denies is broken the same way. Cluster access is read-only.
+//
+// It also reports to w what an exempt namespace will admit (see
+// reportExemptedImages).
+//
+// --force installs anyway, and returns the same list as a warning.
+func preflightImagePolicy(ctx context.Context, w io.Writer, values map[string]any, components []c8sComponent, releaseNamespace string, force bool) (warn string, err error) {
+	if !boolAtPath(values, "nriImagePolicy.enabled") {
+		return "", nil
+	}
+	// A mode the chart cannot read is the render guard's to reject, not this
+	// preflight's; either way nothing is denied here.
+	if mode, err := stringAtPath(values, "nriImagePolicy.policy.mode"); err != nil || mode != policyModeFailClosed {
+		return "", nil
+	}
+
+	podsJSON, err := exec.CommandContext(ctx, "kubectl", "get", "pods",
+		"--all-namespaces", "-o", "json").Output()
+	if err != nil {
+		return "", fmt.Errorf("kubectl get pods --all-namespaces: %w", err)
+	}
+	var list corev1.PodList
+	if err := json.Unmarshal(podsJSON, &list); err != nil {
+		return "", fmt.Errorf("parse pod list: %w", err)
+	}
+
+	exempt := stringsAtPath(values, exemptNamespacesPath)
+	reportExemptedImages(w, exempt, exemptedPlatformImages(list.Items, exempt))
+
+	denied := deniedPlatformImages(list.Items, releaseNamespace, exempt, admissibleDigests(values, components))
+	if len(denied) == 0 {
+		return "", nil
+	}
+	if force {
+		return "installing a fail-closed image policy that denies " + deniedSummary(denied) + "; those containers will not come back after the containerd restart", nil
+	}
+	return "", fmt.Errorf("fail-closed image admission would deny %s the cluster runs, and registering the plugin restarts containerd — the denied containers would not come back:\n  %s\nAdmit their namespaces with -f setting nriImagePolicy.policy.exemptNamespaces, pin their digests in nriImagePolicy.bootstrapAllowlist.digests, or re-run with --force to install anyway",
+		deniedSummary(denied), strings.Join(denied, "\n  "))
+}
+
+// deniedSummary names the size of the denied set for a one-line message.
+func deniedSummary(denied []string) string {
+	if len(denied) == 1 {
+		return "1 platform image"
+	}
+	return fmt.Sprintf("%d platform images", len(denied))
+}
+
+// platformImageLines returns one "namespace/pod  repository@digest" line per
+// (namespace, digest) accept keeps, sorted. A DaemonSet runs the same image on
+// every node, so entries are deduplicated and named by the first pod carrying
+// them. A pod the kubelet has finished with is skipped: it has no container the
+// containerd restart will recreate, so the policy never sees its images.
+func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string) bool) []string {
+	seen := map[string]bool{}
+	var lines []string
+	for _, p := range pods {
+		if !platformPod(p) || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		for _, st := range podContainerStatuses(p) {
+			digest := imageDigest(st.ImageID, st.Image)
+			if digest == "" || !accept(p.Namespace, digest) {
+				continue
+			}
+			if key := p.Namespace + "\x00" + digest; !seen[key] {
+				seen[key] = true
+				lines = append(lines, fmt.Sprintf("%s/%s  %s@%s", p.Namespace, p.Name, imageRepository(st.Image, st.ImageID), digest))
+			}
+		}
+	}
+	slices.Sort(lines)
+	return lines
+}
+
+// deniedPlatformImages lists the platform-pod images the policy would deny.
+func deniedPlatformImages(pods []corev1.Pod, releaseNamespace string, exempt []string, admitted map[string]bool) []string {
+	denied := platformImageLines(pods, func(namespace, digest string) bool {
+		return namespace != releaseNamespace && !slices.Contains(exempt, namespace) && !admitted[digest]
+	})
+	if len(denied) > deniedImagesListed {
+		rest := len(denied) - deniedImagesListed
+		denied = append(denied[:deniedImagesListed:deniedImagesListed], fmt.Sprintf("… and %d more", rest))
+	}
+	return denied
+}
+
+// exemptedPlatformImages lists the platform-pod images an exempt namespace
+// admits by captured digest.
+func exemptedPlatformImages(pods []corev1.Pod, exempt []string) []string {
+	return platformImageLines(pods, func(namespace, _ string) bool {
+		return slices.Contains(exempt, namespace)
+	})
+}
+
+// reportExemptedImages prints what the exemption will admit. The plugin freezes
+// the digest set per node under its own cache dir, so an install is the one
+// place an operator can review it — and the one place where pinning the same
+// digests in the floor instead is still a choice. Uncapped: a truncated audit
+// list is not one.
+func reportExemptedImages(w io.Writer, exempt, images []string) {
+	if len(images) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "+ image policy: %s admitted by captured digest. The plugin freezes what runs\n"+
+		"  there when it first connects; as of now that is %d image(s):\n", strings.Join(exempt, ", "), len(images))
+	for _, image := range images {
+		fmt.Fprintf(w, "    %s\n", image)
+	}
+	fmt.Fprintf(w, "  To pin them explicitly instead, put these digests in\n"+
+		"  nriImagePolicy.bootstrapAllowlist.digests and set %s: [] via -f.\n", exemptNamespacesPath)
+}
+
+// platformPod reports whether a pod belongs to the cluster's own platform
+// rather than to a tenant: a static pod (the control plane, which the kubelet
+// mirrors into the API) or a DaemonSet pod (CNI, kube-proxy, CSI and device
+// plugins). Those are the pods a containerd restart takes down and the cluster
+// cannot be repaired without. A tenant Deployment denied by a policy the
+// operator is deliberately installing is theirs to allowlist, not a refusal.
+func platformPod(p corev1.Pod) bool {
+	if _, mirror := p.Annotations[corev1.MirrorPodAnnotationKey]; mirror {
+		return true
+	}
+	return slices.ContainsFunc(p.OwnerReferences, func(o metav1.OwnerReference) bool {
+		return o.Kind == "DaemonSet"
+	})
+}
+
+// podContainerStatuses is every container the kubelet reports for a pod, so
+// init and ephemeral containers are checked alongside the main ones.
+func podContainerStatuses(p corev1.Pod) []corev1.ContainerStatus {
+	return slices.Concat(p.Status.InitContainerStatuses, p.Status.ContainerStatuses, p.Status.EphemeralContainerStatuses)
+}
+
+// imageDigest reads the sha256 the policy matches on out of the first
+// reference that carries one — the runtime's resolved imageID for preference,
+// since a tag says nothing about what admission will see. Empty means no
+// reference carried a digest (a container that has not pulled yet), which
+// nothing here can evaluate.
+//
+// A container status reports imageID as a digested reference, as a bare
+// digest, or — on older runtimes — behind a docker-pullable:// prefix.
+func imageDigest(refs ...string) string {
+	for _, ref := range refs {
+		ref = strings.TrimPrefix(ref, "docker-pullable://")
+		if strings.HasPrefix(ref, "sha256:") {
+			return ref
+		}
+		named, err := reference.ParseDockerRef(ref)
+		if err != nil {
+			continue
+		}
+		if digested, ok := named.(reference.Digested); ok {
+			return digested.Digest().String()
+		}
+	}
+	return ""
+}
+
+// imageRepository normalizes the first parseable reference to the bare
+// repository the digest is reported against — the same form
+// workloadImageAllowlistEntry writes into the floor, so a reported line pastes
+// straight into it.
+func imageRepository(refs ...string) string {
+	for _, ref := range refs {
+		named, err := reference.ParseDockerRef(strings.TrimPrefix(ref, "docker-pullable://"))
+		if err != nil {
+			continue
+		}
+		return reference.TrimNamed(named).String()
+	}
+	return ""
+}
+
+// admissibleDigests collects the image digests the rendered floor admits: the
+// operator-supplied bootstrapAllowlist (digests, and the per-container digests
+// of its workloads) plus every pinned component image the floor derives from.
+// The component digests are taken whether or not derivation is on and whether
+// or not the component renders — a digest here that the chart would not
+// actually emit can only mean one fewer image reported, and no c8s component
+// image runs in a platform pod.
+func admissibleDigests(values map[string]any, components []c8sComponent) map[string]bool {
+	admitted := map[string]bool{}
+	for _, c := range components {
+		if digest, err := stringAtPath(values, c.valuePrefix+".digest"); err == nil && digest != "" {
+			admitted[digest] = true
+		}
+	}
+	if floor, ok := valueAtPath(values, "nriImagePolicy.bootstrapAllowlist.digests"); ok {
+		if m, ok := floor.(map[string]any); ok {
+			for digest := range m {
+				admitted[digest] = true
+			}
+		}
+	}
+	if workloads, ok := nestedMap(values, "nriImagePolicy", "bootstrapAllowlist", "workloads"); ok {
+		for _, w := range workloads {
+			for _, digest := range workloadDigests(w) {
+				admitted[digest] = true
+			}
+		}
+	}
+	return admitted
+}
+
+// workloadDigests pulls the container digests out of one decoded
+// bootstrapAllowlist.workloads entry.
+func workloadDigests(workload any) []string {
+	m, ok := workload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, field := range []string{"initContainers", "containers"} {
+		list, _ := m[field].([]any)
+		for _, entry := range list {
+			c, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if digest, ok := c["digest"].(string); ok && digest != "" {
+				out = append(out, digest)
+			}
+		}
+	}
+	return out
+}
+
+// stringsAtPath returns the string list at a dotted path; a missing key, a
+// non-list leaf, or a non-string element yields what could be read.
+func stringsAtPath(tree map[string]any, path string) []string {
+	value, ok := valueAtPath(tree, path)
+	if !ok {
+		return nil
+	}
+	list, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, entry := range list {
+		if s, ok := entry.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // clusterDistroNodes reads every node's kubeletVersion via kubectl and splits
 // the nodes into RKE2-built vs upstream-built buckets.
 //
@@ -560,19 +832,45 @@ func stringAtPath(tree map[string]any, path string) (string, error) {
 	return s, nil
 }
 
+// valueAtPath walks a dotted path through a decoded YAML tree. ok reports
+// whether the key is there, so a key written with a null or empty value is
+// distinguishable from one that is absent.
+func valueAtPath(tree map[string]any, path string) (value any, ok bool) {
+	var cur any = tree
+	for _, seg := range strings.Split(path, ".") {
+		m, isMap := cur.(map[string]any)
+		if !isMap {
+			return nil, false
+		}
+		if cur, ok = m[seg]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// decodeValuesFile reads and parses one -f values file.
+func decodeValuesFile(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read values file %q: %w", path, err)
+	}
+	var tree map[string]any
+	if err := yaml.Unmarshal(data, &tree); err != nil {
+		return nil, fmt.Errorf("parse values file %q: %w", path, err)
+	}
+	return tree, nil
+}
+
 // valuesFilesSetDistro reports whether any -f values file explicitly sets
 // kata.distro or nriImagePolicy.distro. When one does, that file owns the host
 // containerd layout and cluster auto-detection must stand aside; when none
 // does, detection still applies even though other values were supplied.
 func valuesFilesSetDistro(files []string) (bool, error) {
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		tree, err := decodeValuesFile(f)
 		if err != nil {
-			return false, fmt.Errorf("read values file %q: %w", f, err)
-		}
-		var tree map[string]any
-		if err := yaml.Unmarshal(data, &tree); err != nil {
-			return false, fmt.Errorf("parse values file %q: %w", f, err)
+			return false, err
 		}
 		for _, path := range []string{"kata.distro", "nriImagePolicy.distro"} {
 			if v, err := stringAtPath(tree, path); err == nil && v != "" {
@@ -624,6 +922,26 @@ func materializeStdinValues(files []string, stdin io.Reader) ([]string, func(), 
 	return out, cleanup, nil
 }
 
+// exemptNamespacesPath is the image-policy value the hosted lanes default.
+const exemptNamespacesPath = "nriImagePolicy.policy.exemptNamespaces"
+
+// valuesFilesSetExemptNamespaces reports whether any -f values file writes
+// nriImagePolicy.policy.exemptNamespaces. Key presence is the test, an empty
+// list included: writing one chooses digest-only admission, and the
+// hosted-lane default must leave that choice standing.
+func valuesFilesSetExemptNamespaces(files []string) (bool, error) {
+	for _, f := range files {
+		tree, err := decodeValuesFile(f)
+		if err != nil {
+			return false, err
+		}
+		if _, ok := valueAtPath(tree, exemptNamespacesPath); ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install the c8s operator, CRDs, attestation-api, and component charts via Helm",
@@ -655,6 +973,15 @@ override kata.distro / nriImagePolicy.distro via -f for a layout detection
 cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
 containerd-prep initContainer that wires up the drop-in import; no node
 preparation is required beyond a running cluster.
+
+On the hosted lanes (--cvm-mode=pod/gke/aks) the provider's kube-system pods are
+not on the c8s allowlist, so the install renders
+nriImagePolicy.policy.exemptNamespaces=[kube-system], admitting them by the
+digests they run at the plugin's first connect. A -f file that sets that key
+owns it. Either way the install refuses, before it touches the cluster, when the
+resolved policy would deny a platform pod the cluster is already running:
+registering the plugin restarts containerd, and a denied control-plane container
+does not come back. --force installs anyway.
 
 By default each component image tag is resolved to its registry digest (via the
 'crane' CLI) and pinned, including the CDS digest the image-policy floor and
@@ -855,6 +1182,23 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 		}
 
+		// The values the release will actually render with (chart defaults + -f
+		// + computed), read once and shared by the checks below.
+		values, err := effectiveValues(cmd.Context(), chartPath, setArgs)
+		if err != nil {
+			return err
+		}
+
+		// Fail fast when the policy this install renders would deny the
+		// cluster's own platform pods: registering the plugin restarts
+		// containerd, and a denied control-plane static pod takes the API
+		// server with it. Read-only, so it runs with -f too.
+		if warn, err := preflightImagePolicy(cmd.Context(), os.Stdout, values, components, installNamespace, installForce); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
+
 		// --cvm-mode=pod: label every kata-targeted node for the declared
 		// --hardware-platform (see autoLabelTEENodes), then fail fast if
 		// confidential pods still have nowhere to schedule. Labelling mutates
@@ -864,10 +1208,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// --single-node: a one-node cluster needs the label too. A `-f` values
 		// file no longer disables TEE node labelling.
 		if cvmModeIsPod(installCvmMode) {
-			values, err := effectiveValues(cmd.Context(), chartPath, setArgs)
-			if err != nil {
-				return err
-			}
 			selectorInValues, err := valuesFilesSetTEESelector(installValues, installHardwarePlatform)
 			if err != nil {
 				return err
@@ -1480,6 +1820,29 @@ func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []
 	return append(setArgs, "--set", "volumed.enabled=true")
 }
 
+// appendExemptNamespacesInstallArgs defaults image admission to admitting
+// kube-system by captured digest on the hosted lanes (see hostedCvmModes),
+// where the provider's platform pods are not on the c8s allowlist. Without it a
+// default install renders digest-only admission and then restarts containerd to
+// register the plugin, which on a self-managed control plane denies the static
+// pods and never brings the API server back.
+//
+// A -f file that writes the key owns it: the computed values are helm's last
+// -f, so injecting unconditionally would override an operator's choice.
+func appendExemptNamespacesInstallArgs(setArgs []string, cvmMode string, valuesFiles []string) ([]string, error) {
+	if !slices.Contains(hostedCvmModes, cvmMode) {
+		return setArgs, nil
+	}
+	set, err := valuesFilesSetExemptNamespaces(valuesFiles)
+	if err != nil {
+		return nil, err
+	}
+	if set {
+		return setArgs, nil
+	}
+	return append(setArgs, "--set-string", exemptNamespacesPath+"[0]="+platformExemptNamespace), nil
+}
+
 type workloadRef struct {
 	kind      string
 	name      string
@@ -1999,6 +2362,6 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), and --cvm-mode=pod without --measurements (no cw workload can start)")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
 	rootCmd.AddCommand(installCmd)
 }
