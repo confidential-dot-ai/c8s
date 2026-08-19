@@ -592,6 +592,62 @@ see Enablement.
 
 ---
 
+## Corner 8 — exempt namespaces admit on a captured digest, not the name
+
+On the hosted lanes (pod/gke/aks) the provider owns the platform pods in
+`kube-system` — kube-proxy, CoreDNS, the CNI, CSI drivers — and their images are
+not on the c8s allowlist. Nothing baked into the node measures them either;
+unlike node-CVM, whose image carries the RKE2 system floor, these nodes run the
+provider's unmeasured OS and containerd. So admission there needs a source of
+truth for "the platform images this node runs" that the c8s allowlist does not
+supply.
+
+`policy.exempt_namespaces` supplies it **without** re-introducing the
+namespace-name key that admission keyed on before it was removed. A namespace
+name is API-server metadata the pod's creator chooses, so keying admission on it
+let an allowlist-denied image run by being named into `kube-system`. Here the
+name is only a **capture selector**: when the plugin first connects to a
+containerd that already requires it — the platform pods having come up before
+the `required_plugins` gate — it resolves each listed namespace's running images
+to their content-store digests and freezes that set, scoped per namespace. From
+then on a container in a listed namespace is admitted only if its resolved
+digest is in that namespace's frozen set. The key is the digest — a local fact
+the plugin reads from the store — not the relayed name.
+
+What this does and does not grant:
+
+- **An unlisted image in a listed namespace is denied**, and audited
+  `exempt_snapshot_miss` so drift (a provider rotating a platform image between
+  chart upgrades) is alertable from the log. It is **denied, never killed**:
+  stopping a running kube-proxy or CoreDNS can cut the node, so enforcement is
+  at the next create, not retroactive.
+- **A captured digest does not admit in a tenant namespace.** The set is scoped
+  to the namespace it was captured in, so this does not widen tenant admission
+  the way a namespace-global floor entry would.
+- **The exemption only downgrades a denial** (`checkContainer`), so the label
+  rules and the allowlist still run and still audit; the exemption event names
+  the denial it overturned (`overrides`).
+
+Freezing and regeneration. The captured set is persisted under the plugin's
+cache dir and is **loaded, not recaptured, on a plain restart or reboot** — on a
+reboot containerd gates every container on this plugin, so the plugin sees an
+empty node at connect time and a recapture would freeze nothing. The one event
+that recaptures is the installer rewriting the boot config (a chart install or
+upgrade), which deletes the snapshot file; the next connect re-freezes from
+what is running then. An operator changing the exempt list is such a rewrite.
+
+Scope of trust. This is a hosted-lane mechanism and it does not claim a
+node-CVM guarantee: the captured digests come from an unmeasured store on an
+unmeasured host, and anything an adversarial control plane had already planted
+in a listed namespace before the plugin first connected is captured along with
+the genuine platform set. That is strictly narrower than the removed
+namespace-name exemption — bounded to one capture window per node and to
+concrete digests rather than "any image, forever" — but it is weaker than the
+node-CVM floor, which is why `exempt_namespaces` is left empty on `cvmMode=node`
+and the baked floor stands alone there.
+
+---
+
 ## Enablement
 
 Always on in both shapes. On node-CVM the chart wires the NRI inventory socket,
