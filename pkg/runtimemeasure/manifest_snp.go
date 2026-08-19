@@ -92,10 +92,13 @@ func LoadSNPImageManifest(path string) (SNPImagePins, error) {
 			// launches; pinning either would be a guess.
 			return SNPImagePins{}, fmt.Errorf("image manifest %s: duplicate snp_variants entry for smp %d", path, v.SMP)
 		}
-		// The launch measurement is SHA-384 (Size). A manifest naming another
-		// algorithm is describing something this gate cannot compare.
-		if alg := v.Measurement.Algorithm; alg != "" && alg != "sha384" {
-			return SNPImagePins{}, fmt.Errorf("image manifest %s: snp_variants[smp=%d] algorithm %q, want sha384", path, v.SMP, alg)
+		// The launch measurement is SHA-384 (Size). The algorithm must be
+		// named and must be sha384: an absent field would let a manifest
+		// whose digest means something else load as if it were comparable,
+		// and the TDX loader's posture is that an incomplete pin fails the
+		// whole load rather than being guessed at.
+		if v.Measurement.Algorithm != "sha384" {
+			return SNPImagePins{}, fmt.Errorf("image manifest %s: snp_variants[smp=%d] algorithm %q, want sha384", path, v.SMP, v.Measurement.Algorithm)
 		}
 		var digest [Size]byte
 		if v.Measurement.SNPLaunchDigest == "" {

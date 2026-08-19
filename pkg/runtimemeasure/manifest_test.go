@@ -178,12 +178,13 @@ func TestLoadSNPImageManifestRejects(t *testing.T) {
 	cases := map[string]string{
 		"no snp_variants (TDX tuple)": `{"mrtd":"` + strings.Repeat("a", 96) + `"}`,
 		"empty variant list":          `{"snp_variants":[]}`,
-		"zero smp":                    `{"snp_variants":[{"smp":0,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `"}}]}`,
-		"duplicate smp":               `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `"}},{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP4Digest + `"}}]}`,
+		"zero smp":                    `{"snp_variants":[{"smp":0,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `","algorithm":"sha384"}}]}`,
+		"duplicate smp":               `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `","algorithm":"sha384"}},{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP4Digest + `","algorithm":"sha384"}}]}`,
 		"wrong algorithm":             `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `","algorithm":"sha256"}}]}`,
 		"missing digest":              `{"snp_variants":[{"smp":2,"measurement":{"algorithm":"sha384"}}]}`,
-		"short digest":                `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"abcd"}}]}`,
-		"uppercase digest":            `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + strings.ToUpper(snpSMP2Digest) + `"}}]}`,
+		"missing algorithm":           `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `"}}]}`,
+		"short digest":                `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"abcd","algorithm":"sha384"}}]}`,
+		"uppercase digest":            `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + strings.ToUpper(snpSMP2Digest) + `","algorithm":"sha384"}}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
