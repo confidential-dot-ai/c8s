@@ -214,6 +214,12 @@ jobs:
           CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
 
           # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
+          # Both substitutions are throwaway stand-ins so `helm template` has
+          # something well-formed to validate — the 96 zeros for the launch
+          # measurement, 10.0.0.1/32 for the node route. Neither can come from
+          # config: the real measurement is read out of the booted guest, and the
+          # real node address is whatever KubeVirt assigns the VMI this run. The
+          # payload substitutes both again in-guest; nothing here reaches runtime.
           printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' | sed 's|NODE_CIDR|10.0.0.1/32|' > /tmp/gate-vals.yaml
           helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
           echo "render gate: chart+values validate clean"
