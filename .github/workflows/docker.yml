@@ -74,11 +74,10 @@ jobs:
   # every image. The final release job rebuilds the complete component set from
   # this exact revision before applying its SemVer aliases.
   #
-  # On a push to main, unchanged components keep their existing
-  # `latest` / `main` tag pointing at the previous build's manifest —
+  # On a push to main, unchanged components keep their existing `main` tag
+  # pointing at the previous build's manifest —
   # which is the correct state, since nothing changed for them.
-  # Deploys pinned to `latest` continue to consume the normal main build;
-  # stable release aliases consume the complete release rebuild below.
+  # `latest` is reserved for the complete stable release rebuild below.
   changes:
     name: Detect changed components
     runs-on: ubuntu-latest
@@ -213,7 +212,6 @@ jobs:
           tags: |
             type=sha,prefix=
             type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
@@ -231,9 +229,9 @@ jobs:
           # to pin their digests into the measured bootstrap allowlist. tags[0]
           # is the highest-priority *human* tag (main), so with the old
           # single-tag push the short-SHA tag never reached GHCR and that lookup
-          # could not resolve. Pushing the full set also makes `latest` real on
-          # main (deploys pin it). A later release job performs the separate,
-          # version-stamped all-component build used by SemVer aliases.
+          # could not resolve. A later release job performs the separate,
+          # version-stamped all-component build and is the only writer of
+          # `latest`.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # GHA layer caching. ignore-error: a cache-service blip during the

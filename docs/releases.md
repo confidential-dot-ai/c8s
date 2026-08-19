@@ -45,8 +45,9 @@ Release publication stays inside the successful main-push `Docker` run:
    then creates a create-only annotated Git tag with the built-in
    `GITHUB_TOKEN`.
 6. The verified manifests are promoted to `vX.Y.Z`, `X.Y.Z`, the moving `X.Y`
-   compatibility tag, and the commit's short-SHA tag used by the measured Kata
-   build. The same job publishes chart `X.Y.Z`.
+   compatibility tag, `latest` when this is the newest stable release, and the
+   commit's short-SHA tag used by the measured Kata build. The same job
+   publishes chart `X.Y.Z`. Normal branch builds update `main`, never `latest`.
 7. Completion of the original Docker run starts the existing measured node,
    Kata guest, and e2e workflows. The node workflow builds both TDX/SNP formats,
    then promotes their exact commit manifests to
@@ -107,8 +108,9 @@ tag whose digest differs. A pulled existing Helm chart must match the
 deterministic package byte-for-byte.
 
 The moving `X.Y` image aliases advance only when the run's Git tag is the latest
-stable patch in that series. Re-running an older workflow therefore cannot roll
-the compatibility alias backward.
+stable patch in that series. The global `latest` alias advances only for the
+newest stable version across all series. Re-running an older workflow therefore
+cannot roll either compatibility alias backward.
 
 - A non-release commit completes without creating a stable tag.
 - A failed build creates no tag because release calculation depends on every
