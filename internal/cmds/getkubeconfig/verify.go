@@ -19,10 +19,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
@@ -152,6 +154,16 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 	}
 	if json.Unmarshal(env.Evidence, &inner) == nil && inner.Platform != "" && len(inner.Evidence) > 0 {
 		return nil, fmt.Errorf("evidence envelope is double-wrapped ({platform,evidence} inside evidence); the envelope must wrap the platform evidence object exactly once")
+	}
+
+	// Bare-metal SNP evidence is a raw report with NO inline VCEK — the guest
+	// attestation-api serves cert_chain: null and offers no endpoint to fetch
+	// one — so attestation-go's offline path cannot verify it. localverify
+	// handles that shape and fetches the VCEK from AMD KDS, and is already
+	// what the RA-TLS dial arm uses; routing the gate through it too keeps
+	// the two halves of one policy able to consume the same evidence (c8s#415).
+	if exp.platform == teetypes.PlatformSNP {
+		return verifySNPEvidence(env, expectedReportData, exp)
 	}
 
 	res, err := verifyEnvelope(envelopeJSON, teetypes.VerifyParams{
@@ -301,4 +313,44 @@ func postAttest(ctx context.Context, attestURL string, nonce []byte) ([]byte, er
 		return nil, fmt.Errorf("attest HTTP %d: %s", resp.StatusCode, respBody)
 	}
 	return respBody, nil
+}
+
+// snpAttestTimeout bounds the gate's verification, whose collateral fetch
+// (VCEK from AMD KDS) crosses the network.
+const snpAttestTimeout = 30 * time.Second
+
+// verifySNPEvidence is verifyEvidence's SNP arm. It verifies a bare-metal SNP
+// envelope through localverify — which accepts the raw-report shape and pulls
+// the VCEK from AMD KDS, rather than requiring the guest to have volunteered
+// it inline — then enforces the same measured identity the RA-TLS dial does.
+//
+// The engine already enforces both pins (Measurements, ExpectedInitDataHash);
+// checkSNPMeasuredIdentity re-checks them over the returned claims so a
+// success the claims contradict is never accepted.
+func verifySNPEvidence(env teetypes.AttestationEvidence, expectedReportData []byte, exp measuredPolicy) (*teetypes.VerificationResult, error) {
+	measurements := make([][]byte, 0, len(exp.snpPins.BySMP))
+	for _, d := range exp.snpPins.Digests() {
+		measurements = append(measurements, append([]byte(nil), d[:]...))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), snpAttestTimeout)
+	defer cancel()
+	res, err := verifySNPRATLS(ctx, string(env.Platform), env.Evidence, localverify.Params{
+		ExpectedReportData:   expectedReportData,
+		Measurements:         measurements,
+		ExpectedInitDataHash: exp.hostData[:],
+	})
+	if err != nil {
+		return nil, fmt.Errorf("verify evidence: %w", err)
+	}
+	if !res.SignatureValid {
+		return nil, fmt.Errorf("quote signature invalid")
+	}
+	if res.ReportDataMatch == nil || !*res.ReportDataMatch {
+		return nil, fmt.Errorf("report_data does not match the expected binding (stale/replayed quote)")
+	}
+	if err := checkSNPMeasuredIdentity(res, exp); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
