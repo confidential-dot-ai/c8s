@@ -1,10 +1,11 @@
 // Package getkubeconfig implements the operator-side client (B4 client) that
-// obtains a kube credential from a measured TDX CVM: it attests the node,
-// confirms the full measured identity — the guest image tuple (MRTD,
-// RTMR[1], RTMR[2]) from an explicitly selected build-artifact manifest plus
-// the RTMR[3] chain seeded by the operator's key and extended by the expected
-// workload images — then exchanges a CSR for a short-lived kube client cert
-// over the cred-release endpoint and assembles a kubeconfig.
+// obtains a kube credential from a measured CVM: it attests the node,
+// confirms the full measured identity — on TDX the image tuple (MRTD,
+// RTMR[1], RTMR[2]) plus the RTMR[3] chain seeded by the operator's key and
+// extended by the expected workload images; on SEV-SNP the pinned per-SMP
+// launch digest plus the operator-key HOSTDATA binding — then exchanges a CSR
+// for a short-lived kube client cert over the cred-release endpoint and
+// assembles a kubeconfig.
 package getkubeconfig
 
 import (
