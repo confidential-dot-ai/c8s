@@ -215,6 +215,9 @@ jobs:
             sudo chown -R "$(id -u):$(id -g)" apt-debs
             sudo apt-get install -y ./apt-debs/*.deb
           fi
+          # iasl (DSDT) and clang (bindgen) shape measured bytes; record the
+          # exact host set until these ride a snapshot mirror (confos#36).
+          { echo "### host build-dep debs"; ls apt-debs | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save build-dep debs
         # Inline: runs only when the install above succeeded.
