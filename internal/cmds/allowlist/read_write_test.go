@@ -104,7 +104,7 @@ func TestSignerRejectsGarbagePEM(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a pem"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	o := &options{Options: cdsconn.Options{OperatorKey: path}}
+	o := &options{Options: cdsconn.Options{OperatorKey: path, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "load operator key") {
 		t.Fatalf("expected a key-parse error, got %v", err)
 	}

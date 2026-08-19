@@ -165,7 +165,7 @@ func TestSignerReadsTheEnvAndPrefersTheFlag(t *testing.T) {
 	key := writeTestKey(t)
 	t.Setenv(EnvOperatorKey, key)
 
-	var o Options
+	o := Options{Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}
 	if _, err := o.Signer(); err != nil {
 		t.Fatalf("env fallback: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestSignerRejectsGarbagePEM(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a pem"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	o := Options{OperatorKey: path}
+	o := Options{OperatorKey: path, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}
 	if _, err := o.Signer(); err == nil || !strings.Contains(err.Error(), "load operator key") {
 		t.Fatalf("expected a key-parse error, got %v", err)
 	}
@@ -226,4 +226,50 @@ func TestBindFlagsNamesEveryOption(t *testing.T) {
 	if o.URL != "https://cds.example" || o.OperatorKey != "/k.pem" {
 		t.Fatalf("parsed into %+v", o)
 	}
+}
+
+// An https CDS with no --measurements is attested but not identified: RA-TLS
+// proves the peer is a TEE, not that it is the CDS this operator meant. Reads
+// only warn, but a signed token hands `c8s secrets put`'s secret and
+// `c8s allowlist`'s policy change to whatever answered, so minting one is
+// refused outright.
+func TestSignerRefusesAnUnpinnedEndpoint(t *testing.T) {
+	key := writeTestKey(t)
+
+	o := Options{URL: "https://cds.example:8443", OperatorKey: key}
+	_, err := o.Signer()
+	if err == nil || !strings.Contains(err.Error(), "unpinned CDS") {
+		t.Fatalf("err = %v, want a refusal naming the unpinned CDS", err)
+	}
+	if !strings.Contains(err.Error(), "--measurements") {
+		t.Errorf("the refusal must name the flag that fixes it, got %q", err)
+	}
+
+	// Pinned by either flag.
+	o.Measurements = []string{strings.Repeat("ab", 48)}
+	if _, err := o.Signer(); err != nil {
+		t.Fatalf("--measurements should satisfy the pin, got %v", err)
+	}
+	o.Measurements = nil
+	o.MeasurementsFile = writeMeasurementsFile(t, strings.Repeat("cd", 48))
+	if _, err := o.Signer(); err != nil {
+		t.Fatalf("--measurements-file should satisfy the pin, got %v", err)
+	}
+
+	// Plaintext is HTTPClient's call, not this gate's: without --insecure it is
+	// refused there, and that error is the specific one.
+	o.MeasurementsFile = ""
+	o.URL = "http://cds.example:8080"
+	if _, err := o.Signer(); err != nil {
+		t.Fatalf("plaintext must fall through to the HTTPClient refusal, got %v", err)
+	}
+}
+
+func writeMeasurementsFile(t *testing.T, hexes ...string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "measurements.txt")
+	if err := os.WriteFile(p, []byte(strings.Join(hexes, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write measurements file: %v", err)
+	}
+	return p
 }

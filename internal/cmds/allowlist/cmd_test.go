@@ -347,7 +347,7 @@ func TestSignerPrefersFlagOverEnv(t *testing.T) {
 	keyPath := writeOperatorKey(t, dir)
 	t.Setenv(cdsconn.EnvOperatorKey, filepath.Join(dir, "nonexistent.key"))
 
-	o := &options{Options: cdsconn.Options{OperatorKey: keyPath}}
+	o := &options{Options: cdsconn.Options{OperatorKey: keyPath, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}}
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("flag should take precedence over (broken) env, got %v", err)
 	}
@@ -358,7 +358,7 @@ func TestSignerFallsBackToEnv(t *testing.T) {
 	keyPath := writeOperatorKey(t, dir)
 	t.Setenv(cdsconn.EnvOperatorKey, keyPath)
 
-	o := &options{} // no flags
+	o := &options{Options: cdsconn.Options{Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}} // no key flag
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("env fallback should work, got %v", err)
 	}
