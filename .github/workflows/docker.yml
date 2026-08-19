@@ -194,7 +194,7 @@ jobs:
         run: make build-c8s
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -214,7 +214,7 @@ jobs:
             type=ref,event=branch
 
       - name: Build and push
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -332,7 +332,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup ORAS
-        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
       - name: Retag :main -> :${{ github.sha }} (short)
         env:
           IMAGE: ${{ matrix.image }}

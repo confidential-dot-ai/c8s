@@ -56,7 +56,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Setup mkosi
         uses: ./c8s/.github/actions/setup-mkosi
@@ -143,7 +143,7 @@ jobs:
 
       - name: Upload evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repro-debug-${{ inputs.platform }}-${{ github.run_id }}
           path: |
