@@ -97,6 +97,8 @@ if [ -d "$GPU_MIRROR" ] && [ "$(cat "$GPU_STAMP" 2>/dev/null)" = "$GPU_FPR" ]; t
     mkdir -p mkosi/base/mkosi.local
     cp -a "$GPU_MIRROR" mkosi/base/mkosi.local/mkosi.extra
 else
+    echo "staged GPU tree unusable (mirror: $([ -d "$GPU_MIRROR" ] && echo present || echo missing);" \
+         "stamp: $(cat "$GPU_STAMP" 2>/dev/null || echo none); want: $GPU_FPR) — running confos-fetch-gpu"
     MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
     rm -rf "$GPU_MIRROR"
     mkdir -p "$(dirname "$GPU_MIRROR")"
