@@ -27,7 +27,6 @@ common_set=(
   --set nriImagePolicy.image.tag=ci
   --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000
   --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001
-  --set nriImagePolicy.cds.node.selector.role=cds-node
   # tls-lb has no default upstream; a c8s-<id> headless-Service address (what
   # `c8s install --upstream` derives, recognized as mesh-wrapped) is the
   # representative configuration.
