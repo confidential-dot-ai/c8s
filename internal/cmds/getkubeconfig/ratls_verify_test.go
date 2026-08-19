@@ -2,6 +2,7 @@ package getkubeconfig
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -452,5 +455,111 @@ func TestSNPPolicyRejectsWorkloadImages(t *testing.T) {
 	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)})
 	if err == nil || !strings.Contains(err.Error(), "requires a TDX node") {
 		t.Fatalf("want workload-image rejection, got %v", err)
+	}
+}
+
+// stubSNPRATLS replaces the localverify call the SNP dial uses, so the arm is
+// testable without AMD KDS. Records the params it was asked to enforce.
+func stubSNPRATLS(t *testing.T, res *teetypes.VerificationResult, err error) *localverify.Params {
+	t.Helper()
+	var got localverify.Params
+	orig := verifySNPRATLS
+	verifySNPRATLS = func(_ context.Context, _ string, _ json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		got = p
+		return res, err
+	}
+	t.Cleanup(func() { verifySNPRATLS = orig })
+	return &got
+}
+
+// snpAttestedCert builds an RA-TLS cert carrying a RAW SNP report — the shape
+// bare-metal SNP guests actually present (no JSON envelope), which is why the
+// dial has its own arm.
+func snpAttestedCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, err := ratls.ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Minimal raw report: REPORTDATA at its fixed offset is what CertEnvelope
+	// reads; the rest stays zero (the stubbed verifier supplies the verdict).
+	report := make([]byte, 1184)
+	copy(report[0x50:], rd[:])
+	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: report}
+	der, err := ratls.CreateAttestedCert(key, att, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+// The SNP dial must enforce the SAME two pins as the attest gate — this is
+// the leg that silently could not run before, since bare-metal SNP certs
+// carry no embedded envelope.
+func TestVerifyServerCertSNPEnforcesBothPins(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	params := stubSNPRATLS(t, snpResultFor(exp, 2), nil)
+
+	if err := verifyServerCert(snpAttestedCert(t), exp); err != nil {
+		t.Fatalf("verifyServerCert: %v", err)
+	}
+	// Both pins must have been handed to the verifier, not just checked after.
+	if len(params.Measurements) != len(exp.snpPins.BySMP) {
+		t.Errorf("passed %d measurements, want %d (every pinned SMP variant)", len(params.Measurements), len(exp.snpPins.BySMP))
+	}
+	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
+		t.Errorf("ExpectedInitDataHash = %x, want the operator-key binding %x", params.ExpectedInitDataHash, exp.hostData)
+	}
+	if len(params.ExpectedReportData) == 0 {
+		t.Error("ExpectedReportData empty: the quote would not be bound to this TLS channel")
+	}
+}
+
+// A verdict that contradicts the pins must be refused even if the engine
+// returned success (defense in depth).
+func TestVerifyServerCertSNPRejectsContradictoryClaims(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	other := snpTestPolicy(t, operatorPub(t))
+
+	for name, res := range map[string]*teetypes.VerificationResult{
+		"wrong HOSTDATA": func() *teetypes.VerificationResult {
+			r := snpResultFor(exp, 2)
+			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			return r
+		}(),
+		"unpinned launch digest": func() *teetypes.VerificationResult {
+			r := snpResultFor(exp, 2)
+			r.Claims.LaunchDigest = strings.Repeat("ab", runtimemeasure.Size)
+			return r
+		}(),
+		"signature not valid": func() *teetypes.VerificationResult {
+			r := snpResultFor(exp, 2)
+			r.SignatureValid = false
+			return r
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubSNPRATLS(t, res, nil)
+			if err := verifyServerCert(snpAttestedCert(t), exp); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+// A verifier refusal (bad evidence, KDS failure) must fail the dial closed.
+func TestVerifyServerCertSNPPropagatesVerifierError(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	stubSNPRATLS(t, nil, fmt.Errorf("collateral unavailable"))
+	if err := verifyServerCert(snpAttestedCert(t), exp); err == nil {
+		t.Fatal("expected error, got nil")
 	}
 }
