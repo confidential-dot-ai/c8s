@@ -124,9 +124,7 @@
      leave the hop unprotected. There is no plaintext-to-unattested escape hatch.
 */ -}}
 {{- if and $tlsLB.enabled $tlsLB.upstream.address -}}
-{{- /* c8s-<id> is a DNS-1035 label, <ns> a DNS-1123 label — the exact
-  webhook.WorkloadServiceFQDN form the operator provisions and the mesh wraps. */ -}}
-{{- if regexMatch "^c8s-[a-z]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.svc\\.cluster\\.local:[0-9]+$" $tlsLB.upstream.address -}}
+{{- if eq (include "tls-lb.meshWrappedUpstream" $tlsLB.upstream.address) "true" -}}
 {{- if eq $tlsLB.upstream.protocol "https" -}}
 {{- fail "VALIDATION_ERROR kind=workload_https_upstream: a c8s-<id> headless-Service upstream is plaintext http at the app layer (the mesh wraps the hop in attested mTLS), but tlsLb.upstream.protocol=https; use protocol http for a mesh-wrapped upstream" -}}
 {{- end -}}

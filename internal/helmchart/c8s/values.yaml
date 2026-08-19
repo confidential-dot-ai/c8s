@@ -1386,13 +1386,15 @@ tlsLb:
     #    (targetPort references the named `https` port), so public 443 is
     #    unaffected; front it with a LoadBalancer for external ingress.
     httpsPort: 8443
-    # -- DNS server nginx queries to re-resolve the catch-all upstream address
-    #    at request time (per record TTL). Headless-Service upstreams (an adopted
-    #    workload) resolve to pod IPs that change on pod churn; without
-    #    runtime re-resolution nginx would pin the IPs it saw at startup and
-    #    502 until the next config reload. This name is resolved once at nginx
-    #    startup through the pod's /etc/resolv.conf, and nginx exits (crash-
-    #    loops) if it does not resolve. Empty derives from the distro values
+    # -- DNS server nginx queries to re-resolve a mesh-wrapped catch-all
+    #    upstream at request time (per record TTL). Only the adopted-workload
+    #    headless Service is dialed that way: its pod IPs change on pod churn,
+    #    so a static upstream block would pin the IPs seen at startup and 502
+    #    until the next config reload. Every other upstream address is static
+    #    and this value is unused (no resolver directive is rendered at all).
+    #    The name itself is resolved once at nginx startup through the pod's
+    #    /etc/resolv.conf, and nginx exits (crash-loops) if it does not
+    #    resolve. Empty derives from the distro values
     #    (kata.distro / nriImagePolicy.distro): rke2 ->
     #    rke2-coredns-rke2-coredns.kube-system, else kube-dns.kube-system.
     #    Set explicitly on clusters whose DNS Service is named differently.
