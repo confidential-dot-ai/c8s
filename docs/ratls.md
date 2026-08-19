@@ -570,10 +570,12 @@ injects under kata (and then injects no socket volume). Both endpoints are
 compiled in, so the flag selects a shape and never an address: a wrong setting
 fails closed against a port nothing serves.
 
-CDS must be able to reach every node and kata guest on `:1019`, and the node
+CDS must be able to reach every node and kata guest on `:1019`, and the
 bound must cover those addresses: `cds.sandboxInventoryCIDRs` (`c8s install
 --node-cidr`) when set, else one host route per node derived live from the node
-list — a node added later is covered without a CDS restart.
+list — a node added later is covered without a CDS restart. Under
+`--cvm-mode=pod` the inventory answers from inside the guest on its pod IP, so
+`c8s install` pins the pod range(s) instead.
 
 An empty measurement allowlist does not disable any of this — it tracks the same
 posture `/attest` takes (see "What RA-TLS guarantees"): both ends still require
