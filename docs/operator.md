@@ -486,11 +486,12 @@ On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
 guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
 MRTD alone warns that they are unmeasured by that policy. To pin the whole
 image, pass `--image-manifest <file>` — a build-artifact manifest published
-with the guest image build, a JSON object carrying `mrtd`, `rtmr1` and
-`rtmr2` (96 lowercase hex chars each, each named once). The three registers
-are loaded atomically from that one provenanced manifest and all three are
-compared exactly, the same rule `c8s get-kubeconfig` applies to the same
-manifest — MRTD is deliberately not merged into the `--measurements`
+with the guest image build, carrying `mrtd`, `rtmr1` and `rtmr2` (96
+lowercase hex chars each, each named once) under its `tdx` object, as a
+confos manifest publishes them; a flat top-level tuple is also accepted. The
+three registers are loaded atomically from that one provenanced manifest and
+all three are compared exactly, the same rule `c8s get-kubeconfig` applies to
+the same manifest — MRTD is deliberately not merged into the `--measurements`
 allowlist, since an allowlist is satisfied by any member and a launch digest
 from a different build would then pass alongside this manifest's
 RTMR[1]/RTMR[2].
@@ -585,8 +586,8 @@ and again on the RA-TLS credential-release connection:
 - **platform** — TDX only; any other platform is refused up front;
 - **guest image** — MRTD, RTMR[1] and RTMR[2] must match the tuple from
   `--image-manifest` (required), an explicitly selected, provenanced
-  build-artifact manifest carrying all three fields. A generic artifact-hash
-  `manifest.json` is not an image pin and is rejected;
+  build-artifact manifest carrying all three fields under its `tdx` object. A
+  generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain** — the register must equal the operator-key seed
   (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are

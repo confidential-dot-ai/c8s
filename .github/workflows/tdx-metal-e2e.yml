@@ -397,8 +397,9 @@ jobs:
         run: |
           set -euo pipefail
           # The trust gate pins the whole image tuple, not MRTD alone; the
-          # manifest is written from the same refs CM the boot used.
-          printf '{"mrtd":"%s","rtmr1":"%s","rtmr2":"%s"}\n' "$mrtd" "$rtmr1" "$rtmr2" > /tmp/image-manifest.json
+          # manifest is written from the same refs CM the boot used, in the
+          # nested shape a confos build manifest actually publishes.
+          printf '{"version":3,"build":{"platform":"tdx"},"tdx":{"mrtd":"%s","rtmr1":"%s","rtmr2":"%s"}}\n' "$mrtd" "$rtmr1" "$rtmr2" > /tmp/image-manifest.json
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
