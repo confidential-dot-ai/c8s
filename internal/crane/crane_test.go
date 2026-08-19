@@ -3,8 +3,11 @@ package crane
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 )
@@ -71,5 +74,60 @@ func TestIsNotFound(t *testing.T) {
 				t.Fatalf("IsNotFound(%v) = %t, want %t", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// installHangingCrane puts a crane stub on PATH that accepts the invocation
+// and never answers — a registry that holds the connection open.
+func installHangingCrane(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	// exec replaces the shell, so the deadline's kill has a single process to
+	// signal and no child is left holding stdout.
+	if err := os.WriteFile(filepath.Join(dir, "crane"), []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatalf("write crane stub: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestBoundsAHungRegistry pins the package's own deadline: `c8s allowlist lint
+// --online` reaches crane with a context that carries none, so without this a
+// stalled registry blocks the gate for the whole run.
+func TestBoundsAHungRegistry(t *testing.T) {
+	installHangingCrane(t)
+	restore := commandTimeout
+	commandTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { commandTimeout = restore })
+
+	done := make(chan error, 1)
+	go func() { done <- ManifestExists(context.Background(), "registry.example.com/app@"+cranetest.DigA) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ManifestExists error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ManifestExists did not return within its timeout")
+	}
+}
+
+// TestReturnsOnContextCancel pins that the caller's cancellation still wins
+// when it fires before commandTimeout.
+func TestReturnsOnContextCancel(t *testing.T) {
+	installHangingCrane(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := Digest(ctx, "registry.example.com/app:v1"); done <- err }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Digest error = %v, want context.Canceled", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Digest did not return after context cancel")
 	}
 }

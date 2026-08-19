@@ -16,10 +16,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// requestTimeout bounds one CDS call; the peer decides whether it ever answers.
+const requestTimeout = 30 * time.Second
 
 // Client is an HTTP client for the CDS allowlist API.
 type Client struct {
@@ -29,7 +33,7 @@ type Client struct {
 
 // NewClient creates a new allowlist client.
 func NewClient(baseURL string) Client {
-	return Client{baseURL: strings.TrimRight(baseURL, "/"), httpClient: http.DefaultClient}
+	return Client{baseURL: strings.TrimRight(baseURL, "/"), httpClient: &http.Client{Timeout: requestTimeout}}
 }
 
 // NewClientWithHTTP creates a new allowlist client with a custom HTTP client.
