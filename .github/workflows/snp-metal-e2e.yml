@@ -158,6 +158,18 @@ jobs:
           $OPPUB
             handoff:
               enabled: true
+            # HOLDING ACTION, delete with console delivery (research/guest-transport.md).
+            # c8s#385 has CDS derive this from the node list and dropped it here. That
+            # cannot work on THIS guest: it boots the June rke2 image, which predates the
+            # 08-11 node-image fix and still uses RKE2's default cluster-cidr
+            # 10.42.0.0/16 — the same range the outer cluster hands the CVM its own IP
+            # from. NodeHostCIDRs then excludes the node address for sitting inside a pod
+            # range (correctly: a bound covering the node covers every pod), the bound is
+            # empty and every sandbox-token CSR is refused. values.yaml says to pin the
+            # bound where node and pod addresses are not separable, so pin it.
+            # The real fix is an agent-bearing image, which needs the console-free
+            # transport; until then the lane cannot move off the June image.
+            sandboxInventoryCIDRs: ["NODE_CIDR"]
           attestationApi:
             image:
               tag: "$AATAG"
@@ -202,7 +214,7 @@ jobs:
           CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
 
           # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
-          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' > /tmp/gate-vals.yaml
+          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' | sed 's|NODE_CIDR|10.0.0.1/32|' > /tmp/gate-vals.yaml
           helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
           echo "render gate: chart+values validate clean"
 
@@ -218,8 +230,11 @@ jobs:
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
+          NODEIP=\$(\$K get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+          { printf '%s' "\$NODEIP" | grep -qE '^[0-9.]+\$'; } || { say FAIL_NODEIP; exit 0; }
+          say "NODE_CIDR \$NODEIP/32"
           { printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: c8s\n  namespace: kube-system\nspec:\n  chartContent: %s\n  targetNamespace: c8s-system\n  createNamespace: false\n  valuesContent: |\n' "\$CC"
-            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed 's/^/    /'
+            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed "s|NODE_CIDR|\$NODEIP/32|" | sed 's/^/    /'
           } | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
           say \$MMARK
           HOK=0
