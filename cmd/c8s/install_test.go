@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1933,5 +1935,66 @@ func TestImageRepositoryFallsBackToImageID(t *testing.T) {
 	}
 	if got := imageRepository("", ""); got != "" {
 		t.Errorf("imageRepository with nothing parseable = %q, want empty", got)
+	}
+}
+
+// The exemption admits by a digest set the plugin freezes per node under its
+// own cache dir, so the install is the one place an operator can review it.
+func TestExemptedPlatformImages(t *testing.T) {
+	const (
+		etcd  = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		proxy = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		gke   = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		vllm  = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	)
+	pods := []corev1.Pod{
+		mirrorPod("kube-system", "etcd-node-a", "rancher/hardened-etcd:v3.6.12", "rancher/hardened-etcd@"+etcd),
+		daemonSetPod("kube-system", "kube-proxy-a", "kube-proxy:v1.31.0", "kube-proxy@"+proxy),
+		// Same DaemonSet on a second node: one line, not two.
+		daemonSetPod("kube-system", "kube-proxy-b", "kube-proxy:v1.31.0", "kube-proxy@"+proxy),
+		// Outside the exempt set: not what this admits.
+		daemonSetPod("gke-system", "gke-agent-a", "gke/agent:v1", "gke/agent@"+gke),
+		deploymentPod("tenant", "infer-abc", "example.test/vllm:v1", "example.test/vllm@"+vllm),
+	}
+	got := exemptedPlatformImages(pods, []string{"kube-system"})
+	want := []string{
+		"kube-system/etcd-node-a  docker.io/rancher/hardened-etcd@" + etcd,
+		"kube-system/kube-proxy-a  docker.io/library/kube-proxy@" + proxy,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("exemptedPlatformImages = %#v, want %#v", got, want)
+	}
+
+	if got := exemptedPlatformImages(pods, nil); len(got) != 0 {
+		t.Errorf("with no exempt namespace, got %#v, want none", got)
+	}
+}
+
+// The report is the audit surface: it must carry every digest (never a
+// truncated list) and name the alternative posture.
+func TestReportExemptedImages(t *testing.T) {
+	images := make([]string, 0, deniedImagesListed+5)
+	for i := range cap(images) {
+		images = append(images, fmt.Sprintf("kube-system/pod-%02d  example.test/img%02d@sha256:%064d", i, i, i))
+	}
+	var buf bytes.Buffer
+	reportExemptedImages(&buf, []string{"kube-system"}, images)
+	out := buf.String()
+
+	for _, image := range images {
+		if !strings.Contains(out, image) {
+			t.Errorf("report omits %q — a truncated audit list is not one:\n%s", image, out)
+		}
+	}
+	for _, want := range []string{"kube-system", "nriImagePolicy.bootstrapAllowlist.digests", exemptNamespacesPath} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report does not mention %q:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	reportExemptedImages(&buf, nil, nil)
+	if buf.Len() != 0 {
+		t.Errorf("nothing exempted must print nothing, got:\n%s", buf.String())
 	}
 }

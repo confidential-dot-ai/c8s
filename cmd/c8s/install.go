@@ -488,8 +488,11 @@ const deniedImagesListed = 20
 // every install including -f ones — whoever wrote the policy, a cluster whose
 // own pods it denies is broken the same way. Cluster access is read-only.
 //
+// It also reports to w what an exempt namespace will admit (see
+// reportExemptedImages).
+//
 // --force installs anyway, and returns the same list as a warning.
-func preflightImagePolicy(ctx context.Context, values map[string]any, components []c8sComponent, releaseNamespace string, force bool) (warn string, err error) {
+func preflightImagePolicy(ctx context.Context, w io.Writer, values map[string]any, components []c8sComponent, releaseNamespace string, force bool) (warn string, err error) {
 	if !boolAtPath(values, "nriImagePolicy.enabled") {
 		return "", nil
 	}
@@ -509,8 +512,10 @@ func preflightImagePolicy(ctx context.Context, values map[string]any, components
 		return "", fmt.Errorf("parse pod list: %w", err)
 	}
 
-	denied := deniedPlatformImages(list.Items, releaseNamespace,
-		stringsAtPath(values, exemptNamespacesPath), admissibleDigests(values, components))
+	exempt := stringsAtPath(values, exemptNamespacesPath)
+	reportExemptedImages(w, exempt, exemptedPlatformImages(list.Items, exempt))
+
+	denied := deniedPlatformImages(list.Items, releaseNamespace, exempt, admissibleDigests(values, components))
 	if len(denied) == 0 {
 		return "", nil
 	}
@@ -529,39 +534,69 @@ func deniedSummary(denied []string) string {
 	return fmt.Sprintf("%d platform images", len(denied))
 }
 
-// deniedPlatformImages lists the platform-pod images the policy would deny, as
-// "namespace/pod <image>@<digest>" lines. A DaemonSet runs the same image on
-// every node, so entries are deduplicated by namespace and digest and name the
-// first pod carrying them.
-func deniedPlatformImages(pods []corev1.Pod, releaseNamespace string, exempt []string, admitted map[string]bool) []string {
+// platformImageLines returns one "namespace/pod  repository@digest" line per
+// (namespace, digest) accept keeps, sorted. A DaemonSet runs the same image on
+// every node, so entries are deduplicated and named by the first pod carrying
+// them. A pod the kubelet has finished with is skipped: it has no container the
+// containerd restart will recreate, so the policy never sees its images.
+func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string) bool) []string {
 	seen := map[string]bool{}
-	var denied []string
+	var lines []string
 	for _, p := range pods {
-		if p.Namespace == releaseNamespace || slices.Contains(exempt, p.Namespace) || !platformPod(p) {
-			continue
-		}
-		// A pod the kubelet has finished with has no container the containerd
-		// restart will recreate, so the policy never sees its images.
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		if !platformPod(p) || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
 		}
 		for _, st := range podContainerStatuses(p) {
 			digest := imageDigest(st.ImageID, st.Image)
-			if digest == "" || admitted[digest] {
+			if digest == "" || !accept(p.Namespace, digest) {
 				continue
 			}
 			if key := p.Namespace + "\x00" + digest; !seen[key] {
 				seen[key] = true
-				denied = append(denied, fmt.Sprintf("%s/%s  %s@%s", p.Namespace, p.Name, imageRepository(st.Image, st.ImageID), digest))
+				lines = append(lines, fmt.Sprintf("%s/%s  %s@%s", p.Namespace, p.Name, imageRepository(st.Image, st.ImageID), digest))
 			}
 		}
 	}
-	slices.Sort(denied)
+	slices.Sort(lines)
+	return lines
+}
+
+// deniedPlatformImages lists the platform-pod images the policy would deny.
+func deniedPlatformImages(pods []corev1.Pod, releaseNamespace string, exempt []string, admitted map[string]bool) []string {
+	denied := platformImageLines(pods, func(namespace, digest string) bool {
+		return namespace != releaseNamespace && !slices.Contains(exempt, namespace) && !admitted[digest]
+	})
 	if len(denied) > deniedImagesListed {
 		rest := len(denied) - deniedImagesListed
 		denied = append(denied[:deniedImagesListed:deniedImagesListed], fmt.Sprintf("… and %d more", rest))
 	}
 	return denied
+}
+
+// exemptedPlatformImages lists the platform-pod images an exempt namespace
+// admits by captured digest.
+func exemptedPlatformImages(pods []corev1.Pod, exempt []string) []string {
+	return platformImageLines(pods, func(namespace, _ string) bool {
+		return slices.Contains(exempt, namespace)
+	})
+}
+
+// reportExemptedImages prints what the exemption will admit. The plugin freezes
+// the digest set per node under its own cache dir, so an install is the one
+// place an operator can review it — and the one place where pinning the same
+// digests in the floor instead is still a choice. Uncapped: a truncated audit
+// list is not one.
+func reportExemptedImages(w io.Writer, exempt, images []string) {
+	if len(images) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "+ image policy: %s admitted by captured digest. The plugin freezes what runs\n"+
+		"  there when it first connects; as of now that is %d image(s):\n", strings.Join(exempt, ", "), len(images))
+	for _, image := range images {
+		fmt.Fprintf(w, "    %s\n", image)
+	}
+	fmt.Fprintf(w, "  To pin them explicitly instead, put these digests in\n"+
+		"  nriImagePolicy.bootstrapAllowlist.digests and set %s: [] via -f.\n", exemptNamespacesPath)
 }
 
 // platformPod reports whether a pod belongs to the cluster's own platform
@@ -1158,7 +1193,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// cluster's own platform pods: registering the plugin restarts
 		// containerd, and a denied control-plane static pod takes the API
 		// server with it. Read-only, so it runs with -f too.
-		if warn, err := preflightImagePolicy(cmd.Context(), values, components, installNamespace, installForce); err != nil {
+		if warn, err := preflightImagePolicy(cmd.Context(), os.Stdout, values, components, installNamespace, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)

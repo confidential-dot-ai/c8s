@@ -1423,3 +1423,49 @@ func TestInstallAuditPolicySkipsPlatformPodCheck(t *testing.T) {
 	}
 	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
 }
+
+// The exempted digest set is what an operator has to review before the plugin
+// freezes it on every node, so a default hosted-lane install must print it.
+func TestInstallReportsWhatTheExemptionAdmits(t *testing.T) {
+	var s *installStubs
+	var err error
+	stdout := captureStdout(t, func() {
+		s = newInstallStubs(t, "", false)
+		s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
+		err = runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false")
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	for _, want := range []string{
+		"kube-system/etcd-node-a",
+		"docker.io/rancher/hardened-etcd@" + etcdDigest,
+		"nriImagePolicy.bootstrapAllowlist.digests",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("install output does not report %q:\n%s", want, stdout)
+		}
+	}
+	// It has to land before the plugin is installed, or reviewing it is moot.
+	if i, h := strings.Index(stdout, "kube-system/etcd-node-a"), lineIndex(s.f.calls(t), "helm upgrade "); i < 0 || h < 0 {
+		t.Fatalf("missing report (%d) or helm upgrade (%d)", i, h)
+	}
+	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
+}
+
+// Nothing is exempt on the node lane, so there is nothing to report.
+func TestInstallNodeLaneReportsNoExemption(t *testing.T) {
+	var s *installStubs
+	var err error
+	stdout := captureStdout(t, func() {
+		s = newInstallStubs(t, "", false)
+		s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
+		err = runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--force", "--resolve-digests=false")
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if strings.Contains(stdout, "admitted by captured digest") {
+		t.Errorf("node lane reported an exemption it does not render:\n%s", stdout)
+	}
+}
