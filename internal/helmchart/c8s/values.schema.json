@@ -1,0 +1,417 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Partial by design: only the four subtrees operators hand-write are sealed, so an unknown or misspelled key there is a render-time error instead of a silently dropped value. Every key of those subtrees in values.yaml must appear here; leaf types are deliberately unconstrained. Maps whose keys belong to the consumer (label maps, digest maps, resources) are left open.",
+  "type": "object",
+  "properties": {
+    "cds": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "allowlistDB": {},
+        "ca": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "certValidity": {},
+            "commonName": {},
+            "minValidity": {}
+          }
+        },
+        "certTTL": {},
+        "challengeTTL": {},
+        "cnPattern": {},
+        "dnsSanPatterns": {},
+        "earIssuer": {},
+        "expectedIssuer": {},
+        "handoff": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "peerUrl": {}
+          }
+        },
+        "image": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "digest": {},
+            "pullPolicy": {},
+            "repository": {},
+            "tag": {}
+          }
+        },
+        "jwtClockSkew": {},
+        "logLevel": {},
+        "maxRequestSize": {},
+        "maxTTL": {},
+        "measurements": {},
+        "namedCertTTL": {},
+        "node": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "selector": {},
+            "tolerations": {}
+          }
+        },
+        "operatorKeys": {},
+        "persistence": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "size": {},
+            "storageClassName": {}
+          }
+        },
+        "podDisruptionBudget": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "maxUnavailable": {}
+          }
+        },
+        "port": {},
+        "rateBurst": {},
+        "rateLimit": {},
+        "rateLimiterEvictInterval": {},
+        "rateLimiterIdleTimeout": {},
+        "rateLimiterMaxEntries": {},
+        "ratlsCertTTL": {},
+        "ratlsPlatform": {},
+        "readinessInterval": {},
+        "requestTimeout": {},
+        "resources": {},
+        "sanValidation": {},
+        "sandboxInventoryCIDRs": {},
+        "secretsMaxPaths": {},
+        "secretsMaxPathsPerWorkload": {},
+        "service": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "nodePort": {},
+            "type": {}
+          }
+        },
+        "tokenSignerOverlap": {},
+        "tokenSignerRotationInterval": {},
+        "tokenSignerRotationJitter": {}
+      }
+    },
+    "nriImagePolicy": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "bootstrapAllowlist": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "deriveComponents": {},
+            "digests": {},
+            "workloads": {}
+          }
+        },
+        "cds": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "url": {}
+          }
+        },
+        "containerd": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "configDir": {},
+            "namespace": {},
+            "restartCommand": {},
+            "socket": {}
+          }
+        },
+        "containerdPrep": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "digest": {},
+                "pullPolicy": {},
+                "repository": {},
+                "tag": {}
+              }
+            }
+          }
+        },
+        "distro": {},
+        "enabled": {},
+        "healthSocketName": {},
+        "hostPaths": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "cacheDir": {},
+            "configDir": {},
+            "pluginDir": {},
+            "runtimeDir": {}
+          }
+        },
+        "image": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "digest": {},
+            "pullPolicy": {},
+            "repository": {},
+            "tag": {}
+          }
+        },
+        "imagePullSecrets": {},
+        "logLevel": {},
+        "nodeAffinity": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "excludeLabels": {}
+          }
+        },
+        "pluginFilename": {},
+        "pluginName": {},
+        "policy": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "denyMissingAnnotation": {},
+            "enforceExisting": {},
+            "exemptNamespaces": {},
+            "labelRules": {},
+            "mode": {}
+          }
+        },
+        "priorityClassName": {},
+        "refresh": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "interval": {}
+          }
+        },
+        "resources": {},
+        "sandboxDigests": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "advertiseHost": {}
+          }
+        },
+        "uninstall": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {}
+          }
+        }
+      }
+    },
+    "tlsLb": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "allowlist": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "proxyPort": {},
+            "rateLimit": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "burst": {},
+                "requestsPerSecond": {},
+                "totalBurst": {},
+                "totalRequestsPerSecond": {}
+              }
+            },
+            "readRateLimit": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "burst": {},
+                "requestsPerSecond": {}
+              }
+            },
+            "resources": {}
+          }
+        },
+        "attest": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "attestationApiURL": {},
+            "enabled": {},
+            "expectedWorkload": {},
+            "generation": {},
+            "platform": {},
+            "port": {},
+            "resources": {}
+          }
+        },
+        "certProvisioning": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "renewInterval": {},
+            "verbose": {}
+          }
+        },
+        "cors": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "allowCredentials": {},
+            "allowHeaders": {},
+            "allowMethods": {},
+            "allowOrigins": {},
+            "enabled": {},
+            "exposeHeaders": {},
+            "maxAge": {},
+            "protocolEndpoints": {}
+          }
+        },
+        "discovery": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "cdsCertPath": {},
+            "enabled": {},
+            "fileName": {},
+            "meshCAPath": {},
+            "mountPath": {},
+            "path": {}
+          }
+        },
+        "enabled": {},
+        "hostPort": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "https": {}
+          }
+        },
+        "imagePullSecrets": {},
+        "meshCA": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "expose": {}
+          }
+        },
+        "nameOverride": {},
+        "nginx": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "httpsPort": {},
+            "image": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "digest": {},
+                "pullPolicy": {},
+                "repository": {},
+                "tag": {}
+              }
+            },
+            "replicas": {},
+            "resolver": {},
+            "resources": {},
+            "runAsGroup": {},
+            "runAsNonRoot": {},
+            "runAsUser": {}
+          }
+        },
+        "publicTLS": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "certKey": {},
+            "keyKey": {},
+            "mountPath": {},
+            "secretName": {}
+          }
+        },
+        "routes": {},
+        "san": {},
+        "service": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "annotations": {},
+            "externalTrafficPolicy": {},
+            "port": {},
+            "type": {}
+          }
+        },
+        "strategy": {},
+        "tlsMountPath": {},
+        "upstream": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "address": {},
+            "protocol": {},
+            "tls": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "serverName": {},
+                "trustedCAPath": {},
+                "useCDSClientCert": {},
+                "verify": {},
+                "verifyDepth": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "volumed": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {},
+        "hostPaths": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "cgroupRoot": {},
+            "kubeletRoot": {}
+          }
+        },
+        "image": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "digest": {},
+            "pullPolicy": {},
+            "repository": {},
+            "tag": {}
+          }
+        },
+        "imagePullSecrets": {},
+        "maxMounts": {},
+        "nodeSelector": {},
+        "priorityClassName": {},
+        "reapInterval": {},
+        "resources": {},
+        "tolerations": {}
+      }
+    }
+  }
+}

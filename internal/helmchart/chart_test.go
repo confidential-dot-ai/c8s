@@ -7406,3 +7406,106 @@ func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
 		t.Error("iptables-sync command does not carry --cluster-dns-ip")
 	}
 }
+
+// schemaCoveredPaths are the values subtrees values.schema.json seals: the
+// component blocks the docs tell operators to write by hand.
+var schemaCoveredPaths = []string{"cds", "nriImagePolicy", "tlsLb", "volumed"}
+
+// readChartFile decodes a file from the chart directory. JSON is a subset of
+// YAML, so one decoder serves values.yaml and values.schema.json alike.
+func readChartFile(t *testing.T, name string, into any) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("c8s", name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	if err := yaml.Unmarshal(data, into); err != nil {
+		t.Fatalf("decode %s: %v", name, err)
+	}
+}
+
+// Helm accepts values a chart never reads, so a misspelled key under a
+// documented path is applied, silently dropped at render, and shows up only as
+// whatever the un-applied value was protecting against. The schema turns that
+// into a render-time error naming the key.
+func TestChartValuesSchemaRejectsUnknownKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  string
+	}{
+		// The singular of the key whose loss bricked a cluster.
+		{"nriImagePolicy.policy", "nriImagePolicy.policy.exemptNamespace=kube-system"},
+		{"nriImagePolicy top level", "nriImagePolicy.exemptNamespaces=kube-system"},
+		{"tlsLb.hostPort", "tlsLb.hostPort.enable=false"},
+		{"cds.persistence", "cds.persistence.enable=true"},
+		{"volumed", "volumed.enable=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key, _, _ := strings.Cut(tc.set, "=")
+			out, err := helmTemplate(t, "--set", tc.set)
+			if err == nil {
+				t.Fatalf("helm template accepted the unknown key %s\n%s", key, out)
+			}
+			// Helm's wording for the same rejection differs by version
+			// ("Additional property X is not allowed" vs "additional
+			// properties 'X' not allowed"), so match on the shared stem.
+			unknown := key[strings.LastIndexByte(key, '.')+1:]
+			if !strings.Contains(strings.ToLower(out), "additional propert") || !strings.Contains(out, unknown) {
+				t.Errorf("render failure does not name the unknown key %q:\n%s", unknown, out)
+			}
+		})
+	}
+}
+
+// The schema is only as good as its coverage: a key added to values.yaml but
+// not to the schema makes every render of the chart fail on its own default.
+// This is the lockstep guard, checked against the chart's own values.
+func TestChartValuesSchemaCoversValuesYAML(t *testing.T) {
+	var values map[string]any
+	readChartFile(t, "values.yaml", &values)
+	var schema struct {
+		Properties map[string]any `yaml:"properties"`
+	}
+	readChartFile(t, "values.schema.json", &schema)
+
+	for _, top := range schemaCoveredPaths {
+		node, ok := schema.Properties[top]
+		if !ok {
+			t.Errorf("values.schema.json does not cover %s", top)
+			continue
+		}
+		assertSchemaCovers(t, values[top], node, top)
+	}
+}
+
+// assertSchemaCovers walks a values subtree against its schema node: every key
+// of a sealed object (one carrying "properties") must be declared, and the
+// walk continues into each. A node with no "properties" is deliberately open —
+// a label map, a digest map, a resources block — and ends the walk.
+func assertSchemaCovers(t *testing.T, values, node any, path string) {
+	t.Helper()
+	schema, ok := node.(map[string]any)
+	if !ok {
+		t.Errorf("%s: schema node is not an object (%T)", path, node)
+		return
+	}
+	props, sealed := schema["properties"].(map[string]any)
+	if !sealed {
+		return
+	}
+	if blocked, ok := schema["additionalProperties"].(bool); !ok || blocked {
+		t.Errorf("%s: declares properties but does not set additionalProperties: false, so a typo still passes", path)
+	}
+	m, ok := values.(map[string]any)
+	if !ok {
+		return
+	}
+	for k, v := range m {
+		child, ok := props[k]
+		if !ok {
+			t.Errorf("values.yaml sets %s.%s but values.schema.json does not declare it; every render would fail", path, k)
+			continue
+		}
+		assertSchemaCovers(t, v, child, path+"."+k)
+	}
+}
