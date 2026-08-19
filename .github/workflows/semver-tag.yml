@@ -35,6 +35,7 @@ jobs:
       image-matrix: ${{ steps.release-images.outputs.matrix }}
       publish: ${{ steps.version.outputs.publish }}
       tag: ${{ steps.version.outputs.tag }}
+      update-latest: ${{ steps.version.outputs.update-latest }}
       update-series: ${{ steps.version.outputs.update-series }}
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -504,11 +505,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.calculate.outputs.tag }}
           TARGET_SHA: ${{ inputs.target-sha }}
+          UPDATE_LATEST: ${{ needs.calculate.outputs.update-latest }}
           UPDATE_SERIES: ${{ needs.calculate.outputs.update-series }}
           VERSION: ${{ needs.calculate.outputs.version }}
         run: |
           set -euo pipefail
 
+          [[ "$UPDATE_LATEST" =~ ^(true|false)$ ]]
           [[ "$UPDATE_SERIES" =~ ^(true|false)$ ]]
           series="${VERSION%.*}"
           short_sha="${TARGET_SHA:0:7}"
@@ -529,6 +532,12 @@ jobs:
                 new_tags+=("$series")
               fi
             fi
+            if [ "$UPDATE_LATEST" = true ]; then
+              if ! grep -Fxq -- latest <<< "$repo_tags" || \
+                 [ "$(oras resolve "$image:latest")" != "$source_digest" ]; then
+                new_tags+=(latest)
+              fi
+            fi
             # The downstream Kata build resolves component manifests by this
             # commit tag. Point it at the canonical all-components release
             # rebuild before the parent Docker workflow completes.
@@ -545,6 +554,9 @@ jobs:
             test "$(oras resolve "$image:$short_sha")" = "$source_digest"
             if [ "$UPDATE_SERIES" = true ]; then
               test "$(oras resolve "$image:$series")" = "$source_digest"
+            fi
+            if [ "$UPDATE_LATEST" = true ]; then
+              test "$(oras resolve "$image:latest")" = "$source_digest"
             fi
           done < "$RUNNER_TEMP/release-image-digests"
 

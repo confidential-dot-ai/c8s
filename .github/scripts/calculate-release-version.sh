@@ -60,9 +60,25 @@ if [ "$latest_series_tag" = "$candidate" ]; then
   update_series=true
 fi
 
+latest_release_tag="$(
+  {
+    git tag --list 'v*'
+    printf '%s\n' "$candidate"
+  } \
+    | grep -E '^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$' \
+    | sort -Vu \
+    | tail -n 1
+)"
+test -n "$latest_release_tag"
+update_latest=false
+if [ "$latest_release_tag" = "$candidate" ]; then
+  update_latest=true
+fi
+
 {
   echo "publish=$publish"
   echo "tag=$candidate"
+  echo "update-latest=$update_latest"
   echo "update-series=$update_series"
   echo "version=$version"
 } >> "$GITHUB_OUTPUT"
