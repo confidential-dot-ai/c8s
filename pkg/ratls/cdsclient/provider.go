@@ -21,6 +21,9 @@ type Logger = ratls.Logger
 // CDS CA endpoint. Each Provision call performs:
 // authenticate -> attest -> obtain cert and authenticated CA bundle -> return
 // CA-signed certificate.
+//
+// Provision and RefreshCABundle share one client: the CA bundle Provision
+// accepts is the trust the refresh continuity-checks against.
 type Provider struct {
 	client *Client
 	logger Logger
@@ -35,13 +38,10 @@ func NewProvider(cfg *Config, logger Logger) (*Provider, error) {
 		return nil, err
 	}
 
-	return NewProviderWithClient(NewClient(cfg), logger)
+	return newProviderWithClient(NewClient(cfg), logger)
 }
 
-// NewProviderWithClient creates an CDS-backed CertProvider using an existing
-// Client. Reusing the client lets certificate provisioning seed the CA trust
-// state that later /ca refreshes continuity-check.
-func NewProviderWithClient(client *Client, logger Logger) (*Provider, error) {
+func newProviderWithClient(client *Client, logger Logger) (*Provider, error) {
 	if client == nil || client.cfg == nil {
 		return nil, fmt.Errorf("cdsclient: client is required")
 	}
@@ -79,6 +79,13 @@ func validateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// RefreshCABundle fetches the current CA bundle from CDS's /ca endpoint.
+// Provision must have run first: the refresh only accepts candidates with
+// signature continuity to the bundle provisioning already established.
+func (p *Provider) RefreshCABundle(ctx context.Context) ([]*x509.Certificate, error) {
+	return p.client.refreshCABundle(ctx)
 }
 
 // Provision performs the full CDS attestation flow and returns a CA-signed

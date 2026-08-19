@@ -305,6 +305,43 @@ func TestProviderProvision(t *testing.T) {
 	}
 }
 
+// TestProviderRefreshCABundleAfterProvision is the regression test for the
+// in-guest refresh that could never succeed: Provision and RefreshCABundle
+// must run over one client, or the continuity check has nothing to check
+// against and every refresh fails closed.
+func TestProviderRefreshCABundleAfterProvision(t *testing.T) {
+	caKey, caCert := testCA(t)
+	cdsSrv, attestSvc, issuer := mockServers(t, caKey, caCert)
+	defer cdsSrv.Close()
+	defer attestSvc.Close()
+	defer issuer.Close()
+
+	p, err := NewProvider(&Config{
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := p.Provision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	certs, err := p.RefreshCABundle(context.Background())
+	if err != nil {
+		t.Fatalf("refresh after provision: %v", err)
+	}
+	if len(certs) != 1 || !sameCertificate(certs[0], caCert) {
+		t.Fatalf("refreshed bundle = %d cert(s), want the provisioning CA", len(certs))
+	}
+}
+
 // TestProviderProvisionRejectsLeafOutsideValidityWindow proves an issued leaf
 // the mesh could never serve — expired, or NotBefore beyond the shared
 // clock-skew allowance — fails issuance instead of being cached.
@@ -371,7 +408,7 @@ func TestRefreshCABundle(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, caCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +446,7 @@ func TestRefreshCABundleUsesExplicitCACertURL(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, caCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +476,7 @@ func TestRefreshCABundleRejectsUntrustedInitialBundle(t *testing.T) {
 		HTTPClient:        plainHTTPClient(),
 	})
 
-	_, err := client.RefreshCABundle(context.Background())
+	_, err := client.refreshCABundle(context.Background())
 	if err == nil {
 		t.Fatal("RefreshCABundle succeeded before certificate provisioning seeded trust")
 	}
@@ -465,7 +502,7 @@ func TestRefreshCABundleDoesNotAddUnverifiedRotationRoot(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +534,7 @@ func TestRefreshCABundleDoesNotTrustPublicKeyCloneChain(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, trustedCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +565,7 @@ func TestRefreshCABundleRejectsTrustedSignerPublicKeyClone(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, trustedCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +628,7 @@ func TestProviderProvisionRetainsPreviouslyTrustedPublishedCA(t *testing.T) {
 		NodeName:          "test-node",
 	})
 	seedTrustedCABundle(t, client, oldCert)
-	p, err := NewProviderWithClient(client, nil)
+	p, err := newProviderWithClient(client, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +915,7 @@ func TestRefreshCABundleAcceptsContinuitySignedRotationCA(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -910,7 +947,7 @@ func TestRefreshCABundleAcceptsContinuitySignedRotationChainInBundleOrder(t *tes
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
-	certs, err := client.RefreshCABundle(context.Background())
+	certs, err := client.refreshCABundle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +973,7 @@ func TestRefreshCABundleRejectsReplacementWithoutOverlap(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
-	_, err := client.RefreshCABundle(context.Background())
+	_, err := client.refreshCABundle(context.Background())
 	if err == nil {
 		t.Fatal("RefreshCABundle accepted replacement bundle with no overlap")
 	}
@@ -962,7 +999,7 @@ func TestRefreshCABundleRejectsExpiredTrustedOnlyBundle(t *testing.T) {
 	})
 	seedTrustedCABundle(t, client, currentCert, expiredCert)
 
-	_, err := client.RefreshCABundle(context.Background())
+	_, err := client.refreshCABundle(context.Background())
 	if err == nil {
 		t.Fatal("RefreshCABundle accepted a bundle containing only an expired trusted CA")
 	}

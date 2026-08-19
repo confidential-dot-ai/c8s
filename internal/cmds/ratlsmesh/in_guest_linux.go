@@ -464,8 +464,17 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 			clientCertMgr:   clientCertMgr,
 			metrics:         m,
 		}.run(ctx)
+
+		go caBundleRefresh{
+			logger:        logger,
+			logPrefix:     "in-guest cds",
+			provider:      provider,
+			interval:      c.caPollInterval,
+			opTimeout:     c.cdsOpTimeout,
+			serverCertMgr: serverCertMgr,
+			clientCertMgr: clientCertMgr,
+		}.run(ctx)
 	}
-	go runInGuestCABundleRefresh(ctx, logger, c, cdsCfg, serverCertMgr, clientCertMgr)
 
 	logger.Info("ratls-mesh in-guest listening",
 		"outbound", proxy.outboundAddr,
@@ -476,37 +485,6 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return fmt.Errorf("in-guest proxy: %w", err)
 	}
 	return nil
-}
-
-func runInGuestCABundleRefresh(
-	ctx context.Context,
-	logger *slog.Logger,
-	c *inGuestConfig,
-	cdsCfg *cdsclient.Config,
-	serverCertMgr, clientCertMgr *ratls.CertManager,
-) {
-	client := cdsclient.NewClient(cdsCfg)
-	ticker := time.NewTicker(c.caPollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		refreshCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-		newCerts, err := client.RefreshCABundle(refreshCtx)
-		cancel()
-		if err != nil {
-			logger.Warn("in-guest CA bundle refresh failed", "error", err)
-			continue
-		}
-		serverCertMgr.UpdateCACerts(newCerts)
-		if clientCertMgr != nil {
-			clientCertMgr.UpdateCACerts(newCerts)
-		}
-		logger.Debug("in-guest CA bundle refreshed", "count", len(newCerts))
-	}
 }
 
 // inGuestResolver is the stub Resolver used by `ratls-mesh in-guest`.

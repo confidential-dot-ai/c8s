@@ -159,12 +159,13 @@ func (c *Client) RequestCert(ctx context.Context) (*ecdsa.PrivateKey, []byte, []
 	return key, certutil.EncodeCertPEM(certs[0].Raw), encodeCABundlePEM(certs[1:]), nil
 }
 
-// RefreshCABundle fetches the CA certificate bundle from CDS's
+// refreshCABundle fetches the CA certificate bundle from CDS's
 // /ca endpoint. A candidate is accepted only when it is already trusted or
 // when it is a CA certificate signed by an already trusted CA. This keeps
 // unauthenticated CA bundle refreshes from expanding trust without signature
-// continuity.
-func (c *Client) RefreshCABundle(ctx context.Context) ([]*x509.Certificate, error) {
+// continuity. Reached only through [Provider.RefreshCABundle], over the client
+// [Provider.Provision] seeds that trust on.
+func (c *Client) refreshCABundle(ctx context.Context) ([]*x509.Certificate, error) {
 	certs, err := c.fetchAndParseCABundle(ctx)
 	if err != nil {
 		return nil, err
