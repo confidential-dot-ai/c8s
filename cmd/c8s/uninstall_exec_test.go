@@ -453,3 +453,78 @@ func TestWaitPodsGone(t *testing.T) {
 		}
 	})
 }
+
+// volumedReleaseValuesFile writes the computed-values JSON `helm get values
+// --all` returns for a release with the volume node agent deployed.
+func volumedReleaseValuesFile(t *testing.T) string {
+	t.Helper()
+	path := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	tree := map[string]any{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &tree); err != nil {
+		t.Fatal(err)
+	}
+	tree["volumed"] = map[string]any{"enabled": true}
+	if data, err = json.Marshal(tree); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Deleting volumed under a pod that holds a volume strands the dm stack on the
+// node — nothing else reaps it, and it keeps the disk open against the next
+// install. Refuse, name the pods, and say what to do.
+func TestUninstallRefusesWhileVolumePodsRun(t *testing.T) {
+	values := volumedReleaseValuesFile(t)
+	holding := `*c8s-volumes*) /usr/bin/printf 'default\tinference-0\tRunning\tweights=/tenant-a/volumes/weights\n' ;;
+`
+
+	t.Run("refuses and names the pods", func(t *testing.T) {
+		s := newUninstallStubs(t, values, holding, false)
+		err := runC8s(t, "uninstall")
+		if err == nil || !strings.Contains(err.Error(), "default/inference-0") {
+			t.Fatalf("want the volume-holding pod named, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "scale those workloads to zero") {
+			t.Errorf("refusal %q does not say what to do instead", err)
+		}
+		mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
+	})
+
+	t.Run("--force proceeds", func(t *testing.T) {
+		s := newUninstallStubs(t, values, holding, false)
+		if err := runC8s(t, "uninstall", "--force"); err != nil {
+			t.Fatalf("uninstall --force: %v", err)
+		}
+		mustContainLine(t, s.f.calls(t), "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	})
+
+	t.Run("pod listing failure surfaces", func(t *testing.T) {
+		s := newUninstallStubs(t, values, "*c8s-volumes*) exit 1 ;;\n", false)
+		if err := runC8s(t, "uninstall"); err == nil {
+			t.Fatal("want error when the volume pod listing fails")
+		}
+		mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
+	})
+}
+
+// A release that never deployed volumed has no mappings to strand, so the
+// guard must not query for them at all.
+func TestUninstallWithoutVolumedSkipsTheVolumeGuard(t *testing.T) {
+	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	s := newUninstallStubs(t, values, "", false)
+	if err := runC8s(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, l := range s.f.calls(t) {
+		if strings.Contains(l, "c8s-volumes") {
+			t.Errorf("volume guard queried for a release without volumed: %q", l)
+		}
+	}
+}
