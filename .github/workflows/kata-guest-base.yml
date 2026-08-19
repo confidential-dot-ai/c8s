@@ -176,7 +176,7 @@ jobs:
       # --- Build the in-guest binaries ---------------------------------
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Derive the toolchain from the module itself rather than a separate
           # GO_VERSION pin — one source of truth (c8s/go.mod), and no drift
@@ -217,7 +217,7 @@ jobs:
       # right after the build, before that flaky step.
       - name: Restore attestation-api build
         id: attestation-api-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attestation-rs/target/release/attestation-api
           key: ${{ runner.os }}-attestation-api-${{ env.ATTESTATION_RS_REF }}-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**') }}
@@ -247,7 +247,7 @@ jobs:
       # restore-step note for why the unified cache action wouldn't.
       - name: Save attestation-api build
         if: steps.attestation-api-cache.outputs.cache-hit != 'true' && steps.build-attestation-api.outcome == 'success'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attestation-rs/target/release/attestation-api
           key: ${{ steps.attestation-api-cache.outputs.cache-primary-key }}
@@ -259,7 +259,7 @@ jobs:
       # builder sandbox deps.
 
       - name: Setup uv (mkosi v26 toolchain)
-        uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Setup mkosi
         # Keep in lockstep with confidential-os-builder/.github/workflows/base.yml.
@@ -273,7 +273,7 @@ jobs:
       # kata-guest-base build.
       - name: Restore confos build
         id: confos-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: confidential-os-builder/target/release/confos
           key: ${{ runner.os }}-confos-${{ hashFiles('confidential-os-builder/Cargo.lock', 'confidential-os-builder/src/**', 'confidential-os-builder/crates/**') }}
@@ -289,7 +289,7 @@ jobs:
 
       - name: Save confos build
         if: steps.confos-cache.outputs.cache-hit != 'true' && steps.build-confos.outcome == 'success'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: confidential-os-builder/target/release/confos
           key: ${{ steps.confos-cache.outputs.cache-primary-key }}
@@ -305,7 +305,7 @@ jobs:
       # the build is aborted — by design; an unpinned allowlist would be
       # silently permissive.
       - name: Setup ORAS
-        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           # Explicit pin so an action bump can't silently change the oras that resolves the allowlist digests.
           version: "1.2.3"
@@ -355,7 +355,7 @@ jobs:
       # key bump retires v1 caches that lack the NVIDIA artifacts.
       - name: Restore kata guest artifacts
         id: kata-conf-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kata-conf
           key: kata-guest-artifacts-v2-${{ env.KATA_VERSION }}
@@ -376,7 +376,7 @@ jobs:
       # forcing the multi-GB kata-static re-download on every run.
       - name: Save kata guest artifacts
         if: steps.kata-conf-cache.outputs.cache-hit != 'true' && steps.stage-kata-conf.outcome == 'success'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kata-conf
           key: ${{ steps.kata-conf-cache.outputs.cache-primary-key }}
@@ -400,7 +400,7 @@ jobs:
       # with different packages into the measured image.
       - name: Restore base rootfs
         id: rootfs-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kata-base-rootfs.tar.zst
           key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh', 'c8s/kata-guest-base/patches/*.patch') }}
@@ -434,7 +434,7 @@ jobs:
       # build step below.
       - name: Restore guest kernel build
         id: kernel-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             confidential-os-builder/output/kernel
@@ -470,7 +470,7 @@ jobs:
       # stamp-mismatched tree that confos would rebuild anyway.
       - name: Restore kernel-builder tools tree
         id: tools-tree-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
           key: ${{ runner.os }}-confos-tools-tree-mkosi-v26-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
@@ -578,7 +578,7 @@ jobs:
 
       - name: Save guest kernel build
         if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Keep in lockstep with the Restore step: the snapshot must travel
           # with output/kernel or confos's fingerprint check misses every run.
@@ -599,7 +599,7 @@ jobs:
       # nothing to upload and the warn is harmless.
       - name: Upload kernel-config snapshot
         if: always()
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: config-x86_64.snapshot
           path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
@@ -630,7 +630,7 @@ jobs:
 
       - name: Save kernel-builder tools tree
         if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
           key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
@@ -647,7 +647,7 @@ jobs:
 
       - name: Save base rootfs
         if: always() && steps.rootfs-cache.outputs.cache-hit != 'true' && steps.rootfs-tar.outputs.exists == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kata-base-rootfs.tar.zst
           key: ${{ steps.rootfs-cache.outputs.cache-primary-key }}

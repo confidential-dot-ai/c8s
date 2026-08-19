@@ -77,7 +77,7 @@ jobs:
 
       # --- confos kernel-builder sandbox deps (mirror kata-guest-base.yml) ----
       - name: Setup uv (mkosi v26 toolchain)
-        uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Setup mkosi
         # Keep in lockstep with confidential-os-builder/.github/workflows/base.yml + kata-guest-base.yml.
@@ -92,7 +92,7 @@ jobs:
       # --- confos binary (shared cache with kata-guest-base.yml) --------------
       - name: Restore confos build
         id: confos-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: confidential-os-builder/target/release/confos
           key: ${{ runner.os }}-confos-${{ hashFiles('confidential-os-builder/Cargo.lock', 'confidential-os-builder/src/**', 'confidential-os-builder/crates/**') }}
@@ -105,7 +105,7 @@ jobs:
 
       - name: Save confos build
         if: steps.confos-cache.outputs.cache-hit != 'true' && steps.build-confos.outcome == 'success'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: confidential-os-builder/target/release/confos
           key: ${{ steps.confos-cache.outputs.cache-primary-key }}
@@ -115,7 +115,7 @@ jobs:
       # against the mkosi.conf hash). See kata-guest-base.yml for the full rationale.
       - name: Restore kernel-builder tools tree
         id: tools-tree-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
           key: ${{ runner.os }}-confos-tools-tree-mkosi-v26-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
@@ -130,7 +130,7 @@ jobs:
       # --- guest kernel output (shared kata-kernel-v3 cache) ----------------
       - name: Restore guest kernel build
         id: kernel-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             confidential-os-builder/output/kernel
@@ -162,7 +162,7 @@ jobs:
           echo "resolved kernel-config snapshot sha256: ${sha}"
 
       - name: Upload kernel-config snapshot
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: config-x86_64.snapshot
           path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
@@ -184,7 +184,7 @@ jobs:
 
       - name: Save kernel-builder tools tree
         if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
           key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
@@ -203,7 +203,7 @@ jobs:
 
       - name: Save guest kernel build
         if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             confidential-os-builder/output/kernel
