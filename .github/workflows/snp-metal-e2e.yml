@@ -296,6 +296,18 @@ jobs:
             if [ "\$WOK" != "1" ]; then
               \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
               \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
+              # csr_denied with "the inventory callback has no node addresses"
+              # is CDS-side, and CERTLOG only shows the workload's half. With
+              # cds.sandboxInventoryCIDRs unset CDS derives the bound from the
+              # node list, and it can come back empty two ways that read
+              # identically from here: no in-cluster config, or every node
+              # address excluded for sitting inside a pod range. CDS logs a
+              # distinct line for each; without them the cause is a guess.
+              \$K -n c8s-system logs -l app.kubernetes.io/component=cds -c cds --tail=40 2>&1 \\
+                | grep -iE 'sandbox-digests|node inventory|in-cluster|pod range|bound' \\
+                | tail -10 | sed 's/^/@@CDSBOUND /;s/\$/@@/'
+              \$K get nodes -o jsonpath='{range .items[*]}{.metadata.name} internalIP={.status.addresses[?(@.type=="InternalIP")].address} podCIDR={.spec.podCIDR}{"\\n"}{end}' 2>&1 \\
+                | sed 's/^/@@NODEADDR /;s/\$/@@/'
             fi
           fi
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -10 | sed 's/^/@@EV /;s/\$/@@/'
