@@ -1,0 +1,129 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# CONSUMER: capture the SNP launch measurement at a given vCPU count.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Not an e2e test. It boots a plain attested VM (base-cpu) at one vCPU count
+# and reports the measurement the hardware produced, so a published per-SMP
+# digest can be confirmed against a real launch.
+#
+# WHY: an SNP launch measurement covers initial vCPU state, so the image ships
+# one measured IGVM per supported count and the manifest publishes a digest for
+# each. get-kubeconfig's trust gate accepts any of them, but the e2e lanes only
+# ever boot the cell default, so the other counts are pinned without ever having
+# been launched. A digest that is wrong for a count nobody boots surfaces as a
+# real node booting fine and then being refused credentials.
+#
+# Compare the reported value against that count's snp_launch_digest in the
+# image's published manifest.json:
+#   crane manifest ghcr.io/confidential-dot-ai/node-guest-base:rke2-snp-dev \
+#     | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest'
+#   crane blob ghcr.io/confidential-dot-ai/node-guest-base@<digest> \
+#     | jq -r '.snp_variants[]|select(.smp==<cores>)|.measurement.snp_launch_digest'
+name: snp-measure-smp
+on:
+  workflow_dispatch:
+    inputs:
+      cores:
+        description: 'vCPU count to boot (must be a count the image ships a guest-smp<N>.igvm for)'
+        required: true
+        default: '8'
+
+permissions:
+  contents: read
+  # Load-bearing: the primitive's reaper asks GitHub whether a CVM's owning run
+  # finished. Without it that call 403s and reaping falls back to age alone.
+  actions: read
+
+concurrency:
+  group: snp-measure-smp
+  cancel-in-progress: false
+
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/confidential-dot-ai/node-guest-base:rke2-snp-dev
+    outputs:
+      b64: ${{ steps.build.outputs.b64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Same pin as the other lanes that shell out to crane.
+      - name: install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+
+      - name: validate the requested vCPU count
+        env:
+          CORES: ${{ inputs.cores }}
+        run: |
+          set -euo pipefail
+          case "$CORES" in
+            ''|*[!0-9]*) echo "::error::cores '$CORES' is not a positive integer"; exit 1 ;;
+          esac
+          # A guest can only boot a measured IGVM, so the bootable counts are
+          # exactly the ones the image shipped. Checking here fails a typo on a
+          # cheap runner instead of after the CVM lease starts.
+          ships=$(crane manifest "$IMAGE" \
+            | jq -r '.layers[].annotations["org.opencontainers.image.title"] // empty' \
+            | sed -n 's/^guest-smp\([0-9]\+\)\.igvm$/\1/p' | sort -n | tr '\n' ' ')
+          [ -n "$ships" ] || { echo "::error::$IMAGE ships no guest-smp<N>.igvm layers"; exit 1; }
+          case " $ships " in
+            *" $CORES "*) echo "smp$CORES is one of the shipped IGVMs ($ships)" ;;
+            *) echo "::error::the image ships no guest-smp$CORES.igvm — available: $ships"; exit 1 ;;
+          esac
+
+      - name: build the in-guest payload
+        id: build
+        run: |
+          set -euo pipefail
+          # The primitive reads the runtime measurement from configfs-tsm,
+          # emits it as @@MEAS@@ and exports it as the `measurement` output
+          # before the payload runs, so nothing has to be measured here. The
+          # payload exists only to satisfy the contract's success marker: a
+          # clean boot IS the result this lane wants.
+          cat > payload.sh <<'EOF'
+          echo "@@PAYLOAD_OK@@"
+          EOF
+          echo "b64=$(base64 -w0 payload.sh)" >> "$GITHUB_OUTPUT"
+
+  cvm:
+    needs: payload
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/cvm-e2e.yml
+    with:
+      platform: snp-metal
+      # base-cpu publishes igvmFilePattern, so it can serve a non-default vCPU
+      # count. rke2-node pins a single igvmFile and the primitive refuses the
+      # override there.
+      flavor: base-cpu
+      runner: cvm-launcher
+      payload_b64: ${{ needs.payload.outputs.b64 }}
+      cores_override: ${{ inputs.cores }}
+      timeout_minutes: 30
+
+  report:
+    needs: [cvm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: report the measurement
+        env:
+          MEASUREMENT: ${{ needs.cvm.outputs.measurement }}
+          CORES: ${{ inputs.cores }}
+        run: |
+          set -euo pipefail
+          [ -n "$MEASUREMENT" ] || { echo "::error::the run attested no measurement"; exit 1; }
+          {
+            echo "### SNP launch measurement — smp${CORES}"
+            echo
+            echo '```'
+            echo "$MEASUREMENT"
+            echo '```'
+            echo
+            echo "Compare against \`snp_variants[smp=${CORES}].measurement.snp_launch_digest\` in the image's published manifest.json."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "smp${CORES} measurement: $MEASUREMENT"
