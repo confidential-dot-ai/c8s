@@ -241,8 +241,7 @@ func initDataAnchor(claim []byte) ([]byte, error) {
 // classifyVerifyError splits a refusal of the report from a failure to reach
 // the verifier, which is what decides whether the caller retries. The
 // attestation-api refuses with a 4xx status rather than with a false verdict,
-// so the status arm is the one a conforming verifier takes. That arm is shared
-// with cds.classifyVerifyError; the sentinel arms are not.
+// so the status arm is the one a conforming verifier takes.
 func classifyVerifyError(err error) error {
 	switch {
 	case errors.Is(err, attestationclient.ErrSignatureInvalid),
@@ -253,12 +252,12 @@ func classifyVerifyError(err error) error {
 		errors.Is(err, attestationclient.ErrUnsupportedPlatform):
 		return errAttestVerdict
 	}
-	// A refusal whose body is not the api's JSON error shape arrives as
-	// UnexpectedError, carrying the same status.
 	var apiErr *attestationclient.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return errAttestVerdict
 	}
+	// A refusal whose body is not the api's JSON error shape arrives as
+	// UnexpectedError, carrying the same status.
 	var unexpected *attestationclient.UnexpectedError
 	if errors.As(err, &unexpected) && refusesEvidence(unexpected.Status) {
 		return errAttestVerdict
