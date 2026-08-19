@@ -2,9 +2,47 @@
 # and image pins are deliberate measurement changes and stay manual. The image
 # repro gate gives every image-relevant PR a throwaway module-signing key; never
 # copy the production MODULE_SIG_KEY_PEM into Dependabot secrets.
+#
+# "Image pins" above means the measured component digests in
+# internal/helmchart/c8s/values.yaml and node-guest-image/c8s/mkosi.sync. No
+# ecosystem below reads either file: docker covers Dockerfile FROM bases only.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /test/mock-attestation
+      - /test/mock-cds
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # The runtime bases of attestation-gated components: nri-image-policy's image
+  # is in the measured allowlist floor, and docker.yml's type=gha cache means a
+  # repointed base can otherwise ride a warm layer unnoticed.
+  - package-ecosystem: docker
+    directories:
+      - /cmd/c8s
+      - /cmd/cds
+      - /cmd/get-cert
+      - /cmd/nri-image-policy
+      - /cmd/ratls-mesh
+      - /cmd/volumed
+      - /test/mock-attestation
+      - /test/mock-cds
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
