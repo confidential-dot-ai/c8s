@@ -3,6 +3,18 @@
 # builder with a read-only token and no inherited secrets.
 name: c8s-image
 
+# Every Docker run spawns one of these, PR runs included, and only the
+# main-push one builds — so a single merge produces one building run plus
+# several correctly-skipped siblings that are otherwise indistinguishable in
+# the UI and `gh run list` (same name, branch and SHA). Saying which is which
+# in the run name is what stops "my guest-image merge produced no image"
+# being the obvious-but-wrong reading of that list.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && 'c8s-image (manual dispatch)'
+   || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+      && 'c8s-image BUILDS (main push)'
+   || format('c8s-image skipped ({0} on {1}, not a main push)', github.event.workflow_run.event, github.event.workflow_run.head_branch) }}
+
 on:
   # build-c8s resolves cds:<sha> / nri-image-policy:<sha>, which Docker
   # publishes first. Gate on it so those digests exist.
