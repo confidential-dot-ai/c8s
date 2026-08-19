@@ -1,7 +1,6 @@
 package runtimemeasure
 
 import (
-	"bytes"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -132,17 +131,8 @@ const (
 	snpSMP4Digest = "a0185a3b93d8a10438fc2c2445edf9908c6de694350a3eaf2f55277d5287fd3532a02994c1e2932809da4147d8b58c97"
 )
 
-func snpManifest(t *testing.T, body string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "manifest.json")
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
 func TestLoadSNPImageManifestValid(t *testing.T) {
-	p := snpManifest(t, `{"version":3,"snp_variants":[
+	p := writeManifest(t, `{"version":3,"snp_variants":[
 	  {"smp":2,"measurement":{"snp_launch_digest":"`+snpSMP2Digest+`","algorithm":"sha384"}},
 	  {"smp":4,"measurement":{"snp_launch_digest":"`+snpSMP4Digest+`","algorithm":"sha384"}}]}`)
 	pins, err := LoadSNPImageManifest(p)
@@ -152,25 +142,26 @@ func TestLoadSNPImageManifestValid(t *testing.T) {
 	if len(pins.BySMP) != 2 {
 		t.Fatalf("got %d variants, want 2", len(pins.BySMP))
 	}
-	want2, _ := hex.DecodeString(snpSMP2Digest)
-	if got := pins.BySMP[2]; !bytes.Equal(got[:], want2) {
-		t.Errorf("smp2 digest = %x, want %s", got, snpSMP2Digest)
-	}
-	// Both variants are accepted: one image, two legitimate vCPU shapes.
-	var d2, d4 [Size]byte
-	copy(d2[:], want2)
-	w4, _ := hex.DecodeString(snpSMP4Digest)
-	copy(d4[:], w4)
-	if !pins.Has(d2) || !pins.Has(d4) {
-		t.Error("Has must accept every pinned variant")
+	for _, v := range []struct {
+		smp  int
+		want string
+	}{{2, snpSMP2Digest}, {4, snpSMP4Digest}} {
+		got := pins.BySMP[v.smp]
+		if hex.EncodeToString(got[:]) != v.want {
+			t.Errorf("smp%d digest = %x, want %s", v.smp, got, v.want)
+		}
+		// Both variants are accepted: one image, two legitimate vCPU shapes.
+		if !pins.Has(got) {
+			t.Errorf("Has must accept the smp%d variant", v.smp)
+		}
 	}
 	var other [Size]byte
 	if pins.Has(other) {
 		t.Error("Has must reject a digest outside the set")
 	}
-	// Digests are ordered by SMP so operator-facing output is stable.
-	if got := pins.Digests(); len(got) != 2 || !bytes.Equal(got[0][:], want2) {
-		t.Errorf("Digests() not in ascending SMP order: %x", got)
+	// Rendered in ascending SMP order so operator-facing output is stable.
+	if got, want := pins.String(), snpSMP2Digest+", "+snpSMP4Digest; got != want {
+		t.Errorf("String() = %s, want %s", got, want)
 	}
 }
 
@@ -188,9 +179,66 @@ func TestLoadSNPImageManifestRejects(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := LoadSNPImageManifest(snpManifest(t, body)); err == nil {
+			if _, err := LoadSNPImageManifest(writeManifest(t, body)); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})
+	}
+}
+
+// The loaders must read a real confos build manifest, not just a hand-written
+// pin. These fixtures are verbatim gate artifacts (confos manifest schema
+// version 3): the TDX tuple nests under "tdx", the SNP set under
+// "snp_variants", and both carry build/inputs/outputs the loaders ignore.
+func TestLoadImageManifestReadsConfosBuild(t *testing.T) {
+	pins, err := LoadImageManifest("testdata/confos-tdx-manifest.json")
+	if err != nil {
+		t.Fatalf("LoadImageManifest on a real confos manifest: %v", err)
+	}
+	const wantMRTD = "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1"
+	if got := hex.EncodeToString(pins.MRTD[:]); got != wantMRTD {
+		t.Errorf("mrtd = %s, want %s", got, wantMRTD)
+	}
+	var zero [Size]byte
+	if pins.RTMR1 == zero || pins.RTMR2 == zero {
+		t.Error("rtmr1/rtmr2 must be read from the nested tdx object")
+	}
+}
+
+func TestLoadSNPImageManifestReadsConfosBuild(t *testing.T) {
+	pins, err := LoadSNPImageManifest("testdata/confos-snp-manifest.json")
+	if err != nil {
+		t.Fatalf("LoadSNPImageManifest on a real confos manifest: %v", err)
+	}
+	// The build ships one IGVM per supported vCPU count.
+	for _, smp := range []int{2, 4, 8, 16} {
+		if _, ok := pins.BySMP[smp]; !ok {
+			t.Errorf("no pinned variant for smp %d", smp)
+		}
+	}
+	const wantSMP2 = "e7df3a8f1dbe619607154ce994c1f4d7299c539b120b5560e137f7787e4ece304f270c1444b47c863fde54bc863291d7"
+	if got := pins.BySMP[2]; hex.EncodeToString(got[:]) != wantSMP2 {
+		t.Errorf("smp2 digest = %x, want %s", got, wantSMP2)
+	}
+}
+
+// A TDX manifest carries no snp_variants and an SNP manifest no tdx tuple, so
+// each loader must reject the other platform's real manifest. This is what
+// get-kubeconfig's platform inference rests on.
+func TestLoadersRejectTheOtherPlatformsConfosBuild(t *testing.T) {
+	if _, err := LoadSNPImageManifest("testdata/confos-tdx-manifest.json"); err == nil {
+		t.Error("SNP loader accepted a real TDX manifest")
+	}
+	if _, err := LoadImageManifest("testdata/confos-snp-manifest.json"); err == nil {
+		t.Error("TDX loader accepted a real SNP manifest")
+	}
+}
+
+// The duplicate-key guard must follow the tuple into the nested object, or a
+// nested manifest could name a register twice and load the last value.
+func TestLoadImageManifestRejectsDuplicateNestedRegister(t *testing.T) {
+	p := writeManifest(t, `{"tdx":{"mrtd":"`+mrtdHex+`","mrtd":"`+strings.Repeat("9f", Size)+`","rtmr1":"`+rtmr1Hex+`","rtmr2":"`+rtmr2Hex+`"}}`)
+	if _, err := LoadImageManifest(p); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("error = %v, want a duplicate-key rejection", err)
 	}
 }

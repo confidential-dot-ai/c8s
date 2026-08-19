@@ -21,13 +21,14 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get-kubeconfig",
 		Short: "Attest a c8s CVM and obtain an operator kubeconfig via the measured image + operator-key gate",
-		Long: "get-kubeconfig attests a measured c8s TDX CVM and enforces its full\n" +
-			"measured identity: the guest image tuple (MRTD, RTMR[1], RTMR[2]) from\n" +
-			"an explicitly selected build-artifact manifest, plus the RTMR[3] chain\n" +
+		Long: "get-kubeconfig attests a measured c8s CVM and enforces its full\n" +
+			"measured identity. The build-artifact manifest selects the platform:\n" +
+			"on TDX the image tuple (MRTD, RTMR[1], RTMR[2]) plus the RTMR[3] chain\n" +
 			"seeded by the operator's key and extended by the expected workload\n" +
-			"images. It then exchanges a CSR for a short-lived kube client cert over\n" +
-			"the cred-release endpoint and writes a kubeconfig. Verification runs\n" +
-			"in-process (attestation-go).",
+			"images; on SEV-SNP the pinned per-SMP launch digest plus the\n" +
+			"operator-key HOSTDATA binding. It then exchanges a CSR for a\n" +
+			"short-lived kube client cert over the cred-release endpoint and writes\n" +
+			"a kubeconfig. Verification runs in-process (attestation-go).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cfg.OperatorKeyPath == "" || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
 				return fmt.Errorf("--operator-key, --image-manifest and --out are required")
@@ -70,7 +71,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ReleaseBaseURL, "release-url", "", "cred-release base URL (overrides --node)")
 	f.StringVar(&cfg.APIServerURL, "apiserver-url", "", "apiserver URL for the kubeconfig (overrides --node)")
 	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM (its public half is bound into RTMR[3]) (required)")
-	f.StringVar(&cfg.ImageManifestPath, "image-manifest", "", "an explicitly selected, provenanced build-artifact manifest carrying the expected guest image's measured identity — TDX: the full tuple (mrtd, rtmr1, rtmr2); SNP: the per-SMP launch digests (snp_variants). The manifest's shape selects the platform, and the gate pins every value, so a host cannot substitute the guest image and replay the operator-key binding (required)")
+	f.StringVar(&cfg.ImageManifestPath, "image-manifest", "", "an explicitly selected, provenanced build-artifact manifest carrying the expected guest image's measured identity — TDX: mrtd/rtmr1/rtmr2; SNP: snp_variants. Its shape selects the platform, and the gate pins every value (required)")
 	f.StringArrayVar(&cfg.WorkloadImages, "workload-image", nil, "digest-pinned image ref (\"sha256:<hex>\" or \"name@sha256:<hex>\"; tags rejected) the node's measurer is expected to have extended into RTMR[3]; repeatable, in first-extend order. Omit if the node runs no measured workloads. TDX only — SNP has no runtime-extend register")
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")

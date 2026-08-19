@@ -33,24 +33,39 @@ var (
 	testMRTDHex  = strings.Repeat("1a", 48)
 	testRTMR1Hex = strings.Repeat("2b", 48)
 	testRTMR2Hex = strings.Repeat("3c", 48)
+
+	// The per-SMP launch digests the SNP test manifests pin.
+	testSNPSMP2Hex = strings.Repeat("4d", 48)
+	testSNPSMP4Hex = strings.Repeat("5e", 48)
 )
 
-// writeTestManifest writes a build-artifact manifest carrying the test tuple.
-func writeTestManifest(t *testing.T) string {
+// writeTestManifest writes a build-artifact manifest with the given body.
+func writeTestManifest(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "manifest.json")
-	content := `{"mrtd":"` + testMRTDHex + `","rtmr1":"` + testRTMR1Hex + `","rtmr2":"` + testRTMR2Hex + `"}`
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
+// tdxManifest is the TDX tuple the test manifests pin.
+func tdxManifest() string {
+	return `{"mrtd":"` + testMRTDHex + `","rtmr1":"` + testRTMR1Hex + `","rtmr2":"` + testRTMR2Hex + `"}`
+}
+
+// snpManifest is a two-variant SNP manifest (smp2 + smp4) for one image.
+func snpManifest() string {
+	return `{"version":3,"snp_variants":[
+	  {"smp":2,"measurement":{"snp_launch_digest":"` + testSNPSMP2Hex + `","algorithm":"sha384"}},
+	  {"smp":4,"measurement":{"snp_launch_digest":"` + testSNPSMP4Hex + `","algorithm":"sha384"}}]}`
+}
+
 // testPolicy builds the full measured policy for the test tuple + operator
 // key, with no workload images (bare-seed RTMR[3]).
 func testPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	exp, err := policyFor(writeTestManifest(t), operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,20 +372,10 @@ func TestVerifyServerCertAuthenticatesBody(t *testing.T) {
 	})
 }
 
-// snpTestPolicy builds an SNP gate from a two-variant manifest carrying the
-// digests confirmed against hardware on build 9ce1642 (smp2 and smp4).
+// snpTestPolicy builds an SNP gate from a two-variant manifest.
 func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	const smp2 = "e9dd4de2ddc59700fa8842fff7e9d80605d433d8d32e8b4112afd761b96506e4e67d97139df5cad76dfa5881c7b11ff5"
-	const smp4 = "a0185a3b93d8a10438fc2c2445edf9908c6de694350a3eaf2f55277d5287fd3532a02994c1e2932809da4147d8b58c97"
-	p := filepath.Join(t.TempDir(), "manifest.json")
-	body := `{"version":3,"snp_variants":[
-	  {"smp":2,"measurement":{"snp_launch_digest":"` + smp2 + `","algorithm":"sha384"}},
-	  {"smp":4,"measurement":{"snp_launch_digest":"` + smp4 + `","algorithm":"sha384"}}]}`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	exp, err := policyFor(p, operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,12 +451,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 // SNP has no runtime-extend register, so claiming workload enforcement is a
 // usage error rather than a silently-ignored flag.
 func TestSNPPolicyRejectsWorkloadImages(t *testing.T) {
-	const smp2 = "e9dd4de2ddc59700fa8842fff7e9d80605d433d8d32e8b4112afd761b96506e4e67d97139df5cad76dfa5881c7b11ff5"
-	p := filepath.Join(t.TempDir(), "manifest.json")
-	body := `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + smp2 + `","algorithm":"sha384"}}]}`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	p := writeTestManifest(t, snpManifest())
 	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)})
 	if err == nil || !strings.Contains(err.Error(), "requires a TDX node") {
 		t.Fatalf("want workload-image rejection, got %v", err)

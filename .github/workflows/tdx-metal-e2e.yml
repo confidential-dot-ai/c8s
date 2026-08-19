@@ -396,9 +396,20 @@ jobs:
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
           set -euo pipefail
-          # The trust gate pins the whole image tuple, not MRTD alone; the
-          # manifest is written from the same refs CM the boot used.
-          printf '{"mrtd":"%s","rtmr1":"%s","rtmr2":"%s"}\n' "$mrtd" "$rtmr1" "$rtmr2" > /tmp/image-manifest.json
+          # Pull the manifest the image build published rather than writing
+          # one: a hand-built stub only ever proves the gate accepts the shape
+          # this step chose. The CDI tag the CVM boots and the oras artifact
+          # carrying manifest.json are the same build under sibling tags, so
+          # the manifest is fetched by stripping the -cdi suffix.
+          oras_ref="${image%-cdi}"
+          [ "$oras_ref" != "$image" ] || { echo "::error::refs CM 'image' ($image) is not a -cdi tag, so the sibling oras artifact carrying manifest.json cannot be derived"; exit 1; }
+          digest=$(crane manifest "$oras_ref" | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json") | .digest')
+          [ -n "$digest" ] || { echo "::error::$oras_ref publishes no manifest.json layer"; exit 1; }
+          crane blob "${oras_ref%%:*}@${digest}" > /tmp/image-manifest.json
+          # The published manifest must describe the image this run booted, or
+          # the gate would be pinned to a different build's measurements.
+          got_mrtd=$(jq -r '.tdx.mrtd' /tmp/image-manifest.json)
+          [ "$got_mrtd" = "$mrtd" ] || { echo "::error::published manifest MRTD ($got_mrtd) != the refs CM pin ($mrtd): $oras_ref is not the build this CVM booted"; exit 1; }
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')

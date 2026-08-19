@@ -22,8 +22,16 @@ type ImagePins struct {
 
 // imageManifest is the JSON subset LoadImageManifest reads. Extra fields are
 // allowed (build manifests carry other data); the three registers are not
-// optional.
+// optional. A confos build manifest nests them under "tdx"; the flat form is
+// also accepted so a hand-written pin stays valid.
 type imageManifest struct {
+	MRTD  string           `json:"mrtd"`
+	RTMR1 string           `json:"rtmr1"`
+	RTMR2 string           `json:"rtmr2"`
+	TDX   *tdxMeasurements `json:"tdx"`
+}
+
+type tdxMeasurements struct {
 	MRTD  string `json:"mrtd"`
 	RTMR1 string `json:"rtmr1"`
 	RTMR2 string `json:"rtmr2"`
@@ -47,7 +55,12 @@ func LoadImageManifest(path string) (ImagePins, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return pins, fmt.Errorf("image manifest %s is not a JSON object: %w", path, err)
 	}
-	if err := rejectDuplicateRegisters(data); err != nil {
+	scope := "" // top level; a confos manifest nests the tuple under "tdx"
+	if m.TDX != nil {
+		m.MRTD, m.RTMR1, m.RTMR2 = m.TDX.MRTD, m.TDX.RTMR1, m.TDX.RTMR2
+		scope = "tdx"
+	}
+	if err := rejectDuplicateRegisters(data, scope); err != nil {
 		return ImagePins{}, fmt.Errorf("image manifest %s: %w", path, err)
 	}
 	for _, f := range []struct {
@@ -77,7 +90,11 @@ func LoadImageManifest(path string) (ImagePins, error) {
 // while a human (and any diff or signature-over-the-published-line review)
 // reads the other. Unknown extra fields stay tolerated — build manifests carry
 // plenty — but the three registers this pin is made of must be unambiguous.
-func rejectDuplicateRegisters(data []byte) error {
+//
+// scope names the object the registers were read from: "" for the top level,
+// or "tdx" for a confos manifest that nests them. The check must follow the
+// tuple, or a duplicate inside the nested object would go unnoticed.
+func rejectDuplicateRegisters(data []byte, scope string) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
@@ -101,6 +118,12 @@ func rejectDuplicateRegisters(data []byte) error {
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
 			return nil
+		}
+		if scope != "" {
+			if key == scope {
+				return rejectDuplicateRegisters(value, "")
+			}
+			continue
 		}
 		switch key {
 		case "mrtd", "rtmr1", "rtmr2":

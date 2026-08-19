@@ -486,11 +486,15 @@ On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
 guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
 MRTD alone warns that they are unmeasured by that policy. To pin the whole
 image, pass `--image-manifest <file>` — a build-artifact manifest published
-with the guest image build, a JSON object carrying `mrtd`, `rtmr1` and
-`rtmr2` (96 lowercase hex chars each, each named once). The three registers
-are loaded atomically from that one provenanced manifest and all three are
-compared exactly, the same rule `c8s get-kubeconfig` applies to the same
-manifest — MRTD is deliberately not merged into the `--measurements`
+with the guest image build, carrying `mrtd`, `rtmr1` and `rtmr2` (96
+lowercase hex chars each, each named once) under its `tdx` object, as a
+confos manifest publishes them; a flat top-level tuple is also accepted.
+The manifest ships as a `manifest.json` layer in the image's oras artifact
+(the tag the CDI ref carries without its `-cdi` suffix), so it can be
+fetched with `crane blob` for the exact build a node booted. The
+three registers are loaded atomically from that one provenanced manifest and
+all three are compared exactly, the same rule `c8s get-kubeconfig` applies to
+the same manifest — MRTD is deliberately not merged into the `--measurements`
 allowlist, since an allowlist is satisfied by any member and a launch digest
 from a different build would then pass alongside this manifest's
 RTMR[1]/RTMR[2].
@@ -577,28 +581,34 @@ Caveats the output surfaces:
 
 ### Trust gate: `c8s get-kubeconfig`
 
-`c8s get-kubeconfig` obtains an admin kubeconfig from a measured TDX node CVM.
+`c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
 and it enforces the identical policy twice — on the initial attestation gate
 and again on the RA-TLS credential-release connection:
 
-- **platform** — TDX only; any other platform is refused up front;
-- **guest image** — MRTD, RTMR[1] and RTMR[2] must match the tuple from
+- **platform** — the `--image-manifest` shape selects it (a TDX tuple or SNP
+  `snp_variants`); a node of any other platform is refused up front;
+- **guest image (TDX)** — MRTD, RTMR[1] and RTMR[2] must match the tuple from
   `--image-manifest` (required), an explicitly selected, provenanced
-  build-artifact manifest carrying all three fields. A generic artifact-hash
-  `manifest.json` is not an image pin and is rejected;
-- **RTMR[3] chain** — the register must equal the operator-key seed
+  build-artifact manifest carrying all three fields under its `tdx` object. A
+  generic artifact-hash `manifest.json` is not an image pin and is rejected;
+- **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
   (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are
   rejected). With no `--workload-image` the register must equal the bare seed;
+- **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
+  one of the per-SMP launch digests pinned by `snp_variants` (one image has
+  one digest per vCPU count), and HOSTDATA must equal `SHA-256(operator
+  pubkey)`. SNP has no runtime-extend register, so `--workload-image` is a
+  usage error there rather than a silently ignored flag;
 - **certificate body** — the credential-release serving cert must sit inside
   its validity window (NotBefore with a bounded 5-minute skew, NotAfter with
   none) and, being self-signed, verify its own signature with its attested
   key.
 
-What the gate proves: a genuine TDX guest booted exactly the pinned image,
-was launched to trust exactly this operator key, and ran exactly the expected
-measured workloads. What it does not prove: anything about images or keys the
+What the gate proves: a genuine guest of the manifest's platform booted
+exactly the pinned image, was launched to trust exactly this operator key,
+and (on TDX) ran exactly the expected measured workloads. What it does not prove: anything about images or keys the
 manifest and flags do not name, or the provenance of the manifest file itself
 — select it deliberately from the trusted image build. An RTMR[3]-only gate
 would prove much less: the untrusted host stages the operator public key, so
