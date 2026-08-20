@@ -1,9 +1,15 @@
 {{- if .Values.volumed.enabled }}
 {{- /*
   Pre-delete DaemonSet that reaps the device-mapper stack volumed opened on
-  each node (files/scripts/volumed-teardown.sh). Helm waits for it to be Ready
-  before deleting the release, so the reap happens while the mounts are still
-  reachable — and it runs for any chart consumer, not only `c8s uninstall`.
+  each node (files/scripts/volumed-teardown.sh). It runs before the release is
+  deleted, so the reap happens while the mounts are still reachable — and it
+  runs for any chart consumer, not only `c8s uninstall`.
+
+  The script exits non-zero when a mapping will not close, which helm 4 waits
+  for and turns into a failed uninstall. Helm 3 waits only until the DaemonSet
+  object exists, so there the failure is in the hook pod rather than in helm's
+  exit code; `c8s uninstall` names the pods that cause it before it starts.
+  hook-delete-policy keeps a failed hook's pods for exactly that reason.
 
   Same privilege shape as the volumed DaemonSet it cleans up after: unmounting
   another pod's directory and closing a dm target needs it.

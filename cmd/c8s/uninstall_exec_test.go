@@ -497,12 +497,23 @@ func TestUninstallRefusesWhileVolumePodsRun(t *testing.T) {
 		mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
 	})
 
-	t.Run("--force proceeds", func(t *testing.T) {
+	t.Run("--force proceeds, having still asked which pods hold volumes", func(t *testing.T) {
 		s := newUninstallStubs(t, values, holding, false)
 		if err := runC8s(t, "uninstall", "--force"); err != nil {
 			t.Fatalf("uninstall --force: %v", err)
 		}
 		mustContainLine(t, s.f.calls(t), "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+		// The pre-delete hook cannot close what these pods hold, so --force has
+		// to name them here; a failed hook's logs go with the release.
+		var listed bool
+		for _, c := range s.f.calls(t) {
+			if strings.HasPrefix(c, "kubectl get pods --all-namespaces") {
+				listed = true
+			}
+		}
+		if !listed {
+			t.Errorf("--force skipped the volume-pod listing, so the mappings it strands are never named; calls: %v", s.f.calls(t))
+		}
 	})
 
 	t.Run("pod listing failure surfaces", func(t *testing.T) {

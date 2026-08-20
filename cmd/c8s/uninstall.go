@@ -162,7 +162,11 @@ removing it under a live volume strands the mappings on the node, where they
 keep the backing disk open against the next install. Scale those workloads to
 zero first — volumed tears the volumes down — or pass --force. Whatever is
 still mapped when the release goes is reaped by the chart's volumed pre-delete
-hook, which runs on every node before the daemon is removed.
+hook, which runs on every node before the daemon is removed. That hook can only
+close a mapping nothing is using: a live consumer keeps the device open through
+its own mount namespace, which the hook's host-side unmount does not reach, so
+under --force the hook fails on those and names them. Whatever it leaves is
+swept by volumed the next time it starts.
 
 Left in place by default: the ConfidentialWorkload CRD (helm never deletes
 crds/; --delete-crds removes it ALONG WITH EVERY ConfidentialWorkload object)
@@ -223,13 +227,16 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 
 		// volumed goes with the release and is the only component that unmaps
 		// a pod's volume devices, so the teardown order is load-bearing.
-		if boolAtPath(values, "volumed.enabled") && !uninstallForce {
+		if boolAtPath(values, "volumed.enabled") {
 			pods, err := listVolumePods(ctx)
 			if err != nil {
 				return err
 			}
 			if len(pods) > 0 {
-				return volumePodsRunningError(pods)
+				if !uninstallForce {
+					return volumePodsRunningError(pods)
+				}
+				fmt.Fprintf(os.Stdout, "%s\n", forcedVolumePodsWarning(pods))
 			}
 		}
 
@@ -533,7 +540,15 @@ func filterVolumePods(lines []string) []string {
 // volumePodsRunningError is the volume guard's refusal: it names the pods and
 // the ordering that avoids the leak.
 func volumePodsRunningError(pods []string) error {
-	return fmt.Errorf("pods are still holding c8s encrypted volumes, and volumed is the only thing that unmaps them:\n  %s\nscale those workloads to zero first (volumed then tears the volumes down), or pass --force to uninstall anyway and leave the device-mapper stack on the node",
+	return fmt.Errorf("pods are still holding c8s encrypted volumes, and volumed is the only thing that unmaps them:\n  %s\nscale those workloads to zero first (volumed then tears the volumes down), or pass --force to uninstall with those mappings still open",
+		strings.Join(pods, "\n  "))
+}
+
+// forcedVolumePodsWarning is what --force buys: the uninstall proceeds, and the
+// mappings these pods hold stay open on their nodes, because the pre-delete
+// hook cannot close a device a live mount namespace still references.
+func forcedVolumePodsWarning(pods []string) string {
+	return fmt.Sprintf("! --force: these pods still hold c8s encrypted volumes:\n  %s\nthe volumed pre-delete hook will fail to close their dm-crypt/dm-verity mappings, which then hold the backing disks open. Delete these pods and re-run the uninstall to leave the nodes clean; otherwise volumed sweeps the residue the next time it starts, so a reinstall clears it",
 		strings.Join(pods, "\n  "))
 }
 
@@ -818,7 +833,7 @@ func init() {
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
 	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep the kata host artifacts (/opt/kata, containerd drop-in, kata-guest-base image, RKE2 prep template, node labels) off every kata node via a short-lived privileged DaemonSet. Skipped automatically when the release was installed without --cvm-mode=pod")
 	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the kata host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry kata artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
-	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (their mounts go with the pre-delete hook that reaps the node's device-mapper stack)")
+	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (the pre-delete hook cannot close a mapping a live pod holds, and fails naming it)")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteNamespace, "delete-namespace", false, "also delete the release namespace (and everything left in it, e.g. an operator-created image pull Secret)")
 	rootCmd.AddCommand(uninstallCmd)
