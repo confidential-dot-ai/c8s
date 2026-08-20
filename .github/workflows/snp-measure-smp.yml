@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# Capture the SNP launch measurement at a given vCPU count.
+# Prove an SNP vCPU count boots and attests, and report its measurement.
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Not an e2e test, and deliberately NOT built on cvm-e2e.yml: that primitive
@@ -18,6 +18,19 @@
 # ever boot the cell default, so the other counts are pinned without having been
 # launched. A digest that is wrong for a count nobody boots surfaces as a real
 # node booting fine and then being refused credentials.
+#
+# WHAT THIS PROVES: that a vCPU count actually boots and attests. cvm-e2e
+# hardcodes CORES per cell, so every other count ships measured IGVMs that
+# nothing in CI has ever launched. A count that cannot boot, or boots and
+# fails to attest, is a node that never joins — and this is the only lane
+# that can find that out.
+#
+# WHAT IT DOES NOT DO: compare the measurement to a published digest. The
+# cell boots an artifact staged onto the cluster, and the manifest.json for
+# that build lives inside the same 1.5GB tarball the IGVM was extracted from
+# (see confidential-ci c8s-e2e/cluster-prep/igvm-stage-job.yaml), not in a
+# registry manifest this job can cheaply read. Pulling it to compare is a
+# worthwhile follow-up; until then the comparison is a manual step.
 name: snp-measure-smp
 on:
   workflow_dispatch:
@@ -57,7 +70,6 @@ jobs:
           mkdir -p "$PWD/bin"
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
           chmod +x bin/kubectl; echo "$PWD/bin" >> "$GITHUB_PATH"
-          go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
           go build -o bin/c8s ./cmd/c8s
 
       - name: resolve image refs and validate the vCPU count
@@ -70,27 +82,17 @@ jobs:
           [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc"; exit 1; }
           PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
           [ -n "$PAT" ] || { echo "::error::$REFS_CM has no igvmFilePattern, so it cannot serve a per-count IGVM"; exit 1; }
-          # The image to measure AND to compare against is whatever this CM
-          # pins: a measurement from one image says nothing about another
-          # image's published digest.
-          IMAGE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.image}')
-          [ -n "$IMAGE" ] || { echo "::error::$REFS_CM has no 'image' key, so the published digest cannot be located"; exit 1; }
-          echo "booting $IMAGE (per $REFS_CM)"
-          # A guest can only boot a measured IGVM, so the bootable counts are
-          # exactly the ones this image shipped.
-          ships=$(crane manifest "$IMAGE" \
-            | jq -r '.layers[].annotations["org.opencontainers.image.title"] // empty' \
-            | sed -n 's/^guest-smp\([0-9]\+\)\.igvm$/\1/p' | sort -n | tr '\n' ' ')
-          [ -n "$ships" ] || { echo "::error::$IMAGE ships no guest-smp<N>.igvm layers"; exit 1; }
-          case " $ships " in
-            *" $CORES "*) echo "smp$CORES is one of the shipped IGVMs ($ships)" ;;
-            *) echo "::error::the image ships no guest-smp$CORES.igvm — available: $ships"; exit 1 ;;
-          esac
+          # The IGVM files are staged on the cluster, not pulled per-run, so
+          # the shipped set is what the igvm-files PVC holds. The cell boots a
+          # CDI artifact (a single rootfs tarball), which carries no
+          # manifest.json and therefore no published digest to compare
+          # against — see the header note.
+          IGVMFILE=${PAT//\{cores\}/$CORES}
           {
             echo "ROOTPVC=$ROOTPVC"
-            echo "IGVMFILE=${PAT//\{cores\}/$CORES}"
-            echo "IMAGE=$IMAGE"
+            echo "IGVMFILE=$IGVMFILE"
           } >> "$GITHUB_ENV"
+          echo "cell $REFS_CM: rootPvc=$ROOTPVC igvm=$IGVMFILE"
 
       - name: boot the CVM
         run: |
@@ -207,30 +209,27 @@ jobs:
           echo "measurement=$M" >> "$GITHUB_OUTPUT"
           echo "smp$CORES measurement: $M"
 
-      - name: compare against the published digest
+      - name: report
         run: |
           set -euo pipefail
           M='${{ steps.capture.outputs.measurement }}'
-          repo="${IMAGE%%@*}"; repo="${repo%%:*}"
-          d=$(crane manifest "$IMAGE" | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest')
-          [ -n "$d" ] || { echo "::error::$IMAGE publishes no manifest.json layer, so there is no digest to compare against"; exit 1; }
-          PUB=$(crane blob "${repo}@${d}" | jq -r --argjson c "$CORES" '.snp_variants[]|select(.smp==$c)|.measurement.snp_launch_digest')
           {
-            echo "### SNP launch measurement — smp${CORES}"
+            echo "### smp${CORES}: boots and attests"
             echo
-            echo "| source | value |"
+            echo "A guest booted \`$IGVMFILE\` at ${CORES} vCPU on SEV-SNP and served a"
+            echo "verifiable attestation report."
+            echo
+            echo "| | |"
             echo "|---|---|"
-            echo "| hardware | \`${M}\` |"
-            echo "| manifest | \`${PUB:-(no variant for smp$CORES)}\` |"
-            echo "| image | \`${IMAGE}\` |"
+            echo "| cell | \`$REFS_CM\` |"
+            echo "| IGVM | \`$IGVMFILE\` |"
+            echo "| launch measurement | \`${M}\` |"
             echo
-            if [ "$M" = "$PUB" ]; then
-              echo "**MATCH** — the published digest for smp${CORES} is what the hardware produces."
-            else
-              echo "**MISMATCH** — the manifest publishes a digest this vCPU count does not produce, so a real smp${CORES} node would be refused by the trust gate."
-            fi
+            echo "To check the measurement against the published digest, compare it"
+            echo "with \`snp_variants[smp=${CORES}].measurement.snp_launch_digest\` in the"
+            echo "manifest.json of the build that produced \`$IGVMFILE\`."
           } >> "$GITHUB_STEP_SUMMARY"
-          [ "$M" = "$PUB" ] || echo "::warning title=digest mismatch (smp$CORES)::hardware $M != manifest ${PUB:-none}"
+          echo "smp$CORES boots and attests; measurement: $M"
 
       - name: teardown
         if: always()
