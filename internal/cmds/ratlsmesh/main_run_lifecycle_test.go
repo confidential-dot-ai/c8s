@@ -130,6 +130,7 @@ func TestRunProxyMeasurementLengthMessage(t *testing.T) {
 	t.Setenv("NODE_IP", "")
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(), nil)
 	cfg := defaultTestProxyConfig(t)
+	bindProxyPorts(t, cfg)
 	cfg.logLevel = "error"
 	cfg.localCIDRBootTimeout = time.Millisecond
 	cfg.nodeIP = "127.0.0.1"
@@ -155,9 +156,7 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = attest.URL
-	cfg.outboundPort = freePort(t)
-	cfg.inboundPort = freePort(t)
-	cfg.healthPort = freePort(t)
+	bindProxyPorts(t, cfg)
 	cfg.rotationTimeout = 5 * time.Second
 	cfg.metricsUpdateInterval = 10 * time.Millisecond
 	cfg.localCIDRBootTimeout = time.Millisecond
@@ -292,9 +291,7 @@ func TestRunProxyCDSModeDegraded(t *testing.T) {
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = "http://127.0.0.1:1" // refused: warm-up failure is non-fatal
-	cfg.outboundPort = freePort(t)
-	cfg.inboundPort = freePort(t)
-	cfg.healthPort = freePort(t)
+	bindProxyPorts(t, cfg)
 	cfg.certMode = "cds"
 	cfg.cdsURL = cds.URL
 	cfg.cdsMeasurements = "" // deliberately unset: must warn
