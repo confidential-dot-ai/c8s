@@ -539,7 +539,15 @@ than let you discover them:
 - **CDS is a singleton by default.** The mesh CA key lives only in CDS process
   memory; a restart mints a new CA and workloads re-bootstrap. Attested
   handoff to a successor replica exists behind `cds.handoff.enabled` —
-  one active CDS at a time, not active/active.
+  one active CDS at a time, not active/active — and CDS does not serve
+  `/secrets` while handoff is configured, so CA continuity and secret release
+  are mutually exclusive today (see [docs/secrets.md](docs/secrets.md)).
+
+- **Secrets and volume keys live only in CDS memory.** There is no persistent
+  or external key store: a CDS restart destroys every secret and volume key,
+  every workload holding one must be rolled, and volume keys come back only
+  from the operator's escrow file. Rotation, versioning and delete are absent
+  — a replaced value is gone, and pods keep what they read at startup.
 
 - **Mesh peers are verified by CA chain, not per-peer measurement.** Leaves
   carry the evidence CDS verified at issuance, and `VerifyPolicy` has a
@@ -580,20 +588,28 @@ than let you discover them:
   injected fetcher is a native sidecar for this reason: it is the one entry in
   `initContainers` that keeps running alongside the workload.
 
-- **On TDX, `c8s allowlist` writes do not reach running confidential pods.**
-  In-guest `policy-monitor` refuses to refresh from CDS unless
-  `C8S_CDS_MEASUREMENTS` pins the CDS launch digest. On SEV-SNP the webhook
-  delivers that pin in the pod's launch-committed init-data document and
-  running guests pick up writes within one refresh interval; on TDX the guest
-  does not accept the pin, so refresh stays disabled and each guest enforces
-  only the seed baked into its measured
-  image — admitting a new workload image inside a TDX confidential pod means
-  rebuilding the guest image. Installs with no pinned measurements, and the
-  chart-managed pods in the release namespace (which get no init-data),
-  enforce the seed alone on either platform. The gating is deliberately
-  fail-closed — "any attested TEE" is not good enough here, because the host
-  can boot its own CVM from the same guest image and serve an allowlist of
-  its choosing.
+- **`c8s allowlist` writes reach running confidential pods only under a
+  pinned CDS measurement.** In-guest `policy-monitor` refuses to refresh from
+  CDS unless the pod's launch-committed init-data document pins the CDS
+  launch digest (SNP `HOST_DATA`, TDX `MRCONFIGID`). Installs with no pinned
+  measurements, and the chart-managed pods in the release namespace (which
+  get no init-data), enforce only the seed baked into the measured guest
+  image — admitting a new workload image there means rebuilding it. The
+  gating is deliberately fail-closed — "any attested TEE" is not good enough
+  here, because the host can boot its own CVM from the same guest image and
+  serve an allowlist of its choosing.
+
+- **Encrypted volumes are attached at node boot, and a force-deleted volume
+  pod leaks its dm stack.** A volume reaches a node-as-CVM node as a block
+  device declared in the VM spec; adding one to a running node is not
+  supported (it is a VM spec change and a node reboot). `volumed` tears a
+  volume down only when the pod's cgroup empties; a `kubectl delete pod
+  --force --grace-period=0` that leaves it populated leaves the
+  dm-crypt/dm-verity targets and the mount behind, with the volume key
+  resident in kernel memory, until an operator closes them by hand
+  (`dmsetup ls | grep ^c8s-`). `volumed` does not reconcile existing
+  mappings on start, so restarting it does not recover them. See
+  [docs/volumes.md](docs/volumes.md).
 
 - **Root workloads are intercepted but cannot egress to non-mesh peers.**
   In-guest egress exemptions are scoped to the attestation service and the
