@@ -432,6 +432,17 @@ it via `kata.guestImage.debug=true`; its launch measurement differs from
 the locked image, so locked-reference attestation rejects it. See "Debug
 variant" in [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
+## Host-side introspection of a staged image
+
+Loop-mounting the staged rootfs (e.g. to read the baked bootstrap allowlist)
+pins the file under `/var/lib/c8s/kata-images`; `c8s uninstall` detaches
+loops whose backing file is under the guest dirs, unmounting their mounts
+first, wherever the mountpoint lives. Mounts and loops on a *copy* outside
+`/var/lib/c8s` are yours to clean up: unmount before `losetup -d` (a mounted
+loop detaches silently via autoclear and reads as stuck), and match devices
+by backing path — never `losetup -D`, which takes every unused loop on the
+host.
+
 ## Puller DaemonSet
 
 `internal/helmchart/c8s/templates/kata-image-puller.yaml`. Per node, the

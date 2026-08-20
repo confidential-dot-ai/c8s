@@ -163,7 +163,9 @@ install's containerd-prep uses — and removes, idempotently:
     (detached, via systemd-run) only if a drop-in was still registered
   - the pulled kata-guest-base artifact (kata.guestImage.hostPath, multi-GB —
     nothing else cleans this up), and the separate GPU guest image
-    (kata.gpu.guestImage.hostPath)
+    (kata.gpu.guestImage.hostPath); loop devices still bound under those dirs
+    are unmounted and detached first, or the rm unlinks files the loops keep
+    pinning and the space is never reclaimed
   - on RKE2: the c8s-managed containerd template (skipped on c8s node images,
     same baked-state rule) and the containerd-prep lock
   - the katacontainers.io/kata-runtime node labels and the
@@ -953,7 +955,7 @@ func init() {
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
 	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep c8s host artifacts (NRI image-policy plugin, ratls-mesh netfilter state, nydus unit, /opt/kata, containerd drop-in, kata-guest-base images, RKE2 prep template, node labels) off every node via a short-lived privileged DaemonSet. Runs for every release shape — leftovers may come from a previous install's shape, not this release's")
 	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry c8s artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
-	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (the pre-delete hook cannot close a mapping a live pod holds, and fails naming it)")
+	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (the pre-delete hook cannot close a mapping a live pod holds, and fails naming it). With pods left running, the sweep's loop detach and guest-image deletion also cut devices and images out from under live guests")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteNamespace, "delete-namespace", false, "also delete the release namespace (and everything left in it, e.g. an operator-created image pull Secret)")
 	rootCmd.AddCommand(uninstallCmd)

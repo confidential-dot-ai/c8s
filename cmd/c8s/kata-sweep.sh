@@ -195,7 +195,85 @@ rm -f /host/usr/local/bin/containerd-shim-kata-*-v2
 
 # 6. The guest image dirs (multi-GB; nothing else cleans them up). Presence-
 #    gated: a non-kata release never wrote these, so an absent custom path is
-#    a no-op while an existing unsafe one still fails closed.
+#    a no-op while an existing unsafe one still fails closed. Before each rm,
+#    unmount the mounts of loop devices bound to files under the dir (wherever
+#    the mountpoint lives), detach those loops, and unmount anything mounted
+#    at or beneath the dir — otherwise the rm unlinks files a loop still pins
+#    and the space is never reclaimed. Runs host-side: loop backing_file
+#    paths render against the reader's mount namespace.
+# shellcheck disable=SC2016
+detach_guest_dir_script='
+set -u
+dir="$GUEST_DIR"
+fail=0
+
+for bf in /sys/block/loop*/loop/backing_file; do
+  [ -f "$bf" ] || continue
+  backing=$(cat "$bf" 2>/dev/null) || continue
+  case "$backing" in
+    "$dir"/*) ;;
+    *) continue ;;
+  esac
+  lo=${bf#/sys/block/}
+  lo=${lo%%/*}
+  dev="/dev/$lo"
+  # Unmount this device (and its partitions) wherever it is mounted: losetup
+  # -d on a mounted loop reports success but only defers via autoclear.
+  mps=$(
+    while read -r src mp _; do
+      case "$src" in
+        "$dev" | "$dev"p[0-9]*) echo "$mp" ;;
+      esac
+    done < /proc/self/mounts | sort -r
+  )
+  echo "$mps" | while read -r mp; do
+    [ -n "$mp" ] || continue
+    umount "$mp" 2>/dev/null && echo "unmounted: $mp" || echo "warning: umount failed: $mp ($dev)" >&2
+  done
+  if losetup -d "$dev" 2>/dev/null; then
+    echo "loop device detached: $dev ($backing)"
+  else
+    echo "warning: could not detach $dev ($backing)" >&2
+  fi
+done
+
+# Anything mounted at or beneath the dir itself: rm -rf crosses mountpoints,
+# so a mount left behind would redirect the delete outside the validated
+# tree. Any source, not just the loops above.
+mps=$(
+  while read -r _ mp _; do
+    case "$mp" in
+      "$dir" | "$dir"/*) echo "$mp" ;;
+    esac
+  done < /proc/self/mounts | sort -r
+)
+echo "$mps" | while read -r mp; do
+  [ -n "$mp" ] || continue
+  umount "$mp" 2>/dev/null && echo "unmounted: $mp" || echo "warning: umount failed: $mp" >&2
+done
+
+while read -r _ mp _; do
+  case "$mp" in
+    "$dir" | "$dir"/*) echo "still mounted: $mp" >&2; fail=1 ;;
+  esac
+done < /proc/self/mounts
+for bf in /sys/block/loop*/loop/backing_file; do
+  [ -f "$bf" ] || continue
+  backing=$(cat "$bf" 2>/dev/null) || continue
+  lo=${bf#/sys/block/}
+  lo=${lo%%/*}
+  case "$backing" in
+    "$dir"/*" (deleted)")
+      # Already unlinked; the loop pins space until reboot and cannot be
+      # detached (losetup -d answers ENOENT). Nothing left to protect.
+      echo "note: /dev/$lo holds an already-deleted file; space frees on reboot" ;;
+    "$dir"/*) echo "still bound: /dev/$lo ($backing)" >&2; fail=1 ;;
+  esac
+done
+
+[ "$fail" = "0" ]
+'
+
 sweep_guest_dir() {
   dir="${1%/}"
   if [ ! -d "/host${dir}" ]; then
@@ -203,8 +281,13 @@ sweep_guest_dir() {
     return 0
   fi
   assert_safe_guest_dir "$dir"
-  rm -rf "/host${dir}"
-  echo "guest image dir removed: ${dir}"
+  if GUEST_DIR="$dir" nsenter -t 1 -m -- sh -c "$detach_guest_dir_script"; then
+    rm -rf "/host${dir}"
+    echo "guest image dir removed: ${dir}"
+  else
+    echo "ERROR: ${dir} is still pinned (see above); leaving it in place" >&2
+    sweep_failed=1
+  fi
 }
 
 sweep_guest_dir "${GUEST_IMAGE_DIR}"

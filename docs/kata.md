@@ -654,7 +654,9 @@ linux node, removing:
   systemd-run) only when a runtime drop-in was still registered;
 - the pulled kata-guest-base artifact (`kata.guestImage.hostPath`,
   multi-GB) — nothing else cleans this up; and the separate GPU guest image
-  (`kata.gpu.guestImage.hostPath`);
+  (`kata.gpu.guestImage.hostPath`). Loop devices still bound under those
+  dirs are unmounted and detached first; a dir that stays pinned is left in
+  place and fails the sweep rather than being unlinked under the loops;
 - on RKE2, the sentinel-marked containerd template the containerd-prep
   initContainer wrote (skipped on the c8s node image, same baked-state
   rule), and its lock file;
