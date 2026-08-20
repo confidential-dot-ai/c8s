@@ -366,15 +366,19 @@ logging:
   level: error
 `, dir, dir, pushDigestA, stalledCDS, stalledAttestation.URL, strings.Repeat("ab", 48))
 
-	// The NRI socket does not exist here, so registration fails and that
-	// failure is what Run must report. A nil return means Run classified the
-	// stalled pull as a shutdown and swallowed it.
+	// The NRI socket does not exist here, so the plugin always fails. Which of
+	// its two failures Run reports is a race: pullInitial reads pluginErrCh
+	// before its first attempt, so whether the plugin has already landed there
+	// decides between errPluginDied and the post-init "plugin: " error. Both
+	// exit non-zero and both let containerd restart the plugin, so neither is
+	// worth pinning. The regression is a nil return — that is the stalled pull
+	// being read as a shutdown and swallowed.
 	err := runWithDeadline(t, 20*time.Second, []string{"-config", writeConfigYAML(t, cfgYAML)})
 	if err == nil {
 		t.Fatal("Run returned nil: a stalled initial pull was misread as shutdown")
 	}
-	if !strings.HasPrefix(err.Error(), "plugin: ") {
-		t.Fatalf("err = %v, want the NRI plugin run failure", err)
+	if !errors.Is(err, errPluginDied) && !strings.HasPrefix(err.Error(), "plugin: ") {
+		t.Fatalf("err = %v, want errPluginDied or the NRI plugin run failure", err)
 	}
 }
 
