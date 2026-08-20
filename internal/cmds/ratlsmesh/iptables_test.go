@@ -339,19 +339,19 @@ func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
 		{iptablesFamilyIPv4, cwPodIPSetName4, "10.53.0.10"},
 		{iptablesFamilyIPv6, cwPodIPSetName6, "fd00::10"},
 	}
-	// Per family: established RETURN, 1 DNS RETURN, [14 ICMPv6 RETURN for v6],
-	// nontcp DROP. v4 = 4 rules, v6 = 4 + 14.
+	// Per family: established RETURN, 2 DNS RETURNs (one per destination
+	// scope), [14 ICMPv6 RETURN for v6], nontcp DROP. v4 = 5, v6 = 5 + 14.
 	var offset int
 	for _, spec := range specs {
 		icmpCount := 0
 		if spec.family == iptablesFamilyIPv6 {
 			icmpCount = len(essentialICMPv6Types)
 		}
-		perFamily := 3 + icmpCount // est, dns, icmpv6 x N, drop
+		perFamily := 4 + icmpCount // est, dns x 2, icmpv6 x N, drop
 		group := rules[offset : offset+perFamily]
 		offset += perFamily
-		est, dnsRule, drop := group[0], group[1], group[perFamily-1]
-		for _, r := range []iptablesRule{est, dnsRule, drop} {
+		est, dnsCt, dnsDst, drop := group[0], group[1], group[2], group[perFamily-1]
+		for _, r := range []iptablesRule{est, dnsCt, dnsDst, drop} {
 			if r.table != "filter" || r.chain != cwEgressChainName {
 				t.Errorf("%s: table=%q chain=%q, want filter/%s", spec.family, r.table, r.chain, cwEgressChainName)
 			}
@@ -374,21 +374,33 @@ func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
 		if !reflect.DeepEqual(est.args, wantEst) {
 			t.Errorf("%s established return = %v, want %v", spec.family, est.args, wantEst)
 		}
-		// DNS carve-out is destination-scoped to the cluster DNS IP so a cw
-		// pod cannot reach an un-scoped external resolver in plaintext.
-		wantDNS := []string{
+		// The carve-out keeps the cluster resolver as the only non-TCP
+		// destination a cw pod can reach. It is written against both the
+		// connection's original destination and the packet's: this chain runs
+		// after kube-proxy's DNAT, where only the former survives, and on an
+		// untracked flow only the latter matches.
+		wantCt := []string{
+			"-m", "set", "--match-set", spec.setName, "src",
+			"-p", "udp", "--dport", "53",
+			"-m", "conntrack", "--ctorigdst", spec.dnsIP,
+			"-j", "RETURN",
+		}
+		if !reflect.DeepEqual(dnsCt.args, wantCt) {
+			t.Errorf("%s dns query (original dest) = %v, want %v", spec.family, dnsCt.args, wantCt)
+		}
+		wantDst := []string{
 			"-m", "set", "--match-set", spec.setName, "src",
 			"-p", "udp", "--dport", "53",
 			"-d", spec.dnsIP,
 			"-j", "RETURN",
 		}
-		if !reflect.DeepEqual(dnsRule.args, wantDNS) {
-			t.Errorf("%s dns query = %v, want %v", spec.family, dnsRule.args, wantDNS)
+		if !reflect.DeepEqual(dnsDst.args, wantDst) {
+			t.Errorf("%s dns query (packet dest) = %v, want %v", spec.family, dnsDst.args, wantDst)
 		}
 		// ICMPv6 allow rules (v6 only) must cover every essential type.
 		if spec.family == iptablesFamilyIPv6 {
 			for ti, wantType := range essentialICMPv6Types {
-				r := group[2+ti]
+				r := group[3+ti]
 				want := []string{
 					"-m", "set", "--match-set", spec.setName, "src",
 					"-p", "ipv6-icmp", "--icmpv6-type", strconv.Itoa(wantType),
@@ -850,9 +862,10 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 			icmpv6Count++
 		case strings.Contains(r.label, "dns"):
 			dnsCount++
-			// The DNS carve-out must be destination-scoped to the cluster DNS.
-			if !slices.Contains(r.args, "-d") {
-				t.Errorf("egress dns rule lacks a destination match: %v", r.args)
+			// Every carve-out row carries the destination scope in one form
+			// or the other; a row with neither would admit UDP/53 to anywhere.
+			if !slices.Contains(r.args, "--ctorigdst") && !slices.Contains(r.args, "-d") {
+				t.Errorf("egress dns rule carries no destination scope: %v", r.args)
 			}
 		}
 	}
@@ -862,8 +875,8 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 	if icmpv6Count != len(essentialICMPv6Types) {
 		t.Errorf("compose icmpv6 allow rules = %d, want %d", icmpv6Count, len(essentialICMPv6Types))
 	}
-	if dnsCount != 1 { // one IPv4 cluster-DNS destination
-		t.Errorf("compose dns rules = %d, want 1", dnsCount)
+	if dnsCount != 2 { // one IPv4 cluster-DNS destination, two scopes
+		t.Errorf("compose dns rules = %d, want 2", dnsCount)
 	}
 
 	// The egress FORWARD jump must sit in the jump set alongside the inbound

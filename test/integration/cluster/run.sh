@@ -153,7 +153,13 @@ log "Writing the allowlist floor"
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -q "docker.io/library/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
-python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
+# The cw egress guard scopes its DNS carve-out to this address, and the chart
+# default is the c8s node image's, which no other distribution shares — kind's
+# is 10.96.0.10. Read it off the cluster, as an operator must.
+CLUSTER_DNS_IP="$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')"
+[ -n "$CLUSTER_DNS_IP" ] || fail "could not read the kube-dns ClusterIP"
+
+python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" "$CLUSTER_DNS_IP" <<'PYEOF'
 import sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
@@ -162,7 +168,10 @@ for line in open(sys.argv[1]):
 # Kept out of the floor on purpose: the admission test's unseen digest.
 floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
 with open(sys.argv[2], "w") as f:
-    yaml.safe_dump({"nriImagePolicy": {"bootstrapAllowlist": {"digests": floor}}}, f)
+    yaml.safe_dump({
+        "nriImagePolicy": {"bootstrapAllowlist": {"digests": floor}},
+        "ratlsMesh": {"clusterDNSIP": sys.argv[4]},
+    }, f)
 print(f"floor: {len(floor)} digests")
 PYEOF
 
@@ -490,6 +499,28 @@ kubectl wait --for=condition=Ready pod/it-mesh-client --timeout=120s || fail "me
 CLIENT_IP="$(kubectl get pod it-mesh-client -o jsonpath='{.status.podIP}')"
 await_ipset RATLS-MESH-LOCAL-PODS "$CLIENT_IP"
 await_ipset RATLS-MESH-CW-PODS "$POD_IP"
+
+# The egress guard drops every non-TCP packet a cw pod sends, carving out
+# UDP/53 to the cluster resolver. The carve-out sits in a chain downstream of
+# kube-proxy's Service DNAT, so a query arrives there addressed to a CoreDNS
+# pod and a rule written against the packet's destination cannot fire — the
+# pod stays Running and every name it resolves fails. Assert resolution, not
+# health.
+KUBERNETES_IP="$(kubectl -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}')"
+resolved="$(kubectl -n demo exec "$POD" -c app -- timeout 15 nslookup kubernetes.default.svc.cluster.local 2>&1)" \
+    || fail "cw pod cannot resolve a cluster name; the egress guard's DNS carve-out is unreachable in its chain:
+$resolved"
+echo "$resolved" | grep -q "$KUBERNETES_IP" \
+    || fail "cw pod's resolver answered without the kubernetes ClusterIP $KUBERNETES_IP: $resolved"
+pass "cw pod resolves cluster DNS through the egress guard's carve-out"
+
+# The carve-out names one resolver. Widening it to any UDP/53 destination
+# would pass the check above and hand every cw pod a plaintext channel to an
+# arbitrary host, so the scope is asserted directly.
+if kubectl -n demo exec "$POD" -c app -- timeout 8 nslookup example.com 192.0.2.53 >/dev/null 2>&1; then
+    fail "cw pod reached an off-cluster resolver on UDP/53; the carve-out must name the cluster DNS server only"
+fi
+pass "cw pod cannot reach an unnamed resolver on UDP/53"
 
 inbound='^ratls_mesh_connections_total.*direction="inbound"'
 base_inbound="$(mesh_metric "$inbound")"

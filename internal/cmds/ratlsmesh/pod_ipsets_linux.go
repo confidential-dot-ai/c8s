@@ -135,6 +135,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 		return fmt.Errorf("--log-level: %w", err)
 	}
 	slog.SetDefault(logger)
+	warnUnlessClusterDNSResolves(logger, cfg.clusterDNSIPs, resolvConfPath)
 	if err := initIptablesClients(); err != nil {
 		return err
 	}
@@ -493,6 +494,52 @@ func composeIptablesSyncRules(outboundPort, uid int, excludeUIDs []uint32, cwPas
 	rules = append(rules, buildCWEgressGuardRules(dnsIPsByFamily)...)
 	jumps := append(jumpRules(), cwJumpRule(), cwEgressJumpRule())
 	return rules, jumps
+}
+
+// resolvConfPath is the resolver configuration kubelet writes for this pod.
+// The ratls-mesh DaemonSet runs hostNetwork with dnsPolicy
+// ClusterFirstWithHostNet, so it names the servers every pod on this node
+// resolves against — which is what the carve-out has to name to be reachable.
+const resolvConfPath = "/etc/resolv.conf"
+
+// warnUnlessClusterDNSResolves reports each configured DNS server that this
+// node's own pod resolver does not name.
+//
+// The carve-out stays operator-declared: resolv.conf is read to contradict a
+// wrong value, never to supply one, so a resolver the node was pointed at
+// cannot widen a fail-closed egress guard. A cw pod whose queries go somewhere
+// the carve-out does not name loses DNS with nothing in the guard to say so,
+// and the shipped default is the c8s node image's, which no other
+// distribution shares.
+func warnUnlessClusterDNSResolves(logger *slog.Logger, configured []string, path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		logger.Warn("cannot check the cluster DNS carve-out against this node's resolver", "path", path, "error", err)
+		return
+	}
+	nameservers := map[string]bool{}
+	var listed []string
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "nameserver" {
+			continue
+		}
+		if ip := net.ParseIP(fields[1]); ip != nil {
+			nameservers[ip.String()] = true
+			listed = append(listed, ip.String())
+		}
+	}
+	if len(nameservers) == 0 {
+		return
+	}
+	for _, raw := range configured {
+		ip := net.ParseIP(raw)
+		if ip == nil || nameservers[ip.String()] {
+			continue
+		}
+		logger.Warn("cluster DNS carve-out names a server this node's pods do not resolve against; confidential-workload pods will lose DNS unless --cluster-dns-ip is corrected",
+			"configured", ip.String(), "node_resolvers", listed)
+	}
 }
 
 // clusterDNSIPsByFamily validates each cluster DNS IP and groups it under its

@@ -862,6 +862,14 @@ func buildInGuestIptablesRules(outboundPort, inboundPort, healthPort int, inboun
 // ESTABLISHED/RELATED replies on INPUT, and the ICMPv6 types IPv6 needs. The
 // guest enforces this locally so it does not depend on an external node.
 func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
+	// The guest runs no kube-proxy, so its nat table holds only the mesh's own
+	// TCP redirects and a query still carries the DNS server address on OUTPUT.
+	// The carve-out is installed in the client that owns that address; the
+	// drop below is family-agnostic, so tagging it wrong drops the guest's DNS.
+	dnsFamily := iptablesFamilyIPv4
+	if ip := net.ParseIP(dnsServerIP); ip != nil && ip.To4() == nil {
+		dnsFamily = iptablesFamilyIPv6
+	}
 	rules := []iptablesRule{
 		iptablesRule{
 			table: "filter", chain: guestFilterOutputChain,
@@ -871,7 +879,7 @@ func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
 		iptablesRule{
 			table: "filter", chain: guestFilterOutputChain,
 			label:  "in-guest-output-return-dns",
-			family: iptablesFamilyIPv4,
+			family: dnsFamily,
 			args:   []string{"-p", "udp", "--dport", "53", "-d", dnsServerIP, "-j", "RETURN"},
 		},
 	}
@@ -904,7 +912,7 @@ func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
 		iptablesRule{
 			table: "filter", chain: guestFilterInputChain,
 			label:  "in-guest-input-return-dns-reply",
-			family: iptablesFamilyIPv4,
+			family: dnsFamily,
 			args:   []string{"-p", "udp", "--sport", "53", "-s", dnsServerIP, "-j", "RETURN"},
 		},
 	)
