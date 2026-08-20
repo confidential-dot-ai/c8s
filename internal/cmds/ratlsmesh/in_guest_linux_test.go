@@ -642,3 +642,32 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 		}
 	})
 }
+
+// The guest's non-TCP drop is family-agnostic while the DNS carve-out is
+// installed in one client, so an IPv6 cluster DNS whose carve-out is tagged
+// IPv4 loses the guest's own name resolution.
+func TestBuildInGuestFailClosedRulesTagsDNSByFamily(t *testing.T) {
+	dnsRules := func(t *testing.T, dnsIP string) []iptablesRule {
+		t.Helper()
+		var got []iptablesRule
+		for _, r := range buildInGuestFailClosedRules(dnsIP) {
+			if strings.Contains(r.label, "dns") {
+				got = append(got, r)
+			}
+		}
+		if len(got) != 2 {
+			t.Fatalf("%s: got %d dns rules, want the OUTPUT query and the INPUT reply", dnsIP, len(got))
+		}
+		return got
+	}
+	for _, r := range dnsRules(t, "10.53.0.10") {
+		if r.family != iptablesFamilyIPv4 {
+			t.Errorf("%s family = %q, want ipv4", r.label, r.family)
+		}
+	}
+	for _, r := range dnsRules(t, "fd00::10") {
+		if r.family != iptablesFamilyIPv6 {
+			t.Errorf("%s family = %q, want ipv6", r.label, r.family)
+		}
+	}
+}
