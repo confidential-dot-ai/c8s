@@ -329,10 +329,18 @@ What it does **not** guarantee:
   (pod-as-CVM). Do not point it across a trust boundary.
 - **Per-handshake measurement of CA-verified peers.** See "Dual verification"
   above: after the CDS upgrade, mesh peers are verified by CA chain only.
-- **Full TDX runtime measurement, in-cluster.** The mesh `VerifyPolicy` pins
-  MRTD only — the TDVF firmware, not the guest kernel/rootfs — RTMR[0..3] are
-  not pinned on that path, and `MinTCBVersion` is dropped on the TDX path
-  (GAPS). Operator-side, `c8s verify --image-manifest` pins the full
+- **Full TDX runtime measurement, unless RTMRs are pinned.** On TDX the
+  launch digest covers the TDVF firmware alone; the guest kernel measures
+  into RTMR[1] and the command line — carrying the dm-verity root hash — into
+  RTMR[2]. In-cluster those registers are pinned by `cds.rtmrs` /
+  `ratlsMesh.rtmrs` (`c8s install --rtmrs 1=<hex>,2=<hex>`): CDS requires
+  them of TDX callers on `/attest` and `/attest-key`, and every component
+  dialing CDS (and every mesh peer policy) enforces them on the handshake.
+  Left empty — the default, warned on a TDX install — the in-cluster pins
+  confer **no guest-code identity**: any TD booting the pinned firmware is
+  accepted. The RTMR pin is one register set for the whole fleet, not a
+  per-image tuple, and `MinTCBVersion` is still dropped on the TDX path
+  (GAP). Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
   `--measurements` rather than combining with it — and `--rtmr 3=`
   (or `--operator-pkey`, which derives the same value from the operator public

@@ -23,6 +23,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -238,7 +239,7 @@ func newHandoffPeer(t *testing.T, operatorKeysHash string) *handoffPeer {
 func injectPeerClient(t *testing.T, peer *handoffPeer) {
 	t.Helper()
 	orig := newVerifyingHTTPClient
-	newVerifyingHTTPClient = func([][]byte, string) (*http.Client, error) {
+	newVerifyingHTTPClient = func(ratls.Pins, string) (*http.Client, error) {
 		return peer.srv.Client(), nil
 	}
 	t.Cleanup(func() { newVerifyingHTTPClient = orig })

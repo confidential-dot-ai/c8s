@@ -28,6 +28,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // config is everything the sidecar needs. The webhook renders all of it.
@@ -76,13 +77,13 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	measurements, err := cfg.ParseMeasurements()
+	pins, err := cfg.ParsePins()
 	if err != nil {
 		return err
 	}
 
 	if err := sidecar.Retry(ctx, cfg.Config, "volume", func(ctx context.Context) error {
-		return openAll(ctx, cfg, measurements)
+		return openAll(ctx, cfg, pins)
 	}); err != nil {
 		return err
 	}
@@ -99,8 +100,8 @@ func run(cfg config) error {
 // openAll fetches and opens every requested volume in one pass. The daemon is
 // idempotent for a repeated identical request, so a pass that fails partway is
 // safe to run again.
-func openAll(ctx context.Context, cfg config, measurements [][]byte) error {
-	client, pub, err := sidecar.NewClient(cfg.Config, measurements)
+func openAll(ctx context.Context, cfg config, pins ratls.Pins) error {
+	client, pub, err := sidecar.NewClient(cfg.Config, pins)
 	if err != nil {
 		return err
 	}

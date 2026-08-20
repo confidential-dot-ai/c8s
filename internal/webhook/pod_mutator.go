@@ -202,6 +202,13 @@ type Config struct {
 	// answer with a value of its choosing.
 	CDSMeasurements []string
 
+	// CDSRTMRs are the TDX RTMR pins (<index>=<sha384-hex>) the injected
+	// sidecars additionally hold CDS to. On TDX the launch measurement covers
+	// TDVF firmware alone, so without these CDSMeasurements says nothing
+	// about CDS's kernel or rootfs. Ignored for SNP evidence; empty pins no
+	// registers.
+	CDSRTMRs []string
+
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
 
@@ -772,7 +779,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if m.cfg.KataGuestReadyGate {
 			requireGuestReadyNode(pod)
 		}
-		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements); err != nil {
+		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements, m.cfg.CDSRTMRs); err != nil {
 			if errors.Is(err, errInvalidInjectionAnnotation) {
 				return admission.Errored(http.StatusBadRequest, err)
 			}
@@ -1089,6 +1096,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	// where the secret and volume fetchers take a repeatable --measurements.
 	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
 		args = append(args, "--cds-measurements="+joined)
+	}
+	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
+		args = append(args, "--cds-rtmrs="+joined)
 	}
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
@@ -1512,6 +1522,9 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
 	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, "--rtmrs="+r)
+	}
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1554,6 +1567,9 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, "--rtmrs="+r)
 	}
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.

@@ -29,8 +29,8 @@ var confidentialKataClasses = map[string]struct{}{
 // HOST_DATA check cannot tell it from ours, so it is rejected. Comparing
 // against the desired value rather than banning the key is what keeps this
 // reinvocation-safe: initdata rendering is canonical.
-func stampInitData(pod *corev1.Pod, kataClass string, measurements []string) error {
-	want, err := initDataAnnotation(kataClass, measurements)
+func stampInitData(pod *corev1.Pod, kataClass string, measurements, rtmrs []string) error {
+	want, err := initDataAnnotation(kataClass, measurements, rtmrs)
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,9 @@ func rejectKataHypervisorAnnotations(pod *corev1.Pod) error {
 }
 
 // initDataAnnotation renders the value, or "" when the shape carries none.
-func initDataAnnotation(kataClass string, measurements []string) (string, error) {
+// The RTMR pins ride the measurements: with no measurement pinned there is no
+// CDS identity for registers to narrow, so they are omitted with it.
+func initDataAnnotation(kataClass string, measurements, rtmrs []string) (string, error) {
 	if _, ok := confidentialKataClasses[kataClass]; !ok {
 		return "", nil
 	}
@@ -76,10 +78,14 @@ func initDataAnnotation(kataClass string, measurements []string) (string, error)
 	if joined == "" {
 		return "", nil
 	}
-	built, err := initdata.New(map[string]string{
+	data := map[string]string{
 		initdata.KeyRole:            initdata.RoleWorkload,
 		initdata.KeyCDSMeasurements: joined,
-	}).Build()
+	}
+	if joinedRTMRs := strings.Join(rtmrs, ","); joinedRTMRs != "" {
+		data[initdata.KeyCDSRTMRs] = joinedRTMRs
+	}
+	built, err := initdata.New(data).Build()
 	if err != nil {
 		return "", fmt.Errorf("build init-data document: %w", err)
 	}

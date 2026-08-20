@@ -170,8 +170,8 @@ func TestResolveInitDataMeasurementsHonoursCommittedDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveInitDataMeasurements: %v", err)
 	}
-	if got != "aabb,ccdd" {
-		t.Fatalf("measurements = %q, want %q", got, "aabb,ccdd")
+	if got.measurements != "aabb,ccdd" {
+		t.Fatalf("measurements = %q, want %q", got.measurements, "aabb,ccdd")
 	}
 }
 
@@ -528,8 +528,8 @@ func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
 	if !errors.Is(err, errAttestVerdict) {
 		t.Fatalf("err = %v, want the refusal classified as a terminal verdict", err)
 	}
-	if measurements != "" {
-		t.Fatalf("measurements = %q, want none from an unverified report", measurements)
+	if measurements != (initDataCDSPins{}) {
+		t.Fatalf("measurements = %+v, want none from an unverified report", measurements)
 	}
 }
 

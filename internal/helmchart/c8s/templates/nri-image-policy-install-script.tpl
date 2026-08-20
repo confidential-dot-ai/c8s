@@ -226,6 +226,12 @@ allowlist:
 {{- else }}
       []
 {{- end }}
+    cds_rtmrs:
+{{- range $root.Values.cds.rtmrs }}
+      - {{ . | quote }}
+{{- else }}
+      []
+{{- end }}
 {{- /* Self-allow the installer image first (load-bearing when
        bootstrapAllowlist.deriveComponents=false, where the floor omits it), then
        add the floor — skipping the installer digest so the map has no

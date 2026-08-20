@@ -249,7 +249,11 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if len(measurements) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
+	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("parse CDS RTMR pins: %w", err)
+	}
+	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
@@ -542,13 +546,17 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	if len(measurements) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
+	rtmrs, err := ratls.ParseRTMRPins(cfg.Allowlist.Pull.CDSRTMRs)
+	if err != nil {
+		return fmt.Errorf("parse CDS RTMR pins: %w", err)
+	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
 	// The attest func is platform-agnostic despite its name (see its doc
 	// comment); the platform string is the only thing that follows the hardware.
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, measurements)
+		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs})
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).

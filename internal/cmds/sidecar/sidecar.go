@@ -28,6 +28,7 @@ type Config struct {
 	CDSURL            string
 	AttestationApiURL string
 	Measurements      []string
+	RTMRs             []string
 
 	CertPath string
 	KeyPath  string
@@ -63,6 +64,7 @@ func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
+	f.StringSliceVar(&cfg.RTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy (repeatable; ignored when CDS presents SNP evidence, empty pins no registers)")
 	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
@@ -97,18 +99,22 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParseMeasurements decodes --measurements, refusing an empty pin inside a kata
-// guest and warning outside one.
-func (c *Config) ParseMeasurements() ([][]byte, error) {
+// ParsePins decodes --measurements and --rtmrs, refusing an empty measurement
+// pin inside a kata guest and warning outside one.
+func (c *Config) ParsePins() (ratls.Pins, error) {
 	measurements, err := ratls.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
-		return nil, fmt.Errorf("--measurements: %w", err)
+		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
 	if err := cmdsutil.CheckCDSPinned(len(measurements), c.WorkloadClaimsGuest,
 		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
-		return nil, err
+		return ratls.Pins{}, err
 	}
-	return measurements, nil
+	rtmrs, err := ratls.ParseRTMRPins(c.RTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
 }
 
 // Terminal marks a non-nil error no later attempt can clear, so Retry stops on

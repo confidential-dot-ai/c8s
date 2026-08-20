@@ -5565,6 +5565,7 @@ type nriRuntimeConfig struct {
 			Timeout           string   `yaml:"timeout"`
 			AttestationApiURL string   `yaml:"attestation_api_url"`
 			CDSMeasurements   []string `yaml:"cds_measurements"`
+			CDSRTMRs          []string `yaml:"cds_rtmrs"`
 		} `yaml:"pull"`
 		Push struct {
 			PersistPath string `yaml:"persist_path"`
@@ -7857,5 +7858,67 @@ func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
 	}
 	if got := int32(np.Spec.Ingress[0].Ports[0].Port.IntValue()); got != wantPort {
 		t.Errorf("policy admits :%d but the Service targets containerPort :%d — external traffic would be dropped", got, wantPort)
+	}
+}
+
+// TestChartRTMRPinsFlagThrough confirms cds.rtmrs and ratlsMesh.rtmrs reach
+// every consumer the way cds.measurements does: without the fan-out a TDX
+// install's RTMR pins would validate in values and enforce nowhere.
+func TestChartRTMRPinsFlagThrough(t *testing.T) {
+	const (
+		measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+		rtmr1       = "1=111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+		rtmr2       = "2=222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
+	)
+	out, err := helmTemplate(t,
+		"--set", "cds.measurements[0]="+measurement,
+		"--set", "cds.rtmrs[0]="+rtmr1,
+		"--set", "cds.rtmrs[1]="+rtmr2,
+		"--set", "ratlsMesh.rtmrs[0]="+rtmr1,
+		"--set", "cds.handoff.enabled=true",
+		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	joined := rtmr1 + "," + rtmr2
+
+	cdsArgs := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", cdsArgs, "--rtmrs="+joined)
+	assertContainerHasArg(t, "cds", cdsArgs, "--handoff-rtmrs="+joined)
+
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if i := slices.Index(meshArgs, "--cds-rtmrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != joined {
+		t.Fatalf("ratls-mesh missing --cds-rtmrs %q\nargs: %v", joined, meshArgs)
+	}
+	if i := slices.Index(meshArgs, "--rtmrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != rtmr1 {
+		t.Fatalf("ratls-mesh missing --rtmrs %q\nargs: %v", rtmr1, meshArgs)
+	}
+
+	operatorArgs := renderedOperatorArgs(t, out)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-rtmrs="+rtmr1)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-rtmrs="+rtmr2)
+
+	workerCfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if want := []string{rtmr1, rtmr2}; !slices.Equal(workerCfg.Allowlist.Pull.CDSRTMRs, want) {
+		t.Fatalf("worker CDS RTMR pins = %v, want %v", workerCfg.Allowlist.Pull.CDSRTMRs, want)
+	}
+
+	proxyArgs := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy").Args
+	assertContainerHasArg(t, "allowlist-proxy", proxyArgs, "--cds-rtmrs="+joined)
+}
+
+// With no rtmrs set nothing renders the flags — the empty default must not
+// emit empty pins.
+func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cdsArgs := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerNoArgPrefix(t, "cds", cdsArgs, "--rtmrs")
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
+		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
 	}
 }

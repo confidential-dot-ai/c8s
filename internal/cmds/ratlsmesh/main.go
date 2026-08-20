@@ -97,6 +97,7 @@ type proxyConfig struct {
 	maxConnsPerSource         int
 	healthPort                int
 	measurements              string
+	rtmrs                     string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -104,6 +105,7 @@ type proxyConfig struct {
 	caCertPath                string
 	caPollInterval            time.Duration
 	cdsMeasurements           string
+	cdsRTMRs                  string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
@@ -140,6 +142,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.maxConnsPerSource, "max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
+	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -147,6 +150,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.caCertPath, "ca-cert", "", "path to CA certificate file for peer verification")
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
+	fs.StringVar(&c.cdsRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents SNP evidence. Empty = launch-digest pinning only")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
@@ -202,7 +206,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements)
+	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.rtmrs)
 	if err != nil {
 		return err
 	}
@@ -210,6 +214,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
+	}
+	if len(meshPolicy.RTMRs) > 0 {
+		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.RTMRs))
+	} else if c.platform == "tdx" && len(meshPolicy.Measurements) > 0 {
+		logger.Warn("no --rtmrs set: TDX measurement pinning covers TDVF firmware only (MRTD); peer guest kernel and rootfs are not pinned")
 	}
 
 	var caCerts []*x509.Certificate
@@ -240,6 +249,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
+	}
+	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	if err != nil {
+		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
 	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
@@ -421,6 +434,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			DNSSAN:            c.certDNSSAN,
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
+			CDSRTMRs:          cdsRTMRs,
 		}
 		// A provider-construction failure (config validation) is logged and
 		// the mesh keeps serving self-signed certs; it never blocks startup.
@@ -661,10 +675,16 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 
 // meshVerifyPolicy builds the mesh peer-verification policy: evidence checked
 // by the same-node attestation-api, launch measurements pinned to the
-// --measurements allowlist. Empty measurements leaves the policy unpinned
-// (accept any TEE — development only).
-func meshVerifyPolicy(attestationApiURL, measurements string) (*ratls.VerifyPolicy, error) {
+// --measurements allowlist, and TDX peers additionally pinned to the --rtmrs
+// registers. Empty measurements leaves the policy unpinned (accept any TEE —
+// development only).
+func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
+	pins, err := ratls.ParseRTMRPinsString(rtmrs)
+	if err != nil {
+		return nil, fmt.Errorf("--rtmrs: %w", err)
+	}
+	policy.RTMRs = pins
 	if measurements == "" {
 		return policy, nil
 	}

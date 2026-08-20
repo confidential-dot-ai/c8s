@@ -30,7 +30,7 @@ func decodeStamped(t *testing.T, pod *corev1.Pod) initdata.Document {
 
 func TestStampInitDataCarriesMeasurementsAndRole(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, nil); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestStampInitDataCarriesMeasurementsAndRole(t *testing.T) {
 // commits — that equality is the whole trust anchor.
 func TestStampInitDataDigestMatchesEncodedBytes(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, nil); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	raw, err := initdata.Decode(pod.Annotations[initdata.AnnotationKey])
@@ -71,7 +71,7 @@ func TestStampInitDataDigestMatchesEncodedBytes(t *testing.T) {
 // Nothing in a plain kata-qemu guest reads the document.
 func TestStampInitDataSkipsNonConfidentialClass(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataRuntimeClass, testMeasurements, nil); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	if _, ok := pod.Annotations[initdata.AnnotationKey]; ok {
@@ -81,7 +81,7 @@ func TestStampInitDataSkipsNonConfidentialClass(t *testing.T) {
 
 func TestStampInitDataSkipsWithoutMeasurements(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, nil); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, nil, nil); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	if _, ok := pod.Annotations[initdata.AnnotationKey]; ok {
@@ -94,7 +94,7 @@ func TestStampInitDataRejectsAuthorSuppliedValue(t *testing.T) {
 	pod := &corev1.Pod{}
 	pod.Annotations = map[string]string{initdata.AnnotationKey: "rogue"}
 
-	err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements)
+	err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, nil)
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("err = %v, want errInvalidInjectionAnnotation", err)
 	}
@@ -114,7 +114,7 @@ func TestStampInitDataRejectsAuthorValueOnUnstampedShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{}
 			pod.Annotations = map[string]string{initdata.AnnotationKey: "rogue"}
-			if err := stampInitData(pod, tc.class, tc.measurements); !errors.Is(err, errInvalidInjectionAnnotation) {
+			if err := stampInitData(pod, tc.class, tc.measurements, nil); !errors.Is(err, errInvalidInjectionAnnotation) {
 				t.Fatalf("err = %v, want errInvalidInjectionAnnotation", err)
 			}
 		})
@@ -124,11 +124,11 @@ func TestStampInitDataRejectsAuthorValueOnUnstampedShapes(t *testing.T) {
 // The second pass must accept its own stamp, not read it as author-supplied.
 func TestStampInitDataIsReinvocationSafe(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, nil); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	first := pod.Annotations[initdata.AnnotationKey]
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, nil); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	if pod.Annotations[initdata.AnnotationKey] != first {
@@ -139,11 +139,36 @@ func TestStampInitDataIsReinvocationSafe(t *testing.T) {
 func TestStampInitDataCoversEveryConfidentialClass(t *testing.T) {
 	for class := range confidentialKataClasses {
 		pod := &corev1.Pod{}
-		if err := stampInitData(pod, class, testMeasurements); err != nil {
+		if err := stampInitData(pod, class, testMeasurements, nil); err != nil {
 			t.Fatalf("stampInitData(%s): %v", class, err)
 		}
 		if _, ok := pod.Annotations[initdata.AnnotationKey]; !ok {
 			t.Fatalf("confidential class %s got no init-data document", class)
 		}
+	}
+}
+
+func TestStampInitDataCarriesRTMRPins(t *testing.T) {
+	rtmrs := []string{"1=" + testMeasurements[0], "2=" + testMeasurements[1]}
+	pod := &corev1.Pod{}
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, rtmrs); err != nil {
+		t.Fatalf("stampInitData: %v", err)
+	}
+	doc := decodeStamped(t, pod)
+	want := rtmrs[0] + "," + rtmrs[1]
+	if got := doc.Data[initdata.KeyCDSRTMRs]; got != want {
+		t.Fatalf("rtmrs = %q, want %q", got, want)
+	}
+}
+
+// Without a measurement pin there is no CDS identity for registers to narrow,
+// so RTMR pins alone stamp no document.
+func TestStampInitDataRTMRsAloneStampNothing(t *testing.T) {
+	pod := &corev1.Pod{}
+	if err := stampInitData(pod, kataSnpRuntimeClass, nil, []string{"1=" + testMeasurements[0]}); err != nil {
+		t.Fatalf("stampInitData: %v", err)
+	}
+	if _, ok := pod.Annotations[initdata.AnnotationKey]; ok {
+		t.Fatal("RTMR pins without measurements stamped a document")
 	}
 }

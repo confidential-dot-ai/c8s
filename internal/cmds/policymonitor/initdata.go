@@ -45,34 +45,44 @@ const initDataTimeout = 15 * time.Second
 // tempdir; production always uses the baked path.
 var initDataDocumentPath = initdata.GuestDocumentPath
 
-// resolveInitDataMeasurements returns the CDS measurements the host delivered.
+// initDataCDSPins are the CDS pin values a launch-committed init-data
+// document carries, still in their comma-separated wire form.
+type initDataCDSPins struct {
+	measurements string
+	rtmrs        string
+}
+
+// resolveInitDataMeasurements returns the CDS pins the host delivered.
 //
 // The document is host-supplied; what makes it usable is that the shim commits
 // sha256(document) into HOST_DATA at launch. A mismatch means the host wrote
 // one document and committed another, and is treated as tampering.
-func resolveInitDataMeasurements(ctx context.Context, cfg *Config) (string, error) {
+func resolveInitDataMeasurements(ctx context.Context, cfg *Config) (initDataCDSPins, error) {
 	raw, err := os.ReadFile(initDataDocumentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", errNoInitData
+			return initDataCDSPins{}, errNoInitData
 		}
-		return "", fmt.Errorf("read init-data: %w", err)
+		return initDataCDSPins{}, fmt.Errorf("read init-data: %w", err)
 	}
 
 	hostData, err := verifiedSelfHostData(ctx, cfg)
 	if err != nil {
-		return "", err
+		return initDataCDSPins{}, err
 	}
 	want := initdata.Digest(raw)
 	if subtle.ConstantTimeCompare(hostData, want[:]) != 1 {
-		return "", fmt.Errorf("policy-monitor: init-data digest %x is not the launch-committed HOST_DATA %x", want, hostData)
+		return initDataCDSPins{}, fmt.Errorf("policy-monitor: init-data digest %x is not the launch-committed HOST_DATA %x", want, hostData)
 	}
 
 	doc, err := initdata.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse init-data: %w", err)
+		return initDataCDSPins{}, fmt.Errorf("parse init-data: %w", err)
 	}
-	return doc.Data[initdata.KeyCDSMeasurements], nil
+	return initDataCDSPins{
+		measurements: doc.Data[initdata.KeyCDSMeasurements],
+		rtmrs:        doc.Data[initdata.KeyCDSRTMRs],
+	}, nil
 }
 
 // applyInitDataMeasurements fills cfg.CDSMeasurements from the launch-committed
@@ -85,7 +95,7 @@ func applyInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 	if cfg.CDSMeasurements != "" {
 		return
 	}
-	measurements, err := resolveInitDataMeasurements(ctx, cfg)
+	pins, err := resolveInitDataMeasurements(ctx, cfg)
 	switch {
 	case errors.Is(err, errNoInitData):
 		logger.Warn("no init-data document; CDS measurements unset, so allowlist refresh will stay disabled",
@@ -95,14 +105,25 @@ func applyInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 		// One read, so every failure is final here — including one a retry would clear.
 		logger.Error("init-data rejected; enforcing the baked seed alone", "error", err)
 		return
-	case measurements == "":
+	case pins.measurements == "":
 		logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
 			"key", initdata.KeyCDSMeasurements)
 		return
 	}
-	cfg.CDSMeasurements = measurements
-	logger.Info("CDS measurements taken from the launch-committed init-data document",
-		"key", initdata.KeyCDSMeasurements)
+	adoptInitDataCDSPins(logger, cfg, pins)
+}
+
+// adoptInitDataCDSPins writes the launch-committed pin values into cfg. The
+// RTMR pins ride the measurements' explicit-wins rule: this runs only when no
+// explicit measurement value was configured, and a document that pins
+// measurements without registers leaves any explicit CDSRTMRs standing.
+func adoptInitDataCDSPins(logger *slog.Logger, cfg *Config, pins initDataCDSPins) {
+	cfg.CDSMeasurements = pins.measurements
+	if pins.rtmrs != "" {
+		cfg.CDSRTMRs = pins.rtmrs
+	}
+	logger.Info("CDS pins taken from the launch-committed init-data document",
+		"key", initdata.KeyCDSMeasurements, "rtmrs_pinned", pins.rtmrs != "")
 }
 
 // initDataWaitBudget bounds how long the guest waits for kata-agent to write
@@ -141,12 +162,10 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 	var lastErr error
 	settling := 0
 	for {
-		measurements, err := resolveInitDataMeasurements(ctx, cfg)
+		pins, err := resolveInitDataMeasurements(ctx, cfg)
 		switch {
-		case err == nil && measurements != "":
-			cfg.CDSMeasurements = measurements
-			logger.Info("CDS measurements taken from the launch-committed init-data document",
-				"key", initdata.KeyCDSMeasurements)
+		case err == nil && pins.measurements != "":
+			adoptInitDataCDSPins(logger, cfg, pins)
 			return
 		case err == nil:
 			// The digest matched, so this is the launch-committed document

@@ -1288,7 +1288,7 @@ func TestHandleRejectsKataHypervisorAnnotations(t *testing.T) {
 	// cc_init_data is unchanged: the webhook's own stamp passes, an
 	// author-chosen document is still rejected by stampInitData.
 	t.Run("accepts the stamped cc_init_data value", func(t *testing.T) {
-		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements)
+		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

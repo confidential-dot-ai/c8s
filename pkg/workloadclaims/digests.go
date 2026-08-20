@@ -160,11 +160,11 @@ func outboundHost(ctx context.Context, target string) (string, error) {
 // DigestsServerTLSConfig builds the inventory's listener config for
 // ServeDigests: it presents an RA-TLS certificate proving the inventory runs in
 // a TEE, and requires the caller to present a hardware-attested one too. With
-// cdsMeasurements set the caller's launch measurement must be in it, so the
-// endpoint discloses what a node runs only to a CDS on an expected measurement;
-// empty pins no measurement, and any TEE on the network can then read it.
-// UNSAFE outside development; callers warn.
-func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte, certTTL time.Duration) (*tls.Config, *ratls.CertManager, error) {
+// cdsPins set the caller must satisfy them (launch measurement, and TDX RTMRs
+// when pinned), so the endpoint discloses what a node runs only to a CDS on an
+// expected measurement; zero pins accept any TEE on the network. UNSAFE
+// outside development; callers warn.
+func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins, certTTL time.Duration) (*tls.Config, *ratls.CertManager, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, nil, err
 	}
@@ -173,7 +173,8 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		AttestFunc: attestFunc,
 		CertTTL:    certTTL,
 		ClientPolicy: &ratls.VerifyPolicy{
-			Measurements:      cdsMeasurements,
+			Measurements:      cdsPins.Measurements,
+			RTMRs:             cdsPins.RTMRs,
 			AttestationApiURL: attestationApiURL,
 		},
 	})
@@ -199,8 +200,8 @@ func requireAttestationApi(url string) error {
 // rather than after the warm-up window. Warm-up failure is logged, not fatal:
 // the endpoint provisions on the first handshake instead, and taking the
 // inventory down would cost far more than a slow first callback.
-func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte) error {
-	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsMeasurements, 0)
+func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins) error {
+	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsPins, 0)
 	if err != nil {
 		return err
 	}
@@ -233,23 +234,24 @@ type DigestsClient struct {
 	timeout time.Duration
 }
 
-// NewDigestsClient builds the client. measurements are the launch digests an
-// inventory may present — the same allowlist CDS pins for the inventory's
-// /attest-key EAR, so a sandbox token and the callback that follows it are
-// held to one standard. Empty accepts any RA-TLS-attested inventory, matching
-// what an empty allowlist already means for the EAR: UNSAFE outside
-// development; callers warn.
+// NewDigestsClient builds the client. pins hold the launch digests (and any
+// TDX RTMR pins) an inventory may present — the same allowlist CDS pins for
+// the inventory's /attest-key EAR, so a sandbox token and the callback that
+// follows it are held to one standard. Zero pins accept any RA-TLS-attested
+// inventory, matching what an empty allowlist already means for the EAR:
+// UNSAFE outside development; callers warn.
 //
 // It warms its own RA-TLS certificate before returning: provisioning costs an
 // attestation round-trip, and paying it lazily would put it inside the first
 // pod's issuance deadline.
-func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, measurements [][]byte, timeout time.Duration) (*DigestsClient, error) {
+func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, pins ratls.Pins, timeout time.Duration) (*DigestsClient, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
 		Policy: &ratls.VerifyPolicy{
-			Measurements:      measurements,
+			Measurements:      pins.Measurements,
+			RTMRs:             pins.RTMRs,
 			AttestationApiURL: attestationApiURL,
 		},
 		Platform:   ratls.NormalizePlatform(platform),

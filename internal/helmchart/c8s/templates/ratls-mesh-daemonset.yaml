@@ -261,6 +261,10 @@ spec:
             - --measurements
             - {{ .Values.ratlsMesh.measurements | join "," | quote }}
             {{- end }}
+            {{- with .Values.ratlsMesh.rtmrs }}
+            - --rtmrs
+            - {{ join "," . | quote }}
+            {{- end }}
             {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
             - --max-conns
             - {{ .Values.ratlsMesh.maxConns | quote }}
@@ -288,6 +292,10 @@ spec:
             - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs
             - {{ join "," . | quote }}
             {{- end }}
             {{- end }}

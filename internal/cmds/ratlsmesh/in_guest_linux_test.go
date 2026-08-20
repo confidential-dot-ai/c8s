@@ -35,7 +35,9 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 		envLogLevel:              "debug",
 		envPlatform:              "sev-snp",
 		envCDSMeasurements:       "aa,bb",
+		envCDSRTMRs:              "1=" + strings.Repeat("aa", 48),
 		envMeshMeasurements:      "cc",
+		envMeshRTMRs:             "2=" + strings.Repeat("bb", 48),
 		envPodIP:                 "10.0.0.5",
 		envClusterDNSIP:          "fd53::a",
 	}
@@ -54,6 +56,12 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 	}
 	if c.podIP != "10.0.0.5" {
 		t.Errorf("podIP = %q", c.podIP)
+	}
+	if c.cdsRTMRs != envs[envCDSRTMRs] {
+		t.Errorf("cdsRTMRs = %q, want %q", c.cdsRTMRs, envs[envCDSRTMRs])
+	}
+	if c.meshRTMRs != envs[envMeshRTMRs] {
+		t.Errorf("meshRTMRs = %q, want %q", c.meshRTMRs, envs[envMeshRTMRs])
 	}
 	if c.clusterDNSIP != "fd53::a" {
 		t.Errorf("clusterDNSIP = %q, want the env override", c.clusterDNSIP)

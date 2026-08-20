@@ -261,6 +261,15 @@ cds:
   ##      serving cert against it when they dial CDS.
   ## Empty = no pinning (UNSAFE outside dev).
   measurements: []
+  ## TDX RTMR pins, each "<index>=<sha384-hex>", completing `measurements` on
+  ## TDX: the launch digest (MRTD) covers TDVF firmware only, while RTMR[1]
+  ## pins the guest kernel and RTMR[2] the command line carrying the dm-verity
+  ## root hash. Used the same two ways as `measurements`: CDS requires them of
+  ## TDX callers on /attest and /attest-key, and every component dialing CDS
+  ## pins CDS's RA-TLS cert against them. Ignored for SNP evidence. Empty = no
+  ## RTMR pinning (on TDX the measurement pin then confers no guest-code
+  ## identity, UNSAFE).
+  rtmrs: []
   ## PEM bundle of operator EC public keys (public material, not a secret).
   ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a
   ## short-lived token signed by one of the matching operator private keys (see
@@ -720,6 +729,10 @@ ratlsMesh:
 
   # Expected launch digests for measurement pinning (empty = accept any)
   measurements: []
+
+  # TDX RTMR pins for mesh peers, each "<index>=<sha384-hex>" (see cds.rtmrs).
+  # Ignored for SNP peers; empty = no RTMR pinning.
+  rtmrs: []
 
   # Pod shutdown budget. The iptables-cleanup preStop hook fires last in the
   # native-sidecar reverse-init order, so its sleep upper bound must leave room

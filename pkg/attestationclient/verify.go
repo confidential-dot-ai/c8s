@@ -177,17 +177,26 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
 		return types.VerifyResponse{}, err
 	}
-	if err := enforceRTMRs(resp, policy.RTMRs); err != nil {
+	if err := EnforceRTMRs(resp, policy.RTMRs); err != nil {
 		return types.VerifyResponse{}, err
 	}
 	return resp, nil
 }
 
-// enforceRTMRs requires each pinned register to byte-equal the value the
+// TDXPlatform reports whether platform names TDX-shaped evidence, i.e. carries
+// runtime measurement registers an RTMR pin can be enforced against.
+func TDXPlatform(platform string) bool {
+	return platform == string(types.PlatformTdx) || platform == string(types.PlatformAzTdx)
+}
+
+// EnforceRTMRs requires each pinned register to byte-equal the value the
 // verifier reported. A pinned register the evidence does not carry is a
 // refusal, not a pass: that is what an SNP quote (or a verifier that stopped
 // reporting them) looks like, and neither says the guest is the expected one.
-func enforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
+// Exported for issuance gates (CDS /attest, /attest-key) that verify evidence
+// via [Client.VerifyEnforced] rather than [Client.VerifyEvidence]; such
+// callers gate on [TDXPlatform] first, since RTMRs exist only there.
+func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	if len(pinned) == 0 {
 		return nil
 	}

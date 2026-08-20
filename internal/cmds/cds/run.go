@@ -113,6 +113,7 @@ func run(cfg config) error {
 		PeerURL:           strings.TrimRight(cfg.handoffPeerURL, "/"),
 		AttestationApiURL: cfg.attestationApiURL,
 		Measurements:      cfg.handoffMeasurements,
+		RTMRs:             cfg.handoffRTMRs,
 		ExpectedIssuer:    cfg.earIssuerName,
 		Timeout:           cfg.handoffPeerTimeout,
 		OperatorKeysHash:  operatorKeysHash,
@@ -137,6 +138,15 @@ func run(cfg config) error {
 		slog.Warn("--measurements empty: /attest accepts any TEE measurement. UNSAFE outside development.")
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
+	}
+	rtmrPins, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		return fmt.Errorf("--rtmrs: %w", err)
+	}
+	if len(rtmrPins) > 0 {
+		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
+	} else if len(measurements) > 0 {
+		slog.Warn("--rtmrs empty: on TDX the measurement allowlist pins TDVF firmware only (MRTD); the guest kernel and rootfs are not pinned. SNP is unaffected.")
 	}
 
 	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
@@ -209,6 +219,7 @@ func run(cfg config) error {
 		AttestationClient: asClient,
 		EarIssuer:         earIssuer,
 		OperatorKeysHash:  attestKeyOperatorPolicy,
+		RTMRs:             rtmrPins,
 	}
 
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
@@ -244,7 +255,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			measurementBytes,
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -313,6 +324,7 @@ func run(cfg config) error {
 			NamedCertTTL:      cfg.namedCertTTL,
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
+			RTMRs:             rtmrPins,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

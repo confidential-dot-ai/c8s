@@ -2086,3 +2086,63 @@ func TestValuesFilesSetGuestImageTag(t *testing.T) {
 		}
 	})
 }
+
+// --rtmrs completes the TDX pin: the entries fan into cds.rtmrs and
+// ratlsMesh.rtmrs, normalized and in index order.
+func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
+	prev := installRTMRs
+	defer func() { installRTMRs = prev }()
+	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
+	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
+
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"cds.rtmrs[0]=1=" + r1, "ratlsMesh.rtmrs[0]=1=" + r1,
+		"cds.rtmrs[1]=2=" + r2, "ratlsMesh.rtmrs[1]=2=" + r2,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+
+	installRTMRs = []string{"0=" + r1}
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
+		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")
+	}
+}
+
+// A TDX install without RTMR pins warns that the measurement pin covers TDVF
+// firmware only; SNP, pinned TDX, and values-file-pinned TDX stay quiet.
+func TestTDXRTMRPinWarning(t *testing.T) {
+	r1 := "1=" + strings.Repeat("11", 48)
+
+	if warn, err := tdxRTMRPinWarning("sev-snp", nil, nil); err != nil || warn != "" {
+		t.Fatalf("sev-snp: warn=%q err=%v, want quiet", warn, err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", []string{r1}, nil); err != nil || warn != "" {
+		t.Fatalf("pinned tdx: warn=%q err=%v, want quiet", warn, err)
+	}
+	warn, err := tdxRTMRPinWarning("tdx", nil, nil)
+	if err != nil || warn == "" {
+		t.Fatalf("unpinned tdx: warn=%q err=%v, want a warning", warn, err)
+	}
+
+	pinned := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(pinned, []byte("cds:\n  rtmrs:\n    - \""+r1+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", nil, []string{pinned}); err != nil || warn != "" {
+		t.Fatalf("values-file pinned tdx: warn=%q err=%v, want quiet", warn, err)
+	}
+
+	empty := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(empty, []byte("cds:\n  rtmrs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", nil, []string{empty}); err != nil || warn == "" {
+		t.Fatalf("empty-list values file: warn=%q err=%v, want a warning", warn, err)
+	}
+}
