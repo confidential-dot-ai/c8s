@@ -29,9 +29,9 @@ c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
-`--cvm-mode` is required — one of `pod` (per-pod kata CVMs), `node`
-(node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here), `gke`, or
-`aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
+`--cvm-mode` is required — one of `pod` (per-pod kata CVMs, multi-tenant),
+`node` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
+single-tenant), `gke`, or `aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
 `tdx` (under `aks` it selects the Azure vTPM shape instead). `--operator-keys`
 takes a PEM bundle of EC public keys that authorize
 `c8s allowlist` writes; without it the install refuses to proceed (pass

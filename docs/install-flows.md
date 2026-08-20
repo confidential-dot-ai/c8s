@@ -34,7 +34,7 @@ evidence is read (native device, GKE managed CVM, Azure vTPM).
 
 | Mode | Flag | One-liner |
 |---|---|---|
-| **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. Host-side mesh + attestation + image policy. The dev/baseline shape. |
+| **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. **Single-tenant** — the node is one trust domain. Host-side mesh + attestation + image policy. The dev/baseline shape. |
 | **kata** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
 
 ```mermaid
@@ -103,7 +103,9 @@ unattested enforcement path.
 
 **base** — there is no per-pod confidentiality. Everything runs in ordinary
 containers the host kernel can read. The mesh/attestation components operate at
-the node level; they do not hide pod memory from the host.
+the node level; they do not hide pod memory from the host. The node is a single
+trust domain, so this mode is **single-tenant**: every pod on it can reach what
+any other pod on it can reach. Multi-tenant isolation requires `--cvm-mode=pod`.
 
 ```
  HOST (trusted in this mode)
