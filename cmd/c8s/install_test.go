@@ -246,7 +246,7 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 
 func TestAppendKataInstallArgsNonPodModeIsNoOp(t *testing.T) {
 	for _, mode := range []string{"node", "gke", "aks", ""} {
-		got := appendKataInstallArgs([]string{"upgrade"}, mode, false)
+		got := appendKataInstallArgs([]string{"upgrade"}, mode, false, "")
 		assertArgsEqual(t, got, []string{"upgrade"})
 	}
 }
@@ -257,7 +257,7 @@ func TestAppendKataInstallArgsPodModeIsEnforcing(t *testing.T) {
 	// image (the chart's enforce_host_components validation rejects them left
 	// on). Enforcement itself (webhook injection + ValidatingAdmissionPolicy)
 	// is keyed on kata.enabled in the chart — no separate value.
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", false)
+	got := appendKataInstallArgs([]string{"upgrade"}, "pod", false, "")
 	assertArgsEqual(t, got, []string{
 		"upgrade",
 		"--set", "kata.enabled=true",
@@ -270,7 +270,7 @@ func TestAppendKataInstallArgsPodModeIsEnforcing(t *testing.T) {
 func TestAppendKataInstallArgsDebugSelectsDebugGuestImage(t *testing.T) {
 	// --cvm-mode=pod --debug keeps the enforcing shape and additionally points
 	// the puller at the -debug guest image (host log/exec streams allowed).
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true)
+	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true, "")
 	assertArgsEqual(t, got, []string{
 		"upgrade",
 		"--set", "kata.enabled=true",
@@ -281,11 +281,35 @@ func TestAppendKataInstallArgsDebugSelectsDebugGuestImage(t *testing.T) {
 	})
 }
 
+func TestAppendKataInstallArgsPinsGuestImageTagToTheComponentTag(t *testing.T) {
+	// The guest's baked allowlist seed names the components of the commit it was
+	// built from, so a guest resolved from a different tag than the components
+	// admits neither: policy-monitor SIGKILLs the injected get-cert and the
+	// install never converges. --set-string, so an all-digit tag is not coerced.
+	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true, "v0.1.10")
+	assertArgsEqual(t, got, []string{
+		"upgrade",
+		"--set", "kata.enabled=true",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "kata.guestImage.debug=true",
+		"--set-string", "kata.guestImage.tag=v0.1.10",
+	})
+}
+
+func TestAppendKataInstallArgsGuestImageTagNonPodModeIsNoOp(t *testing.T) {
+	// The guest axis exists only under --cvm-mode=pod; a non-pod install must
+	// not emit a guest tag even if one reaches the builder.
+	got := appendKataInstallArgs([]string{"upgrade"}, "node", false, "v0.1.10")
+	assertArgsEqual(t, got, []string{"upgrade"})
+}
+
 func TestAppendKataInstallArgsDebugNonPodModeIsNoOp(t *testing.T) {
 	// RunE rejects --debug outside --cvm-mode=pod before args are built; the
 	// builder still keys everything on the pod mode so a call-order change
 	// cannot silently emit a debug guest image for a non-pod install.
-	got := appendKataInstallArgs([]string{"upgrade"}, "node", true)
+	got := appendKataInstallArgs([]string{"upgrade"}, "node", true, "")
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
@@ -2015,4 +2039,50 @@ func TestReportExemptedImages(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Errorf("nothing exempted must print nothing, got:\n%s", buf.String())
 	}
+}
+
+// A -f file that names kata.guestImage.tag owns the guest axis; the install
+// must not overwrite it with the component tag (the computed values file is
+// applied last and would otherwise win).
+func TestValuesFilesSetGuestImageTag(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	pinned := write("pinned.yaml", "kata:\n  guestImage:\n    tag: v0.1.10\n")
+	other := write("other.yaml", "kata:\n  guestImage:\n    debug: true\n")
+	empty := write("empty.yaml", "{}\n")
+
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"no files", nil, false},
+		{"unrelated keys only", []string{other, empty}, false},
+		{"tag pinned", []string{pinned}, true},
+		{"tag pinned in a later file", []string{other, pinned}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := valuesFilesSetGuestImageTag(tc.files)
+			if err != nil {
+				t.Fatalf("valuesFilesSetGuestImageTag: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("valuesFilesSetGuestImageTag = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// An unreadable -f must surface, not read as "operator did not pin it" —
+	// that would silently re-float the guest axis the install is pinning.
+	t.Run("unreadable file errors", func(t *testing.T) {
+		if _, err := valuesFilesSetGuestImageTag([]string{filepath.Join(dir, "absent.yaml")}); err == nil {
+			t.Fatal("missing values file: want error, got nil")
+		}
+	})
 }

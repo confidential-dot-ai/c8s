@@ -52,10 +52,12 @@ rke2). An install with `-f` values owns the distro instead: set
 doesn't fit — a mixed cluster cannot be detected and always needs that, plus
 nodeSelectors to partition the install.
 
-The kata-image-puller is on by default under `--cvm-mode=pod`. A
-single-node / local build can switch it off, and pin the guest image tag,
-through a `-f` values file (`kata.guestImage.enabled=false` /
-`kata.guestImage.tag=<tag>`) — there is no dedicated CLI flag for these.
+The kata-image-puller is on by default under `--cvm-mode=pod`, and the install
+pins `kata.guestImage.tag` to the tag it resolves the component images at — the
+guest's baked allowlist seed admits only the components of the commit the guest
+was built from. A `-f` values file can switch the puller off or own the tag
+itself (`kata.guestImage.enabled=false` / `kata.guestImage.tag=<tag>`); a file
+that sets the tag wins. There is no dedicated CLI flag for these.
 
 `--cvm-mode=pod --debug` points the puller at the `<tag>-debug` guest image —
 identical except the baked guest policy allows host log/exec streams, so

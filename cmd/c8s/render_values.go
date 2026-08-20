@@ -184,7 +184,22 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	if err != nil {
 		return nil, err
 	}
-	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug)
+	// The guest artifact and the component images are one identity: the guest's
+	// baked allowlist seed names the components of the commit it was built from
+	// (see appendKataInstallArgs). A -f file that names kata.guestImage.tag owns
+	// the axis and is left alone; installValues is empty for render-values,
+	// which registers no -f flag.
+	guestTag := ""
+	if cvmModeIsPod(installCvmMode) {
+		pinnedInValues, err := valuesFilesSetGuestImageTag(installValues)
+		if err != nil {
+			return nil, err
+		}
+		if !pinnedInValues {
+			guestTag = imageTag
+		}
+	}
+	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug, guestTag)
 	// installValues is empty for render-values, which registers no -f flag, so
 	// the hosted-lane default always applies there.
 	setArgs, err = appendExemptNamespacesInstallArgs(setArgs, installCvmMode, installValues)

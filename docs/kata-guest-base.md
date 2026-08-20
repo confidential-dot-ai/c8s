@@ -407,8 +407,10 @@ the image as `<short-sha>` and `main`. When the parent run created a stable
 release tag on that exact revision, the same build also receives the matching
 `vX.Y.Z` alias. A manual dispatch can publish a branch-scoped alias.
 
-Operators select the artifact tag by setting `kata.guestImage.tag` in a values
-file (`c8s install --cvm-mode=pod -f values.yaml`). The
+`c8s install --cvm-mode=pod` sets `kata.guestImage.tag` to the tag it resolves
+the component images at, so both axes name one commit. Operators override it by
+setting `kata.guestImage.tag` in a values file
+(`c8s install --cvm-mode=pod -f values.yaml`), which then owns the axis. The
 `c8s-kata-image-puller` DaemonSet picks that up and pulls accordingly —
 see "How it's consumed in-cluster" in
 [`kata-guest-base/README.md`](../kata-guest-base/README.md).
