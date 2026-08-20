@@ -12,8 +12,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -366,16 +368,42 @@ logging:
   level: error
 `, dir, dir, pushDigestA, stalledCDS, stalledAttestation.URL, strings.Repeat("ab", 48))
 
-	// The NRI socket does not exist here, so registration fails and that
-	// failure is what Run must report. A nil return means Run classified the
-	// stalled pull as a shutdown and swallowed it.
+	// Hand the stub a connected socket so the plugin cannot die while the pull
+	// is running: without it the NRI dial fails instantly, pullInitial's first
+	// select sees the error, and the run ends as errPluginDied having never
+	// reached the branch under test. Registration then stalls for its own 5s
+	// timeout — far longer than the 300ms pull — so the pull deterministically
+	// exhausts its retries first and the plugin failure is what Run reports.
+	holdNRISocket(t)
+
 	err := runWithDeadline(t, 20*time.Second, []string{"-config", writeConfigYAML(t, cfgYAML)})
 	if err == nil {
 		t.Fatal("Run returned nil: a stalled initial pull was misread as shutdown")
 	}
+	if errors.Is(err, errPluginDied) {
+		t.Fatalf("plugin died during the pull, so the stalled-pull branch never ran: %v", err)
+	}
 	if !strings.HasPrefix(err.Error(), "plugin: ") {
 		t.Fatalf("err = %v, want the NRI plugin run failure", err)
 	}
+}
+
+// holdNRISocket points the NRI stub at one end of a socketpair via
+// NRI_PLUGIN_SOCKET, which stub.connect adopts instead of dialing. Nothing
+// serves the peer end, so registration blocks until its timeout rather than
+// failing on connect. Both ends stay open for the test: closing either makes
+// registration fail immediately and restores the race.
+func holdNRISocket(t *testing.T) {
+	t.Helper()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Close(fds[0])
+		_ = syscall.Close(fds[1])
+	})
+	t.Setenv(api.PluginSocketEnvVar, strconv.Itoa(fds[0]))
 }
 
 // --- allowlistPullHTTPClient ------------------------------------------------
