@@ -398,11 +398,37 @@ jobs:
           set -euo pipefail
           # Pull the manifest the image build published rather than writing
           # one: a hand-built stub only ever proves the gate accepts the shape
-          # this step chose. The CDI tag the CVM boots and the oras artifact
-          # carrying manifest.json are the same build under sibling tags, so
-          # the manifest is fetched by stripping the -cdi suffix.
-          oras_ref="${image%-cdi}"
-          [ "$oras_ref" != "$image" ] || { echo "::error::refs CM 'image' ($image) is not a -cdi tag, so the sibling oras artifact carrying manifest.json cannot be derived"; exit 1; }
+          # this step chose. The CDI image the CVM boots and the oras artifact
+          # carrying manifest.json are the same build under sibling tags
+          # (:<variant>-cdi and :<variant>), so the artifact is the CDI tag
+          # without its -cdi suffix.
+          #
+          # The refs CM pins the image by digest, which carries no tag to
+          # strip (the image has no version label or annotation to read one
+          # from either). Resolve the digest back to the -cdi tag that points
+          # at it, then take that tag's sibling. The MRTD cross-check below
+          # is what proves the artifact belongs to the booted build; this only
+          # has to find it.
+          case "$image" in
+            *@sha256:*)
+              repo="${image%%@*}"
+              want="${image##*@}"
+              cdi_tag=""
+              for t in $(crane ls "$repo"); do
+                case "$t" in *-cdi|*-cdi-*) ;; *) continue ;; esac
+                [ "$(crane digest "$repo:$t")" = "$want" ] || continue
+                cdi_tag="$t"
+                break
+              done
+              [ -n "$cdi_tag" ] || { echo "::error::no -cdi tag in $repo resolves to $want, so the sibling oras artifact carrying manifest.json cannot be derived"; exit 1; }
+              echo "refs CM digest resolves to $cdi_tag"
+              oras_ref="$repo:$(printf '%s' "$cdi_tag" | sed 's/-cdi//')"
+              ;;
+            *)
+              oras_ref="${image%-cdi}"
+              [ "$oras_ref" != "$image" ] || { echo "::error::refs CM 'image' ($image) is neither a digest nor a -cdi tag, so the sibling oras artifact carrying manifest.json cannot be derived"; exit 1; }
+              ;;
+          esac
           digest=$(crane manifest "$oras_ref" | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json") | .digest')
           [ -n "$digest" ] || { echo "::error::$oras_ref publishes no manifest.json layer"; exit 1; }
           crane blob "${oras_ref%%:*}@${digest}" > /tmp/image-manifest.json
