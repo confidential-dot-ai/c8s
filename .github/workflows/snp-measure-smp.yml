@@ -195,7 +195,8 @@ jobs:
             -d "{\"platform\":\"auto\",\"report_data\":\"$nonce\"}" \
             "http://$GUEST_IP:8400/attest" > evidence.json
           jq -e '.evidence' evidence.json >/dev/null || { echo "::error::/attest returned no evidence object"; head -c 400 evidence.json; exit 1; }
-          erd=$(printf '%s' "$nonce" | base64 -d | xxd -p -c256)
+          # od, not xxd: xxd ships with vim, which the runner does not have.
+          erd=$(printf '%s' "$nonce" | base64 -d | od -An -tx1 -v | tr -d ' \n')
           bin/c8s verify --from-file evidence.json --expected-report-data "$erd" --output json > verdict.json || true
           M=$(jq -r '.measurement // empty' verdict.json)
           [ -n "$M" ] || { echo "::error::no measurement in the verdict"; jq . verdict.json | head -40; exit 1; }
