@@ -645,6 +645,10 @@ linux node, removing:
   ipsets. The mesh's own preStop deliberately keeps the fail-closed guard,
   so this state survives every healthy uninstall, and a stale `OUTPUT`
   redirect blackholes host-originated pod traffic for non-root users;
+- the `nydus-for-kata-tee` systemd unit kata-deploy installs. Its data dir
+  `/var/lib/nydus-for-kata-tee` is preserved on purpose: containerd's
+  meta.db keeps nydus snapshot records, and wiping the backend behind them
+  breaks the next install's pulls;
 - `/opt/kata` and the `containerd-shim-kata-*` symlinks, if the preStop
   cleanup was cut short — restarting containerd/RKE2 (detached, via
   systemd-run) only when a runtime drop-in was still registered;

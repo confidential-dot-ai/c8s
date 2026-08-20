@@ -209,8 +209,8 @@ and block pod creation cluster-wide.
 It then **sweeps the host-side artifacts** that the chart's hooks and the
 `kata-deploy` preStop cleanup cannot guarantee — on every release shape, since
 leftovers may come from a previous install of a different shape. The swept set
-(NRI image-policy plugin, ratls-mesh netfilter state, kata payload and
-guest images, RKE2 containerd-prep template, node labels) is in
+(NRI image-policy plugin, ratls-mesh netfilter state, nydus unit, kata payload
+and guest images, RKE2 containerd-prep template, node labels) is in
 [`docs/kata.md`](kata.md#uninstalling). The host paths are read from the
 release's computed values *before* deletion, so install-time `-f` overrides are
 honored.

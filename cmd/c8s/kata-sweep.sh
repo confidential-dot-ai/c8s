@@ -23,9 +23,9 @@
 # fail-closed image admission until reimage — so the NRI and template steps
 # below are skipped when the baked-only nri-node-ip.service unit exists.
 #
-# Fatal vs warn: containerd config removal, the runtime restart, and the
-# guest-dir steps fail the sweep (the CLI then keeps the DaemonSet so its
-# logs survive). Per-object netfilter failures warn and
+# Fatal vs warn: containerd config removal, the runtime restart, the nydus
+# unit, and the guest-dir steps fail the sweep (the CLI then keeps the
+# DaemonSet so its logs survive). Per-object netfilter failures warn and
 # continue; a host with no iptables at all fails the sweep at the end, after
 # every other step ran.
 #
@@ -165,6 +165,23 @@ fi
 
 # == Phase 3: host artifacts =================================================
 
+# 4. nydus-for-kata-tee: kata-deploy's EXPERIMENTAL_SETUP_SNAPSHOTTER
+#    installs this host unit; its own cleanup removes it only when the
+#    preStop completes. Stop it while its binary under /opt/kata still
+#    exists. /var/lib/nydus-for-kata-tee stays on purpose: containerd's
+#    meta.db keeps nydus snapshot records, and wiping the backend behind
+#    them makes the next install's pulls fail with "target snapshot already
+#    exists" (see kata-deploy's uninstall_nydus_snapshotter).
+NYDUS_UNIT=/host/etc/systemd/system/nydus-for-kata-tee.service
+if [ -f "$NYDUS_UNIT" ]; then
+  nsenter -t 1 -m -u -i -n -p -- systemctl disable --now nydus-for-kata-tee.service
+  rm -f "$NYDUS_UNIT"
+  nsenter -t 1 -m -u -i -n -p -- systemctl daemon-reload
+  echo "nydus-for-kata-tee.service removed"
+else
+  echo "nydus-for-kata-tee.service already absent"
+fi
+
 # 5. The kata-static payload (runtime, shim, QEMU/CLH, guest kernel + images)
 #    and the per-shim symlinks kata-deploy installs beside it. /opt/kata also
 #    carries the image-puller's <cfg>.upstream snapshot, so that goes too.
@@ -176,7 +193,7 @@ else
 fi
 rm -f /host/usr/local/bin/containerd-shim-kata-*-v2
 
-# 4. The guest image dirs (multi-GB; nothing else cleans them up). Presence-
+# 6. The guest image dirs (multi-GB; nothing else cleans them up). Presence-
 #    gated: a non-kata release never wrote these, so an absent custom path is
 #    a no-op while an existing unsafe one still fails closed.
 sweep_guest_dir() {
@@ -196,7 +213,7 @@ if [ -n "${GUEST_IMAGE_DIR_NVIDIA}" ]; then
   sweep_guest_dir "${GUEST_IMAGE_DIR_NVIDIA}"
 fi
 
-# 5. The NRI plugin's host artifacts: the binary, its boot config, the health
+# 7. The NRI plugin's host artifacts: the binary, its boot config, the health
 #    socket dir, and the allowlist cache. The rm -rf targets must carry the
 #    plugin's own directory name — the values come from the release and a
 #    bare parent dir (/var/run, /var/lib) is never deleted.
@@ -225,7 +242,7 @@ if [ "$baked_node" = "0" ]; then
   esac
 fi
 
-# 6. RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
+# 8. RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
 #    interception (--keep-guard keeps the fail-closed filter chains and their
 #    ipsets by design), and a mesh pod that never ran preStop leaves
 #    everything — including the OUTPUT redirect that sends host-originated
