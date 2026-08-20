@@ -398,18 +398,40 @@ jobs:
           set -euo pipefail
           # Pull the manifest the image build published rather than writing
           # one: a hand-built stub only ever proves the gate accepts the shape
-          # this step chose. The CDI tag the CVM boots and the oras artifact
-          # carrying manifest.json are the same build under sibling tags, so
-          # the manifest is fetched by stripping the -cdi suffix.
-          oras_ref="${image%-cdi}"
-          [ "$oras_ref" != "$image" ] || { echo "::error::refs CM 'image' ($image) is not a -cdi tag, so the sibling oras artifact carrying manifest.json cannot be derived"; exit 1; }
-          digest=$(crane manifest "$oras_ref" | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json") | .digest')
-          [ -n "$digest" ] || { echo "::error::$oras_ref publishes no manifest.json layer"; exit 1; }
-          crane blob "${oras_ref%%:*}@${digest}" > /tmp/image-manifest.json
-          # The published manifest must describe the image this run booted, or
-          # the gate would be pinned to a different build's measurements.
-          got_mrtd=$(jq -r '.tdx.mrtd' /tmp/image-manifest.json)
-          [ "$got_mrtd" = "$mrtd" ] || { echo "::error::published manifest MRTD ($got_mrtd) != the refs CM pin ($mrtd): $oras_ref is not the build this CVM booted"; exit 1; }
+          # this step chose. manifest.json ships as a layer of the oras
+          # artifact that sits beside the CDI image the CVM boots.
+          #
+          # The CM's 'image' may be a tag OR a digest (digest-pinning the boot
+          # ref is the stronger position), and a digest has no sibling name to
+          # derive, so candidates are tried in order and the MRTD comparison
+          # below picks the right one. That check is the real test anyway: it
+          # proves the manifest describes the build this CVM booted, which a
+          # name match never could.
+          repo="${image%%@*}"; repo="${repo%%:*}"
+          cands="${imageTag:-}"
+          case "$image" in
+            *@*) : ;;                                  # digest: no name to strip
+            *-cdi) cands="$cands ${image#*:}" ;;       # tag: strip the -cdi suffix
+          esac
+          # shellcheck disable=SC2086  # deliberate split: cands is a word list
+          cands="$(printf '%s\n' ${cands} | sed 's/-cdi$//' | awk 'NF && !seen[$0]++')"
+          [ -n "$cands" ] || cands=rke2-tdx-dev
+          got_mrtd=""; oras_ref=""
+          for t in $cands; do
+            d=$(crane manifest "$repo:$t" 2>/dev/null | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest') || true
+            [ -n "$d" ] || { echo "  $t: no manifest.json layer"; continue; }
+            crane blob "$repo@$d" > /tmp/candidate-manifest.json 2>/dev/null || continue
+            m=$(jq -r '.tdx.mrtd // empty' /tmp/candidate-manifest.json)
+            if [ "$m" = "$mrtd" ]; then
+              cp /tmp/candidate-manifest.json /tmp/image-manifest.json
+              got_mrtd="$m"; oras_ref="$repo:$t"; break
+            fi
+            echo "  $t: MRTD $m != $mrtd"
+          done
+          # Fail closed: without a manifest from the booted build there is
+          # nothing to pin the gate to.
+          [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose MRTD is $mrtd (the build this CVM booted). Set 'imageTag' in $REFS_CM to the image's tag if it is not a rke2-tdx-dev build"; exit 1; }
+          echo "manifest from $oras_ref (MRTD $got_mrtd)"
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
