@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -79,6 +80,14 @@ func newRatlsMeshCommand() *cobra.Command {
 	return cmd
 }
 
+// proxyListeners are served instead of binding the matching *Port fields;
+// tests pre-bind them.
+type proxyListeners struct {
+	outbound net.Listener
+	inbound  net.Listener
+	health   net.Listener
+}
+
 type proxyConfig struct {
 	platform                  string
 	attestationApiURL         string
@@ -96,6 +105,7 @@ type proxyConfig struct {
 	maxConns                  int
 	maxConnsPerSource         int
 	healthPort                int
+	listeners                 proxyListeners
 	measurements              string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
@@ -321,6 +331,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	proxy := &Proxy{
 		outboundAddr:      fmt.Sprintf(":%d", c.outboundPort),
 		inboundAddr:       fmt.Sprintf(":%d", c.inboundPort),
+		outboundLn:        c.listeners.outbound,
+		inboundLn:         c.listeners.inbound,
 		serverTLS:         serverTLS,
 		clientTLS:         clientTLS,
 		nodeIP:            c.nodeIP,
@@ -364,7 +376,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 
 	// Start health/metrics server.
 	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort)); err != nil {
+		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort), c.listeners.health); err != nil {
 			logger.Error("health server error", "error", err)
 		}
 	}()

@@ -106,16 +106,21 @@ func (h *healthServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("ready\n"))
 }
 
-func (h *healthServer) serve(ctx context.Context, addr string) error {
+// serve binds addr, or adopts the pre-bound ln when non-nil, and serves
+// until ctx is cancelled.
+func (h *healthServer) serve(ctx context.Context, addr string, ln net.Listener) error {
 	srv := &http.Server{
 		Handler:      h.mux,
 		ReadTimeout:  durOrDefault(h.readTimeout, 5*time.Second),
 		WriteTimeout: durOrDefault(h.writeTimeout, 10*time.Second),
 		IdleTimeout:  60 * time.Second,
 	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
 	}
 	go func() {
 		<-ctx.Done()

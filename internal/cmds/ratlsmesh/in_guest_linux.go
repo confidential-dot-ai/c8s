@@ -433,7 +433,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	}
 
 	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", inGuestHealthPort)); err != nil {
+		if err := health.serve(ctx, fmt.Sprintf(":%d", inGuestHealthPort), nil); err != nil {
 			logger.Error("health server error", "error", err)
 		}
 	}()

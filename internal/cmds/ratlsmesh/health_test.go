@@ -198,10 +198,11 @@ func TestHealthReadyGatesOnCertUsable(t *testing.T) {
 func TestHealthServerServe(t *testing.T) {
 	h := newHealthServer(testMetrics(), nil, nil, 10, time.Second, time.Second)
 	h.ready.Store(true)
-	port := freePort(t)
+	ln := bindLoopback(t)
+	port := listenerPort(ln)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- h.serve(ctx, fmt.Sprintf("127.0.0.1:%d", port)) }()
+	go func() { errCh <- h.serve(ctx, ln.Addr().String(), ln) }()
 
 	assertEventually(t, 5*time.Second, func() bool {
 		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/live", port))
@@ -223,12 +224,12 @@ func TestHealthServerServe(t *testing.T) {
 	}
 
 	// A second serve on an already-bound port errors immediately.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	if err := h.serve(context.Background(), ln.Addr().String()); err == nil {
+	defer held.Close()
+	if err := h.serve(context.Background(), held.Addr().String(), nil); err == nil {
 		t.Fatal("serve on a bound port should error")
 	}
 }
