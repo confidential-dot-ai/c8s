@@ -18,6 +18,15 @@
 # ever boot the cell default, so the other counts are pinned without having been
 # launched. A digest that is wrong for a count nobody boots surfaces as a real
 # node booting fine and then being refused credentials.
+#
+# WHAT THIS CANNOT DO YET: compare against a published digest automatically.
+# Both SNP cells boot a CDI artifact — rke2-image-refs pins
+# ghcr.io/confidential-dot-ai/rke2:containerd-disk, base-image-refs pins
+# base-cpu-image-cdi — and a CDI image is a single rootfs tarball carrying no
+# manifest.json, so there is no snp_variants set to read from what CI boots.
+# The per-SMP digests live on node-guest-base, which neither cell boots.
+# Until that is reconciled this job reports the measured value and names the
+# IGVM it booted; the comparison is a manual step.
 name: snp-measure-smp
 on:
   workflow_dispatch:
@@ -57,7 +66,6 @@ jobs:
           mkdir -p "$PWD/bin"
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
           chmod +x bin/kubectl; echo "$PWD/bin" >> "$GITHUB_PATH"
-          go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
           go build -o bin/c8s ./cmd/c8s
 
       - name: resolve image refs and validate the vCPU count
@@ -70,27 +78,17 @@ jobs:
           [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc"; exit 1; }
           PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
           [ -n "$PAT" ] || { echo "::error::$REFS_CM has no igvmFilePattern, so it cannot serve a per-count IGVM"; exit 1; }
-          # The image to measure AND to compare against is whatever this CM
-          # pins: a measurement from one image says nothing about another
-          # image's published digest.
-          IMAGE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.image}')
-          [ -n "$IMAGE" ] || { echo "::error::$REFS_CM has no 'image' key, so the published digest cannot be located"; exit 1; }
-          echo "booting $IMAGE (per $REFS_CM)"
-          # A guest can only boot a measured IGVM, so the bootable counts are
-          # exactly the ones this image shipped.
-          ships=$(crane manifest "$IMAGE" \
-            | jq -r '.layers[].annotations["org.opencontainers.image.title"] // empty' \
-            | sed -n 's/^guest-smp\([0-9]\+\)\.igvm$/\1/p' | sort -n | tr '\n' ' ')
-          [ -n "$ships" ] || { echo "::error::$IMAGE ships no guest-smp<N>.igvm layers"; exit 1; }
-          case " $ships " in
-            *" $CORES "*) echo "smp$CORES is one of the shipped IGVMs ($ships)" ;;
-            *) echo "::error::the image ships no guest-smp$CORES.igvm — available: $ships"; exit 1 ;;
-          esac
+          # The IGVM files are staged on the cluster, not pulled per-run, so
+          # the shipped set is what the igvm-files PVC holds. The cell boots a
+          # CDI artifact (a single rootfs tarball), which carries no
+          # manifest.json and therefore no published digest to compare
+          # against — see the header note.
+          IGVMFILE=${PAT//\{cores\}/$CORES}
           {
             echo "ROOTPVC=$ROOTPVC"
-            echo "IGVMFILE=${PAT//\{cores\}/$CORES}"
-            echo "IMAGE=$IMAGE"
+            echo "IGVMFILE=$IGVMFILE"
           } >> "$GITHUB_ENV"
+          echo "cell $REFS_CM: rootPvc=$ROOTPVC igvm=$IGVMFILE"
 
       - name: boot the CVM
         run: |
@@ -207,30 +205,26 @@ jobs:
           echo "measurement=$M" >> "$GITHUB_OUTPUT"
           echo "smp$CORES measurement: $M"
 
-      - name: compare against the published digest
+      - name: report the measurement
         run: |
           set -euo pipefail
           M='${{ steps.capture.outputs.measurement }}'
-          repo="${IMAGE%%@*}"; repo="${repo%%:*}"
-          d=$(crane manifest "$IMAGE" | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest')
-          [ -n "$d" ] || { echo "::error::$IMAGE publishes no manifest.json layer, so there is no digest to compare against"; exit 1; }
-          PUB=$(crane blob "${repo}@${d}" | jq -r --argjson c "$CORES" '.snp_variants[]|select(.smp==$c)|.measurement.snp_launch_digest')
           {
             echo "### SNP launch measurement — smp${CORES}"
             echo
-            echo "| source | value |"
-            echo "|---|---|"
-            echo "| hardware | \`${M}\` |"
-            echo "| manifest | \`${PUB:-(no variant for smp$CORES)}\` |"
-            echo "| image | \`${IMAGE}\` |"
+            echo '```'
+            echo "$M"
+            echo '```'
             echo
-            if [ "$M" = "$PUB" ]; then
-              echo "**MATCH** — the published digest for smp${CORES} is what the hardware produces."
-            else
-              echo "**MISMATCH** — the manifest publishes a digest this vCPU count does not produce, so a real smp${CORES} node would be refused by the trust gate."
-            fi
+            echo "Guest booted \`$IGVMFILE\` from the \`$REFS_CM\` cell."
+            echo
+            echo "To check this against a published digest, compare it with"
+            echo "\`snp_variants[smp=${CORES}].measurement.snp_launch_digest\` in the"
+            echo "manifest.json of the image build that produced \`$IGVMFILE\`."
+            echo "The cell boots a CDI rootfs artifact, which carries no manifest,"
+            echo "so this job cannot resolve that image on its own."
           } >> "$GITHUB_STEP_SUMMARY"
-          [ "$M" = "$PUB" ] || echo "::warning title=digest mismatch (smp$CORES)::hardware $M != manifest ${PUB:-none}"
+          echo "smp$CORES measurement: $M"
 
       - name: teardown
         if: always()
