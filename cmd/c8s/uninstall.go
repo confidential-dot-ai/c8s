@@ -28,10 +28,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
-// kataSweepScript reverses the kata host install on a single node. Kept as a
-// standalone POSIX-shell file (like the chart's files/scripts/*) so it gets
-// shellcheck; it runs as the init container of the sweep DaemonSet built in
-// kataSweepDaemonSet.
+// kataSweepScript sweeps c8s host state off a single node (see the script
+// header for the full inventory). Kept as a standalone POSIX-shell file (like
+// the chart's files/scripts/*) so it gets shellcheck; it runs as the init
+// container of the sweep DaemonSet built in kataSweepDaemonSet.
 //
 //go:embed kata-sweep.sh
 var kataSweepScript string
@@ -90,14 +90,14 @@ const kataRuntimeNodeLabel = "katacontainers.io/kata-runtime"
 // by c8s and is not c8s's to strip.
 const snpCapabilityNodeLabel = "confidential.ai/sev-snp"
 
-// kataUninstallConfig is the slice of the release's computed values the kata
-// host sweep needs. It is read from `helm get values --all` BEFORE the
-// release is deleted — afterwards the -f/--set overrides from install time
-// (custom guestImage.hostPath, distro, nodeSelector) are unrecoverable.
+// kataUninstallConfig is the slice of the release's computed values the host
+// sweep needs. It is read from `helm get values --all` BEFORE the release is
+// deleted — afterwards the -f/--set overrides from install time (custom
+// guestImage.hostPath, distro, nriImagePolicy.hostPaths) are unrecoverable.
 type kataUninstallConfig struct {
 	Enabled             bool
 	Distro              string
-	ContainerdConfigDir string // resolved absolute host dir
+	ContainerdConfigDir string // resolved absolute host dir (kata.distro)
 	GuestImageHostPath  string
 	// GuestImageNvidiaHostPath is the GPU guest-image dir (kata.gpu.guestImage.hostPath).
 	// The GPU stack ships with every kata install, so it is set for any kata
@@ -105,7 +105,16 @@ type kataUninstallConfig struct {
 	// sweep skips it.
 	GuestImageNvidiaHostPath string
 	SweepImage               string
-	NodeSelector             map[string]string
+	// NRI image-policy host paths (nriImagePolicy.*): where the chart's
+	// installer DaemonSet wrote the plugin, or where the node image baked it.
+	// The sweep distinguishes the two via a baked-only marker on the host.
+	NriContainerdDir   string // resolved from nriImagePolicy.containerd.configDir/.distro
+	NriPluginDir       string
+	NriPluginFilename  string
+	NriConfigDir       string
+	NriRuntimeDir      string
+	NriCacheDir        string
+	ImagePullSecretRef []string // Secret names for the sweep pod's imagePullSecrets
 }
 
 var uninstallCmd = &cobra.Command{
@@ -121,33 +130,44 @@ plugin (pre-delete hook), and — best-effort — the kata runtime itself:
 deleting the kata-deploy DaemonSet runs 'kata-deploy cleanup' in its preStop
 hook on each node.
 
-The kata host sweep then nukes what that path cannot guarantee. The preStop
-hook is bounded by the pod's termination grace period (and the runtime
-restart it triggers can kill the pod mid-cleanup), and it knows nothing about
-the c8s-side artifacts. After the release is gone the sweep runs a
-short-lived privileged DaemonSet (the same digest-pinned busybox image the
-install's containerd-prep uses) on the nodes kata-deploy targeted and
-removes, idempotently:
+The host sweep then nukes what that path cannot guarantee. The preStop hook
+is bounded by the pod's termination grace period (and the runtime restart it
+triggers can kill the pod mid-cleanup), the pre-delete hooks only fire on a
+release healthy enough to run them, and none of them knows about the
+c8s-side artifacts. The sweep runs on every uninstall — not only kata
+releases — because the host state below is not confined to the release's own
+shape: a previous install on the same host may have had a different shape
+(node vs pod), and leftovers brick or degrade the next cluster. After the
+release is gone the sweep runs a short-lived privileged DaemonSet on every
+linux node — with the release's NRI plugin image where the fail-closed
+plugin is live (the sweep image must already be on the allowlist; the sweep
+is what removes the plugin), else the digest-pinned busybox image the
+install's containerd-prep uses — and removes, idempotently:
 
+  - the NRI image-policy host plugin: containerd registration (drop-in or
+    managed config block), the plugin binary, its config/cache/runtime dirs —
+    skipped entirely on c8s node images, where the whole stack is baked into
+    the measured image (detected via nri-node-ip.service) and is the image's
+    to keep, not the release's to delete
   - /opt/kata (the kata-static payload) and the containerd-shim-kata-*
     symlinks
   - kata-deploy's containerd runtime drop-in, restarting containerd/RKE2
-    only if the drop-in was still registered
+    (detached, via systemd-run) only if a drop-in was still registered
   - the pulled kata-guest-base artifact (kata.guestImage.hostPath, multi-GB —
     nothing else cleans this up), and the separate GPU guest image
     (kata.gpu.guestImage.hostPath)
-  - on RKE2: the c8s-managed containerd template and the containerd-prep lock
+  - on RKE2: the c8s-managed containerd template (skipped on c8s node images,
+    same baked-state rule) and the containerd-prep lock
   - the katacontainers.io/kata-runtime node labels and the
     confidential.ai/sev-snp capability labels the install's probe applied
     (via kubectl)
 
-Whether kata was installed — and which host paths, distro layout, and node
-set to sweep — is read from the release's computed values
-('helm get values --all') before the release is deleted, so -f overrides from
-install time are honored. For a release that is already gone (e.g. a previous
-bare 'helm uninstall' left the hosts dirty), pass --host-sweep-only: the helm
-step is skipped and the sweep uses the embedded chart's defaults plus the
-distro detected from the cluster.
+Which host paths and distro layout to sweep is read from the release's
+computed values ('helm get values --all') before the release is deleted, so
+-f overrides from install time are honored. For a release that is already
+gone (e.g. a previous bare 'helm uninstall' left the hosts dirty), pass
+--host-sweep-only: the helm step is skipped and the sweep uses the embedded
+chart's defaults plus the distro detected from the cluster.
 
 The uninstall refuses to proceed while pods with a kata RuntimeClass are
 still running — removing the runtime under a running confidential workload
@@ -206,10 +226,12 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 				return err
 			}
 		}
-		// --host-sweep-only is an explicit "the hosts are dirty" claim, so it
-		// sweeps even when the release values say kata was off (the dirt may
-		// be from an earlier kata-enabled install of the same release name).
-		sweep := uninstallKataSweep && (cfg.Enabled || uninstallHostSweepOnly)
+		// The host sweep runs on every uninstall, whatever the release's
+		// shape: the artifacts it removes (NRI plugin, mesh netfilter state,
+		// kata payload, guest images) may be cross-shape leftovers the
+		// release's own values cannot see, and the chart's pre-delete hooks
+		// are only a healthy-release first line. --kata-sweep=false opts out.
+		sweep := uninstallKataSweep
 
 		// Deleting the kata-deploy DaemonSet removes the runtime from under
 		// any pod still using a kata RuntimeClass (its preStop cleanup runs
@@ -247,16 +269,14 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 			hc.Stdout = os.Stdout
 			hc.Stderr = os.Stderr
 			if err := hc.Run(); err != nil {
-				return fmt.Errorf("helm uninstall failed: %w", err)
+				return fmt.Errorf("helm uninstall failed: %w — a wedged pre-delete hook blocks the sweep too; recover with 'helm uninstall --no-hooks %s --namespace %s' followed by 'c8s uninstall --host-sweep-only'", err, uninstallRelease, uninstallNamespace)
 			}
 		}
 
 		if sweep {
-			if err := runKataSweep(ctx, uninstallNamespace, uninstallRelease, cfg); err != nil {
+			if err := runKataSweep(ctx, uninstallNamespace, uninstallRelease, cfg, uninstallHostSweepOnly); err != nil {
 				return err
 			}
-		} else if uninstallKataSweep {
-			fmt.Fprintln(os.Stdout, "+ kata not enabled in the release values — host sweep skipped")
 		}
 
 		if uninstallDeleteCRDs {
@@ -349,6 +369,9 @@ func chartDefaultKataConfig(ctx context.Context) (kataUninstallConfig, error) {
 		return kataUninstallConfig{}, fmt.Errorf("embedded chart values carry no kata block")
 	}
 	kata["distro"] = distro
+	if nri, ok := nestedMap(tree, "nriImagePolicy"); ok {
+		nri["distro"] = distro
+	}
 
 	cfg, err := kataConfigFromValues(tree)
 	if err != nil {
@@ -379,7 +402,7 @@ func kataConfigFromValues(tree map[string]any) (kataUninstallConfig, error) {
 	cfg.Distro = distro
 
 	override, _ := kata["containerdConfigDir"].(string)
-	cfg.ContainerdConfigDir, err = kataContainerdDir(override, distro)
+	cfg.ContainerdConfigDir, err = containerdConfigDirFor(override, distro)
 	if err != nil {
 		return kataUninstallConfig{}, err
 	}
@@ -400,23 +423,71 @@ func kataConfigFromValues(tree map[string]any) (kataUninstallConfig, error) {
 		return kataUninstallConfig{}, err
 	}
 
-	if sel, ok := nestedMap(tree, "kata", "nodeSelector"); ok {
-		cfg.NodeSelector = make(map[string]string, len(sel))
-		for k, v := range sel {
-			s, ok := v.(string)
-			if !ok {
-				return kataUninstallConfig{}, fmt.Errorf("kata.nodeSelector[%q] is not a string (%T)", k, v)
-			}
-			cfg.NodeSelector[k] = s
-		}
-	}
+	cfg = nriConfigFromValues(tree, cfg)
+	cfg.ImagePullSecretRef = imagePullSecretNames(tree)
 	return cfg, nil
 }
 
-// kataContainerdDir resolves the host containerd config directory the sweep
-// targets — the same mapping as the chart's c8s.kataContainerdConfigDir
-// helper, so the sweep cleans exactly where the install wrote.
-func kataContainerdDir(override, distro string) (string, error) {
+// nriConfigFromValues fills the NRI image-policy host paths, defaulting to
+// the chart's values.yaml constants when a key is absent (an old or foreign
+// release). The containerd dir follows nriImagePolicy.*, not kata.*: the CLI
+// sets both distros together at install, but a -f release can diverge them,
+// and the NRI installer targeted its own.
+func nriConfigFromValues(tree map[string]any, cfg kataUninstallConfig) kataUninstallConfig {
+	cfg.NriPluginDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.pluginDir", "/opt/nri/plugins")
+	cfg.NriPluginFilename = stringOrDefault(tree, "nriImagePolicy.pluginFilename", "10-nri-image-policy")
+	cfg.NriConfigDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.configDir", "/etc/nri/conf.d")
+	cfg.NriRuntimeDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.runtimeDir", "/var/run/nri-image-policy")
+	cfg.NriCacheDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.cacheDir", "/var/lib/nri-image-policy")
+	distro := stringOrDefault(tree, "nriImagePolicy.distro", cfg.Distro)
+	override := stringOrDefault(tree, "nriImagePolicy.containerd.configDir", "")
+	dir, err := containerdConfigDirFor(override, distro)
+	if err != nil {
+		// An exotic NRI distro the mapping does not know: fall back to the
+		// kata-resolved dir rather than refuse the whole sweep.
+		dir = cfg.ContainerdConfigDir
+	}
+	cfg.NriContainerdDir = dir
+	return cfg
+}
+
+// stringOrDefault reads a dotted path from a decoded values tree, returning
+// fallback when the path is absent or not a string.
+func stringOrDefault(tree map[string]any, path, fallback string) string {
+	s, err := stringAtPath(tree, path)
+	if err != nil {
+		return fallback
+	}
+	return s
+}
+
+// imagePullSecretNames collects the chart-wide pull secret references
+// (imagePullSecret + imagePullSecrets[].name) so the sweep pod can pull its
+// image where the install needed credentials. Absent on a default release.
+func imagePullSecretNames(tree map[string]any) []string {
+	var names []string
+	if s, err := stringAtPath(tree, "imagePullSecret"); err == nil && s != "" {
+		names = append(names, s)
+	}
+	if list, ok := tree["imagePullSecrets"].([]any); ok {
+		for _, item := range list {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if name, ok := m["name"].(string); ok && name != "" && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// containerdConfigDirFor resolves the host containerd config directory a
+// component targeted — the same mapping as the chart's helpers
+// (c8s.kataContainerdConfigDir, nri-image-policy.containerdConfigDir), so the
+// sweep cleans exactly where the install wrote.
+func containerdConfigDirFor(override, distro string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
@@ -443,30 +514,48 @@ func kataRestartCommand(distro string) string {
 	return "systemctl restart containerd"
 }
 
-// sweepImageRef picks the image the sweep DaemonSet runs: the chart's
-// containerd-prep image (kata.containerdPrep.image). The sweep has the same
-// shape — pure POSIX shell, privileged, host root mounted — so it inherits
-// the same digest-pinned, already-vetted image instead of introducing a new
-// supply-chain entry. Digest wins over tag, mirroring the chart helper;
-// neither set is an error, never a silently-floating default.
+// sweepImageRef picks the image the sweep DaemonSet runs. On shapes where
+// the fail-closed NRI plugin is live on the host, the sweep pod's image must
+// already be on the allowlist — the sweep is what removes the plugin, so it
+// cannot ask for admission afterwards. The one image guaranteed admitted
+// there is the plugin's own (the installer DaemonSet ran it), so a release
+// that resolved nriImagePolicy.image sweeps with it (debian-based: sh,
+// coreutils, and util-linux's nsenter are all present). Everywhere else the
+// digest-pinned containerd-prep busybox is enough: no host NRI to consult,
+// or the baked node image whose floor already admits it. Digest wins over
+// tag, mirroring the chart helper; neither set on either image is an error,
+// never a silently-floating default.
 func sweepImageRef(tree map[string]any) (string, error) {
-	img, ok := nestedMap(tree, "kata", "containerdPrep", "image")
+	if ref, ok := imageRefAt(tree, "nriImagePolicy.image"); ok {
+		return ref, nil
+	}
+	if ref, ok := imageRefAt(tree, "kata.containerdPrep.image"); ok {
+		return ref, nil
+	}
+	return "", fmt.Errorf("neither nriImagePolicy.image nor kata.containerdPrep.image resolves to a pinned reference (digest or tag)")
+}
+
+// imageRefAt renders values image block <path> (repository + digest|tag) as
+// a pullable reference. ok=false when the block is missing, incomplete, or
+// carries neither digest nor tag.
+func imageRefAt(tree map[string]any, path string) (string, bool) {
+	img, ok := nestedMap(tree, strings.Split(path, ".")...)
 	if !ok {
-		return "", fmt.Errorf("values carry no kata.containerdPrep.image block")
+		return "", false
 	}
 	repo, _ := img["repository"].(string)
 	digest, _ := img["digest"].(string)
 	tag, _ := img["tag"].(string)
 	if repo == "" {
-		return "", fmt.Errorf("kata.containerdPrep.image.repository is unset")
+		return "", false
 	}
 	if digest != "" {
-		return repo + "@" + digest, nil
+		return repo + "@" + digest, true
 	}
 	if tag != "" {
-		return repo + ":" + tag, nil
+		return repo + ":" + tag, true
 	}
-	return "", fmt.Errorf("kata.containerdPrep.image has neither digest nor tag")
+	return "", false
 }
 
 // listKataPods returns "namespace/name (runtimeClass)" for every pod the guard
@@ -607,17 +696,22 @@ func validateSweepPath(field, p string, allowEmpty bool) error {
 	return nil
 }
 
-func runKataSweep(ctx context.Context, namespace, release string, cfg kataUninstallConfig) error {
+func runKataSweep(ctx context.Context, namespace, release string, cfg kataUninstallConfig, hostSweepOnly bool) error {
 	// The sweep launches a privileged DaemonSet that recursively deletes the
 	// guest-image dirs below the mounted host root. Validate those release-
 	// derived paths before doing anything destructive so a hostile/malformed
 	// value cannot turn the sweep into host destruction (defense in depth with
-	// the guard inside kata-sweep.sh).
-	if err := validateSweepPath("kata.guestImage.hostPath", cfg.GuestImageHostPath, false); err != nil {
-		return err
-	}
-	if err := validateSweepPath("kata.gpu.guestImage.hostPath", cfg.GuestImageNvidiaHostPath, true); err != nil {
-		return err
+	// the guard inside kata-sweep.sh). Only a kata release could have written
+	// those dirs, so only a kata release fails pre-flight on a bad one — for
+	// other shapes the script's own guard presence-gates the deletion instead
+	// of failing the whole uninstall over a dir c8s never wrote.
+	if cfg.Enabled || hostSweepOnly {
+		if err := validateSweepPath("kata.guestImage.hostPath", cfg.GuestImageHostPath, false); err != nil {
+			return err
+		}
+		if err := validateSweepPath("kata.gpu.guestImage.hostPath", cfg.GuestImageNvidiaHostPath, true); err != nil {
+			return err
+		}
 	}
 
 	// The kata-deploy preStop cleanup and the image-puller's reconcile loop
@@ -718,11 +812,12 @@ func waitPodsGone(ctx context.Context, namespace, selector string) error {
 	}
 }
 
-// kataSweepDaemonSet renders the sweep DaemonSet: same node set (linux +
-// kata.nodeSelector), tolerations, and privilege shape as the kata-deploy
-// DaemonSet it cleans up after, with kata-sweep.sh as an init container and a
-// pause container whose readiness lets `kubectl rollout status` double as
-// "every node finished sweeping".
+// kataSweepDaemonSet renders the sweep DaemonSet: every linux node (the
+// swept artifacts are not confined to kata-selected nodes — the NRI installer
+// and the mesh DaemonSets land on all of them — and a node can carry a
+// previous shape's leftovers), tolerating all taints, with kata-sweep.sh as
+// an init container and a pause container whose readiness lets `kubectl
+// rollout status` double as "every node finished sweeping".
 func kataSweepDaemonSet(release, namespace string, cfg kataUninstallConfig) *appsv1.DaemonSet {
 	labels := map[string]string{
 		"app.kubernetes.io/name":      "c8s-operator",
@@ -730,10 +825,11 @@ func kataSweepDaemonSet(release, namespace string, cfg kataUninstallConfig) *app
 		"app.kubernetes.io/component": "kata-sweep",
 	}
 	nodeSelector := map[string]string{"kubernetes.io/os": "linux"}
-	for k, v := range cfg.NodeSelector {
-		nodeSelector[k] = v
-	}
 	privileged := true
+	pullSecrets := make([]corev1.LocalObjectReference, 0, len(cfg.ImagePullSecretRef))
+	for _, n := range cfg.ImagePullSecretRef {
+		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: n})
+	}
 	return &appsv1.DaemonSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "DaemonSet"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -746,10 +842,13 @@ func kataSweepDaemonSet(release, namespace string, cfg kataUninstallConfig) *app
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					// hostPID: the sweep nsenters into PID 1 to restart the
-					// runtime when it deregisters a leftover drop-in.
+					// hostPID: the sweep nsenters into PID 1 for host binaries
+					// (systemctl, iptables, losetup) and the runtime restart.
 					HostPID:      true,
 					NodeSelector: nodeSelector,
+					// The install's pull secret, so the sweep image pulls on
+					// private-mirror clusters too (chart-wide values).
+					ImagePullSecrets: pullSecrets,
 					// Sweep everywhere kata-deploy installed — including
 					// control-plane and otherwise-tainted nodes (mirrors the
 					// install's one-shot posture).
@@ -767,6 +866,12 @@ func kataSweepDaemonSet(release, namespace string, cfg kataUninstallConfig) *app
 							{Name: "GUEST_IMAGE_DIR_NVIDIA", Value: cfg.GuestImageNvidiaHostPath},
 							{Name: "RKE2_PREP", Value: strconv.FormatBool(cfg.Distro == "rke2")},
 							{Name: "RESTART_COMMAND", Value: kataRestartCommand(cfg.Distro)},
+							{Name: "NRI_CONTAINERD_DIR", Value: cfg.NriContainerdDir},
+							{Name: "NRI_PLUGIN_DIR", Value: cfg.NriPluginDir},
+							{Name: "NRI_PLUGIN_FILENAME", Value: cfg.NriPluginFilename},
+							{Name: "NRI_CONFIG_DIR", Value: cfg.NriConfigDir},
+							{Name: "NRI_RUNTIME_DIR", Value: cfg.NriRuntimeDir},
+							{Name: "NRI_CACHE_DIR", Value: cfg.NriCacheDir},
 						},
 						// Privileged with the host root mounted — the same
 						// posture as kata-deploy: removing a runtime from a
@@ -831,8 +936,8 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallNamespace, "namespace", "c8s-system", "namespace the release was installed into")
 	uninstallCmd.Flags().StringVar(&uninstallRelease, "release", "c8s", "Helm release name")
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
-	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep the kata host artifacts (/opt/kata, containerd drop-in, kata-guest-base image, RKE2 prep template, node labels) off every kata node via a short-lived privileged DaemonSet. Skipped automatically when the release was installed without --cvm-mode=pod")
-	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the kata host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry kata artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
+	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep c8s host artifacts (NRI image-policy plugin, /opt/kata, containerd drop-in, kata-guest-base images, RKE2 prep template, node labels) off every node via a short-lived privileged DaemonSet. Runs for every release shape — leftovers may come from a previous install's shape, not this release's")
+	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry c8s artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
 	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (the pre-delete hook cannot close a mapping a live pod holds, and fails naming it)")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteNamespace, "delete-namespace", false, "also delete the release namespace (and everything left in it, e.g. an operator-created image pull Secret)")

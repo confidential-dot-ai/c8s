@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -154,18 +155,65 @@ func TestUninstallRejectsMalformedReleaseValues(t *testing.T) {
 	mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
 }
 
-func TestUninstallNonKataSkipsSweep(t *testing.T) {
+// A non-kata release still sweeps: the host state (NRI plugin, mesh
+// netfilter, guest-image leftovers) may be a previous shape's leftover the
+// release's own values cannot see.
+func TestUninstallNonKataStillSweeps(t *testing.T) {
 	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "/var/lib/c8s/kata-images-nvidia")
 	s := newUninstallStubs(t, values, "", false)
 	if err := runC8s(t, "uninstall"); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	calls := s.f.calls(t)
-	mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
-	// No sweep: nothing applied, nothing rolled out, nothing deleted.
-	mustNotContainPrefix(t, calls, "kubectl apply")
-	mustNotContainPrefix(t, calls, "kubectl rollout")
-	mustNotContainPrefix(t, calls, "kubectl delete")
+	hi := lineIndex(calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	ai := lineIndex(calls, "kubectl apply -f -")
+	ri := lineIndex(calls, "kubectl rollout status daemonset/c8s-kata-sweep -n c8s-system --timeout=5m")
+	di := lineIndex(calls, "kubectl delete daemonset c8s-kata-sweep -n c8s-system --ignore-not-found")
+	if hi < 0 || ai < hi || ri < ai || di < ri {
+		t.Fatalf("sweep order wrong (helm=%d apply=%d rollout=%d delete=%d):\n%s", hi, ai, ri, di, strings.Join(calls, "\n"))
+	}
+	// The sweep is parameterized from the non-kata release's values...
+	ds := appliedDaemonSet(t, s.applied)
+	env := map[string]string{}
+	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["GUEST_IMAGE_DIR"] != "/var/lib/c8s/kata-images" || env["GUEST_IMAGE_DIR_NVIDIA"] != "/var/lib/c8s/kata-images-nvidia" {
+		t.Errorf("sweep env guest dirs = %q / %q, want the release values", env["GUEST_IMAGE_DIR"], env["GUEST_IMAGE_DIR_NVIDIA"])
+	}
+	// ...and targets every linux node, not kata-selected ones.
+	wantSelector := map[string]string{"kubernetes.io/os": "linux"}
+	if !reflect.DeepEqual(ds.Spec.Template.Spec.NodeSelector, wantSelector) {
+		t.Errorf("nodeSelector = %v, want %v", ds.Spec.Template.Spec.NodeSelector, wantSelector)
+	}
+}
+
+// --kata-sweep=false opts every release shape out of the host sweep.
+func TestUninstallKataSweepFalseSkipsSweep(t *testing.T) {
+	for _, kataEnabled := range []bool{true, false} {
+		values := kataReleaseValuesFile(t, kataEnabled, "/var/lib/c8s/kata-images", "")
+		s := newUninstallStubs(t, values, "", false)
+		if err := runC8s(t, "uninstall", "--kata-sweep=false"); err != nil {
+			t.Fatalf("uninstall (kataEnabled=%v): %v", kataEnabled, err)
+		}
+		calls := s.f.calls(t)
+		mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+		mustNotContainPrefix(t, calls, "kubectl apply")
+		mustNotContainPrefix(t, calls, "kubectl rollout")
+	}
+}
+
+// The kata-pods guard stays gated on kata: a non-kata release sweeps even
+// with kata pods still running (nothing it removes is their runtime).
+func TestUninstallNonKataIgnoresRunningKataPods(t *testing.T) {
+	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	running := `*runtimeClassName*) /usr/bin/printf 'default\tinference-0\tkata-qemu-snp\tinference\n' ;;
+`
+	s := newUninstallStubs(t, values, running, false)
+	if err := runC8s(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
 }
 
 func TestUninstallRefusesWhileKataPodsRun(t *testing.T) {
@@ -273,6 +321,18 @@ func TestUninstallSweepRefusesUnsafeGuestImagePaths(t *testing.T) {
 		}
 		mustNotContainPrefix(t, s.f.calls(t), "kubectl apply")
 	})
+	// A non-kata release never wrote the guest dirs, so a hostile custom
+	// path in its values is not a pre-flight error: the sweep script's own
+	// guard presence-gates the deletion instead of failing the uninstall
+	// over a dir c8s never created.
+	t.Run("non-kata release with an unsafe guest path still sweeps", func(t *testing.T) {
+		values := kataReleaseValuesFile(t, false, "/opt/kata", "")
+		s := newUninstallStubs(t, values, "", false)
+		if err := runC8s(t, "uninstall"); err != nil {
+			t.Fatalf("uninstall: %v", err)
+		}
+		mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
+	})
 }
 
 func TestUninstallSweepRolloutFailureKeepsDaemonSet(t *testing.T) {
@@ -317,7 +377,13 @@ func TestUninstallHelmUninstallFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "helm uninstall failed") {
 		t.Fatalf("want the helm failure surfaced, got %v", err)
 	}
-	mustContainLine(t, s.f.calls(t), "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	if !strings.Contains(err.Error(), "--no-hooks") {
+		t.Fatalf("want the recovery hint (--no-hooks + --host-sweep-only), got %v", err)
+	}
+	calls := s.f.calls(t)
+	mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	// A failed helm uninstall aborts before the sweep.
+	mustNotContainPrefix(t, calls, "kubectl apply")
 }
 
 func TestUninstallDeleteCRDsAndNamespace(t *testing.T) {
@@ -329,8 +395,16 @@ func TestUninstallDeleteCRDsAndNamespace(t *testing.T) {
 			t.Fatalf("uninstall: %v", err)
 		}
 		calls := s.f.calls(t)
-		mustContainLine(t, calls, "kubectl delete crd "+confidentialWorkloadCRD+" --ignore-not-found")
-		mustContainLine(t, calls, "kubectl delete namespace c8s-system --ignore-not-found")
+		ci := lineIndex(calls, "kubectl delete crd "+confidentialWorkloadCRD+" --ignore-not-found")
+		ni := lineIndex(calls, "kubectl delete namespace c8s-system --ignore-not-found")
+		if ci < 0 || ni < 0 {
+			t.Fatalf("want crd and namespace deletes, got:\n%s", strings.Join(calls, "\n"))
+		}
+		// The sweep finishes before the CRD/namespace deletes.
+		si := lineIndex(calls, "kubectl delete daemonset c8s-kata-sweep -n c8s-system --ignore-not-found")
+		if si < 0 || si > ci || si > ni {
+			t.Fatalf("sweep cleanup must precede the deletes (sweep=%d crd=%d ns=%d):\n%s", si, ci, ni, strings.Join(calls, "\n"))
+		}
 	})
 
 	t.Run("delete failure surfaces", func(t *testing.T) {

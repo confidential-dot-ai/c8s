@@ -206,14 +206,14 @@ webhook configuration, RuntimeClasses, and the enforcement policy). The
 release — a `failurePolicy: Fail` webhook cannot outlive the operator Service
 and block pod creation cluster-wide.
 
-For a `--cvm-mode=pod` install it then **sweeps the host-side kata artifacts** that the
-`kata-deploy` preStop cleanup cannot guarantee: a short-lived privileged
-DaemonSet removes `/opt/kata`, the containerd runtime drop-in (restarting the
-runtime only when the drop-in was still registered), the pulled
-`kata-guest-base` image, the RKE2 containerd-prep template, and the
-`katacontainers.io/kata-runtime` node labels. The sweep set and host paths are
-read from the release's computed values *before* deletion, so install-time `-f`
-overrides are honored; it is skipped automatically for a non-kata install.
+It then **sweeps the host-side artifacts** that the chart's hooks and the
+`kata-deploy` preStop cleanup cannot guarantee — on every release shape, since
+leftovers may come from a previous install of a different shape. The swept set
+(NRI image-policy plugin, kata payload and guest images, RKE2
+containerd-prep template, node labels) is in
+[`docs/kata.md`](kata.md#uninstalling). The host paths are read from the
+release's computed values *before* deletion, so install-time `-f` overrides are
+honored.
 
 Guardrails:
 
@@ -224,7 +224,7 @@ Guardrails:
   chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) are excluded by
   release namespace + `app.kubernetes.io/instance`, and the refusal reports how
   many it skipped; see [`docs/kata.md`](kata.md#uninstalling).
-- `--host-sweep-only` runs only the kata sweep, for a cluster whose release a
+- `--host-sweep-only` runs only the host sweep, for a cluster whose release a
   bare `helm uninstall` already removed but whose nodes still carry artifacts;
   it uses the chart defaults and the distro detected from the cluster.
 - `--delete-crds` and `--delete-namespace` are **off by default** and
