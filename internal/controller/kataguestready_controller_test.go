@@ -33,7 +33,7 @@ func pullerPod(name, node string, ready bool) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testReleaseNS,
-			Labels:    map[string]string{componentLabel: kataImagePullerComponent},
+			Labels:    map[string]string{ComponentLabel: KataImagePullerComponent},
 		},
 		Spec: corev1.PodSpec{NodeName: node},
 		Status: corev1.PodStatus{
@@ -156,7 +156,7 @@ func TestPullerPodPredicate(t *testing.T) {
 		t.Fatal("predicate rejected a puller pod in the release namespace")
 	}
 	other := pullerPod("p", "n1", true)
-	other.Labels[componentLabel] = "cds"
+	other.Labels[ComponentLabel] = "cds"
 	if p.Create(event.CreateEvent{Object: other}) {
 		t.Fatal("predicate accepted a non-puller pod")
 	}

@@ -95,6 +95,7 @@ spec:
                 - /bin/sh
                 - /scripts/pull-and-configure.sh
                 - check
+            timeoutSeconds: 5
             periodSeconds: 10
             failureThreshold: 30
           volumeMounts:
