@@ -314,6 +314,70 @@ logging:
 	}
 }
 
+// A CDS that is merely slow must not be read as a shutdown request. Every
+// initial-pull attempt carries its own deadline, so exhausting the retries
+// against an unresponsive endpoint returns an error wrapping
+// context.DeadlineExceeded while the process context is still live. Treating
+// that as SIGTERM parked the process on the plugin error channel: never ready,
+// never pulling again, and only a containerd restart cleared it. Run must take
+// the fail-soft path instead and surface the plugin's own failure.
+func TestRun_SlowCDSDuringInitialPullIsNotShutdown(t *testing.T) {
+	t.Setenv("NRI_PLUGIN_NAME", "")
+	origDelay, origRetries := allowlistApiInitialDelay, allowlistApiMaxRetries
+	allowlistApiInitialDelay = 5 * time.Millisecond
+	allowlistApiMaxRetries = 1
+	defer func() {
+		allowlistApiInitialDelay, allowlistApiMaxRetries = origDelay, origRetries
+	}()
+
+	// Both endpoints accept and then hang, so an attempt expires on its own
+	// deadline instead of being refused: connection-refused is a plain error
+	// and would never have reached the branch under test.
+	blocked := make(chan struct{})
+	defer close(blocked)
+	stalledAttestation := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-blocked:
+		case <-r.Context().Done():
+		}
+	}))
+	defer stalledAttestation.Close()
+	stalledCDS := stalledListener(t, blocked)
+
+	dir := t.TempDir()
+	cfgYAML := fmt.Sprintf(`
+plugin:
+  health_addr: unix://%s/health.sock
+containerd:
+  socket: %s/ctr.sock
+allowlist:
+  always_allow:
+    "%s": image-a
+  pull:
+    url: https://%s/
+    attestation_api_url: %s
+    cds_measurements: ["%s"]
+    interval: 30s
+    timeout: 300ms
+policy:
+  mode: fail-closed
+  enforce_existing: false
+logging:
+  level: error
+`, dir, dir, pushDigestA, stalledCDS, stalledAttestation.URL, strings.Repeat("ab", 48))
+
+	// The NRI socket does not exist here, so registration fails and that
+	// failure is what Run must report. A nil return means Run classified the
+	// stalled pull as a shutdown and swallowed it.
+	err := runWithDeadline(t, 20*time.Second, []string{"-config", writeConfigYAML(t, cfgYAML)})
+	if err == nil {
+		t.Fatal("Run returned nil: a stalled initial pull was misread as shutdown")
+	}
+	if !strings.HasPrefix(err.Error(), "plugin: ") {
+		t.Fatalf("err = %v, want the NRI plugin run failure", err)
+	}
+}
+
 // --- allowlistPullHTTPClient ------------------------------------------------
 
 func TestAllowlistPullHTTPClient_ValidMeasurements(t *testing.T) {
@@ -605,4 +669,29 @@ func TestAllowlistPullHTTPClient_InvalidMeasurements(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid CDS measurements")
 	}
+}
+
+// stalledListener accepts TCP connections and holds them open without ever
+// speaking, so a client dialing it hangs until its own deadline fires. It
+// returns the host:port to dial.
+func stalledListener(t *testing.T, done <-chan struct{}) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-done
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }
