@@ -60,14 +60,24 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
           go build -o bin/c8s ./cmd/c8s
 
-      - name: validate the requested vCPU count
+      - name: resolve image refs and validate the vCPU count
         run: |
           set -euo pipefail
           case "$CORES" in
             ''|*[!0-9]*) echo "::error::cores '$CORES' is not a positive integer"; exit 1 ;;
           esac
+          ROOTPVC=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.rootPvc}')
+          [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc"; exit 1; }
+          PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
+          [ -n "$PAT" ] || { echo "::error::$REFS_CM has no igvmFilePattern, so it cannot serve a per-count IGVM"; exit 1; }
+          # The image to measure AND to compare against is whatever this CM
+          # pins: a measurement from one image says nothing about another
+          # image's published digest.
+          IMAGE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.image}')
+          [ -n "$IMAGE" ] || { echo "::error::$REFS_CM has no 'image' key, so the published digest cannot be located"; exit 1; }
+          echo "booting $IMAGE (per $REFS_CM)"
           # A guest can only boot a measured IGVM, so the bootable counts are
-          # exactly the ones the image shipped.
+          # exactly the ones this image shipped.
           ships=$(crane manifest "$IMAGE" \
             | jq -r '.layers[].annotations["org.opencontainers.image.title"] // empty' \
             | sed -n 's/^guest-smp\([0-9]\+\)\.igvm$/\1/p' | sort -n | tr '\n' ' ')
@@ -76,25 +86,11 @@ jobs:
             *" $CORES "*) echo "smp$CORES is one of the shipped IGVMs ($ships)" ;;
             *) echo "::error::the image ships no guest-smp$CORES.igvm — available: $ships"; exit 1 ;;
           esac
-
-      - name: resolve image refs
-        run: |
-          set -euo pipefail
-          ROOTPVC=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.rootPvc}')
-          [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc"; exit 1; }
-          PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
-          [ -n "$PAT" ] || { echo "::error::$REFS_CM has no igvmFilePattern, so it cannot serve a per-count IGVM"; exit 1; }
-          # The digest to compare against must come from the image this VM
-          # boots, not a hardcoded ref: a measurement from one image tells you
-          # nothing about another image's published digest.
-          IMG=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.image}')
-          [ -n "$IMG" ] || { echo "::error::$REFS_CM has no 'image' key, so the published digest cannot be located"; exit 1; }
           {
             echo "ROOTPVC=$ROOTPVC"
             echo "IGVMFILE=${PAT//\{cores\}/$CORES}"
-            echo "IMAGE=$IMG"
+            echo "IMAGE=$IMAGE"
           } >> "$GITHUB_ENV"
-          echo "booting $IMG (per $REFS_CM)"
 
       - name: boot the CVM
         run: |
