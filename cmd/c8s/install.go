@@ -102,9 +102,10 @@ func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
 // against, so an operator's -f override of a repository cannot leave the chart
 // deploying repoA@<digest-of-repoB>.
 type c8sComponent struct {
-	valuePrefix string // values path, e.g. "cds.image" (renders {repository}@{digest})
-	repository  string // values.yaml default repository resolved against
-	enabledPath string // values path guarding the render, e.g. "attestationApi.enabled" ("" = always rendered)
+	valuePrefix  string // values path, e.g. "cds.image" (renders {repository}@{digest})
+	repository   string // values.yaml default repository resolved against
+	enabledPath  string // values path guarding the render, e.g. "attestationApi.enabled" ("" = always rendered)
+	pinnedDigest string // chart-declared digest to pin instead of resolving at the install tag ("" = resolve)
 }
 
 // chartComponents reads the component set from the chart at chartPath via
@@ -145,7 +146,9 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 		}
 		// enabledPath is optional; absent/empty means the component always renders.
 		enabledPath, _ := m["enabledPath"].(string)
-		comps = append(comps, c8sComponent{valuePrefix: valuePath, repository: repo, enabledPath: enabledPath})
+		// pinnedDigest is optional; absent/empty means resolve at the install tag.
+		pinnedDigest, _ := m["pinnedDigest"].(string)
+		comps = append(comps, c8sComponent{valuePrefix: valuePath, repository: repo, enabledPath: enabledPath, pinnedDigest: pinnedDigest})
 	}
 	return comps, nil
 }
@@ -2234,7 +2237,7 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 // component tag is worse than failing (an operator predating the chart's
 // webhook features silently mis-injects).
 func tagCouplingHint(repo, tag string) string {
-	return fmt.Sprintf("every c8s component image must be published at the install tag (they publish in lockstep; a mismatched older operator would silently lack webhook features the chart expects). If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. Verify with: crane ls %s", tag, tag, repo)
+	return fmt.Sprintf("the c8s component images publish in lockstep, so each must exist at the install tag; a mismatched older operator would silently lack webhook features the chart expects. If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. If %s is released on its own cadence rather than with c8s, give its c8sComponents entry a pinnedDigest. Verify with: crane ls %s", tag, tag, repo, repo)
 }
 
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
@@ -2357,6 +2360,10 @@ func overlaySetArgs(tree map[string]any, setArgs []string) error {
 // partially-pinned floor would let the render guard pass while the served
 // allowlist pointed at the wrong digest. The resolver is injected so the arg
 // assembly is testable without a registry.
+//
+// A component carrying a chart-declared pinnedDigest is pinned to it and never
+// resolved: it is released on another repository's cadence, so no c8s tag names
+// an image of it and resolving one can only fail.
 func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, resolve func(ref string) (string, error), enabled func(valuePath string) (bool, error)) ([]string, error) {
 	for _, c := range components {
 		// Skip components the effective config disables: they never render, so
@@ -2373,12 +2380,18 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 			}
 		}
 		repo := c.repository
-		digest, err := resolve(repo + ":" + tag)
-		if err != nil {
-			if crane.IsNotFound(err) {
-				return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
+		digest := c.pinnedDigest
+		if digest == "" {
+			var err error
+			digest, err = resolve(repo + ":" + tag)
+			if err != nil {
+				if crane.IsNotFound(err) {
+					return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
+				}
+				return nil, err
 			}
-			return nil, err
+		} else {
+			fmt.Fprintf(os.Stderr, "+ pinned %s@%s (chart pinnedDigest; not resolved at %s)\n", repo, digest, tag)
 		}
 		helmArgs = append(helmArgs,
 			"--set-string", c.valuePrefix+".repository="+repo,
