@@ -287,14 +287,23 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		}
 	}
 
-	// The default render carries the attestation-api default-deny NetworkPolicy
-	// plus the ratls-mesh tcp-only-egress policy (default-on since the mesh
-	// fails closed on non-TCP). The attestation-api policy must remain; nothing
-	// may select the hostNetwork mesh pods.
-	if kinds := renderedKinds(t, out); kinds["NetworkPolicy"] != 2 ||
-		!renderedManifestHasNamedKind(t, out, "NetworkPolicy", "c8s-attestation-api") ||
-		!renderedManifestHasNamedKind(t, out, "NetworkPolicy", "ratls-mesh-tcp-only-egress") {
-		t.Errorf("default render must carry the attestation-api default-deny and the ratls-mesh tcp-only-egress NetworkPolicies; got %d", kinds["NetworkPolicy"])
+	// The attestation-api policy must remain; nothing may select the hostNetwork
+	// mesh pods. volumed's is absent here because volumed is off by default.
+	wantPolicies := []string{
+		"c8s-attestation-api",
+		"ratls-mesh-tcp-only-egress",
+		"c8s-cds-ingress",
+		"c8s-operator-ingress",
+		"c8s-tls-lb-ingress",
+	}
+	kinds := renderedKinds(t, out)
+	if kinds["NetworkPolicy"] != len(wantPolicies) {
+		t.Errorf("default render NetworkPolicy count = %d, want %d", kinds["NetworkPolicy"], len(wantPolicies))
+	}
+	for _, name := range wantPolicies {
+		if !renderedManifestHasNamedKind(t, out, "NetworkPolicy", name) {
+			t.Errorf("default render is missing NetworkPolicy %q", name)
+		}
 	}
 }
 
@@ -7740,5 +7749,113 @@ func TestChartValuesSchemaConstrainsTheEnumsAndRanges(t *testing.T) {
 	if out, err := helmTemplate(t, "--set", "cds.service.nodePort=31234",
 		"--set-string", "nriImagePolicy.policy.mode=audit"); err != nil {
 		t.Fatalf("a valid nodePort and mode were refused: %v\n%s", err, out)
+	}
+}
+
+// Every component that serves a port had no ingress policy at all, so anything
+// on the pod network could reach any port they happened to bind — the tls-lb
+// sidecars bind loopback by intention, not by enforcement. These policies are
+// default-deny with the declared ports carved back out.
+func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		policy    string
+		component string
+		ports     []int32
+	}{
+		{"c8s-cds-ingress", "cds", []int32{8443}},
+		{"c8s-operator-ingress", "operator", []int32{9443, 8081, 8080}},
+		{"c8s-volumed-ingress", "volumed", nil},
+		{"c8s-tls-lb-ingress", "", []int32{8443}},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			var np networkingv1.NetworkPolicy
+			if !findDoc(t, out, "NetworkPolicy", tc.policy, &np) {
+				t.Fatalf("render is missing NetworkPolicy %q", tc.policy)
+			}
+			// Ingress only: ratls-mesh's tcp-only-egress selects every pod and
+			// allows all TCP, so an egress rule here would be unioned away.
+			if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+				t.Errorf("policyTypes = %v, want [Ingress]", np.Spec.PolicyTypes)
+			}
+			if tc.component != "" && np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"] != tc.component {
+				t.Errorf("podSelector = %v, want component %q", np.Spec.PodSelector.MatchLabels, tc.component)
+			}
+			if len(np.Spec.PodSelector.MatchLabels) == 0 {
+				t.Error("podSelector is empty: this policy would apply to every pod in the namespace")
+			}
+
+			var got []int32
+			for _, rule := range np.Spec.Ingress {
+				if len(rule.From) != 0 {
+					t.Errorf("ingress rule restricts source (%v); these policies narrow which port answers, never who connects — tls-lb is a public front door, the API server dialling the webhook has no selectable address, and the CDS NodePort route arrives off-cluster", rule.From)
+				}
+				for _, p := range rule.Ports {
+					if p.Port == nil {
+						t.Fatalf("ingress rule opens every port on %s", tc.policy)
+					}
+					got = append(got, int32(p.Port.IntValue()))
+				}
+			}
+			if !slices.Equal(got, tc.ports) {
+				t.Errorf("allowed ports = %v, want %v", got, tc.ports)
+			}
+		})
+	}
+}
+
+// tls-lb is the public front door, so its policy must leave the front-door port
+// open to every source. A `from` here would also be unsatisfiable in principle:
+// externalTrafficPolicy defaults to Local precisely to preserve arbitrary public
+// client IPs, and no selector can enumerate the internet.
+func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-tls-lb-ingress", &np) {
+		t.Fatal("render is missing the tls-lb ingress policy")
+	}
+	if len(np.Spec.Ingress) != 1 {
+		t.Fatalf("ingress rules = %d, want 1", len(np.Spec.Ingress))
+	}
+	if len(np.Spec.Ingress[0].From) != 0 {
+		t.Fatalf("the front-door rule names sources (%v); external clients would be refused", np.Spec.Ingress[0].From)
+	}
+
+	// The allowed port must be the one the Service and hostPort both target,
+	// or external traffic lands on a port the policy does not name.
+	var svc corev1.Service
+	if !findDoc(t, out, "Service", "c8s-tls-lb", &svc) {
+		t.Fatal("render is missing the tls-lb Service")
+	}
+	if len(svc.Spec.Ports) != 1 {
+		t.Fatalf("tls-lb Service exposes %d ports; the policy names one", len(svc.Spec.Ports))
+	}
+	target := svc.Spec.Ports[0].TargetPort.StrVal
+
+	var deploy appsv1.Deployment
+	if !findDoc(t, out, "Deployment", "c8s-tls-lb", &deploy) {
+		t.Fatal("render is missing the tls-lb Deployment")
+	}
+	var wantPort int32
+	for _, c := range deploy.Spec.Template.Spec.Containers {
+		for _, p := range c.Ports {
+			if p.Name == target {
+				wantPort = p.ContainerPort
+			}
+		}
+	}
+	if wantPort == 0 {
+		t.Fatalf("no containerPort named %q on the tls-lb pod", target)
+	}
+	if got := int32(np.Spec.Ingress[0].Ports[0].Port.IntValue()); got != wantPort {
+		t.Errorf("policy admits :%d but the Service targets containerPort :%d — external traffic would be dropped", got, wantPort)
 	}
 }
