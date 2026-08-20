@@ -268,6 +268,13 @@ jobs:
             c8s/node-guest-image/kernel/config-x86_64-*.snapshot
           key: ${{ runner.os }}-kernel-v3-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','c8s/node-guest-image/kernel/config-x86_64-*.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
 
+      - name: Rebuild the kernel when its toolchain is gone
+        # confos kernel short-circuits on the manifest before it ensures the
+        # tools tree that confos-fetch-gpu compiles the modules in; dropping
+        # the manifest takes the full path, which rebuilds both.
+        if: steps.tools-tree.outputs.cache-hit != 'true'
+        run: rm -f confidential-os-builder/output/kernel/manifest.json
+
       - name: Cache base image tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
