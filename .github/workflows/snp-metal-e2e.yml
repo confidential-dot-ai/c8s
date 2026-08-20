@@ -52,7 +52,7 @@ jobs:
       b64: ${{ steps.build.outputs.b64 }}
       short: ${{ steps.build.outputs.short }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/c8s
           ref: ${{ inputs.c8s_ref || 'main' }}   # push/schedule have no inputs
