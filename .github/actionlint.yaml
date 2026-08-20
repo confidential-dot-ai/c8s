@@ -4,3 +4,4 @@ self-hosted-runner:
   labels:
     - the-machine
     - cvm-launcher-tdx
+    - cvm-launcher
