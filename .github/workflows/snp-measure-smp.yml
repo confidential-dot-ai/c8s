@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# Capture the SNP launch measurement at a given vCPU count.
+# Prove an SNP vCPU count boots and attests, and report its measurement.
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Not an e2e test, and deliberately NOT built on cvm-e2e.yml: that primitive
@@ -19,14 +19,18 @@
 # launched. A digest that is wrong for a count nobody boots surfaces as a real
 # node booting fine and then being refused credentials.
 #
-# WHAT THIS CANNOT DO YET: compare against a published digest automatically.
-# Both SNP cells boot a CDI artifact — rke2-image-refs pins
-# ghcr.io/confidential-dot-ai/rke2:containerd-disk, base-image-refs pins
-# base-cpu-image-cdi — and a CDI image is a single rootfs tarball carrying no
-# manifest.json, so there is no snp_variants set to read from what CI boots.
-# The per-SMP digests live on node-guest-base, which neither cell boots.
-# Until that is reconciled this job reports the measured value and names the
-# IGVM it booted; the comparison is a manual step.
+# WHAT THIS PROVES: that a vCPU count actually boots and attests. cvm-e2e
+# hardcodes CORES per cell, so every other count ships measured IGVMs that
+# nothing in CI has ever launched. A count that cannot boot, or boots and
+# fails to attest, is a node that never joins — and this is the only lane
+# that can find that out.
+#
+# WHAT IT DOES NOT DO: compare the measurement to a published digest. The
+# cell boots an artifact staged onto the cluster, and the manifest.json for
+# that build lives inside the same 1.5GB tarball the IGVM was extracted from
+# (see confidential-ci c8s-e2e/cluster-prep/igvm-stage-job.yaml), not in a
+# registry manifest this job can cheaply read. Pulling it to compare is a
+# worthwhile follow-up; until then the comparison is a manual step.
 name: snp-measure-smp
 on:
   workflow_dispatch:
@@ -205,26 +209,27 @@ jobs:
           echo "measurement=$M" >> "$GITHUB_OUTPUT"
           echo "smp$CORES measurement: $M"
 
-      - name: report the measurement
+      - name: report
         run: |
           set -euo pipefail
           M='${{ steps.capture.outputs.measurement }}'
           {
-            echo "### SNP launch measurement — smp${CORES}"
+            echo "### smp${CORES}: boots and attests"
             echo
-            echo '```'
-            echo "$M"
-            echo '```'
+            echo "A guest booted \`$IGVMFILE\` at ${CORES} vCPU on SEV-SNP and served a"
+            echo "verifiable attestation report."
             echo
-            echo "Guest booted \`$IGVMFILE\` from the \`$REFS_CM\` cell."
+            echo "| | |"
+            echo "|---|---|"
+            echo "| cell | \`$REFS_CM\` |"
+            echo "| IGVM | \`$IGVMFILE\` |"
+            echo "| launch measurement | \`${M}\` |"
             echo
-            echo "To check this against a published digest, compare it with"
-            echo "\`snp_variants[smp=${CORES}].measurement.snp_launch_digest\` in the"
-            echo "manifest.json of the image build that produced \`$IGVMFILE\`."
-            echo "The cell boots a CDI rootfs artifact, which carries no manifest,"
-            echo "so this job cannot resolve that image on its own."
+            echo "To check the measurement against the published digest, compare it"
+            echo "with \`snp_variants[smp=${CORES}].measurement.snp_launch_digest\` in the"
+            echo "manifest.json of the build that produced \`$IGVMFILE\`."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "smp$CORES measurement: $M"
+          echo "smp$CORES boots and attests; measurement: $M"
 
       - name: teardown
         if: always()
