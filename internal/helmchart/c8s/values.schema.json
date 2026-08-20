@@ -1,15 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$comment": "Partial by design: only the four subtrees operators hand-write are sealed, so an unknown or misspelled key there is a render-time error instead of a silently dropped value. Every key of those subtrees in values.yaml must appear here; leaf types are deliberately unconstrained. Maps whose keys belong to the consumer (label maps, digest maps, resources) are left open.",
+  "$comment": "The root key set is closed, and the four subtrees operators hand-write are sealed, so an unknown or misspelled key is a render-time error instead of a silently dropped value. Every key of those subtrees in values.yaml must appear here. Leaf types stay unconstrained except where a wrong value is otherwise accepted silently (see the enums and ranges below). Maps whose keys belong to the consumer (label maps, digest maps, resources) are left open.",
   "type": "object",
   "properties": {
     "cds": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "properties": {
         "allowlistDB": {},
         "ca": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "certValidity": {},
@@ -24,7 +30,10 @@
         "earIssuer": {},
         "expectedIssuer": {},
         "handoff": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {},
@@ -32,7 +41,10 @@
           }
         },
         "image": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "digest": {},
@@ -48,7 +60,10 @@
         "measurements": {},
         "namedCertTTL": {},
         "node": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "selector": {},
@@ -57,7 +72,10 @@
         },
         "operatorKeys": {},
         "persistence": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {},
@@ -66,7 +84,10 @@
           }
         },
         "podDisruptionBudget": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {},
@@ -89,11 +110,28 @@
         "secretsMaxPaths": {},
         "secretsMaxPathsPerWorkload": {},
         "service": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
-            "nodePort": {},
-            "type": {}
+            "nodePort": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 30000,
+              "maximum": 32767
+            },
+            "type": {
+              "enum": [
+                "NodePort",
+                "ClusterIP",
+                "LoadBalancer",
+                null
+              ]
+            }
           }
         },
         "tokenSignerOverlap": {},
@@ -102,11 +140,17 @@
       }
     },
     "nriImagePolicy": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "properties": {
         "bootstrapAllowlist": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "deriveComponents": {},
@@ -115,14 +159,20 @@
           }
         },
         "cds": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "url": {}
           }
         },
         "containerd": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "configDir": {},
@@ -132,11 +182,17 @@
           }
         },
         "containerdPrep": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "image": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "additionalProperties": false,
               "properties": {
                 "digest": {},
@@ -151,7 +207,10 @@
         "enabled": {},
         "healthSocketName": {},
         "hostPaths": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "cacheDir": {},
@@ -161,7 +220,10 @@
           }
         },
         "image": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "digest": {},
@@ -173,7 +235,10 @@
         "imagePullSecrets": {},
         "logLevel": {},
         "nodeAffinity": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "excludeLabels": {}
@@ -182,19 +247,31 @@
         "pluginFilename": {},
         "pluginName": {},
         "policy": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "denyMissingAnnotation": {},
             "enforceExisting": {},
             "exemptNamespaces": {},
             "labelRules": {},
-            "mode": {}
+            "mode": {
+              "enum": [
+                "fail-closed",
+                "audit",
+                null
+              ]
+            }
           }
         },
         "priorityClassName": {},
         "refresh": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "interval": {}
@@ -202,14 +279,20 @@
         },
         "resources": {},
         "sandboxDigests": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "advertiseHost": {}
           }
         },
         "uninstall": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {}
@@ -218,17 +301,26 @@
       }
     },
     "tlsLb": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "properties": {
         "allowlist": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {},
             "proxyPort": {},
             "rateLimit": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "additionalProperties": false,
               "properties": {
                 "burst": {},
@@ -238,7 +330,10 @@
               }
             },
             "readRateLimit": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "additionalProperties": false,
               "properties": {
                 "burst": {},
@@ -249,7 +344,10 @@
           }
         },
         "attest": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "attestationApiURL": {},
@@ -262,7 +360,10 @@
           }
         },
         "certProvisioning": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "renewInterval": {},
@@ -270,7 +371,10 @@
           }
         },
         "cors": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "allowCredentials": {},
@@ -284,7 +388,10 @@
           }
         },
         "discovery": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "cdsCertPath": {},
@@ -297,7 +404,10 @@
         },
         "enabled": {},
         "hostPort": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "enabled": {},
@@ -306,7 +416,10 @@
         },
         "imagePullSecrets": {},
         "meshCA": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "expose": {}
@@ -314,12 +427,18 @@
         },
         "nameOverride": {},
         "nginx": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "httpsPort": {},
             "image": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "additionalProperties": false,
               "properties": {
                 "digest": {},
@@ -337,7 +456,10 @@
           }
         },
         "publicTLS": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "certKey": {},
@@ -349,7 +471,10 @@
         "routes": {},
         "san": {},
         "service": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "annotations": {},
@@ -361,13 +486,19 @@
         "strategy": {},
         "tlsMountPath": {},
         "upstream": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "address": {},
             "protocol": {},
             "tls": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "additionalProperties": false,
               "properties": {
                 "serverName": {},
@@ -382,12 +513,18 @@
       }
     },
     "volumed": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "additionalProperties": false,
       "properties": {
         "enabled": {},
         "hostPaths": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "cgroupRoot": {},
@@ -395,7 +532,10 @@
           }
         },
         "image": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": false,
           "properties": {
             "digest": {},
@@ -412,6 +552,24 @@
         "resources": {},
         "tolerations": {}
       }
+    },
+    "c8sComponents": {},
+    "image": {},
+    "operator": {},
+    "imagePullSecrets": {},
+    "imagePullSecret": {},
+    "certProvisioning": {},
+    "serviceAccount": {},
+    "statusMirror": {},
+    "hostNamespacePolicy": {},
+    "webhook": {},
+    "attestationApi": {},
+    "kata": {},
+    "ratlsMesh": {},
+    "podSecurityContext": {},
+    "teeProxy": {
+      "$comment": "Removed component, listed only so validations.yaml can answer with the migration message rather than a generic unknown-key refusal."
     }
-  }
+  },
+  "additionalProperties": false
 }
