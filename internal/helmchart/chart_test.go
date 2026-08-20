@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/controller"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -4459,6 +4460,40 @@ func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
 	slices.Sort(pinned)
 	if want := []string{"c8s-cds", "c8s-tls-lb"}; !reflect.DeepEqual(pinned, want) {
 		t.Errorf("kata-pinned workloads = %v, want %v", pinned, want)
+	}
+}
+
+// Contract with KataGuestReadyReconciler (internal/controller): it lists the
+// puller pods by this label pair and mirrors their readiness into
+// webhook.GuestReadyNodeLabel. If the rendered label drifts, the list matches
+// nothing, the label is never set, and every confidential pod stays Pending.
+func TestChartKataImagePullerCarriesControllerSelector(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller")
+	if got := ds.Spec.Template.Labels[controller.ComponentLabel]; got != controller.KataImagePullerComponent {
+		t.Fatalf("puller pod template: %s = %q, want %q", controller.ComponentLabel, got, controller.KataImagePullerComponent)
+	}
+}
+
+// The check stats the pulled artifacts across the /host bind mount, so
+// kubelet's 1s default probe timeout would drop the guest-ready label off a
+// healthy node under load.
+func TestChartKataImagePullerProbeTimeout(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, ds := range []string{"c8s-kata-deploy-image-puller", "c8s-kata-deploy-image-puller-nvidia"} {
+		probe := renderedDaemonSetContainer(t, out, ds, "reconcile").ReadinessProbe
+		if probe == nil || probe.Exec == nil {
+			t.Fatalf("%s: want an exec readiness probe, got %+v", ds, probe)
+		}
+		if probe.TimeoutSeconds != 5 {
+			t.Errorf("%s: readiness timeoutSeconds = %d, want 5", ds, probe.TimeoutSeconds)
+		}
 	}
 }
 
