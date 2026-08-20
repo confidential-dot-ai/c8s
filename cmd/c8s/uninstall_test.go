@@ -527,3 +527,20 @@ func TestFilterVolumePodsKeepsOnlyLivePodsHoldingVolumes(t *testing.T) {
 		t.Errorf("filterVolumePods = %v, want %v", got, want)
 	}
 }
+
+// --force does not make the leak clean, and the text has to say so: the
+// operator's only other chance to learn it is a hook log that goes with the
+// release.
+func TestForcedVolumePodsWarning(t *testing.T) {
+	got := forcedVolumePodsWarning([]string{"default/inference-0", "tenant-a/rag-1"})
+	for _, want := range []string{
+		"default/inference-0",
+		"tenant-a/rag-1",
+		"re-run the uninstall",
+		"volumed sweeps",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning does not carry %q:\n%s", want, got)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -110,6 +111,30 @@ func (f *fakeOps) VerityClose(ctx context.Context, mapper string) error {
 	defer f.mu.Unlock()
 	delete(f.verityOpen, mapper)
 	return nil
+}
+
+// ListMappings answers from what is open, the way /dev/mapper does: a mapping
+// is listed until something closes it.
+func (f *fakeOps) ListMappings(ctx context.Context) ([]string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if err := f.record("ListMappings"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for name := range f.cryptOpen {
+		out = append(out, name)
+	}
+	for name := range f.verityOpen {
+		out = append(out, name)
+	}
+	// /dev/mapper carries every consumer's targets, not only ours.
+	out = append(out, "control", "rootvg-swap")
+	sort.Strings(out)
+	return out, nil
 }
 
 func (f *fakeOps) MountRO(ctx context.Context, _ string, target *os.File) error {
@@ -489,5 +514,79 @@ func TestOpenUnwindsAfterTheCallerContextIsCancelled(t *testing.T) {
 	}
 	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
 		t.Errorf("leaked crypt=%d verity=%d mounts=%d after a cancelled open", c, v, m)
+	}
+}
+
+// A volume stack outlives the volumed that opened it: the mappings are kernel
+// state, and nothing else on a node reaps them. Until they go they hold the
+// backing disk open, so the next install cannot reopen the volume.
+func TestSweepStaleClosesMappingsLeftByAnEarlierVolumed(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["c8s-crypt-podA-weights"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+
+	o := testOpener(t, ops)
+	closed, stuck := o.SweepStale(context.Background())
+	if closed != 2 {
+		t.Errorf("closed %d mappings, want the crypt and verity pair", closed)
+	}
+	if len(stuck) != 0 {
+		t.Errorf("reported %v as still in use", stuck)
+	}
+	if len(ops.cryptOpen) != 0 || len(ops.verityOpen) != 0 {
+		t.Errorf("mappings survived the sweep: crypt=%v verity=%v", ops.cryptOpen, ops.verityOpen)
+	}
+	// verity is stacked on crypt and holds it open, so closing crypt first
+	// would fail against a real device-mapper.
+	var verityAt, cryptAt = -1, -1
+	for i, c := range ops.calls {
+		switch c {
+		case "VerityClose":
+			verityAt = i
+		case "CryptClose":
+			cryptAt = i
+		}
+	}
+	if verityAt < 0 || cryptAt < 0 || verityAt > cryptAt {
+		t.Errorf("verity must close before the crypt device under it; calls: %v", ops.calls)
+	}
+}
+
+// The sweep runs before this process has any state, so the kernel is what
+// decides: a mapping something still has mounted refuses to close, and a
+// workload's volume is not pulled out from under it.
+func TestSweepStaleLeavesAMappingStillInUse(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["c8s-crypt-podA-weights"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+	ops.failOn = "VerityClose"
+
+	o := testOpener(t, ops)
+	closed, stuck := o.SweepStale(context.Background())
+	if closed != 1 {
+		t.Errorf("closed %d, want only the crypt mapping", closed)
+	}
+	if len(stuck) != 1 || stuck[0] != "c8s-verity-podA-weights" {
+		t.Errorf("stuck = %v, want the verity mapping that refused", stuck)
+	}
+	if !ops.verityOpen["c8s-verity-podA-weights"] {
+		t.Error("a mapping that refused to close was reported as gone")
+	}
+}
+
+// Sweeping by name prefix keeps it to volumes this platform opened; the node's
+// other device-mapper targets are not ours to close.
+func TestSweepStaleTouchesOnlyC8sMappings(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["luks-tenant-disk"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+
+	o := testOpener(t, ops)
+	closed, _ := o.SweepStale(context.Background())
+	if closed != 1 {
+		t.Errorf("closed %d, want only the c8s mapping", closed)
+	}
+	if !ops.cryptOpen["luks-tenant-disk"] {
+		t.Error("closed a device-mapper target this platform did not open")
 	}
 }

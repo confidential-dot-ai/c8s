@@ -92,7 +92,12 @@ func (a Attacher) Attach(ctx context.Context, name, image string) (serial string
 
 	store := a.backstore(name)
 	if _, err := os.Stat(store); err == nil {
-		return "", fmt.Errorf("volume: %q is already attached; detach it first", name)
+		// The kernel opened the image once, at the attach that built this
+		// backstore, and serves that file for as long as the backstore lives.
+		// Replacing the image at the same path since then — kubectl cp, or any
+		// mv into place — left the device on the old file, where hashing the
+		// path confirms bytes nothing is reading.
+		return "", fmt.Errorf("volume: %q is already attached, and the device serves the file that attach opened rather than whatever is at its path now; detach it first, then attach again", name)
 	}
 
 	var undo []func()
@@ -345,7 +350,11 @@ Hyper-V exposes no virtio bus, and a cloud disk's serial is the provider's, so
 this drives LIO's loopback target to build a local SCSI disk instead.
 
 The image is ciphertext and this does not read it. Pointing a pod at the wrong
-device fails closed — the key will not decrypt it, and verity will refuse it.`,
+device fails closed — the key will not decrypt it, and verity will refuse it.
+
+The device serves the file this command opens, not the path. Replace an image
+by 'detach', overwrite, then 'attach' again: writing a new file over the path
+of an attached image leaves the device on the old one.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

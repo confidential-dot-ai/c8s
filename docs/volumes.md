@@ -137,6 +137,15 @@ The serial is a **selector, not a trust input**. The host chooses it and answers
 the query per read. Pointing a pod at the wrong device fails closed: the wrong
 key produces noise, and verity refuses it.
 
+### Replacing an image
+
+`attach` hands LIO the file, and the kernel resolves the path once. Replace an
+image with **`detach` → overwrite → `attach`**, never in place: a `kubectl cp`,
+or any `mv` into position, leaves a new file at the path while the device keeps
+serving the one the attach opened. `md5sum` on the node then matches the source
+while every read from the pod fails, because they are reading different files.
+`attach` refuses an already-attached volume and says so.
+
 Because the device is on one node, the pod must be scheduled there; `create`
 emits the matching `nodeSelector`.
 
@@ -258,6 +267,36 @@ it — so the sandbox would have to arrive as an inventory-signed token bound to
 nonce the daemon issued, because such a token is otherwise transferable between
 pods. The kata shape does not need this: moving the daemon inside the guest
 removes the second caller instead of authenticating it.
+
+## Uninstalling, and what is left behind
+
+`c8s uninstall` refuses while a pod holds a volume, because volumed is the only
+thing that unmaps one. Scale those workloads to zero and let volumed tear the
+volumes down before uninstalling.
+
+`--force` proceeds and names the pods it is proceeding past. Their mappings
+stay: the chart's pre-delete hook unmounts on the host, but a running consumer
+holds the device open through its own mount namespace, so the close fails and
+the hook says which names it could not close. A mapping left open holds the
+backing disk open, so a volume it covers cannot be reopened.
+
+Nothing needs a shell on the node to clear it. volumed sweeps the c8s mappings
+it finds at startup, so **reinstalling c8s reaps whatever an uninstall left** —
+and the kernel refuses to close a mapping something still has mounted, so the
+sweep cannot take a volume from a workload that is still using it. A mapping
+still held after a reinstall means a pod is still holding it: delete the pod
+and volumed's reaper closes it within a sweep interval.
+
+Rebooting or replacing the node clears them too — device-mapper state does not
+survive a reboot.
+
+**A leftover LIO backstore is not that.** `c8s volume attach` is operator-driven
+and outside the release lifecycle, so uninstall leaves it alone by design; a
+node that has had volumes attached still lists them afterwards. The two look
+alike on the node and are told apart by what lists them: a leaked mapping shows
+in `dmsetup ls` as a `c8s-crypt-`/`c8s-verity-` pair, an attached backstore in
+`/sys/kernel/config/target/core/fileio_0/`. Remove the second with
+`c8s volume detach <name>`.
 
 ## What this defends
 

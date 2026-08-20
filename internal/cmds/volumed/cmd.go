@@ -120,6 +120,12 @@ func runNode(ctx context.Context, cfg config) error {
 	}
 	defer l.Close()
 
+	// Mappings an earlier volumed left behind hold the backing disk open, so a
+	// volume they cover cannot be reopened until they go. Sweep before serving.
+	if closed, stuck := opener.SweepStale(ctx); closed > 0 || len(stuck) > 0 {
+		slog.Info("swept mappings left by an earlier volumed", "closed", closed, "still_in_use", stuck)
+	}
+
 	reaper := &Reaper{
 		Opener:   opener,
 		Liveness: CgroupLiveness{Root: cfg.cgroupRoot},

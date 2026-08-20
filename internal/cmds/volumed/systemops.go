@@ -91,6 +91,20 @@ func (SystemOps) MountRO(_ context.Context, source string, target *os.File) erro
 
 // Unmount detaches the mount. MNT_DETACH so a mount still busy is removed from
 // the tree rather than left for kubelet to trip over while tearing the pod down.
+// ListMappings names what device-mapper has published, which is the only
+// record of a volume stack that outlives the process that opened it.
+func (SystemOps) ListMappings(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(mapperDir)
+	if err != nil {
+		return nil, fmt.Errorf("volumed: read %s: %w", mapperDir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
 func (SystemOps) Unmount(_ context.Context, target string) error {
 	if err := unix.Unmount(target, unix.MNT_DETACH); !unmounted(err) {
 		return fmt.Errorf("unmount %s: %w", target, err)
