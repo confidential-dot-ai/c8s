@@ -124,9 +124,11 @@ c8s supports both answers.
 
 The entire Kubernetes node is one confidential VM. Pods are ordinary
 containers inside it. A verifier checks the node's launch digest; everything
-on the node is inside that one boundary, including the kubelet. This is the
-simplest and densest shape, and the only one available on managed services
-without nested virtualization (for example Azure AKS).
+on the node is inside that one boundary, including the kubelet. Every pod
+shares that boundary, so **node-as-CVM is single-tenant**: it isolates the
+node from the host, not workloads from each other. This is the simplest and
+densest shape, and the only one available on managed services without nested
+virtualization (for example Azure AKS).
 
 ```text
                              NODE-AS-CVM
@@ -186,7 +188,8 @@ baked into the measured guest image, out of the host's reach.
 ```
 
 In short: node-as-CVM is the all-or-nothing model (verify the node once,
-trust everything on it), pod-as-CVM is the mutual-distrust model (the
+trust everything on it, one tenant per node), pod-as-CVM is the
+mutual-distrust model (the
 platform and the workloads do not trust each other, and each pod attests
 independently). The full comparison, including density, latency, and platform
 support, is in the
