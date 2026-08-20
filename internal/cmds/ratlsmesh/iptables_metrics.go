@@ -24,6 +24,7 @@ type iptablesMetricsSnapshot struct {
 	JumpPositionViolations  int64 `json:"jump_position_violations"`
 	JumpPositionCheckErrors int64 `json:"jump_position_check_errors"`
 	IPSetOverflows          int64 `json:"ipset_overflows"`
+	IPSetSyncFailures       int64 `json:"ipset_sync_failures"`
 	CWInboundDrops          int64 `json:"cw_inbound_drops"`
 	CWPassthroughReturns    int64 `json:"cw_passthrough_returns"`
 	// Membership is what the guard and the interception rules key on, so a set
@@ -59,6 +60,7 @@ func currentIptablesMetricsSnapshot() iptablesMetricsSnapshot {
 		JumpPositionViolations:  iptablesJumpPositionViolations(),
 		JumpPositionCheckErrors: iptablesJumpPositionCheckErrors(),
 		IPSetOverflows:          iptablesIPSetOverflows(),
+		IPSetSyncFailures:       iptablesIPSetSyncFailures(),
 		CWInboundDrops:          iptablesCWInboundDrops(),
 		CWPassthroughReturns:    iptablesCWPassthroughReturns(),
 		PodIPSetMembers:         podIPSetMemberCount(),

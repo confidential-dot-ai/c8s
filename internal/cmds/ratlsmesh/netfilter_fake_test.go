@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 )
 
 // fakeIptablesScript emulates iptables/ip6tables closely enough for
@@ -945,5 +947,64 @@ func TestPublishIptablesMetricsWarnsOnlyOnWriteFailure(t *testing.T) {
 	publishIptablesMetrics(slog.New(slog.NewJSONHandler(&failBuf, nil)))
 	if !hasMsg(decodeLogRecords(failBuf.String()), "write iptables metrics file failed") {
 		t.Errorf("failed write did not warn: %s", failBuf.String())
+	}
+}
+
+// cwPodStore is a pod cache holding one confidential workload, which is what
+// the guard sets are computed from.
+func cwPodStore(t *testing.T) cache.Store {
+	t.Helper()
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := store.Add(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "serving",
+			Namespace: "demo",
+			Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
+		},
+		Status: corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
+	}); err != nil {
+		t.Fatalf("seed pod store: %v", err)
+	}
+	return store
+}
+
+// Membership is what the guard matches on, so a set left at a previous cycle's
+// contents is enforcement that has stopped covering pods created since — and
+// the cw sets, which the fail-closed guard keys on, used to be written last and
+// abandoned whenever an earlier set failed.
+func TestReconcilePodIPSetsWritesGuardSetsFirst(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	if _, err := reconcilePodIPSets(cwPodStore(t), []string{"10.0.0.1"}, nil, 100, testLogger()); err != nil {
+		t.Fatalf("reconcilePodIPSets: %v", err)
+	}
+	script := nf.read("restore_scripts")
+	cwAt := strings.Index(script, cwPodIPSetName4)
+	podAt := strings.Index(script, podIPSetName4)
+	if cwAt < 0 || podAt < 0 {
+		t.Fatalf("both sets must be written; script:\n%s", script)
+	}
+	if cwAt > podAt {
+		t.Errorf("the guard's own set is written after the interception sets, so an earlier failure costs it its write:\n%s", script)
+	}
+}
+
+func TestReconcilePodIPSetsAttemptsEverySetWhenOneFails(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	nf.set("ipset_restore_fail", "ipset v7.15: Kernel error received: Invalid argument")
+	before := iptablesIPSetSyncFailures()
+
+	_, err := reconcilePodIPSets(cwPodStore(t), []string{"10.0.0.1"}, nil, 100, testLogger())
+	if err == nil {
+		t.Fatal("a failing ipset write must surface")
+	}
+	// Abandoning the remaining sets is what froze membership behind a single
+	// warning; every set gets its own attempt and its own error.
+	for _, label := range []string{"IPv4 cw pod ipset", "IPv6 cw pod ipset", "IPv4 pod ipset", "local IPv4 pod ipset"} {
+		if !strings.Contains(err.Error(), label) {
+			t.Errorf("the %s was never attempted after an earlier set failed: %v", label, err)
+		}
+	}
+	if got := iptablesIPSetSyncFailures() - before; got != 6 {
+		t.Errorf("sync failures counted %d, want one per managed set (6)", got)
 	}
 }

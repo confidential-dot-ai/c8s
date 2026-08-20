@@ -45,6 +45,7 @@ type metrics struct {
 	iptablesJumpViolations       prometheus.Gauge
 	iptablesJumpCheckErrors      prometheus.Gauge
 	iptablesIPSetOverflows       prometheus.Gauge
+	iptablesIPSetSyncFailures    prometheus.Gauge
 	iptablesPodIPSetMembers      prometheus.Gauge
 	iptablesCWIPSetMembers       prometheus.Gauge
 	iptablesCWIPSetShrinks       prometheus.Gauge
@@ -138,6 +139,10 @@ func newMetrics() *metrics {
 		Name: "ratls_mesh_iptables_ipset_overflow_total",
 		Help: "Sidecar-reported reconcile cycles where pod count exceeded --ipset-maxelem.",
 	})
+	m.iptablesIPSetSyncFailures = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_ipset_sync_failures_total",
+		Help: "Sidecar-reported ipset writes that failed. A set keeps its previous contents, so enforcement runs against a stale membership until the next cycle succeeds.",
+	})
 	m.iptablesPodIPSetMembers = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_pod_ipset_members",
 		Help: "Sidecar-reported pod IPs in the interception ipset (v4+v6). Interception is membership-driven, so a drop means those pods stopped being redirected through the proxy.",
@@ -229,6 +234,7 @@ func newMetrics() *metrics {
 		m.iptablesJumpViolations,
 		m.iptablesJumpCheckErrors,
 		m.iptablesIPSetOverflows,
+		m.iptablesIPSetSyncFailures,
 		m.iptablesPodIPSetMembers,
 		m.iptablesCWIPSetMembers,
 		m.iptablesCWIPSetShrinks,
@@ -364,6 +370,7 @@ func (m *metrics) refreshIptablesMetrics(path string) error {
 	m.iptablesJumpViolations.Set(float64(snap.JumpPositionViolations))
 	m.iptablesJumpCheckErrors.Set(float64(snap.JumpPositionCheckErrors))
 	m.iptablesIPSetOverflows.Set(float64(snap.IPSetOverflows))
+	m.iptablesIPSetSyncFailures.Set(float64(snap.IPSetSyncFailures))
 	m.iptablesPodIPSetMembers.Set(float64(snap.PodIPSetMembers))
 	m.iptablesCWIPSetMembers.Set(float64(snap.CWIPSetMembers))
 	m.iptablesCWIPSetShrinks.Set(float64(snap.CWIPSetShrinks))

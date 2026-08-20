@@ -60,6 +60,27 @@ diagnostics() {
     kubectl get pods -A -o wide 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-cds --tail=40 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-operator --tail=40 2>&1 || true
+    mesh_diagnostics
+}
+
+# The mesh assertions are counter and membership claims, and neither survives
+# into the log otherwise: a failed one leaves no way to tell a stale ipset from
+# a rule that never fired from a workload reached in plaintext.
+mesh_diagnostics() {
+    local pod
+    pod="$(kubectl -n "$NS" get pod -l app=c8s-ratls-mesh -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    [ -n "$pod" ] || return 0
+    echo "--- ratls-mesh counters ---"
+    kubectl -n "$NS" exec "$pod" -c iptables-sync -- \
+        sh -c 'cat /tmp/ratls-iptables-metrics.json' 2>&1 || true
+    echo "--- cw guard chains and ipsets ---"
+    for chain in RATLS-MESH-CW RATLS-MESH-CW-EGRESS; do
+        kubectl -n "$NS" exec "$pod" -c iptables-sync -- iptables -L "$chain" -n -v -x 2>&1 || true
+    done
+    kubectl -n "$NS" exec "$pod" -c iptables-sync -- iptables -L FORWARD -n --line-numbers 2>&1 | head -12 || true
+    for set in RATLS-MESH-CW-PODS RATLS-MESH-PODS RATLS-MESH-LOCAL-PODS; do
+        kubectl -n "$NS" exec "$pod" -c iptables-sync -- ipset list "$set" 2>&1 | head -20 || true
+    done
 }
 
 cleanup() {
@@ -568,7 +589,8 @@ case "$rc" in
         ;;
     0)
         echo "$out" | grep -q "^200" || fail "VIP dial rc=0 but no 200: $out"
-        await_metric_above "$inbound" "${base_inbound_vip:-0}" "mesh inbound counter (VIP hop wrapped)"
+        await_metric_above "$inbound" "${base_inbound_vip:-0}" \
+            "VIP dial returned 200 but the mesh recorded no inbound connection, so the hop reached the cw workload outside the mesh — in plaintext"
         pass "Service-VIP dial wrapped by the mesh (inbound counter moved; rule-ordering variant)"
         ;;
     *)
@@ -583,7 +605,9 @@ kubectl wait --for=condition=Ready pod/it-mesh-excl -n kube-system --timeout=120
     || fail "excluded-namespace client pod not Ready"
 out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
 rc="$(echo "$out" | grep -o 'rc=[0-9]*' | cut -d= -f2)"
-[ "$rc" = "28" ] || fail "excluded-namespace bypass to the cw workload: want curl rc=28 (DROP timeout), got rc=$rc"
+# rc=0 is the insecure outcome, not a slow one: the dial completed, so the cw
+# guard admitted an unmeshed source.
+[ "$rc" = "28" ] || fail "excluded-namespace dial reached the cw workload in plaintext: want curl rc=28 (DROP timeout), got rc=$rc"
 pass "excluded-namespace plaintext bypass dropped by the cw inbound guard"
 
 log "tls-lb front door"
