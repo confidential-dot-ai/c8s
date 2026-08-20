@@ -1,0 +1,28 @@
+Subject: [PATCH] agent: stop logging the CDI-injected spec
+
+handle_cdi_devices logged the whole modified OCI spec at info level on the
+success path, the agent's default log level is info, and the shipped unit sends
+stdout to the guest console. On a confidential guest that console is wired to
+the host, so every GPU pod start wrote the container's argv and env -- including
+values sourced from Kubernetes secrets -- back to the host. This is the same
+leak patch 0005 closed for do_create_container, on the path that runs after it.
+
+Log the CDI device names instead. They come from the request's cdi.k8s.io/*
+annotations, so the host already has them; the full spec remains available at
+trace level via the #[instrument] span, which needs StartTracingRequest.
+
+--- a/src/agent/src/device/mod.rs
++++ b/src/agent/src/device/mod.rs
+@@ -294,10 +294,8 @@
+ 
+         match inject_result {
+             Ok(_) => {
+-                info!(
+-                    logger,
+-                    "all devices injected successfully, modified CDI container spec: {:?}", &spec
+-                );
++                // c8s: the guest console is host-visible; the spec carries env/argv.
++                info!(logger, "all devices injected successfully: {:?}", &devices);
+                 return Ok(());
+             }
+             Err(e) => {
