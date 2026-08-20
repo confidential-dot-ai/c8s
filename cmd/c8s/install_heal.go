@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
 // runHelmWithKataHeal runs `helm upgrade --install --wait ...` and, on
@@ -22,6 +24,9 @@ import (
 // --cvm-mode=pod (kata is the only shape that produces this state) and
 // --wait (nothing to heal without a rollout deadline). Non-kata failures and
 // second-attempt failures surface unchanged.
+//
+// A pod the scheduler never placed is reported instead: it has no sandbox, so
+// the retry would just re-wait on a pod that still cannot schedule.
 func runHelmWithKataHeal(ctx context.Context, stdout, stderr io.Writer, helmArgs []string, namespace string, kata, wait bool) error {
 	fmt.Fprintf(stdout, "+ helm %s\n", strings.Join(helmArgs, " "))
 	if err := runCommand(ctx, stdout, stderr, "helm", helmArgs); err == nil {
@@ -31,13 +36,18 @@ func runHelmWithKataHeal(ctx context.Context, stdout, stderr io.Writer, helmArgs
 	} else if !looksLikeRolloutTimeout(err) {
 		return fmt.Errorf("helm install failed: %w", err)
 	}
-	stuck, err := stuckKataPods(ctx, namespace)
+	stuck, unscheduled, err := triageKataPods(ctx, namespace)
 	if err != nil {
 		fmt.Fprintf(stderr, "helm install failed and heal-check failed: %v\n", err)
 		return fmt.Errorf("helm install failed: %w", err)
 	}
+	// helm --wait gates on the whole release, so a retry that leaves an
+	// unplaced pod behind spends the full deadline again.
+	if len(unscheduled) > 0 {
+		return fmt.Errorf("helm install failed: %s", unscheduledPodReport(namespace, unscheduled))
+	}
 	if len(stuck) == 0 {
-		return fmt.Errorf("helm install failed (no stuck c8s-system kata pods found; nothing to heal)")
+		return fmt.Errorf("helm install failed (no c8s-system kata pod is stuck at sandbox creation; nothing to heal)")
 	}
 	fmt.Fprintf(stdout, "+ helm rollout timed out on %d stuck kata pod(s): %s. Force-deleting and retrying once.\n",
 		len(stuck), strings.Join(stuck, ", "))
@@ -84,16 +94,13 @@ func looksLikeRolloutTimeout(err error) bool {
 	return true
 }
 
-// stuckKataPods returns the names of pods in namespace whose spec pins a
-// kata RuntimeClass and that have been sitting in a pre-Running state long
-// enough that a kata-agent race is the plausible cause. The threshold
-// deliberately matches the manual-heal experience: 90s is well past a
-// healthy sandbox start (single-digit seconds on a warm host, up to ~30s on
-// a cold one) and well before an operator would notice by tailing pods.
-func stuckKataPods(ctx context.Context, namespace string) ([]string, error) {
+// triageKataPods splits the namespace's kata-RuntimeClass pods into ones
+// placed on a node and pre-Running past stuckPodMinAge (a force-delete drops
+// the wedged sandbox) and ones the scheduler never placed (no sandbox exists).
+func triageKataPods(ctx context.Context, namespace string) (stuck, unscheduled []string, err error) {
 	out, err := exec.CommandContext(ctx, "kubectl", "get", "pods", "-n", namespace, "-o", "json").Output()
 	if err != nil {
-		return nil, fmt.Errorf("kubectl get pods -n %s: %w", namespace, err)
+		return nil, nil, fmt.Errorf("kubectl get pods -n %s: %w", namespace, err)
 	}
 	var list struct {
 		Items []struct {
@@ -103,6 +110,7 @@ func stuckKataPods(ctx context.Context, namespace string) ([]string, error) {
 				DeletionTimestamp time.Time `json:"deletionTimestamp"`
 			} `json:"metadata"`
 			Spec struct {
+				NodeName         string `json:"nodeName"`
 				RuntimeClassName string `json:"runtimeClassName"`
 			} `json:"spec"`
 			Status struct {
@@ -114,12 +122,20 @@ func stuckKataPods(ctx context.Context, namespace string) ([]string, error) {
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &list); err != nil {
-		return nil, fmt.Errorf("parse kubectl get pods output: %w", err)
+		return nil, nil, fmt.Errorf("parse kubectl get pods output: %w", err)
 	}
-	var stuck []string
 	now := time.Now()
 	for _, p := range list.Items {
 		if !strings.HasPrefix(p.Spec.RuntimeClassName, "kata-") {
+			continue
+		}
+		// A pod mid-shutdown will be replaced by the Deployment controller
+		// — don't fight it.
+		if !p.Metadata.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if p.Spec.NodeName == "" {
+			unscheduled = append(unscheduled, p.Metadata.Name)
 			continue
 		}
 		// Already Running with a Ready container is progressing, not stuck.
@@ -133,17 +149,27 @@ func stuckKataPods(ctx context.Context, namespace string) ([]string, error) {
 		if anyReady {
 			continue
 		}
-		// A pod mid-shutdown will be replaced by the Deployment controller
-		// — don't fight it.
-		if !p.Metadata.DeletionTimestamp.IsZero() {
-			continue
-		}
 		if now.Sub(p.Metadata.CreationTimestamp) < stuckPodMinAge {
 			continue
 		}
 		stuck = append(stuck, p.Metadata.Name)
 	}
-	return stuck, nil
+	return stuck, unscheduled, nil
+}
+
+const kataImagePullerSelector = "app.kubernetes.io/component=kata-image-puller"
+
+func unscheduledPodReport(namespace string, pods []string) string {
+	return fmt.Sprintf(`%d kata pod(s) never scheduled, so there is no sandbox to heal: %s
+Confidential pods require the node label %s=true, set by the operator once a node's kata-image-puller is Ready.
+  kubectl -n %s describe pod %s
+  kubectl get nodes -L %s
+  kubectl -n %s get pods -l %s -o wide`,
+		len(pods), strings.Join(pods, ", "),
+		webhook.GuestReadyNodeLabel,
+		namespace, pods[0],
+		webhook.GuestReadyNodeLabel,
+		namespace, kataImagePullerSelector)
 }
 
 // stuckPodMinAge is the lower bound before a pre-Running kata pod counts as
