@@ -67,6 +67,8 @@ var (
 	installAttestEnabled  bool
 	installMeasurements   []string
 	installRTMRs          []string
+	installPCRs           []string
+	installInitDataHash   string
 	installInventoryCIDRs []string
 )
 
@@ -190,6 +192,34 @@ func podModeMeasurementsPreflight(cvmMode string, measurements []string, valuesF
 		return "", fmt.Errorf("--cvm-mode=pod without a pinned CDS measurement: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), set a non-empty cds.measurements in a -f values file, or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
 	}
 	return "installing --cvm-mode=pod with no --measurements: CDS and tls-lb will run, but no confidential.ai/cw workload can obtain a certificate until you reinstall with --measurements", nil
+}
+
+// aksVTPMPinWarning is the Azure analogue of tdxRTMRPinWarning: on an AKS
+// install the launch measurement covers the Microsoft paravisor/IGVM alone,
+// so without a vTPM PCR pin or an init-data binding the measurement pin
+// confers no guest-OS identity. Satisfied by --pcrs / --init-data-hash or a
+// -f values file setting cds.pcrs or cds.initDataHash.
+func aksVTPMPinWarning(cvmMode string, pcrs []string, initDataHash string, valuesFiles []string) (string, error) {
+	if cvmMode != "aks" || len(pcrs) > 0 || initDataHash != "" {
+		return "", nil
+	}
+	for _, f := range valuesFiles {
+		tree, err := decodeValuesFile(f)
+		if err != nil {
+			return "", err
+		}
+		if v, ok := valueAtPath(tree, "cds.pcrs"); ok {
+			if list, isList := v.([]any); isList && len(list) > 0 {
+				return "", nil
+			}
+		}
+		if v, ok := valueAtPath(tree, "cds.initDataHash"); ok {
+			if str, isStr := v.(string); isStr && str != "" {
+				return "", nil
+			}
+		}
+	}
+	return "AKS with no --pcrs or --init-data-hash: on Azure CVMs the launch measurement covers the Microsoft paravisor only, NOT the guest OS — measurement pinning then confers no guest-code identity in-cluster. Pin the relevant vTPM PCRs (--pcrs <i>=<sha256-hex>, values read off a boot you trust) or the init-data binding (--init-data-hash)", nil
 }
 
 // tdxRTMRPinWarning is the "MRTD does not confer code identity" warning for a
@@ -1134,6 +1164,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
+		if warn, err := aksVTPMPinWarning(installCvmMode, installPCRs, installInitDataHash, installValues); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
 		}
@@ -1720,6 +1755,29 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
+		)
+	}
+	// --pcrs is the Azure analogue: on az-snp/az-tdx the launch measurement
+	// covers the Microsoft paravisor alone, and the guest OS lands in the
+	// vTPM PCRs.
+	pcrs, err := ratls.ParsePCRPins(installPCRs)
+	if err != nil {
+		return nil, fmt.Errorf("--pcrs: %w", err)
+	}
+	for i, idx := range slices.Sorted(maps.Keys(pcrs)) {
+		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(pcrs[idx]))
+		helmArgs = append(helmArgs,
+			"--set-string", fmt.Sprintf("cds.pcrs[%d]=%s", i, pin),
+			"--set-string", fmt.Sprintf("ratlsMesh.pcrs[%d]=%s", i, pin),
+		)
+	}
+	if _, err := ratls.ParseInitDataHash(installInitDataHash); err != nil {
+		return nil, fmt.Errorf("--init-data-hash: %w", err)
+	}
+	if installInitDataHash != "" {
+		helmArgs = append(helmArgs,
+			"--set-string", "cds.initDataHash="+installInitDataHash,
+			"--set-string", "ratlsMesh.initDataHash="+installInitDataHash,
 		)
 	}
 	for i, c := range installInventoryCIDRs {
@@ -2469,6 +2527,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
 	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringSliceVar(&installPCRs, "pcrs", nil, "Azure vTPM PCR pin(s) <index>=<sha256-hex> completing --measurements on --cvm-mode=aks (repeatable/comma-separated). Pins cds.pcrs + ratlsMesh.pcrs: on Azure CVMs the launch measurement covers the Microsoft paravisor alone, while the guest OS measures into the vTPM PCRs. Read the values off a boot you trust; ignored for non-vTPM evidence")
+	installCmd.Flags().StringVar(&installInitDataHash, "init-data-hash", "", "hex SHA-256 init-data digest the cluster's evidence must bind (vTPM PCR[8] on az). Pins cds.initDataHash + ratlsMesh.initDataHash; empty = no init-data pinning")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")

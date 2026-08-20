@@ -242,23 +242,41 @@ func Run(args []string) error {
 // URL is always https (enforced by config.Validate), so this always verifies
 // the CDS attestation handshake.
 func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	pins, err := cdsPins(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parse CDS measurements: %w", err)
+		return nil, err
 	}
-	if len(measurements) == 0 {
+	if len(pins.Measurements) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("parse CDS RTMR pins: %w", err)
-	}
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
 	client.Timeout = cfg.Timeout
 	return client, nil
+}
+
+// cdsPins parses the pull config's CDS identity pins into the set the RA-TLS
+// policy enforces.
+func cdsPins(cfg pullConfig) (ratls.Pins, error) {
+	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS measurements: %w", err)
+	}
+	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS RTMR pins: %w", err)
+	}
+	pcrs, err := ratls.ParsePCRPins(cfg.CDSPCRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS PCR pins: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(cfg.CDSInitDataHash)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS init-data hash: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs, PCRs: pcrs, InitDataHash: initDataHash}, nil
 }
 
 // alwaysAllowAllowlist builds the static floor from the config's AlwaysAllow
@@ -539,16 +557,12 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 // startSandboxDigests serves the CDS-facing digests endpoint over
 // mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
 func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
+	pins, err := cdsPins(cfg.Allowlist.Pull)
 	if err != nil {
-		return fmt.Errorf("parse CDS measurements: %w", err)
+		return err
 	}
-	if len(measurements) == 0 {
+	if len(pins.Measurements) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
-	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.Allowlist.Pull.CDSRTMRs)
-	if err != nil {
-		return fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
 	// The attest func is platform-agnostic despite its name (see its doc
@@ -556,7 +570,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs})
+		attestationApiURL, pins)
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).

@@ -98,6 +98,8 @@ type proxyConfig struct {
 	healthPort                int
 	measurements              string
 	rtmrs                     string
+	pcrs                      string
+	initDataHash              string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -106,6 +108,8 @@ type proxyConfig struct {
 	caPollInterval            time.Duration
 	cdsMeasurements           string
 	cdsRTMRs                  string
+	cdsPCRs                   string
+	cdsInitDataHash           string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
@@ -143,6 +147,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
+	fs.StringVar(&c.pcrs, "pcrs", "", "comma-separated Azure vTPM PCR pins <index>=<sha256-hex> mesh peers must satisfy. On az-snp/az-tdx the launch measurement covers the paravisor alone; the guest OS lands in the vTPM PCRs. Ignored for peers without a vTPM. Empty = no PCR pinning")
+	fs.StringVar(&c.initDataHash, "init-data-hash", "", "hex SHA-256 init-data digest mesh peers' evidence must bind (vTPM PCR[8] on az, HOST_DATA on snp, MRCONFIGID on tdx). Empty = no init-data pinning")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -151,6 +157,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.StringVar(&c.cdsRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents SNP evidence. Empty = launch-digest pinning only")
+	fs.StringVar(&c.cdsPCRs, "cds-pcrs", "", "comma-separated Azure vTPM PCR pins <index>=<sha256-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents non-vTPM evidence. Empty = no PCR pinning")
+	fs.StringVar(&c.cdsInitDataHash, "cds-init-data-hash", "", "hex SHA-256 init-data digest CDS's evidence must bind (vTPM PCR[8] on az). Empty = no init-data pinning")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
@@ -210,6 +218,14 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
+	meshPolicy.PCRs, err = ratls.ParsePCRPinsString(c.pcrs)
+	if err != nil {
+		return fmt.Errorf("--pcrs: %w", err)
+	}
+	meshPolicy.InitDataHash, err = ratls.ParseInitDataHash(c.initDataHash)
+	if err != nil {
+		return fmt.Errorf("--init-data-hash: %w", err)
+	}
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
@@ -253,6 +269,14 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	cdsPCRs, err := ratls.ParsePCRPinsString(c.cdsPCRs)
+	if err != nil {
+		return fmt.Errorf("--cds-pcrs: %w", err)
+	}
+	cdsInitDataHash, err := ratls.ParseInitDataHash(c.cdsInitDataHash)
+	if err != nil {
+		return fmt.Errorf("--cds-init-data-hash: %w", err)
 	}
 	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
@@ -435,6 +459,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
 			CDSRTMRs:          cdsRTMRs,
+			CDSPCRs:           cdsPCRs,
+			CDSInitDataHash:   cdsInitDataHash,
 		}
 		// A provider-construction failure (config validation) is logged and
 		// the mesh keeps serving self-signed certs; it never blocks startup.

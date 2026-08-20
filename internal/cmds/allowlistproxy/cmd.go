@@ -35,6 +35,8 @@ type config struct {
 	cdsURL            string
 	cdsMeasurements   []string
 	cdsRTMRs          []string
+	cdsPCRs           []string
+	cdsInitDataHash   string
 	attestationAPIURL string
 	requestTimeout    time.Duration
 	readHeaderTimeout time.Duration
@@ -59,6 +61,8 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
 	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
+	f.StringSliceVar(&cfg.cdsPCRs, "cds-pcrs", nil, "Azure vTPM PCR pin(s) <index>=<sha256-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents non-vTPM evidence (empty pins no registers)")
+	f.StringVar(&cfg.cdsInitDataHash, "cds-init-data-hash", "", "hex SHA-256 init-data digest CDS's evidence must bind (vTPM PCR[8] on az; empty pins nothing)")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -138,7 +142,15 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.attestationAPIURL)
+	pcrs, err := ratls.ParsePCRPins(cfg.cdsPCRs)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-pcrs: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(cfg.cdsInitDataHash)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-init-data-hash: %w", err)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, PCRs: pcrs, InitDataHash: initDataHash}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

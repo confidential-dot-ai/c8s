@@ -268,6 +268,8 @@ func classifyVerifyError(err error) error {
 		errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
 		errors.Is(err, attestationclient.ErrInvalidLaunchDigest),
 		errors.Is(err, attestationclient.ErrRTMRNotAllowed),
+		errors.Is(err, attestationclient.ErrPCRNotAllowed),
+		errors.Is(err, attestationclient.ErrInitDataMismatch),
 		errors.Is(err, attestationclient.ErrUnsupportedPlatform):
 		return errAttestVerdict
 	}

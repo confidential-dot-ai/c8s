@@ -76,6 +76,8 @@ type pullConfig struct {
 	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
 	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
 	CDSRTMRs          []string      `yaml:"cds_rtmrs"`           // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	CDSPCRs           []string      `yaml:"cds_pcrs"`            // Azure vTPM PCR pins <index>=<sha256-hex>; ignored for non-vTPM evidence
+	CDSInitDataHash   string        `yaml:"cds_init_data_hash"`  // hex SHA-256 init-data digest CDS's evidence must bind
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -241,6 +243,12 @@ func (c *config) Validate() error {
 		}
 		if _, err := ratls.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
+		}
+		if _, err := ratls.ParsePCRPins(c.Allowlist.Pull.CDSPCRs); err != nil {
+			return fmt.Errorf("allowlist.pull.cds_pcrs: %w", err)
+		}
+		if _, err := ratls.ParseInitDataHash(c.Allowlist.Pull.CDSInitDataHash); err != nil {
+			return fmt.Errorf("allowlist.pull.cds_init_data_hash: %w", err)
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {

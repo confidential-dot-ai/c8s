@@ -48,6 +48,8 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.caCommonName, "ca-common-name", issuer.DefaultCACommonName, "common name for the in-memory generated mesh CA")
 	flags.DurationVar(&cfg.caCertValidity, "ca-cert-validity", 8760*time.Hour, "validity period of the in-memory mesh CA certificate")
 	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest (empty = no pinning, UNSAFE)")
+	flags.StringSliceVar(&cfg.pcrs, "pcrs", nil, "Azure vTPM PCR pins <index>=<sha256-hex> required of az-snp/az-tdx callers on /attest and /attest-key (repeatable). On Azure CVMs the launch measurement covers the Microsoft paravisor alone; the guest OS lands in the vTPM PCRs. Non-vTPM evidence is unaffected. Empty = no PCR pinning")
+	flags.StringVar(&cfg.initDataHash, "init-data-hash", "", "hex SHA-256 init-data digest callers' evidence must bind on /attest and /attest-key (vTPM PCR[8] on az, HOST_DATA on snp, MRCONFIGID on tdx). Empty = no init-data pinning")
 	flags.StringSliceVar(&cfg.rtmrs, "rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> required of TDX callers on /attest and /attest-key (repeatable; RTMR[1] pins the guest kernel, RTMR[2] the command line carrying the dm-verity root hash). SNP evidence is unaffected. Empty = no RTMR pinning: on TDX the measurement allowlist then covers TDVF firmware only, UNSAFE")
 
 	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
@@ -78,6 +80,8 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA and allowlist via /handoff; requires --operator-keys so both replicas attest the same policy (empty = /handoff disabled)")
 	flags.StringVar(&cfg.handoffPeerURL, "handoff-peer-url", "", "https URL of a surviving CDS peer to adopt the mesh CA and allowlist from on startup via attested /handoff (empty = generate a fresh CA). When set, startup fails closed if the peer cannot be reached, denies handoff, or attests a different operator-key policy. Pins the peer with --handoff-measurements.")
 	flags.DurationVar(&cfg.handoffPeerTimeout, "handoff-peer-timeout", 2*time.Minute, "deadline for adopting the CA from --handoff-peer-url before failing startup")
+	flags.StringSliceVar(&cfg.handoffPCRs, "handoff-pcrs", nil, "Azure vTPM PCR pins <index>=<sha256-hex> the --handoff-peer-url peer's RA-TLS cert must satisfy on the adopt dial; repeatable. Peers without a vTPM are unaffected")
+	flags.StringVar(&cfg.handoffInitDataHash, "handoff-init-data-hash", "", "hex SHA-256 init-data digest the --handoff-peer-url peer's evidence must bind on the adopt dial")
 	flags.StringSliceVar(&cfg.handoffRTMRs, "handoff-rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> the --handoff-peer-url peer's RA-TLS cert must satisfy on the adopt dial; repeatable (the served /handoff endpoint pins its callers through --rtmrs on /attest-key). SNP peers are unaffected. Empty = launch-digest pinning only")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
@@ -133,6 +137,8 @@ type config struct {
 	caCertValidity      time.Duration
 	measurements        []string
 	rtmrs               []string
+	pcrs                []string
+	initDataHash        string
 	earIssuerName       string
 	expectedIssuer      string
 	jwtClockSkew        int64
@@ -159,6 +165,8 @@ type config struct {
 	operatorKeys        string
 	handoffMeasurements []string
 	handoffRTMRs        []string
+	handoffPCRs         []string
+	handoffInitDataHash string
 	handoffPeerURL      string
 	handoffPeerTimeout  time.Duration
 	rotationInterval    time.Duration

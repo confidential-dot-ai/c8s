@@ -40,6 +40,7 @@ import (
 type Verdict struct {
 	SignatureValid  bool
 	ReportDataMatch *bool
+	InitDataMatch   *bool
 	Claims          types.Claims
 }
 
@@ -193,6 +194,7 @@ func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {
 			Platform:        req.Platform,
 			SignatureValid:  verdict.SignatureValid,
 			ReportDataMatch: verdict.ReportDataMatch,
+			InitDataMatch:   verdict.InitDataMatch,
 			Claims:          verdict.Claims,
 		},
 	})

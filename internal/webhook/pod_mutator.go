@@ -209,6 +209,17 @@ type Config struct {
 	// registers.
 	CDSRTMRs []string
 
+	// CDSPCRs are the Azure vTPM PCR pins (<index>=<sha256-hex>) the
+	// injected sidecars additionally hold CDS to — the az analogue of
+	// CDSRTMRs (the launch measurement there covers the Microsoft paravisor
+	// alone). Ignored for non-vTPM evidence; empty pins no registers.
+	CDSPCRs []string
+
+	// CDSInitDataHash is the hex SHA-256 init-data digest the injected
+	// sidecars require CDS's evidence to bind (vTPM PCR[8] on az). Empty
+	// pins nothing.
+	CDSInitDataHash string
+
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
 
@@ -1100,6 +1111,12 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
 		args = append(args, "--cds-rtmrs="+joined)
 	}
+	if joined := strings.Join(cfg.CDSPCRs, ","); joined != "" {
+		args = append(args, "--cds-pcrs="+joined)
+	}
+	if cfg.CDSInitDataHash != "" {
+		args = append(args, "--cds-init-data-hash="+cfg.CDSInitDataHash)
+	}
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1525,6 +1542,12 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, r := range cfg.CDSRTMRs {
 		args = append(args, "--rtmrs="+r)
 	}
+	for _, p := range cfg.CDSPCRs {
+		args = append(args, "--pcrs="+p)
+	}
+	if cfg.CDSInitDataHash != "" {
+		args = append(args, "--init-data-hash="+cfg.CDSInitDataHash)
+	}
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1570,6 +1593,12 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	for _, r := range cfg.CDSRTMRs {
 		args = append(args, "--rtmrs="+r)
+	}
+	for _, p := range cfg.CDSPCRs {
+		args = append(args, "--pcrs="+p)
+	}
+	if cfg.CDSInitDataHash != "" {
+		args = append(args, "--init-data-hash="+cfg.CDSInitDataHash)
 	}
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.

@@ -32,6 +32,13 @@ type Handler struct {
 	// without these the EAR vouches for a guest image the host chose. Enforced
 	// only against TDX-shaped evidence; empty = no RTMR pinning.
 	RTMRs map[int][]byte
+	// PCRs pins Azure vTPM registers on /attest-key, the az analogue of
+	// RTMRs: the launch measurement covers the Microsoft paravisor alone.
+	// Enforced only against az-shaped evidence; empty = no PCR pinning.
+	PCRs map[int][]byte
+	// InitDataHash, when set, is carried on the verify request as
+	// expected_init_data_hash and the init_data_match verdict is required.
+	InitDataHash []byte
 }
 
 // HandleAuthenticate returns a handler that issues a single-use base64
@@ -107,6 +114,10 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
 	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	if h.InitDataHash != nil {
+		pinned := types.NewBase64Bytes(h.InitDataHash)
+		verifyReq.Params.ExpectedInitDataHash = &pinned
+	}
 	verifyResp, err := h.AttestationClient.VerifyEnforced(r.Context(), verifyReq)
 	switch {
 	case errors.Is(err, attestationclient.ErrSignatureInvalid):
@@ -116,6 +127,10 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		slog.Warn("attest-key: challenge did not match attestation evidence")
 		WriteError(w, http.StatusUnauthorized, "verification_failed", "challenge mismatch in attestation evidence")
+		return
+	case errors.Is(err, attestationclient.ErrInitDataMismatch):
+		slog.Warn("attest-key: init-data pin not satisfied")
+		WriteError(w, http.StatusForbidden, "verification_failed", "init-data mismatch in attestation evidence")
 		return
 	case err != nil:
 		h.handleAttestationError(w, err)
@@ -128,6 +143,11 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, http.StatusForbidden, "verification_failed", "TDX runtime measurement registers not allowed")
 			return
 		}
+	}
+	if err := attestationclient.EnforcePCRs(req.Evidence.Platform, verifyResp, h.PCRs); err != nil {
+		slog.Warn("attest-key: vTPM PCR pin not satisfied", "error", err)
+		WriteError(w, http.StatusForbidden, "verification_failed", "vTPM platform configuration registers not allowed")
+		return
 	}
 
 	earToken, err := h.EarIssuer.IssueAttestedKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, pub, req.OperatorKeysHash)
