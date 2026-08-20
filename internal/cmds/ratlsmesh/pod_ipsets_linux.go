@@ -36,6 +36,15 @@ func iptablesIPSetOverflows() int64 {
 	return ipsetOverflows.Load()
 }
 
+// ipsetSyncFailures counts individual set writes that failed. A set that keeps
+// its previous contents is enforcement running against a stale membership,
+// which no other counter distinguishes from a quiet cluster.
+var ipsetSyncFailures atomic.Int64
+
+func iptablesIPSetSyncFailures() int64 {
+	return ipsetSyncFailures.Load()
+}
+
 // Membership levels for the last reconcile, plus a count of reconciles that
 // shrank the cw set. Absence from these sets is what silently removes
 // interception and the cw guard, so it has to be visible: a gauge alone cannot
@@ -310,18 +319,30 @@ func reconcilePodIPSets(store cache.Store, nodeIPs []string, excludedSourceNames
 		ipsetOverflows.Add(1)
 		publishIptablesMetrics(logger)
 	}
+	// INVARIANT: the guard sets are written first, and one set's failure never
+	// costs another its write. Membership is what the fail-closed guard and the
+	// interception rules match on, so a set left at a previous cycle's contents
+	// stops covering pods created since — plaintext reaches a cw pod, and the
+	// only signal is a warning. Ordering puts the cw sets, which the guard
+	// keys on, ahead of the sets that only decide interception.
 	specs := []ipSetSpec{
+		{cwPodIPSetName4, "inet", sets.cwIPv4, "IPv4 cw pod ipset"},
+		{cwPodIPSetName6, "inet6", sets.cwIPv6, "IPv6 cw pod ipset"},
 		{podIPSetName4, "inet", sets.allIPv4, "IPv4 pod ipset"},
 		{podIPSetName6, "inet6", sets.allIPv6, "IPv6 pod ipset"},
 		{localPodIPSetName4, "inet", sets.localIPv4, "local IPv4 pod ipset"},
 		{localPodIPSetName6, "inet6", sets.localIPv6, "local IPv6 pod ipset"},
-		{cwPodIPSetName4, "inet", sets.cwIPv4, "IPv4 cw pod ipset"},
-		{cwPodIPSetName6, "inet6", sets.cwIPv6, "IPv6 cw pod ipset"},
 	}
+	var errs []error
 	for _, spec := range specs {
 		if err := replaceIPSetMembers(logger, spec.name, spec.family, spec.members, ipsetMaxElem); err != nil {
-			return nil, fmt.Errorf("sync %s: %w", spec.label, err)
+			ipsetSyncFailures.Add(1)
+			errs = append(errs, fmt.Errorf("sync %s: %w", spec.label, err))
 		}
+	}
+	if len(errs) > 0 {
+		publishIptablesMetrics(logger)
+		return nil, errors.Join(errs...)
 	}
 	recordIPSetMembership(logger, len(sets.allIPv4)+len(sets.allIPv6), len(sets.cwIPv4)+len(sets.cwIPv6))
 	logger.Debug("pod ipsets reconciled", "ipv4", len(sets.allIPv4), "ipv6", len(sets.allIPv6), "local_ipv4", len(sets.localIPv4), "local_ipv6", len(sets.localIPv6), "cw_ipv4", len(sets.cwIPv4), "cw_ipv6", len(sets.cwIPv6))
