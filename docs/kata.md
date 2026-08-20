@@ -640,6 +640,11 @@ linux node, removing:
   the c8s node image, where the whole stack is baked into the measured image
   (detected via the baked-only `nri-node-ip.service`) — there it is the
   image's to keep, not the release's to delete;
+- the ratls-mesh netfilter state: the `RATLS-MESH` chains and their
+  base-chain jumps in `iptables` and `ip6tables`, and the `RATLS-MESH-*`
+  ipsets. The mesh's own preStop deliberately keeps the fail-closed guard,
+  so this state survives every healthy uninstall, and a stale `OUTPUT`
+  redirect blackholes host-originated pod traffic for non-root users;
 - `/opt/kata` and the `containerd-shim-kata-*` symlinks, if the preStop
   cleanup was cut short — restarting containerd/RKE2 (detached, via
   systemd-run) only when a runtime drop-in was still registered;

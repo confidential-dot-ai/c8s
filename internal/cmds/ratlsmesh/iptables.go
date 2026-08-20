@@ -53,6 +53,9 @@ const ipSetTmpSuffix = "-TMP"
 // managedIPSetNames is the single source of truth for the ipsets this process
 // owns. reconcileLiveSetMaxElem and runIptablesCleanup derive their name lists
 // (and the -TMP swap variants) from it, so adding a set is one edit here.
+// These names (and the chain/jump names below) are a fixed contract with the
+// uninstall host sweep (cmd/c8s/kata-sweep.sh), pinned there by
+// TestKataSweepScriptMeshNetfilterNames.
 var managedIPSetNames = []string{
 	podIPSetName4, podIPSetName6,
 	localPodIPSetName4, localPodIPSetName6,

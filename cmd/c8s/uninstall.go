@@ -149,6 +149,10 @@ install's containerd-prep uses — and removes, idempotently:
     skipped entirely on c8s node images, where the whole stack is baked into
     the measured image (detected via nri-node-ip.service) and is the image's
     to keep, not the release's to delete
+  - the ratls-mesh netfilter state: the RATLS-MESH chains and their
+    base-chain jumps in iptables and ip6tables, and the RATLS-MESH-* ipsets
+    (the mesh's own preStop deliberately keeps the fail-closed guard, so this
+    survives every healthy uninstall too)
   - /opt/kata (the kata-static payload) and the containerd-shim-kata-*
     symlinks
   - kata-deploy's containerd runtime drop-in, restarting containerd/RKE2
@@ -726,6 +730,13 @@ func runKataSweep(ctx context.Context, namespace, release string, cfg kataUninst
 			return fmt.Errorf("waiting for %s pods to terminate: %w", component, err)
 		}
 	}
+	// Same for the mesh: it re-asserts its base-chain iptables jumps on a
+	// watchdog, so sweeping while a mesh pod still runs leaks the rules the
+	// sweep just deleted (helm --wait=false leaves pods terminating).
+	meshSelector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/name=ratls-mesh", release)
+	if err := waitPodsGone(ctx, namespace, meshSelector); err != nil {
+		return fmt.Errorf("waiting for ratls-mesh pods to terminate: %w", err)
+	}
 
 	// The sweep pods are privileged; re-assert the namespace's privileged
 	// pod-security labels (idempotent — the install already set them, but on
@@ -936,7 +947,7 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallNamespace, "namespace", "c8s-system", "namespace the release was installed into")
 	uninstallCmd.Flags().StringVar(&uninstallRelease, "release", "c8s", "Helm release name")
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
-	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep c8s host artifacts (NRI image-policy plugin, /opt/kata, containerd drop-in, kata-guest-base images, RKE2 prep template, node labels) off every node via a short-lived privileged DaemonSet. Runs for every release shape — leftovers may come from a previous install's shape, not this release's")
+	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep c8s host artifacts (NRI image-policy plugin, ratls-mesh netfilter state, /opt/kata, containerd drop-in, kata-guest-base images, RKE2 prep template, node labels) off every node via a short-lived privileged DaemonSet. Runs for every release shape — leftovers may come from a previous install's shape, not this release's")
 	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry c8s artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
 	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (the pre-delete hook cannot close a mapping a live pod holds, and fails naming it)")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")

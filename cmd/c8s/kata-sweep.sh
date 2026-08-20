@@ -23,9 +23,11 @@
 # fail-closed image admission until reimage — so the NRI and template steps
 # below are skipped when the baked-only nri-node-ip.service unit exists.
 #
-# Failure policy: containerd config removal, the runtime restart, and the
-# guest-dir deletions are fatal — the CLI keeps the failed DaemonSet so its
-# logs survive.
+# Fatal vs warn: containerd config removal, the runtime restart, and the
+# guest-dir steps fail the sweep (the CLI then keeps the DaemonSet so its
+# logs survive). Per-object netfilter failures warn and
+# continue; a host with no iptables at all fails the sweep at the end, after
+# every other step ran.
 #
 # Env (all required unless noted; set by `c8s uninstall` from the release's
 # computed values):
@@ -66,6 +68,7 @@ assert_safe_guest_dir() {
 CONTAINERD_DIR="/host${HOST_CONTAINERD_DIR}"
 NRI_CONTAINERD_DIR_HOST="/host${NRI_CONTAINERD_DIR}"
 config_changed=0
+sweep_failed=0
 
 baked_node=0
 if [ -f /host/etc/systemd/system/nri-node-ip.service ]; then
@@ -222,4 +225,72 @@ if [ "$baked_node" = "0" ]; then
   esac
 fi
 
+# 6. RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
+#    interception (--keep-guard keeps the fail-closed filter chains and their
+#    ipsets by design), and a mesh pod that never ran preStop leaves
+#    everything — including the OUTPUT redirect that sends host-originated
+#    pod traffic to a dead proxy port. Names are the mesh's fixed contract
+#    (internal/cmds/ratlsmesh/iptables.go; pinned by a Go test). Both address
+#    families; jumps before chains, chains before ipsets (a referenced object
+#    cannot be deleted). Prefers the nft frontend the mesh always wrote.
+# shellcheck disable=SC2016
+mesh_cleanup_script='
+set -u
+ipt4=""
+ipt6=""
+for b in iptables-nft iptables; do
+  if command -v "$b" >/dev/null 2>&1; then ipt4="$b"; break; fi
+done
+for b in ip6tables-nft ip6tables; do
+  if command -v "$b" >/dev/null 2>&1; then ipt6="$b"; break; fi
+done
+if [ -z "$ipt4" ] && [ -z "$ipt6" ]; then
+  echo "ERROR: no iptables/ip6tables on this host — cannot sweep RATLS-MESH netfilter state" >&2
+  exit 1
+fi
+
+clean_family() {
+  B="$1"
+  while "$B" -t nat -D OUTPUT -j RATLS-MESH 2>/dev/null; do :; done
+  while "$B" -t nat -D PREROUTING -j RATLS-MESH-PREROUTING 2>/dev/null; do :; done
+  while "$B" -t filter -D FORWARD -j RATLS-MESH-CW 2>/dev/null; do :; done
+  while "$B" -t filter -D FORWARD -j RATLS-MESH-CW-EGRESS 2>/dev/null; do :; done
+  for spec in nat:RATLS-MESH nat:RATLS-MESH-PREROUTING filter:RATLS-MESH-CW filter:RATLS-MESH-CW-EGRESS filter:RATLS-MESH-GUEST-IN filter:RATLS-MESH-GUEST-OUT
+  do
+    t=${spec%%:*}
+    c=${spec#*:}
+    if "$B" -t "$t" -L "$c" -n >/dev/null 2>&1; then
+      if "$B" -t "$t" -F "$c" && "$B" -t "$t" -X "$c"; then
+        echo "$B $t chain removed: $c"
+      else
+        echo "warning: could not remove $B $t chain $c" >&2
+      fi
+    fi
+  done
+}
+[ -z "$ipt4" ] || clean_family "$ipt4"
+[ -z "$ipt6" ] || clean_family "$ipt6"
+
+if command -v ipset >/dev/null 2>&1; then
+  for s in RATLS-MESH-PODS RATLS-MESH-PODS6 RATLS-MESH-LOCAL-PODS RATLS-MESH-LOCAL-PODS6 RATLS-MESH-CW-PODS RATLS-MESH-CW-PODS6
+  do
+    for n in "$s" "$s-TMP"; do
+      ipset destroy "$n" 2>/dev/null && echo "ipset removed: $n" || true
+    done
+  done
+else
+  echo "warning: no ipset on this host — any RATLS-MESH-* ipsets are left in place" >&2
+fi
+exit 0
+'
+
+if ! nsenter -t 1 -m -u -i -n -p -- sh -c "$mesh_cleanup_script"; then
+  echo "ERROR: RATLS-MESH netfilter sweep failed — stale chains redirect host-originated pod traffic to a dead port" >&2
+  sweep_failed=1
+fi
+
+if [ "$sweep_failed" = "1" ]; then
+  echo "==> c8s host sweep finished WITH FAILURES (see above)" >&2
+  exit 1
+fi
 echo "==> c8s host sweep finished"

@@ -657,3 +657,42 @@ func TestForcedVolumePodsWarning(t *testing.T) {
 	}
 }
 
+// TestKataSweepScriptMeshNetfilterNames pins the netfilter names the sweep
+// script removes to the mesh's fixed contract (internal/cmds/ratlsmesh:
+// jumpRules, managedChains, managedIPSetNames + the -TMP swap variants). The
+// two cleanup paths must not drift: a name added or renamed on the mesh side
+// must be added here too.
+func TestKataSweepScriptMeshNetfilterNames(t *testing.T) {
+	names := []string{
+		// Base-chain jumps (as "parent -j chain" in -D form).
+		"-D OUTPUT -j RATLS-MESH",
+		"-D PREROUTING -j RATLS-MESH-PREROUTING",
+		"-D FORWARD -j RATLS-MESH-CW",
+		"-D FORWARD -j RATLS-MESH-CW-EGRESS",
+		// Chains (as "table:chain" sweep specs).
+		"nat:RATLS-MESH",
+		"nat:RATLS-MESH-PREROUTING",
+		"filter:RATLS-MESH-CW",
+		"filter:RATLS-MESH-CW-EGRESS",
+		"filter:RATLS-MESH-GUEST-IN",
+		"filter:RATLS-MESH-GUEST-OUT",
+		// ipsets.
+		"RATLS-MESH-PODS",
+		"RATLS-MESH-PODS6",
+		"RATLS-MESH-LOCAL-PODS",
+		"RATLS-MESH-LOCAL-PODS6",
+		"RATLS-MESH-CW-PODS",
+		"RATLS-MESH-CW-PODS6",
+	}
+	for _, name := range names {
+		// Delimit the match so a suffixed sibling (RATLS-MESH-PODS6) cannot
+		// satisfy a missing shorter name (RATLS-MESH-PODS).
+		if !strings.Contains(kataSweepScript, name+" ") && !strings.Contains(kataSweepScript, name+"\n") {
+			t.Errorf("kata-sweep.sh does not sweep %q (mesh netfilter contract)", name)
+		}
+	}
+	// The -TMP swap variants are destroyed alongside each ipset.
+	if !strings.Contains(kataSweepScript, `"$s-TMP"`) {
+		t.Error("kata-sweep.sh does not destroy the -TMP ipset swap variants")
+	}
+}
