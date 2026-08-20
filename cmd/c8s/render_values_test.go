@@ -523,3 +523,75 @@ func TestCoerceTypedVsString(t *testing.T) {
 		}
 	}
 }
+
+// The guest axis is pinned to the component tag under --cvm-mode=pod, and a -f
+// file that names kata.guestImage.tag owns it instead. An unreadable -f must
+// abort the render rather than fall through to the pinning branch, which would
+// overwrite a tag the operator did set.
+func TestBuildValueArgsGuestImageTagPinning(t *testing.T) {
+	prev := installResolveDigests
+	installResolveDigests = false
+	defer func() { installResolveDigests = prev }()
+	prevValues := installValues
+	defer func() { installValues = prevValues }()
+
+	dir := t.TempDir()
+	pinned := filepath.Join(dir, "pinned.yaml")
+	if err := os.WriteFile(pinned, []byte("kata:\n  guestImage:\n    tag: v9.9.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newCmd := func(mode string) *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().String(flagCvmMode, mode, "")
+		return cmd
+	}
+
+	t.Run("pod mode pins the guest to the component tag", func(t *testing.T) {
+		setCvmModeForTest(t, "pod")
+		installValues = nil
+		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !slices.Contains(args, "kata.guestImage.tag=v0.1.10") {
+			t.Fatalf("pod mode should pin the guest tag to the component tag, got %v", args)
+		}
+	})
+
+	t.Run("a -f that sets the tag owns the axis", func(t *testing.T) {
+		setCvmModeForTest(t, "pod")
+		installValues = []string{pinned}
+		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if slices.ContainsFunc(args, func(a string) bool {
+			return strings.HasPrefix(a, "kata.guestImage.tag=")
+		}) {
+			t.Fatalf("a -f owning kata.guestImage.tag must not be overwritten, got %v", args)
+		}
+	})
+
+	t.Run("node mode emits no guest tag", func(t *testing.T) {
+		setCvmModeForTest(t, "node")
+		installValues = nil
+		args, err := buildValueArgs(context.Background(), newCmd("node"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if slices.ContainsFunc(args, func(a string) bool {
+			return strings.HasPrefix(a, "kata.guestImage.tag=")
+		}) {
+			t.Fatalf("non-pod mode has no guest axis, got %v", args)
+		}
+	})
+
+	t.Run("an unreadable -f aborts the render", func(t *testing.T) {
+		setCvmModeForTest(t, "pod")
+		installValues = []string{filepath.Join(dir, "absent.yaml")}
+		if _, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs); err == nil {
+			t.Fatal("unreadable values file: want error, got nil")
+		}
+	})
+}

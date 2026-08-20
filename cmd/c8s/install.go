@@ -884,6 +884,23 @@ func valuesFilesSetDistro(files []string) (bool, error) {
 	return false, nil
 }
 
+// valuesFilesSetGuestImageTag reports whether any -f values file names the
+// kata-guest-base tag itself. That file then owns the guest axis, and the
+// install leaves it alone — the same "a -f that actually sets the key owns it"
+// rule valuesFilesSetDistro applies to the containerd layout.
+func valuesFilesSetGuestImageTag(files []string) (bool, error) {
+	for _, f := range files {
+		tree, err := decodeValuesFile(f)
+		if err != nil {
+			return false, err
+		}
+		if v, err := stringAtPath(tree, "kata.guestImage.tag"); err == nil && v != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // valuesFilesSetMeasurements reports whether any -f values file pins a CDS
 // launch measurement. cds.measurements is the one the injected get-cert reads,
 // so it alone decides whether a pod-mode install is pinned; ratlsMesh.measurements
@@ -1722,7 +1739,18 @@ func validateDebugFlag(cvmMode string, debug bool) error {
 // rejects --debug outside --cvm-mode=pod before args are built; everything here still
 // keys on kata so a call-order change cannot emit a debug value for a non-kata
 // install.
-func appendKataInstallArgs(helmArgs []string, cvmMode string, debug bool) []string {
+//
+// guestTag pins the kata-guest-base artifact to the same tag the component
+// images resolve at.
+//
+// INVARIANT: the guest's baked bootstrap allowlist admits the component digests
+// this install resolves. The seed is fixed when the guest is built, so it names
+// the components of exactly one commit; letting the two axes resolve from
+// different tags admits a guest whose seed predates the components, and
+// policy-monitor then SIGKILLs the injected get-cert — the install never
+// converges and says only "Broken pipe". Empty leaves the chart default, which
+// is what a -f file owning kata.guestImage.tag wants.
+func appendKataInstallArgs(helmArgs []string, cvmMode string, debug bool, guestTag string) []string {
 	if !cvmModeIsPod(cvmMode) {
 		return helmArgs
 	}
@@ -1734,6 +1762,11 @@ func appendKataInstallArgs(helmArgs []string, cvmMode string, debug bool) []stri
 	)
 	if debug {
 		helmArgs = append(helmArgs, "--set", "kata.guestImage.debug=true")
+	}
+	if guestTag != "" {
+		// --set-string for the same reason component tags use it: an all-digit
+		// or zero-padded tag would otherwise be int-coerced.
+		helmArgs = append(helmArgs, "--set-string", "kata.guestImage.tag="+guestTag)
 	}
 	return helmArgs
 }
