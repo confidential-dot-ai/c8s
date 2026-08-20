@@ -41,7 +41,6 @@ jobs:
     env:
       NS: confai-images
       REFS_CM: base-image-refs
-      IMAGE: ghcr.io/confidential-dot-ai/node-guest-base:rke2-snp-dev
       VM: cvm-meas-${{ github.run_id }}-${{ github.run_attempt }}
       CORES: ${{ inputs.cores }}
       MEMORY: 8Gi
@@ -85,8 +84,17 @@ jobs:
           [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc"; exit 1; }
           PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
           [ -n "$PAT" ] || { echo "::error::$REFS_CM has no igvmFilePattern, so it cannot serve a per-count IGVM"; exit 1; }
-          echo "ROOTPVC=$ROOTPVC" >> "$GITHUB_ENV"
-          echo "IGVMFILE=${PAT//\{cores\}/$CORES}" >> "$GITHUB_ENV"
+          # The digest to compare against must come from the image this VM
+          # boots, not a hardcoded ref: a measurement from one image tells you
+          # nothing about another image's published digest.
+          IMG=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.image}')
+          [ -n "$IMG" ] || { echo "::error::$REFS_CM has no 'image' key, so the published digest cannot be located"; exit 1; }
+          {
+            echo "ROOTPVC=$ROOTPVC"
+            echo "IGVMFILE=${PAT//\{cores\}/$CORES}"
+            echo "IMAGE=$IMG"
+          } >> "$GITHUB_ENV"
+          echo "booting $IMG (per $REFS_CM)"
 
       - name: boot the CVM
         run: |
@@ -207,8 +215,10 @@ jobs:
         run: |
           set -euo pipefail
           M='${{ steps.capture.outputs.measurement }}'
+          repo="${IMAGE%%@*}"; repo="${repo%%:*}"
           d=$(crane manifest "$IMAGE" | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest')
-          PUB=$(crane blob "${IMAGE%%:*}@${d}" | jq -r --argjson c "$CORES" '.snp_variants[]|select(.smp==$c)|.measurement.snp_launch_digest')
+          [ -n "$d" ] || { echo "::error::$IMAGE publishes no manifest.json layer, so there is no digest to compare against"; exit 1; }
+          PUB=$(crane blob "${repo}@${d}" | jq -r --argjson c "$CORES" '.snp_variants[]|select(.smp==$c)|.measurement.snp_launch_digest')
           {
             echo "### SNP launch measurement — smp${CORES}"
             echo
@@ -216,6 +226,7 @@ jobs:
             echo "|---|---|"
             echo "| hardware | \`${M}\` |"
             echo "| manifest | \`${PUB:-(no variant for smp$CORES)}\` |"
+            echo "| image | \`${IMAGE}\` |"
             echo
             if [ "$M" = "$PUB" ]; then
               echo "**MATCH** — the published digest for smp${CORES} is what the hardware produces."
