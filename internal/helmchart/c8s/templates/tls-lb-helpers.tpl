@@ -565,3 +565,19 @@ list.
   "extraMounts" (join "\n" $mounts)
 ) -}}
 {{- end }}
+
+{{/*
+tls-lb.meshWrappedUpstream — "true" when the address is an operator-managed
+headless Service (c8s-<id>.<ns>.svc.cluster.local:<port>, the exact
+webhook.WorkloadServiceFQDN form). c8s-<id> is a DNS-1035 label, <ns> a
+DNS-1123 label. That shape is the one upstream whose backing pod IPs churn, so
+it is dialed through a variable and re-resolved per request; every other
+address gets a static upstream block resolved once at startup. validations.yaml
+(kind=workload_https_upstream, kind=tlslb_unsecured_upstream) branches on the
+same predicate. Call with the address string.
+*/}}
+{{- define "tls-lb.meshWrappedUpstream" -}}
+{{- if regexMatch "^c8s-[a-z]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.svc\\.cluster\\.local:[0-9]+$" . -}}
+true
+{{- end -}}
+{{- end -}}

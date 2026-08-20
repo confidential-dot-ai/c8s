@@ -2276,7 +2276,8 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 	defaultRoute.assertDirective(t, "proxy_ssl_verify", "on")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/cert.pem")
-	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
+	defaultRoute.assertDirective(t, "proxy_pass", "https://catch_all")
+	cfg.upstream(t, "catch_all").assertServer(t, "my-backend.other-ns.svc:8443")
 
 	spec := renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec
 	if _, ok := podVolume(spec, "tls-certs"); !ok {
@@ -2766,6 +2767,29 @@ func TestChartTLSLBMeshWrappedUpstreamIsWorkloadDirect(t *testing.T) {
 	cfg.assertNoDirectivePrefix(t, "proxy_ssl_")
 }
 
+// A manual upstream is dialed through a static upstream block, so nginx
+// resolves it once at startup instead of per request. Per-request resolution
+// asks cluster DNS -- plaintext UDP the mesh does not intercept -- where to
+// send every request, so a forged answer retargets the hop mid-session; a
+// loose tls.serverName or a wildcard SAN pattern leaves nothing to catch it.
+// Only the mesh-wrapped headless shape keeps the variable dial, because its
+// pod IPs churn; the resolver is rendered for that shape alone.
+func TestChartTLSLBManualUpstreamResolvesAtStartup(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
+		"--set", "tlsLb.upstream.protocol=https",
+		"--set", "tlsLb.upstream.tls.verify=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.upstream(t, "catch_all").assertServer(t, "my-backend.other-ns.svc:8443")
+	route := cfg.location(t, "prefix", "/")
+	route.assertDirective(t, "proxy_pass", "https://catch_all")
+	route.assertNoDirective(t, "set")
+	cfg.http.assertNoDirective(t, "resolver")
+}
+
 // nginx exits at startup on a resolver name that does not resolve, and RKE2
 // names its CoreDNS Service rke2-coredns-rke2-coredns — the kube-dns default
 // crash-loops tls-lb on every RKE2 cluster. The resolver therefore derives
@@ -3120,8 +3144,8 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	}
 
 	defaultRoute := cfg.location(t, "prefix", "/")
-	defaultRoute.assertDirective(t, "set", "$backend_addr", "vllm:8000")
-	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
+	defaultRoute.assertDirective(t, "proxy_pass", "https://catch_all")
+	cfg.upstream(t, "catch_all").assertServer(t, "vllm:8000")
 	cfg.upstream(t, "route_0").assertServer(t, "cds.c8s-system.svc:8080")
 	cfg.upstream(t, "route_1").assertServer(t, "tenant-router.c8s-system.svc:8080")
 }
@@ -5736,18 +5760,16 @@ func Example_tlsLBConfig() {
 	//
 	//     sendfile on;
 	//     keepalive_timeout 65;
-	//
-	//     # The catch-all upstream is dialed via a variable (see location /), so
-	//     # nginx re-resolves it here at request time per record TTL. A static
-	//     # upstream block would pin the pod IPs a headless-Service name (an
-	//     # adopted workload) resolved to at startup and 502 after pod churn.
-	//     resolver kube-dns.kube-system.svc.cluster.local;
 	//     upstream route_0 {
 	//         server c8s-cds.c8s-system.svc:8443;
 	//     }
 	//     upstream route_1 {
 	//         server tenant-router.c8s-system.svc:8080;
 	//     }
+	//     upstream catch_all {
+	//         server vllm:8000;
+	//     }
+	//
 	//     server {
 	//         listen 8443 ssl;
 	//         server_name c8s-tls-lb.c8s-system.svc;
@@ -5801,8 +5823,7 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
 	//             proxy_ssl_trusted_certificate /tls/cert.pem;
-	//             set $backend_addr vllm:8000;
-	//             proxy_pass https://$backend_addr;
+	//             proxy_pass https://catch_all;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;
 	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -6805,17 +6826,27 @@ func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
 	}
 }
 
-// tlsLbUpstreamAddress returns the address from the catch-all location's
-// `set $backend_addr <addr>;` directive in the rendered tls-lb nginx config.
+// tlsLbUpstreamAddress returns the catch-all upstream address from the
+// rendered tls-lb nginx config: the `upstream catch_all` block's server for a
+// static dial, or the `set $backend_addr <addr>;` directive for the
+// mesh-wrapped shape that is re-resolved per request.
 func tlsLbUpstreamAddress(t *testing.T, manifest string) string {
 	t.Helper()
-	sets := renderedTLSLBNginxConfig(t, manifest).location(t, "prefix", "/").directives["set"]
+	cfg := renderedTLSLBNginxConfig(t, manifest)
+	if block, ok := cfg.upstreams["catch_all"]; ok {
+		servers := block.directives["server"]
+		if len(servers) != 1 || len(servers[0]) != 1 {
+			t.Fatalf("upstream catch_all must carry exactly one server; got %v", servers)
+		}
+		return servers[0][0]
+	}
+	sets := cfg.location(t, "prefix", "/").directives["set"]
 	for _, args := range sets {
 		if len(args) == 2 && args[0] == "$backend_addr" {
 			return args[1]
 		}
 	}
-	t.Fatalf("location / has no `set $backend_addr <addr>;` directive; got %v", sets)
+	t.Fatalf("catch-all has neither an `upstream catch_all` block nor a `set $backend_addr <addr>;` directive; got %v", sets)
 	return ""
 }
 

@@ -6,6 +6,7 @@
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
+{{- $upstreamMeshWrapped := eq (include "tls-lb.meshWrappedUpstream" $upstreamAddress) "true" -}}
 {{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
 {{- $allowlistProxyPort := 0 -}}
 {{- $allowlistWriteRate := 0 -}}
@@ -111,11 +112,17 @@ data:
         limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate={{ $allowlistReadRate }}r/s;
 {{- end }}
 
-        # The catch-all upstream is dialed via a variable (see location /), so
-        # nginx re-resolves it here at request time per record TTL. A static
-        # upstream block would pin the pod IPs a headless-Service name (an
-        # adopted workload) resolved to at startup and 502 after pod churn.
+        {{- if $upstreamMeshWrapped }}
+        # A mesh-wrapped catch-all is dialed via a variable (see location /), so
+        # nginx re-resolves it here at request time per record TTL: a static
+        # upstream block would pin the pod IPs the adopted workload's headless
+        # Service resolved to at startup and 502 after pod churn. Nothing
+        # authenticates the answer -- the app-layer hop is plaintext and the
+        # mesh binds the pod IP it is handed, not the name -- so an adversary
+        # who can forge cluster DNS retargets this hop. Every other upstream
+        # gets a static block below and no resolver is rendered at all.
         resolver {{ include "c8s.tlsLb.resolver" . }};
+        {{- end }}
 
         {{- range $i, $route := .Values.tlsLb.routes }}
         {{- if hasKey $route "upstream" }}
@@ -131,6 +138,12 @@ data:
         }
 
         {{- end }}
+        {{- if and $upstreamAddress (not $upstreamMeshWrapped) }}
+        upstream catch_all {
+            server {{ $upstreamAddress }};
+        }
+        {{- end }}
+
         server {
             listen {{ .Values.tlsLb.nginx.httpsPort }} ssl;
             server_name {{ $serverNames }};
@@ -294,8 +307,12 @@ data:
                 {{- if eq .Values.tlsLb.upstream.protocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}
+                {{- if $upstreamMeshWrapped }}
                 set $backend_addr {{ $upstreamAddress }};
                 proxy_pass {{ .Values.tlsLb.upstream.protocol }}://$backend_addr;
+                {{- else }}
+                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://catch_all;
+                {{- end }}
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
