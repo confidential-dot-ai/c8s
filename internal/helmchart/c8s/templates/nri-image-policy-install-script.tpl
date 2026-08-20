@@ -146,7 +146,9 @@ fi
 
 # NRI does not respawn pre-registered plugins on exit. Binary, config, or
 # containerd registration changes therefore require a restart. Shims survive.
+restarted_containerd=0
 if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_changed" = "1" ]; then
+  restarted_containerd=1
   echo "restarting containerd (detached via systemd-run): $RESTART_COMMAND"
   # The restart tears down this pod's own containerd shim. Running it in this
   # pod's process tree (nsenter ... sh -c) means it is killed together with the
@@ -162,20 +164,36 @@ if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_
     sh -c "$RESTART_COMMAND"
 fi
 
-i=0
-# Sized against the worker plugin's initial CDS pull (allowlistApi* consts in
-# internal/cmds/nri-image-policy/main.go): 4 backoff sleeps (2+4+8+16s) plus
-# per-attempt fetch timeouts before it goes Ready on the floor.
-until curl --unix-socket "/host{{ include "nri-image-policy.hostHealthSocket" $root }}" --silent --fail \
-    --max-time 2 http://localhost/healthz >/dev/null 2>&1; do
-  i=$((i + 1))
-  if [ "$i" -gt 120 ]; then
-    echo "ERROR: plugin not healthy after 120s" >&2
+# The plugin goes ready once its initial CDS pull settles: 4 backoff sleeps
+# (2+4+8+16s) plus per-attempt fetch timeouts (allowlistApi* consts in
+# internal/cmds/nri-image-policy/main.go). A containerd restart adds the
+# runtime's own recovery, and on a sole control-plane node that takes the
+# apiserver down with it, so the budget is wider when we restarted it.
+budget=120
+if [ "$restarted_containerd" = "1" ]; then
+  budget=300
+fi
+# A wall-clock deadline, so the number in the failure message is the time that
+# actually passed: each miss costs the curl timeout as well as the sleep.
+deadline=$(($(date +%s) + budget))
+
+health_socket="/host{{ include "nri-image-policy.hostHealthSocket" $root }}"
+until health=$(curl --unix-socket "$health_socket" --silent --fail --max-time 2 \
+    --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1); do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    # Re-read without --fail so the body and status come back rather than
+    # being discarded: the plugin says why it is not ready, and curl exit 7
+    # (nothing listening on the socket) is a different fault entirely.
+    rc=0
+    last=$(curl --unix-socket "$health_socket" --silent --max-time 2 \
+      --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1) || rc=$?
+    echo "ERROR: plugin not healthy after ${budget}s; last /healthz: ${last:-<no response>} (curl exit $rc)" >&2
+    echo "       the plugin runs under containerd, so its log is the journal of the unit restarted by: $RESTART_COMMAND" >&2
     exit 1
   fi
   sleep 1
 done
-echo "==> nri-image-policy installer finished; plugin healthy"
+echo "==> nri-image-policy installer finished; plugin healthy: $health"
 {{- end }}
 
 {{/*

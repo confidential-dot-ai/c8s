@@ -185,7 +185,13 @@ func Run(args []string) error {
 		})
 		if err != nil {
 			switch {
-			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			// INVARIANT: shutdown is read off the parent context, never off
+			// the error chain. pullInitial gives every attempt its own
+			// deadline, so a merely slow CDS returns an error wrapping
+			// context.DeadlineExceeded that is indistinguishable from a
+			// SIGTERM by inspection — and taking that branch parks the
+			// process on pluginErrCh forever, never ready and never pulling.
+			case ctx.Err() != nil:
 				logger.Info("shutdown before plugin became ready")
 				if perr := <-pluginErrCh; perr != nil {
 					logger.Error("plugin error during shutdown", "error", perr)
