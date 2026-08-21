@@ -629,13 +629,12 @@ func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
 	}
 }
 
-// A refused report is terminal and reaches the operator at Error: the wait
-// stops at the first refusal rather than spending the budget on retries that
-// reproduce it.
+// A refusal that keeps reproducing is terminal and reaches the operator at
+// Error. The budget is two orders of magnitude past the retries so that the
+// bound, not the deadline, is what the call count measures.
 func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
-	// A budget that would dominate the test if the refusal were retried.
-	shortInitDataWait(t, time.Minute, 10*time.Second)
+	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
 
 	v := newScriptedVerifier(t, http.StatusUnprocessableEntity, -1)
 	cfg := &Config{AttestationServiceURL: v.url}
@@ -646,14 +645,49 @@ func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
 	if cfg.CDSMeasurements != "" {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
 	}
-	if n := v.verifyCalls(); n != 1 {
-		t.Fatalf("verify attempts = %d, want 1: a refusal must not be retried", n)
+	if n, want := v.verifyCalls(), initDataVerdictRetries+1; n != want {
+		t.Fatalf("verify attempts = %d, want %d: the refusal must be bounded", n, want)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("refusal took %s; it must not consume the wait budget", elapsed)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("refusal took %s; the bound must stop it, not the wait budget", elapsed)
 	}
 	if got := rec.levelOf(t, "refused"); got != slog.LevelError {
 		t.Fatalf("refusal logged at %v, want Error", got)
+	}
+}
+
+// The bug this fixes: policy-monitor self-reports at READY=1, before kata-agent
+// has installed the pod network, so the verifier's VCEK fetch has no resolver
+// and it answers about itself rather than about the evidence. Taking that as a
+// verdict left the guest frozen on its baked seed for the life of the pod, so
+// no operator allowlist entry ever reached it.
+func TestAwaitInitDataMeasurementsOutlastsARefusalTheNetworkCaused(t *testing.T) {
+	raw := testDocument(t, "aabb,ccdd")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
+
+	// Refused while the route is missing, answered once it appears.
+	v := newScriptedVerifier(t, http.StatusUnprocessableEntity, 2)
+	v.attester.SetVerdict(hostDataVerdict(digest[:]))
+
+	cfg := &Config{AttestationServiceURL: v.url}
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "aabb,ccdd" {
+		t.Fatalf("CDSMeasurements = %q, want the wait to outlast a refusal the missing network caused", cfg.CDSMeasurements)
+	}
+	if n := v.verifyCalls(); n != 3 {
+		t.Fatalf("verify calls = %d, want 3: two refusals then the answer", n)
+	}
+}
+
+// A refusal is retried, so it delays the refresh posture a would-be deny waits
+// on (monitor.go, refreshState.awaitSettled). The retries have to fit inside
+// that wait or the deny stops seeing a settled answer.
+func TestVerdictRetriesFitTheDenyWait(t *testing.T) {
+	if spent := initDataVerdictRetries * initDataWaitInterval; spent >= refreshSettleBudget {
+		t.Fatalf("verdict retries spend %s, which is not inside refreshSettleBudget %s", spent, refreshSettleBudget)
 	}
 }
 
