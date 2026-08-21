@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/coverage-gate.sh run [profile]        run tests, write coverage profile
-#   scripts/coverage-gate.sh total <profile>      print total coverage (e.g. "67.9")
+#   scripts/coverage-gate.sh total <profile>      print total coverage (e.g. "67.94")
 #
 # The profile is produced with -coverpkg=./... so packages without their own
 # test files are still measured (a brand-new untested package counts as 0%,
@@ -28,7 +28,9 @@ percent() { # per-package coverage table from a coverprofile: "<pct> <stmts> <pk
         T+=stmts[k]; if (covered[k]) C+=stmts[k];
       }
       for (p in tot) printf "%.1f %d %s\n", 100*cov[p]/tot[p], tot[p], p;
-      printf "%.1f %d TOTAL\n", (T ? 100*C/T : 0), T;
+      # Two decimals: the gate compares this against a tolerance, and at one
+      # decimal the smallest representable drop already exceeded it.
+      printf "%.2f %d TOTAL\n", (T ? 100*C/T : 0), T;
     }' "$1"
 }
 
