@@ -215,12 +215,9 @@ await_metric_above "$excluded_node_ip" "$drops" "$base_excluded_drops" \
 
 # --- egress guard: the DNS carve-out is scoped where it can match -----------
 
-# The guard chain hangs off FORWARD, downstream of kube-proxy's Service DNAT,
-# so a carve-out written against the packet's destination reads a CoreDNS pod
-# IP and never fires — every cw pod then loses DNS while still reaching
-# Running, which is why this is asserted against the chain the node actually
-# runs rather than against the pod's health. Read on the workload's node, in
-# the sidecar that programs it.
+# A cw pod that loses DNS still reaches Running, so this is asserted against
+# the chain the node actually runs rather than against the pod's health. Read
+# on the workload's node, in the sidecar that programs it.
 mesh_pod=$(kubectl get pods -n "$mesh_ns" -l app=c8s-ratls-mesh \
   --field-selector="spec.nodeName=$cw_node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -n "$mesh_pod" ] || fail "no ratls-mesh pod on $cw_node in namespace $mesh_ns (set MESH_NS)"
@@ -233,19 +230,15 @@ dns_rows=$(awk '/udp/ && /dpt:53/' <<<"$egress_chain")
 [ -n "$dns_rows" ] || fail "RATLS-MESH-CW-EGRESS carries no UDP/53 carve-out on $cw_node; cw pods cannot resolve:
 $egress_chain"
 
-# The chain runs downstream of kube-proxy's Service DNAT, so a carve-out
-# written only against the packet's destination cannot fire; the row that
-# names the connection's original destination is the one that does.
-grep -q 'ctorigdst' <<<"$dns_rows" || fail "no UDP/53 carve-out is scoped to the connection's original destination, so kube-proxy's DNAT puts the carve-out out of reach and every cw DNS query hits the drop below it:
-$dns_rows"
-
-# The address has to be the resolver this cluster's pods actually use;
-# scoping to any other is indistinguishable from having no carve-out.
-cluster_dns=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-if [ -n "$cluster_dns" ]; then
-  grep -q "$cluster_dns" <<<"$dns_rows" || fail "the UDP/53 carve-out names no address matching this cluster's DNS ClusterIP $cluster_dns; set ratlsMesh.clusterDNSIP:
-$dns_rows"
-fi
+# The carve-out names no destination, so it survives kube-proxy's Service DNAT
+# and holds whatever address this cluster's resolver has. A row naming one is
+# the regression this replaced: where the resolver sits elsewhere it puts the
+# carve-out out of reach and every cw DNS query hits the drop below.
+# In `iptables -L -n -v -x` the destination column is field 9; unscoped reads
+# 0.0.0.0/0. A conntrack scope shows as an extra match instead of a column.
+scoped=$(awk '$9 != "0.0.0.0/0" || /ctorigdst/' <<<"$dns_rows")
+[ -z "$scoped" ] || fail "the UDP/53 carve-out is destination-scoped; it must name no address:
+$scoped"
 
 # A RETURN below the drop is a RETURN that never runs.
 drop_line=$(awk '/DROP/ && /!tcp/ {print NR; exit}' <<<"$egress_chain")

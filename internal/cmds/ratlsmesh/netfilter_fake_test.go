@@ -670,11 +670,11 @@ func TestCleanupPodIPSetsForNamesWarnsOnDestroyFailure(t *testing.T) {
 // carve-out for the cluster DNS server.
 func TestSetupInGuestIptablesInstallsFailClosed(t *testing.T) {
 	nf := installFakeNetfilter(t)
-	if err := setupInGuestIptables(slog.New(slog.DiscardHandler), "10.0.0.5", nil, clusterDNSClusterIP); err != nil {
+	if err := setupInGuestIptables(slog.New(slog.DiscardHandler), "10.0.0.5", nil); err != nil {
 		t.Fatalf("setupInGuestIptables: %v", err)
 	}
-	if len(callsContaining(nf.calls(), "iptables ", clusterDNSClusterIP)) == 0 {
-		t.Errorf("no rule references the cluster DNS IP %s", clusterDNSClusterIP)
+	if len(callsContaining(nf.calls(), "iptables ", "--dport 53")) == 0 {
+		t.Error("no in-guest rule carves out UDP/53; the guest cannot resolve")
 	}
 }
 

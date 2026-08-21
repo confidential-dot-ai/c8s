@@ -174,13 +174,7 @@ log "Writing the allowlist floor"
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -q "docker.io/library/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
-# The cw egress guard scopes its DNS carve-out to this address, and the chart
-# default is the c8s node image's, which no other distribution shares — kind's
-# is 10.96.0.10. Read it off the cluster, as an operator must.
-CLUSTER_DNS_IP="$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')"
-[ -n "$CLUSTER_DNS_IP" ] || fail "could not read the kube-dns ClusterIP"
-
-python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" "$CLUSTER_DNS_IP" <<'PYEOF'
+python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
 import sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
@@ -191,7 +185,6 @@ floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
         "nriImagePolicy": {"bootstrapAllowlist": {"digests": floor}},
-        "ratlsMesh": {"clusterDNSIP": sys.argv[4]},
     }, f)
 print(f"floor: {len(floor)} digests")
 PYEOF

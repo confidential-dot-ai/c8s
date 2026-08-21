@@ -48,7 +48,6 @@ const (
 	envPlatform              = "C8S_PLATFORM"
 	envPodIP                 = "C8S_POD_IP"
 	envInboundPassthrough    = "C8S_MESH_INBOUND_PASSTHROUGH"
-	envClusterDNSIP          = "C8S_CLUSTER_DNS_IP"
 )
 
 // defaultInGuestAttestationServiceURL is the loopback URL the in-guest
@@ -74,10 +73,6 @@ type inGuestConfig struct {
 	meshMeasurements      string
 	podIP                 string
 	inboundPassthrough    string
-	// clusterDNSIP is the cluster DNS (CoreDNS) server IP the in-guest egress
-	// guard's DNS carve-out is scoped to; set via C8S_CLUSTER_DNS_IP and must
-	// match the host's --cluster-dns-ip.
-	clusterDNSIP string
 
 	// Parsed from inboundPassthrough by validate().
 	inboundPassthroughPorts []int
@@ -99,7 +94,6 @@ func defaultInGuestConfig() inGuestConfig {
 	return inGuestConfig{
 		platform:           "sev-snp",
 		logLevel:           "info",
-		clusterDNSIP:       clusterDNSClusterIP,
 		certTTL:            24 * time.Hour,
 		rotationTimeout:    30 * time.Second,
 		dialTimeout:        5 * time.Second,
@@ -136,11 +130,6 @@ func loadInGuestConfig(env func(string) string) inGuestConfig {
 	c.meshMeasurements = env(envMeshMeasurements)
 	c.podIP = env(envPodIP)
 	c.inboundPassthrough = env(envInboundPassthrough)
-	if v := env(envClusterDNSIP); v != "" {
-		c.clusterDNSIP = v
-	} else {
-		c.clusterDNSIP = clusterDNSClusterIP
-	}
 	return c
 }
 
@@ -165,9 +154,6 @@ func (c *inGuestConfig) validate() error {
 		return fmt.Errorf("%s: %w", envInboundPassthrough, err)
 	}
 	c.inboundPassthroughPorts = ports
-	if net.ParseIP(c.clusterDNSIP) == nil {
-		return fmt.Errorf("%s %q is not a valid IP address", envClusterDNSIP, c.clusterDNSIP)
-	}
 	return validateConfig(c.attestationServiceURL, inGuestOutboundPort, inGuestInboundPort, inGuestHealthPort, c.certTTL)
 }
 
@@ -291,7 +277,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	// Install iptables redirects first. A failure here is non-recoverable:
 	// the proxy would otherwise come up but the workload's traffic would
 	// silently bypass the mesh — a worse failure mode than crashing.
-	if err := setupInGuestIptables(logger, podIP, c.inboundPassthroughPorts, c.clusterDNSIP); err != nil {
+	if err := setupInGuestIptables(logger, podIP, c.inboundPassthroughPorts); err != nil {
 		return fmt.Errorf("in-guest iptables setup: %w", err)
 	}
 
@@ -715,12 +701,12 @@ same end state.`,
 // Returns an error on the first failure; the caller exits non-zero.
 // Idempotent: installIptablesRules flushes the managed chains first so
 // a crash-restart does not double-install rules.
-func setupInGuestIptables(logger *slog.Logger, podIP string, inboundPassthroughPorts []int, clusterDNSIP string) error {
+func setupInGuestIptables(logger *slog.Logger, podIP string, inboundPassthroughPorts []int) error {
 	if err := initIptablesClients(); err != nil {
 		return err
 	}
 	rules := buildInGuestIptablesRules(inGuestOutboundPort, inGuestInboundPort, inGuestHealthPort, inboundPassthroughPorts)
-	rules = append(rules, buildInGuestFailClosedRules(clusterDNSIP)...)
+	rules = append(rules, buildInGuestFailClosedRules()...)
 	jumps := jumpRules()
 	jumps = append(jumps, guestFilterJumps()...)
 	logger.Info("installing in-guest iptables redirects",
@@ -858,18 +844,14 @@ func buildInGuestIptablesRules(outboundPort, inboundPort, healthPort int, inboun
 // non-TCP the NAT redirects do not carry: the mesh terminates TCP only, so
 // these rules make the guest fail closed on the UDP/ICMP/SCTP that would
 // otherwise egress or enter plaintext. The exemptions are loopback (intra-VM
-// IPC), UDP/53 to the cluster DNS server (host and the DNS reply), TCP
-// ESTABLISHED/RELATED replies on INPUT, and the ICMPv6 types IPv6 needs. The
-// guest enforces this locally so it does not depend on an external node.
-func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
-	// The guest runs no kube-proxy, so its nat table holds only the mesh's own
-	// TCP redirects and a query still carries the DNS server address on OUTPUT.
-	// The carve-out is installed in the client that owns that address; the
-	// drop below is family-agnostic, so tagging it wrong drops the guest's DNS.
-	dnsFamily := iptablesFamilyIPv4
-	if ip := net.ParseIP(dnsServerIP); ip != nil && ip.To4() == nil {
-		dnsFamily = iptablesFamilyIPv6
-	}
+// IPC), UDP/53 (the query and its reply), TCP ESTABLISHED/RELATED replies on
+// INPUT, and the ICMPv6 types IPv6 needs. The guest enforces this locally so
+// it does not depend on an external node.
+//
+// The UDP/53 carve-out names no destination. A resolver is outside the guest's
+// trust boundary whatever its address, so an answer is untrusted input that
+// authenticated peers do not rely on; see docs/ratls.md, "DNS".
+func buildInGuestFailClosedRules() []iptablesRule {
 	rules := []iptablesRule{
 		iptablesRule{
 			table: "filter", chain: guestFilterOutputChain,
@@ -878,9 +860,8 @@ func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
 		},
 		iptablesRule{
 			table: "filter", chain: guestFilterOutputChain,
-			label:  "in-guest-output-return-dns",
-			family: dnsFamily,
-			args:   []string{"-p", "udp", "--dport", "53", "-d", dnsServerIP, "-j", "RETURN"},
+			label: "in-guest-output-return-dns",
+			args:  []string{"-p", "udp", "--dport", "53", "-j", "RETURN"},
 		},
 	}
 	// In-guest chains are installed per family; tag the ICMPv6 Allows so they
@@ -911,9 +892,8 @@ func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
 		},
 		iptablesRule{
 			table: "filter", chain: guestFilterInputChain,
-			label:  "in-guest-input-return-dns-reply",
-			family: dnsFamily,
-			args:   []string{"-p", "udp", "--sport", "53", "-s", dnsServerIP, "-j", "RETURN"},
+			label: "in-guest-input-return-dns-reply",
+			args:  []string{"-p", "udp", "--sport", "53", "-j", "RETURN"},
 		},
 	)
 	for _, t := range essentialICMPv6Types {

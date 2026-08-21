@@ -173,8 +173,6 @@ spec:
             - {{ $excludeSourceNamespaces | quote }}
             - --node-ip
             - $(NODE_IP)
-            - --cluster-dns-ip
-            - {{ .Values.ratlsMesh.clusterDNSIP | quote }}
             - --resync-period
             - {{ .Values.ratlsMesh.iptablesSync.resyncPeriod | quote }}
             - --watchdog-period
