@@ -116,14 +116,23 @@ func ratlsServingCert(t *testing.T) tls.Certificate {
 // caDER. Returns the fake and its https URL.
 func newAttestedCDS(t *testing.T, caDER []byte) (*fakeCDS, string) {
 	t.Helper()
+	var body []byte
+	if caDER != nil {
+		body = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	}
+	return newAttestedCDSServingCA(t, http.StatusOK, body)
+}
+
+// newAttestedCDSServingCA is newAttestedCDS with the /ca response written out
+// verbatim, for the answers a well-behaved CDS never gives.
+func newAttestedCDSServingCA(t *testing.T, status int, body []byte) (*fakeCDS, string) {
+	t.Helper()
 	f := &fakeCDS{values: map[string]intsecrets.Origin{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ca", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-pem-file")
-		if caDER == nil {
-			return
-		}
-		_ = pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
 	})
 	mux.HandleFunc("/", f.serve)
 	srv := httptest.NewUnstartedServer(mux)
@@ -302,5 +311,135 @@ func TestPutPlaintextInsecureSkipsTheGate(t *testing.T) {
 	}
 	if len(f.seen) != 1 {
 		t.Fatalf("sent %d requests, want 1", len(f.seen))
+	}
+}
+
+// An answer that is not a served CA must fail the write rather than be read as
+// one. Each of these is a distinct refusal, and none of them may fall through
+// to a comparison against a set the CLI never actually received.
+func TestPutRefusesAnUnusableCAResponse(t *testing.T) {
+	good := meshCA(t, "cds-m")
+	bundle := writePEM(t, "mesh-ca.pem", good)
+	key := writeOperatorKey(t)
+
+	tests := []struct {
+		name   string
+		status int
+		body   []byte
+		want   string
+	}{
+		{
+			// A CDS that does not route /ca (an LB pointed elsewhere, or a
+			// build without the route) must not read as "no CA to object to".
+			name:   "not found",
+			status: http.StatusNotFound,
+			body:   []byte("no such route\n"),
+			want:   "returned 404",
+		},
+		{
+			name:   "server error",
+			status: http.StatusInternalServerError,
+			body:   []byte("boom\n"),
+			want:   "returned 500",
+		},
+		{
+			// Truncated DER inside a well-formed PEM frame: the block decodes,
+			// the certificate does not. Skipping it would leave the served set
+			// empty and the comparison vacuous.
+			name:   "certificate does not parse",
+			status: http.StatusOK,
+			body:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: good[:len(good)/2]}),
+			want:   "does not parse",
+		},
+		{
+			// PEM that carries no certificate at all.
+			name:   "no certificate block",
+			status: http.StatusOK,
+			body:   pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a key")}),
+			want:   "served no certificate",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, url := newAttestedCDSServingCA(t, tc.status, tc.body)
+			_, _, err := runAttested(t, "hunter2", "put", "/tenant-a/db", "--url", url,
+				"--measurements", testMeasurement, "--operator-key", key, "--mesh-ca", bundle)
+			if err == nil {
+				t.Fatal("the write was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.want)
+			}
+			if len(f.seen) != 0 {
+				t.Fatalf("the refused write still sent %d request(s)", len(f.seen))
+			}
+		})
+	}
+}
+
+// A CDS whose /ca is unreachable fails the write. The gate has no "could not
+// check, so proceed" branch: an unanswered /ca is the same refusal as a wrong
+// one.
+func TestPutRefusesWhenTheCAIsUnreachable(t *testing.T) {
+	_, url := newAttestedCDS(t, meshCA(t, "cds-m"))
+	bundle := writePEM(t, "mesh-ca.pem", meshCA(t, "cds-m"))
+	key := writeOperatorKey(t)
+
+	// A port with nothing behind it: the URL parses and the scheme is https,
+	// so the gate runs and the fetch is what fails.
+	dead := strings.Replace(url, url[strings.LastIndex(url, ":")+1:], "1", 1)
+	_, _, err := runAttested(t, "hunter2", "put", "/tenant-a/db", "--url", dead,
+		"--measurements", testMeasurement, "--operator-key", key, "--mesh-ca", bundle)
+	if err == nil {
+		t.Fatal("a write to an unreachable CDS was accepted")
+	}
+}
+
+// A bundle carrying a non-certificate PEM block alongside the CA is still a
+// usable bundle: the extra block is skipped, and the CA in it still matches.
+// Operators paste these out of files that hold more than one kind of object.
+func TestPutIgnoresNonCertificateBlocksInTheBundle(t *testing.T) {
+	ca := meshCA(t, "cds-m")
+	f, url := newAttestedCDS(t, ca)
+	var buf bytes.Buffer
+	if err := pem.Encode(&buf, &pem.Block{Type: "PRIVATE KEY", Bytes: []byte("ignored")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: ca}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mixed.pem")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := writeOperatorKey(t)
+
+	if _, _, err := runAttested(t, "hunter2", "put", "/tenant-a/db", "--url", url,
+		"--measurements", testMeasurement, "--operator-key", key, "--mesh-ca", path); err != nil {
+		t.Fatalf("a bundle with a non-certificate block was refused: %v", err)
+	}
+	if len(f.seen) != 1 {
+		t.Fatalf("sent %d requests, want 1", len(f.seen))
+	}
+}
+
+// A bundle whose certificate does not parse fails the write. Pinning against a
+// set the CLI could not fully read is not pinning.
+func TestPutRefusesABundleWithAnUnparseableCertificate(t *testing.T) {
+	ca := meshCA(t, "cds-m")
+	_, url := newAttestedCDS(t, ca)
+	path := filepath.Join(t.TempDir(), "truncated.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca[:len(ca)/2]}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := writeOperatorKey(t)
+
+	_, _, err := runAttested(t, "hunter2", "put", "/tenant-a/db", "--url", url,
+		"--measurements", testMeasurement, "--operator-key", key, "--mesh-ca", path)
+	if err == nil {
+		t.Fatal("an unparseable bundle was accepted")
+	}
+	if !strings.Contains(err.Error(), "--mesh-ca") || !strings.Contains(err.Error(), "does not parse") {
+		t.Fatalf("err = %v", err)
 	}
 }
