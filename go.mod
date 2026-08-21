@@ -12,7 +12,7 @@ require (
 	github.com/coreos/go-iptables v0.8.0
 	github.com/distribution/reference v0.6.0
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-logr/logr v1.4.4
