@@ -1167,6 +1167,14 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		installInventoryCIDRs = resolved
 
+		// The cw egress guard is fail-closed but for UDP/53 to this address,
+		// and the chart default is the c8s node image's. A -f file that sets
+		// the key owns it.
+		clusterDNSIP, err := resolveClusterDNSIP(cmd.Context(), installCvmMode, installValues)
+		if err != nil {
+			return err
+		}
+
 		// The computed values are shared with `c8s render-values` via
 		// buildValueArgs, then written to one values file rather than passed as a
 		// pile of --set flags. The contract that the CLI's flag-derived values
@@ -1176,6 +1184,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, imageTag, distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
+		}
+		// buildValueArgs is shared with render-values, which reads no cluster.
+		if clusterDNSIP != "" {
+			setArgs = append(setArgs, "--set-string", "ratlsMesh.clusterDNSIP="+clusterDNSIP)
 		}
 		if installResolveDigests {
 			setArgs, err = appendResolvedWorkloadImageArgs(cmd.Context(), setArgs, workloadImages)

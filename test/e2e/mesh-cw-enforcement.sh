@@ -240,12 +240,12 @@ grep -q 'ctorigdst' <<<"$dns_rows" || fail "no UDP/53 carve-out is scoped to the
 $dns_rows"
 
 # The address has to be the resolver this cluster's pods actually use;
-# scoping to any other is indistinguishable from having no carve-out.
-cluster_dns=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-if [ -n "$cluster_dns" ]; then
-  grep -q "$cluster_dns" <<<"$dns_rows" || fail "the UDP/53 carve-out names no address matching this cluster's DNS ClusterIP $cluster_dns; set ratlsMesh.clusterDNSIP:
+# scoping to any other is indistinguishable from having no carve-out. Select
+# on the label, not the name: RKE2 calls the Service rke2-coredns-rke2-coredns.
+cluster_dns=$(kubectl -n kube-system get svc -l k8s-app=kube-dns -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
+[ -n "$cluster_dns" ] || fail "could not read this cluster's DNS ClusterIP, so the carve-out's scope cannot be checked"
+grep -q "$cluster_dns" <<<"$dns_rows" || fail "the UDP/53 carve-out names no address matching this cluster's DNS ClusterIP $cluster_dns, which c8s install derives:
 $dns_rows"
-fi
 
 # A RETURN below the drop is a RETURN that never runs.
 drop_line=$(awk '/DROP/ && /!tcp/ {print NR; exit}' <<<"$egress_chain")

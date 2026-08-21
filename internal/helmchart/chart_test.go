@@ -7422,32 +7422,48 @@ func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
 // server; the daemonset must pass that ClusterIP to iptables-sync so the
 // carve-out is not silently scoped to a different address.
 func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	ds := findRATLSMeshDaemonSet(t, out)
-	var flags []string
-	for _, c := range allContainers(ds) {
-		if c.Name != "iptables-sync" {
-			continue
-		}
-		flags = c.Command
-	}
-	if len(flags) == 0 {
-		t.Fatal("iptables-sync container command not found")
-	}
-	var saw bool
-	for i := 0; i+1 < len(flags); i++ {
-		if flags[i] == "--cluster-dns-ip" {
-			saw = true
-			if flags[i+1] != "10.53.0.10" {
-				t.Errorf("--cluster-dns-ip = %q, want c8s default 10.53.0.10", flags[i+1])
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "chart default", want: "10.53.0.10"},
+		{
+			// What `c8s install` derives from the cluster's DNS Service.
+			name: "derived value reaches the flag",
+			args: []string{"--set-string", "ratlsMesh.clusterDNSIP=10.43.0.10"},
+			want: "10.43.0.10",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-		}
-	}
-	if !saw {
-		t.Error("iptables-sync command does not carry --cluster-dns-ip")
+			ds := findRATLSMeshDaemonSet(t, out)
+			var flags []string
+			for _, c := range allContainers(ds) {
+				if c.Name != "iptables-sync" {
+					continue
+				}
+				flags = c.Command
+			}
+			if len(flags) == 0 {
+				t.Fatal("iptables-sync container command not found")
+			}
+			var saw bool
+			for i := 0; i+1 < len(flags); i++ {
+				if flags[i] == "--cluster-dns-ip" {
+					saw = true
+					if flags[i+1] != tc.want {
+						t.Errorf("--cluster-dns-ip = %q, want %q", flags[i+1], tc.want)
+					}
+				}
+			}
+			if !saw {
+				t.Error("iptables-sync command does not carry --cluster-dns-ip")
+			}
+		})
 	}
 }
 

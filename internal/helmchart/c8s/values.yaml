@@ -711,9 +711,9 @@ ratlsMesh:
         sourcePort: 53
 
   # Cluster DNS (CoreDNS) Service ClusterIP the egress guards' DNS carve-out
-  # is destination-scoped to. Defaults to the c8s node image's cluster-dns
-  # (10.53.0.10). Override if the cluster uses a different IP, and set the
-  # same value in the guest's C8S_CLUSTER_DNS_IP.
+  # is destination-scoped to. `c8s install` reads it off the cluster's DNS
+  # Service; setting it here owns the address, and the guest's
+  # C8S_CLUSTER_DNS_IP must carry the same one.
   clusterDNSIP: "10.53.0.10"
 
   # Certificate settings

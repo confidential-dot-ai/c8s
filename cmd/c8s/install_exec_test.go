@@ -790,6 +790,7 @@ func clusterKubectl(applied, extra string) string {
 "get nodes -l role=cds -o name") echo node/node-a ;;
 "get nodes -l confidential.ai/sev-snp=true -o name") echo node/node-a ;;
 "get nodes -o json") echo '{"items":[{"metadata":{"name":"node-a"},"spec":{"podCIDR":"10.42.0.0/24"},"status":{"addresses":[{"type":"InternalIP","address":"192.0.2.10"}]}}]}' ;;
+"get svc -n kube-system -l k8s-app=kube-dns -o json") echo '{"items":[{"metadata":{"name":"kube-dns"},"spec":{"clusterIP":"10.43.0.10"}}]}' ;;
 "get pods --all-namespaces -o json") echo '{"items":[]}' ;;
 "apply -f -") /bin/cat >> '` + applied + `' ;;
 esac`
@@ -1326,6 +1327,61 @@ func TestInstallHostedLaneKeepsOperatorExemptNamespaces(t *testing.T) {
 	policy, _ := treeAt(t, readYAMLTree(t, s.computed), "nriImagePolicy").(map[string]any)["policy"].(map[string]any)
 	if got, ok := policy["exemptNamespaces"]; ok {
 		t.Errorf("computed values override the operator's exemptNamespaces with %#v", got)
+	}
+}
+
+// The chart default is the c8s node image's cluster-dns, so on any other
+// cluster the cw egress guard carves UDP/53 out to an address no pod resolves
+// against — a cluster-wide DNS outage from an install that reported success.
+func TestInstallScopesTheDNSCarveOutToThisCluster(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	if err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--resolve-digests=false", "--force"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	calls := s.f.calls(t)
+	lookup := lineIndex(calls, "kubectl get svc -n kube-system -l k8s-app=kube-dns -o json")
+	for _, after := range []string{"kubectl apply -f -", "helm upgrade "} {
+		if i := lineIndex(calls, after); lookup < 0 || lookup > i {
+			t.Fatalf("the DNS lookup must run before %q (index %d vs %d):\n%s", after, lookup, i, strings.Join(calls, "\n"))
+		}
+	}
+	if got := treeAt(t, readYAMLTree(t, s.computed), "ratlsMesh", "clusterDNSIP"); got != "10.43.0.10" {
+		t.Errorf("ratlsMesh.clusterDNSIP = %#v, want this cluster's resolver 10.43.0.10", got)
+	}
+}
+
+// Nothing legitimate scopes the carve-out to a guess, so an unreadable DNS
+// Service stops the install where the operator sees it.
+func TestInstallAbortsWhenTheClusterDNSIsUnreadable(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, `"get svc"*) echo forbidden >&2; exit 1 ;;
+`))
+	err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--resolve-digests=false", "--force")
+	if err == nil {
+		t.Fatal("install succeeded: the carve-out would keep the chart default and blackhole every cw pod's DNS")
+	}
+	if !strings.Contains(err.Error(), "ratlsMesh.clusterDNSIP") || !strings.Contains(err.Error(), "forbidden") {
+		t.Errorf("error = %v, want kubectl's own failure and the key that fixes it", err)
+	}
+	calls := s.f.calls(t)
+	mustNotContainPrefix(t, calls, "helm upgrade")
+	mustNotContainPrefix(t, calls, "kubectl apply")
+}
+
+// The computed values are helm's last -f, so a file that sets the key has to
+// be left alone rather than overridden.
+func TestInstallKeepsAnOperatorsClusterDNSIP(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	values := writeValuesFile(t, "ratlsMesh:\n  clusterDNSIP: 10.0.0.53\n")
+	if err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--resolve-digests=false", "--force", "-f", values); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	mustNotContainPrefix(t, s.f.calls(t), "kubectl get svc")
+	mesh, _ := treeAt(t, readYAMLTree(t, s.computed), "ratlsMesh").(map[string]any)
+	if got, ok := mesh["clusterDNSIP"]; ok {
+		t.Errorf("computed values override the operator's clusterDNSIP with %#v", got)
 	}
 }
 

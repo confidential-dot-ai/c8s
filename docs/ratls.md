@@ -826,14 +826,18 @@ theater), and CDS and tls-lb run in their own kata CVMs.
   UDP/53 to the cluster DNS server. The host takes it from the chart
   (`ratlsMesh.clusterDNSIP` → `--cluster-dns-ip`); the guest reads
   `C8S_CLUSTER_DNS_IP` baked in kata-guest-base. Set both to the same value
-  or one side drops the other's DNS; the c8s default is 10.53.0.10 on both,
-  which is the c8s node image's `cluster-dns` — stock RKE2 uses 10.43.0.10
-  and kubeadm 10.96.0.10, so a cluster off that image must set it. The host
-  logs a warning naming the mismatch when the configured server is not one
-  its own pod resolver lists. The host guard hangs off `FORWARD`, downstream
-  of kube-proxy's Service DNAT, so it carves out both the packet's
-  destination and the connection's original one — whichever survives on the
-  cluster's dataplane.
+  or one side drops the other's DNS; the chart default is 10.53.0.10 on
+  both, which is the c8s node image's `cluster-dns` — stock RKE2 uses
+  10.43.0.10 and kubeadm 10.96.0.10. `c8s install` derives the host's from
+  the ClusterIP of the kube-system Service labelled `k8s-app=kube-dns`; a
+  `-f` file that sets `ratlsMesh.clusterDNSIP` owns the address instead,
+  which is what a node-local DNS cache needs — pods there query its
+  link-local address, not the Service. The host logs a warning naming the
+  mismatch when the configured server is not one its own pod resolver
+  lists. The host guard hangs off `FORWARD`, downstream of kube-proxy's
+  Service DNAT, so it carves out both the packet's destination and the
+  connection's original one — whichever survives on the cluster's
+  dataplane.
 
 ## Which certificate is used where
 
