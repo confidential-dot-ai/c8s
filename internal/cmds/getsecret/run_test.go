@@ -248,3 +248,13 @@ func TestWriteAllRejectsBadMode(t *testing.T) {
 		t.Fatal("a bad file mode was accepted")
 	}
 }
+
+// A malformed RTMR pin is a typo in rendered config; pinning nothing is not
+// an acceptable fallback for it.
+func TestRunRejectsBadRTMRs(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.RTMRs = []string{"nope"}
+	if err := run(cfg); err == nil || !strings.Contains(err.Error(), "--rtmrs") {
+		t.Fatalf("err = %v, want an RTMR-parse failure", err)
+	}
+}

@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"context"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"path/filepath"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -133,5 +136,26 @@ func TestDaemonClientSelectsCompiledShape(t *testing.T) {
 	}
 	if _, guestBase := daemonClient(config{Config: sidecar.Config{WorkloadClaimsGuest: true}}); guestBase != volumed.GuestEndpoint() {
 		t.Errorf("guest base = %q, want the compiled %q", guestBase, volumed.GuestEndpoint())
+	}
+}
+
+// A malformed RTMR pin is a typo in rendered config; pinning nothing is not
+// an acceptable fallback for it.
+func TestRunRejectsBadRTMRs(t *testing.T) {
+	cfg := validConfig()
+	cfg.RTMRs = []string{"nope"}
+	if err := run(cfg); err == nil || !strings.Contains(err.Error(), "--rtmrs") {
+		t.Fatalf("err = %v, want an RTMR-parse failure", err)
+	}
+}
+
+// openAll builds the client before it asks for anything, so a leaf that is
+// not on disk yet surfaces there.
+func TestOpenAllWithoutLeaf(t *testing.T) {
+	cfg := validConfig()
+	cfg.CertPath = filepath.Join(t.TempDir(), "absent.crt")
+	cfg.KeyPath = filepath.Join(t.TempDir(), "absent.key")
+	if err := openAll(context.Background(), cfg, ratls.Pins{}); err == nil {
+		t.Fatal("a missing leaf was accepted")
 	}
 }

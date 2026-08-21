@@ -46,3 +46,10 @@ func TestParsePinsRejectsMalformedHex(t *testing.T) {
 		t.Fatalf("error = %v, want a parse error naming the flag", err)
 	}
 }
+
+func TestParsePinsRejectsMalformedRTMR(t *testing.T) {
+	cfg := Config{Measurements: []string{measurementHex()}, RTMRs: []string{"1=zz"}}
+	if _, err := cfg.ParsePins(); err == nil || !strings.Contains(err.Error(), "--rtmrs") {
+		t.Fatalf("error = %v, want a parse error naming the flag", err)
+	}
+}

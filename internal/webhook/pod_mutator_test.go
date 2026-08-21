@@ -1604,3 +1604,38 @@ func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
 		}
 	}
 }
+
+// The RTMR pins ride the same routes as the measurements: comma-joined
+// --cds-rtmrs on get-cert, repeatable --rtmrs on the secret and volume
+// fetchers, and no flag at all when unset.
+func TestFetchersCarryCDSRTMRPins(t *testing.T) {
+	rtmrs := []string{"1=" + strings.Repeat("ab", 48), "2=" + strings.Repeat("cd", 48)}
+	pod := podWithApp()
+	cfg := secretsConfig()
+	cfg.CDSRTMRs = rtmrs
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	if args := containerNamed(pod, reservedCertContainerName).Args; !hasArg(args, "--cds-rtmrs="+rtmrs[0]+","+rtmrs[1]) {
+		t.Fatalf("c8s-cert args %v missing --cds-rtmrs", args)
+	}
+	for _, name := range []string{reservedSecretContainerName, reservedVolumeContainerName} {
+		args := containerNamed(pod, name).Args
+		for _, r := range rtmrs {
+			if !hasArg(args, "--rtmrs="+r) {
+				t.Fatalf("%s args %v missing --rtmrs=%s", name, args, r)
+			}
+		}
+	}
+
+	unpinned := podWithApp()
+	mutatePod(unpinned, &injection{WorkloadID: "api"}, secretsConfig())
+	for _, arg := range containerNamed(unpinned, reservedCertContainerName).Args {
+		if strings.HasPrefix(arg, "--cds-rtmrs") {
+			t.Fatalf("c8s-cert carries %q with no RTMR pins configured", arg)
+		}
+	}
+}

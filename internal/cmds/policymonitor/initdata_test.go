@@ -732,3 +732,44 @@ func TestAwaitInitDataMeasurementsBudgetExhausted(t *testing.T) {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
 	}
 }
+
+// The RTMR pins ride the same launch-committed document as the measurements
+// and are adopted with them.
+func TestResolveInitDataMeasurementsCarriesRTMRPins(t *testing.T) {
+	rtmrs := "1=" + strings.Repeat("ab", 48)
+	raw, err := initdata.New(map[string]string{
+		initdata.KeyRole:            initdata.RoleWorkload,
+		initdata.KeyCDSMeasurements: "aabb",
+		initdata.KeyCDSRTMRs:        rtmrs,
+	}).Render()
+	if err != nil {
+		t.Fatalf("render document: %v", err)
+	}
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+	got, err := resolveInitDataMeasurements(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("resolveInitDataMeasurements: %v", err)
+	}
+	if got.rtmrs != rtmrs {
+		t.Fatalf("rtmrs = %q, want %q", got.rtmrs, rtmrs)
+	}
+
+	adoptInitDataCDSPins(quietLogger(), cfg, got)
+	if cfg.CDSMeasurements != "aabb" || cfg.CDSRTMRs != rtmrs {
+		t.Fatalf("adopted pins = (%q, %q), want (%q, %q)", cfg.CDSMeasurements, cfg.CDSRTMRs, "aabb", rtmrs)
+	}
+}
+
+// An explicit CDSRTMRs value survives a document that pins measurements but
+// no registers.
+func TestAdoptInitDataCDSPinsKeepsExplicitRTMRs(t *testing.T) {
+	explicit := "2=" + strings.Repeat("cd", 48)
+	cfg := &Config{CDSRTMRs: explicit}
+	adoptInitDataCDSPins(quietLogger(), cfg, initDataCDSPins{measurements: "aabb"})
+	if cfg.CDSMeasurements != "aabb" || cfg.CDSRTMRs != explicit {
+		t.Fatalf("adopted pins = (%q, %q), want measurements adopted and explicit RTMRs kept", cfg.CDSMeasurements, cfg.CDSRTMRs)
+	}
+}

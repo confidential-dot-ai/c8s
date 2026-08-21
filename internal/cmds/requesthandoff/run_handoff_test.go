@@ -372,6 +372,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{"invalid measurement hex", func(c *config) { c.measurements = []string{"zz"} }, "--measurements"},
 		{"wrong measurement size", func(c *config) { c.measurements = []string{"abcd"} }, "--measurements"},
 		{"no usable measurement", func(c *config) { c.measurements = []string{" ", ""} }, "no usable measurement"},
+		{"invalid rtmr pin", func(c *config) { c.rtmrs = []string{"1=zz"} }, "--rtmrs"},
 		{"missing operator keys file", func(c *config) { c.operatorKeys = filepath.Join(t.TempDir(), "absent.pem") }, "--operator-keys"},
 		{"operator keys not PEM", func(c *config) { c.operatorKeys = badPEM }, "--operator-keys"},
 		{"missing attestation-api URL", func(c *config) { c.attestationApiURL = "" }, "attestation-api URL is required"},

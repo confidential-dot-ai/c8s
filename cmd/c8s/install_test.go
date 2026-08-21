@@ -2145,4 +2145,8 @@ func TestTDXRTMRPinWarning(t *testing.T) {
 	if warn, err := tdxRTMRPinWarning("tdx", nil, []string{empty}); err != nil || warn == "" {
 		t.Fatalf("empty-list values file: warn=%q err=%v, want a warning", warn, err)
 	}
+
+	if _, err := tdxRTMRPinWarning("tdx", nil, []string{filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
+		t.Fatal("an unreadable values file was silently treated as unpinned")
+	}
 }
