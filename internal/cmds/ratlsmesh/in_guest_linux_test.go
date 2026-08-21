@@ -37,7 +37,6 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 		envCDSMeasurements:       "aa,bb",
 		envMeshMeasurements:      "cc",
 		envPodIP:                 "10.0.0.5",
-		envClusterDNSIP:          "fd53::a",
 	}
 	c := loadInGuestConfig(func(k string) string { return envs[k] })
 	if c.workloadID != "alice" {
@@ -55,9 +54,6 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 	if c.podIP != "10.0.0.5" {
 		t.Errorf("podIP = %q", c.podIP)
 	}
-	if c.clusterDNSIP != "fd53::a" {
-		t.Errorf("clusterDNSIP = %q, want the env override", c.clusterDNSIP)
-	}
 }
 
 func TestInGuestConfigValidate(t *testing.T) {
@@ -72,20 +68,8 @@ func TestInGuestConfigValidate(t *testing.T) {
 				workloadID:            "alice",
 				cdsURL:                "https://cds:8443",
 				attestationServiceURL: "http://127.0.0.1:8400",
-				clusterDNSIP:          clusterDNSClusterIP,
 				certTTL:               24 * time.Hour,
 			},
-		},
-		{
-			name: "bad cluster DNS IP",
-			cfg: inGuestConfig{
-				workloadID:            "alice",
-				cdsURL:                "https://cds:8443",
-				attestationServiceURL: "http://127.0.0.1:8400",
-				clusterDNSIP:          "not-an-ip",
-				certTTL:               24 * time.Hour,
-			},
-			wantErr: envClusterDNSIP,
 		},
 		{
 			name: "missing workload id",
@@ -280,12 +264,11 @@ func containsArg(args []string, want string) bool {
 }
 
 // The in-guest filter fail-closed rules drop non-TCP the NAT redirects do
-// not carry, exempting loopback (intra-VM IPC), UDP/53 restricted to the
-// cluster DNS server, and the ICMPv6 types IPv6 needs. The guest enforces
-// this locally so it does not depend on an external node.
+// not carry, exempting loopback (intra-VM IPC), UDP/53 to any destination,
+// and the ICMPv6 types IPv6 needs. The guest enforces this locally so it does
+// not depend on an external node.
 func TestBuildInGuestFailClosedRulesGolden(t *testing.T) {
-	const dnsIP = "10.53.0.10"
-	rules := buildInGuestFailClosedRules(dnsIP)
+	rules := buildInGuestFailClosedRules()
 	// OUTPUT: lo return, dns return, 14 icmpv6 returns, drop = 17.
 	// INPUT: established, lo, dns reply, 14 icmpv6 returns, drop = 18.
 	if len(rules) != 17+18 {
@@ -294,18 +277,17 @@ func TestBuildInGuestFailClosedRulesGolden(t *testing.T) {
 	out := rules[0:17]
 	in := rules[17:35]
 
-	// OUTPUT order: loopback, DNS (family ipv4, -d), icmpv6 (ipv6), drop.
+	// OUTPUT order: loopback, DNS (both families), icmpv6 (ipv6), drop.
 	if out[0].chain != guestFilterOutputChain || out[0].table != "filter" {
 		t.Errorf("OUTPUT[0]: got %s/%s, want filter/%s", out[0].table, out[0].chain, guestFilterOutputChain)
 	}
 	assertContains(t, "out lo", out[0].args, "-o", "lo")
 	assertContains(t, "out lo", out[0].args, "-j", "RETURN")
-	if out[1].family != iptablesFamilyIPv4 {
-		t.Errorf("OUTPUT dns rule family=%q, want ipv4 (ClusterIP is v4)", out[1].family)
+	if out[1].family != iptablesFamilyAll {
+		t.Errorf("OUTPUT dns rule family=%q, want both families", out[1].family)
 	}
 	assertContains(t, "out dns", out[1].args, "-p", "udp")
 	assertContains(t, "out dns", out[1].args, "--dport", "53")
-	assertContains(t, "out dns", out[1].args, "-d", dnsIP)
 	assertContains(t, "out dns", out[1].args, "-j", "RETURN")
 	for ti, want := range essentialICMPv6Types {
 		r := out[2+ti]
@@ -318,7 +300,7 @@ func TestBuildInGuestFailClosedRulesGolden(t *testing.T) {
 	}
 	assertNontcpDrop(t, "OUTPUT", out[len(out)-1])
 
-	// INPUT order: established, loopback, dns reply (ipv4, -s), icmpv6, drop.
+	// INPUT order: established, loopback, dns reply (both families), icmpv6, drop.
 	if in[0].chain != guestFilterInputChain || in[0].table != "filter" {
 		t.Errorf("INPUT[0]: got %s/%s, want filter/%s", in[0].table, in[0].chain, guestFilterInputChain)
 	}
@@ -327,12 +309,11 @@ func TestBuildInGuestFailClosedRulesGolden(t *testing.T) {
 	assertContains(t, "in est", in[0].args, "-j", "RETURN")
 	assertContains(t, "in lo", in[1].args, "-i", "lo")
 	assertContains(t, "in lo", in[1].args, "-j", "RETURN")
-	if in[2].family != iptablesFamilyIPv4 {
-		t.Errorf("INPUT dns reply rule family=%q, want ipv4", in[2].family)
+	if in[2].family != iptablesFamilyAll {
+		t.Errorf("INPUT dns reply rule family=%q, want both families", in[2].family)
 	}
 	assertContains(t, "in dns reply", in[2].args, "-p", "udp")
 	assertContains(t, "in dns reply", in[2].args, "--sport", "53")
-	assertContains(t, "in dns reply", in[2].args, "-s", dnsIP)
 	assertContains(t, "in dns reply", in[2].args, "-j", "RETURN")
 	for ti, want := range essentialICMPv6Types {
 		r := in[3+ti]
@@ -643,31 +624,28 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 	})
 }
 
-// The guest's non-TCP drop is family-agnostic while the DNS carve-out is
-// installed in one client, so an IPv6 cluster DNS whose carve-out is tagged
-// IPv4 loses the guest's own name resolution.
-func TestBuildInGuestFailClosedRulesTagsDNSByFamily(t *testing.T) {
-	dnsRules := func(t *testing.T, dnsIP string) []iptablesRule {
-		t.Helper()
-		var got []iptablesRule
-		for _, r := range buildInGuestFailClosedRules(dnsIP) {
-			if strings.Contains(r.label, "dns") {
-				got = append(got, r)
+// The guest carve-out names no resolver address and is installed in both
+// clients, so it holds on a cluster whose DNS sits at any address and in
+// either family. A destination or source scope here would drop the guest's
+// own name resolution wherever the resolver does not match.
+func TestBuildInGuestFailClosedRulesDNSNamesNoAddress(t *testing.T) {
+	var dns []iptablesRule
+	for _, r := range buildInGuestFailClosedRules() {
+		if strings.Contains(r.label, "dns") {
+			dns = append(dns, r)
+		}
+	}
+	if len(dns) != 2 {
+		t.Fatalf("got %d dns rules, want the OUTPUT query and the INPUT reply", len(dns))
+	}
+	for _, r := range dns {
+		if r.family != iptablesFamilyAll {
+			t.Errorf("%s family = %q, want both families", r.label, r.family)
+		}
+		for _, scope := range []string{"-d", "-s", "--ctorigdst"} {
+			if slices.Contains(r.args, scope) {
+				t.Errorf("%s is scoped by %s (%v); the carve-out must name no address", r.label, scope, r.args)
 			}
-		}
-		if len(got) != 2 {
-			t.Fatalf("%s: got %d dns rules, want the OUTPUT query and the INPUT reply", dnsIP, len(got))
-		}
-		return got
-	}
-	for _, r := range dnsRules(t, "10.53.0.10") {
-		if r.family != iptablesFamilyIPv4 {
-			t.Errorf("%s family = %q, want ipv4", r.label, r.family)
-		}
-	}
-	for _, r := range dnsRules(t, "fd00::10") {
-		if r.family != iptablesFamilyIPv6 {
-			t.Errorf("%s family = %q, want ipv6", r.label, r.family)
 		}
 	}
 }

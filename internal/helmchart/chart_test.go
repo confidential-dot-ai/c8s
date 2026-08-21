@@ -7418,10 +7418,11 @@ func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
 	}
 }
 
-// The fail-closed egress guards scope their DNS carve-out to the cluster DNS
-// server; the daemonset must pass that ClusterIP to iptables-sync so the
-// carve-out is not silently scoped to a different address.
-func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
+// The fail-closed egress guards carve out UDP/53 to any destination, so the
+// daemonset names no resolver address. A reintroduced --cluster-dns-ip would
+// scope the carve-out to one address again and silently drop every cw DNS
+// query on a cluster whose resolver sits elsewhere.
+func TestChartIptablesSyncNamesNoClusterDNS(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -7437,17 +7438,10 @@ func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
 	if len(flags) == 0 {
 		t.Fatal("iptables-sync container command not found")
 	}
-	var saw bool
-	for i := 0; i+1 < len(flags); i++ {
-		if flags[i] == "--cluster-dns-ip" {
-			saw = true
-			if flags[i+1] != "10.53.0.10" {
-				t.Errorf("--cluster-dns-ip = %q, want c8s default 10.53.0.10", flags[i+1])
-			}
+	for _, f := range flags {
+		if f == "--cluster-dns-ip" {
+			t.Errorf("iptables-sync carries --cluster-dns-ip; the carve-out must name no address: %v", flags)
 		}
-	}
-	if !saw {
-		t.Error("iptables-sync command does not carry --cluster-dns-ip")
 	}
 }
 

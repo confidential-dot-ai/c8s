@@ -3,12 +3,8 @@
 package ratlsmesh
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +44,6 @@ func defaultTestSyncConfig() *iptablesSyncConfig {
 		watchdogPeriod:          2 * time.Second,
 		ipsetMaxElem:            defaultIPSetMaxElem,
 		cwInboundPassthrough:    formatCWPassthrough(defaultCWPassthrough),
-		clusterDNSIPs:           []string{clusterDNSClusterIP},
 		logLevel:                "error",
 	}
 }
@@ -220,22 +215,6 @@ func TestSelectMissingFamilyNodeIPsRejectsAggregate(t *testing.T) {
 	}
 }
 
-func TestClusterDNSIPsByFamily(t *testing.T) {
-	byFam, err := clusterDNSIPsByFamily([]string{"10.53.0.10", "fd00::10"})
-	if err != nil {
-		t.Fatalf("clusterDNSIPsByFamily: %v", err)
-	}
-	if got := byFam[iptablesFamilyIPv4]; len(got) != 1 || got[0] != "10.53.0.10" {
-		t.Errorf("v4 group = %v, want [10.53.0.10]", got)
-	}
-	if got := byFam[iptablesFamilyIPv6]; len(got) != 1 || got[0] != "fd00::10" {
-		t.Errorf("v6 group = %v, want [fd00::10]", got)
-	}
-	if _, err := clusterDNSIPsByFamily([]string{"not-an-ip"}); err == nil {
-		t.Error("malformed IP: want an error so the egress carve-out fails closed")
-	}
-}
-
 // A link-local-only family presence is not a host address: the selector must
 // skip it and report the family as genuinely absent (single-stack), not error.
 func TestSelectMissingFamilyNodeIPsSkipsLinkLocal(t *testing.T) {
@@ -267,48 +246,5 @@ func TestDiscoverMissingFamilyNodeIPsRealHostSmoke(t *testing.T) {
 	}
 	if _, ok := got[iptablesFamilyIPv4]; ok {
 		t.Errorf("discover returned IPv4 %q even though it was provided", got[iptablesFamilyIPv4])
-	}
-}
-
-// The shipped carve-out default is the c8s node image's cluster-dns, so on any
-// other distribution it names a server no pod resolves against — a cluster-wide
-// cw DNS outage whose only symptom is a drop counter. resolv.conf is read to
-// contradict a wrong value, never to supply one.
-func TestWarnUnlessClusterDNSResolves(t *testing.T) {
-	write := func(t *testing.T, body string) string {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "resolv.conf")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatalf("write resolv.conf: %v", err)
-		}
-		return path
-	}
-	warnings := func(t *testing.T, configured []string, path string) string {
-		t.Helper()
-		var buf bytes.Buffer
-		warnUnlessClusterDNSResolves(slog.New(slog.NewJSONHandler(&buf, nil)), configured, path)
-		return buf.String()
-	}
-
-	pod := write(t, "search demo.svc.cluster.local svc.cluster.local\nnameserver 10.43.0.10\n")
-	if got := warnings(t, []string{"10.53.0.10"}, pod); !strings.Contains(got, "10.53.0.10") {
-		t.Errorf("a carve-out naming a server the node does not resolve against went unreported: %q", got)
-	}
-	if got := warnings(t, []string{"10.43.0.10"}, pod); got != "" {
-		t.Errorf("matching server warned anyway: %q", got)
-	}
-
-	// Dual-stack: each configured server is judged on its own.
-	dual := write(t, "nameserver 10.43.0.10\nnameserver fd00::a\n")
-	if got := warnings(t, []string{"10.43.0.10", "fd00::a"}, dual); got != "" {
-		t.Errorf("both configured servers are listed, yet one warned: %q", got)
-	}
-
-	// A resolv.conf with nothing to compare against says nothing either way.
-	if got := warnings(t, []string{"10.53.0.10"}, write(t, "search cluster.local\n")); got != "" {
-		t.Errorf("nameserver-less resolv.conf produced a mismatch claim: %q", got)
-	}
-	if got := warnings(t, []string{"10.53.0.10"}, filepath.Join(t.TempDir(), "absent")); !strings.Contains(got, "cannot check") {
-		t.Errorf("unreadable resolv.conf went unreported: %q", got)
 	}
 }

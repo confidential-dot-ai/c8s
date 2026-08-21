@@ -822,18 +822,15 @@ theater), and CDS and tls-lb run in their own kata CVMs.
   Guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the CDS/tls-lb
   front doors can accept certless external clients — inbound :8443 is
   unmeshed in every guest.
-- **Cluster DNS carve-out is a shared invariant.** The egress guards scope
-  UDP/53 to the cluster DNS server. The host takes it from the chart
-  (`ratlsMesh.clusterDNSIP` → `--cluster-dns-ip`); the guest reads
-  `C8S_CLUSTER_DNS_IP` baked in kata-guest-base. Set both to the same value
-  or one side drops the other's DNS; the c8s default is 10.53.0.10 on both,
-  which is the c8s node image's `cluster-dns` — stock RKE2 uses 10.43.0.10
-  and kubeadm 10.96.0.10, so a cluster off that image must set it. The host
-  logs a warning naming the mismatch when the configured server is not one
-  its own pod resolver lists. The host guard hangs off `FORWARD`, downstream
-  of kube-proxy's Service DNAT, so it carves out both the packet's
-  destination and the connection's original one — whichever survives on the
-  cluster's dataplane.
+- **DNS.** The egress guards carve out UDP/53 to any destination, on the
+  host and in the guest alike. A resolver sits outside the guest's trust
+  boundary whatever its address, so its answers are untrusted input: they
+  select which endpoint a workload dials, and the RA-TLS handshake at that
+  endpoint is what authenticates the peer. A host that swaps, forges or
+  drops a DNS answer redirects or denies a connection it cannot read, which
+  it can do at the network layer regardless. The carve-out is scoped to the
+  cw pod ipset and to UDP/53; every other non-TCP from a cw pod still
+  drops.
 
 ## Which certificate is used where
 

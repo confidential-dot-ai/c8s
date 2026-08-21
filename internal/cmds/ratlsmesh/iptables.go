@@ -62,14 +62,6 @@ var managedIPSetNames = []string{
 	cwPodIPSetName4, cwPodIPSetName6,
 }
 
-// clusterDNSClusterIP is the cluster DNS Service ClusterIP the DNS carve-out
-// is destination-scoped to. The c8s node guest image sets cluster-dns
-// 10.53.0.10 (rke2 config.yaml); stock RKE2 uses 10.43.0.10 and kubeadm
-// 10.96.0.10, so a cluster off the c8s node image needs --cluster-dns-ip.
-// The scope makes the cluster resolver the only non-TCP destination a cw pod
-// can reach; queries it forwards upstream are the resolver's to police.
-const clusterDNSClusterIP = "10.53.0.10"
-
 // essentialICMPv6Types are the ICMPv6 types IPv6 needs to operate (RFC 4890):
 // 1-4 error/PMTU reporting, 128/129 echo, 130-132 Multicast Listener, 133-137
 // NDP (RS/RA/NS/NA) and redirect. The fail-closed egress guards RETURN these
@@ -437,22 +429,14 @@ func buildCWGuardRules(passthrough []cwPassthrough) []iptablesRule {
 // buildCWEgressGuardRules computes the filter-table rules that fail closed
 // on egress from confidential-workload pods: the mesh redirects TCP only, so
 // these rules drop every non-TCP from a cw pod, exempting established TCP
-// replies, UDP/53 queries to the cluster DNS server(s), and the ICMPv6 types
-// IPv6 needs. dnsIPs maps each family to the cluster DNS server IP(s) the DNS
-// carve-out is restricted to. TCP egress never reaches this chain: pod-
-// destination TCP is intercepted in PREROUTING and non-pod TCP is out of
-// scope here.
+// replies, UDP/53 queries, and the ICMPv6 types IPv6 needs. TCP egress never
+// reaches this chain: pod-destination TCP is intercepted in PREROUTING and
+// non-pod TCP is out of scope here.
 //
-// INVARIANT: the DNS carve-out is emitted twice per server, once against the
-// packet's destination and once against the connection's original one. This
-// chain hangs off FORWARD, which kube-proxy's nat/PREROUTING DNAT precedes: by
-// then a query to the DNS ClusterIP carries a CoreDNS pod IP and -d matches
-// nothing, while the conntrack original tuple still holds the ClusterIP. Where
-// the flow is untracked, or the dataplane translates the Service outside
-// netfilter, the reverse holds and -d is the row that fires. Both carry the
-// same destination scope, so whichever matches admits the same traffic: the
-// only non-TCP destination a cw pod may reach is the named resolver.
-func buildCWEgressGuardRules(dnsIPs map[iptablesFamily][]string) []iptablesRule {
+// The UDP/53 carve-out names no destination. A resolver is outside the guest's
+// trust boundary whatever its address, so an answer is untrusted input that
+// authenticated peers do not rely on; see docs/ratls.md, "DNS".
+func buildCWEgressGuardRules() []iptablesRule {
 	var rules []iptablesRule
 	for _, spec := range []struct {
 		family  iptablesFamily
@@ -473,24 +457,17 @@ func buildCWEgressGuardRules(dnsIPs map[iptablesFamily][]string) []iptablesRule 
 				"-j", "RETURN",
 			},
 		})
-		for _, ip := range dnsIPs[spec.family] {
-			for _, scope := range [][]string{
-				{"-m", "conntrack", "--ctorigdst", ip},
-				{"-d", ip},
-			} {
-				rules = append(rules, iptablesRule{
-					table:  "filter",
-					chain:  cwEgressChainName,
-					label:  "cw-egress-dns-query",
-					family: spec.family,
-					args: slices.Concat(
-						[]string{"-m", "set", "--match-set", spec.setName, "src", "-p", "udp", "--dport", "53"},
-						scope,
-						[]string{"-j", "RETURN"},
-					),
-				})
-			}
-		}
+		rules = append(rules, iptablesRule{
+			table:  "filter",
+			chain:  cwEgressChainName,
+			label:  "cw-egress-dns-query",
+			family: spec.family,
+			args: []string{
+				"-m", "set", "--match-set", spec.setName, "src",
+				"-p", "udp", "--dport", "53",
+				"-j", "RETURN",
+			},
+		})
 		if spec.family == iptablesFamilyIPv6 {
 			for _, t := range essentialICMPv6Types {
 				rules = append(rules, iptablesRule{
