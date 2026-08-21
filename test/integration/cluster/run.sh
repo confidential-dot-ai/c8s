@@ -598,17 +598,36 @@ case "$rc" in
         ;;
 esac
 
-# A mesh-excluded namespace (kube-system) is not intercepted; its direct dial
-# to the cw pod IP falls through to the FORWARD guard.
+# A mesh-excluded namespace (kube-system) is not intercepted on egress; its
+# direct dial to the cw pod IP is left to the node's inbound chains.
 kubectl run it-mesh-excl -n kube-system --restart=Never --image="$CURL_IMAGE" --command -- sleep 600 >/dev/null
 kubectl wait --for=condition=Ready pod/it-mesh-excl -n kube-system --timeout=120s \
     || fail "excluded-namespace client pod not Ready"
-out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
+# This dial crosses the same nat PREROUTING chains as the VIP case, so it has
+# the same two secure outcomes and the same one insecure outcome. Which of the
+# two secure ones happens is a property of rule ordering, not of the client's
+# namespace, so demanding rc=28 alone fails on a wrapped hop and passes a
+# plaintext one unnoticed (rc=0 proves only "not dropped"). Require the
+# matching counter instead.
+base_drops_excl="$(mesh_metric "$drops")"
+base_inbound_excl="$(mesh_metric "$inbound")"
+out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
 rc="$(echo "$out" | grep -o 'rc=[0-9]*' | cut -d= -f2)"
-# rc=0 is the insecure outcome, not a slow one: the dial completed, so the cw
-# guard admitted an unmeshed source.
-[ "$rc" = "28" ] || fail "excluded-namespace dial reached the cw workload in plaintext: want curl rc=28 (DROP timeout), got rc=$rc"
-pass "excluded-namespace plaintext bypass dropped by the cw inbound guard"
+case "$rc" in
+    28)
+        await_metric_above "$drops" "${base_drops_excl:-0}" "cw inbound drop counter"
+        pass "excluded-namespace plaintext bypass dropped by the cw inbound guard (counter moved)"
+        ;;
+    0)
+        echo "$out" | grep -q "^200" || fail "excluded-namespace dial rc=0 but no 200: $out"
+        await_metric_above "$inbound" "${base_inbound_excl:-0}" \
+            "excluded-namespace dial returned 200 but the mesh recorded no inbound connection, so the hop reached the cw workload outside the mesh — in plaintext"
+        pass "excluded-namespace dial wrapped by the mesh (inbound counter moved; rule-ordering variant)"
+        ;;
+    *)
+        fail "excluded-namespace bypass to the cw workload: want rc=28 (dropped) or rc=0 (wrapped), got rc=$rc"
+        ;;
+esac
 
 log "tls-lb front door"
 kubectl -n "$NS" exec deploy/c8s-tls-lb -c nginx -- cat /tls/ca.pem > "$WORKDIR/mesh-ca.pem" \
