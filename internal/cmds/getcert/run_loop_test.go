@@ -680,3 +680,27 @@ func TestCDSHTTPClientParsesRTMRPins(t *testing.T) {
 		t.Fatalf("cdsHTTPClient with valid pins: %v", err)
 	}
 }
+
+// The az pin flags are refused when malformed rather than silently unpinning.
+func TestCDSHTTPClientParsesAzurePins(t *testing.T) {
+	base := config{CDSURL: "https://cds:8443", AttestationApiURL: "http://attestation-api:8400"}
+
+	cfg := base
+	cfg.CDSPCRs = "8=zz"
+	if _, err := cdsHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "--cds-pcrs") {
+		t.Fatalf("err = %v, want a PCR parse failure naming the flag", err)
+	}
+
+	cfg = base
+	cfg.CDSInitDataHash = "zz"
+	if _, err := cdsHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "--cds-init-data-hash") {
+		t.Fatalf("err = %v, want an init-data parse failure naming the flag", err)
+	}
+
+	cfg = base
+	cfg.CDSPCRs = "8=" + strings.Repeat("ab", 32)
+	cfg.CDSInitDataHash = strings.Repeat("cd", 32)
+	if _, err := cdsHTTPClient(cfg); err != nil {
+		t.Fatalf("cdsHTTPClient with valid az pins: %v", err)
+	}
+}

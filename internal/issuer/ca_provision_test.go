@@ -315,3 +315,22 @@ func TestAdoptFromPeerRejectsBadRTMRs(t *testing.T) {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
+
+// Malformed az pins fail the adopt dial before it is attempted.
+func TestAdoptFromPeerRejectsBadAzurePins(t *testing.T) {
+	base := CAProvisionConfig{
+		PeerURL:           "https://peer.example",
+		AttestationApiURL: "http://127.0.0.1:8400",
+		Measurements:      []string{strings.Repeat("ab", 48)},
+	}
+	bad := base
+	bad.PCRs = []string{"8=zz"}
+	if _, err := adoptFromPeer(context.Background(), bad, slog.Default()); err == nil || !strings.Contains(err.Error(), "PCR") {
+		t.Fatalf("err = %v, want a PCR parse failure", err)
+	}
+	bad = base
+	bad.InitDataHash = "zz"
+	if _, err := adoptFromPeer(context.Background(), bad, slog.Default()); err == nil || !strings.Contains(err.Error(), "init-data") {
+		t.Fatalf("err = %v, want an init-data parse failure", err)
+	}
+}

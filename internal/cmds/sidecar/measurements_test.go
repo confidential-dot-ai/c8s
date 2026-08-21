@@ -53,3 +53,14 @@ func TestParsePinsRejectsMalformedRTMR(t *testing.T) {
 		t.Fatalf("error = %v, want a parse error naming the flag", err)
 	}
 }
+
+func TestParsePinsRejectsMalformedPCRAndInitData(t *testing.T) {
+	cfg := Config{Measurements: []string{measurementHex()}, PCRs: []string{"8=zz"}}
+	if _, err := cfg.ParsePins(); err == nil || !strings.Contains(err.Error(), "--pcrs") {
+		t.Fatalf("error = %v, want a PCR parse error naming the flag", err)
+	}
+	cfg = Config{Measurements: []string{measurementHex()}, InitDataHash: "zz"}
+	if _, err := cfg.ParsePins(); err == nil || !strings.Contains(err.Error(), "--init-data-hash") {
+		t.Fatalf("error = %v, want an init-data parse error naming the flag", err)
+	}
+}

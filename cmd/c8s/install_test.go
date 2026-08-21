@@ -2206,4 +2206,26 @@ func TestAKSVTPMPinWarning(t *testing.T) {
 	if warn, err := aksVTPMPinWarning("aks", nil, "", []string{pinned}); err != nil || warn != "" {
 		t.Fatalf("values-file pinned aks: warn=%q err=%v, want quiet", warn, err)
 	}
+
+	initDataPinned := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(initDataPinned, []byte("cds:\n  initDataHash: \""+initData+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", nil, "", []string{initDataPinned}); err != nil || warn != "" {
+		t.Fatalf("init-data values file: warn=%q err=%v, want quiet", warn, err)
+	}
+	if _, err := aksVTPMPinWarning("aks", nil, "", []string{filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
+		t.Fatal("an unreadable values file was silently treated as unpinned")
+	}
+}
+
+// A malformed --init-data-hash aborts the fan-out rather than emitting a
+// half-pinned install.
+func TestAppendCvmModeInstallArgsRejectsBadInitDataHash(t *testing.T) {
+	prev := installInitDataHash
+	defer func() { installInitDataHash = prev }()
+	installInitDataHash = "zz"
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "sev-snp"); err == nil || !strings.Contains(err.Error(), "--init-data-hash") {
+		t.Fatalf("err = %v, want an init-data parse failure naming the flag", err)
+	}
 }

@@ -214,17 +214,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.rtmrs)
+	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.rtmrs, c.pcrs, c.initDataHash)
 	if err != nil {
 		return err
-	}
-	meshPolicy.PCRs, err = ratls.ParsePCRPinsString(c.pcrs)
-	if err != nil {
-		return fmt.Errorf("--pcrs: %w", err)
-	}
-	meshPolicy.InitDataHash, err = ratls.ParseInitDataHash(c.initDataHash)
-	if err != nil {
-		return fmt.Errorf("--init-data-hash: %w", err)
 	}
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
@@ -262,23 +254,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return err
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	cdsPins, err := cdsDialPins(c)
 	if err != nil {
-		return fmt.Errorf("--cds-measurements: %w", err)
+		return err
 	}
-	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
-	if err != nil {
-		return fmt.Errorf("--cds-rtmrs: %w", err)
-	}
-	cdsPCRs, err := ratls.ParsePCRPinsString(c.cdsPCRs)
-	if err != nil {
-		return fmt.Errorf("--cds-pcrs: %w", err)
-	}
-	cdsInitDataHash, err := ratls.ParseInitDataHash(c.cdsInitDataHash)
-	if err != nil {
-		return fmt.Errorf("--cds-init-data-hash: %w", err)
-	}
-	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
+	if c.certMode == "cds" && len(cdsPins.Measurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
 	}
 
@@ -457,10 +437,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			NodeIP:            c.nodeIP,
 			DNSSAN:            c.certDNSSAN,
 			TEEType:           teeType,
-			CDSMeasurements:   cdsMeasurements,
-			CDSRTMRs:          cdsRTMRs,
-			CDSPCRs:           cdsPCRs,
-			CDSInitDataHash:   cdsInitDataHash,
+			CDSMeasurements:   cdsPins.Measurements,
+			CDSRTMRs:          cdsPins.RTMRs,
+			CDSPCRs:           cdsPins.PCRs,
+			CDSInitDataHash:   cdsPins.InitDataHash,
 		}
 		// A provider-construction failure (config validation) is logged and
 		// the mesh keeps serving self-signed certs; it never blocks startup.
@@ -701,16 +681,25 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 
 // meshVerifyPolicy builds the mesh peer-verification policy: evidence checked
 // by the same-node attestation-api, launch measurements pinned to the
-// --measurements allowlist, and TDX peers additionally pinned to the --rtmrs
-// registers. Empty measurements leaves the policy unpinned (accept any TEE —
+// --measurements allowlist, TDX peers additionally pinned to the --rtmrs
+// registers, and az peers to the --pcrs registers and --init-data-hash
+// binding. Empty measurements leaves the policy unpinned (accept any TEE —
 // development only).
-func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
+func meshVerifyPolicy(attestationApiURL, measurements, rtmrs, pcrs, initDataHash string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
 	pins, err := ratls.ParseRTMRPinsString(rtmrs)
 	if err != nil {
 		return nil, fmt.Errorf("--rtmrs: %w", err)
 	}
 	policy.RTMRs = pins
+	policy.PCRs, err = ratls.ParsePCRPinsString(pcrs)
+	if err != nil {
+		return nil, fmt.Errorf("--pcrs: %w", err)
+	}
+	policy.InitDataHash, err = ratls.ParseInitDataHash(initDataHash)
+	if err != nil {
+		return nil, fmt.Errorf("--init-data-hash: %w", err)
+	}
 	if measurements == "" {
 		return policy, nil
 	}
@@ -727,6 +716,29 @@ func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.Ver
 		policy.Measurements = append(policy.Measurements, b)
 	}
 	return policy, nil
+}
+
+// cdsDialPins parses the CDS-dial identity pins from the host-mode flags.
+// Split from runProxy so the parse rules are testable without the proxy
+// machinery.
+func cdsDialPins(c *proxyConfig) (ratls.Pins, error) {
+	measurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-measurements: %w", err)
+	}
+	rtmrs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	pcrs, err := ratls.ParsePCRPinsString(c.cdsPCRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-pcrs: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(c.cdsInitDataHash)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-init-data-hash: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs, PCRs: pcrs, InitDataHash: initDataHash}, nil
 }
 
 func effectiveCDSCAURL(certMode, cdsURL string) string {

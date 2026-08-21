@@ -360,3 +360,21 @@ func TestNewHandlerRejectsBadRTMRPin(t *testing.T) {
 		t.Fatalf("error = %v, want an RTMR parse failure naming the flag", err)
 	}
 }
+
+func TestNewHandlerRejectsBadAzurePins(t *testing.T) {
+	base := config{
+		cdsURL:            "https://c8s-cds:8443",
+		attestationAPIURL: "http://attestation-api:8400",
+		requestTimeout:    time.Second,
+	}
+	bad := base
+	bad.cdsPCRs = []string{"8=zz"}
+	if _, err := newHandler(bad, slog.Default()); err == nil || !strings.Contains(err.Error(), "--cds-pcrs") {
+		t.Fatalf("error = %v, want a PCR parse failure naming the flag", err)
+	}
+	bad = base
+	bad.cdsInitDataHash = "zz"
+	if _, err := newHandler(bad, slog.Default()); err == nil || !strings.Contains(err.Error(), "--cds-init-data-hash") {
+		t.Fatalf("error = %v, want an init-data parse failure naming the flag", err)
+	}
+}
