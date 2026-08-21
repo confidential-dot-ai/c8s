@@ -323,16 +323,14 @@ sequenceDiagram
 kata-deploy separately runs `kata-deploy cleanup` on `preStop` to unwind the
 host runtime install.
 
-**`c8s uninstall`** wraps the helm step and adds the kata host sweep the
-preStop hook cannot guarantee: after the release is gone, a short-lived
-privileged DaemonSet removes whatever survived on each node — `/opt/kata`, the
-containerd runtime drop-in (restarting the runtime only if it was still
-registered), the pulled kata-guest-base artifact, the RKE2 containerd-prep
-template — plus the `katacontainers.io/kata-runtime` node labels. It refuses
+**`c8s uninstall`** wraps the helm step and adds the host sweep the preStop
+hook cannot guarantee: after the release is gone, a short-lived privileged
+DaemonSet removes whatever survived on each node, on every release shape
+(leftovers may come from a previous install of a different shape). It refuses
 to run under live kata pods (`--force` overrides), reads the release values
 before deletion so install-time `-f` overrides are honored, and
 `--host-sweep-only` recovers a cluster whose release a bare `helm uninstall`
-already deleted. See [`kata.md`](kata.md#uninstalling).
+already deleted. Full sweep inventory: [`kata.md`](kata.md#uninstalling).
 
 ---
 
