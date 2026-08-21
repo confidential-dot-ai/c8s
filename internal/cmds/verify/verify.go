@@ -120,6 +120,7 @@ type config struct {
 	allowlistFile    string
 	meshCA           string
 	initDataHex      string
+	pcrs             []string
 	allowDebug       bool
 	minTCBBootloader uint
 	minTCBTEE        uint
@@ -212,6 +213,7 @@ responder chose).`,
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
+	f.StringSliceVar(&cfg.pcrs, "pcr", nil, "expected Azure vTPM platform configuration register(s) as <index>=<sha256-hex> (repeatable). On az-snp/az-tdx the launch measurement covers the Microsoft paravisor alone — the guest OS kernel and initrd measure into the vTPM PCRs — so these are what pin the guest OS. Read the values off a boot you trust. Azure vTPM evidence only — with any other platform a pin here is a policy error")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	const tcbSNPOnly = " (SEV-SNP evidence only — TDX carries no such component, so against TDX evidence this is a policy error rather than an ignored flag)"
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component"+tcbSNPOnly)
@@ -491,6 +493,11 @@ type verifyPlan struct {
 	meshCA *x509.CertPool
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
+	// pcrPins holds --pcr <index>=<hex>. Enforced on the verified claims
+	// (applyPCRPins) for the same reason as rtmrPins.manual: this command
+	// always verifies in process, and localverify.Params carries no
+	// registers.
+	pcrPins map[int][]byte
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -602,19 +609,26 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	if err != nil {
 		return nil, err
 	}
+	pcrPins, err := ratls.ParsePCRPins(cfg.pcrs)
+	if err != nil {
+		return nil, fmt.Errorf("--pcr: %w", err)
+	}
 
 	return &verifyPlan{
-		// RTMRs is still set: it is what enforces the pin if this policy is
-		// ever verified through the delegated attestation-api path. It is not
-		// what enforces it today — see rtmrPins.manual.
+		// RTMRs and PCRs are still set: they are what enforce the pins if
+		// this policy is ever verified through the delegated attestation-api
+		// path. They are not what enforces them today — see rtmrPins.manual
+		// and verifyPlan.pcrPins.
 		policy: &ratls.VerifyPolicy{
 			Measurements: measurements,
 			RTMRs:        pins.manual,
+			PCRs:         pcrPins,
 			AllowDebug:   cfg.allowDebug,
 		},
 		pins:         pins,
 		meshCA:       caPool,
 		initDataHash: initDataHash,
+		pcrPins:      pcrPins,
 	}, nil
 }
 
@@ -1049,6 +1063,10 @@ type Outcome struct {
 	// verdict that proves neither must not look like one that proves both.
 	RTMRsPinned []string `json:"rtmrs_pinned,omitempty"`
 
+	// PCRsPinned lists the Azure vTPM registers this verdict enforced, as
+	// index:hex pairs, empty when no PCR pin was set.
+	PCRsPinned []string `json:"pcrs_pinned,omitempty"`
+
 	// Warnings are policy gaps in an otherwise passing verdict — verified
 	// true, but with named limits a relying party should read.
 	Warnings []string `json:"warnings,omitempty"`
@@ -1298,6 +1316,15 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		oc.Error = fmt.Sprintf("an RTMR pin (--image-manifest / --expected-rtmr3 / --operator-pkey) is set but the evidence platform is %q: runtime measurement registers exist only on TDX, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
 		return oc
 	}
+	// Same rule for the vTPM registers: a --pcr pin against evidence with no
+	// vTPM is an inapplicable policy, never an ignored option. The raw tag is
+	// compared (not NormalizePlatform, which collapses az-snp into sev-snp)
+	// because it is the az verification path alone that checks a TPM quote —
+	// an attester relabeling its evidence lands here, refused.
+	if len(plan.pcrPins) > 0 && !attestationclient.AzPlatform(oc.Platform) {
+		oc.Error = fmt.Sprintf("a --pcr pin is set but the evidence platform is %q: vTPM platform configuration registers exist only on az-snp/az-tdx, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
+		return oc
+	}
 	if !enforceMinTCB(&oc, cfg, result) {
 		return oc
 	}
@@ -1329,6 +1356,9 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		}
 	}
 	if !applyRTMRPins(&oc, plan.pins, result) {
+		return oc
+	}
+	if !applyPCRPins(&oc, plan.pcrPins, result) {
 		return oc
 	}
 	oc.Verified = true
@@ -1460,6 +1490,38 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
+// applyPCRPins enforces the --pcr pins on the verified claims' vTPM register
+// set (platform_data.tpm), recording what was enforced in PCRsPinned.
+// newOutcome has already gated the platform. An absent or malformed claim, or
+// a mismatch, fails the verdict — never an ignored option.
+func applyPCRPins(oc *Outcome, pins map[int][]byte, result *teetypes.VerificationResult) bool {
+	if len(pins) == 0 {
+		return true
+	}
+	tpm, _ := result.Claims.PlatformData["tpm"].(map[string]any)
+	for _, idx := range slices.Sorted(maps.Keys(pins)) {
+		key := fmt.Sprintf("pcr%02d", idx)
+		got, _ := tpm[key].(string)
+		got = strings.ToLower(strings.TrimSpace(got))
+		if got == "" {
+			oc.Error = fmt.Sprintf("cannot enforce the PCR[%d] pin: the verified claims carry no tpm.%s", idx, key)
+			return false
+		}
+		gb, err := hex.DecodeString(got)
+		if err != nil || len(gb) != ratls.PCRDigestSize {
+			oc.Error = fmt.Sprintf("cannot enforce the PCR[%d] pin: tpm.%s claim is malformed (%q)", idx, key, got)
+			return false
+		}
+		want := pins[idx]
+		if !bytes.Equal(gb, want) {
+			oc.Error = fmt.Sprintf("PCR[%d] is %s, expected %s", idx, got, hex.EncodeToString(want))
+			return false
+		}
+		oc.PCRsPinned = append(oc.PCRsPinned, fmt.Sprintf("%d:%s", idx, hex.EncodeToString(want)))
+	}
+	return true
+}
+
 // rtmrMeaning labels a register in operator-facing output. parseRTMRPins
 // admits only 1 and 2; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
@@ -1584,6 +1646,10 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	for _, p := range oc.RTMRsPinned {
 		idx, hexVal, _ := strings.Cut(p, ":")
 		fmt.Fprintf(out, "  RTMR[%s]:      %s (matched)\n", idx, hexVal)
+	}
+	for _, p := range oc.PCRsPinned {
+		idx, hexVal, _ := strings.Cut(p, ":")
+		fmt.Fprintf(out, "  PCR[%s]:       %s (matched)\n", idx, hexVal)
 	}
 	if oc.InitDataNote != "" {
 		if oc.InitData != "" {

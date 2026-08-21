@@ -224,6 +224,12 @@ spec:
             {{- with .Values.cds.rtmrs }}
             - --rtmrs={{ join "," . }}
             {{- end }}
+            {{- with .Values.cds.pcrs }}
+            - --pcrs={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --init-data-hash={{ . }}
+            {{- end }}
             {{- with .Values.cds.sandboxInventoryCIDRs }}
             - --sandbox-inventory-cidr={{ join "," . }}
             {{- end }}
@@ -234,6 +240,12 @@ spec:
             - --handoff-measurements={{ join "," .Values.cds.measurements }}
             {{- with .Values.cds.rtmrs }}
             - --handoff-rtmrs={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.pcrs }}
+            - --handoff-pcrs={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --handoff-init-data-hash={{ . }}
             {{- end }}
             {{- end }}
             {{- with (include "c8s.cdsHandoffPeerURL" .) }}

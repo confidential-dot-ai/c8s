@@ -38,6 +38,14 @@ var (
 	// malformed, or does not match the value the policy pins.
 	ErrRTMRNotAllowed = errors.New("attestationclient: RTMR not allowed")
 
+	// ErrPCRNotAllowed: a pinned vTPM platform configuration register is
+	// absent, malformed, or does not match the value the policy pins.
+	ErrPCRNotAllowed = errors.New("attestationclient: vTPM PCR not allowed")
+
+	// ErrInitDataMismatch: the request pinned an expected init-data hash and
+	// the verifier's init_data_match verdict is absent or false.
+	ErrInitDataMismatch = errors.New("attestationclient: init-data mismatch in attestation evidence")
+
 	// ErrUnsupportedPlatform: [Client.VerifyEvidence] has no verification
 	// rules for the envelope's platform and fails closed.
 	ErrUnsupportedPlatform = errors.New("attestationclient: unsupported platform for evidence verification")
@@ -76,10 +84,11 @@ func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 			return ErrReportDataMismatch
 		}
 	}
-	// The init-data pin is enforced on the in-process engine path
-	// (internal/localverify Params.ExpectedInitDataHash), not on this delegated
-	// one: wiring req.Params.ExpectedInitDataHash must add a matching
-	// InitDataMatch gate here — see #89.
+	if req.Params != nil && req.Params.ExpectedInitDataHash != nil {
+		if resp.Result.InitDataMatch == nil || !*resp.Result.InitDataMatch {
+			return ErrInitDataMismatch
+		}
+	}
 	return nil
 }
 
@@ -118,6 +127,22 @@ type EvidencePolicy struct {
 	// shape. RTMR[3] is extended by in-guest software and cannot speak to guest
 	// identity — a substituted guest extends it with whatever it likes.
 	RTMRs map[int][]byte
+
+	// PCRs pins Azure vTPM platform configuration registers by index, and is
+	// what makes an az-snp / az-tdx guest's OS attested rather than just the
+	// Microsoft paravisor's: on Azure CVMs the launch measurement covers the
+	// paravisor/IGVM, while the guest kernel and initrd measure into the vTPM
+	// PCRs. Enforced against claims.platform_data.tpm.pcrNN on the az
+	// platforms only; ignored where there is no vTPM (snp, gcp-snp, tdx).
+	// Values are SHA-256 (32 bytes). Empty pins nothing.
+	PCRs map[int][]byte
+
+	// ExpectedInitDataHash, when set, is forwarded to /verify as
+	// expected_init_data_hash and the init_data_match verdict is required to
+	// be affirmatively true. On az-snp/az-tdx the verifier binds it through
+	// vTPM PCR[8]; on snp it is HOST_DATA and on tdx the zero-padded
+	// MRCONFIGID. Nil sends no pin and requires no verdict.
+	ExpectedInitDataHash []byte
 }
 
 // VerifyEvidence verifies an attestation evidence envelope against policy via
@@ -145,11 +170,14 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 		reportData = policy.ExpectedReportData[:sha512.Size384]
 	}
 
-	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, policy.MinTcb))
+	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, policy.MinTcb, policy.ExpectedInitDataHash))
 	if err != nil {
 		return types.VerifyResponse{}, err
 	}
 	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+		return types.VerifyResponse{}, err
+	}
+	if err := EnforcePCRs(evidence.Platform, resp, policy.PCRs); err != nil {
 		return types.VerifyResponse{}, err
 	}
 
@@ -170,7 +198,7 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	// RTMRs as hex in claims.platform_data. Both are enforced client-side, so
 	// the policy stays here rather than being asserted by the verifier. MinTcb
 	// is omitted because the c8s TDX request has no minimum-TCB policy field.
-	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, nil))
+	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, nil, policy.ExpectedInitDataHash))
 	if err != nil {
 		return types.VerifyResponse{}, err
 	}
@@ -180,6 +208,9 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	if err := EnforceRTMRs(resp, policy.RTMRs); err != nil {
 		return types.VerifyResponse{}, err
 	}
+	if err := EnforcePCRs(evidence.Platform, resp, policy.PCRs); err != nil {
+		return types.VerifyResponse{}, err
+	}
 	return resp, nil
 }
 
@@ -187,6 +218,55 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 // runtime measurement registers an RTMR pin can be enforced against.
 func TDXPlatform(platform string) bool {
 	return platform == string(types.PlatformTdx) || platform == string(types.PlatformAzTdx)
+}
+
+// AzPlatform reports whether platform names Azure vTPM-shaped evidence, i.e.
+// carries the TPM quote a PCR pin can be enforced against.
+func AzPlatform(platform string) bool {
+	return platform == string(types.PlatformAzSnp) || platform == string(types.PlatformAzTdx)
+}
+
+// pcrDigestSize is the width of the vTPM PCR values the az verifiers report
+// (SHA-256 bank).
+const pcrDigestSize = 32
+
+// EnforcePCRs requires each pinned vTPM register to byte-equal the value the
+// verifier reported in claims.platform_data.tpm. Pins are enforced only
+// against az-shaped evidence — the other platforms carry no vTPM, so there is
+// nothing for a pin to narrow and a mixed fleet keeps working. On an az
+// platform a pinned register the verifier did not report is a refusal, not a
+// pass. The reported values are bound to the quote's signed pcrDigest by the
+// verifier; like the launch digest, their integrity rests on that verifier
+// being inside the caller's TCB (VerifyPolicy.AttestationApiURL).
+func EnforcePCRs(platform string, resp types.VerifyResponse, pinned map[int][]byte) error {
+	if len(pinned) == 0 || !AzPlatform(platform) {
+		return nil
+	}
+	var platformData struct {
+		TPM map[string]string `json:"tpm"`
+	}
+	if len(resp.Result.Claims.PlatformData) > 0 {
+		if err := json.Unmarshal(resp.Result.Claims.PlatformData, &platformData); err != nil {
+			return fmt.Errorf("%w: platform data unreadable: %w", ErrPCRNotAllowed, err)
+		}
+	}
+	for _, idx := range sortedPinIndices(pinned) {
+		reported, ok := platformData.TPM[fmt.Sprintf("pcr%02d", idx)]
+		if !ok || reported == "" {
+			return fmt.Errorf("%w: PCR[%d] pinned but not reported", ErrPCRNotAllowed, idx)
+		}
+		got, err := hex.DecodeString(reported)
+		if err != nil {
+			return fmt.Errorf("%w: PCR[%d] is not hex: %w", ErrPCRNotAllowed, idx, err)
+		}
+		if len(got) != pcrDigestSize {
+			return fmt.Errorf("%w: PCR[%d] is %d bytes, expected %d", ErrPCRNotAllowed, idx, len(got), pcrDigestSize)
+		}
+		if !bytes.Equal(got, pinned[idx]) {
+			return fmt.Errorf("%w: PCR[%d] does not match", ErrPCRNotAllowed, idx)
+		}
+	}
+	return nil
 }
 
 // EnforceRTMRs requires each pinned register to byte-equal the value the
@@ -213,7 +293,7 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	}
 	reported := [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}
 
-	for _, idx := range sortedRTMRIndices(pinned) {
+	for _, idx := range sortedPinIndices(pinned) {
 		want := pinned[idx]
 		if idx < 0 || idx >= len(reported) {
 			return fmt.Errorf("%w: RTMR[%d] does not exist", ErrRTMRNotAllowed, idx)
@@ -235,8 +315,8 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	return nil
 }
 
-// sortedRTMRIndices keeps the error an operator sees stable across runs.
-func sortedRTMRIndices(pinned map[int][]byte) []int {
+// sortedPinIndices keeps the error an operator sees stable across runs.
+func sortedPinIndices(pinned map[int][]byte) []int {
 	idx := make([]int, 0, len(pinned))
 	for i := range pinned {
 		idx = append(idx, i)
@@ -272,13 +352,18 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 
 // verifyRequest builds the /verify request: expected REPORTDATA bound, token
 // issuance off (c8s callers mint their own EAR after verifying).
-func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowDebug bool, minTcb *types.MinTcb) types.VerifyRequest {
+func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowDebug bool, minTcb *types.MinTcb, initDataHash []byte) types.VerifyRequest {
 	expected := types.NewBase64Bytes(reportData)
-	return types.NewVerifyRequest(evidence, &types.VerifyParams{
+	params := &types.VerifyParams{
 		ExpectedReportData: &expected,
 		AllowDebug:         &allowDebug,
 		MinTcb:             minTcb,
-	}, false)
+	}
+	if initDataHash != nil {
+		pinned := types.NewBase64Bytes(initDataHash)
+		params.ExpectedInitDataHash = &pinned
+	}
+	return types.NewVerifyRequest(evidence, params, false)
 }
 
 // MeasurementAllowed reports whether measurement byte-equals one of the

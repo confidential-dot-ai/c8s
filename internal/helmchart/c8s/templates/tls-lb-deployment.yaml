@@ -300,6 +300,12 @@ spec:
             {{- with .Values.cds.rtmrs }}
             - --cds-rtmrs={{ join "," . }}
             {{- end }}
+            {{- with .Values.cds.pcrs }}
+            - --cds-pcrs={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --cds-init-data-hash={{ . }}
+            {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
           # cvmMode=node: the proxy verifies CDS through the node-baked
           # attestation-api, reached from this pod via its node IP.

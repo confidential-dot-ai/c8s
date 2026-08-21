@@ -114,6 +114,8 @@ func run(cfg config) error {
 		AttestationApiURL: cfg.attestationApiURL,
 		Measurements:      cfg.handoffMeasurements,
 		RTMRs:             cfg.handoffRTMRs,
+		PCRs:              cfg.handoffPCRs,
+		InitDataHash:      cfg.handoffInitDataHash,
 		ExpectedIssuer:    cfg.earIssuerName,
 		Timeout:           cfg.handoffPeerTimeout,
 		OperatorKeysHash:  operatorKeysHash,
@@ -142,6 +144,17 @@ func run(cfg config) error {
 	rtmrPins, err := ratls.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
+	}
+	pcrPins, err := ratls.ParsePCRPins(cfg.pcrs)
+	if err != nil {
+		return fmt.Errorf("--pcrs: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(cfg.initDataHash)
+	if err != nil {
+		return fmt.Errorf("--init-data-hash: %w", err)
+	}
+	if len(pcrPins) > 0 || initDataHash != nil {
+		slog.Info("Azure vTPM pinning enabled for /attest and /attest-key", "pcrs", len(pcrPins), "init_data", initDataHash != nil)
 	}
 	if len(rtmrPins) > 0 {
 		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
@@ -220,6 +233,8 @@ func run(cfg config) error {
 		EarIssuer:         earIssuer,
 		OperatorKeysHash:  attestKeyOperatorPolicy,
 		RTMRs:             rtmrPins,
+		PCRs:              pcrPins,
+		InitDataHash:      initDataHash,
 	}
 
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
@@ -255,7 +270,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, PCRs: pcrPins, InitDataHash: initDataHash},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -325,6 +340,8 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
+			PCRs:              pcrPins,
+			InitDataHash:      initDataHash,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

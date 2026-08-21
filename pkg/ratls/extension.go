@@ -39,6 +39,10 @@ const (
 	// SNPMeasurementSize is the size of an SEV-SNP launch measurement
 	// (SHA-384 digest = 48 bytes).
 	SNPMeasurementSize = 48
+
+	// PCRDigestSize is the size of an Azure vTPM PCR value in the SHA-256
+	// bank, and of the init-data digest bound through PCR[8] (32 bytes).
+	PCRDigestSize = 32
 )
 
 // OID arc: 1.3.6.1.4.1.66378 is our official PEN (Private Enterprise Number).

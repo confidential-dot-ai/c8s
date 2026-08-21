@@ -5566,6 +5566,8 @@ type nriRuntimeConfig struct {
 			AttestationApiURL string   `yaml:"attestation_api_url"`
 			CDSMeasurements   []string `yaml:"cds_measurements"`
 			CDSRTMRs          []string `yaml:"cds_rtmrs"`
+			CDSPCRs           []string `yaml:"cds_pcrs"`
+			CDSInitDataHash   string   `yaml:"cds_init_data_hash"`
 		} `yaml:"pull"`
 		Push struct {
 			PersistPath string `yaml:"persist_path"`
@@ -7921,4 +7923,59 @@ func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
 	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
 		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
 	}
+}
+
+// TestChartAzurePinsFlagThrough confirms cds.pcrs / cds.initDataHash and the
+// ratlsMesh mirrors reach every consumer the way the RTMR pins do.
+func TestChartAzurePinsFlagThrough(t *testing.T) {
+	const (
+		pcr4     = "4=4444444444444444444444444444444444444444444444444444444444444444"
+		pcr8     = "8=8888888888888888888888888888888888888888888888888888888888888888"
+		initData = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	)
+	out, err := helmTemplate(t,
+		"--set", "cds.pcrs[0]="+pcr4,
+		"--set", "cds.pcrs[1]="+pcr8,
+		"--set-string", "cds.initDataHash="+initData,
+		"--set", "ratlsMesh.pcrs[0]="+pcr8,
+		"--set-string", "ratlsMesh.initDataHash="+initData,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	joined := pcr4 + "," + pcr8
+
+	cdsArgs := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", cdsArgs, "--pcrs="+joined)
+	assertContainerHasArg(t, "cds", cdsArgs, "--init-data-hash="+initData)
+
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if i := slices.Index(meshArgs, "--cds-pcrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != joined {
+		t.Fatalf("ratls-mesh missing --cds-pcrs %q\nargs: %v", joined, meshArgs)
+	}
+	if i := slices.Index(meshArgs, "--pcrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != pcr8 {
+		t.Fatalf("ratls-mesh missing --pcrs %q\nargs: %v", pcr8, meshArgs)
+	}
+	if i := slices.Index(meshArgs, "--init-data-hash"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != initData {
+		t.Fatalf("ratls-mesh missing --init-data-hash %q\nargs: %v", initData, meshArgs)
+	}
+	if i := slices.Index(meshArgs, "--cds-init-data-hash"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != initData {
+		t.Fatalf("ratls-mesh missing --cds-init-data-hash %q\nargs: %v", initData, meshArgs)
+	}
+
+	operatorArgs := renderedOperatorArgs(t, out)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-pcrs="+pcr4)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-init-data-hash="+initData)
+
+	workerCfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if want := []string{pcr4, pcr8}; !slices.Equal(workerCfg.Allowlist.Pull.CDSPCRs, want) {
+		t.Fatalf("worker CDS PCR pins = %v, want %v", workerCfg.Allowlist.Pull.CDSPCRs, want)
+	}
+	if workerCfg.Allowlist.Pull.CDSInitDataHash != initData {
+		t.Fatalf("worker CDS init-data hash = %q, want %q", workerCfg.Allowlist.Pull.CDSInitDataHash, initData)
+	}
+
+	proxyArgs := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy").Args
+	assertContainerHasArg(t, "allowlist-proxy", proxyArgs, "--cds-pcrs="+joined)
+	assertContainerHasArg(t, "allowlist-proxy", proxyArgs, "--cds-init-data-hash="+initData)
 }

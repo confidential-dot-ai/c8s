@@ -1639,3 +1639,39 @@ func TestFetchersCarryCDSRTMRPins(t *testing.T) {
 		}
 	}
 }
+
+// The az pins ride the same routes: comma-joined --cds-pcrs and a single
+// --cds-init-data-hash on get-cert, repeatable --pcrs and --init-data-hash on
+// the secret and volume fetchers, and no flags at all when unset.
+func TestFetchersCarryAzurePins(t *testing.T) {
+	pcrs := []string{"4=" + strings.Repeat("ab", 32), "8=" + strings.Repeat("cd", 32)}
+	initData := strings.Repeat("ef", 32)
+	pod := podWithApp()
+	cfg := secretsConfig()
+	cfg.CDSPCRs = pcrs
+	cfg.CDSInitDataHash = initData
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	certArgs := containerNamed(pod, reservedCertContainerName).Args
+	if !hasArg(certArgs, "--cds-pcrs="+pcrs[0]+","+pcrs[1]) || !hasArg(certArgs, "--cds-init-data-hash="+initData) {
+		t.Fatalf("c8s-cert args %v missing az pins", certArgs)
+	}
+	for _, name := range []string{reservedSecretContainerName, reservedVolumeContainerName} {
+		args := containerNamed(pod, name).Args
+		if !hasArg(args, "--pcrs="+pcrs[0]) || !hasArg(args, "--pcrs="+pcrs[1]) || !hasArg(args, "--init-data-hash="+initData) {
+			t.Fatalf("%s args %v missing az pins", name, args)
+		}
+	}
+
+	unpinned := podWithApp()
+	mutatePod(unpinned, &injection{WorkloadID: "api"}, secretsConfig())
+	for _, arg := range containerNamed(unpinned, reservedCertContainerName).Args {
+		if strings.HasPrefix(arg, "--cds-pcrs") || strings.HasPrefix(arg, "--cds-init-data-hash") {
+			t.Fatalf("c8s-cert carries %q with no az pins configured", arg)
+		}
+	}
+}

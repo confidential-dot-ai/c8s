@@ -39,6 +39,13 @@ type CAProvisionConfig struct {
 	// whose kernel and rootfs the host chose. SNP peers are unaffected;
 	// optional.
 	RTMRs []string
+	// PCRs pins the peer's Azure vTPM registers on the adopt dial, as
+	// <index>=<sha256-hex> entries — the az analogue of RTMRs. Peers without
+	// a vTPM are unaffected; optional.
+	PCRs []string
+	// InitDataHash, when set, is the hex SHA-256 init-data digest the peer's
+	// evidence must bind on the adopt dial. Optional.
+	InitDataHash string
 	// ExpectedIssuer is the EAR issuer claim required on the peer's handoff
 	// EAR (the peer's --ear-issuer; "cds" by default).
 	ExpectedIssuer string
@@ -135,6 +142,14 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 	if err != nil {
 		return nil, fmt.Errorf("parse handoff RTMR pins: %w", err)
 	}
+	pcrPins, err := ratls.ParsePCRPins(cfg.PCRs)
+	if err != nil {
+		return nil, fmt.Errorf("parse handoff PCR pins: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(cfg.InitDataHash)
+	if err != nil {
+		return nil, fmt.Errorf("parse handoff init-data hash: %w", err)
+	}
 	// The same digest set pins both channels; the EAR-side map is derived
 	// from the validated digests so the two representations stay in sync.
 	allowed := make(map[string]bool, len(pinned))
@@ -142,7 +157,7 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 		allowed[hex.EncodeToString(m)] = true
 	}
 
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: pinned, RTMRs: rtmrPins}, cfg.AttestationApiURL)
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: pinned, RTMRs: rtmrPins, PCRs: pcrPins, InitDataHash: initDataHash}, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, err
 	}

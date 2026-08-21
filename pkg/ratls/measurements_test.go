@@ -117,3 +117,54 @@ func TestParseRTMRPinsString(t *testing.T) {
 		t.Fatalf("blank input = %v, %v; want nil, nil", got, err)
 	}
 }
+
+func TestParsePCRPins(t *testing.T) {
+	hex32 := strings.Repeat("ef", 32)
+	want, err := hex.DecodeString(hex32)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ParsePCRPins([]string{"0=" + hex32, " 8 = " + hex32, "23=" + hex32})
+	if err != nil {
+		t.Fatalf("ParsePCRPins: %v", err)
+	}
+	if len(got) != 3 || !bytes.Equal(got[0], want) || !bytes.Equal(got[8], want) || !bytes.Equal(got[23], want) {
+		t.Fatalf("pins = %v, want PCR[0], PCR[8] and PCR[23] = %s", got, hex32)
+	}
+	if got, err := ParsePCRPins(nil); err != nil || got != nil {
+		t.Fatalf("empty input = %v, %v; want nil, nil", got, err)
+	}
+
+	rejects := map[string][]string{
+		"missing separator":  {hex32},
+		"negative index":     {"-1=" + hex32},
+		"index out of range": {"24=" + hex32},
+		"duplicate index":    {"8=" + hex32, "8=" + hex32},
+		"non-hex value":      {"8=zz"},
+		"sha384 value":       {"8=" + strings.Repeat("ab", 48)},
+	}
+	for name, in := range rejects {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParsePCRPins(in); err == nil {
+				t.Fatalf("ParsePCRPins(%q) accepted, want error", in)
+			}
+		})
+	}
+}
+
+func TestParseInitDataHash(t *testing.T) {
+	hex32 := strings.Repeat("ab", 32)
+	got, err := ParseInitDataHash(hex32)
+	if err != nil || len(got) != PCRDigestSize {
+		t.Fatalf("ParseInitDataHash = %x, %v; want the 32-byte digest", got, err)
+	}
+	if got, err := ParseInitDataHash(" "); err != nil || got != nil {
+		t.Fatalf("blank input = %v, %v; want nil, nil", got, err)
+	}
+	for _, bad := range []string{"zz", "abcd", strings.Repeat("ab", 48)} {
+		if _, err := ParseInitDataHash(bad); err == nil {
+			t.Fatalf("ParseInitDataHash(%q) accepted, want error", bad)
+		}
+	}
+}

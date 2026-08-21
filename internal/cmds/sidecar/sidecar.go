@@ -29,6 +29,8 @@ type Config struct {
 	AttestationApiURL string
 	Measurements      []string
 	RTMRs             []string
+	PCRs              []string
+	InitDataHash      string
 
 	CertPath string
 	KeyPath  string
@@ -65,6 +67,8 @@ func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
 	f.StringSliceVar(&cfg.RTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy (repeatable; ignored when CDS presents SNP evidence, empty pins no registers)")
+	f.StringSliceVar(&cfg.PCRs, "pcrs", nil, "Azure vTPM PCR pin(s) <index>=<sha256-hex> CDS must additionally satisfy (repeatable; ignored when CDS presents non-vTPM evidence, empty pins no registers)")
+	f.StringVar(&cfg.InitDataHash, "init-data-hash", "", "hex SHA-256 init-data digest CDS's evidence must bind (vTPM PCR[8] on az; empty pins nothing)")
 	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
@@ -114,7 +118,15 @@ func (c *Config) ParsePins() (ratls.Pins, error) {
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
 	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	pcrs, err := ratls.ParsePCRPins(c.PCRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--pcrs: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(c.InitDataHash)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--init-data-hash: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs, PCRs: pcrs, InitDataHash: initDataHash}, nil
 }
 
 // Terminal marks a non-nil error no later attempt can clear, so Retry stops on
