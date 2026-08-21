@@ -287,7 +287,9 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: base-total.txt
-          key: coverage-total-${{ github.sha }}
+          # -v2: entries below carry a one-decimal total, which the gate no
+          # longer compares against.
+          key: coverage-total-v2-${{ github.sha }}
 
       - name: Restore baseline total
         if: github.event_name == 'pull_request'
@@ -295,7 +297,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: base-total.txt
-          key: coverage-total-${{ github.event.pull_request.base.sha }}
+          key: coverage-total-v2-${{ github.event.pull_request.base.sha }}
 
       # Fallback when the base commit's total is not cached (e.g. cache
       # evicted, or main's coverage run predates this workflow).
@@ -319,9 +321,18 @@ jobs:
           head=$(./scripts/coverage-gate.sh total head.out)
           base=$(cat base-total.txt)
           echo "total coverage: base=${base}% head=${head}%"
+          # Tests exercising retries, timeouts and concurrent paths cover
+          # slightly different statements run to run, so the total wanders.
+          # Across 18 consecutive PR runs it moved within a ~0.2pp band, in
+          # both directions, including on PRs touching no Go at all: below
+          # that, the gate fails on noise. 0.25 is the smallest value clearing
+          # the band, and it is a real blind spot, roughly 80 statements on
+          # this tree. Shrinking it means making the measurement deterministic
+          # (fake clocks, seeded RNG in the offending packages), not lowering
+          # the number, which only restores the false failures.
           awk -v h="$head" -v b="$base" 'BEGIN {
-            if (h + 0.05 < b) {
-              printf "coverage gate: total coverage decreased (%.1f%% -> %.1f%%)\n", b, h
+            if (h + 0.25 < b) {
+              printf "coverage gate: total coverage decreased (%.2f%% -> %.2f%%)\n", b, h
               exit 1
             }
           }'
