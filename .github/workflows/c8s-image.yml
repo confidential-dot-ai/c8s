@@ -78,7 +78,7 @@ env:
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
   # TODO(confos#111): before merge, repoint at the confos main merge commit.
-  CONFOS_REF: ${{ inputs.confos_ref || '8109fcd8544f34b350a1ef4d334bb4e21c126c33' }} # pin: PR confos#111 head — snapshot-pinned host build deps (confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
+  CONFOS_REF: ${{ inputs.confos_ref || '0039c27ae329ab88117b06a8f6b7045475895e82' }} # pin: PR confos#111 head — snapshot-pinned host build deps (confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
   ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
@@ -184,46 +184,32 @@ jobs:
           ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
       - name: Restore build-dep debs
-        # Keyed on the runner-image release and the host-deps pin: the
-        # resolved deb set is a function of confos's committed snapshot
-        # timestamp and the preinstalled package state. Warm runs never touch
-        # the apt mirror, whose degradation has taken out gate legs repeatedly.
+        # Keyed on the runner-image release and the host-deps pin (script +
+        # the base mkosi.sources it reads): the resolved deb set is a
+        # function of confos's committed snapshot and the preinstalled
+        # package state. Warm runs never touch the apt mirror, whose
+        # degradation has taken out gate legs repeatedly.
         id: apt-debs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apt-debs
-          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps') }}
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
 
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
         # base ovmf is for the SNP path.
         # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
-        # iasl (DSDT) and clang (bindgen) shape measured bytes: cold runs
-        # install through confos's bin/host-deps (snapshot-pinned, fail-closed
-        # on live-mirror fetches, confos#36), which moves the dep closure to
-        # the snapshot's versions — hence --allow-downgrades on the warm
-        # reinstall too. Warm runs stay fully offline: apt sources are nulled,
-        # so a deb set that no longer resolves fails instead of drifting.
+        # iasl (DSDT) and clang (bindgen) shape measured bytes: host-deps
+        # installs them snapshot-pinned, fail-closed on live-mirror fetches
+        # (confos#36); with a warm apt-debs it reinstalls fully offline.
         # Bounded: a dead mirror connection otherwise hangs until the job's
         # 3h limit.
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          if compgen -G "apt-debs/*.deb" >/dev/null; then
-            sudo DEBIAN_FRONTEND=noninteractive apt-get \
-              -o Dir::Etc::sourcelist=/dev/null \
-              -o Dir::Etc::sourceparts=/dev/null \
-              -o Dpkg::Options::=--force-confdef \
-              -o Dpkg::Options::=--force-confold \
-              install -y --allow-downgrades ./apt-debs/*.deb
-          else
-            confidential-os-builder/bin/host-deps \
-              systemd-container ovmf cpio acpica-tools \
-              libclang-dev clang libtss2-dev
-            mkdir -p apt-debs
-            sudo cp /var/cache/apt/archives/*.deb apt-debs/
-            sudo chown -R "$(id -u):$(id -g)" apt-debs
-          fi
+          confidential-os-builder/bin/host-deps --cache-dir apt-debs \
+            systemd-container ovmf cpio acpica-tools \
+            libclang-dev clang libtss2-dev
           # The exact host set, for auditing a published measurement's toolchain.
           { echo "### host build-dep debs"; find apt-debs -maxdepth 1 -name '*.deb' -printf '- %f\n' | sort; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -233,7 +219,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apt-debs
-          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps') }}
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache staged GPU tree
