@@ -427,7 +427,11 @@ jobs:
           esac
           # shellcheck disable=SC2086  # deliberate split: cands is a word list
           cands="$(printf '%s\n' ${cands} | sed 's/-cdi//' | awk 'NF && !seen[$0]++')"
-          cands="$cands rke2-tdx-dev"
+          # No blind fallback to rke2-tdx-dev: it floats independently of the
+          # pinned image, and the dev variant is a serial-root-autologin build
+          # that is never shipped. Pin it through imageTag if it is genuinely
+          # under test, so the choice is recorded in the CM.
+          [ -n "$cands" ] || { echo "::error::cannot derive a manifest tag from image '$image'. Set 'imageTag' in $REFS_CM to the oras tag published beside it"; exit 1; }
           got_mrtd=""; oras_ref=""
           for t in $cands; do
             d=$(crane manifest "$repo:$t" 2>/dev/null | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest') || true
@@ -444,7 +448,7 @@ jobs:
           done
           # Fail closed: without a manifest from the booted build there is
           # nothing to pin the gate to.
-          [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the image's tag if it is not a rke2-tdx-dev build"; exit 1; }
+          [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the oras tag published beside the pinned image"; exit 1; }
           echo "manifest from $oras_ref (MRTD $got_mrtd)"
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
