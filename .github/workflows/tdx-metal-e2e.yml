@@ -402,35 +402,49 @@ jobs:
           # artifact that sits beside the CDI image the CVM boots.
           #
           # The CM's 'image' may be a tag OR a digest (digest-pinning the boot
-          # ref is the stronger position), and a digest has no sibling name to
-          # derive, so candidates are tried in order and the MRTD comparison
-          # below picks the right one. That check is the real test anyway: it
-          # proves the manifest describes the build this CVM booted, which a
-          # name match never could.
+          # ref is the stronger position). A digest carries no name, so resolve
+          # it back to the sibling tag that points at it; without that the only
+          # candidate left is the floating dev tag, which moves independently of
+          # the pinned image.
+          #
+          # Candidates are matched on the whole mrtd+rtmr1+rtmr2 tuple. MRTD
+          # alone does not identify a build: two builds sharing a firmware and
+          # memory layout have the same MRTD while their kernels, and so their
+          # RTMR[1], differ. Matching on MRTD accepted such a manifest and the
+          # run then failed inside get-kubeconfig on an RTMR[1] mismatch.
           repo="${image%%@*}"; repo="${repo%%:*}"
           cands="${imageTag:-}"
           case "$image" in
-            *@*) : ;;                                  # digest: no name to strip
-            *-cdi) cands="$cands ${image#*:}" ;;       # tag: strip the -cdi suffix
+            *@*)
+              # Digest: find the -cdi tag resolving to it, and take its sibling.
+              want="${image#*@}"
+              for t in $(crane ls "$repo" 2>/dev/null | grep -E -- '-cdi(-[0-9a-f]+)?$'); do
+                [ "$(crane digest "$repo:$t" 2>/dev/null)" = "$want" ] || continue
+                cands="$cands $t"; break
+              done
+              ;;
+            *-cdi*) cands="$cands ${image#*:}" ;;      # tag: strip the -cdi suffix
           esac
           # shellcheck disable=SC2086  # deliberate split: cands is a word list
-          cands="$(printf '%s\n' ${cands} | sed 's/-cdi$//' | awk 'NF && !seen[$0]++')"
-          [ -n "$cands" ] || cands=rke2-tdx-dev
+          cands="$(printf '%s\n' ${cands} | sed 's/-cdi//' | awk 'NF && !seen[$0]++')"
+          cands="$cands rke2-tdx-dev"
           got_mrtd=""; oras_ref=""
           for t in $cands; do
             d=$(crane manifest "$repo:$t" 2>/dev/null | jq -r '.layers[]|select(.annotations["org.opencontainers.image.title"]=="manifest.json")|.digest') || true
             [ -n "$d" ] || { echo "  $t: no manifest.json layer"; continue; }
             crane blob "$repo@$d" > /tmp/candidate-manifest.json 2>/dev/null || continue
             m=$(jq -r '.tdx.mrtd // empty' /tmp/candidate-manifest.json)
-            if [ "$m" = "$mrtd" ]; then
+            m1=$(jq -r '.tdx.rtmr1 // empty' /tmp/candidate-manifest.json)
+            m2=$(jq -r '.tdx.rtmr2 // empty' /tmp/candidate-manifest.json)
+            if [ "$m" = "$mrtd" ] && [ "$m1" = "$rtmr1" ] && [ "$m2" = "$rtmr2" ]; then
               cp /tmp/candidate-manifest.json /tmp/image-manifest.json
               got_mrtd="$m"; oras_ref="$repo:$t"; break
             fi
-            echo "  $t: MRTD $m != $mrtd"
+            echo "  $t: tuple mismatch (mrtd ${m:0:16}/${mrtd:0:16} rtmr1 ${m1:0:16}/${rtmr1:0:16} rtmr2 ${m2:0:16}/${rtmr2:0:16})"
           done
           # Fail closed: without a manifest from the booted build there is
           # nothing to pin the gate to.
-          [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose MRTD is $mrtd (the build this CVM booted). Set 'imageTag' in $REFS_CM to the image's tag if it is not a rke2-tdx-dev build"; exit 1; }
+          [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the image's tag if it is not a rke2-tdx-dev build"; exit 1; }
           echo "manifest from $oras_ref (MRTD $got_mrtd)"
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
