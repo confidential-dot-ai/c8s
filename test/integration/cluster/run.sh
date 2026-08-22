@@ -60,6 +60,27 @@ diagnostics() {
     kubectl get pods -A -o wide 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-cds --tail=40 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-operator --tail=40 2>&1 || true
+    mesh_diagnostics
+}
+
+# The mesh assertions are counter and membership claims, and neither survives
+# into the log otherwise: a failed one leaves no way to tell a stale ipset from
+# a rule that never fired from a workload reached in plaintext.
+mesh_diagnostics() {
+    local pod
+    pod="$(kubectl -n "$NS" get pod -l app=c8s-ratls-mesh -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    [ -n "$pod" ] || return 0
+    echo "--- ratls-mesh counters ---"
+    kubectl -n "$NS" exec "$pod" -c iptables-sync -- \
+        sh -c 'cat /tmp/ratls-iptables-metrics.json' 2>&1 || true
+    echo "--- cw guard chains and ipsets ---"
+    for chain in RATLS-MESH-CW RATLS-MESH-CW-EGRESS; do
+        kubectl -n "$NS" exec "$pod" -c iptables-sync -- iptables -L "$chain" -n -v -x 2>&1 || true
+    done
+    kubectl -n "$NS" exec "$pod" -c iptables-sync -- iptables -L FORWARD -n --line-numbers 2>&1 | head -12 || true
+    for set in RATLS-MESH-CW-PODS RATLS-MESH-PODS RATLS-MESH-LOCAL-PODS; do
+        kubectl -n "$NS" exec "$pod" -c iptables-sync -- ipset list "$set" 2>&1 | head -20 || true
+    done
 }
 
 cleanup() {
@@ -153,13 +174,7 @@ log "Writing the allowlist floor"
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -q "docker.io/library/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
-# The cw egress guard scopes its DNS carve-out to this address, and the chart
-# default is the c8s node image's, which no other distribution shares — kind's
-# is 10.96.0.10. Read it off the cluster, as an operator must.
-CLUSTER_DNS_IP="$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')"
-[ -n "$CLUSTER_DNS_IP" ] || fail "could not read the kube-dns ClusterIP"
-
-python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" "$CLUSTER_DNS_IP" <<'PYEOF'
+python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
 import sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
@@ -170,7 +185,6 @@ floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
         "nriImagePolicy": {"bootstrapAllowlist": {"digests": floor}},
-        "ratlsMesh": {"clusterDNSIP": sys.argv[4]},
     }, f)
 print(f"floor: {len(floor)} digests")
 PYEOF
@@ -568,7 +582,8 @@ case "$rc" in
         ;;
     0)
         echo "$out" | grep -q "^200" || fail "VIP dial rc=0 but no 200: $out"
-        await_metric_above "$inbound" "${base_inbound_vip:-0}" "mesh inbound counter (VIP hop wrapped)"
+        await_metric_above "$inbound" "${base_inbound_vip:-0}" \
+            "VIP dial returned 200 but the mesh recorded no inbound connection, so the hop reached the cw workload outside the mesh — in plaintext"
         pass "Service-VIP dial wrapped by the mesh (inbound counter moved; rule-ordering variant)"
         ;;
     *)
@@ -576,15 +591,36 @@ case "$rc" in
         ;;
 esac
 
-# A mesh-excluded namespace (kube-system) is not intercepted; its direct dial
-# to the cw pod IP falls through to the FORWARD guard.
+# A mesh-excluded namespace (kube-system) is not intercepted on egress; its
+# direct dial to the cw pod IP is left to the node's inbound chains.
 kubectl run it-mesh-excl -n kube-system --restart=Never --image="$CURL_IMAGE" --command -- sleep 600 >/dev/null
 kubectl wait --for=condition=Ready pod/it-mesh-excl -n kube-system --timeout=120s \
     || fail "excluded-namespace client pod not Ready"
-out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
+# This dial crosses the same nat PREROUTING chains as the VIP case, so it has
+# the same two secure outcomes and the same one insecure outcome. Which of the
+# two secure ones happens is a property of rule ordering, not of the client's
+# namespace, so demanding rc=28 alone fails on a wrapped hop and passes a
+# plaintext one unnoticed (rc=0 proves only "not dropped"). Require the
+# matching counter instead.
+base_drops_excl="$(mesh_metric "$drops")"
+base_inbound_excl="$(mesh_metric "$inbound")"
+out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
 rc="$(echo "$out" | grep -o 'rc=[0-9]*' | cut -d= -f2)"
-[ "$rc" = "28" ] || fail "excluded-namespace bypass to the cw workload: want curl rc=28 (DROP timeout), got rc=$rc"
-pass "excluded-namespace plaintext bypass dropped by the cw inbound guard"
+case "$rc" in
+    28)
+        await_metric_above "$drops" "${base_drops_excl:-0}" "cw inbound drop counter"
+        pass "excluded-namespace plaintext bypass dropped by the cw inbound guard (counter moved)"
+        ;;
+    0)
+        echo "$out" | grep -q "^200" || fail "excluded-namespace dial rc=0 but no 200: $out"
+        await_metric_above "$inbound" "${base_inbound_excl:-0}" \
+            "excluded-namespace dial returned 200 but the mesh recorded no inbound connection, so the hop reached the cw workload outside the mesh — in plaintext"
+        pass "excluded-namespace dial wrapped by the mesh (inbound counter moved; rule-ordering variant)"
+        ;;
+    *)
+        fail "excluded-namespace bypass to the cw workload: want rc=28 (dropped) or rc=0 (wrapped), got rc=$rc"
+        ;;
+esac
 
 log "tls-lb front door"
 kubectl -n "$NS" exec deploy/c8s-tls-lb -c nginx -- cat /tls/ca.pem > "$WORKDIR/mesh-ca.pem" \

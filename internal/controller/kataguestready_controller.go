@@ -16,9 +16,12 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
-const kataImagePullerComponent = "kata-image-puller"
+// KataImagePullerComponent and ComponentLabel select the puller pods whose
+// readiness this controller mirrors. The chart must render the same pair onto
+// the puller pod template (asserted in internal/helmchart/chart_test.go).
+const KataImagePullerComponent = "kata-image-puller"
 
-const componentLabel = "app.kubernetes.io/component"
+const ComponentLabel = "app.kubernetes.io/component"
 
 // KataGuestReadyReconciler maintains webhook.GuestReadyNodeLabel from the
 // node's kata-image-puller readiness, which already re-validates the drop-in
@@ -79,7 +82,7 @@ func (r *KataGuestReadyReconciler) pullerReadyOn(ctx context.Context, node strin
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(r.Namespace),
-		client.MatchingLabels{componentLabel: kataImagePullerComponent},
+		client.MatchingLabels{ComponentLabel: KataImagePullerComponent},
 	); err != nil {
 		return false, fmt.Errorf("list kata-image-puller pods: %w", err)
 	}
@@ -120,6 +123,6 @@ func pullerPodToNode(_ context.Context, obj client.Object) []ctrl.Request {
 func pullerPodPredicate(namespace string) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		return obj.GetNamespace() == namespace &&
-			obj.GetLabels()[componentLabel] == kataImagePullerComponent
+			obj.GetLabels()[ComponentLabel] == KataImagePullerComponent
 	})
 }

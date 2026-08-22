@@ -1443,6 +1443,58 @@ func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 	}
 }
 
+// A component released on another repository's cadence has no image at a c8s
+// release tag, so its chart-declared pinnedDigest must be used verbatim and the
+// resolver must never be asked for it — asking is what aborted the whole
+// install, since a c8s tag can only 404 against that repository.
+func TestBuildDigestArgsUsesPinnedDigestWithoutResolving(t *testing.T) {
+	const pinned = "sha256:00000000000000000000000000000000000000000000000000000000000000ff"
+	comps := []c8sComponent{
+		{valuePrefix: "cds.image", repository: "ghcr.io/confidential-dot-ai/cds"},
+		{valuePrefix: "attestationApi.image", repository: "ghcr.io/confidential-dot-ai/attestation-api", pinnedDigest: pinned},
+	}
+	resolve := func(ref string) (string, error) {
+		if strings.Contains(ref, "attestation-api") {
+			return "", fmt.Errorf("resolver must not be called for a pinned component, got %q", ref)
+		}
+		return "sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+	got, err := buildDigestArgs(nil, "v0.1.15", comps, resolve, allEnabled)
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	for _, want := range []string{
+		"attestationApi.image.repository=ghcr.io/confidential-dot-ai/attestation-api",
+		"attestationApi.image.digest=" + pinned,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+}
+
+// A pinned component that the effective config disables must not be pinned
+// either: the enabled check has to run first, or a kata install would carry a
+// floor entry for a DaemonSet it never renders.
+func TestBuildDigestArgsSkipsDisabledPinnedComponent(t *testing.T) {
+	comps := []c8sComponent{{
+		valuePrefix:  "attestationApi.image",
+		repository:   "ghcr.io/confidential-dot-ai/attestation-api",
+		enabledPath:  "attestationApi.enabled",
+		pinnedDigest: "sha256:00000000000000000000000000000000000000000000000000000000000000ff",
+	}}
+	resolve := func(string) (string, error) { return "", errTestResolve }
+	got, err := buildDigestArgs(nil, "v0.1.15", comps, resolve, func(string) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "attestationApi.image") {
+			t.Errorf("disabled pinned component was still pinned: %v", got)
+		}
+	}
+}
+
 // Auth/network resolve failures must pass through without the tag-coupling
 // hint — advising a tag change for a 401 would send the operator down the
 // wrong path.
@@ -1489,6 +1541,23 @@ func TestChartComponentsFromValues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)
+	}
+
+	// Exactly the components released outside the c8s train may carry a
+	// pinnedDigest. Pinning one that does publish at the install tag would
+	// freeze it there silently, and unpinning attestation-api puts back the
+	// abort that made `--image-tag <release>` uninstallable.
+	pinned := map[string]string{}
+	for _, c := range comps {
+		if c.pinnedDigest != "" {
+			pinned[c.valuePrefix] = c.pinnedDigest
+		}
+	}
+	if len(pinned) != 1 || pinned["attestationApi.image"] == "" {
+		t.Errorf("pinnedDigest components = %v, want only attestationApi.image", pinned)
+	}
+	if !strings.HasPrefix(pinned["attestationApi.image"], "sha256:") || len(pinned["attestationApi.image"]) != len("sha256:")+64 {
+		t.Errorf("attestationApi pinnedDigest is not a sha256 digest: %q", pinned["attestationApi.image"])
 	}
 }
 

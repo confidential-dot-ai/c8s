@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/controller"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -4462,6 +4463,40 @@ func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
 	}
 }
 
+// Contract with KataGuestReadyReconciler (internal/controller): it lists the
+// puller pods by this label pair and mirrors their readiness into
+// webhook.GuestReadyNodeLabel. If the rendered label drifts, the list matches
+// nothing, the label is never set, and every confidential pod stays Pending.
+func TestChartKataImagePullerCarriesControllerSelector(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller")
+	if got := ds.Spec.Template.Labels[controller.ComponentLabel]; got != controller.KataImagePullerComponent {
+		t.Fatalf("puller pod template: %s = %q, want %q", controller.ComponentLabel, got, controller.KataImagePullerComponent)
+	}
+}
+
+// The check stats the pulled artifacts across the /host bind mount, so
+// kubelet's 1s default probe timeout would drop the guest-ready label off a
+// healthy node under load.
+func TestChartKataImagePullerProbeTimeout(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, ds := range []string{"c8s-kata-deploy-image-puller", "c8s-kata-deploy-image-puller-nvidia"} {
+		probe := renderedDaemonSetContainer(t, out, ds, "reconcile").ReadinessProbe
+		if probe == nil || probe.Exec == nil {
+			t.Fatalf("%s: want an exec readiness probe, got %+v", ds, probe)
+		}
+		if probe.TimeoutSeconds != 5 {
+			t.Errorf("%s: readiness timeoutSeconds = %d, want 5", ds, probe.TimeoutSeconds)
+		}
+	}
+}
+
 func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
 	out, err := helmTemplateKata(t)
 	if err != nil {
@@ -7384,10 +7419,11 @@ func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
 	}
 }
 
-// The fail-closed egress guards scope their DNS carve-out to the cluster DNS
-// server; the daemonset must pass that ClusterIP to iptables-sync so the
-// carve-out is not silently scoped to a different address.
-func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
+// The fail-closed egress guards carve out UDP/53 to any destination, so the
+// daemonset names no resolver address. A reintroduced --cluster-dns-ip would
+// scope the carve-out to one address again and silently drop every cw DNS
+// query on a cluster whose resolver sits elsewhere.
+func TestChartIptablesSyncNamesNoClusterDNS(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -7403,17 +7439,10 @@ func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
 	if len(flags) == 0 {
 		t.Fatal("iptables-sync container command not found")
 	}
-	var saw bool
-	for i := 0; i+1 < len(flags); i++ {
-		if flags[i] == "--cluster-dns-ip" {
-			saw = true
-			if flags[i+1] != "10.53.0.10" {
-				t.Errorf("--cluster-dns-ip = %q, want c8s default 10.53.0.10", flags[i+1])
-			}
+	for _, f := range flags {
+		if f == "--cluster-dns-ip" {
+			t.Errorf("iptables-sync carries --cluster-dns-ip; the carve-out must name no address: %v", flags)
 		}
-	}
-	if !saw {
-		t.Error("iptables-sync command does not carry --cluster-dns-ip")
 	}
 }
 

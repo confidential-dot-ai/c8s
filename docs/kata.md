@@ -620,32 +620,55 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
 
 ## Uninstalling
 
-`c8s uninstall` wraps `helm uninstall` and then sweeps the host-side kata
+`c8s uninstall` wraps `helm uninstall` and then sweeps the host-side
 artifacts off every node. The helm step deletes the kata-deploy DaemonSet,
 whose `preStop` hook runs `kata-deploy cleanup` (removes `/opt/kata`,
 deregisters the containerd drop-in, restarts the runtime, unlabels the
 node) — but that hook is best-effort: it is bounded by the pod's termination
 grace period, the runtime restart it triggers can kill the pod mid-cleanup,
 and it knows nothing about the c8s-side artifacts. The sweep is the
-idempotent last word. It reads the release's computed values before the
-release is deleted (so install-time `-f` overrides are honored), then runs a
-short-lived privileged DaemonSet (the same digest-pinned busybox image as the
-containerd-prep initContainer) on the nodes kata-deploy targeted, removing:
+idempotent last word, and it runs on every uninstall, whatever the release's
+shape: leftovers may come from a previous install of a *different* shape
+(node vs pod), which this release's values cannot see. It reads the release's
+computed values before the release is deleted (so install-time `-f` overrides
+are honored), then runs a short-lived privileged DaemonSet (the same
+digest-pinned busybox image as the containerd-prep initContainer) on every
+linux node, removing:
 
+- the NRI image-policy host plugin: its containerd registration (drop-in or
+  managed config block), binary, config, and state dirs. Skipped entirely on
+  the c8s node image, where the whole stack is baked into the measured image
+  (detected via the baked-only `nri-node-ip.service`) — there it is the
+  image's to keep, not the release's to delete;
+- the ratls-mesh netfilter state: the `RATLS-MESH` chains and their
+  base-chain jumps in `iptables` and `ip6tables`, and the `RATLS-MESH-*`
+  ipsets. The mesh's own preStop deliberately keeps the fail-closed guard,
+  so this state survives every healthy uninstall, and a stale `OUTPUT`
+  redirect blackholes host-originated pod traffic for non-root users;
+- the `nydus-for-kata-tee` systemd unit kata-deploy installs. Its data dir
+  `/var/lib/nydus-for-kata-tee` is preserved on purpose: containerd's
+  meta.db keeps nydus snapshot records, and wiping the backend behind them
+  breaks the next install's pulls;
 - `/opt/kata` and the `containerd-shim-kata-*` symlinks, if the preStop
-  cleanup was cut short — restarting containerd/RKE2 only when the runtime
-  drop-in was still registered;
+  cleanup was cut short — restarting containerd/RKE2 (detached, via
+  systemd-run) only when a runtime drop-in was still registered;
 - the pulled kata-guest-base artifact (`kata.guestImage.hostPath`,
   multi-GB) — nothing else cleans this up; and the separate GPU guest image
-  (`kata.gpu.guestImage.hostPath`);
+  (`kata.gpu.guestImage.hostPath`). Loop devices still bound under those
+  dirs are unmounted and detached first; a dir that stays pinned is left in
+  place and fails the sweep rather than being unlinked under the loops;
 - on RKE2, the sentinel-marked containerd template the containerd-prep
-  initContainer wrote, and its lock file;
+  initContainer wrote (skipped on the c8s node image, same baked-state
+  rule), and its lock file;
 - the `katacontainers.io/kata-runtime` node labels and the platform labels
   the install applied from `--hardware-platform`
   (`confidential.ai/sev-snp`, `confidential.ai/tdx`) — via
   kubectl. Only those exact default keys are removed — a custom
   `kata.snpNodeSelector` (an NFD or provisioning-owned label) was never
   applied by c8s and is left alone.
+
+The swept paths are cluster-global, so running two c8s releases in one
+cluster is unsupported: uninstalling either strips the other's host state.
 
 The RuntimeClass objects and the enforcement policy are deleted with the
 release. The uninstall refuses to run while pods with a kata RuntimeClass

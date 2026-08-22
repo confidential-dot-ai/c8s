@@ -150,6 +150,10 @@ spec:
                 - /bin/sh
                 - /scripts/pull-and-configure.sh
                 - check
+            # The check stats the pulled artifacts and the wrapper across the
+            # /host bind mount; kubelet's 1s default would fail it on a loaded
+            # node and drop the guest-ready label off a healthy one.
+            timeoutSeconds: 5
             periodSeconds: 10
             failureThreshold: 30
           volumeMounts:

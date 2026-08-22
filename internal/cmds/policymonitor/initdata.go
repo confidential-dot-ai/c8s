@@ -25,7 +25,7 @@ var errNoInitData = errors.New("policy-monitor: no init-data document")
 // The attester or the verifier did not answer; a later read may.
 var errAttestUnavailable = errors.New("policy-monitor: attestation service unavailable")
 
-// The verifier refused this guest's report, which every retry reproduces.
+// The verifier refused this guest's report.
 var errAttestVerdict = errors.New("policy-monitor: self-report refused")
 
 // The verified report carries no usable init-data anchor to compare the
@@ -135,6 +135,12 @@ var (
 	initDataWaitInterval = 2 * time.Second
 )
 
+// A refusal is re-tried this many times before it counts as a verdict.
+// INVARIANT: initDataVerdictRetries * initDataWaitInterval stays under
+// refreshSettleBudget, so a real refusal still lands inside the wait a
+// would-be deny makes. TestVerdictRetriesFitTheDenyWait pins the two.
+const initDataVerdictRetries = 5
+
 // A digest mismatch is re-read this many times, this far apart, before it counts
 // as a verdict. Covers a document caught mid-write without letting a genuinely
 // uncommitted one hold the guest off its seed for the whole budget.
@@ -154,6 +160,11 @@ const (
 //
 // Waiting is bounded and every outcome still falls back to the baked seed, so
 // a guest whose host delivers no document behaves exactly as before.
+//
+// The verifier fetches AMD KDS collateral to judge an SNP report, and the pod
+// network arrives from a unit ordered behind this one (see
+// resolveSandboxDigestsHostLate), so the first self-reports run without a
+// resolver: a refusal counts as a verdict only after initDataVerdictRetries.
 func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Config) {
 	if cfg.CDSMeasurements != "" {
 		return
@@ -161,6 +172,7 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 	deadline := time.Now().Add(initDataWaitBudget)
 	var lastErr error
 	settling := 0
+	verdicts := 0
 	for {
 		pins, err := resolveInitDataMeasurements(ctx, cfg)
 		switch {
@@ -174,8 +186,8 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 			logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
 				"key", initdata.KeyCDSMeasurements)
 			return
-		case errors.Is(err, errAttestVerdict):
-			logger.Error("self-report refused by the verifier", "error", err)
+		case errors.Is(err, errAttestVerdict) && verdicts >= initDataVerdictRetries:
+			logger.Error("self-report refused by the verifier", "error", err, "attempts", verdicts+1)
 			return
 		case errors.Is(err, errNoHostDataAnchor):
 			logger.Warn("verified report carries no 32-byte init-data anchor", "error", err)
@@ -184,7 +196,10 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 		lastErr = err
 
 		wait := initDataWaitInterval
-		if errors.Is(err, errNoInitData) || errors.Is(err, errAttestUnavailable) {
+		if errors.Is(err, errAttestVerdict) {
+			verdicts++
+			settling = 0
+		} else if errors.Is(err, errNoInitData) || errors.Is(err, errAttestUnavailable) {
 			settling = 0
 		} else {
 			// kata-agent writes the document in place, so a read that lands

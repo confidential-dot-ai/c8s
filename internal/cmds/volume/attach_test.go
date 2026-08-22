@@ -121,8 +121,16 @@ func TestAttachRefusesAnAlreadyAttachedVolume(t *testing.T) {
 	if _, err := a.Attach(context.Background(), "weights", img); err != nil {
 		t.Fatalf("first attach: %v", err)
 	}
-	if _, err := a.Attach(context.Background(), "weights", img); err == nil {
+	_, err := a.Attach(context.Background(), "weights", img)
+	if err == nil {
 		t.Fatal("attached the same volume twice")
+	}
+	// The kernel resolves fd_dev_name once. An operator who replaced the image
+	// in place is here because the device is serving the file the first attach
+	// opened, so the refusal has to say that rather than just "already
+	// attached" — hashing the path confirms bytes nothing is reading.
+	if !strings.Contains(err.Error(), "the file that attach opened") {
+		t.Errorf("refusal does not say the device is bound to the file, not the path: %v", err)
 	}
 }
 

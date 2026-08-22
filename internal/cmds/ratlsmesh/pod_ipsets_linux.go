@@ -36,6 +36,15 @@ func iptablesIPSetOverflows() int64 {
 	return ipsetOverflows.Load()
 }
 
+// ipsetSyncFailures counts individual set writes that failed. A set that keeps
+// its previous contents is enforcement running against a stale membership,
+// which no other counter distinguishes from a quiet cluster.
+var ipsetSyncFailures atomic.Int64
+
+func iptablesIPSetSyncFailures() int64 {
+	return ipsetSyncFailures.Load()
+}
+
 // Membership levels for the last reconcile, plus a count of reconciles that
 // shrank the cw set. Absence from these sets is what silently removes
 // interception and the cw guard, so it has to be visible: a gauge alone cannot
@@ -115,19 +124,12 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
-	// Validate the cluster DNS IPs and split them per family. The egress DNS
-	// carve-out is restricted to these, so a cw pod cannot reach an un-scoped
-	// external resolver over plaintext UDP/53.
-	dnsIPsByFamily, err := clusterDNSIPsByFamily(cfg.clusterDNSIPs)
-	if err != nil {
-		return err
-	}
 	// The cw inbound and egress guards are always installed. Inbound posture
 	// is the passthrough allowlist; the egress guard drops non-TCP from cw
 	// pods, with the DNS carve-out and ICMPv6 essentials as the only
 	// exceptions.
 	rules, jumps := composeIptablesSyncRules(
-		cfg.outboundPort, cfg.uid, excludeUIDs, cwPassthrough, nodeIPsByFamily, dnsIPsByFamily,
+		cfg.outboundPort, cfg.uid, excludeUIDs, cwPassthrough, nodeIPsByFamily,
 	)
 
 	logger, err := certutil.NewJSONLogger(cfg.logLevel)
@@ -135,7 +137,6 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 		return fmt.Errorf("--log-level: %w", err)
 	}
 	slog.SetDefault(logger)
-	warnUnlessClusterDNSResolves(logger, cfg.clusterDNSIPs, resolvConfPath)
 	if err := initIptablesClients(); err != nil {
 		return err
 	}
@@ -310,18 +311,30 @@ func reconcilePodIPSets(store cache.Store, nodeIPs []string, excludedSourceNames
 		ipsetOverflows.Add(1)
 		publishIptablesMetrics(logger)
 	}
+	// INVARIANT: the guard sets are written first, and one set's failure never
+	// costs another its write. Membership is what the fail-closed guard and the
+	// interception rules match on, so a set left at a previous cycle's contents
+	// stops covering pods created since — plaintext reaches a cw pod, and the
+	// only signal is a warning. Ordering puts the cw sets, which the guard
+	// keys on, ahead of the sets that only decide interception.
 	specs := []ipSetSpec{
+		{cwPodIPSetName4, "inet", sets.cwIPv4, "IPv4 cw pod ipset"},
+		{cwPodIPSetName6, "inet6", sets.cwIPv6, "IPv6 cw pod ipset"},
 		{podIPSetName4, "inet", sets.allIPv4, "IPv4 pod ipset"},
 		{podIPSetName6, "inet6", sets.allIPv6, "IPv6 pod ipset"},
 		{localPodIPSetName4, "inet", sets.localIPv4, "local IPv4 pod ipset"},
 		{localPodIPSetName6, "inet6", sets.localIPv6, "local IPv6 pod ipset"},
-		{cwPodIPSetName4, "inet", sets.cwIPv4, "IPv4 cw pod ipset"},
-		{cwPodIPSetName6, "inet6", sets.cwIPv6, "IPv6 cw pod ipset"},
 	}
+	var errs []error
 	for _, spec := range specs {
 		if err := replaceIPSetMembers(logger, spec.name, spec.family, spec.members, ipsetMaxElem); err != nil {
-			return nil, fmt.Errorf("sync %s: %w", spec.label, err)
+			ipsetSyncFailures.Add(1)
+			errs = append(errs, fmt.Errorf("sync %s: %w", spec.label, err))
 		}
+	}
+	if len(errs) > 0 {
+		publishIptablesMetrics(logger)
+		return nil, errors.Join(errs...)
 	}
 	recordIPSetMembership(logger, len(sets.allIPv4)+len(sets.allIPv6), len(sets.cwIPv4)+len(sets.cwIPv6))
 	logger.Debug("pod ipsets reconciled", "ipv4", len(sets.allIPv4), "ipv6", len(sets.allIPv6), "local_ipv4", len(sets.localIPv4), "local_ipv6", len(sets.localIPv6), "cw_ipv4", len(sets.cwIPv4), "cw_ipv6", len(sets.cwIPv6))
@@ -488,79 +501,12 @@ func parseNodeIPs(raw []string) (map[iptablesFamily]string, error) {
 // cycle. It is a pure function over already-validated inputs so the rule/jump
 // composition is unit-testable without a live kube; a rule dropped here is
 // caught the same way a rule-shaped regression is.
-func composeIptablesSyncRules(outboundPort, uid int, excludeUIDs []uint32, cwPassthrough []cwPassthrough, nodeIPsByFamily map[iptablesFamily]string, dnsIPsByFamily map[iptablesFamily][]string) ([]iptablesRule, []iptablesRule) {
+func composeIptablesSyncRules(outboundPort, uid int, excludeUIDs []uint32, cwPassthrough []cwPassthrough, nodeIPsByFamily map[iptablesFamily]string) ([]iptablesRule, []iptablesRule) {
 	rules := buildPodIPSetRules(outboundPort, uid, excludeUIDs, nodeIPsByFamily)
 	rules = append(rules, buildCWGuardRules(cwPassthrough)...)
-	rules = append(rules, buildCWEgressGuardRules(dnsIPsByFamily)...)
+	rules = append(rules, buildCWEgressGuardRules()...)
 	jumps := append(jumpRules(), cwJumpRule(), cwEgressJumpRule())
 	return rules, jumps
-}
-
-// resolvConfPath is the resolver configuration kubelet writes for this pod.
-// The ratls-mesh DaemonSet runs hostNetwork with dnsPolicy
-// ClusterFirstWithHostNet, so it names the servers every pod on this node
-// resolves against — which is what the carve-out has to name to be reachable.
-const resolvConfPath = "/etc/resolv.conf"
-
-// warnUnlessClusterDNSResolves reports each configured DNS server that this
-// node's own pod resolver does not name.
-//
-// The carve-out stays operator-declared: resolv.conf is read to contradict a
-// wrong value, never to supply one, so a resolver the node was pointed at
-// cannot widen a fail-closed egress guard. A cw pod whose queries go somewhere
-// the carve-out does not name loses DNS with nothing in the guard to say so,
-// and the shipped default is the c8s node image's, which no other
-// distribution shares.
-func warnUnlessClusterDNSResolves(logger *slog.Logger, configured []string, path string) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		logger.Warn("cannot check the cluster DNS carve-out against this node's resolver", "path", path, "error", err)
-		return
-	}
-	nameservers := map[string]bool{}
-	var listed []string
-	for _, line := range strings.Split(string(b), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[0] != "nameserver" {
-			continue
-		}
-		if ip := net.ParseIP(fields[1]); ip != nil {
-			nameservers[ip.String()] = true
-			listed = append(listed, ip.String())
-		}
-	}
-	if len(nameservers) == 0 {
-		return
-	}
-	for _, raw := range configured {
-		ip := net.ParseIP(raw)
-		if ip == nil || nameservers[ip.String()] {
-			continue
-		}
-		logger.Warn("cluster DNS carve-out names a server this node's pods do not resolve against; confidential-workload pods will lose DNS unless --cluster-dns-ip is corrected",
-			"configured", ip.String(), "node_resolvers", listed)
-	}
-}
-
-// clusterDNSIPsByFamily validates each cluster DNS IP and groups it under its
-// address family. A malformed value fails the sync so the egress carve-out
-// never silently degrades to an un-scoped allow-all.
-func clusterDNSIPsByFamily(ips []string) (map[iptablesFamily][]string, error) {
-	out := map[iptablesFamily][]string{}
-	for _, raw := range ips {
-		ip := net.ParseIP(raw)
-		if ip == nil {
-			return out, fmt.Errorf("--cluster-dns-ip %q is not a valid IP address", raw)
-		}
-		var fam iptablesFamily
-		if ip.To4() != nil {
-			fam = iptablesFamilyIPv4
-		} else {
-			fam = iptablesFamilyIPv6
-		}
-		out[fam] = append(out[fam], ip.String())
-	}
-	return out, nil
 }
 
 // ifaceAddrSet groups the addresses bound to one interface.

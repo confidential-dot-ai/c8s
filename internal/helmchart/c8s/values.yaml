@@ -7,6 +7,12 @@
 ##                  nor coverage-checked.
 ##   - cdsExempt:   cds is always seeded via its self-entry (independent of
 ##                  deriveComponents), so the fail-closed coverage guard skips it.
+##   - pinnedDigest: the digest `c8s install` pins for this component instead of
+##                  resolving its repository at --image-tag, for a component
+##                  released on another repository's cadence and therefore
+##                  absent at a c8s release tag. Only `c8s install` reads it, so
+##                  a chart consumer that sets the component's image.tag or
+##                  image.digest itself is unaffected.
 ## Consumed by the c8s.components helper (NRI allowlist derivation + render
 ## guard) and by `c8s install` (digest resolution, via `helm show values`).
 c8sComponents:
@@ -19,6 +25,9 @@ c8sComponents:
   - valuePath: attestationApi.image
     enabledPath: attestationApi.enabled
     cdsExempt: false
+    ## Released by attestation-rs. Bump with:
+    ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:main
+    pinnedDigest: sha256:b81b6bd4304c1e66da1970990ebf6c7611d2a1fc211c3432e68dec5b7702c660
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
     cdsExempt: false
@@ -709,12 +718,6 @@ ratlsMesh:
         sourcePort: 53
       - protocol: tcp
         sourcePort: 53
-
-  # Cluster DNS (CoreDNS) Service ClusterIP the egress guards' DNS carve-out
-  # is destination-scoped to. Defaults to the c8s node image's cluster-dns
-  # (10.53.0.10). Override if the cluster uses a different IP, and set the
-  # same value in the guest's C8S_CLUSTER_DNS_IP.
-  clusterDNSIP: "10.53.0.10"
 
   # Certificate settings
   certMode: cds  # self-signed | cds

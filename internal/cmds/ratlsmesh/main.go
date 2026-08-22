@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -79,6 +80,14 @@ func newRatlsMeshCommand() *cobra.Command {
 	return cmd
 }
 
+// proxyListeners are served instead of binding the matching *Port fields;
+// tests pre-bind them.
+type proxyListeners struct {
+	outbound net.Listener
+	inbound  net.Listener
+	health   net.Listener
+}
+
 type proxyConfig struct {
 	platform                  string
 	attestationApiURL         string
@@ -96,6 +105,7 @@ type proxyConfig struct {
 	maxConns                  int
 	maxConnsPerSource         int
 	healthPort                int
+	listeners                 proxyListeners
 	measurements              string
 	rtmrs                     string
 	certTTL                   time.Duration
@@ -334,6 +344,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	proxy := &Proxy{
 		outboundAddr:      fmt.Sprintf(":%d", c.outboundPort),
 		inboundAddr:       fmt.Sprintf(":%d", c.inboundPort),
+		outboundLn:        c.listeners.outbound,
+		inboundLn:         c.listeners.inbound,
 		serverTLS:         serverTLS,
 		clientTLS:         clientTLS,
 		nodeIP:            c.nodeIP,
@@ -377,7 +389,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 
 	// Start health/metrics server.
 	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort)); err != nil {
+		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort), c.listeners.health); err != nil {
 			logger.Error("health server error", "error", err)
 		}
 	}()
@@ -541,7 +553,6 @@ type iptablesSyncConfig struct {
 	excludeUIDs             string
 	excludeSourceNamespaces string
 	nodeIPs                 []string
-	clusterDNSIPs           []string
 	resyncPeriod            time.Duration
 	watchdogPeriod          time.Duration
 	ipsetMaxElem            int
@@ -568,7 +579,6 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.StringVar(&cfg.excludeUIDs, "exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
 	fs.StringVar(&cfg.excludeSourceNamespaces, "exclude-source-namespaces", defaultMeshExcludedSourceNamespacesCSV(), "comma-separated local source namespaces excluded from transparent mesh interception")
 	fs.StringSliceVar(&cfg.nodeIPs, "node-ip", nil, "local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to NODE_IP env. Each address must be a non-loopback, non-unspecified IP bound to a local interface.")
-	fs.StringSliceVar(&cfg.clusterDNSIPs, "cluster-dns-ip", []string{clusterDNSClusterIP}, "cluster DNS (CoreDNS) server IP(s) the egress DNS carve-out is restricted to (c8s default 10.53.0.10). Set the same IP in the guest C8S_CLUSTER_DNS_IP and verify the carve-out on a live cluster (post-DNAT).")
 	fs.DurationVar(&cfg.resyncPeriod, "resync-period", 30*time.Second, "periodic full ipset reconciliation interval")
 	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at position 1 (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")

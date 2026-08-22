@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,8 @@ type DeviceOps interface {
 	// by teardown that handle is long closed.
 	MountRO(ctx context.Context, source string, target *os.File) error
 	Unmount(ctx context.Context, target string) error
+	// ListMappings names the device-mapper targets published on this node.
+	ListMappings(ctx context.Context) ([]string, error)
 }
 
 // ErrNotAuthorized is returned when a caller presents the wrong key for a
@@ -173,13 +176,13 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 		return nil, err
 	}
 
-	cryptMapper := mapperName("crypt", req.Pod.UID, req.Name)
+	cryptMapper := mapperName(cryptKind, req.Pod.UID, req.Name)
 	if err := o.Ops.CryptOpen(ctx, req.Device, cryptMapper, key); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-crypt: %w", err))
 	}
 	undo = append(undo, func(ctx context.Context) { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
-	verityMapper := mapperName("verity", req.Pod.UID, req.Name)
+	verityMapper := mapperName(verityKind, req.Pod.UID, req.Name)
 	if err := o.Ops.VerityOpen(ctx, devPath(cryptMapper), verityMapper, req.Blob.Verity); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-verity: %w", err))
 	}
@@ -245,6 +248,45 @@ func (o *Opener) teardown(ctx context.Context, m *mount) {
 	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
 }
 
+// SweepStale closes the c8s mappings left on this node by an earlier volumed,
+// and reports how many it closed and which it could not.
+//
+// Nothing else on a node can reap these: they outlive the release that made
+// them, and until they are closed they hold the backing disk open, so the next
+// install cannot reopen it. This runs once, before the daemon serves, which is
+// what makes the residue self-healing rather than permanent.
+//
+// INVARIANT: the kernel is the liveness check. A mapping something still has
+// mounted refuses to close, so a workload's volume cannot be pulled out from
+// under it — including one whose pod outlived the volumed that opened it. That
+// is stronger than inferring liveness here, which would be a decision this
+// process has no state to make.
+func (o *Opener) SweepStale(ctx context.Context) (closed int, stuck []string) {
+	mappings, err := o.Ops.ListMappings(ctx)
+	if err != nil {
+		return 0, []string{fmt.Sprintf("unreadable %s: %v", mapperDir, err)}
+	}
+	// verity is stacked on crypt and holds it open, so it goes first.
+	for _, kind := range []string{verityKind, cryptKind} {
+		prefix := "c8s-" + kind + "-"
+		for _, name := range mappings {
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			close := o.Ops.VerityClose
+			if kind == cryptKind {
+				close = o.Ops.CryptClose
+			}
+			if err := close(ctx, name); err != nil {
+				stuck = append(stuck, name)
+				continue
+			}
+			closed++
+		}
+	}
+	return closed, stuck
+}
+
 // Pods returns the distinct pods holding a volume, so teardown can ask which of
 // them still exist.
 func (o *Opener) Pods() []PodCgroup {
@@ -290,6 +332,13 @@ func mountKey(podUID, name string) string { return podUID + "/" + name }
 
 // mapperName is scoped by pod so two pods opening the same volume get their own
 // mappings, and one pod's teardown cannot remove another's.
+// The two halves of a volume's device stack, and the mapper-name prefixes
+// SweepStale matches on.
+const (
+	cryptKind  = "crypt"
+	verityKind = "verity"
+)
+
 func mapperName(kind, podUID, name string) string {
 	return fmt.Sprintf("c8s-%s-%s-%s", kind, podUID, name)
 }

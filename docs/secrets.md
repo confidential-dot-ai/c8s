@@ -171,12 +171,30 @@ an operator:
 
 ```sh
 c8s secrets put /tenant-a/hf-token --url "$CDS" --measurements "$M" \
-  --operator-key operator.key < token.txt
+  --mesh-ca mesh-ca.pem --operator-key operator.key < token.txt
 ```
 
 The value is read from stdin or `--from-file`, and the bytes are stored exactly
 as read — a trailing newline is part of the value. The byte count is printed to
 confirm which one was sent.
+
+### Naming the CDS you are writing to
+
+`--mesh-ca` takes the CA bundle you hold out of band, the same anchor
+`c8s verify --mesh-ca` takes. Before the write, the CLI reads the mesh CA CDS
+serves at `GET /ca` over the attested connection and refuses unless it is one
+you pinned.
+
+`--measurements` alone does not cover this. It proves the peer is an attested
+build at a pinned launch measurement — but every confidential pod boots the
+same guest image, so that measurement is a property of the shape, not of the
+role. The mesh CA key is generated per CDS, so it is what tells your CDS from
+another one at the same measurement, and it is the anchor your workloads
+already trust.
+
+The write is refused with no `--mesh-ca`. `--force` writes without the check
+and says so on stderr; it governs the CA check only, and is unrelated to
+`--overwrite`, which governs replacing a value already at the path.
 
 ```
 PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1007,6 +1008,33 @@ func TestReadinessOnShutdown(t *testing.T) {
 
 	if health.ready.Load() {
 		t.Fatal("health.ready should be false after shutdown")
+	}
+}
+
+// A held port makes the outbound bind fail; Run must return the listen
+// error instead of dropping it.
+func TestRunReturnsListenError(t *testing.T) {
+	held := bindLoopback(t)
+	p := &Proxy{
+		outboundAddr: held.Addr().String(),
+		inboundAddr:  "127.0.0.1:0",
+		logger:       testLogger(),
+		metrics:      testMetrics(),
+		drainTimeout: time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "outbound: listen") {
+			t.Fatalf("Run() = %v, want the outbound listen error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after cancel")
 	}
 }
 

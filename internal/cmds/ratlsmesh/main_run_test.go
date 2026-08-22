@@ -54,15 +54,32 @@ func stubKubeClientset(t *testing.T, cs kubernetes.Interface, err error) {
 	t.Cleanup(func() { newKubeClientset = old })
 }
 
-func freePort(t *testing.T) int {
+// bindLoopback returns a held-open loopback listener for the code under test
+// to adopt.
+func bindLoopback(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	t.Cleanup(func() { ln.Close() }) // ignored error once the server adopts ln
+	return ln
+}
+
+func listenerPort(ln net.Listener) int {
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// bindProxyPorts hands runProxy pre-bound listeners and points the matching
+// port fields at them.
+func bindProxyPorts(t *testing.T, cfg *proxyConfig) {
+	t.Helper()
+	cfg.listeners.outbound = bindLoopback(t)
+	cfg.listeners.inbound = bindLoopback(t)
+	cfg.listeners.health = bindLoopback(t)
+	cfg.outboundPort = listenerPort(cfg.listeners.outbound)
+	cfg.inboundPort = listenerPort(cfg.listeners.inbound)
+	cfg.healthPort = listenerPort(cfg.listeners.health)
 }
 
 // writeSelfSignedCertPEM writes a throwaway self-signed certificate to a
@@ -173,6 +190,8 @@ func TestRunProxyConfigErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := defaultTestProxyConfig(t)
+			// A case that slips past validation binds ephemeral ports, not the fixed defaults.
+			bindProxyPorts(t, cfg)
 			cfg.logLevel = "error"
 			cfg.localCIDRBootTimeout = time.Millisecond
 			tt.mutate(cfg)
@@ -279,9 +298,7 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = "http://127.0.0.1:1" // refused instantly; warm-up failure is non-fatal
-	cfg.outboundPort = freePort(t)
-	cfg.inboundPort = freePort(t)
-	cfg.healthPort = freePort(t)
+	bindProxyPorts(t, cfg)
 	cfg.certDNSSAN = "mesh.example"
 	cfg.measurements = strings.Repeat("ab", 48)
 	cfg.cdsMeasurements = strings.Repeat("cd", 48)

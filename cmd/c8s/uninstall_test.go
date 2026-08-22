@@ -163,7 +163,7 @@ func TestKataPodsRunningErrorReportsSkippedChartPods(t *testing.T) {
 
 // The sweep must target exactly the directory the install wrote into — the
 // same mapping as the chart's c8s.kataContainerdConfigDir helper.
-func TestKataContainerdDir(t *testing.T) {
+func TestContainerdConfigDirFor(t *testing.T) {
 	tests := []struct {
 		name     string
 		override string
@@ -180,7 +180,7 @@ func TestKataContainerdDir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := kataContainerdDir(tt.override, tt.distro)
+			got, err := containerdConfigDirFor(tt.override, tt.distro)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %t", err, tt.wantErr)
 			}
@@ -222,8 +222,6 @@ kata:
   enabled: true
   distro: rke2
   containerdConfigDir: ""
-  nodeSelector:
-    confidential.ai/kata: "true"
   containerdPrep:
     image:
       repository: busybox
@@ -231,6 +229,8 @@ kata:
       digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
   guestImage:
     hostPath: /var/lib/c8s/kata-images
+nriImagePolicy:
+  distro: rke2
 `)
 	cfg, err := kataConfigFromValues(tree)
 	if err != nil {
@@ -242,10 +242,64 @@ kata:
 		ContainerdConfigDir: "/var/lib/rancher/rke2/agent/etc/containerd",
 		GuestImageHostPath:  "/var/lib/c8s/kata-images",
 		SweepImage:          "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
-		NodeSelector:        map[string]string{"confidential.ai/kata": "true"},
+		// The NRI containerd dir follows nriImagePolicy.distro; the host
+		// paths fall back to the chart defaults when absent.
+		NriContainerdDir:  "/var/lib/rancher/rke2/agent/etc/containerd",
+		NriPluginDir:      "/opt/nri/plugins",
+		NriPluginFilename: "10-nri-image-policy",
+		NriConfigDir:      "/etc/nri/conf.d",
+		NriRuntimeDir:     "/var/run/nri-image-policy",
+		NriCacheDir:       "/var/lib/nri-image-policy",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("config = %+v, want %+v", cfg, want)
+	}
+}
+
+// A -f release can diverge the two distros; the NRI sweep must target the
+// NRI installer's containerd dir, not kata's.
+func TestNriConfigFromValuesDivergentDistro(t *testing.T) {
+	tree := chartValuesTree(t, `
+kata:
+  enabled: false
+  distro: rke2
+  guestImage:
+    hostPath: /var/lib/c8s/kata-images
+  containerdPrep:
+    image:
+      repository: busybox
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+nriImagePolicy:
+  distro: k8s
+  hostPaths:
+    pluginDir: /custom/nri/plugins
+`)
+	cfg, err := kataConfigFromValues(tree)
+	if err != nil {
+		t.Fatalf("kataConfigFromValues: %v", err)
+	}
+	if cfg.NriContainerdDir != "/etc/containerd" {
+		t.Errorf("NriContainerdDir = %q, want /etc/containerd (nriImagePolicy.distro)", cfg.NriContainerdDir)
+	}
+	if cfg.NriPluginDir != "/custom/nri/plugins" {
+		t.Errorf("NriPluginDir = %q, want the values override", cfg.NriPluginDir)
+	}
+}
+
+func TestImagePullSecretNames(t *testing.T) {
+	tree := chartValuesTree(t, `
+imagePullSecret: regcred
+imagePullSecrets:
+  - name: regcred
+  - name: mirrorcred
+`)
+	got := imagePullSecretNames(tree)
+	want := []string{"regcred", "mirrorcred"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("imagePullSecretNames = %v, want %v (uniq, secret first)", got, want)
+	}
+	if got := imagePullSecretNames(map[string]any{}); len(got) != 0 {
+		t.Errorf("imagePullSecretNames(empty) = %v, want none", got)
 	}
 }
 
@@ -387,6 +441,49 @@ kata:
 	}
 }
 
+// On a host running the fail-closed NRI plugin the sweep pod's image must
+// already be admitted; the plugin's own image is the one image guaranteed
+// on the allowlist (the installer ran it).
+func TestSweepImageRefPrefersNriImageOnNriReleases(t *testing.T) {
+	tree := chartValuesTree(t, `
+kata:
+  containerdPrep:
+    image:
+      repository: busybox
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+nriImagePolicy:
+  image:
+    repository: ghcr.io/confidential-dot-ai/nri-image-policy
+    digest: "sha256:aaa"
+`)
+	ref, err := sweepImageRef(tree)
+	if err != nil {
+		t.Fatalf("sweepImageRef: %v", err)
+	}
+	if ref != "ghcr.io/confidential-dot-ai/nri-image-policy@sha256:aaa" {
+		t.Errorf("sweepImageRef = %q, want the NRI plugin image", ref)
+	}
+	// Unpinned NRI image (a release that never resolved it) falls back to
+	// the containerd-prep busybox.
+	tree = chartValuesTree(t, `
+kata:
+  containerdPrep:
+    image:
+      repository: busybox
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+nriImagePolicy:
+  image:
+    repository: ghcr.io/confidential-dot-ai/nri-image-policy
+`)
+	ref, err = sweepImageRef(tree)
+	if err != nil {
+		t.Fatalf("sweepImageRef: %v", err)
+	}
+	if ref != "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028" {
+		t.Errorf("sweepImageRef = %q, want the busybox fallback", ref)
+	}
+}
+
 func TestKataSweepDaemonSetShape(t *testing.T) {
 	cfg := kataUninstallConfig{
 		Enabled:                  true,
@@ -395,7 +492,13 @@ func TestKataSweepDaemonSetShape(t *testing.T) {
 		GuestImageHostPath:       "/var/lib/c8s/kata-images",
 		GuestImageNvidiaHostPath: "/var/lib/c8s/kata-images-nvidia",
 		SweepImage:               "busybox@sha256:abc",
-		NodeSelector:             map[string]string{"confidential.ai/kata": "true"},
+		NriContainerdDir:         "/var/lib/rancher/rke2/agent/etc/containerd",
+		NriPluginDir:             "/opt/nri/plugins",
+		NriPluginFilename:        "10-nri-image-policy",
+		NriConfigDir:             "/etc/nri/conf.d",
+		NriRuntimeDir:            "/var/run/nri-image-policy",
+		NriCacheDir:              "/var/lib/nri-image-policy",
+		ImagePullSecretRef:       []string{"regcred"},
 	}
 	ds := kataSweepDaemonSet("c8s", "c8s-system", cfg)
 
@@ -404,15 +507,18 @@ func TestKataSweepDaemonSetShape(t *testing.T) {
 	}
 
 	pod := ds.Spec.Template.Spec
-	// The sweep must reach every node kata-deploy installed on: the merged
-	// linux + kata.nodeSelector node set, tolerating all taints, with hostPID
-	// for the nsenter-driven runtime restart.
+	// The sweep must reach every linux node: the NRI installer and the mesh
+	// DaemonSets are not confined to kata-selected nodes, and a node can
+	// carry a previous shape's leftovers. All taints tolerated; hostPID for
+	// the nsenter-driven host work.
 	wantSelector := map[string]string{
-		"kubernetes.io/os":     "linux",
-		"confidential.ai/kata": "true",
+		"kubernetes.io/os": "linux",
 	}
 	if !reflect.DeepEqual(pod.NodeSelector, wantSelector) {
 		t.Errorf("nodeSelector = %v, want %v", pod.NodeSelector, wantSelector)
+	}
+	if len(pod.ImagePullSecrets) != 1 || pod.ImagePullSecrets[0].Name != "regcred" {
+		t.Errorf("imagePullSecrets = %v, want [regcred]", pod.ImagePullSecrets)
 	}
 	if len(pod.Tolerations) != 1 || pod.Tolerations[0].Operator != "Exists" {
 		t.Errorf("tolerations = %v, want a single operator:Exists", pod.Tolerations)
@@ -442,6 +548,12 @@ func TestKataSweepDaemonSetShape(t *testing.T) {
 		"GUEST_IMAGE_DIR_NVIDIA": "/var/lib/c8s/kata-images-nvidia",
 		"RKE2_PREP":              "true",
 		"RESTART_COMMAND":        kataRestartCommand("rke2"),
+		"NRI_CONTAINERD_DIR":     "/var/lib/rancher/rke2/agent/etc/containerd",
+		"NRI_PLUGIN_DIR":         "/opt/nri/plugins",
+		"NRI_PLUGIN_FILENAME":    "10-nri-image-policy",
+		"NRI_CONFIG_DIR":         "/etc/nri/conf.d",
+		"NRI_RUNTIME_DIR":        "/var/run/nri-image-policy",
+		"NRI_CACHE_DIR":          "/var/lib/nri-image-policy",
 	}
 	gotEnv := map[string]string{}
 	for _, e := range sweep.Env {
@@ -525,5 +637,62 @@ func TestFilterVolumePodsKeepsOnlyLivePodsHoldingVolumes(t *testing.T) {
 	want := []string{"default/inference-0", "team-a/loader-1"}
 	if got := filterVolumePods(lines); !reflect.DeepEqual(got, want) {
 		t.Errorf("filterVolumePods = %v, want %v", got, want)
+	}
+}
+
+// --force does not make the leak clean, and the text has to say so: the
+// operator's only other chance to learn it is a hook log that goes with the
+// release.
+func TestForcedVolumePodsWarning(t *testing.T) {
+	got := forcedVolumePodsWarning([]string{"default/inference-0", "tenant-a/rag-1"})
+	for _, want := range []string{
+		"default/inference-0",
+		"tenant-a/rag-1",
+		"re-run the uninstall",
+		"volumed sweeps",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning does not carry %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestKataSweepScriptMeshNetfilterNames pins the netfilter names the sweep
+// script removes to the mesh's fixed contract (internal/cmds/ratlsmesh:
+// jumpRules, managedChains, managedIPSetNames + the -TMP swap variants). The
+// two cleanup paths must not drift: a name added or renamed on the mesh side
+// must be added here too.
+func TestKataSweepScriptMeshNetfilterNames(t *testing.T) {
+	names := []string{
+		// Base-chain jumps (as "parent -j chain" in -D form).
+		"-D OUTPUT -j RATLS-MESH",
+		"-D PREROUTING -j RATLS-MESH-PREROUTING",
+		"-D FORWARD -j RATLS-MESH-CW",
+		"-D FORWARD -j RATLS-MESH-CW-EGRESS",
+		// Chains (as "table:chain" sweep specs).
+		"nat:RATLS-MESH",
+		"nat:RATLS-MESH-PREROUTING",
+		"filter:RATLS-MESH-CW",
+		"filter:RATLS-MESH-CW-EGRESS",
+		"filter:RATLS-MESH-GUEST-IN",
+		"filter:RATLS-MESH-GUEST-OUT",
+		// ipsets.
+		"RATLS-MESH-PODS",
+		"RATLS-MESH-PODS6",
+		"RATLS-MESH-LOCAL-PODS",
+		"RATLS-MESH-LOCAL-PODS6",
+		"RATLS-MESH-CW-PODS",
+		"RATLS-MESH-CW-PODS6",
+	}
+	for _, name := range names {
+		// Delimit the match so a suffixed sibling (RATLS-MESH-PODS6) cannot
+		// satisfy a missing shorter name (RATLS-MESH-PODS).
+		if !strings.Contains(kataSweepScript, name+" ") && !strings.Contains(kataSweepScript, name+"\n") {
+			t.Errorf("kata-sweep.sh does not sweep %q (mesh netfilter contract)", name)
+		}
+	}
+	// The -TMP swap variants are destroyed alongside each ipset.
+	if !strings.Contains(kataSweepScript, `"$s-TMP"`) {
+		t.Error("kata-sweep.sh does not destroy the -TMP ipset swap variants")
 	}
 }
