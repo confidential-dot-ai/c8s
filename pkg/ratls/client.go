@@ -10,9 +10,9 @@ import (
 
 // NewVerifyingHTTPClient returns an http.Client whose TLS handshake
 // verifies the peer's RA-TLS attestation extension against the supplied
-// measurement allowlist. Empty measurements falls back to TOFU on the
-// attestation extension — UNSAFE outside development; the caller is
-// expected to warn.
+// pins (launch-measurement allowlist plus any TDX RTMR pins). Zero pins
+// falls back to TOFU on the attestation extension — UNSAFE outside
+// development; the caller is expected to warn.
 //
 // attestationApiURL is the local attestation-api whose /verify endpoint
 // performs all peer evidence verification. Required: every handshake
@@ -20,12 +20,12 @@ import (
 //
 // Connection-pool and timeout knobs: 5s dial, 10s response-header, 30s
 // overall, MaxIdleConns=5, MaxConnsPerHost=2.
-func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*http.Client, error) {
+func NewVerifyingHTTPClient(pins Pins, attestationApiURL string) (*http.Client, error) {
 	if attestationApiURL == "" {
 		return nil, fmt.Errorf("ratls client config: attestation-api URL is required")
 	}
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{
-		Policy: &VerifyPolicy{Measurements: measurements, AttestationApiURL: attestationApiURL},
+		Policy: &VerifyPolicy{Measurements: pins.Measurements, RTMRs: pins.RTMRs, AttestationApiURL: attestationApiURL},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)

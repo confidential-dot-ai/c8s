@@ -25,6 +25,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -71,7 +72,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	measurements, err := cfg.ParseMeasurements()
+	pins, err := cfg.ParsePins()
 	if err != nil {
 		return err
 	}
@@ -79,7 +80,7 @@ func run(cfg config) error {
 	var values map[string][]byte
 	err = sidecar.Retry(ctx, cfg.Config, "secret", func(ctx context.Context) error {
 		var err error
-		values, err = fetchAll(ctx, cfg, measurements)
+		values, err = fetchAll(ctx, cfg, pins)
 		return err
 	})
 	if err != nil {
@@ -101,8 +102,8 @@ func run(cfg config) error {
 // fetchAll gets every secret in one pass. All-or-nothing: a partial set is not
 // written, so a consumer never sees some of its secrets and waits forever for
 // the rest.
-func fetchAll(ctx context.Context, cfg config, measurements [][]byte) (map[string][]byte, error) {
-	client, pub, err := sidecar.NewClient(cfg.Config, measurements)
+func fetchAll(ctx context.Context, cfg config, pins ratls.Pins) (map[string][]byte, error) {
+	client, pub, err := sidecar.NewClient(cfg.Config, pins)
 	if err != nil {
 		return nil, err
 	}

@@ -34,7 +34,7 @@ func (p leafProvider) Provision(context.Context) (*tls.Certificate, time.Duratio
 
 // NewClient builds the mTLS client to CDS and returns the leaf's public key,
 // which the sandbox token is bound to.
-func NewClient(cfg Config, measurements [][]byte) (*http.Client, crypto.PublicKey, error) {
+func NewClient(cfg Config, pins ratls.Pins) (*http.Client, crypto.PublicKey, error) {
 	provider := leafProvider{certPath: cfg.CertPath, keyPath: cfg.KeyPath}
 	leaf, _, err := provider.Provision(context.Background())
 	if err != nil {
@@ -45,7 +45,7 @@ func NewClient(cfg Config, measurements [][]byte) (*http.Client, crypto.PublicKe
 		return nil, nil, fmt.Errorf("parse leaf: %w", err)
 	}
 	tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:       &ratls.VerifyPolicy{Measurements: measurements, AttestationApiURL: cfg.AttestationApiURL},
+		Policy:       &ratls.VerifyPolicy{Measurements: pins.Measurements, RTMRs: pins.RTMRs, AttestationApiURL: cfg.AttestationApiURL},
 		CertProvider: provider,
 	})
 	if err != nil {

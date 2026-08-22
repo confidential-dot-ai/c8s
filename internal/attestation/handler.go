@@ -27,6 +27,11 @@ type Handler struct {
 	// OperatorKeysHash, when set, makes /attest-key fail closed unless the
 	// caller attests the same operator-key policy. /attest remains unaffected.
 	OperatorKeysHash string
+	// RTMRs pins TDX runtime measurement registers on /attest-key: the launch
+	// digest recorded in the issued EAR covers TDVF firmware alone on TDX, so
+	// without these the EAR vouches for a guest image the host chose. Enforced
+	// only against TDX-shaped evidence; empty = no RTMR pinning.
+	RTMRs map[int][]byte
 }
 
 // HandleAuthenticate returns a handler that issues a single-use base64
@@ -115,6 +120,14 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.handleAttestationError(w, err)
 		return
+	}
+
+	if attestationclient.TDXPlatform(req.Evidence.Platform) {
+		if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
+			slog.Warn("attest-key: RTMR pin not satisfied", "error", err)
+			WriteError(w, http.StatusForbidden, "verification_failed", "TDX runtime measurement registers not allowed")
+			return
+		}
 	}
 
 	earToken, err := h.EarIssuer.IssueAttestedKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, pub, req.OperatorKeysHash)

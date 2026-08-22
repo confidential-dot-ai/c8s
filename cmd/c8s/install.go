@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,7 @@ var (
 	installResolveDigests bool
 	installAttestEnabled  bool
 	installMeasurements   []string
+	installRTMRs          []string
 	installInventoryCIDRs []string
 )
 
@@ -191,6 +193,38 @@ func podModeMeasurementsPreflight(cvmMode string, measurements []string, valuesF
 		return "", fmt.Errorf("--cvm-mode=pod without a pinned CDS measurement: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), set a non-empty cds.measurements in a -f values file, or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
 	}
 	return "installing --cvm-mode=pod with no --measurements: CDS and tls-lb will run, but no confidential.ai/cw workload can obtain a certificate until you reinstall with --measurements", nil
+}
+
+// tdxRTMRPinWarning is the "MRTD does not confer code identity" warning for a
+// TDX install that pins no RTMRs: measurement pinning then covers the TDVF
+// firmware only, and a host can boot it with a substituted kernel and rootfs.
+// Satisfied by --rtmrs or by a -f values file that sets a non-empty cds.rtmrs.
+func tdxRTMRPinWarning(hardwarePlatform string, rtmrs, valuesFiles []string) (string, error) {
+	if hardwarePlatform != "tdx" || len(rtmrs) > 0 {
+		return "", nil
+	}
+	set, err := valuesFilesSetRTMRs(valuesFiles)
+	if err != nil || set {
+		return "", err
+	}
+	return "TDX with no --rtmrs: measurement pinning covers the TDVF firmware only (MRTD), NOT the guest kernel or rootfs — a host can boot the pinned firmware with substituted guest software and still attest. Pass --rtmrs 1=<hex>,2=<hex> (values read off a boot you trust, e.g. `c8s verify --kind lb` verbose output) to pin the guest image in-cluster", nil
+}
+
+// valuesFilesSetRTMRs reports whether any -f values file pins TDX RTMRs
+// (cds.rtmrs), mirroring valuesFilesSetMeasurements.
+func valuesFilesSetRTMRs(files []string) (bool, error) {
+	for _, f := range files {
+		tree, err := decodeValuesFile(f)
+		if err != nil {
+			return false, err
+		}
+		if v, ok := valueAtPath(tree, "cds.rtmrs"); ok {
+			if list, isList := v.([]any); isList && len(list) > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // preflightCDSNode fails fast (before the helm install) when no node carries
@@ -1098,6 +1132,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
+		if warn, err := tdxRTMRPinWarning(installHardwarePlatform, installRTMRs, installValues); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
 		}
@@ -1669,6 +1708,21 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
 			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
+		)
+	}
+	// --rtmrs completes the TDX pin: the launch measurement (MRTD) covers TDVF
+	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
+	// command line carrying the dm-verity root hash. Emitted normalized and in
+	// index order so the fanned values match what was validated.
+	rtmrs, err := ratls.ParseRTMRPins(installRTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("--rtmrs: %w", err)
+	}
+	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
+		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
+		helmArgs = append(helmArgs,
+			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
+			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
 		)
 	}
 	for i, c := range installInventoryCIDRs {
@@ -2428,6 +2482,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
 	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")

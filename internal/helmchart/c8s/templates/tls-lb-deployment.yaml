@@ -297,6 +297,9 @@ spec:
             {{- with .Values.cds.measurements }}
             - --cds-measurements={{ join "," . }}
             {{- end }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ join "," . }}
+            {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
           # cvmMode=node: the proxy verifies CDS through the node-baked
           # attestation-api, reached from this pod via its node IP.

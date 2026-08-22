@@ -106,6 +106,7 @@
         "requestTimeout": {},
         "resources": {},
         "sanValidation": {},
+        "rtmrs": {},
         "sandboxInventoryCIDRs": {},
         "secretsMaxPaths": {},
         "secretsMaxPathsPerWorkload": {},

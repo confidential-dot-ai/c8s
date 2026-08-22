@@ -73,6 +73,13 @@ type Config struct {
 	// populate this from `cds.measurements` in values.yaml.
 	CDSMeasurements [][]byte
 
+	// CDSRTMRs, when non-empty, additionally pins CDS's TDX runtime
+	// measurement registers by index during the RA-TLS handshake. On TDX the
+	// launch digest covers TDVF firmware alone, so without these the
+	// handshake trusts a CDS whose kernel and rootfs the host chose. Ignored
+	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
+	CDSRTMRs map[int][]byte
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -98,7 +105,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

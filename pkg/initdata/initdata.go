@@ -64,6 +64,13 @@ const (
 	// cannot be baked (it is a digest of the image it would live in).
 	KeyCDSMeasurements = "c8s.cds.measurements"
 
+	// KeyCDSRTMRs carries the comma-separated <index>=<sha384-hex> TDX RTMR
+	// pins the guest additionally holds CDS's RA-TLS serving cert to. On TDX
+	// the launch digest covers TDVF firmware alone, so without these the pin
+	// in KeyCDSMeasurements says nothing about CDS's kernel or rootfs. Unbaked
+	// for the same reason as the measurements. Absent = no RTMR pinning.
+	KeyCDSRTMRs = "c8s.cds.rtmrs"
+
 	// KeyCDSAllowlistSeedSHA256 is the hex sha256 of the allowlist document CDS
 	// was started with (--allowlist-seed). Committed into CDS's own launch so a
 	// measurement pin no longer says nothing about the content served.

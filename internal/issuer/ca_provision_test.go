@@ -301,3 +301,17 @@ func TestAdoptFromPeerRequiresMeasurements(t *testing.T) {
 		t.Fatal("adoptFromPeer without measurements should error")
 	}
 }
+
+// A malformed handoff RTMR pin fails the adopt dial before it is attempted:
+// pinning nothing is not an acceptable fallback for a typo.
+func TestAdoptFromPeerRejectsBadRTMRs(t *testing.T) {
+	_, err := adoptFromPeer(context.Background(), CAProvisionConfig{
+		PeerURL:           "https://peer.example",
+		AttestationApiURL: "http://127.0.0.1:8400",
+		Measurements:      []string{strings.Repeat("ab", 48)},
+		RTMRs:             []string{"1=zz"},
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "RTMR") {
+		t.Fatalf("err = %v, want an RTMR parse failure", err)
+	}
+}

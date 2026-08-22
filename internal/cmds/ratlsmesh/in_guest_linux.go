@@ -44,7 +44,9 @@ const (
 	envAttestationServiceURL = "C8S_ATTESTATION_SERVICE_URL"
 	envLogLevel              = "C8S_LOG_LEVEL"
 	envCDSMeasurements       = "C8S_CDS_MEASUREMENTS"
+	envCDSRTMRs              = "C8S_CDS_RTMRS"
 	envMeshMeasurements      = "C8S_MESH_MEASUREMENTS"
+	envMeshRTMRs             = "C8S_MESH_RTMRS"
 	envPlatform              = "C8S_PLATFORM"
 	envPodIP                 = "C8S_POD_IP"
 	envInboundPassthrough    = "C8S_MESH_INBOUND_PASSTHROUGH"
@@ -70,7 +72,9 @@ type inGuestConfig struct {
 	logLevel              string
 	platform              string
 	cdsMeasurements       string
+	cdsRTMRs              string
 	meshMeasurements      string
+	meshRTMRs             string
 	podIP                 string
 	inboundPassthrough    string
 
@@ -127,7 +131,9 @@ func loadInGuestConfig(env func(string) string) inGuestConfig {
 		c.platform = v
 	}
 	c.cdsMeasurements = env(envCDSMeasurements)
+	c.cdsRTMRs = env(envCDSRTMRs)
 	c.meshMeasurements = env(envMeshMeasurements)
+	c.meshRTMRs = env(envMeshRTMRs)
 	c.podIP = env(envPodIP)
 	c.inboundPassthrough = env(envInboundPassthrough)
 	return c
@@ -219,7 +225,11 @@ Optional environment variables:
   C8S_LOG_LEVEL                 debug | info (default) | warn | error
   C8S_PLATFORM                  TEE platform (default sev-snp)
   C8S_CDS_MEASUREMENTS          comma-separated hex SHA-384 measurements
+  C8S_CDS_RTMRS                 comma-separated TDX RTMR pins <index>=<hex>
+                                CDS's RA-TLS cert must satisfy
   C8S_MESH_MEASUREMENTS         comma-separated hex SHA-384 measurements
+  C8S_MESH_RTMRS                comma-separated TDX RTMR pins <index>=<hex>
+                                mesh peers must satisfy
   C8S_POD_IP                    in-guest pod IP (auto-detected if empty)
   C8S_MESH_INBOUND_PASSTHROUGH  comma-separated tcp:<port> destination ports
                                 exempted from the inbound mTLS redirect (public
@@ -300,24 +310,9 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	case ratls.TEETypeSEVSNP:
 		c.platform = "sev-snp"
 	}
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	meshPolicy, cdsPins, err := inGuestVerifyPins(c, logger)
 	if err != nil {
-		return fmt.Errorf("%s: %w", envCDSMeasurements, err)
-	}
-	meshPolicyMeasurements, err := ratls.ParseHexMeasurements(c.meshMeasurements)
-	if err != nil {
-		return fmt.Errorf("%s: %w", envMeshMeasurements, err)
-	}
-
-	meshPolicy := &ratls.VerifyPolicy{
-		Measurements:      meshPolicyMeasurements,
-		AttestationApiURL: c.attestationServiceURL,
-	}
-	if len(meshPolicyMeasurements) == 0 {
-		logger.Warn("no mesh measurements pinned (C8S_MESH_MEASUREMENTS empty); accepting any TEE attestation (unsafe for production)")
-	}
-	if len(cdsMeasurements) == 0 {
-		logger.Warn("no CDS measurements pinned (C8S_CDS_MEASUREMENTS empty); the RA-TLS handshake with CDS will accept any measurement (unsafe for production)")
+		return err
 	}
 
 	asClient := attestclient.NewClientWithHTTP("", &http.Client{Timeout: c.rotationTimeout})
@@ -432,7 +427,8 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		NodeIP:            podIP,
 		NodeName:          c.workloadID,
 		TEEType:           teeType,
-		CDSMeasurements:   cdsMeasurements,
+		CDSMeasurements:   cdsPins.Measurements,
+		CDSRTMRs:          cdsPins.RTMRs,
 	}
 	// A provider-construction failure (config validation) is logged and the
 	// mesh keeps serving self-signed certs; it never blocks startup.
@@ -471,6 +467,52 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return fmt.Errorf("in-guest proxy: %w", err)
 	}
 	return nil
+}
+
+// inGuestVerifyPins parses the env-delivered identity pins into the mesh
+// peer-verification policy and the CDS pin set, warning on every unpinned
+// posture. Split from runInGuest so the parse and warning rules are testable
+// without the iptables and proxy machinery. Call it after the config's
+// platform has been resolved to a concrete TEE: the TDX-only warnings key on
+// c.platform.
+func inGuestVerifyPins(c *inGuestConfig, logger *slog.Logger) (*ratls.VerifyPolicy, ratls.Pins, error) {
+	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	if err != nil {
+		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envCDSMeasurements, err)
+	}
+	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	if err != nil {
+		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envCDSRTMRs, err)
+	}
+	meshPolicyMeasurements, err := ratls.ParseHexMeasurements(c.meshMeasurements)
+	if err != nil {
+		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envMeshMeasurements, err)
+	}
+	meshRTMRs, err := ratls.ParseRTMRPinsString(c.meshRTMRs)
+	if err != nil {
+		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envMeshRTMRs, err)
+	}
+
+	meshPolicy := &ratls.VerifyPolicy{
+		Measurements:      meshPolicyMeasurements,
+		RTMRs:             meshRTMRs,
+		AttestationApiURL: c.attestationServiceURL,
+	}
+	if len(meshPolicyMeasurements) == 0 {
+		logger.Warn("no mesh measurements pinned (C8S_MESH_MEASUREMENTS empty); accepting any TEE attestation (unsafe for production)")
+	}
+	if len(cdsMeasurements) == 0 {
+		logger.Warn("no CDS measurements pinned (C8S_CDS_MEASUREMENTS empty); the RA-TLS handshake with CDS will accept any measurement (unsafe for production)")
+	}
+	if c.platform == "tdx" {
+		if len(meshPolicyMeasurements) > 0 && len(meshRTMRs) == 0 {
+			logger.Warn("no mesh RTMR pins (C8S_MESH_RTMRS empty): TDX measurement pinning covers TDVF firmware only; peer guest kernel and rootfs are not pinned")
+		}
+		if len(cdsMeasurements) > 0 && len(cdsRTMRs) == 0 {
+			logger.Warn("no CDS RTMR pins (C8S_CDS_RTMRS empty): TDX measurement pinning covers TDVF firmware only; CDS's guest kernel and rootfs are not pinned")
+		}
+	}
+	return meshPolicy, ratls.Pins{Measurements: cdsMeasurements, RTMRs: cdsRTMRs}, nil
 }
 
 // inGuestResolver is the stub Resolver used by `ratls-mesh in-guest`.

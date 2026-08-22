@@ -4,6 +4,8 @@ package ratlsmesh
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +37,9 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 		envLogLevel:              "debug",
 		envPlatform:              "sev-snp",
 		envCDSMeasurements:       "aa,bb",
+		envCDSRTMRs:              "1=" + strings.Repeat("aa", 48),
 		envMeshMeasurements:      "cc",
+		envMeshRTMRs:             "2=" + strings.Repeat("bb", 48),
 		envPodIP:                 "10.0.0.5",
 	}
 	c := loadInGuestConfig(func(k string) string { return envs[k] })
@@ -53,6 +57,12 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 	}
 	if c.podIP != "10.0.0.5" {
 		t.Errorf("podIP = %q", c.podIP)
+	}
+	if c.cdsRTMRs != envs[envCDSRTMRs] {
+		t.Errorf("cdsRTMRs = %q, want %q", c.cdsRTMRs, envs[envCDSRTMRs])
+	}
+	if c.meshRTMRs != envs[envMeshRTMRs] {
+		t.Errorf("meshRTMRs = %q, want %q", c.meshRTMRs, envs[envMeshRTMRs])
 	}
 }
 
@@ -647,5 +657,74 @@ func TestBuildInGuestFailClosedRulesDNSNamesNoAddress(t *testing.T) {
 				t.Errorf("%s is scoped by %s (%v); the carve-out must name no address", r.label, scope, r.args)
 			}
 		}
+	}
+}
+
+// inGuestVerifyPins turns the env-delivered pin strings into the mesh policy
+// and CDS pin set; each malformed value errors naming its env var.
+func TestInGuestVerifyPins(t *testing.T) {
+	hexM := strings.Repeat("ab", 48)
+	rtmr := "1=" + strings.Repeat("cd", 48)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	c := defaultInGuestConfig()
+	c.platform = "tdx"
+	c.attestationServiceURL = defaultInGuestAttestationServiceURL
+	c.cdsMeasurements = hexM
+	c.cdsRTMRs = rtmr
+	c.meshMeasurements = hexM
+	c.meshRTMRs = rtmr
+
+	policy, cdsPins, err := inGuestVerifyPins(&c, logger)
+	if err != nil {
+		t.Fatalf("inGuestVerifyPins: %v", err)
+	}
+	if len(policy.Measurements) != 1 || len(policy.RTMRs) != 1 {
+		t.Fatalf("mesh policy = %d measurements, %d rtmrs; want 1 and 1", len(policy.Measurements), len(policy.RTMRs))
+	}
+	if policy.AttestationApiURL != c.attestationServiceURL {
+		t.Fatalf("policy attestation-api = %q, want %q", policy.AttestationApiURL, c.attestationServiceURL)
+	}
+	if len(cdsPins.Measurements) != 1 || len(cdsPins.RTMRs) != 1 {
+		t.Fatalf("cds pins = %d measurements, %d rtmrs; want 1 and 1", len(cdsPins.Measurements), len(cdsPins.RTMRs))
+	}
+}
+
+// The unpinned-TDX warnings must not turn into errors: an unpinned posture is
+// warned, never refused, and the returned policy pins exactly what was given.
+func TestInGuestVerifyPinsUnpinnedTDXWarnsOnly(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := defaultInGuestConfig()
+	c.platform = "tdx"
+	c.cdsMeasurements = strings.Repeat("ab", 48)
+	c.meshMeasurements = strings.Repeat("ab", 48)
+
+	policy, cdsPins, err := inGuestVerifyPins(&c, logger)
+	if err != nil {
+		t.Fatalf("inGuestVerifyPins: %v", err)
+	}
+	if len(policy.RTMRs) != 0 || len(cdsPins.RTMRs) != 0 {
+		t.Fatalf("unset RTMR envs produced pins: mesh=%v cds=%v", policy.RTMRs, cdsPins.RTMRs)
+	}
+}
+
+func TestInGuestVerifyPinsRejectsMalformedValues(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for name, tc := range map[string]struct {
+		mutate  func(*inGuestConfig)
+		wantEnv string
+	}{
+		"bad cds measurements":  {func(c *inGuestConfig) { c.cdsMeasurements = "zz" }, envCDSMeasurements},
+		"bad cds rtmrs":         {func(c *inGuestConfig) { c.cdsRTMRs = "0=" + strings.Repeat("cd", 48) }, envCDSRTMRs},
+		"bad mesh measurements": {func(c *inGuestConfig) { c.meshMeasurements = "zz" }, envMeshMeasurements},
+		"bad mesh rtmrs":        {func(c *inGuestConfig) { c.meshRTMRs = "1=zz" }, envMeshRTMRs},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := defaultInGuestConfig()
+			tc.mutate(&c)
+			if _, _, err := inGuestVerifyPins(&c, logger); err == nil || !strings.Contains(err.Error(), tc.wantEnv) {
+				t.Fatalf("err = %v, want a parse failure naming %s", err, tc.wantEnv)
+			}
+		})
 	}
 }

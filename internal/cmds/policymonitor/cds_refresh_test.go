@@ -222,3 +222,24 @@ func TestRunAllowlistRefresh_EmptyMeasurementsFailsClosed(t *testing.T) {
 		t.Fatalf("size = %d, want 1", a.Size())
 	}
 }
+
+// A malformed RTMR pin disables refresh the same way a malformed measurement
+// does: the baked seed keeps enforcing, nothing is silently unpinned.
+func TestRunAllowlistRefresh_InvalidRTMRs(t *testing.T) {
+	seed := "sha256:" + strings.Repeat("a", 64)
+	a := newSeededAllowlist(t, seed)
+	cfg := &Config{
+		CDSURL:          "https://cds.example",
+		CDSMeasurements: strings.Repeat("ab", 48),
+		CDSRTMRs:        "0=" + strings.Repeat("cd", 48),
+		RefreshInterval: time.Second,
+	}
+	state := &refreshState{}
+	runAllowlistRefresh(context.Background(), testLogger(t), cfg, a, &policyOverlay{}, state)
+	if a.Size() != 1 {
+		t.Fatalf("size = %d, want 1 (seed unchanged)", a.Size())
+	}
+	if got := state.frozenReason(); got != reasonBadMeasurements {
+		t.Fatalf("frozenReason = %q, want %q", got, reasonBadMeasurements)
+	}
+}

@@ -33,6 +33,12 @@ type CAProvisionConfig struct {
 	// Measurements pins the peer's launch digest on both the RA-TLS serving
 	// cert and the handoff issuer EAR. Required when PeerURL is set.
 	Measurements []string
+	// RTMRs pins the peer's TDX runtime measurement registers on the RA-TLS
+	// adopt dial, as <index>=<sha384-hex> entries. On TDX the launch digest
+	// covers TDVF firmware alone, so without these the dial trusts a peer
+	// whose kernel and rootfs the host chose. SNP peers are unaffected;
+	// optional.
+	RTMRs []string
 	// ExpectedIssuer is the EAR issuer claim required on the peer's handoff
 	// EAR (the peer's --ear-issuer; "cds" by default).
 	ExpectedIssuer string
@@ -125,6 +131,10 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 	if len(pinned) == 0 {
 		return nil, fmt.Errorf("adopting a CA requires pinned peer measurements")
 	}
+	rtmrPins, err := ratls.ParseRTMRPins(cfg.RTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("parse handoff RTMR pins: %w", err)
+	}
 	// The same digest set pins both channels; the EAR-side map is derived
 	// from the validated digests so the two representations stay in sync.
 	allowed := make(map[string]bool, len(pinned))
@@ -132,7 +142,7 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 		allowed[hex.EncodeToString(m)] = true
 	}
 
-	httpClient, err := ratls.NewVerifyingHTTPClient(pinned, cfg.AttestationApiURL)
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: pinned, RTMRs: rtmrPins}, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, err
 	}

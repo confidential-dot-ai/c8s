@@ -49,7 +49,12 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 		disableRefresh(logger, state, reasonNoMeasurements, a)
 		return
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	if err != nil {
+		disableRefresh(logger, state, reasonBadMeasurements, a, "error", err)
+		return
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationServiceURL)
 	if err != nil {
 		disableRefresh(logger, state, reasonClientFailed, a, "error", err)
 		return

@@ -60,6 +60,10 @@ type Options struct {
 	// requires CDS to present. Empty pins none.
 	CDSMeasurements []string
 
+	// CDSRTMRs are the TDX RTMR pins (<index>=<sha384-hex>) the injected
+	// sidecars additionally hold CDS to. Ignored for SNP evidence.
+	CDSRTMRs []string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -264,6 +268,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			CDSURL:                opts.CDSURL,
 			AttestationApiURL:     opts.AttestationApiURL,
 			CDSMeasurements:       opts.CDSMeasurements,
+			CDSRTMRs:              opts.CDSRTMRs,
 			CertFSGroup:           ptr.To(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,

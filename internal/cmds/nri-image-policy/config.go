@@ -75,6 +75,7 @@ type pullConfig struct {
 	Timeout           time.Duration `yaml:"timeout"`             // per-request timeout; > 0 required when URL is set
 	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
 	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
+	CDSRTMRs          []string      `yaml:"cds_rtmrs"`           // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -237,6 +238,9 @@ func (c *config) Validate() error {
 		}
 		if _, err := ratls.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_measurements: %w", err)
+		}
+		if _, err := ratls.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
+			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {

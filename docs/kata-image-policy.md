@@ -17,10 +17,12 @@ the gaps it does not.
 > cannot change without changing the value operators pin. On TDX the launch
 > measurement is MRTD, which covers TDVF only — the kernel lands in RTMR[1]
 > and the cmdline in RTMR[2] — so pinning MRTD alone leaves the guest image
-> substitutable. Those two registers are pinnable
-> (`c8s verify --rtmr 1=<hex> --rtmr 2=<hex>`, `ratls.VerifyPolicy.RTMRs`);
-> what is not yet derivable offline is their expected values, so today they
-> have to come from a known-good boot. The measurement mechanics (osbuilder dm-verity ext4, `kernel-hashes`, the
+> substitutable. Those two registers are pinnable — operator-side with
+> `c8s verify --rtmr 1=<hex> --rtmr 2=<hex>`, and in-cluster with
+> `c8s install --rtmrs 1=<hex>,2=<hex>` (`cds.rtmrs` / `ratlsMesh.rtmrs`,
+> enforced on CDS issuance, the mesh peer policy, and every component
+> dialing CDS); what is not yet derivable offline is their expected values,
+> so today they have to come from a known-good boot. The measurement mechanics (osbuilder dm-verity ext4, `kernel-hashes`, the
 > verity root hash in the kata kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 

@@ -185,6 +185,13 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
+	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	if err != nil {
+		logger.Error("sandbox tokens disabled: C8S_CDS_RTMRS invalid", "error", err)
+		signers.Disable()
+		return
+	}
+	cdsPins := ratls.Pins{Measurements: measurements, RTMRs: rtmrs}
 	resolveCtx, cancel := context.WithDeadline(ctx, settle)
 	host, err := resolveSandboxDigestsHostLate(resolveCtx, cfg, logger, sandboxDigestsHost)
 	cancel()
@@ -202,7 +209,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	// Before the route answers, not after: a token names this endpoint, and CDS
 	// refuses one it cannot call back on. Issuing first would hand out tokens
 	// that are guaranteed to be rejected.
-	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer, measurements); err != nil {
+	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer, cdsPins); err != nil {
 		logger.Error("sandbox-digests endpoint disabled; issuing without a sandbox ID rather than tokens CDS would refuse", "error", err)
 		signers.Disable()
 		return
@@ -309,7 +316,7 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 // from the in-guest attestation-api rather than assumed: a TDX guest whose
 // leaf claimed SEV-SNP would carry a TDX envelope under the SNP TEE type, and
 // CDS would refuse every sandbox token it signs.
-func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, measurements [][]byte) error {
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, cdsPins ratls.Pins) error {
 	platform, err := detectGuestPlatform(ctx, cfg.AttestationServiceURL)
 	if err != nil {
 		return fmt.Errorf("detect guest TEE platform: %w", err)
@@ -318,7 +325,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, 
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		platform,
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),
-		cfg.AttestationServiceURL, measurements)
+		cfg.AttestationServiceURL, cdsPins)
 }
 
 // detectGuestPlatform asks the in-guest attestation-api which TEE it is

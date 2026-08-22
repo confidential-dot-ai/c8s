@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"strings"
 )
 
 func TestProxyPreservesAuthorizedRequests(t *testing.T) {
@@ -345,5 +346,17 @@ func validConfig() config {
 		attestationAPIURL: "http://attestation-api.c8s-system.svc:8400",
 		requestTimeout:    time.Second,
 		readHeaderTimeout: time.Second,
+	}
+}
+
+func TestNewHandlerRejectsBadRTMRPin(t *testing.T) {
+	_, err := newHandler(config{
+		cdsURL:            "https://c8s-cds:8443",
+		cdsRTMRs:          []string{"1=zz"},
+		attestationAPIURL: "http://attestation-api:8400",
+		requestTimeout:    time.Second,
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "--cds-rtmrs") {
+		t.Fatalf("error = %v, want an RTMR parse failure naming the flag", err)
 	}
 }

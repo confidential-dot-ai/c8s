@@ -221,6 +221,9 @@ spec:
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
+            {{- with .Values.cds.rtmrs }}
+            - --rtmrs={{ join "," . }}
+            {{- end }}
             {{- with .Values.cds.sandboxInventoryCIDRs }}
             - --sandbox-inventory-cidr={{ join "," . }}
             {{- end }}
@@ -229,6 +232,9 @@ spec:
             {{- end }}
             {{- if .Values.cds.handoff.enabled }}
             - --handoff-measurements={{ join "," .Values.cds.measurements }}
+            {{- with .Values.cds.rtmrs }}
+            - --handoff-rtmrs={{ join "," . }}
+            {{- end }}
             {{- end }}
             {{- with (include "c8s.cdsHandoffPeerURL" .) }}
             - --handoff-peer-url={{ . }}

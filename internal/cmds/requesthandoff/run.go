@@ -41,6 +41,7 @@ type config struct {
 	expectedIssuer    string
 	logLevel          string
 	measurements      []string
+	rtmrs             []string
 	operatorKeys      string
 	timeout           time.Duration
 }
@@ -137,7 +138,13 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		allowed[hex.EncodeToString(m)] = true
 	}
 
-	httpClient, err := newVerifyingHTTPClient(pinned, cfg.attestationApiURL)
+	rtmrPins, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		errorf(errOut, "--rtmrs: %v", err)
+		return exitUsage
+	}
+
+	httpClient, err := newVerifyingHTTPClient(ratls.Pins{Measurements: pinned, RTMRs: rtmrPins}, cfg.attestationApiURL)
 	if err != nil {
 		errorf(errOut, "%v", err)
 		return exitUsage

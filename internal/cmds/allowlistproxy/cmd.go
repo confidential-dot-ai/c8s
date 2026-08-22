@@ -34,6 +34,7 @@ type config struct {
 	port              int
 	cdsURL            string
 	cdsMeasurements   []string
+	cdsRTMRs          []string
 	attestationAPIURL string
 	requestTimeout    time.Duration
 	readHeaderTimeout time.Duration
@@ -57,6 +58,7 @@ func NewCmd() *cobra.Command {
 	f.IntVarP(&cfg.port, "port", "p", 8801, "listen port")
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
+	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -132,7 +134,11 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if len(measurements) == 0 {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.attestationAPIURL)
+	rtmrs, err := ratls.ParseRTMRPins(cfg.cdsRTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

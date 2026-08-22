@@ -51,6 +51,14 @@ type AttestHandler struct {
 	// to obtain a signed leaf. Empty = no measurement pinning.
 	Measurements map[string]bool
 
+	// RTMRs pins TDX runtime measurement registers on issuance: on TDX the
+	// launch digest (MRTD) covers the TDVF firmware alone, so without these a
+	// host can boot the pinned firmware with a substituted kernel and rootfs
+	// and still be issued a leaf. Enforced only against TDX-shaped evidence;
+	// SNP evidence is unaffected (kernel-hashes folds the guest image into
+	// its launch digest). Empty = no RTMR pinning.
+	RTMRs map[int][]byte
+
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
 	// subject — see THREAT MODEL on issuer.CA.SignCSR.
@@ -197,6 +205,13 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		if !h.Measurements[launchDigest] {
 			slog.Warn("measurement not in allowlist", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+			return
+		}
+	}
+	if attestationclient.TDXPlatform(req.Evidence.Platform) {
+		if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
+			slog.Warn("RTMR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
+			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "TDX runtime measurement registers not allowed")
 			return
 		}
 	}
