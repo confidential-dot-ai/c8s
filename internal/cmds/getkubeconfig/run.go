@@ -5,8 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -44,6 +47,8 @@ type Config struct {
 	OutPath string
 	// Timeout bounds each network step.
 	Timeout time.Duration
+	// ReleaseWait bounds retries while cred-release is not yet listening.
+	ReleaseWait time.Duration
 }
 
 // Run executes the client flow: attest + RTMR[3] gate, then CSR -> cred-release
@@ -90,9 +95,25 @@ func Run(ctx context.Context, cfg Config) error {
 	//    cert key AND satisfy the same full measured-identity policy as the
 	//    attest gate, so the host can't MITM the channel.
 	httpClient := newRATLSClient(cfg, exp)
-	relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel2()
-	resp, err := requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
+	// cred-release starts listening well after attest answers (it waits on
+	// the node's own boot chain), so a refused dial right after the attest
+	// gate is boot ordering, not failure. Retry exactly that, bounded.
+	var resp *credrelease.ReleaseResponse
+	releaseDeadline := time.Now().Add(cfg.ReleaseWait)
+	for {
+		relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
+		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
+		cancel2()
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(releaseDeadline) {
+			break
+		}
+		fmt.Fprintln(os.Stderr, "cred-release not listening yet; retrying")
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("credential release: %w", ctx.Err())
+		case <-time.After(5 * time.Second):
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("credential release: %w", err)
 	}
