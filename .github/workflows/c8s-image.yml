@@ -440,6 +440,22 @@ jobs:
             confidential-os-builder/output/${{ env.VARIANT }}/roothash
           if-no-files-found: error
 
+      - name: Upload resolved kernel snapshot (gate)
+        # The lineage lockfile these inputs resolve to, so a fragment PR can
+        # commit it without a local Linux builder (confos#66;
+        # kernel-snapshot.yml is the kata lineage's equivalent). One cell —
+        # the snapshot is per-KERNEL_FLAVOR, not per-platform or per-leg. A
+        # cache-restored copy is equally valid: the exact key hashes the
+        # fragments, so the cached snapshot was resolved from these same
+        # inputs (by a sibling leg or an earlier run of them).
+        if: inputs.gate == true && matrix.platform == 'tdx' && inputs.leg != 'b'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kernel-snapshot-${{ github.run_id }}
+          path: c8s/node-guest-image/kernel/config-x86_64-${{ inputs.dev && 'c8s-dev' || 'c8s' }}.snapshot
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Check whether the rootfs changed
         if: inputs.gate != true
         # Skip the multi-GB push when the roothash matches what's published.
