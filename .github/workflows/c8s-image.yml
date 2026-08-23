@@ -77,8 +77,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  # TODO(confos#111): before merge, repoint at the confos main merge commit.
-  CONFOS_REF: ${{ inputs.confos_ref || '5f560211f78213cb5d880f5fe410a1686264203b' }} # pin: PR confos#111 head — snapshot-pinned host build deps (confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
+  CONFOS_REF: ${{ inputs.confos_ref || 'fd4427c0a401238f3430d05d9ba775ec0691d523' }} # pin: main — snapshot-pinned host build deps (confos#111, confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
   ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
