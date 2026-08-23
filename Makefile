@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -141,6 +141,10 @@ test-integration-cluster:
 # mounts, writes /run/confos) — sudo on a disposable box.
 test-node-guest-image-role:
 	./node-guest-image/tests/rke2-role-test.sh
+
+# GPU-node label logic (root-free unit test; fakes the PCI tree).
+test-node-guest-image-gpu-label:
+	./node-guest-image/tests/gpu-node-label-test.sh
 
 # Role-gated unit wiring under real systemd in a privileged container.
 # Needs only docker.
