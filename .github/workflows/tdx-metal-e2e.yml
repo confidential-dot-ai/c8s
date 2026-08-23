@@ -207,6 +207,40 @@ jobs:
             echo "c8sRef=${{ inputs.c8s_ref }}" >> "$GITHUB_ENV"
           fi
 
+      - name: preflight, the pinned ref still matches the pinned image
+        # c8sRef and image are separate CM fields, so they can drift apart with
+        # nothing to notice: a stale c8sRef built a CLI three days older than
+        # the image and failed the lane on a manifest the CLI could not parse.
+        #
+        # The image's own -cdi tags carry the c8s ref its components were baked
+        # from (c8s-image.yml passes the same SHORT_SHA to both). Reproducible
+        # builds mean one digest can hold SEVERAL such tags -- commits touching
+        # no image input produce a byte-identical image -- so agreement is
+        # "c8sRef is among them", never "equals the first one found".
+        #
+        # Advisory: an operator may deliberately pair a newer CLI with an older
+        # image, and only the baked floor can say whether that is denied.
+        continue-on-error: true
+        if: inputs.c8s_ref == ''
+        run: |
+          set -euo pipefail
+          repo="${image%%@*}"; repo="${repo%%:*}"
+          case "$image" in
+            *@*) want="${image#*@}" ;;
+            *)   want="$(crane digest "$image" 2>/dev/null || true)" ;;
+          esac
+          [ -n "$want" ] || { echo "could not resolve '$image' to a digest; skipping"; exit 0; }
+          matched=0; tagged=""
+          for t in $(crane ls "$repo" 2>/dev/null | grep -E '^rke2-tdx-cdi-[0-9a-f]{7,}$'); do
+            [ "$(crane digest "$repo:$t" 2>/dev/null)" = "$want" ] || continue
+            r="${t#rke2-tdx-cdi-}"
+            tagged="${tagged:+$tagged }$r"
+            [ "$r" = "$c8sRef" ] && matched=1
+          done
+          [ -n "$tagged" ] || { echo "no sha-suffixed tag points at the pinned image; nothing to compare"; exit 0; }
+          [ "$matched" = 1 ] && { echo "c8sRef '$c8sRef' matches the pinned image's build ref"; exit 0; }
+          echo "::warning title=stale c8sRef::the CM pins c8sRef='$c8sRef' but its image was built from [$tagged]. The CLI under test is not the one shipped in this image; re-seed c8sRef unless the pairing is deliberate"
+
       - name: preflight, TDX device capacity
         # KubeVirt's socket device-plugin probes the QGS socket ONLY at
         # virt-handler startup and never re-checks. After a host reboot or a
