@@ -54,6 +54,10 @@ jobs:
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          # Keep in lockstep with c8s-image.yml: rustc shapes the measured
+          # attestation-api bytes the A/B builds compare.
+          toolchain: "1.98.0"
 
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1

@@ -167,6 +167,11 @@ jobs:
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          # Pinned: rustc compiles attestation-api, whose bytes ship in the
+          # measured rootfs — "stable" drifts between legs across a Rust
+          # release (a c8s#392 divergence candidate). Bumping this can move
+          # measurements.
+          toolchain: "1.98.0"
           # Both cargo workspaces this job compiles; the default "." caches neither.
           cache-workspaces: |
             attestation-rs
