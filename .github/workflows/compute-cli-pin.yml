@@ -1,0 +1,29 @@
+# Temporary: compute the c8s CLI pin values datacenter-side (branch is deleted
+# after use). Extracts /c8s from the operator image and prints its sha256.
+name: compute-cli-pin
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "c8s-operator image digest (sha256:...)"
+        required: true
+        type: string
+permissions:
+  packages: read
+jobs:
+  sha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img="ghcr.io/confidential-dot-ai/c8s-operator@${{ inputs.digest }}"
+          docker pull --platform linux/amd64 -q "$img"
+          id=$(docker create --platform linux/amd64 "$img")
+          docker cp "$id:/c8s" ./c8s-bin
+          docker rm "$id" >/dev/null
+          {
+            echo "revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$img")"
+            echo "cli_sha256=$(sha256sum c8s-bin | cut -d' ' -f1)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
