@@ -182,6 +182,12 @@ jobs:
         with:
           ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
+      - name: Compute runner-image cache term
+        # ImageOS/ImageVersion are runner-process env vars, not workflow env
+        # context — ${{ env.ImageOS }} silently renders empty in a key.
+        id: image
+        run: echo "key=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Restore build-dep debs
         # Keyed on the runner-image release and the host-deps pin (script +
         # the base mkosi.sources it reads): the resolved deb set is a
@@ -192,7 +198,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apt-debs
-          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
+          key: apt-debs-${{ steps.image.outputs.key }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
 
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
@@ -218,7 +224,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apt-debs
-          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
+          key: apt-debs-${{ steps.image.outputs.key }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache staged GPU tree
