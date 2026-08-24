@@ -237,7 +237,7 @@ phase=$(run_probe "$bad_pod" "$bad_meas" 30)
 bad_logs=$(kubectl logs "$bad_pod" -n "$cds_ns" 2>/dev/null || true)
 printf '%s\n' "$bad_logs"
 [ "$phase" = Failed ] || fail "probe with a wrong --measurements pin was not refused (phase=${phase:-unknown}; logs above)"
-grep -q "launch measurement not in allowed set" <<<"$bad_logs" \
+grep -q "launch measurement does not match any reference value" <<<"$bad_logs" \
   || fail "refused probe's log names no measurement mismatch (see above)"
 echo "ok: wrong --measurements pin refused (log names the measurement mismatch)"
 

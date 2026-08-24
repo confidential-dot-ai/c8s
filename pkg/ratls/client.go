@@ -10,7 +10,7 @@ import (
 
 // NewVerifyingHTTPClient returns an http.Client whose TLS handshake
 // verifies the peer's RA-TLS attestation extension against the supplied
-// pins (launch-measurement allowlist plus any TDX RTMR pins). Zero pins
+// pins (launch-measurement reference values plus any TDX RTMR pins). Zero pins
 // falls back to TOFU on the attestation extension — UNSAFE outside
 // development; the caller is expected to warn.
 //

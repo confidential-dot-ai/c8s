@@ -24,6 +24,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -47,7 +48,7 @@ type AttestHandler struct {
 	// verification + signing. Zero = no timeout.
 	RequestTimeout time.Duration
 
-	// Measurements is the flat allowlist of SHA-384 launch digests permitted
+	// Measurements is the flat set of SHA-384 launch digests permitted
 	// to obtain a signed leaf. Empty = no measurement pinning.
 	Measurements map[string]bool
 
@@ -58,6 +59,10 @@ type AttestHandler struct {
 	// SNP evidence is unaffected (kernel-hashes folds the guest image into
 	// its launch digest). Empty = no RTMR pinning.
 	RTMRs map[int][]byte
+
+	// Entries pins whole images. When set it replaces Measurements and RTMRs,
+	// so a digest from one image cannot be paired with another's registers.
+	Entries []measurements.Entry
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
@@ -201,18 +206,26 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// measurement is admitted, so the digest a leaf was issued against is the
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-	if len(h.Measurements) > 0 {
-		if !h.Measurements[launchDigest] {
-			slog.Warn("measurement not in allowlist", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
+	if len(h.Entries) > 0 {
+		if err := attestationclient.EnforceEntries(verifyResp, h.Entries, req.Evidence.Platform); err != nil {
+			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
 		}
-	}
-	if attestationclient.TDXPlatform(req.Evidence.Platform) {
-		if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
-			slog.Warn("RTMR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
-			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "TDX runtime measurement registers not allowed")
-			return
+	} else {
+		if len(h.Measurements) > 0 {
+			if !h.Measurements[launchDigest] {
+				slog.Warn("measurement does not match any reference value", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
+				attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+				return
+			}
+		}
+		if attestationclient.TDXPlatform(req.Evidence.Platform) {
+			if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
+				slog.Warn("RTMR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
+				attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "TDX runtime measurement registers not allowed")
+				return
+			}
 		}
 	}
 

@@ -21,7 +21,7 @@ var (
 	ErrSignatureInvalid = errors.New("ratls: hardware signature verification failed")
 
 	// ErrPolicyViolation indicates that the verified launch measurement is not
-	// in the [VerifyPolicy] allowlist. Debug and minimum-TCB policy are
+	// in the [VerifyPolicy] reference values. Debug and minimum-TCB policy are
 	// enforced by the attestation-api; those rejections surface as the
 	// attestation-api error or [ErrSignatureInvalid], not this sentinel.
 	ErrPolicyViolation = errors.New("ratls: attestation policy check failed")

@@ -490,7 +490,7 @@ func TestReadinessFn(t *testing.T) {
 	}
 }
 
-func TestParseMeasurementAllowlist(t *testing.T) {
+func TestParseReferenceDigests(t *testing.T) {
 	cases := []struct {
 		name    string
 		input   []string
@@ -503,7 +503,7 @@ func TestParseMeasurementAllowlist(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseMeasurementAllowlist(tc.input)
+			got := parseReferenceDigests(tc.input)
 			if len(got) != tc.wantLen {
 				t.Errorf("len: got %d, want %d (map=%v)", len(got), tc.wantLen, got)
 			}

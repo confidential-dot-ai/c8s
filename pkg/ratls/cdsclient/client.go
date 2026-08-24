@@ -137,7 +137,7 @@ func NewClient(cfg *Config) *Client {
 //  2. Call CDS (authenticate -> attest) over RA-TLS to get a signed certificate
 //     chain. Authenticity of the response is provided by the RA-TLS handshake
 //     (the underlying http.Client's TLSClientConfig verifies CDS's peer cert
-//     against the configured measurement allowlist).
+//     against the configured reference values).
 //  3. Return key + leaf cert + authenticated CA bundle from the signed response
 func (c *Client) RequestCert(ctx context.Context) (*ecdsa.PrivateKey, []byte, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

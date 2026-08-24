@@ -98,30 +98,31 @@ func rejectDuplicateRegisters(data []byte, scope string) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
-		return nil // not a JSON object; Unmarshal already reported the shape
+		return fmt.Errorf("manifest is not valid JSON: %w", err)
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return nil
+		return fmt.Errorf("manifest is not a JSON object")
 	}
 	seen := make(map[string]bool, 3)
+	var scoped []json.RawMessage
 	for dec.More() {
 		keyTok, err := dec.Token()
 		if err != nil {
-			return nil
+			return fmt.Errorf("manifest is not valid JSON: %w", err)
 		}
 		key, ok := keyTok.(string)
 		if !ok {
-			return nil
+			return fmt.Errorf("manifest is not valid JSON: object key is %T", keyTok)
 		}
 		// Decode consumes the whole value, nested objects and arrays included,
 		// so the loop only ever sees top-level keys.
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
-			return nil
+			return fmt.Errorf("manifest is not valid JSON: %w", err)
 		}
 		if scope != "" {
 			if key == scope {
-				return rejectDuplicateRegisters(value, "")
+				scoped = append(scoped, value)
 			}
 			continue
 		}
@@ -131,6 +132,16 @@ func rejectDuplicateRegisters(data []byte, scope string) error {
 				return fmt.Errorf("duplicate %q key — a register may be named only once, since JSON parsing would silently keep the last value", key)
 			}
 			seen[key] = true
+		}
+	}
+	// Every occurrence must be collected before recursing: Unmarshal keeps the
+	// last, so checking only the first would inspect bytes the pin never loads.
+	if scope != "" {
+		if len(scoped) > 1 {
+			return fmt.Errorf("duplicate %q key — a register object may be named only once, since JSON parsing would silently keep the last value", scope)
+		}
+		if len(scoped) == 1 {
+			return rejectDuplicateRegisters(scoped[0], "")
 		}
 	}
 	return nil
