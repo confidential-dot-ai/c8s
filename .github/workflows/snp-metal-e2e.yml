@@ -211,7 +211,6 @@ jobs:
               enabled: false
           EOF
           )
-          CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
 
           # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
           # Both substitutions are throwaway stand-ins so `helm template` has
@@ -257,22 +256,14 @@ jobs:
             say FAIL_HELM
             exit 0
           fi
+          export PATH="/var/lib/rancher/rke2/bin:\$PATH"
+          E2E=\$(echo /tmp/c8s-*/test/e2e)
           CDSOK=0
-          for i in \$(seq 1 45); do
-            PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
-            printf '%s\n' "\$PODS" | sed 's/^/@@POD /;s/\$/@@/'
-            CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
-            echo "@@CDSR \$i: \${CDS:-nopod}@@"
-            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { CDSOK=1; say CDS_READY; break; }
-            printf '%s\n' "\$PODS" | grep -q 'ImagePullBackOff' && IPB=\$((\${IPB:-0}+1)) || IPB=0
-            [ "\$IPB" -ge 5 ] && { \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'; say FAIL_IMAGEPULL; exit 0; }
-            sleep 12
-          done
-          # consumption proof: a cw workload must RUN with the CDS-issued cert injected.
-          # Under MEAS_ENFORCED that cert is only issued if the node attests the pinned
-          # measurement — so this IS the enforcement test, not a separate assertion.
-          WOK=0; COK=0
+          if bash "\$E2E/components-ready.sh" c8s-cds; then CDSOK=1; say CDS_READY; fi
+          \$K -n c8s-system get pods --no-headers 2>&1 | sed 's/^/@@POD /;s/\$/@@/'
+          WOK=0
           if [ "\$CDSOK" != "1" ]; then
+            \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'
             \$K -n c8s-system logs deploy/c8s-cds --tail=15 2>&1 | sed 's/^/@@CDSLOG /;s/\$/@@/'
             \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
           fi
@@ -294,26 +285,16 @@ jobs:
               sleep 5
             done
             [ "\$NRIOK" = "1" ] || say WARN_NRI_NOT_READY
-            printf %s '$CW' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
-            for i in \$(seq 1 60); do
-              DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
-              echo "@@CWDEP \$i: \$DP@@"
-              printf '%s' "\$DP" | grep -qE ' 1/1 ' && { WOK=1; say WORKLOAD_OK; break; }
-              sleep 10
-            done
-            IC=\$(\$K -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}' 2>/dev/null)
-            echo "@@CWCONTAINERS \${IC:-none}@@"
-            printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
-            if [ "\$WOK" = "1" ] && [ "\$COK" = "1" ]; then
-              # Live-cluster e2e suites from the merge-under-test's own source.
-              # A suite failure fails the lane (FAIL_ marker -> no PAYLOAD_OK).
-              export PATH="/var/lib/rancher/rke2/bin:\$PATH"
-              E2E=\$(echo /tmp/c8s-*/test/e2e)
-              FAILED=""
-              bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
-              bash "\$E2E/ca-handoff.sh" && say E2E_CA_HANDOFF_OK || FAILED="\$FAILED ca-handoff"
-              if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
-            fi
+            # Live-cluster e2e suites from the merge-under-test's own source.
+            # A suite failure fails the lane (FAIL_ marker -> no PAYLOAD_OK).
+            # Only markers reach the run log, so a suite's own stdout lands in
+            # the guest-console artifact; the diagnostics below stay inline.
+            FAILED=""
+            # Under MEAS_ENFORCED the cert is only issued if the node attests the pinned measurement, so this is the enforcement test.
+            bash "\$E2E/cw-workload.sh" && { WOK=1; say WORKLOAD_OK; } || FAILED="\$FAILED cw-workload"
+            bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
+            bash "\$E2E/ca-handoff.sh" && say E2E_CA_HANDOFF_OK || FAILED="\$FAILED ca-handoff"
+            if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
             if [ "\$WOK" != "1" ]; then
               \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
               \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'

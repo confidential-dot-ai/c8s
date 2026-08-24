@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -186,6 +186,26 @@ test-e2e-mesh-cw-enforcement:
 # Also runs post-merge in the snp-metal-e2e lane's in-guest payload.
 test-e2e-ca-handoff:
 	./test/e2e/ca-handoff.sh
+
+# Live-cluster check that image admission is fail-closed and that a signed
+# allowlist write opens it. Needs kubectl pointed at a cluster with c8s
+# installed, plus C8S_ALLOWLIST_URL, C8S_MEASUREMENTS and C8S_OPERATOR_KEY.
+# Also runs post-merge in the tdx-metal-e2e lane.
+test-e2e-allowlist-enforcement:
+	./test/e2e/allowlist-enforcement.sh
+
+# Live-cluster check that every c8s-system pod is Running and Ready. Needs
+# kubectl pointed at a cluster with c8s installed. Also runs post-merge in
+# the tdx-metal-e2e lane.
+test-e2e-components-ready:
+	./test/e2e/components-ready.sh
+
+# Live-cluster check that the sample confidential workload runs with the
+# injected c8s-cert sidecar. Needs kubectl pointed at a cluster with c8s
+# installed; under a fail-closed floor also C8S_OPERATOR_KEY,
+# C8S_ALLOWLIST_URL and C8S_MEASUREMENTS. Runs post-merge in both metal lanes.
+test-e2e-cw-workload:
+	./test/e2e/cw-workload.sh
 
 # Parse + decision tests for the baked kata-agent policy. The guest evaluates
 # it with regorus, which reads Rego v0 plus the future keywords, so the checks
