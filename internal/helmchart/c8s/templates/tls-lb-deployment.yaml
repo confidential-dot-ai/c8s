@@ -67,6 +67,11 @@ spec:
         {{- include "tls-lb.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/nginx-config: {{ include (print $.Template.BasePath "/tls-lb-configmap.yaml") . | sha256sum }}
+        {{- if .Values.cds.measurementsConfig }}
+        # A ConfigMap edit alone does not change the pod template, so without
+        # this a tightened pin would not roll the load balancer.
+        checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
+        {{- end }}
     spec:
       {{- if .Values.kata.enabled }}
       # Chart-managed mesh component: the webhook excludes the release
@@ -294,11 +299,15 @@ spec:
             - --port={{ include "c8s.int" .Values.tlsLb.allowlist.proxyPort }}
             - --cds-url={{ include "c8s.cdsURL" . }}
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            {{- if .Values.cds.measurementsConfig }}
+            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- else }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements={{ join "," . }}
             {{- end }}
             {{- with .Values.cds.rtmrs }}
             - --cds-rtmrs={{ join "," . }}
+            {{- end }}
             {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
           # cvmMode=node: the proxy verifies CDS through the node-baked
@@ -306,9 +315,16 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
-          {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+          {{- if or (eq (include "c8s.attestationApiHostSocket" .) "true") .Values.cds.measurementsConfig }}
           volumeMounts:
+            {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.cds.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -327,6 +343,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        {{- if .Values.cds.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            name: {{ include "c8s.fullname" . }}-measurements
+        {{- end }}
         {{- if .Values.tlsLb.publicTLS.secretName }}
         - name: public-tls
           secret:

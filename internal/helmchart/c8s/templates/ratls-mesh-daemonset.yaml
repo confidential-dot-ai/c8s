@@ -53,6 +53,11 @@ spec:
       labels:
         {{- include "ratls-mesh.selectorLabels" . | nindent 8 }}
       annotations:
+        {{- if .Values.ratlsMesh.measurementsConfig }}
+        # A ConfigMap edit alone does not change the pod template, so without
+        # this a tightened pin would not roll the DaemonSet.
+        checksum/measurements-config: {{ .Values.ratlsMesh.measurementsConfig | sha256sum }}
+        {{- end }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.ratlsMesh.ports.health | quote }}
         prometheus.io/path: "/metrics"
@@ -83,6 +88,11 @@ spec:
         - operator: "Exists"
           effect: "NoSchedule"
       volumes:
+        {{- if .Values.ratlsMesh.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            name: {{ include "c8s.fullname" . }}-measurements
+        {{- end }}
         - name: xtables-lock
           hostPath:
             path: {{ .Values.ratlsMesh.xtablesLockPath }}
@@ -230,6 +240,11 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- if .Values.ratlsMesh.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
           args:
             - --platform
             - {{ .Values.ratlsMesh.platform | quote }}
@@ -255,6 +270,10 @@ spec:
             - --rotation-timeout
             - {{ .Values.ratlsMesh.rotationTimeout | quote }}
             {{- end }}
+            {{- if .Values.ratlsMesh.measurementsConfig }}
+            - --measurements-config
+            - /etc/c8s-measurements/ratls-mesh.json
+            {{- else }}
             {{- if .Values.ratlsMesh.measurements }}
             - --measurements
             - {{ .Values.ratlsMesh.measurements | join "," | quote }}
@@ -262,6 +281,7 @@ spec:
             {{- with .Values.ratlsMesh.rtmrs }}
             - --rtmrs
             - {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
             - --max-conns
@@ -288,6 +308,7 @@ spec:
             - {{ printf "ratls-mesh.%s.svc" .Release.Namespace | quote }}
             - --ca-poll-interval
             - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
+            {{- if not .Values.ratlsMesh.measurementsConfig }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements
             - {{ join "," . | quote }}
@@ -295,6 +316,7 @@ spec:
             {{- with .Values.cds.rtmrs }}
             - --cds-rtmrs
             - {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
           env:

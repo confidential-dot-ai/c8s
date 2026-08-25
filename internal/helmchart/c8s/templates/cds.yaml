@@ -137,6 +137,11 @@ spec:
         app.kubernetes.io/component: cds
       annotations:
         confidential.ai/trust-root-mode: "inMemory"
+        {{- if .Values.cds.measurementsConfig }}
+        # Pins live in a ConfigMap, which no longer changes the pod template on
+        # its own: without this a tightened pin would not roll the pod.
+        checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
+        {{- end }}
     spec:
       {{- if .Values.kata.enabled }}
       # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
@@ -218,11 +223,15 @@ spec:
             {{- if .Values.cds.cnPattern }}
             - --allowed-cn-pattern={{ .Values.cds.cnPattern }}
             {{- end }}
+            {{- if .Values.cds.measurementsConfig }}
+            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- else }}
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
             {{- with .Values.cds.rtmrs }}
             - --rtmrs={{ join "," . }}
+            {{- end }}
             {{- end }}
             {{- with .Values.cds.sandboxInventoryCIDRs }}
             - --sandbox-inventory-cidr={{ join "," . }}
@@ -312,6 +321,11 @@ spec:
               mountPath: /etc/cds-operator-keys
               readOnly: true
             {{- end }}
+            {{- if .Values.cds.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -343,6 +357,11 @@ spec:
         - name: operator-keys
           configMap:
             name: {{ include "c8s.cdsName" . }}-operator-keys
+        {{- end }}
+        {{- if .Values.cds.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            name: {{ include "c8s.fullname" . }}-measurements
         {{- end }}
 ---
 apiVersion: v1

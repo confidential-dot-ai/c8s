@@ -22,9 +22,16 @@ spec:
         app.kubernetes.io/name: c8s-operator
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: operator
-      {{- with .Values.operator.podAnnotations }}
+      {{- if or .Values.operator.podAnnotations .Values.cds.measurementsConfig }}
       annotations:
+        {{- if .Values.cds.measurementsConfig }}
+        # A ConfigMap edit alone does not change the pod template, so without
+        # this a tightened pin would not roll the operator.
+        checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
+        {{- end }}
+        {{- with .Values.operator.podAnnotations }}
 {{ toYaml . | indent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "c8s.operatorName" . }}
@@ -54,11 +61,15 @@ spec:
             {{- /* The same measurements CDS is pinned to elsewhere: the
                    injected secret fetcher verifies CDS before handing it a
                    sandbox token and taking a value back. */}}
+            {{- if .Values.cds.measurementsConfig }}
+            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- else }}
             {{- range .Values.cds.measurements }}
             - --cds-measurements={{ . }}
             {{- end }}
             {{- range .Values.cds.rtmrs }}
             - --cds-rtmrs={{ . }}
+            {{- end }}
             {{- end }}
             {{- range .Values.webhook.extraExcluded }}
             - --exclude-namespaces={{ . }}
@@ -111,9 +122,19 @@ spec:
             # this emptyDir rather than the immutable image.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.cds.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.cds.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            name: {{ include "c8s.fullname" . }}-measurements
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
