@@ -69,9 +69,11 @@ anchors nothing. It is also a fingerprint naming which model a volume holds, and
 A mutable blob carries the key and its mode, nothing else:
 
 ```json
-{ "type": "c8s.volume/v1",
+{
+  "type": "c8s.volume/v1",
   "key": "<base64, 64 bytes>",
-  "mutable": true }
+  "mutable": true
+}
 ```
 
 There is no integrity anchor to carry — a volume the host can rewrite has
@@ -105,7 +107,8 @@ c8s volume create --mutable \
   --path /tenant-a/volumes/datasets \
   --escrow-out ./datasets.escrow.json \
   --node node-1 \
-  --url https://cds.example --measurements-file ./m.txt \
+  --url https://cds.example \
+  --measurements-file ./m.txt \
   --operator-key ./operator.key
 ```
 
@@ -113,10 +116,14 @@ or empty, for scratch space the workload fills itself:
 
 ```sh
 c8s volume create --mutable \
-  --name scratch --size 50Gi \
-  --out ./scratch.img --path /tenant-a/volumes/scratch \
-  --escrow-out ./scratch.escrow.json --node node-1 \
-  --url https://cds.example --measurements-file ./m.txt \
+  --name scratch \
+  --size 50Gi \
+  --out ./scratch.img \
+  --path /tenant-a/volumes/scratch \
+  --escrow-out ./scratch.escrow.json \
+  --node node-1 \
+  --url https://cds.example \
+  --measurements-file ./m.txt \
   --operator-key ./operator.key
 ```
 
@@ -237,7 +244,9 @@ Each entry is `NAME=/store/path`. `NAME` selects the node's device by its
 the volume dir — above, `/models/weights`. It must be a DNS-1123 label of at
 most 12 characters, because the serial holds no more. The annotation is the
 same for both modes; whether the plaintext is writable comes from the volume's
-key blob, not from the pod.
+key blob, not from the pod. Flipping the mode in a blob gets nothing: an
+immutable image is erofs and fails to mount as ext4, and a mutable image has
+no hash tree for verity to anchor.
 
 The webhook injects a `c8s-volume` sidecar and, per volume, an `emptyDir` with
 `mountPropagation: HostToContainer`. The sidecar fetches the key over the
@@ -417,6 +426,9 @@ of scope by decision, not by oversight.
   `c8s cds verify --operator-keys`, and running it continuously is a
   precondition for trusting a volume.
 - **Access patterns are visible.** Which sectors are read, and when, leaks
-  structure.
+  structure. AES-XTS is deterministic, so for a mutable volume the host can
+  also tell when a sector returns to a value it has seen before — the standard
+  FDE trade-off (BitLocker and FileVault share it), with no IV space per
+  sector write to do better with.
 - **Availability.** The host can withhold or destroy the device.
 - **Whatever the workload does with the plaintext** once it has it.

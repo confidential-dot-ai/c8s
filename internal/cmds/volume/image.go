@@ -289,7 +289,9 @@ func treeSize(source string) (dataBytes, entries uint64, err error) {
 	return dataBytes, entries, nil
 }
 
-func alignUp(n, unit uint64) uint64 { return (n + unit - 1) / unit * unit }
+func alignUp(n, unit uint64) uint64 {
+	return (n + unit - 1) / unit * unit
+}
 
 // erofsArgs pins the inputs that would otherwise vary per build, so the same
 // source directory yields the same image and therefore the same root hash.

@@ -83,7 +83,6 @@ type mount struct {
 	device     string
 	mutable    bool
 	cryptDev   string
-	verityDev  string
 	target     string
 }
 
@@ -98,6 +97,9 @@ type Opener struct {
 
 	mu     sync.Mutex
 	mounts map[string]*mount
+	// opening tracks in-flight opens by device, so a concurrent open is judged
+	// against one that has not landed in mounts yet.
+	opening map[string]bool
 }
 
 // DefaultMaxMounts bounds live volumes when MaxMounts is unset.
@@ -129,6 +131,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 	o.mu.Lock()
 	if o.mounts == nil {
 		o.mounts = map[string]*mount{}
+		o.opening = map[string]bool{}
 	}
 	if existing, ok := o.mounts[mountKey(req.Pod.UID, req.Name)]; ok {
 		o.mu.Unlock()
@@ -145,7 +148,16 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 		o.mu.Unlock()
 		return ErrVolumeInUse
 	}
+	// Reserve the device for the open's duration, so a conflicting open racing
+	// this one is judged against it rather than against a mounts map it has
+	// not landed in yet.
+	o.opening[req.Device] = req.Blob.Mutable
 	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		delete(o.opening, req.Device)
+		o.mu.Unlock()
+	}()
 
 	m, err := o.open(ctx, req, key, commitment)
 	if err != nil {
@@ -153,22 +165,17 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 	}
 
 	// A concurrent identical request may have won the race; keep one mapping
-	// and tear the loser down outside the lock. The device check repeats here:
-	// a conflicting open may have landed while this one ran.
+	// and tear the loser down outside the lock.
 	o.mu.Lock()
 	existing, lost := o.mounts[mountKey(req.Pod.UID, req.Name)]
-	conflict := !lost && o.deviceConflict(req.Device, req.Blob.Mutable)
-	if !lost && !conflict {
+	if !lost {
 		o.mounts[mountKey(req.Pod.UID, req.Name)] = m
 	}
 	o.mu.Unlock()
-	if !lost && !conflict {
+	if !lost {
 		return nil
 	}
 	o.teardown(ctx, m)
-	if conflict {
-		return ErrVolumeInUse
-	}
 	if subtle.ConstantTimeCompare(existing.commitment[:], commitment[:]) != 1 {
 		return ErrNotAuthorized
 	}
@@ -176,8 +183,11 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 }
 
 // deviceConflict reports whether opening device in mode mutable conflicts with
-// a live mount. Caller holds mu.
+// a live mount or an in-flight open. Caller holds mu.
 func (o *Opener) deviceConflict(device string, mutable bool) bool {
+	if m, inFlight := o.opening[device]; inFlight && (m || mutable) {
+		return true
+	}
 	for _, m := range o.mounts {
 		if m.device == device && (m.mutable || mutable) {
 			return true
@@ -212,23 +222,14 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	}
 	undo = append(undo, func(ctx context.Context) { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
-	// The stack's top and the mount flags are the mode's: an immutable volume
-	// mounts the verified device, read-only erofs; a mutable one mounts the
-	// crypt device itself, writable ext4.
-	source := devPath(cryptMapper)
-	fsType, readOnly := fsTypeExt4, false
-	verityMapper := ""
-	if !req.Blob.Mutable {
-		verityMapper = mapperName(verityKind, req.Pod.UID, req.Name)
-		if err := o.Ops.VerityOpen(ctx, devPath(cryptMapper), verityMapper, *req.Blob.Verity); err != nil {
-			return fail(fmt.Errorf("volumed: open dm-verity: %w", err))
-		}
-		undo = append(undo, func(ctx context.Context) { _ = o.Ops.VerityClose(ctx, verityMapper) })
-		source = devPath(verityMapper)
-		fsType, readOnly = fsTypeErofs, true
+	mode := modeFor(req.Blob.Mutable)
+	spec, err := mode.open(ctx, o.Ops, req.Pod.UID, req.Name, cryptMapper, req.Blob)
+	if err != nil {
+		return fail(err)
 	}
+	undo = append(undo, func(ctx context.Context) { mode.close(ctx, o.Ops, req.Pod.UID, req.Name) })
 
-	if err := o.Ops.Mount(ctx, source, target, fsType, readOnly); err != nil {
+	if err := o.Ops.Mount(ctx, spec.source, target, spec.fsType, spec.readOnly); err != nil {
 		return fail(fmt.Errorf("volumed: mount: %w", err))
 	}
 
@@ -239,7 +240,6 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 		device:     req.Device,
 		mutable:    req.Blob.Mutable,
 		cryptDev:   cryptMapper,
-		verityDev:  verityMapper,
 		target:     target.Name(),
 	}, nil
 }
@@ -286,10 +286,7 @@ func (o *Opener) teardown(ctx context.Context, m *mount) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
 	_ = o.Ops.Unmount(cleanup, m.target)
-	// A mutable mount has no verity layer.
-	if m.verityDev != "" {
-		_ = o.Ops.VerityClose(cleanup, m.verityDev)
-	}
+	modeFor(m.mutable).close(cleanup, o.Ops, m.pod.UID, m.name)
 	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
 }
 
