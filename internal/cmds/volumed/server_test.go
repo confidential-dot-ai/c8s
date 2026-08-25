@@ -207,7 +207,7 @@ func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
 	if f.opener.Len() != 1 {
 		t.Fatalf("opener holds %d mounts, want 1", f.opener.Len())
 	}
-	if got := f.ops.sequence(); got != "CryptOpen,VerityOpen,Mount" {
+	if got := f.ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("repeats re-ran privileged steps: %q", got)
 	}
 }

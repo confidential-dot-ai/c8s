@@ -150,11 +150,19 @@ func (f *fakeOps) ListMappings(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-func (f *fakeOps) Mount(ctx context.Context, source string, target *os.File, fsType string, readOnly bool) error {
+func (f *fakeOps) MountRO(ctx context.Context, source string, target *os.File, fsType string) error {
+	return f.mount(ctx, "MountRO", source, target, fsType, true)
+}
+
+func (f *fakeOps) MountRW(ctx context.Context, source string, target *os.File, fsType string) error {
+	return f.mount(ctx, "MountRW", source, target, fsType, false)
+}
+
+func (f *fakeOps) mount(ctx context.Context, op, source string, target *os.File, fsType string, readOnly bool) error {
 	if err := f.ctxErr(ctx); err != nil {
 		return err
 	}
-	if err := f.record("Mount"); err != nil {
+	if err := f.record(op); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -239,7 +247,7 @@ func TestOpenRunsTheStepsInOrder(t *testing.T) {
 	if err := o.Open(t.Context(), testRequest(t)); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if got := ops.sequence(); got != "CryptOpen,VerityOpen,Mount" {
+	if got := ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("sequence = %q", got)
 	}
 	if o.Len() != 1 {
@@ -263,7 +271,7 @@ func TestOpenUnwindsEveryCompletedStepOnFailure(t *testing.T) {
 	for _, tc := range []struct{ failOn, wantSeq string }{
 		{"CryptOpen", "CryptOpen"},
 		{"VerityOpen", "CryptOpen,VerityOpen,CryptClose"},
-		{"Mount", "CryptOpen,VerityOpen,Mount,VerityClose,CryptClose"},
+		{"MountRO", "CryptOpen,VerityOpen,MountRO,VerityClose,CryptClose"},
 	} {
 		ops := newOps()
 		ops.failOn = tc.failOn
@@ -297,7 +305,7 @@ func TestOpenIsIdempotentForAnIdenticalRequest(t *testing.T) {
 	if err := o.Open(t.Context(), req); err != nil {
 		t.Fatalf("repeat open: %v", err)
 	}
-	if got := ops.sequence(); got != "CryptOpen,VerityOpen,Mount" {
+	if got := ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("repeat re-ran privileged steps: %q", got)
 	}
 	if o.Len() != 1 {
@@ -326,7 +334,7 @@ func TestOpenRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
 	if err := o.Open(t.Context(), other); !errors.Is(err, ErrNotAuthorized) {
 		t.Fatalf("got %v, want ErrNotAuthorized", err)
 	}
-	if got := ops.sequence(); got != "CryptOpen,VerityOpen,Mount" {
+	if got := ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("a refused caller reached the privileged steps: %q", got)
 	}
 }
@@ -348,7 +356,7 @@ func TestOpenMutableMountsTheCryptDeviceWritable(t *testing.T) {
 	if err := o.Open(t.Context(), testMutableRequest(t)); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if got := ops.sequence(); got != "CryptOpen,Mount" {
+	if got := ops.sequence(); got != "CryptOpen,MountRW" {
 		t.Fatalf("sequence = %q, want no verity step", got)
 	}
 	m := ops.mounts[0]

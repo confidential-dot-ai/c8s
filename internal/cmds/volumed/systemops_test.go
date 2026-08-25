@@ -103,17 +103,15 @@ func TestCryptOpenMutableOmitsReadOnly(t *testing.T) {
 }
 
 func TestMountFlags(t *testing.T) {
-	ro := mountFlags(true)
-	if ro&unix.MS_RDONLY == 0 {
+	if mountROFlags&unix.MS_RDONLY == 0 {
 		t.Error("read-only mount without MS_RDONLY")
 	}
-	rw := mountFlags(false)
-	if rw&unix.MS_RDONLY != 0 {
+	if mountRWFlags&unix.MS_RDONLY != 0 {
 		t.Error("writable mount carries MS_RDONLY")
 	}
 	for _, flag := range []uintptr{unix.MS_NOSUID, unix.MS_NODEV, unix.MS_NOEXEC} {
-		if rw&flag == 0 || ro&flag == 0 {
-			t.Errorf("hardening flag %d missing (rw=%d ro=%d)", flag, rw, ro)
+		if mountRWFlags&flag == 0 || mountROFlags&flag == 0 {
+			t.Errorf("hardening flag %d missing (rw=%d ro=%d)", flag, mountRWFlags, mountROFlags)
 		}
 	}
 }

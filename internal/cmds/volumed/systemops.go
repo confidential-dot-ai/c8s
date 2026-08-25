@@ -84,24 +84,32 @@ func (s SystemOps) VerityClose(ctx context.Context, mapper string) error {
 	return s.run(ctx, "veritysetup", nil, "close", mapper)
 }
 
-// Mount mounts the opened device at the target handle.
+// The hardening every volume mount gets, with and without the read-only flag
+// an immutable volume adds.
+const (
+	mountROFlags uintptr = unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+	mountRWFlags uintptr = unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+)
+
+// MountRO mounts the opened device read-only at the target handle; MountRW
+// mounts it writable.
 //
 // The syscall is made directly rather than through mount(8): the target is an
 // open handle, and passing /proc/self/fd to a subprocess would reopen it by
 // path in a process that does not hold it.
-func (SystemOps) Mount(_ context.Context, source string, target *os.File, fsType string, readOnly bool) error {
-	if err := unix.Mount(source, ProcPath(target), fsType, mountFlags(readOnly), ""); err != nil {
+func (SystemOps) MountRO(_ context.Context, source string, target *os.File, fsType string) error {
+	return doMount(source, target, fsType, mountROFlags)
+}
+
+func (SystemOps) MountRW(_ context.Context, source string, target *os.File, fsType string) error {
+	return doMount(source, target, fsType, mountRWFlags)
+}
+
+func doMount(source string, target *os.File, fsType string, flags uintptr) error {
+	if err := unix.Mount(source, ProcPath(target), fsType, flags, ""); err != nil {
 		return fmt.Errorf("mount %s at %s: %w", source, target.Name(), err)
 	}
 	return nil
-}
-
-func mountFlags(readOnly bool) uintptr {
-	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
-	if readOnly {
-		flags |= unix.MS_RDONLY
-	}
-	return flags
 }
 
 // Unmount detaches the mount. MNT_DETACH so a mount still busy is removed from

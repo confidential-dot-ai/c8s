@@ -38,11 +38,12 @@ type DeviceOps interface {
 	CryptClose(ctx context.Context, mapper string) error
 	VerityOpen(ctx context.Context, dataDev, mapper string, v volume.Verity) error
 	VerityClose(ctx context.Context, mapper string) error
-	// Mount takes the resolved target as an open handle rather than a path:
-	// the implementation mounts through /proc/self/fd so nothing can be swapped
-	// between resolving the target and using it. Unmount takes a path, because
-	// by teardown that handle is long closed.
-	Mount(ctx context.Context, source string, target *os.File, fsType string, readOnly bool) error
+	// MountRO and MountRW take the resolved target as an open handle rather
+	// than a path: the implementation mounts through /proc/self/fd so nothing
+	// can be swapped between resolving the target and using it. Unmount takes
+	// a path, because by teardown that handle is long closed.
+	MountRO(ctx context.Context, source string, target *os.File, fsType string) error
+	MountRW(ctx context.Context, source string, target *os.File, fsType string) error
 	Unmount(ctx context.Context, target string) error
 	// ListMappings names the device-mapper targets published on this node.
 	ListMappings(ctx context.Context) ([]string, error)
@@ -223,15 +224,10 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	undo = append(undo, func(ctx context.Context) { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
 	mode := modeFor(req.Blob.Mutable)
-	spec, err := mode.open(ctx, o.Ops, req.Pod.UID, req.Name, cryptMapper, req.Blob)
-	if err != nil {
+	if err := mode.open(ctx, o.Ops, req.Pod.UID, req.Name, cryptMapper, req.Blob, target); err != nil {
 		return fail(err)
 	}
-	undo = append(undo, func(ctx context.Context) { mode.close(ctx, o.Ops, req.Pod.UID, req.Name) })
-
-	if err := o.Ops.Mount(ctx, spec.source, target, spec.fsType, spec.readOnly); err != nil {
-		return fail(fmt.Errorf("volumed: mount: %w", err))
-	}
+	undo = append(undo, func(ctx context.Context) { mode.close(ctx, o.Ops, req.Pod.UID, req.Name, target.Name()) })
 
 	return &mount{
 		pod:        req.Pod,
@@ -285,8 +281,7 @@ func (o *Opener) ClosePod(ctx context.Context, podUID string) int {
 func (o *Opener) teardown(ctx context.Context, m *mount) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	_ = o.Ops.Unmount(cleanup, m.target)
-	modeFor(m.mutable).close(cleanup, o.Ops, m.pod.UID, m.name)
+	modeFor(m.mutable).close(cleanup, o.Ops, m.pod.UID, m.name, m.target)
 	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
 }
 

@@ -53,10 +53,18 @@ func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.
 
 func (o *recordingOps) VerityClose(context.Context, string) error { return nil }
 
-func (o *recordingOps) Mount(_ context.Context, _ string, target *os.File, fsType string, readOnly bool) error {
+func (o *recordingOps) MountRO(_ context.Context, _ string, target *os.File, fsType string) error {
+	return o.recordMount("MountRO", target, fsType, true)
+}
+
+func (o *recordingOps) MountRW(_ context.Context, _ string, target *os.File, fsType string) error {
+	return o.recordMount("MountRW", target, fsType, false)
+}
+
+func (o *recordingOps) recordMount(op string, target *os.File, fsType string, readOnly bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.calls = append(o.calls, "Mount")
+	o.calls = append(o.calls, op)
 	o.mounted = append(o.mounted, target.Name())
 	o.mounts = append(o.mounts, recordedMount{fsType: fsType, readOnly: readOnly})
 	return nil
@@ -134,7 +142,7 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 	want := []string{
 		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + e2ePodUID + "-weights",
 		"VerityOpen c8s-verity-" + e2ePodUID + "-weights",
-		"Mount",
+		"MountRO",
 	}
 	for i, w := range want {
 		if i >= len(ops.calls) || ops.calls[i] != w {
@@ -241,7 +249,7 @@ func TestSidecarOpensAMutableVolumeEndToEnd(t *testing.T) {
 	defer ops.mu.Unlock()
 	want := []string{
 		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + e2ePodUID + "-weights",
-		"Mount",
+		"MountRW",
 	}
 	if len(ops.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", ops.calls, want)
@@ -336,7 +344,7 @@ func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
 	want := []string{
 		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + volumed.GuestPodUID + "-weights",
 		"VerityOpen c8s-verity-" + volumed.GuestPodUID + "-weights",
-		"Mount",
+		"MountRO",
 	}
 	for i, w := range want {
 		if i >= len(ops.calls) || ops.calls[i] != w {
