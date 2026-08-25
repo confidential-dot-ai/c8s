@@ -108,6 +108,7 @@ type proxyConfig struct {
 	listeners                 proxyListeners
 	measurements              string
 	rtmrs                     string
+	measurementsConfig        string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -153,6 +154,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
+	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image is accepted in both roles: as a mesh peer, and as the CDS this proxy dials — CDS is not scoped to a subset, so any listed image may serve it. Cannot be combined with --measurements, --rtmrs, --cds-measurements or --cds-rtmrs")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -216,10 +218,18 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
+	// Resolve before the flat fields are read: every gate below reads them,
+	// so a config-mode start must fill them first.
+	pins, err := resolveMeasurementsConfig(c)
+	if err != nil {
+		return err
+	}
+
 	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.rtmrs)
 	if err != nil {
 		return err
 	}
+	meshPolicy.Entries = pins.Entries
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
@@ -253,6 +263,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	}
 	teeType, err := ratlsTEEType(c.platform)
 	if err != nil {
+		return err
+	}
+	if err := checkTEEMatchesPlatform(pins, teeType); err != nil {
 		return err
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
@@ -447,6 +460,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
 			CDSRTMRs:          cdsRTMRs,
+			CDSEntries:        pins.Entries,
 		}
 		// A provider-construction failure (config validation) is logged and
 		// the mesh keeps serving self-signed certs; it never blocks startup.

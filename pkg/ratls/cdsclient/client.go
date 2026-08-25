@@ -25,6 +25,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -80,6 +81,11 @@ type Config struct {
 	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
 	CDSRTMRs map[int][]byte
 
+	// CDSEntries pins CDS as a whole image — a launch digest together with
+	// the registers measured from the same build. When set it replaces
+	// CDSMeasurements and CDSRTMRs.
+	CDSEntries []measurements.Entry
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -105,7 +111,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Entries: cfg.CDSEntries, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc
