@@ -391,18 +391,19 @@ logging:
 // holdNRISocket points the NRI stub at one end of a socketpair via
 // NRI_PLUGIN_SOCKET, which stub.connect adopts instead of dialing. Nothing
 // serves the peer end, so registration blocks until its timeout rather than
-// failing on connect. Both ends stay open for the test: closing either makes
-// registration fail immediately and restores the race.
+// failing on connect. The socket stays up for the whole test: the stub holds a
+// dup of the adopted end, and closing the peer end would make registration fail
+// immediately and restore the race.
 func holdNRISocket(t *testing.T) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("socketpair: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = syscall.Close(fds[0])
-		_ = syscall.Close(fds[1])
-	})
+	// nri's NewFdConn dups the adopted descriptor and closes the original, so
+	// fds[0] belongs to the stub from here on and its number is recycled: the
+	// test owns only the peer end.
+	t.Cleanup(func() { _ = syscall.Close(fds[1]) })
 	t.Setenv(api.PluginSocketEnvVar, strconv.Itoa(fds[0]))
 }
 
