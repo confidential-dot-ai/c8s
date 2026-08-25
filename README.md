@@ -90,8 +90,9 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   inventory, or from the in-guest `policy-monitor` under pod-as-CVM.
 
 - **Encrypted volumes.** Data too large to be a secret — model weights, in
-  practice — encrypted at rest on host-visible storage (erofs, dm-verity,
-  dm-crypt) and opened only inside the TEE. The key travels as a secret
+  practice — encrypted at rest on host-visible storage (dm-crypt) and opened
+  only inside the TEE. Immutable volumes verify every read (erofs, dm-verity);
+  mutable volumes are writable ext4. The key travels as a secret
   through the release path above, so possession of the volume implies nothing
   without attestation. On node-as-CVM the `volumed` node agent ships
   disabled — `c8s install --volumes` deploys it; under pod-as-CVM `volumed`

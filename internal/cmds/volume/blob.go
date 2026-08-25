@@ -1,13 +1,12 @@
 // Package volume implements the `c8s volume` operator CLI: building an
-// encrypted, integrity-protected block image and putting its key into the CDS
-// secret store.
+// encrypted block image and putting its key into the CDS secret store.
 //
-// The image is plain dm-crypt with a dm-verity tree inside it. There is
-// deliberately no LUKS header: a LUKS2 header is on-disk metadata whose only
-// integrity is an unkeyed checksum the host can recompute, and it is parsed as
-// root inside the TEE on every open. Plain dm-crypt has no on-disk metadata at
-// all, so every parameter comes from the key blob, which travels over the
-// attested channel.
+// The image is plain dm-crypt — erofs with a dm-verity tree inside it for an
+// immutable volume, writable ext4 for a mutable one. There is deliberately no
+// LUKS header: a LUKS2 header is on-disk metadata whose only integrity is an
+// unkeyed checksum the host can recompute, and it is parsed as root inside the
+// TEE on every open. Plain dm-crypt has no on-disk metadata at all, so every
+// parameter comes from the key blob, which travels over the attested channel.
 package volume
 
 import (
@@ -34,13 +33,19 @@ const KeyBytes = 64
 const verityHashBytes = 32
 
 // Blob is what the store holds for one volume: everything needed to open it,
-// and nothing that could be taken from anywhere else. The verity root hash
-// rides here rather than in an annotation or the allowlist entry because it is
-// the integrity anchor; an anchor the host can edit anchors nothing.
+// and nothing that could be taken from anywhere else.
+//
+// Two shapes, and exactly two. An immutable volume (erofs under dm-verity)
+// carries Verity: the root hash rides here rather than in an annotation or the
+// allowlist entry because it is the integrity anchor, and an anchor the host
+// can edit anchors nothing. A mutable volume (ext4 over writable dm-crypt) has
+// no integrity anchor to carry — by design, the host can flip bits — so it
+// carries only the key, and Mutable says the opener must not expect a tree.
 type Blob struct {
-	Type   string `json:"type"`
-	Key    string `json:"key"`
-	Verity Verity `json:"verity"`
+	Type    string  `json:"type"`
+	Key     string  `json:"key"`
+	Mutable bool    `json:"mutable,omitempty"`
+	Verity  *Verity `json:"verity,omitempty"`
 }
 
 // Verity is the geometry needed to open the hash tree without reading a
@@ -57,7 +62,8 @@ type Verity struct {
 	HashOffset uint64 `json:"hash_offset"`
 }
 
-// NewBlob builds a blob from a freshly generated key and the verity output.
+// NewBlob builds an immutable blob from a freshly generated key and the verity
+// output.
 func NewBlob(key []byte, v Verity) (Blob, error) {
 	if len(key) != KeyBytes {
 		return Blob{}, fmt.Errorf("volume: key is %d bytes, want %d", len(key), KeyBytes)
@@ -65,7 +71,23 @@ func NewBlob(key []byte, v Verity) (Blob, error) {
 	b := Blob{
 		Type:   BlobType,
 		Key:    base64.StdEncoding.EncodeToString(key),
-		Verity: v,
+		Verity: &v,
+	}
+	if err := b.Validate(); err != nil {
+		return Blob{}, err
+	}
+	return b, nil
+}
+
+// NewMutableBlob builds a blob for a writable volume: key only, no tree.
+func NewMutableBlob(key []byte) (Blob, error) {
+	if len(key) != KeyBytes {
+		return Blob{}, fmt.Errorf("volume: key is %d bytes, want %d", len(key), KeyBytes)
+	}
+	b := Blob{
+		Type:    BlobType,
+		Key:     base64.StdEncoding.EncodeToString(key),
+		Mutable: true,
 	}
 	if err := b.Validate(); err != nil {
 		return Blob{}, err
@@ -102,6 +124,19 @@ func (b Blob) Validate() error {
 	}
 	if len(key) != KeyBytes {
 		return fmt.Errorf("volume: key is %d bytes, want %d", len(key), KeyBytes)
+	}
+	// The mode and the tree are one invariant: mutable has no verity to check,
+	// immutable cannot open without it. A blob carrying both is refused rather
+	// than disambiguated, because which of the two the author meant is
+	// unknowable here.
+	if b.Mutable {
+		if b.Verity != nil {
+			return fmt.Errorf("volume: mutable blob must not carry verity geometry")
+		}
+		return nil
+	}
+	if b.Verity == nil {
+		return fmt.Errorf("volume: immutable blob carries no verity geometry")
 	}
 	if err := validateHex("root_hash", b.Verity.RootHash, verityHashBytes); err != nil {
 		return err

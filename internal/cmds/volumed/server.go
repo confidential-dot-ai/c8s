@@ -165,6 +165,8 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authorized for this volume", http.StatusForbidden)
 	case errors.Is(err, ErrTooManyMounts):
 		http.Error(w, "too many open volumes on this node", http.StatusInsufficientStorage)
+	case errors.Is(err, ErrVolumeInUse):
+		http.Error(w, "volume device is already in use", http.StatusConflict)
 	default:
 		// Forward the underlying cause, not just a generic 500: the caller is
 		// the in-pod get-volume sidecar over a node-local socket, same tenant

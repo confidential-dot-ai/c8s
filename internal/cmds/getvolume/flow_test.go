@@ -143,6 +143,23 @@ func testBlobJSON(t *testing.T) []byte {
 	return raw
 }
 
+func testMutableBlobJSON(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, volume.KeyBytes)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := volume.NewMutableBlob(key)
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	raw, err := json.Marshal(blob)
+	if err != nil {
+		t.Fatalf("marshal blob: %v", err)
+	}
+	return raw
+}
+
 func flowConfig(t *testing.T, url string) config {
 	t.Helper()
 	return config{

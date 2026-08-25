@@ -64,10 +64,12 @@ func TestVolumeFetcherIsANativeSidecarAfterTheCertContainers(t *testing.T) {
 	}
 }
 
-// The plaintext is read-only to the workload, and the node agent makes the
-// mount from outside the pod — without HostToContainer the container keeps
-// seeing the empty directory it started with.
-func TestVolumeMountIsReadOnlyAndPropagated(t *testing.T) {
+// The node agent makes the mount from outside the pod — without
+// HostToContainer the container keeps seeing the empty directory it started
+// with. The container's own mount is not read-only: writability is the
+// daemon's mount flags (ro for immutable, rw for mutable), and a container-side
+// flag would not narrow a propagated mount anyway.
+func TestVolumeMountIsPropagated(t *testing.T) {
 	pod := podWithApp()
 	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "")
 
@@ -76,8 +78,8 @@ func TestVolumeMountIsReadOnlyAndPropagated(t *testing.T) {
 	if m == nil {
 		t.Fatalf("app has no volume mount; mounts = %v", mountNames(app))
 	}
-	if !m.ReadOnly {
-		t.Error("the workload may write the decrypted volume")
+	if m.ReadOnly {
+		t.Error("a read-only container mount would hide a mutable volume's writability")
 	}
 	if m.MountPropagation == nil || *m.MountPropagation != corev1.MountPropagationHostToContainer {
 		t.Errorf("propagation = %v, want HostToContainer", m.MountPropagation)
@@ -145,8 +147,8 @@ func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 	if m.MountPath != "/run/c8s/volumes/weights" {
 		t.Errorf("mount path = %q, want the webhook's own", m.MountPath)
 	}
-	if !m.ReadOnly {
-		t.Error("a pre-declared writable mount survived")
+	if m.ReadOnly {
+		t.Error("a pre-declared read-only mount survived")
 	}
 	if m.MountPropagation == nil || *m.MountPropagation != corev1.MountPropagationHostToContainer {
 		t.Error("a pre-declared unpropagated mount survived")

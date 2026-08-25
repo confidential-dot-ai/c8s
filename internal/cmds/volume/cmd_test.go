@@ -84,7 +84,7 @@ func TestPutBlobSendsTheBlobUnderTheOperatorToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server received something that is not a key blob: %v", err)
 	}
-	if got.Key != testBlob(t).Key || got.Verity != validVerity() {
+	if got.Key != testBlob(t).Key || got.Verity == nil || *got.Verity != validVerity() {
 		t.Error("server received a different blob than was built")
 	}
 }

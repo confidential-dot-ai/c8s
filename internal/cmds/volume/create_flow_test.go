@@ -177,7 +177,9 @@ func TestRunCreateStoresBlobAndPrintsGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("escrow blob: %v", err)
 	}
-	if stored.Key != escrowed.Key || stored.Verity != escrowed.Verity {
+	if stored.Key != escrowed.Key ||
+		(stored.Verity == nil) != (escrowed.Verity == nil) ||
+		(stored.Verity != nil && *stored.Verity != *escrowed.Verity) {
 		t.Fatal("the blob stored in CDS differs from the escrowed one")
 	}
 
@@ -237,5 +239,71 @@ func TestExecRunnerPinsEnvAndWrapsFailure(t *testing.T) {
 		t.Fatal("a failing tool reported success")
 	} else if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error drops the tool's output: %v", err)
+	}
+}
+
+// A mutable dry run builds the ext4 image, escrows a key-only blob, and never
+// reaches CDS — the same escrow-then-store ordering the immutable path holds.
+func TestRunCreateMutableDryRunBuildsAndEscrows(t *testing.T) {
+	f := newFlowFixture(t)
+	fake := newFake()
+	cfg := f.config(fake)
+	cfg.dryRun = true
+	cfg.mutable = true
+	cfg.sizeBytes = 20 << 20
+
+	cmd, out := captureCmd()
+	if err := runCreate(cmd, &options{}, cfg); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	img, err := os.ReadFile(f.out)
+	if err != nil {
+		t.Fatalf("image not written: %v", err)
+	}
+	if len(img) != 20<<20 {
+		t.Errorf("image is %d bytes, want %d", len(img), 20<<20)
+	}
+	raw, err := os.ReadFile(f.escrow)
+	if err != nil {
+		t.Fatalf("escrow not written: %v", err)
+	}
+	blob, err := DecodeBlob(raw)
+	if err != nil {
+		t.Fatalf("escrow is not a key blob: %v", err)
+	}
+	if !blob.Mutable || blob.Verity != nil {
+		t.Fatalf("escrow blob = %+v, want mutable with no verity", blob)
+	}
+
+	// The escrowed key must decrypt the image, or the escrow recovers nothing.
+	key, err := blob.DecodeKey()
+	if err != nil {
+		t.Fatalf("escrow key: %v", err)
+	}
+	var plain bytes.Buffer
+	if err := Decrypt(&plain, bytes.NewReader(img), key); err != nil {
+		t.Fatalf("decrypt with escrowed key: %v", err)
+	}
+	if !bytes.Equal(plain.Bytes(), make([]byte, 20<<20)) {
+		t.Fatal("escrowed key does not decrypt the image it was written alongside")
+	}
+	if !strings.Contains(out.String(), "mutable") {
+		t.Errorf("output does not name the volume mutable: %s", out.String())
+	}
+}
+
+// The mutable path must warn on the artifact itself: the operator is giving up
+// tamper detection by choosing it.
+func TestPrintResultWarnsThatMutableHasNoIntegrity(t *testing.T) {
+	var out bytes.Buffer
+	printResult(&out, createConfig{
+		name: "scratch", out: "/tmp/vol.img", escrowOut: "/tmp/escrow.json", mutable: true,
+	}, "/tenant-a/volumes/scratch", 50<<30, Verity{})
+	got := out.String()
+	for _, want := range []string{"50Gi", "no integrity protection"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
 	}
 }

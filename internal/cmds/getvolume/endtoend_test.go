@@ -24,9 +24,16 @@ type recordingOps struct {
 	mounted []string
 	key     []byte
 	verity  volume.Verity
+	mounts  []recordedMount
 }
 
-func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key []byte) error {
+// recordedMount is what one Mount was asked to do.
+type recordedMount struct {
+	fsType   string
+	readOnly bool
+}
+
+func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key []byte, readOnly bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.calls = append(o.calls, "CryptOpen "+device+" "+mapper)
@@ -46,11 +53,12 @@ func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.
 
 func (o *recordingOps) VerityClose(context.Context, string) error { return nil }
 
-func (o *recordingOps) MountRO(_ context.Context, _ string, target *os.File) error {
+func (o *recordingOps) Mount(_ context.Context, _ string, target *os.File, fsType string, readOnly bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.calls = append(o.calls, "MountRO")
+	o.calls = append(o.calls, "Mount")
 	o.mounted = append(o.mounted, target.Name())
+	o.mounts = append(o.mounts, recordedMount{fsType: fsType, readOnly: readOnly})
 	return nil
 }
 
@@ -126,7 +134,7 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 	want := []string{
 		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + e2ePodUID + "-weights",
 		"VerityOpen c8s-verity-" + e2ePodUID + "-weights",
-		"MountRO",
+		"Mount",
 	}
 	for i, w := range want {
 		if i >= len(ops.calls) || ops.calls[i] != w {
@@ -144,6 +152,9 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 	}
 	if ops.verity.RootHash != testBlob(t).Verity.RootHash {
 		t.Error("the verity anchor did not come from the blob")
+	}
+	if len(ops.mounts) != 1 || ops.mounts[0].fsType != "erofs" || !ops.mounts[0].readOnly {
+		t.Errorf("mount = %+v, want read-only erofs", ops.mounts)
 	}
 
 	// It landed in this pod's own emptyDir for this volume, and nowhere else.
@@ -205,6 +216,43 @@ func TestSidecarReportsADaemonRefusal(t *testing.T) {
 	daemon, daemonBase := daemonClient(cfg)
 	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err == nil {
 		t.Fatal("a refused open was reported as success")
+	}
+}
+
+// A mutable blob travels the same delivery path and skips verity: the daemon
+// mounts the crypt device itself, writable ext4.
+func TestSidecarOpensAMutableVolumeEndToEnd(t *testing.T) {
+	endpoint := startInventory(t)
+	_, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testMutableBlobJSON(t)}},
+	})
+
+	socketDir := t.TempDir()
+	ops := startDaemon(t, socketDir)
+
+	cfg := flowConfig(t, url)
+	cfg.SocketDir = socketDir
+	daemon, daemonBase := daemonClient(cfg)
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+	want := []string{
+		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + e2ePodUID + "-weights",
+		"Mount",
+	}
+	if len(ops.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", ops.calls, want)
+	}
+	for i, w := range want {
+		if ops.calls[i] != w {
+			t.Fatalf("calls = %v, want %v", ops.calls, want)
+		}
+	}
+	if len(ops.mounts) != 1 || ops.mounts[0].fsType != "ext4" || ops.mounts[0].readOnly {
+		t.Errorf("mount = %+v, want writable ext4", ops.mounts)
 	}
 }
 
@@ -288,7 +336,7 @@ func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
 	want := []string{
 		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + volumed.GuestPodUID + "-weights",
 		"VerityOpen c8s-verity-" + volumed.GuestPodUID + "-weights",
-		"MountRO",
+		"Mount",
 	}
 	for i, w := range want {
 		if i >= len(ops.calls) || ops.calls[i] != w {

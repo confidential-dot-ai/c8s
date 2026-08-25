@@ -37,7 +37,7 @@ func hasFlag(args []string, flag string) bool {
 // the image was written with and the key it is opened with would differ, and
 // the volume would decrypt to noise with nothing to say why.
 func TestCryptOpenUsesTheKeyBytesDirectly(t *testing.T) {
-	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x")
+	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x", true)
 	if got := argsAfter(args, "--hash"); got != "plain" {
 		t.Fatalf("--hash = %q, want plain", got)
 	}
@@ -49,7 +49,7 @@ func TestCryptOpenUsesTheKeyBytesDirectly(t *testing.T) {
 // The tweak is the sector index; at a larger sector size dm-crypt's numbering
 // depends on iv_large_sectors, so this must match what wrote the image.
 func TestCryptOpenMatchesTheWriterCipherAndSectorSize(t *testing.T) {
-	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x")
+	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x", true)
 	if got := argsAfter(args, "--cipher"); got != "aes-xts-plain64" {
 		t.Errorf("--cipher = %q", got)
 	}
@@ -65,7 +65,7 @@ func TestCryptOpenMatchesTheWriterCipherAndSectorSize(t *testing.T) {
 }
 
 func TestCryptOpenIsReadOnlyAndTakesTheKeyByFD(t *testing.T) {
-	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x")
+	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x", true)
 	if !hasFlag(args, "--readonly") {
 		t.Error("mapping is not opened read-only")
 	}
@@ -81,6 +81,40 @@ func TestCryptOpenIsReadOnlyAndTakesTheKeyByFD(t *testing.T) {
 	}
 	if args[len(args)-2] != "/dev/vdb" || args[len(args)-1] != "c8s-crypt-x" {
 		t.Errorf("device and mapper are not the trailing positionals: %v", args[len(args)-2:])
+	}
+}
+
+// A mutable volume's mapping is the writable one by design: no --readonly,
+// and no read-only assertion to fail it afterwards.
+func TestCryptOpenMutableOmitsReadOnly(t *testing.T) {
+	args := cryptOpenArgs("/dev/vdb", "c8s-crypt-x", false)
+	if hasFlag(args, "--readonly") {
+		t.Error("a writable mapping carries --readonly")
+	}
+	if args[len(args)-3] != "--batch-mode" || args[len(args)-2] != "/dev/vdb" || args[len(args)-1] != "c8s-crypt-x" {
+		t.Errorf("batch-mode, device and mapper are not the trailing arguments: %v", args[len(args)-3:])
+	}
+
+	r := &fakeRunner{}
+	err := SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-absent", make([]byte, volume.KeyBytes), false)
+	if err != nil {
+		t.Fatalf("a writable open ran the read-only assertion: %v", err)
+	}
+}
+
+func TestMountFlags(t *testing.T) {
+	ro := mountFlags(true)
+	if ro&unix.MS_RDONLY == 0 {
+		t.Error("read-only mount without MS_RDONLY")
+	}
+	rw := mountFlags(false)
+	if rw&unix.MS_RDONLY != 0 {
+		t.Error("writable mount carries MS_RDONLY")
+	}
+	for _, flag := range []uintptr{unix.MS_NOSUID, unix.MS_NODEV, unix.MS_NOEXEC} {
+		if rw&flag == 0 || ro&flag == 0 {
+			t.Errorf("hardening flag %d missing (rw=%d ro=%d)", flag, rw, ro)
+		}
 	}
 }
 
@@ -279,7 +313,7 @@ func TestCryptOpenPassesTheKeyOutOfBand(t *testing.T) {
 	key := make([]byte, volume.KeyBytes)
 	// assertReadOnly fails here: there is no real mapping to inspect. The open
 	// itself is what this covers.
-	_ = SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-x", key)
+	_ = SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-x", key, true)
 
 	if len(r.calls) == 0 {
 		t.Fatal("cryptsetup was never invoked")
@@ -296,7 +330,7 @@ func TestCryptOpenPassesTheKeyOutOfBand(t *testing.T) {
 // for the caller to mount.
 func TestCryptOpenClosesAMappingItCannotVerify(t *testing.T) {
 	r := &fakeRunner{}
-	err := SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-absent", make([]byte, volume.KeyBytes))
+	err := SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-absent", make([]byte, volume.KeyBytes), true)
 	if err == nil {
 		t.Fatal("an unverifiable mapping was accepted")
 	}
@@ -307,7 +341,7 @@ func TestCryptOpenClosesAMappingItCannotVerify(t *testing.T) {
 
 func TestCryptOpenReportsAFailedTool(t *testing.T) {
 	r := &fakeRunner{failOn: "open"}
-	err := SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-x", make([]byte, volume.KeyBytes))
+	err := SystemOps{Run: r.run}.CryptOpen(context.Background(), "/dev/vdb", "c8s-crypt-x", make([]byte, volume.KeyBytes), true)
 	if err == nil || !strings.Contains(err.Error(), "tool said no") {
 		t.Fatalf("got %v, want the tool's output", err)
 	}

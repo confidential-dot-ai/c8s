@@ -17,8 +17,8 @@ func NewCmd() *cobra.Command {
 		Use:   "get-volume",
 		Short: "Fetch this pod's volume keys from CDS and have the node open them",
 		Long: `get-volume fetches the key for each encrypted volume a workload is granted
-and hands it to the node agent, which opens the device and mounts it read-only
-into this pod.
+and hands it to the node agent, which opens the device and mounts it into this
+pod — read-only for an immutable volume, read-write for a mutable one.
 
 It authenticates with the pod's CDS-issued certificate and a sandbox token
 redeemed from the node's admission inventory, and CDS releases only when the

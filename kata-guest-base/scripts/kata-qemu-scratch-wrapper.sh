@@ -19,8 +19,10 @@
 # a selector and not a trust input: naming another tenant's device attaches
 # ciphertext the host already holds, and the guest still cannot open it without
 # the key CDS releases against the allowlist grant (docs/volumes.md, "The serial
-# is a selector, not a trust input"). Volume devices are attached read-only, so
-# a guest cannot write ciphertext back over one.
+# is a selector, not a trust input"). Devices are attached read-write: a mutable
+# volume exists to be written, and the host cannot tell one from immutable —
+# the mode lives in the key blob, which the host never sees. An immutable
+# volume's writes are refused in the guest, at its dm-crypt mapping.
 #
 # PRODUCTION NOTE: still a prototype. The clean version attaches the disks from
 # the kata runtime (or a CDI device) rather than wrapping qemu. Tunables via env:
@@ -169,7 +171,7 @@ while IFS= read -r vol; do
     [ -n "$vol" ] || continue
     if dev="$(device_for "$vol")"; then
         volume_args+=(
-            -drive "file=$dev,format=raw,if=none,id=confaivol$n,readonly=on,cache=none"
+            -drive "file=$dev,format=raw,if=none,id=confaivol$n,cache=none"
             -device "virtio-blk-pci,drive=confaivol$n,serial=$SERIAL_PREFIX$vol"
         )
         n=$((n + 1))
