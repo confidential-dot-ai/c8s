@@ -198,17 +198,17 @@ func TestJumpRules(t *testing.T) {
 	assertContains(t, "prerouting jump", jumps[1].args, "-j", preroutingChainName)
 }
 
-// TestJumpRulesArgsShape guards the assumption isJumpAtHead relies on: each
-// jump's args is exactly {"-j", chain}. Any matcher (e.g. -m comment, conntrack)
-// would let iptables -S renormalize tokens, defeat the literal string compare
-// in isJumpAtHead, and turn the watchdog into a reinsert-every-tick loop. Catch
+// TestJumpRulesArgsShape guards the assumption parseJumpBlockAtHead relies on:
+// each jump's args is exactly {"-j", chain}. Any matcher (e.g. -m comment,
+// conntrack) would let iptables -S renormalize tokens, defeat the literal
+// string compare, and turn the watchdog into a reinsert-every-tick loop. Catch
 // the regression here instead of in a noisy production race.
 func TestJumpRulesArgsShape(t *testing.T) {
 	jumps := append(append(jumpRules(), cwJumpRule()), cwEgressJumpRule())
 	jumps = append(jumps, guestFilterJumps()...)
 	for i, jump := range jumps {
 		if len(jump.args) != 2 || jump.args[0] != "-j" {
-			t.Fatalf("jump %d args = %v; isJumpAtHead requires {\"-j\", <chain>}", i, jump.args)
+			t.Fatalf("jump %d args = %v; parseJumpBlockAtHead requires {\"-j\", <chain>}", i, jump.args)
 		}
 	}
 }

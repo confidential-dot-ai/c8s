@@ -314,6 +314,62 @@ func TestEnsureIptablesJumps(t *testing.T) {
 		}
 	})
 
+	// Regression: the cw inbound and egress guards share filter FORWARD, so
+	// one of them is always rule 2. Checking head position per rule made that
+	// one look demoted forever, and every watchdog tick then deleted and
+	// reinserted both — each repair leaving FORWARD unguarded for the length
+	// of two iptables execs, which is how plaintext reached a cw pod.
+	t.Run("sibling FORWARD guards at head are a no-op", func(t *testing.T) {
+		nf := installFakeNetfilter(t)
+		silenceIptablesMetricsFile(t)
+		mustInitFakeIptables(t)
+		atHead := "-P FORWARD ACCEPT\n-A FORWARD -j " + cwChainName +
+			"\n-A FORWARD -j " + cwEgressChainName + "\n-A FORWARD -j KUBE-FORWARD\n"
+		nf.set("list_iptables_FORWARD", atHead)
+		nf.set("list_ip6tables_FORWARD", atHead)
+
+		violBefore := jumpPositionViolations.Load()
+		if err := ensureIptablesJumps(testLogger(), []iptablesRule{cwJumpRule(), cwEgressJumpRule()}); err != nil {
+			t.Fatalf("ensureIptablesJumps: %v", err)
+		}
+		calls := nf.calls()
+		for _, op := range []string{"-I FORWARD", "-D FORWARD"} {
+			if got := len(callsContaining(calls, "", op)); got != 0 {
+				t.Errorf("%s issued for an in-order guard block:\n%s", op, strings.Join(calls, "\n"))
+			}
+		}
+		if d := jumpPositionViolations.Load() - violBefore; d != 0 {
+			t.Errorf("violations advanced by %d for an in-order guard block", d)
+		}
+	})
+
+	t.Run("demoted FORWARD guards restored in block order", func(t *testing.T) {
+		nf := installFakeNetfilter(t)
+		silenceIptablesMetricsFile(t)
+		mustInitFakeIptables(t)
+		demoted := "-P FORWARD ACCEPT\n-A FORWARD -j KUBE-FORWARD\n-A FORWARD -j " + cwChainName +
+			"\n-A FORWARD -j " + cwEgressChainName + "\n"
+		nf.set("list_iptables_FORWARD", demoted)
+		nf.set("list_ip6tables_FORWARD", demoted)
+		nf.set("del_budget", "4")
+
+		violBefore := jumpPositionViolations.Load()
+		if err := ensureIptablesJumps(testLogger(), []iptablesRule{cwJumpRule(), cwEgressJumpRule()}); err != nil {
+			t.Fatalf("ensureIptablesJumps: %v", err)
+		}
+		calls := callsContaining(nf.calls(), "iptables ", "-I FORWARD 1 -j ")
+		if len(calls) != 2 {
+			t.Fatalf("v4 insert count = %d, want 2\n%s", len(calls), strings.Join(calls, "\n"))
+		}
+		// Inserts land at position 1, so the last one issued ends up first.
+		if !strings.Contains(calls[0], "-j "+cwEgressChainName) || !strings.Contains(calls[1], "-j "+cwChainName) {
+			t.Errorf("inserts issued in the wrong order, leaving the block reversed:\n%s", strings.Join(calls, "\n"))
+		}
+		if d := jumpPositionViolations.Load() - violBefore; d != 4 {
+			t.Errorf("violations advanced by %d, want 4 (two demoted jumps per binary)", d)
+		}
+	})
+
 	t.Run("family-scoped jump touches only its binary", func(t *testing.T) {
 		nf := installFakeNetfilter(t)
 		silenceIptablesMetricsFile(t)

@@ -498,10 +498,11 @@ func buildCWEgressGuardRules() []iptablesRule {
 	return rules
 }
 
-// cwJumpRule returns the filter FORWARD jump into the cw guard chain. It must
-// sit at position 1: KUBE-FORWARD's mark-based ACCEPT would otherwise admit
-// DNAT'd Service traffic before the drop runs. Args must stay exactly
-// {"-j", cwChainName} — see the isJumpAtHead literal-compare note.
+// cwJumpRule returns the filter FORWARD jump into the cw guard chain. It rides
+// at the head of FORWARD alongside cwEgressJumpRule: KUBE-FORWARD's mark-based
+// ACCEPT would otherwise admit DNAT'd Service traffic before the drop runs.
+// Args must stay exactly {"-j", cwChainName} — see the parseJumpBlockAtHead
+// literal-compare note.
 func cwJumpRule() iptablesRule {
 	return iptablesRule{
 		table: "filter",
@@ -513,7 +514,7 @@ func cwJumpRule() iptablesRule {
 
 // cwEgressJumpRule returns the filter FORWARD jump into the cw egress guard
 // chain. Args must stay exactly {"-j", cwEgressChainName} — see the
-// isJumpAtHead literal-compare note.
+// parseJumpBlockAtHead literal-compare note.
 func cwEgressJumpRule() iptablesRule {
 	return iptablesRule{
 		table: "filter",
