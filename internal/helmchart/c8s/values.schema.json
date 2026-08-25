@@ -58,6 +58,9 @@
         "maxRequestSize": {},
         "maxTTL": {},
         "measurements": {},
+        "measurementsConfig": {
+          "type": "string"
+        },
         "namedCertTTL": {},
         "node": {
           "type": [

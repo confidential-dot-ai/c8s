@@ -32,7 +32,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -63,11 +62,12 @@ var (
 	installUpstream     string
 	installWorkloadRefs []string
 
-	installResolveDigests bool
-	installAttestEnabled  bool
-	installMeasurements   []string
-	installRTMRs          []string
-	installInventoryCIDRs []string
+	installResolveDigests     bool
+	installAttestEnabled      bool
+	installMeasurements       []string
+	installMeasurementsConfig string
+	installRTMRs              []string
+	installInventoryCIDRs     []string
 )
 
 // Flag names referenced in more than one place (registration plus a Changed()
@@ -1127,7 +1127,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
-		if warn, err := podModeMeasurementsPreflight(installCvmMode, installMeasurements, installValues, installForce); err != nil {
+		if warn, err := podModeMeasurementsPreflight(installCvmMode, installPinnedMeasurementArgs(), installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1693,10 +1693,11 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// list matches exactly what was validated (a blank/whitespace entry, e.g.
 	// from a trailing comma, is dropped by the parser, not silently emitted as
 	// an empty pin that would disable pinning at that index).
-	measurements, err := ratls.ParseHexMeasurementsList(installMeasurements)
+	measurements, rtmrs, pinArgs, err := installPins()
 	if err != nil {
-		return nil, fmt.Errorf("--measurements: %w", err)
+		return nil, err
 	}
+	helmArgs = append(helmArgs, pinArgs...)
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
 	// is the node image's M. In pod mode those components are per-pod kata
@@ -1714,10 +1715,6 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	rtmrs, err := ratls.ParseRTMRPins(installRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("--rtmrs: %w", err)
-	}
 	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
 		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
 		helmArgs = append(helmArgs,
@@ -2482,6 +2479,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
 	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")

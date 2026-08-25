@@ -285,6 +285,11 @@ cds:
   ## `c8s allowlist` and the README "Operator allowlist credentials").
   ## Empty = allowlist writes are rejected (reads are still served). Prefer
   ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
+  ## Measurements config: the JSON document listing the VM images this cluster
+  ## runs, each pinned as a whole image. Content, not a path — set it with
+  ## `c8s install --measurements-config <file>` or `helm --set-file`. Empty
+  ## disables whole-image matching; `measurements` above still pins.
+  measurementsConfig: ""
   operatorKeys: ""
   tokenSignerRotationInterval: 720h
   tokenSignerOverlap: 25h
@@ -736,6 +741,10 @@ ratlsMesh:
   # TDX RTMR pins for mesh peers, each "<index>=<sha384-hex>" (see cds.rtmrs).
   # Ignored for SNP peers; empty = no RTMR pinning.
   rtmrs: []
+
+  # Measurements config for mesh peers and the CDS the proxy dials: the JSON
+  # document's content, not a path (see cds.measurementsConfig).
+  measurementsConfig: ""
 
   # Pod shutdown budget. The iptables-cleanup preStop hook fires last in the
   # native-sidecar reverse-init order, so its sleep upper bound must leave room
