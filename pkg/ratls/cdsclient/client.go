@@ -86,6 +86,17 @@ type Config struct {
 	// CDSMeasurements and CDSRTMRs.
 	CDSEntries []measurements.Entry
 
+	// CDSPCRs, when non-empty, additionally pins CDS's Azure vTPM registers
+	// during the RA-TLS handshake: on az-snp/az-tdx the launch measurement
+	// covers the paravisor alone, and the guest OS lands in the vTPM PCRs.
+	// Ignored on platforms without a vTPM. Populate from `cds.pcrs`.
+	CDSPCRs map[int][]byte
+
+	// CDSInitDataHash, when set, requires CDS's evidence to bind this
+	// SHA-256 init-data digest (vTPM PCR[8] on az, HOST_DATA on snp,
+	// MRCONFIGID on tdx). Populate from `cds.initDataHash`.
+	CDSInitDataHash []byte
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -111,7 +122,14 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Entries: cfg.CDSEntries, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{
+			Measurements:      cfg.CDSMeasurements,
+			RTMRs:             cfg.CDSRTMRs,
+			PCRs:              cfg.CDSPCRs,
+			InitDataHash:      cfg.CDSInitDataHash,
+			Entries:           cfg.CDSEntries,
+			AttestationApiURL: cfg.AttestationApiURL,
+		}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

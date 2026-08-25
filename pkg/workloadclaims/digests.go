@@ -175,6 +175,8 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		ClientPolicy: &ratls.VerifyPolicy{
 			Measurements:      cdsPins.Measurements,
 			RTMRs:             cdsPins.RTMRs,
+			PCRs:              cdsPins.PCRs,
+			InitDataHash:      cdsPins.InitDataHash,
 			AttestationApiURL: attestationApiURL,
 		},
 	})
@@ -252,6 +254,8 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		Policy: &ratls.VerifyPolicy{
 			Measurements:      pins.Measurements,
 			RTMRs:             pins.RTMRs,
+			PCRs:              pins.PCRs,
+			InitDataHash:      pins.InitDataHash,
 			AttestationApiURL: attestationApiURL,
 		},
 		Platform:   ratls.NormalizePlatform(platform),

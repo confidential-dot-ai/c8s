@@ -42,6 +42,7 @@
             "tag": {}
           }
         },
+        "initDataHash": {},
         "jwtClockSkew": {},
         "logLevel": {},
         "maxRequestSize": {},
@@ -86,6 +87,7 @@
             "maxUnavailable": {}
           }
         },
+        "pcrs": {},
         "port": {},
         "rateBurst": {},
         "rateLimit": {},

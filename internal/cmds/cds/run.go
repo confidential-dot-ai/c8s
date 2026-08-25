@@ -124,6 +124,17 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
+	pcrPins, err := ratls.ParsePCRPins(cfg.pcrs)
+	if err != nil {
+		return fmt.Errorf("--pcrs: %w", err)
+	}
+	initDataHash, err := ratls.ParseInitDataHash(cfg.initDataHash)
+	if err != nil {
+		return fmt.Errorf("--init-data-hash: %w", err)
+	}
+	if len(pcrPins) > 0 || initDataHash != nil {
+		slog.Info("Azure vTPM pinning enabled for /attest and /attest-key", "pcrs", len(pcrPins), "init_data", initDataHash != nil)
+	}
 	if len(rtmrPins) > 0 {
 		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
 	} else if len(measurements) > 0 {
@@ -205,6 +216,8 @@ func run(cfg config) error {
 		AttestationClient: asClient,
 		EarIssuer:         earIssuer,
 		RTMRs:             rtmrPins,
+		PCRs:              pcrPins,
+		InitDataHash:      initDataHash,
 	}
 
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
@@ -240,7 +253,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Entries},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, PCRs: pcrPins, InitDataHash: initDataHash, Entries: pinned.Entries},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -306,6 +319,8 @@ func run(cfg config) error {
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
 			Entries:           pinned.Entries,
+			PCRs:              pcrPins,
+			InitDataHash:      initDataHash,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

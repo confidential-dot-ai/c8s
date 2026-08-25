@@ -186,6 +186,12 @@ spec:
             - --rtmrs={{ join "," . }}
             {{- end }}
             {{- end }}
+            {{- with .Values.cds.pcrs }}
+            - --pcrs={{ join "," . }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --init-data-hash={{ . }}
+            {{- end }}
             {{- with .Values.cds.sandboxInventoryCIDRs }}
             - --sandbox-inventory-cidr={{ join "," . }}
             {{- end }}

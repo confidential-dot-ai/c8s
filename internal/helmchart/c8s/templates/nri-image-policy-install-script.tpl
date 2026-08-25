@@ -275,6 +275,13 @@ allowlist:
 {{- else }}
       []
 {{- end }}
+    cds_pcrs:
+{{- range $root.Values.cds.pcrs }}
+      - {{ . | quote }}
+{{- else }}
+      []
+{{- end }}
+    cds_init_data_hash: {{ $root.Values.cds.initDataHash | quote }}
 {{- /* Self-allow the installer image first (load-bearing when
        bootstrapAllowlist.deriveComponents=false, where the floor omits it), then
        add the floor — skipping the installer digest so the map has no

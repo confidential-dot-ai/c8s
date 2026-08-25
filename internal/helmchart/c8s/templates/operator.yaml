@@ -71,6 +71,12 @@ spec:
             - --cds-rtmrs={{ . }}
             {{- end }}
             {{- end }}
+            {{- range .Values.cds.pcrs }}
+            - --cds-pcrs={{ . }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --cds-init-data-hash={{ . }}
+            {{- end }}
             {{- range .Values.webhook.extraExcluded }}
             - --exclude-namespaces={{ . }}
             {{- end }}
