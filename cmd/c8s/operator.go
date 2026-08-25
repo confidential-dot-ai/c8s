@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/controller"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
@@ -43,6 +44,13 @@ Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet, not
 by this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateOperatorPlatform(operatorHardwarePlatform, kataEnforce); err != nil {
+			return err
+		}
+		// The injected sidecars and the measured initdata document carry a
+		// flat digest list, so a config is flattened into the same fields.
+		if _, err := cmdsutil.LoadMeasurementsConfig(cdsMeasurementsConfig,
+			"--measurements-config", "--cds-measurements", "--cds-rtmrs",
+			&cdsMeasurements, &cdsRTMRs); err != nil {
 			return err
 		}
 		return controller.Run(cmd.Context(), controller.Options{
@@ -86,6 +94,7 @@ var (
 	cdsURL                  string
 	attestationApiURL       string
 	cdsMeasurements         []string
+	cdsMeasurementsConfig   string
 	cdsRTMRs                []string
 	webhookConfigName       string
 	webhookServiceName      string
@@ -115,6 +124,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
+	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs. Any listed image may serve as CDS; the injected sidecars carry the digests flat. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	operatorCmd.Flags().StringSliceVar(&cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for SNP evidence, empty pins no registers)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")

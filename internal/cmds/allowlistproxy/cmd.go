@@ -30,14 +30,15 @@ const (
 )
 
 type config struct {
-	host              string
-	port              int
-	cdsURL            string
-	cdsMeasurements   []string
-	cdsRTMRs          []string
-	attestationAPIURL string
-	requestTimeout    time.Duration
-	readHeaderTimeout time.Duration
+	measurementsConfig string
+	host               string
+	port               int
+	cdsURL             string
+	cdsMeasurements    []string
+	cdsRTMRs           []string
+	attestationAPIURL  string
+	requestTimeout     time.Duration
+	readHeaderTimeout  time.Duration
 }
 
 // NewCmd returns the internal allowlist-proxy subcommand used by the tls-lb
@@ -59,6 +60,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
 	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
+	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Any listed image may serve as CDS. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -127,6 +129,13 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve before the flat fields are read: they feed the pin below.
+	pinned, err := cmdsutil.LoadMeasurementsConfig(cfg.measurementsConfig,
+		"--measurements-config", "--cds-measurements", "--cds-rtmrs",
+		&cfg.cdsMeasurements, &cfg.cdsRTMRs)
+	if err != nil {
+		return nil, err
+	}
 	measurements, err := ratls.ParseHexMeasurementsList(cfg.cdsMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
@@ -138,7 +147,7 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.attestationAPIURL)
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Entries}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
