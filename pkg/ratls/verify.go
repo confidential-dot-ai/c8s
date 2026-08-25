@@ -14,11 +14,17 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // VerifyPolicy defines what attestation claims are acceptable.
 type VerifyPolicy struct {
+	// Entries pins whole images — a launch digest together with the registers
+	// measured from the same build. When set it replaces Measurements and
+	// RTMRs, so a digest from one image cannot be paired with another's.
+	Entries []measurements.Entry
+
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
 	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD.
@@ -327,6 +333,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		ExpectedReportData: expectedReportData,
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
+		Entries:            policy.Entries,
 		Measurements:       policy.Measurements,
 		RTMRs:              policy.RTMRs,
 	})

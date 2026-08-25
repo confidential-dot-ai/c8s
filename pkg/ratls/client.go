@@ -25,7 +25,7 @@ func NewVerifyingHTTPClient(pins Pins, attestationApiURL string) (*http.Client, 
 		return nil, fmt.Errorf("ratls client config: attestation-api URL is required")
 	}
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{
-		Policy: &VerifyPolicy{Measurements: pins.Measurements, RTMRs: pins.RTMRs, AttestationApiURL: attestationApiURL},
+		Policy: pins.VerifyPolicy(attestationApiURL),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)

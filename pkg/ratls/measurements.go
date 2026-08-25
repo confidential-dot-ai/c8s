@@ -3,6 +3,7 @@ package ratls
 import (
 	"encoding/hex"
 	"fmt"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"strconv"
 	"strings"
 )
@@ -19,6 +20,23 @@ type Pins struct {
 	// (VerifyPolicy.RTMRs). Ignored on SNP evidence, where kernel-hashes
 	// folds the guest image into the launch digest.
 	RTMRs map[int][]byte
+
+	// Entries pins whole images (VerifyPolicy.Entries). When set it replaces
+	// Measurements and RTMRs, so a digest from one image cannot be paired
+	// with another's registers.
+	Entries []measurements.Entry
+}
+
+// VerifyPolicy converts the pins into the policy the verifying paths read.
+// Every caller goes through here: a hand-copied conversion that forgets a
+// field drops those pins while still compiling.
+func (p Pins) VerifyPolicy(attestationApiURL string) *VerifyPolicy {
+	return &VerifyPolicy{
+		Entries:           p.Entries,
+		Measurements:      p.Measurements,
+		RTMRs:             p.RTMRs,
+		AttestationApiURL: attestationApiURL,
+	}
 }
 
 // ParseHexMeasurements parses a comma-separated list of hex-encoded SEV-SNP
