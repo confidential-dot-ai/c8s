@@ -220,7 +220,7 @@ func handleAttest(store *challengeStore, verifier attestationclient.Client) http
 			return
 		}
 		if digest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest); digest != mockLaunchDigest {
-			slog.Warn("measurement not in allowlist", "launch_digest", digest, "remote_addr", r.RemoteAddr)
+			slog.Warn("measurement does not match any reference value", "launch_digest", digest, "remote_addr", r.RemoteAddr)
 			writeError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
 		}

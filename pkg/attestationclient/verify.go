@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -26,7 +27,7 @@ var (
 	ErrReportDataMismatch = errors.New("attestationclient: REPORTDATA mismatch in attestation evidence")
 
 	// ErrMeasurementNotAllowed: the verified launch measurement is absent or
-	// not in the caller's allowed set while an allowed set is pinned.
+	// does not match any of the caller's reference values while some are pinned.
 	ErrMeasurementNotAllowed = errors.New("attestationclient: launch measurement not allowed")
 
 	// ErrInvalidLaunchDigest: the /verify response carried a launch digest
@@ -99,6 +100,11 @@ type EvidencePolicy struct {
 	// only: the attestation-api's TDX verifier has no minimum-TCB parameter.
 	MinTcb *types.MinTcb
 
+	// Entries pins whole images — a launch digest together with the registers
+	// measured from the same build. When set it replaces Measurements and
+	// RTMRs, so a digest from one image cannot be paired with another's.
+	Entries []measurements.Entry
+
 	// Measurements is the set of acceptable launch measurements; empty
 	// accepts any (callers are expected to warn). The attestation-api
 	// normalizes both the SNP LAUNCH_DIGEST and the TDX MRTD into
@@ -122,7 +128,7 @@ type EvidencePolicy struct {
 
 // VerifyEvidence verifies an attestation evidence envelope against policy via
 // /verify, enforcing the verdict ([Client.VerifyEnforced]) plus the launch
-// measurement allowlist. Platforms without verification rules here fail
+// measurement reference values. Platforms without verification rules here fail
 // closed with [ErrUnsupportedPlatform] rather than being approved under
 // another platform's rules.
 func (c Client) VerifyEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
@@ -149,11 +155,27 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 	if err != nil {
 		return types.VerifyResponse{}, err
 	}
-	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+	if err := enforcePins(resp, policy, evidence.Platform); err != nil {
 		return types.VerifyResponse{}, err
 	}
 
 	return resp, nil
+}
+
+// enforcePins applies whichever pin form the caller configured. Entries are
+// matched whole; the flat pair keeps its own path so an operator who set only
+// it sees exactly the decisions it always made.
+func enforcePins(resp types.VerifyResponse, policy EvidencePolicy, platform string) error {
+	if len(policy.Entries) > 0 {
+		return EnforceEntries(resp, policy.Entries, platform)
+	}
+	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+		return err
+	}
+	if TDXPlatform(platform) {
+		return EnforceRTMRs(resp, policy.RTMRs)
+	}
+	return nil
 }
 
 func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
@@ -174,10 +196,7 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	if err != nil {
 		return types.VerifyResponse{}, err
 	}
-	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
-		return types.VerifyResponse{}, err
-	}
-	if err := EnforceRTMRs(resp, policy.RTMRs); err != nil {
+	if err := enforcePins(resp, policy, evidence.Platform); err != nil {
 		return types.VerifyResponse{}, err
 	}
 	return resp, nil
@@ -200,6 +219,16 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	if len(pinned) == 0 {
 		return nil
 	}
+	reported, err := reportedRTMRs(resp)
+	if err != nil {
+		return err
+	}
+	return enforceRTMRsAgainst(reported, pinned)
+}
+
+// reportedRTMRs reads the registers the verifier reported. Shared with the
+// entry matcher so the two cannot disagree about what evidence carries.
+func reportedRTMRs(resp types.VerifyResponse) ([4]string, error) {
 	var platform struct {
 		RTMR0 string `json:"rtmr_0"`
 		RTMR1 string `json:"rtmr_1"`
@@ -208,11 +237,13 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	}
 	if len(resp.Result.Claims.PlatformData) > 0 {
 		if err := json.Unmarshal(resp.Result.Claims.PlatformData, &platform); err != nil {
-			return fmt.Errorf("%w: platform data unreadable: %w", ErrRTMRNotAllowed, err)
+			return [4]string{}, fmt.Errorf("%w: platform data unreadable: %w", ErrRTMRNotAllowed, err)
 		}
 	}
-	reported := [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}
+	return [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}, nil
+}
 
+func enforceRTMRsAgainst(reported [4]string, pinned map[int][]byte) error {
 	for _, idx := range sortedRTMRIndices(pinned) {
 		want := pinned[idx]
 		if idx < 0 || idx >= len(reported) {
@@ -246,7 +277,7 @@ func sortedRTMRIndices(pinned map[int][]byte) []int {
 }
 
 // enforceLaunchMeasurement validates the verifier's normalized launch digest
-// and, when allowed is non-empty, requires it to match the caller's allowlist.
+// and, when allowed is non-empty, requires it to match a caller reference value.
 // For SNP the digest is LAUNCH_DIGEST; for TDX it is MRTD. Both are SHA-384.
 func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error {
 	digest := resp.Result.Claims.LaunchDigest
@@ -265,7 +296,7 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 		return fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidLaunchDigest, len(measurement), launchMeasurementSize)
 	}
 	if len(allowed) > 0 && !MeasurementAllowed(measurement, allowed) {
-		return fmt.Errorf("%w: launch measurement not in allowed set", ErrMeasurementNotAllowed)
+		return fmt.Errorf("%w: launch measurement does not match any reference value", ErrMeasurementNotAllowed)
 	}
 	return nil
 }
@@ -282,7 +313,7 @@ func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowD
 }
 
 // MeasurementAllowed reports whether measurement byte-equals one of the
-// allowed launch digests (an empty allowed set means "no pin" and is handled
+// reference launch digests (an empty set means "no pin" and is handled
 // by callers).
 func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
 	for _, m := range allowed {

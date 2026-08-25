@@ -959,7 +959,7 @@ func TestAttest_MeasurementDenialRecordsPeer(t *testing.T) {
 		t.Fatalf("status: got %d, want 403", w.Code)
 	}
 	logs := buf.String()
-	if !strings.Contains(logs, "measurement not in allowlist") {
+	if !strings.Contains(logs, "measurement does not match any reference value") {
 		t.Fatalf("no denial record: %s", logs)
 	}
 	if !strings.Contains(logs, "remote_addr") {

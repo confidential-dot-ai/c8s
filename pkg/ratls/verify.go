@@ -308,7 +308,7 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 
 // verifyEnvelopeOnline forwards the envelope to the attestation-api enforced
 // verifier ([attestationclient.Client.VerifyEvidence] — verdict gate,
-// platform-specific REPORTDATA wire form, measurement allowlist) and maps its
+// platform-specific REPORTDATA wire form, measurement reference values) and maps its
 // verdicts onto this package's sentinels.
 func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
 	timeout := policy.AttestationVerifyTimeout

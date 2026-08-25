@@ -40,7 +40,7 @@ differ. Measured on a live SNP cluster:
 when it is set (see [`secrets.md`](secrets.md), "When it is served"). So pod
 mode needs the *set* of per-shape digests, and until now the only way to learn
 one was to boot a pod, let attestation fail, and read the
-`measurement not in allowlist` warning out of the CDS log. `c8s install
+`measurement does not match any reference value` warning out of the CDS log. `c8s install
 --cvm-mode=pod --measurements` takes the digests this tool produces
 (`cmd/c8s/install.go`); under `--cvm-mode=node/gke/aks` the same flag takes the
 node image's `manifest.json` value instead.
@@ -252,8 +252,8 @@ $ sudo script -qec "/opt/kata/bin/kata-runtime exec $SID" /dev/null
 
 The response's `evidence.quote` is a base64 TDX quote; its `MRTD` is what
 `c8s kata measure --platform tdx` must reproduce. CDS also logs refused
-measurements verbatim (`measurement not in allowlist`) if the allow-list is
-already pinned.
+measurements verbatim (`measurement does not match any reference value`) if
+the reference values are already pinned.
 
 ### TDX limitations
 

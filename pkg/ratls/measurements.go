@@ -8,7 +8,7 @@ import (
 )
 
 // Pins is the peer-identity pin set an in-cluster RA-TLS verifier enforces:
-// the launch-measurement allowlist and, for TDX peers, the runtime
+// the launch-measurement reference values and, for TDX peers, the runtime
 // measurement registers. The zero value pins nothing (accept any attested
 // TEE — development only; callers warn).
 type Pins struct {

@@ -50,6 +50,12 @@ func run(cfg config) error {
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
+	// Resolve before validateConfig: the handoff and secrets predicates read
+	// the flat lists, so a config-mode start must fill them first.
+	pinned, err := resolveMeasurementsConfig(&cfg)
+	if err != nil {
+		return err
+	}
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
@@ -133,7 +139,7 @@ func run(cfg config) error {
 	)
 	caChainPEM := certutil.EncodeCertPEM(mesh.Cert.Raw)
 
-	measurements := parseMeasurementAllowlist(cfg.measurements)
+	measurements := parseReferenceDigests(cfg.measurements)
 	if len(measurements) == 0 {
 		slog.Warn("--measurements empty: /attest accepts any TEE measurement. UNSAFE outside development.")
 	} else {
@@ -325,6 +331,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
+			Entries:           pinned.Entries,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
@@ -433,7 +440,7 @@ func run(cfg config) error {
 // validated against cds's own rotator/issuer name, and the signer EAR is minted
 // by cds's earIssuer — no external service to dial for it.
 func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
-	handoffMeasurements := parseMeasurementAllowlist(cfg.handoffMeasurements)
+	handoffMeasurements := parseReferenceDigests(cfg.handoffMeasurements)
 	if len(handoffMeasurements) == 0 {
 		slog.Info("/handoff disabled: set --handoff-measurements to enable mesh CA handoff to peer replicas")
 		return nil, nil
@@ -690,7 +697,7 @@ func measurementDigests(allowed map[string]bool) ([][]byte, error) {
 	return out, nil
 }
 
-func parseMeasurementAllowlist(raw []string) map[string]bool {
+func parseReferenceDigests(raw []string) map[string]bool {
 	if len(raw) == 0 {
 		return nil
 	}
