@@ -1768,19 +1768,43 @@ func TestMaterializeStdinValues(t *testing.T) {
 	})
 
 	t.Run("a temp-file write failure aborts", func(t *testing.T) {
-		// RLIMIT_FSIZE=0 fails the payload write (Go swallows the SIGXFSZ).
-		var orig syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &orig); err != nil {
-			t.Skipf("getrlimit: %v", err)
+		// RLIMIT_FSIZE=0 fails the payload write (Go swallows the SIGXFSZ),
+		// but the limit is process-wide: the harness's own testlog appends
+		// race the zeroed window and an unlucky buffer flush fails the whole
+		// package with "can't write testlog.txt: file too large" while every
+		// test is green. So the limit is zeroed in a re-exec'ed child (which
+		// runs without a testlog) and the parent reads its verdict from
+		// stdout — a pipe, which RLIMIT_FSIZE does not cover. The exit code
+		// is deliberately not consulted: under -coverprofile the child may
+		// fail writing its own coverage file inside the window.
+		if os.Getenv("C8S_TEST_FSIZE_CHILD") == "1" {
+			var lim syscall.Rlimit
+			if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+				fmt.Println("CHILD_SKIP getrlimit:", err)
+				return
+			}
+			lim.Cur = 0
+			if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+				fmt.Println("CHILD_SKIP setrlimit:", err)
+				return
+			}
+			if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err != nil {
+				fmt.Println("CHILD_GOT_WRITE_ERROR")
+			} else {
+				fmt.Println("CHILD_NO_ERROR")
+			}
+			return
 		}
-		zero := orig
-		zero.Cur = 0
-		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &zero); err != nil {
-			t.Skipf("setrlimit: %v", err)
-		}
-		t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &orig) })
-		if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err == nil {
-			t.Fatal("want the write error surfaced")
+
+		cmd := exec.Command(os.Args[0], "-test.run", "TestMaterializeStdinValues/a_temp-file_write_failure_aborts")
+		cmd.Env = append(os.Environ(), "C8S_TEST_FSIZE_CHILD=1")
+		out, _ := cmd.CombinedOutput()
+		switch {
+		case bytes.Contains(out, []byte("CHILD_GOT_WRITE_ERROR")):
+		case bytes.Contains(out, []byte("CHILD_SKIP")):
+			t.Skipf("child could not zero RLIMIT_FSIZE:\n%s", out)
+		default:
+			t.Fatalf("want the write error surfaced in the child; child output:\n%s", out)
 		}
 	})
 
