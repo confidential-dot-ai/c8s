@@ -62,6 +62,7 @@ const (
 	AnnotationCertDir                = "confidential.ai/c8s-cert-dir"
 	AnnotationCertFile               = "confidential.ai/c8s-cert-file"
 	AnnotationKeyFile                = "confidential.ai/c8s-key-file"
+	AnnotationCAFile                 = "confidential.ai/c8s-ca-file"
 	AnnotationRenewInterval          = "confidential.ai/c8s-renew-interval"
 	AnnotationReloadNginx            = "confidential.ai/c8s-reload-nginx"
 	AnnotationReloadWatchPaths       = "confidential.ai/c8s-reload-watch-paths"
@@ -315,6 +316,7 @@ type certSpec struct {
 	Dir           string
 	CertFile      string
 	KeyFile       string
+	CAFile        string
 	RenewInterval time.Duration
 }
 
@@ -359,6 +361,7 @@ func parseAnnotations(pod *corev1.Pod) (*injection, error) {
 			Dir:      annotations[AnnotationCertDir],
 			CertFile: annotations[AnnotationCertFile],
 			KeyFile:  annotations[AnnotationKeyFile],
+			CAFile:   annotations[AnnotationCAFile],
 		},
 		Reload: reloadSpec{
 			WatchVolume:    annotations[AnnotationReloadWatchVolume],
@@ -476,6 +479,7 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 		AnnotationCertDir,
 		AnnotationCertFile,
 		AnnotationKeyFile,
+		AnnotationCAFile,
 		AnnotationRenewInterval,
 		AnnotationReloadNginx,
 		AnnotationReloadWatchPaths,
@@ -1083,6 +1087,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		"--san=" + inj.SAN,
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key-out=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
+		// The mesh CA alone (0644), next to the leaf+CA bundle in tls.crt: an
+		// app that pins the CA as its own file (mysqld --ssl-ca, any client
+		// doing VERIFY_CA against the mesh) reads it directly instead of
+		// splitting the bundle in an entrypoint.
+		"--ca-out=" + certPath(inj.Cert.Dir, inj.Cert.CAFile),
 		"--key-mode=" + cfg.CertKeyMode,
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
@@ -1245,6 +1254,9 @@ func (inj *injection) withDefaults(cfg Config) injection {
 	}
 	if effective.Cert.KeyFile == "" {
 		effective.Cert.KeyFile = "tls.key"
+	}
+	if effective.Cert.CAFile == "" {
+		effective.Cert.CAFile = "ca.crt"
 	}
 	if effective.Cert.RenewInterval <= 0 {
 		effective.Cert.RenewInterval = cfg.CertRenewInterval

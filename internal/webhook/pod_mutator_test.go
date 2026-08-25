@@ -59,6 +59,7 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		"--san=api",
 		"--out=/etc/c8s/certs/tls.crt",
 		"--key-out=/etc/c8s/certs/tls.key",
+		"--ca-out=/etc/c8s/certs/ca.crt",
 		"--key-mode=0640",
 		"--renew-interval=2h0m0s",
 		"--reload-nginx=false",
@@ -282,6 +283,7 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 	for _, want := range []string{
 		"--out=/tls/cert.pem",
 		"--key-out=/tls/key.pem",
+		"--ca-out=/tls/ca.crt",
 		"--renew-interval=1h0m0s",
 		"--reload-nginx=true",
 		"--reload-watch=/edge-tls/public.crt",
