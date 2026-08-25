@@ -26,6 +26,7 @@ type dependencies struct {
 	JWKSFunc          func() []byte
 	CACertPEM         []byte
 	OperatorKeysPEM   []byte                // pinned operator public keys; empty = /operator-keys 404s
+	MeasurementsDoc   []byte                // reference values being enforced, as served at /measurements
 	RateLimiter       *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
 	ChallengeLimiter  *issuer.IPRateLimiter // /authenticate's own, so it cannot spend the map above
 	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
@@ -95,6 +96,7 @@ func newRouter(deps dependencies) http.Handler {
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
 	r.Get("/operator-keys", handleOperatorKeys(deps.OperatorKeysPEM))
+	r.Get("/measurements", handleMeasurements(deps.MeasurementsDoc))
 
 	return r
 }
@@ -150,6 +152,20 @@ func handleCA(caCertPEM []byte) http.HandlerFunc {
 // handleOperatorKeys serves the pinned operator public-key bundle (public
 // material, like /ca) so `c8s verify` can report which keys may mutate the
 // allowlist. 404 when allowlist writes are disabled (no pinned keys).
+// handleMeasurements serves the reference values this CDS is enforcing. An
+// empty set is served, not 404'd: "admitting any measurement" is the state a
+// verifier most needs to be told about.
+func handleMeasurements(doc []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if len(doc) == 0 {
+			http.Error(w, "measurements unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(doc)
+	}
+}
+
 func handleOperatorKeys(operatorKeysPEM []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if len(operatorKeysPEM) == 0 {

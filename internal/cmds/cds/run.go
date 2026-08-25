@@ -30,6 +30,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -153,6 +154,19 @@ func run(cfg config) error {
 		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
 	} else if len(measurements) > 0 {
 		slog.Warn("--rtmrs empty: on TDX the measurement allowlist pins TDVF firmware only (MRTD); the guest kernel and rootfs are not pinned. SNP is unaffected.")
+	}
+
+	// Served at /measurements so a verifier holding the operator's own file can
+	// detect a swapped config. Built from the enforced values, never re-read
+	// from disk: re-reading would attest the file rather than the policy.
+	served := pinned
+	if served.Empty() {
+		served = measurementspkg.FromFlags(measurementBytes(measurements), rtmrPins)
+	}
+	served.TEE = servedTEE(cfg.ratlsPlatform)
+	measurementsDoc, err := measurementspkg.Serve(served)
+	if err != nil {
+		return fmt.Errorf("render /measurements document: %w", err)
 	}
 
 	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
@@ -363,6 +377,7 @@ func run(cfg config) error {
 		JWKSFunc:          rotator.JWKSetJSON,
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
+		MeasurementsDoc:   measurementsDoc,
 		RateLimiter:       rateLimiter,
 		ChallengeLimiter:  challengeLimiter,
 		MaxRequestSize:    cfg.maxRequestSize,

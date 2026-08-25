@@ -1,6 +1,7 @@
 package cds
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -55,5 +56,27 @@ func sortedIndices(m map[int][]byte) []int {
 		out = append(out, i)
 	}
 	sort.Ints(out)
+	return out
+}
+
+// servedTEE names the platform the served document declares. The flat flags
+// carry no platform of their own, so it comes from the one CDS attests on.
+func servedTEE(ratlsPlatform string) string {
+	if ratls.NormalizePlatform(ratlsPlatform) == measurements.TEETDX {
+		return measurements.TEETDX
+	}
+	return measurements.TEESNP
+}
+
+// measurementBytes decodes the flat allowlist back into digests for the
+// served document. Entries that are not hex never reached a gate either.
+func measurementBytes(allowed map[string]bool) [][]byte {
+	out := make([][]byte, 0, len(allowed))
+	for m := range allowed {
+		if b, err := hex.DecodeString(m); err == nil {
+			out = append(out, b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return string(out[i]) < string(out[j]) })
 	return out
 }
