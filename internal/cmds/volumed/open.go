@@ -34,15 +34,16 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // Each Open has a matching Close, and the orchestration calls Close for every
 // step it completed when a later one fails.
 type DeviceOps interface {
-	CryptOpen(ctx context.Context, device, mapper string, key []byte) error
+	CryptOpen(ctx context.Context, device, mapper string, key []byte, readOnly bool) error
 	CryptClose(ctx context.Context, mapper string) error
 	VerityOpen(ctx context.Context, dataDev, mapper string, v volume.Verity) error
 	VerityClose(ctx context.Context, mapper string) error
-	// MountRO takes the resolved target as an open handle rather than a path:
-	// the implementation mounts through /proc/self/fd so nothing can be swapped
-	// between resolving the target and using it. Unmount takes a path, because
-	// by teardown that handle is long closed.
-	MountRO(ctx context.Context, source string, target *os.File) error
+	// MountRO and MountRW take the resolved target as an open handle rather
+	// than a path: the implementation mounts through /proc/self/fd so nothing
+	// can be swapped between resolving the target and using it. Unmount takes
+	// a path, because by teardown that handle is long closed.
+	MountRO(ctx context.Context, source string, target *os.File, fsType string) error
+	MountRW(ctx context.Context, source string, target *os.File, fsType string) error
 	Unmount(ctx context.Context, target string) error
 	// ListMappings names the device-mapper targets published on this node.
 	ListMappings(ctx context.Context) ([]string, error)
@@ -56,6 +57,13 @@ var ErrNotAuthorized = errors.New("volumed: not authorized for this volume")
 // devices and a mount, and every cw pod can reach the socket.
 var ErrTooManyMounts = errors.New("volumed: too many open volumes on this node")
 
+// ErrVolumeInUse reports an open that conflicts with a live mount of the same
+// device. Two read-write mounts of one device corrupt the filesystem, and a
+// read-write mount under read-only readers corrupts what they read, so a
+// device shared with any mount refuses a mutable open, and one shared with a
+// mutable mount refuses every open.
+var ErrVolumeInUse = errors.New("volumed: volume device is already in use")
+
 // Request is one open, after the caller has been resolved.
 type Request struct {
 	// Pod is the calling pod, as the kernel placed it. Its cgroup path is held
@@ -67,13 +75,15 @@ type Request struct {
 }
 
 // mount is a live volume. The commitment is what a second caller must reproduce
-// to be handed the same mapping.
+// to be handed the same mapping. The device and mode are kept so an open that
+// would mount the same device unsafely is refused (see ErrVolumeInUse).
 type mount struct {
 	pod        PodCgroup
 	name       string
 	commitment [sha256.Size]byte
+	device     string
+	mutable    bool
 	cryptDev   string
-	verityDev  string
 	target     string
 }
 
@@ -88,18 +98,21 @@ type Opener struct {
 
 	mu     sync.Mutex
 	mounts map[string]*mount
+	// opening tracks in-flight opens by device, so a concurrent open is judged
+	// against one that has not landed in mounts yet.
+	opening map[string]bool
 }
 
 // DefaultMaxMounts bounds live volumes when MaxMounts is unset.
 const DefaultMaxMounts = 64
 
-// Open makes the volume readable at the calling pod's mount target, and is
+// Open makes the volume available at the calling pod's mount target, and is
 // idempotent for a caller repeating an identical request — which a restarted
 // sidecar does, since kubelet restarts it for the pod's life.
 //
-// A request naming a volume already open must present the same key and root
-// hash. Without that check the volume *name* would be the credential, and a
-// name is a label in a host-written annotation: any pod reaching the socket
+// A request naming a volume already open must present the same key, mode, and
+// root hash. Without that check the volume *name* would be the credential, and
+// a name is a label in a host-written annotation: any pod reaching the socket
 // would be handed the plaintext once one entitled pod had opened it.
 func (o *Opener) Open(ctx context.Context, req Request) error {
 	key, err := req.Blob.DecodeKey()
@@ -114,11 +127,12 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 		return fmt.Errorf("volumed: volume name %q is not a dns-1123 label", req.Name)
 	}
 
-	commitment := commitmentFor(key, req.Blob.Verity.RootHash)
+	commitment := commitmentFor(key, req.Blob)
 
 	o.mu.Lock()
 	if o.mounts == nil {
 		o.mounts = map[string]*mount{}
+		o.opening = map[string]bool{}
 	}
 	if existing, ok := o.mounts[mountKey(req.Pod.UID, req.Name)]; ok {
 		o.mu.Unlock()
@@ -131,7 +145,20 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 		o.mu.Unlock()
 		return ErrTooManyMounts
 	}
+	if o.deviceConflict(req.Device, req.Blob.Mutable) {
+		o.mu.Unlock()
+		return ErrVolumeInUse
+	}
+	// Reserve the device for the open's duration, so a conflicting open racing
+	// this one is judged against it rather than against a mounts map it has
+	// not landed in yet.
+	o.opening[req.Device] = req.Blob.Mutable
 	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		delete(o.opening, req.Device)
+		o.mu.Unlock()
+	}()
 
 	m, err := o.open(ctx, req, key, commitment)
 	if err != nil {
@@ -156,6 +183,20 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 	return nil
 }
 
+// deviceConflict reports whether opening device in mode mutable conflicts with
+// a live mount or an in-flight open. Caller holds mu.
+func (o *Opener) deviceConflict(device string, mutable bool) bool {
+	if m, inFlight := o.opening[device]; inFlight && (m || mutable) {
+		return true
+	}
+	for _, m := range o.mounts {
+		if m.device == device && (m.mutable || mutable) {
+			return true
+		}
+	}
+	return false
+}
+
 // open runs the privileged steps, undoing everything it completed if a later
 // step fails. A half-open volume leaves a device-mapper target holding the key
 // in kernel memory with nothing owning it.
@@ -177,27 +218,24 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	}
 
 	cryptMapper := mapperName(cryptKind, req.Pod.UID, req.Name)
-	if err := o.Ops.CryptOpen(ctx, req.Device, cryptMapper, key); err != nil {
+	if err := o.Ops.CryptOpen(ctx, req.Device, cryptMapper, key, !req.Blob.Mutable); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-crypt: %w", err))
 	}
 	undo = append(undo, func(ctx context.Context) { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
-	verityMapper := mapperName(verityKind, req.Pod.UID, req.Name)
-	if err := o.Ops.VerityOpen(ctx, devPath(cryptMapper), verityMapper, req.Blob.Verity); err != nil {
-		return fail(fmt.Errorf("volumed: open dm-verity: %w", err))
+	mode := modeFor(req.Blob.Mutable)
+	if err := mode.open(ctx, o.Ops, req.Pod.UID, req.Name, cryptMapper, req.Blob, target); err != nil {
+		return fail(err)
 	}
-	undo = append(undo, func(ctx context.Context) { _ = o.Ops.VerityClose(ctx, verityMapper) })
-
-	if err := o.Ops.MountRO(ctx, devPath(verityMapper), target); err != nil {
-		return fail(fmt.Errorf("volumed: mount: %w", err))
-	}
+	undo = append(undo, func(ctx context.Context) { mode.close(ctx, o.Ops, req.Pod.UID, req.Name, target.Name()) })
 
 	return &mount{
 		pod:        req.Pod,
 		name:       req.Name,
 		commitment: commitment,
+		device:     req.Device,
+		mutable:    req.Blob.Mutable,
 		cryptDev:   cryptMapper,
-		verityDev:  verityMapper,
 		target:     target.Name(),
 	}, nil
 }
@@ -243,8 +281,7 @@ func (o *Opener) ClosePod(ctx context.Context, podUID string) int {
 func (o *Opener) teardown(ctx context.Context, m *mount) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	_ = o.Ops.Unmount(cleanup, m.target)
-	_ = o.Ops.VerityClose(cleanup, m.verityDev)
+	modeFor(m.mutable).close(cleanup, o.Ops, m.pod.UID, m.name, m.target)
 	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
 }
 
@@ -318,11 +355,18 @@ func (o *Opener) maxMounts() int {
 	return DefaultMaxMounts
 }
 
-// commitmentFor binds a mapping to the exact key and root hash that opened it.
-func commitmentFor(key []byte, rootHash string) [sha256.Size]byte {
+// commitmentFor binds a mapping to the exact key and mode that opened it — and,
+// for an immutable volume, the root hash. Without the mode a caller holding the
+// key could be handed a writable mapping by presenting an immutable request, or
+// the reverse.
+func commitmentFor(key []byte, b volume.Blob) [sha256.Size]byte {
 	h := sha256.New()
 	h.Write(key)
-	h.Write([]byte(rootHash))
+	if b.Mutable {
+		h.Write([]byte("mutable"))
+	} else {
+		h.Write([]byte(b.Verity.RootHash))
+	}
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
 	return out

@@ -57,8 +57,9 @@ func NewCmd() *cobra.Command {
 		Long: `volumed opens an encrypted volume for a pod.
 
 An injected sidecar fetches the volume's key from CDS over the attested secrets
-flow and hands it to this daemon, which opens dm-crypt and dm-verity and mounts
-the result read-only into that pod and no other.
+flow and hands it to this daemon, which opens the device and mounts the result
+into that pod and no other — read-only under dm-verity for an immutable volume,
+read-write ext4 for a mutable one.
 
 It runs in one of two shapes. On node-CVM it is a privileged node daemon: it
 resolves the calling pod from kernel peer credentials and mounts into that pod's

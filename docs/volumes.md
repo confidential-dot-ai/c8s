@@ -20,13 +20,17 @@ already has. Treat volume keys accordingly.
 
 ## The artifact
 
-An image built by `c8s volume create`, in three layers:
+An image built by `c8s volume create`, in two modes. Immutable is the default:
+the workload reads, and every read is verified. Mutable (`--mutable`) is for
+data the workload must write — the same encryption with no verification layer,
+because dm-verity cannot cover a writable device. The accepted trade-off: the
+host can flip bits or roll the volume back, and nothing detects it.
 
-| | |
-|---|---|
-| filesystem | erofs, read-only by construction |
-| integrity | dm-verity, hash tree appended to the filesystem |
-| confidentiality | plain dm-crypt, `aes-xts-plain64`, 512-bit key, 512-byte sectors |
+| | immutable (default) | mutable (`--mutable`) |
+|---|---|---|
+| filesystem | erofs, read-only by construction | ext4, read-write |
+| integrity | dm-verity, hash tree appended to the filesystem | none |
+| confidentiality | plain dm-crypt, `aes-xts-plain64`, 512-bit key, 512-byte sectors | same |
 
 **There is no LUKS header.** A LUKS2 header is on-disk metadata whose integrity
 is an unkeyed checksum the host can recompute, and it is parsed as root inside
@@ -35,10 +39,10 @@ parameter comes from the key blob, which only ever travels over the attested
 channel. What a header would buy — rotating the key via keyslots — is not real
 against a host that keeps a copy of the old header and can restore it.
 
-**The hash tree is inside the encryption.** A hash tree is a fingerprint of the
-plaintext, so leaving it in the clear would let the host identify what a volume
-holds. Keeping it inside also means the root hash commits to the data rather
-than to one encryption of it.
+**The hash tree is inside the encryption** (immutable volumes). A hash tree is
+a fingerprint of the plaintext, so leaving it in the clear would let the host
+identify what a volume holds. Keeping it inside also means the root hash
+commits to the data rather than to one encryption of it.
 
 **Sector size is 512.** For `aes-xts-plain64` the tweak is the sector index, but
 at a larger sector size dm-crypt's numbering depends on `iv_large_sectors` — and
@@ -62,7 +66,23 @@ entry because it is the integrity anchor, and an anchor the host can edit
 anchors nothing. It is also a fingerprint naming which model a volume holds, and
 `GET /allowlist` is unauthenticated.
 
+A mutable blob carries the key and its mode, nothing else:
+
+```json
+{
+  "type": "c8s.volume/v1",
+  "key": "<base64, 64 bytes>",
+  "mutable": true
+}
+```
+
+There is no integrity anchor to carry — a volume the host can rewrite has
+nothing for an anchor to commit to. The mode and the tree are one invariant: a
+blob carrying both or neither is refused rather than disambiguated.
+
 ## Creating a volume
+
+Immutable, the default — package a directory:
 
 ```sh
 c8s volume create \
@@ -76,9 +96,47 @@ c8s volume create \
   --operator-key ./operator.key
 ```
 
-It packages the directory, formats the hash tree, generates a key, encrypts, and
-`PUT`s the blob. It prints the annotations, the `nodeSelector`, and the
-allowlist grant to apply; it does not modify any workload.
+Mutable — preloaded from a directory, sized up front:
+
+```sh
+c8s volume create --mutable \
+  --name datasets \
+  --source ./imagenet \
+  --size 200Gi \
+  --out ./datasets.img \
+  --path /tenant-a/volumes/datasets \
+  --escrow-out ./datasets.escrow.json \
+  --node node-1 \
+  --url https://cds.example \
+  --measurements-file ./m.txt \
+  --operator-key ./operator.key
+```
+
+or empty, for scratch space the workload fills itself:
+
+```sh
+c8s volume create --mutable \
+  --name scratch \
+  --size 50Gi \
+  --out ./scratch.img \
+  --path /tenant-a/volumes/scratch \
+  --escrow-out ./scratch.escrow.json \
+  --node node-1 \
+  --url https://cds.example \
+  --measurements-file ./m.txt \
+  --operator-key ./operator.key
+```
+
+`--size` takes a byte count or a quantity like `50Gi`. Omitted with a
+`--source`, it is inferred — the tree's bytes plus a block per entry, grown by
+half — and printed, so you can see what was chosen and pin it on the next run.
+It is rejected without `--mutable`: an immutable image sizes itself to its
+contents. Every byte of the image is encrypted at creation, free space
+included, so a `--size 200Gi` build writes a 200Gi file.
+
+Each form packages its input, generates a key, encrypts, and `PUT`s the blob.
+It prints the annotations, the `nodeSelector`, and the allowlist grant to
+apply; it does not modify any workload.
 
 The key is generated per volume and never taken from you. AES-XTS is
 deterministic, so re-encrypting a changed directory under a reused key would
@@ -89,9 +147,9 @@ serial, `VIRTIO_BLK_ID_BYTES` is 20, and `c8s-vol-` takes eight; a thirteenth
 character is silently dropped, so two volumes would be indistinguishable to the
 node.
 
-Creation needs `mkfs.erofs` and `veritysetup` on the machine running it. It does
-**not** need root, a loop device, or `cryptsetup`: the encryption is done in
-process.
+Creation needs `mkfs.erofs` and `veritysetup` on the machine running it —
+`mkfs.ext4` instead for a mutable volume. It does **not** need root, a loop
+device, or `cryptsetup`: the encryption is done in process.
 
 ### Keep the escrow file
 
@@ -135,7 +193,7 @@ where they are.
 
 The serial is a **selector, not a trust input**. The host chooses it and answers
 the query per read. Pointing a pod at the wrong device fails closed: the wrong
-key produces noise, and verity refuses it.
+key produces noise — verity refuses it, or nothing will mount it.
 
 ### Replacing an image
 
@@ -145,6 +203,11 @@ or any `mv` into position, leaves a new file at the path while the device keeps
 serving the one the attach opened. `md5sum` on the node then matches the source
 while every read from the pod fails, because they are reading different files.
 `attach` refuses an already-attached volume and says so.
+
+Replacing a mutable volume's image discards what was on it: the new image is a
+fresh filesystem, and the old contents exist only in the old ciphertext. Update
+a mutable volume by writing through the mounted volume, not by rebuilding under
+it.
 
 Because the device is on one node, the pod must be scheduled there; `create`
 emits the matching `nodeSelector`.
@@ -162,8 +225,8 @@ Release is gated on the workload entry's `secrets` grant, exactly as in
 volume beneath it, and the annotation naming which volume to open is
 host-written. `create` prints an exact-path grant for this reason.
 
-`read` only. A volume is mounted read-only, so a write grant says nothing about
-whether a workload may see the plaintext.
+`read` only. Writability is a property of the volume, not the grant: a write
+grant says nothing about whether a workload may see the plaintext.
 
 ## Consuming a volume
 
@@ -179,13 +242,25 @@ annotations:
 Each entry is `NAME=/store/path`. `NAME` selects the node's device by its
 `c8s-vol-<NAME>` serial and names the directory the plaintext appears in under
 the volume dir — above, `/models/weights`. It must be a DNS-1123 label of at
-most 12 characters, because the serial holds no more.
+most 12 characters, because the serial holds no more. The annotation is the
+same for both modes; whether the plaintext is writable comes from the volume's
+key blob, not from the pod. Flipping the mode in a blob gets nothing: an
+immutable image is erofs and fails to mount as ext4, and a mutable image has
+no hash tree for verity to anchor.
 
-The webhook injects a `c8s-volume` sidecar and, per volume, an `emptyDir`
-mounted read-only with `mountPropagation: HostToContainer`. The sidecar fetches
-the key over the attested `/secrets` flow and posts `{name, blob}` to
-`c8s volumed`, which opens the device and mounts it read-only into that pod's
-`emptyDir`.
+The webhook injects a `c8s-volume` sidecar and, per volume, an `emptyDir` with
+`mountPropagation: HostToContainer`. The sidecar fetches the key over the
+attested `/secrets` flow and posts `{name, blob}` to `c8s volumed`, which opens
+the device and mounts it into that pod's `emptyDir` — read-only erofs for an
+immutable volume, read-write ext4 for a mutable one.
+
+**One writer per device.** Two read-write mounts of one device corrupt the
+filesystem, so the daemon refuses to open a device that already has a mutable
+mount (or to open mutable one that has any mount) and the sidecar surfaces the
+refusal. Schedule mutable consumers so only one pod opens a device at a time:
+one replica, or a `Recreate` strategy — a rolling update of a single-device
+workload briefly runs two pods against it. Immutable volumes share a device
+freely, as they always have.
 
 Where volumed runs, and how the sidecar reaches it, depends on the shape:
 
@@ -210,11 +285,14 @@ rather than mounts is one marked `encryption_key=ephemeral`, which CDH formats
 under a key the guest generates — so direct-volume assignment is not usable; the
 qemu wrapper
 (`kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh`) attaches this pod's
-volume devices to its VM instead, read-only and with the serial preserved. Which
-volumes it attaches comes from the pod's annotation — a selector, not a trust
-input, on the same reasoning as the serial: attaching another tenant's device
-hands the guest ciphertext the host already holds, and it still cannot be opened
-without the key CDS releases against the grant.
+volume devices to its VM instead, with the serial preserved. Which volumes it
+attaches comes from the pod's annotation — a selector, not a trust input, on
+the same reasoning as the serial: attaching another tenant's device hands the
+guest ciphertext the host already holds, and it still cannot be opened without
+the key CDS releases against the grant. Devices reach the VM writable — the
+host cannot tell a mutable volume from an immutable one, since the mode lives
+in the key blob it never sees — so an immutable volume's writes are refused in
+the guest, at its dm-crypt mapping.
 
 What decides whether a mount happens, in order:
 
@@ -224,11 +302,12 @@ What decides whether a mount happens, in order:
 2. The daemon mounts into **the calling pod's directory and no other**. The pod
    comes from the caller's cgroup via kernel peer credentials; the request has no
    field naming it, and the mount target is built from the resolved UID.
-3. The device opens only if the key is right and the verity root hash matches.
+3. The device opens only if the key is right — and, for an immutable volume,
+   the verity root hash matches.
 
-A request naming a volume already open under that pod must present the same key
-and root hash. Without that the volume *name* — a label in a host-written
-annotation — would be the credential.
+A request naming a volume already open under that pod must present the same
+key, mode, and root hash. Without that the volume *name* — a label in a
+host-written annotation — would be the credential.
 
 The volume appears **after the workload starts**, because release is gated on
 the whole container set having been admitted. A consumer must wait for it rather
@@ -294,11 +373,13 @@ survive a reboot.
 and outside the release lifecycle, so uninstall leaves it alone by design; a
 node that has had volumes attached still lists them afterwards. The two look
 alike on the node and are told apart by what lists them: a leaked mapping shows
-in `dmsetup ls` as a `c8s-crypt-`/`c8s-verity-` pair, an attached backstore in
+in `dmsetup ls` as `c8s-crypt-`/`c8s-verity-` names, an attached backstore in
 `/sys/kernel/config/target/core/fileio_0/`. Remove the second with
 `c8s volume detach <name>`.
 
 ## What this defends
+
+An immutable volume:
 
 | Threat | |
 |---|---|
@@ -312,12 +393,28 @@ in `dmsetup ls` as a `c8s-crypt-`/`c8s-verity-` pair, an attached backstore in
 Tamper detection is **lazy**: `veritysetup open` checks the top of the tree, and
 a modified data block surfaces as an I/O error when it is read, not at open.
 
+A mutable volume:
+
+| Threat | |
+|---|---|
+| Host reads the volume at rest | prevented — AES-XTS, key never leaves the TEE |
+| Host tampers with the ciphertext | **not detected** — a flipped bit returns wrong data, a failed mount, or a read-only remount |
+| Host rolls the volume back | **not detected** — an earlier state is indistinguishable from the current one |
+| Host swaps in a different device | fails closed — wrong key decrypts to noise that will not mount |
+| A pod outside the grant reads it | refused — no grant, no key |
+| An allowlisted but different workload reads it | refused — whole-entry match |
+
+Per-sector authentication (AEAD) would restore tamper and rollback detection
+for mutable volumes and is planned for a future release; for now they are out
+of scope by decision, not by oversight.
+
 ### What it does not
 
 - **Any pod on the node can open a volume whose blob it holds.** The daemon
   authorizes on possession, not entitlement — see [Possession of the blob is the
   authorization](#possession-of-the-blob-is-the-authorization). The blob still
-  only comes from CDS, and only to a pod the grant covers.
+  only comes from CDS, and only to a pod the grant covers. For a mutable
+  volume, opening means writing too.
 - **Anyone with pod create or exec RBAC in the workload's namespace can read a
   mounted volume.** Under `--cvm-mode=node` the control plane runs inside the
   node CVM, so this is not a capability the host has — but it is a Kubernetes
@@ -329,6 +426,9 @@ a modified data block surfaces as an I/O error when it is read, not at open.
   `c8s cds verify --operator-keys`, and running it continuously is a
   precondition for trusting a volume.
 - **Access patterns are visible.** Which sectors are read, and when, leaks
-  structure.
+  structure. AES-XTS is deterministic, so for a mutable volume the host can
+  also tell when a sector returns to a value it has seen before — the standard
+  FDE trade-off (BitLocker and FileVault share it), with no IV space per
+  sector write to do better with.
 - **Availability.** The host can withhold or destroy the device.
 - **Whatever the workload does with the plaintext** once it has it.

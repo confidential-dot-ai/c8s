@@ -31,11 +31,13 @@ func newCmd(verify localverify.VerifyFunc) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Build encrypted volumes and store their keys in CDS",
-		Long: `Build a volume that only an attested workload can read.
+		Long: `Build a volume that only an attested workload can open.
 
 'create' packages a directory into an encrypted, integrity-protected image and
-puts its key into the CDS secret store. The image is ciphertext: copy it to the
-node by any means, including through the untrusted host.
+puts its key into the CDS secret store — or, with --mutable, builds a writable
+volume the workload can both read and write, without integrity protection. The
+image is ciphertext either way: copy it to the node by any means, including
+through the untrusted host.
 
 'attach' then presents that image to the node as a disk carrying the serial the
 volume is found by, and 'detach' removes it. Both run on the node, as root, and

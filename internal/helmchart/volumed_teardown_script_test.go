@@ -148,6 +148,27 @@ func TestVolumedTeardownClosesCleanly(t *testing.T) {
 	}
 }
 
+// A mutable volume's mount source is the crypt device itself — there is no
+// verity layer — so the unmount scan must match it too, or uninstall leaves
+// the mapping holding the backing disk open.
+func TestVolumedTeardownUnmountsAMutableMount(t *testing.T) {
+	f := newTeardownFixture(t,
+		[]string{"c8s-crypt-podA-data"},
+		[]string{"c8s-crypt-podA-data"},
+		"")
+	out, code := f.run(t)
+	if code != 0 {
+		t.Fatalf("exit %d on a node whose mappings all close; output:\n%s", code, out)
+	}
+	calls := strings.Join(f.calls(t), "\n")
+	if !strings.Contains(calls, "umount /var/lib/kubelet/pods/pa/vol") {
+		t.Errorf("the mounted crypt device was not unmounted; calls: %v", calls)
+	}
+	if !strings.Contains(calls, "cryptsetup close c8s-crypt-podA-data") {
+		t.Errorf("the crypt mapping was not closed; calls: %v", calls)
+	}
+}
+
 func TestVolumedTeardownIsIdempotentOnAnEmptyNode(t *testing.T) {
 	f := newTeardownFixture(t, nil, nil, "")
 	out, code := f.run(t)

@@ -150,7 +150,7 @@ func TestPrintResultNamesSerialAnnotationAndExactGrant(t *testing.T) {
 	var out bytes.Buffer
 	printResult(&out, createConfig{
 		name: "weights", out: "/tmp/vol.img", escrowOut: "/tmp/escrow.json", node: "node-1",
-	}, "/tenant-a/volumes/weights", Verity{DataBlocks: 4})
+	}, "/tenant-a/volumes/weights", 0, Verity{DataBlocks: 4})
 	got := out.String()
 	for _, want := range []string{
 		"c8s-vol-weights",
@@ -195,5 +195,83 @@ func TestWriteEscrowReportsAnUnwritableDestination(t *testing.T) {
 	}
 	if err := writeEscrow(filepath.Join(t.TempDir(), "missing-dir", "escrow.json"), blob); err == nil {
 		t.Fatal("accepted a path whose directory does not exist")
+	}
+}
+
+// runCreateArgs drives the command through cobra with exactly the given flags,
+// for validation tests that need source-less invocations. A rejected
+// invocation must fail before any build runs, so no tool fakes are needed.
+func runCreateArgs(dir string, extra ...string) error {
+	o := &options{}
+	cmd := newCreateCmd(o)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(append([]string{
+		"--name=weights",
+		"--out=" + filepath.Join(dir, "vol.img"),
+		"--path=/tenant-a/volumes/weights",
+		"--escrow-out=" + filepath.Join(dir, "escrow.json"),
+		"--dry-run",
+	}, extra...))
+	return cmd.Execute()
+}
+
+func TestCreateImmutableRequiresSource(t *testing.T) {
+	dir := t.TempDir()
+	err := runCreateArgs(dir)
+	if err == nil || !strings.Contains(err.Error(), "--source is required") {
+		t.Fatalf("got %v, want a --source error", err)
+	}
+}
+
+// An immutable image sizes itself to what it packs; a size would say nothing.
+func TestCreateRejectsSizeWithoutMutable(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	err := runCreateArgs(dir, "--source="+src, "--size=50Gi")
+	if err == nil || !strings.Contains(err.Error(), "--size is only valid with --mutable") {
+		t.Fatalf("got %v, want a --size/--mutable error", err)
+	}
+}
+
+// A mutable volume with no source has nothing to be sized from.
+func TestCreateMutableWithoutSourceOrSizeIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	err := runCreateArgs(dir, "--mutable")
+	if err == nil || !strings.Contains(err.Error(), "--size is required") {
+		t.Fatalf("got %v, want a --size error", err)
+	}
+}
+
+func TestCreateRejectsBadSize(t *testing.T) {
+	dir := t.TempDir()
+	for _, size := range []string{"bogus", "-5", "0"} {
+		if err := runCreateArgs(dir, "--mutable", "--size="+size); err == nil {
+			t.Errorf("size %q: accepted", size)
+		}
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for input, want := range map[string]uint64{
+		"50Gi":        50 << 30,
+		"512Mi":       512 << 20,
+		"10G":         10_000_000_000,
+		"10737418240": 10 << 30,
+	} {
+		got, err := parseSize(input)
+		if err != nil {
+			t.Errorf("%q: %v", input, err)
+		} else if got != want {
+			t.Errorf("%q = %d, want %d", input, got, want)
+		}
+	}
+	for _, input := range []string{"", "bogus", "-5", "0", "1.5.2"} {
+		if _, err := parseSize(input); err == nil {
+			t.Errorf("%q: accepted", input)
+		}
 	}
 }

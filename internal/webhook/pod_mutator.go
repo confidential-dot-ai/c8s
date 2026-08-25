@@ -1038,9 +1038,9 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 			remountAll(pod, corev1.VolumeMount{
 				Name:      volume.KubeVolumeName(name),
 				MountPath: filepath.Join(effective.Volumes.Dir, name),
-				ReadOnly:  true,
-				// The node agent makes the mount outside this pod; without
-				// propagation the container keeps seeing the empty directory.
+				// Writability is the daemon's mount flags: read-only for an
+				// immutable volume, read-write for a mutable one. A container-
+				// side ReadOnly would not narrow a propagated mount anyway.
 				MountPropagation: &hostToContainer,
 			})
 		}

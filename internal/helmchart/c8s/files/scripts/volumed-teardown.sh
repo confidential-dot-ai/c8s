@@ -10,8 +10,9 @@
 # and leaves state no later run can reach.
 #
 # Names come from internal/cmds/volumed/open.go (mapperName): the mappings are
-# c8s-crypt-<pod-uid>-<volume> and c8s-verity-<pod-uid>-<volume>, and the
-# verity device is the mount source.
+# c8s-crypt-<pod-uid>-<volume> and c8s-verity-<pod-uid>-<volume>. The mount
+# source is the verity device for an immutable volume, the crypt device itself
+# for a mutable one.
 set -eu
 
 # Retry budget for a close. Sized to ride out kubelet's asynchronous unmount
@@ -25,14 +26,14 @@ root="${C8S_TEARDOWN_ROOT:-}"
 
 echo "==> volumed teardown starting"
 
-# 1. Unmount what the verity devices back. /proc/mounts names the source
-#    device, which holds even after kubelet has renamed the pod directory.
-#    Collect the targets before unmounting any: /proc/mounts is generated as
-#    it is read, so unmounting mid-scan would shift the rest of the file.
+# 1. Unmount what the c8s devices back. /proc/mounts names the source device,
+#    which holds even after kubelet has renamed the pod directory. Collect the
+#    targets before unmounting any: /proc/mounts is generated as it is read, so
+#    unmounting mid-scan would shift the rest of the file.
 targets=""
 while read -r source target _; do
   case "$source" in
-  /dev/mapper/c8s-verity-*) targets="$targets $target" ;;
+  /dev/mapper/c8s-verity-* | /dev/mapper/c8s-crypt-*) targets="$targets $target" ;;
   esac
 done <"$root/proc/mounts"
 

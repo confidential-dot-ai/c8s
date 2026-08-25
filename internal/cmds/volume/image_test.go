@@ -42,6 +42,10 @@ func (f *fakeTools) run(_ context.Context, name string, args ...string) ([]byte,
 			return nil, err
 		}
 		return []byte("VERITY header information\nRoot hash:      " + f.rootHash + "\n"), nil
+	case "mkfs.ext4":
+		// argv is [...flags, dest]; the caller already sized dest. The fake
+		// leaves it zeroed, which is valid plaintext to encrypt.
+		return nil, nil
 	}
 	return nil, errors.New("unexpected tool " + name)
 }
@@ -317,5 +321,199 @@ func TestBuildFailsWhenErofsFails(t *testing.T) {
 		Source: src, Out: filepath.Join(dir, "v.img"), Key: testKey(), Run: f.run,
 	}); err == nil {
 		t.Fatal("build succeeded despite mkfs.erofs failing")
+	}
+}
+
+func mkfsExt4Call(t *testing.T, f *fakeTools) string {
+	t.Helper()
+	for _, c := range f.calls {
+		if c[0] == "mkfs.ext4" {
+			return strings.Join(c, " ")
+		}
+	}
+	t.Fatal("mkfs.ext4 was never invoked")
+	return ""
+}
+
+func TestBuildMutableProducesSizedDecryptableImage(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "vol.img")
+	key := testKey()
+	f := newFake()
+	const size = 20 << 20
+
+	got, err := BuildMutable(t.Context(), MutableBuildConfig{Out: out, Key: key, Size: size, Run: f.run})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got != size {
+		t.Fatalf("size = %d, want %d", got, size)
+	}
+	ct, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	if len(ct) != size {
+		t.Fatalf("image is %d bytes, want %d", len(ct), size)
+	}
+
+	// Every sector is real ciphertext, free space included: the whole image
+	// must decrypt, to the zeroed plaintext the fake left behind.
+	var plain bytes.Buffer
+	if err := Decrypt(&plain, bytes.NewReader(ct), key); err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if !bytes.Equal(plain.Bytes(), make([]byte, size)) {
+		t.Fatal("decrypted image is not the zeroed filesystem the build wrote")
+	}
+
+	argv := mkfsExt4Call(t, f)
+	for _, want := range []string{"-b 4096", "-m 0", "-e remount-ro"} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("mkfs.ext4 argv missing %q: %s", want, argv)
+		}
+	}
+	if strings.Contains(argv, " -d ") {
+		t.Errorf("mkfs.ext4 preloads without a source: %s", argv)
+	}
+}
+
+// A source with no size is sized from the tree, grown and rounded, and the
+// size actually built is handed back so the operator sees it.
+func TestBuildMutableInfersSizeFromSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	const payload = 3 << 20
+	if err := os.WriteFile(filepath.Join(src, "weights.bin"), make([]byte, payload), 0o600); err != nil {
+		t.Fatalf("seed src: %v", err)
+	}
+	f := newFake()
+
+	got, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Source: src, Out: filepath.Join(dir, "vol.img"), Key: testKey(), Run: f.run,
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// The walk counts the directory itself as an entry.
+	if want := inferSize(payload, 2); got != want {
+		t.Fatalf("size = %d, want the inferred %d", got, want)
+	}
+	if argv := mkfsExt4Call(t, f); !strings.Contains(argv, " -d "+src) {
+		t.Errorf("mkfs.ext4 argv does not preload the source: %s", argv)
+	}
+}
+
+// An explicit size is used as given (rounded up to a whole block), with the
+// source preloaded.
+func TestBuildMutableHonorsAnExplicitSize(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	f := newFake()
+
+	got, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Source: src, Out: filepath.Join(dir, "vol.img"), Key: testKey(), Size: 100<<20 + 1, Run: f.run,
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if want := uint64(100<<20 + ImageBlockSize); got != want {
+		t.Fatalf("size = %d, want %d (rounded to a whole block)", got, want)
+	}
+}
+
+func TestBuildMutableRejectsBadInvocations(t *testing.T) {
+	dir := t.TempDir()
+	f := newFake()
+
+	// No source and no size: there is nothing to size from.
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Out: filepath.Join(dir, "a.img"), Key: testKey(), Run: f.run,
+	}); err == nil || !strings.Contains(err.Error(), "--size") {
+		t.Errorf("got %v, want a --size error", err)
+	}
+
+	// Below the floor ext4's own metadata leaves nothing to write into.
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Out: filepath.Join(dir, "b.img"), Key: testKey(), Size: 4 << 20, Run: f.run,
+	}); err == nil {
+		t.Error("accepted a size below the minimum")
+	}
+
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Out: filepath.Join(dir, "c.img"), Key: make([]byte, 32), Size: 20 << 20, Run: f.run,
+	}); err == nil {
+		t.Error("accepted a 32-byte key")
+	}
+
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Source: filepath.Join(dir, "nope"), Out: filepath.Join(dir, "d.img"), Key: testKey(), Run: f.run,
+	}); err == nil {
+		t.Error("accepted a source directory that does not exist")
+	}
+}
+
+// The plaintext image is what the whole design protects, on this path too:
+// it must not survive the build, including when the caller supplied the work
+// directory.
+func TestBuildMutableRemovesPlaintextIntermediates(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	f := newFake()
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Out: filepath.Join(dir, "vol.img"), Key: testKey(), Size: 20 << 20, WorkDir: work, Run: f.run,
+	}); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	entries, err := os.ReadDir(work)
+	if err != nil {
+		t.Fatalf("read work dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("work dir still holds %d file(s); the plaintext image survived the build", len(entries))
+	}
+}
+
+func TestBuildMutableRefusesToOverwriteExistingImage(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "vol.img")
+	if err := os.WriteFile(out, []byte("existing"), 0o600); err != nil {
+		t.Fatalf("seed out: %v", err)
+	}
+	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
+		Out: out, Key: testKey(), Size: 20 << 20, Run: newFake().run,
+	}); err == nil {
+		t.Fatal("build overwrote an existing image")
+	}
+}
+
+func TestInferSize(t *testing.T) {
+	// A tiny tree gets the floor, grown nowhere.
+	if got := inferSize(100, 3); got != minMutableBytes {
+		t.Errorf("inferSize(100, 3) = %d, want the %d-byte floor", got, minMutableBytes)
+	}
+	// Otherwise: bytes plus a block per entry, grown by half, rounded to
+	// whole mebibytes.
+	got := inferSize(32<<20, 1)
+	want := alignUp((32<<20+ImageBlockSize)*3/2, 4<<20)
+	if got != want {
+		t.Errorf("inferSize(32MiB, 1) = %d, want %d", got, want)
+	}
+}
+
+func TestInferInodes(t *testing.T) {
+	// Few entries on a large image: the default ratio suffices.
+	if got := inferInodes(1<<30, 10); got != 0 {
+		t.Errorf("inferInodes(1GiB, 10) = %d, want the default", got)
+	}
+	// A tree of small files outnumbers it.
+	if got := inferInodes(1<<30, 100000); got != 200000 {
+		t.Errorf("inferInodes(1GiB, 100000) = %d, want 200000", got)
 	}
 }

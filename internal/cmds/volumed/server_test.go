@@ -27,12 +27,18 @@ func (f fakeIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
 }
 
 type fakeDevices struct {
-	err error
+	// device, when set, is answered for every name — two names resolving to
+	// one disk, which is what a device-conflict test needs.
+	device string
+	err    error
 }
 
 func (f fakeDevices) Device(name string) (string, error) {
 	if f.err != nil {
 		return "", f.err
+	}
+	if f.device != "" {
+		return f.device, nil
 	}
 	return "/dev/disk/by-id/virtio-c8s-vol-" + name, nil
 }
@@ -133,7 +139,7 @@ func TestServerRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
 	}
 
 	body := openBody(t)
-	blob, err := volume.NewBlob(make([]byte, volume.KeyBytes), body.Blob.Verity)
+	blob, err := volume.NewBlob(make([]byte, volume.KeyBytes), *body.Blob.Verity)
 	if err != nil {
 		t.Fatalf("blob: %v", err)
 	}
@@ -204,6 +210,45 @@ func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
 	if got := f.ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("repeats re-ran privileged steps: %q", got)
 	}
+}
+
+// A second open of a device already held answers 409: the workload backing
+// off and being rescheduled is the recovery, not a retry.
+func TestServerReportsAConflictingOpen(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	f.srv.Devices = fakeDevices{device: "/dev/vdb"}
+	body := openBody(t)
+	blob, err := volume.NewMutableBlob(mustKey(t, body))
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	body.Blob = blob
+	if got := f.post(t, body).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("first open: status %d", got)
+	}
+
+	// Same device, another name, same mutable key: one device, one mount.
+	other := openBody(t)
+	otherBlob, err := volume.NewMutableBlob(mustKey(t, other))
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	other.Name = "datasets"
+	other.Blob = otherBlob
+	if got := f.post(t, other).StatusCode; got != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", got, http.StatusConflict)
+	}
+}
+
+// mustKey decodes the key out of a test body so a re-moded blob opens the same
+// volume.
+func mustKey(t *testing.T, body OpenRequest) []byte {
+	t.Helper()
+	key, err := body.Blob.DecodeKey()
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	return key
 }
 
 // The node cap answers differently from a refusal: a caller turned away here
