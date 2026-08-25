@@ -8,7 +8,7 @@ covers and why the kind harness is shaped the way it is.
 | --- | --- | --- | --- |
 | docker-compose | `make test-integration` | Integration | get-cert's RA-TLS flow against mock CDS + mock attestation-api, nginx serving the issued leaf |
 | kind cluster | `make test-integration-cluster` | Integration (cluster) | the full node-mode control plane and workload path (below) |
-| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, CA handoff on real TEEs |
+| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, CA handoff, allowlist enforcement, control-plane convergence on real TEEs |
 
 ## The kind harness
 

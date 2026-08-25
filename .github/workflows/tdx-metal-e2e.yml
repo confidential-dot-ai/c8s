@@ -509,43 +509,27 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          # awk, not a regex backreference: `$2 !~ /^([0-9]+)\/\1$/` looks right
-          # and is not (awk has no backreferences), so it silently only ever
-          # matches 1/1 and calls every sidecar-bearing pod not-ready.
-          for i in $(seq 1 40); do
-            NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
-            TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
-            [ "$TOTAL" -gt 0 ] && [ "$NOTREADY" -eq 0 ] && { echo "all $TOTAL components Running"; break; }
-            sleep 15
-          done
-          kubectl -n c8s-system get pods --no-headers
-          [ "${NOTREADY:-1}" -eq 0 ] || { echo "::error::components did not converge"; kubectl -n c8s-system describe pods | tail -40; exit 1; }
+          bash /tmp/c8s-src/test/e2e/components-ready.sh
 
-      - name: NEGATIVE, the baked floor must deny a non-allowlisted image
-        # The product's core guarantee, asserted rather than worked around.
-        # Uses the `default` namespace deliberately: the node image bakes a
-        # restricted PSA default and exempts `default` for smoke pods, so a
-        # denial here is unambiguously the IMAGE floor, not PodSecurity.
+      - name: assert the image floor denies, then opens to a signed write
+        # tls-lb fronts /allowlist on hostPort 443, and node mode puts CDS in
+        # the node CVM, so the endpoint pins to the node MRTD.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          kubectl -n default delete pod denied --ignore-not-found >/dev/null 2>&1 || true
-          kubectl -n default run denied --image=busybox:1.36 --restart=Never --command -- sleep 300
-          for i in $(seq 1 24); do
-            R=$(kubectl -n default get pod denied -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)
-            [ -n "$R" ] && [ "$R" != ContainerCreating ] && break
-            sleep 5
-          done
-          MSG=$(kubectl -n default get pod denied -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' 2>/dev/null || true)
-          echo "reason=$R"
-          echo "message=$MSG"
-          echo "$MSG" | grep -q 'image not in allowlist' || {
-            echo "::error title=SECURITY REGRESSION::the baked NRI floor did NOT deny a non-allowlisted image (reason=$R). The product's fail-closed admission guarantee is not holding on this image."
-            kubectl -n default describe pod denied | tail -20
-            exit 1
-          }
-          echo "OK: floor denied busybox:1.36 at container creation"
-          kubectl -n default delete pod denied --wait=false >/dev/null 2>&1 || true
+          export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
+          export C8S_MEASUREMENTS="$mrtd"
+          export C8S_OPERATOR_KEY=/tmp/op.key
+          bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
+
+      - name: assert a confidential workload runs with an injected cert
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
+          export C8S_MEASUREMENTS="$mrtd"
+          export C8S_OPERATOR_KEY=/tmp/op.key
+          bash /tmp/c8s-src/test/e2e/cw-workload.sh
 
       - name: summary
         if: always()
