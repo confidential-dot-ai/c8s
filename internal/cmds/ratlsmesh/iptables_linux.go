@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -141,10 +142,40 @@ func ensureIptablesJumps(logger *slog.Logger, jumps []iptablesRule) error {
 	return nil
 }
 
-// ensureIptablesJumpsForBinary keeps base-chain jumps at position 1 so the
-// mesh rules run before kube-proxy's service DNAT. If a jump is already at
-// position 1 the call is a cheap no-op; otherwise the jump is re-inserted
-// at the head. Two separate counters distinguish:
+// jumpBlock is the ordered run of mesh jumps that must occupy the head of one
+// base chain, ahead of kube-proxy's service DNAT and of KUBE-FORWARD's
+// mark-based ACCEPT. filter FORWARD carries two of them, so head position is a
+// property of the block rather than of a single rule.
+type jumpBlock struct {
+	table string
+	chain string
+	jumps []iptablesRule
+}
+
+// jumpBlocksFor groups jumps by base chain for one family, preserving
+// declaration order: that order is the head order the watchdog asserts.
+func jumpBlocksFor(jumps []iptablesRule, family iptablesFamily) []jumpBlock {
+	var blocks []jumpBlock
+	index := map[[2]string]int{}
+	for _, jump := range jumps {
+		if jump.family != iptablesFamilyAll && jump.family != family {
+			continue
+		}
+		key := [2]string{jump.table, jump.chain}
+		i, ok := index[key]
+		if !ok {
+			i = len(blocks)
+			index[key] = i
+			blocks = append(blocks, jumpBlock{table: jump.table, chain: jump.chain})
+		}
+		blocks[i].jumps = append(blocks[i].jumps, jump)
+	}
+	return blocks
+}
+
+// ensureIptablesJumpsForBinary keeps each base chain's jump block at the head
+// of that chain. A block already in place is a cheap no-op; otherwise every
+// jump in it is reinserted. Two separate counters distinguish:
 //   - jumpPositionViolations: confirmed-misplaced jumps (real kube-proxy race)
 //   - jumpPositionCheckErrors: transient List failures where the watchdog
 //     still reinserts defensively but the position couldn't be read
@@ -154,67 +185,75 @@ func ensureIptablesJumps(logger *slog.Logger, jumps []iptablesRule) error {
 // signal for kube-proxy contention without the noise of shell-call blips.
 func ensureIptablesJumpsForBinary(logger *slog.Logger, ipt *iptables.IPTables, jumps []iptablesRule) error {
 	bin := iptablesLabel(ipt)
-	family := familyForIPT(ipt)
-	for _, jump := range jumps {
-		if jump.family != iptablesFamilyAll && jump.family != family {
-			continue
-		}
-		atHead, present, err := isJumpAtHead(ipt, jump)
+	for _, block := range jumpBlocksFor(jumps, familyForIPT(ipt)) {
+		atHead, misplaced, err := isJumpBlockAtHead(ipt, block)
 		if err != nil {
-			logger.Debug("position check failed; will reinstall defensively", "bin", bin, "chain", jump.chain, "error", err)
+			logger.Debug("position check failed; will reinstall defensively", "bin", bin, "chain", block.chain, "error", err)
 			jumpPositionCheckErrors.Add(1)
 			publishIptablesMetrics(logger)
 		}
 		if atHead {
 			continue
 		}
-		deleteAllIptablesRules(logger, ipt, jump)
-		if addErr := ipt.Insert(jump.table, jump.chain, 1, jump.args...); addErr != nil {
-			return fmt.Errorf("install %s jump rule on %s: %w", jump.label, bin, addErr)
+		// Reverse order: each insert lands at position 1, so the block's
+		// first jump is the last one inserted.
+		for i := len(block.jumps) - 1; i >= 0; i-- {
+			jump := block.jumps[i]
+			deleteAllIptablesRules(logger, ipt, jump)
+			if addErr := ipt.Insert(jump.table, jump.chain, 1, jump.args...); addErr != nil {
+				return fmt.Errorf("install %s jump rule on %s: %w", jump.label, bin, addErr)
+			}
 		}
-		// Only count as a violation when we know the jump was demoted; a
-		// position-check error or an absent jump during clean startup would
-		// inflate the count and drown the kube-proxy-race signal in noise.
-		if err == nil && present {
-			jumpPositionViolations.Add(1)
+		// Only count jumps we know were demoted; a position-check error or an
+		// absent jump during clean startup would inflate the count and drown
+		// the kube-proxy-race signal in noise.
+		if err == nil && misplaced > 0 {
+			jumpPositionViolations.Add(int64(misplaced))
 			publishIptablesMetrics(logger)
 		}
-		logger.Warn("jump rule restored at chain head", "bin", bin, "chain", jump.chain, "target", jump.label, "present_before_restore", present, "check_error", err)
+		logger.Warn("jump block restored at chain head", "bin", bin, "chain", block.chain, "misplaced_before_restore", misplaced, "check_error", err)
 	}
 	return nil
 }
 
-// isJumpAtHead reports whether the given jump rule is present and whether it
-// is the first appended rule of its base chain. The literal compare against
+// isJumpBlockAtHead reports whether the block's jumps are the first appended
+// rules of its base chain, in the block's order, and how many of them were
+// present elsewhere in the chain. The literal compare against
 // strings.Join(jump.args, " ") only round-trips while jump.args stays at {"-j",
 // chainName}; adding matchers (`-m comment`, conntrack, etc.) would let the
 // kernel renormalize tokens and make the compare always false, causing the
 // watchdog to reinsert every tick.
-func isJumpAtHead(ipt *iptables.IPTables, jump iptablesRule) (atHead bool, present bool, err error) {
-	lines, err := ipt.List(jump.table, jump.chain)
+func isJumpBlockAtHead(ipt *iptables.IPTables, block jumpBlock) (atHead bool, misplaced int, err error) {
+	lines, err := ipt.List(block.table, block.chain)
 	if err != nil {
-		return false, false, err
+		return false, 0, err
 	}
-	atHead, present = parseJumpAtHead(strings.Join(lines, "\n"), jump)
-	return atHead, present, nil
+	atHead, misplaced = parseJumpBlockAtHead(strings.Join(lines, "\n"), block)
+	return atHead, misplaced, nil
 }
 
-func parseJumpAtHead(out string, jump iptablesRule) (atHead bool, present bool) {
-	prefix := "-A " + jump.chain + " "
-	want := strings.Join(jump.args, " ")
-	firstRule := true
+func parseJumpBlockAtHead(out string, block jumpBlock) (atHead bool, misplaced int) {
+	prefix := "-A " + block.chain + " "
+	var installed []string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		got := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		if got == want {
-			return firstRule, true
-		}
-		firstRule = false
+		installed = append(installed, strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	}
-	return false, false
+	atHead = true
+	for i, jump := range block.jumps {
+		want := strings.Join(jump.args, " ")
+		if i < len(installed) && installed[i] == want {
+			continue
+		}
+		atHead = false
+		if slices.Contains(installed, want) {
+			misplaced++
+		}
+	}
+	return atHead, misplaced
 }
 
 // jumpPositionViolations counts confirmed kube-proxy races: the watchdog
