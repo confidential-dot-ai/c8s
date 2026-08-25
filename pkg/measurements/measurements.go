@@ -419,3 +419,77 @@ func duplicateKey(obj []byte) (string, error) {
 	}
 	return "", nil
 }
+
+// ParseServed decodes a document a component serves to describe the reference
+// values it is enforcing. Unlike [Parse] it tolerates an empty set — a
+// component enforcing nothing is a report a verifier must be able to read and
+// act on, not a document to reject — and it is not the path an operator's own
+// file takes. See pkg/allowlist ParseJSON vs ParseServedJSON for the same split.
+func ParseServed(data []byte) (ReferenceValues, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var f wire
+	if err := dec.Decode(&f); err != nil {
+		return ReferenceValues{}, fmt.Errorf("decode served measurements: %w", err)
+	}
+	if f.SchemaVersion != SchemaVersion1 {
+		return ReferenceValues{}, fmt.Errorf("served schema_version %q, want %q", f.SchemaVersion, SchemaVersion1)
+	}
+	if f.TEE != TEESNP && f.TEE != TEETDX {
+		return ReferenceValues{}, fmt.Errorf("served tee %q, want %q or %q", f.TEE, TEESNP, TEETDX)
+	}
+	set := ReferenceValues{TEE: f.TEE}
+	for i, we := range f.Measurements {
+		e, err := we.validate(f.TEE, i)
+		if err != nil {
+			return ReferenceValues{}, err
+		}
+		set.Entries = append(set.Entries, e)
+	}
+	return set, nil
+}
+
+// Serve renders the set as a document describing what is being enforced. It
+// accepts an empty set, which [Format] does not: "pinning nothing" is exactly
+// the state a verifier most needs reported.
+func Serve(s ReferenceValues) ([]byte, error) {
+	if len(s.Entries) == 0 {
+		f := wire{SchemaVersion: SchemaVersion1, TEE: s.TEE, Measurements: []wireEntry{}}
+		out, err := json.MarshalIndent(f, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("encode served measurements: %w", err)
+		}
+		return append(out, '\n'), nil
+	}
+	return Format(s)
+}
+
+// Diff reports the entries each side pins and the other does not, matched on
+// what decides admission — the digest and its registers. Names are diagnostic
+// only, so two entries naming one image differently are still the same pin.
+func Diff(want, got ReferenceValues) (missing, extra []Entry) {
+	index := func(s ReferenceValues) map[string]Entry {
+		m := make(map[string]Entry, len(s.Entries))
+		for _, e := range s.Entries {
+			m[tupleKey(e)] = e
+		}
+		return m
+	}
+	w, g := index(want), index(got)
+	for k, e := range w {
+		if _, ok := g[k]; !ok {
+			missing = append(missing, e)
+		}
+	}
+	for k, e := range g {
+		if _, ok := w[k]; !ok {
+			extra = append(extra, e)
+		}
+	}
+	sortEntries(missing)
+	sortEntries(extra)
+	return missing, extra
+}
+
+func sortEntries(e []Entry) {
+	sort.Slice(e, func(i, j int) bool { return tupleKey(e[i]) < tupleKey(e[j]) })
+}

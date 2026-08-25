@@ -5,8 +5,10 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -626,4 +628,50 @@ func newStubRouterWithHandoff(t *testing.T) http.Handler {
 		MaxRequestSize:   65536,
 	}
 	return newRouter(deps)
+}
+
+// /measurements must report what this CDS enforces, and must report an empty
+// set rather than hiding it: "admits any measurement" is the finding a
+// verifier most needs.
+func TestHandleMeasurements(t *testing.T) {
+	set, err := measurements.Parse([]byte(
+		`{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"` +
+			strings.Repeat("ab", 48) + `"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := measurements.Serve(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	handleMeasurements(doc)(w, httptest.NewRequest(http.MethodGet, "/measurements", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	served, err := measurements.ParseServed(w.Body.Bytes())
+	if err != nil {
+		t.Fatalf("served body does not parse: %v", err)
+	}
+	if len(served.Entries) != 1 || served.TEE != measurements.TEESNP {
+		t.Errorf("served set = %+v, want the one pinned image", served)
+	}
+
+	empty, err := measurements.Serve(measurements.ReferenceValues{TEE: measurements.TEESNP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	handleMeasurements(empty)(w, httptest.NewRequest(http.MethodGet, "/measurements", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty set status = %d, want 200 (not a 404)", w.Code)
+	}
+	servedEmpty, err := measurements.ParseServed(w.Body.Bytes())
+	if err != nil {
+		t.Fatalf("empty served body does not parse: %v", err)
+	}
+	if len(servedEmpty.Entries) != 0 {
+		t.Errorf("empty set served %d entries", len(servedEmpty.Entries))
+	}
 }

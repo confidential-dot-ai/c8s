@@ -29,6 +29,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
@@ -108,24 +109,25 @@ type config struct {
 	fromFile      string
 	discoveryPath string
 
-	measurements     []string
-	measurementsFile string
-	imageManifest    string
-	expectedRTMR3Hex string
-	operatorPubkey   string
-	rtmrs            []string
-	operatorKeys     string
-	sandboxID        string
-	workload         string
-	allowlistFile    string
-	meshCA           string
-	initDataHex      string
-	allowDebug       bool
-	minTCBBootloader uint
-	minTCBTEE        uint
-	minTCBSNP        uint
-	minTCBMicrocode  uint
-	expectedRDHex    string
+	measurements       []string
+	measurementsFile   string
+	imageManifest      string
+	expectedRTMR3Hex   string
+	operatorPubkey     string
+	rtmrs              []string
+	operatorKeys       string
+	measurementsConfig string
+	sandboxID          string
+	workload           string
+	allowlistFile      string
+	meshCA             string
+	initDataHex        string
+	allowDebug         bool
+	minTCBBootloader   uint
+	minTCBTEE          uint
+	minTCBSNP          uint
+	minTCBMicrocode    uint
+	expectedRDHex      string
 
 	output       string
 	showEvidence bool
@@ -206,6 +208,7 @@ responder chose).`,
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
 	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
 	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
+	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -294,7 +297,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
+	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), gatherMeasurements(ctx, cfg, ev), out, errOut)
 }
 
 // targetDescription names the evidence source for a verdict produced before
@@ -352,7 +355,7 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // both work — then renders the verdict. The verification attempt (including the
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
-func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, out, errOut io.Writer) int {
+func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, servedMeasurements measurementsReport, out, errOut io.Writer) int {
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -366,7 +369,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc := newOutcome(cfg, ev, result, verr, plan)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applyVerdictPolicies(&oc, cfg, ev, held, opKeys)
+	applyVerdictPolicies(&oc, cfg, ev, held, opKeys, plan, servedMeasurements)
 	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
@@ -377,8 +380,8 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 // the verdict), then the honesty demotions, which only ever turn a passing
 // verdict partial. Ordering matters: applyChainAnchorPolicy reads the pinned
 // chain check's outcome from oc.Verified.
-func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport) {
-	applySandboxPolicy(oc, cfg, ev, opKeys)
+func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport) {
+	applySandboxPolicy(oc, cfg, ev, opKeys, plan, servedMeasurements)
 	applyWorkloadPolicy(oc, cfg, ev, held)
 	applyFrontDoorPolicy(oc, ev)
 	applyChainAnchorPolicy(oc, cfg, ev)
@@ -491,6 +494,9 @@ type verifyPlan struct {
 	meshCA *x509.CertPool
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
+	// refValues is the parsed --measurements-config, empty when unset. It
+	// both pins the target and is compared against what the target serves.
+	refValues measurementspkg.ReferenceValues
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -520,9 +526,22 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	// failure rather than the typo it is. Refuse the pair up front, before any
 	// file is read, so a contradictory invocation is a usage error here just as
 	// it already is in the client-side verifier.
+	if cfg.measurementsConfig != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "" || cfg.imageManifest != "") {
+		return nil, fmt.Errorf("--measurements-config cannot be combined with --measurements, --measurements-file or --image-manifest: it already pins whole images, and a second allowlist beside it can only narrow or contradict that")
+	}
 	if cfg.imageManifest != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "") {
 		used := allowlistFlagsUsed(cfg)
 		return nil, fmt.Errorf("%s cannot be combined with --image-manifest: the manifest pins MRTD exactly (together with RTMR[1] and RTMR[2] from the same build), so a launch-measurement allowlist beside it can only narrow that single digest or contradict it, and a contradiction is a policy no guest can ever satisfy. To pin this image, drop %s; to accept several firmware images instead, drop --image-manifest — which also gives up its RTMR[1]/RTMR[2] guest kernel and rootfs pins", used, used)
+	}
+
+	// Read once, here, like every other file-backed pin on this path.
+	var refValues measurementspkg.ReferenceValues
+	if cfg.measurementsConfig != "" {
+		loaded, err := measurementspkg.Load(cfg.measurementsConfig)
+		if err != nil {
+			return nil, err
+		}
+		refValues = loaded
 	}
 
 	hexes := append([]string{}, cfg.measurements...)
@@ -608,6 +627,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
+			Entries:      refValues.Entries,
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
@@ -615,6 +635,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		pins:         pins,
 		meshCA:       caPool,
 		initDataHash: initDataHash,
+		refValues:    refValues,
 	}, nil
 }
 
@@ -1109,7 +1130,7 @@ type Outcome struct {
 // applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
 // --operator-keys. It only ever demotes Verified — nothing here can rescue a
 // failed hardware verification (docs/ratls.md).
-func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKeysReport) {
+func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport) {
 	fail := func(format string, args ...any) {
 		oc.Verified = false
 		if oc.Error == "" {
@@ -1166,6 +1187,8 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		}
 	}
 
+	checkMeasurementsConfig(cfg, plan, servedMeasurements, fail)
+
 	// The served key list is authenticated by being fetched over the attested
 	// serving cert. A failed fetch fails closed when the operator asked for the
 	// check (a 404 is not an error — it maps to the empty-set digest in
@@ -1192,6 +1215,16 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	if !bytes.Equal(opKeys.digest, expected) {
 		fail("served /operator-keys digest %x does not match the --operator-keys set (%x)", opKeys.digest, expected)
 	}
+}
+
+// checkMeasurementsConfig compares the set the target reports enforcing against
+// the operator's own file. A swapped config leaves the launch measurement
+// untouched, so this is what makes the substitution visible.
+func checkMeasurementsConfig(cfg config, plan *verifyPlan, served measurementsReport, fail func(string, ...any)) {
+	if cfg.measurementsConfig == "" {
+		return
+	}
+	checkServedMeasurements(plan.refValues, served, fail)
 }
 
 // applyWorkloadPolicy surfaces the leaf's matched-workload stamp and enforces
