@@ -187,18 +187,66 @@ func TestHTTPBackendStripsHopByHopHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp, err := hb.Forward(context.Background(), types.TunnelRequest{
-		Method:  "GET",
-		Path:    "/",
-		Headers: map[string]string{"X-C8s-Session": "sess-id", "X-App": "kept"},
+		Method: "GET",
+		Path:   "/",
+		Headers: []types.HeaderField{
+			{Name: "X-C8s-Session", Value: "sess-id"},
+			{Name: "X-App", Value: "kept"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := resp.Headers["Keep-Alive"]; ok {
+	if got := headerValues(resp.Headers, "Keep-Alive"); len(got) != 0 {
 		t.Error("hop-by-hop response header not stripped")
 	}
-	if resp.Headers["X-Resp"] != "kept" {
+	if got := headerValues(resp.Headers, "X-Resp"); len(got) != 1 || got[0] != "kept" {
 		t.Errorf("response header lost: %+v", resp.Headers)
+	}
+}
+
+// headerValues collects the values a pair list carries under name.
+func headerValues(fields []types.HeaderField, name string) []string {
+	var values []string
+	for _, f := range fields {
+		if f.Name == name {
+			values = append(values, f.Value)
+		}
+	}
+	return values
+}
+
+// TestHTTPBackendPreservesDuplicateHeaders: the pair-based envelope must carry
+// every value of a repeated field in both directions — the map envelope's
+// collapse of Set-Cookie was the bug the v2 envelope exists to fix.
+func TestHTTPBackendPreservesDuplicateHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Values("X-Multi"); len(got) != 2 || got[0] != "one" || got[1] != "two" {
+			t.Errorf("duplicate request header not forwarded intact: %v", got)
+		}
+		w.Header().Add("Set-Cookie", "a=1")
+		w.Header().Add("Set-Cookie", "b=2")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	hb, err := NewHTTPBackend(backend.URL, HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hb.Forward(context.Background(), types.TunnelRequest{
+		Method: "GET",
+		Path:   "/",
+		Headers: []types.HeaderField{
+			{Name: "X-Multi", Value: "one"},
+			{Name: "X-Multi", Value: "two"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := headerValues(resp.Headers, "Set-Cookie"); len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
+		t.Fatalf("duplicate response header collapsed: %v", got)
 	}
 }
 

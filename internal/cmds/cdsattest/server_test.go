@@ -158,7 +158,7 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	resp := tunnel(t, ts.URL, channel, hr.SessionID, types.TunnelRequest{
 		Method:  "POST",
 		Path:    "/v1/echo",
-		Headers: map[string]string{"Content-Type": "application/json"},
+		Headers: []types.HeaderField{{Name: "Content-Type", Value: "application/json"}},
 		Body:    []byte("hi enclave"),
 	})
 	if resp.Status != http.StatusOK {
@@ -262,7 +262,7 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 	resp := tunnel(t, ts.URL, channel, hr.SessionID, types.TunnelRequest{
 		Method:  "PUT",
 		Path:    "/v1/data",
-		Headers: map[string]string{"Authorization": "Bearer sekret"},
+		Headers: []types.HeaderField{{Name: "Authorization", Value: "Bearer sekret"}},
 		Body:    []byte("payload"),
 	})
 	if resp.Status != http.StatusCreated {
@@ -271,11 +271,60 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 	if !strings.Contains(string(resp.Body), "upstream saw: /v1/data / payload") {
 		t.Fatalf("unexpected upstream body: %q", resp.Body)
 	}
-	if resp.Headers["X-Echo-Method"] != "PUT" {
-		t.Fatalf("method not forwarded: %q", resp.Headers["X-Echo-Method"])
+	if got := headerValues(resp.Headers, "X-Echo-Method"); len(got) != 1 || got[0] != "PUT" {
+		t.Fatalf("method not forwarded: %q", got)
 	}
-	if resp.Headers["X-Echo-Auth"] != "Bearer sekret" {
-		t.Fatalf("Authorization not forwarded confidentially: %q", resp.Headers["X-Echo-Auth"])
+	if got := headerValues(resp.Headers, "X-Echo-Auth"); len(got) != 1 || got[0] != "Bearer sekret" {
+		t.Fatalf("Authorization not forwarded confidentially: %q", got)
+	}
+}
+
+// TestTunnelPreservesDuplicateHeaders: repeated fields ride the pair-based
+// envelope intact in both directions, through the sealed tunnel and the
+// backend hop — the header map that collapsed Set-Cookie is gone.
+func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Values("X-Multi"); len(got) != 2 || got[0] != "one" || got[1] != "two" {
+			t.Errorf("duplicate request header not forwarded intact: %v", got)
+		}
+		w.Header().Add("Set-Cookie", "a=1")
+		w.Header().Add("Set-Cookie", "b=2")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	hb, err := NewHTTPBackend(backend.URL, HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := writeTestMeshIdentity(t)
+	srv := NewServer(Config{
+		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+		Backend:              hb,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	channel, sessionID := establishSession(t, ts.URL, nonce)
+
+	resp := tunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{
+		Method: "GET",
+		Path:   "/",
+		Headers: []types.HeaderField{
+			{Name: "X-Multi", Value: "one"},
+			{Name: "X-Multi", Value: "two"},
+		},
+	})
+	if resp.Status != http.StatusOK {
+		t.Fatalf("tunnel response status %d", resp.Status)
+	}
+	if got := headerValues(resp.Headers, "Set-Cookie"); len(got) != 2 || got[0] != "a=1" || got[1] != "b=2" {
+		t.Fatalf("duplicate response header collapsed: %v", got)
 	}
 }
 
