@@ -9,15 +9,15 @@
 # /var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/). This file
 # is the config it boots with, before c8s is installed.
 #
-# TRUST POSTURE: this baked copy is measured; after `c8s install` the
-# chart's installer DaemonSet overwrites it (on the unmeasured overlay
-# upper) with the values-rendered version — real cds_measurements pins, the
-# full image-digest floor. That is deliberate: the measured invariants are
-# the plugin BINARY and the fail-closed NRI registration
-# (required_plugins), while the policy DATA arrives via the CDS RA-TLS +
-# attestation chain and may be updated without an image rebuild. Expect
-# exactly one rke2-server restart from the installer when the config diff
-# lands.
+# TRUST POSTURE: this baked copy is measured, and the floor below stays as
+# built — the RKE2 system digests in it are resolved here and nowhere else.
+# `c8s install` runs the chart's installer in its baked form
+# (nriImagePolicy.baked), which writes the release's cds_measurements /
+# cds_rtmrs into this file on the overlay upper and leaves every other key
+# alone. Expect one rke2-server restart from it when those pins change:
+# NRI does not respawn a pre-registered plugin, so the config reaches the
+# plugin only through containerd. The overlay upper is ephemeral, so each
+# boot starts from the pins below and the installer re-applies.
 #
 # Field names/semantics validated against the plugin's config loader
 # (c8s internal/cmds/nri-image-policy/config.go). Notable constraints:
@@ -42,8 +42,7 @@ plugin:
 
 # The node-CVM admission inventory (c8s docs/ratls.md, "Sandbox identity").
 # get-cert dials this socket for its pod's digests before CDS will issue a
-# certificate. In --cvm-mode=node the chart's nri-image-policy installer is
-# disabled, so nothing rewrites this file after boot and the section must be
+# certificate. The installer only patches the CDS pins, so this section must be
 # baked in; without it the socket is never created and every adopted workload
 # hangs waiting for a certificate that cannot be issued.
 workload_claims:
@@ -53,7 +52,7 @@ workload_claims:
   proc_root: "/proc"
   # Empty falls back to NodeIPFile (node-ip in socket_dir). On a Kubernetes-
   # hosted install the chart's installer writes that from its own status.hostIP;
-  # a node-as-CVM has no installer, so nri-node-ip.service writes it at boot
+  # the baked installer does not, so nri-node-ip.service writes it at boot
   # instead. Without either, this resolves to 127.0.0.1 and the plugin refuses
   # to start with "inventory host is not a routable unicast address".
   advertise_host: ""
@@ -111,8 +110,9 @@ allowlist:
     # :8400). The plugin runs in the host netns as a containerd child, so
     # loopback reaches it.
     attestation_api_url: "http://127.0.0.1:8400"
-    # Deploy-time values; the installer's post-install config refresh pins
-    # them. Empty = accept any RA-TLS-attested CDS measurement (logged).
+    # `c8s install --measurements` / `--measurements-config` writes these; see
+    # TRUST POSTURE above. Empty = accept any RA-TLS-attested CDS measurement
+    # (logged), which is what every boot starts from.
     cds_measurements: []
 
 containerd:

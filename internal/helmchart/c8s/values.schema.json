@@ -139,6 +139,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "baked": {},
         "bootstrapAllowlist": {
           "type": [
             "object",

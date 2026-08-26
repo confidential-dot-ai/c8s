@@ -5926,6 +5926,70 @@ func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
 	}
 }
 
+// TestChartPinsCDSInNodeMode guards the node-as-CVM pin path. The node image
+// bakes the plugin with empty cds_measurements, and the chart is the only thing
+// that knows this release's pins — so an install that does not carry them into
+// the baked config leaves the component deciding which images may run on the
+// node willing to take its allowlist from ANY RA-TLS-attested CDS, and its
+// sandbox-digests endpoint willing to answer any of them. Regression for a
+// bare-metal run that found exactly that (2026-08-26).
+func TestChartPinsCDSInNodeMode(t *testing.T) {
+	const (
+		pinM = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+		pinR = "1=bbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"
+	)
+	const pinsImageDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.baked=true",
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+		"--set-string", "nriImagePolicy.image.digest="+pinsImageDigest,
+		"--set-string", "cds.measurements[0]="+pinM,
+		"--set-string", "cds.rtmrs[0]="+pinR,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	ds := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	for _, want := range []string{
+		"set-cds-pins",
+		"--cds-measurements \"" + pinM + "\"",
+		"--cds-rtmrs \"" + pinR + "\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("node-mode installer script missing %q\n%s", want, script)
+		}
+	}
+
+	// The baked config carries the image floor whose RKE2 system digests only
+	// the image build resolves, so the installer must patch it, never rewrite
+	// it — and must leave the binary and the containerd registration alone.
+	for _, forbidden := range []string{"IMAGE_POLICY_EOF", "install_file", "render_nri_toml"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("node-mode installer script must not run %q — it would replace what the node image measured\n%s", forbidden, script)
+		}
+	}
+	for _, c := range ds.Spec.Template.Spec.InitContainers {
+		if c.Name == "containerd-prep" {
+			t.Errorf("node-mode installer renders containerd-prep; the node image owns the containerd NRI registration")
+		}
+	}
+
+	// The installer image is a chart image, not a baked one, so the node admits
+	// it only through the seed CDS serves.
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("node-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if got := seed.Digests[pinsImageDigest]; got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
+		t.Errorf("seed[%s] = %q, want the pins installer image; the baked plugin would deny it", pinsImageDigest, got)
+	}
+}
+
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live

@@ -95,6 +95,29 @@ uninstall hook.
 {{- end }}
 
 {{/*
+Host mounts for the node-as-CVM pins installer: the baked config it patches and
+the runtime dir holding the plugin's health socket. It touches neither the
+plugin binary nor containerd's config, so neither is mounted.
+*/}}
+{{- define "nri-image-policy.pinsVolumeMounts" -}}
+- name: host-config-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.configDir }}
+- name: host-runtime-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+{{- end }}
+
+{{- define "nri-image-policy.pinsVolumes" -}}
+- name: host-config-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.configDir }}
+    type: DirectoryOrCreate
+- name: host-runtime-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+    type: DirectoryOrCreate
+{{- end }}
+
+{{/*
 Host containerd config directory bind-mounted into the installer.
 */}}
 {{- define "nri-image-policy.containerdConfigDir" -}}

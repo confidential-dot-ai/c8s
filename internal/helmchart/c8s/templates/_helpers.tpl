@@ -663,9 +663,10 @@ cache_max_entries = 1024
 {{- /* containerd-prep init-container images (rke2-only): the host NRI plugin
        checks every container node-wide, so its own and kata's busybox prep
        image must be in the floor or a DaemonSet re-roll self-deadlocks on
-       "image not in allowlist: busybox". Only seeded when the plugin enforces. */}}
+       "image not in allowlist: busybox". Only seeded when the plugin enforces,
+       and under .baked the installer runs no prep container. */}}
 {{- if .Values.nriImagePolicy.enabled -}}
-{{- if eq .Values.nriImagePolicy.distro "rke2" -}}
+{{- if and (eq .Values.nriImagePolicy.distro "rke2") (not .Values.nriImagePolicy.baked) -}}
 {{- $prep := .Values.nriImagePolicy.containerdPrep.image -}}
 {{- if $prep.digest -}}
 {{- $_ := set $digests $prep.digest (printf "%s@%s" $prep.repository $prep.digest) -}}
@@ -702,12 +703,12 @@ cache_max_entries = 1024
     - the chart's host NRI plugin (nriImagePolicy.enabled),
     - the in-guest policy-monitor baked into the kata-guest-base image
       (kata.enabled, i.e. --cvm-mode=pod), where the host plugin is off, and
-    - the BAKED host NRI plugin on a node-as-CVM (--cvm-mode=node), where the
-      chart's nriImagePolicy is disabled because the node image bakes the
-      plugin — but that plugin still pulls the live allowlist from CDS, so the
-      seed must be served or CDS starts empty and every un-baked component
+    - the BAKED host NRI plugin on a node-as-CVM (--cvm-mode=node), which pulls
+      the live allowlist from CDS like the chart-installed one, so the seed
+      must be served or CDS starts empty and every un-baked component
       (operator, ratls-mesh, tls-lb's nginx, adopted workloads) is denied
-      until an operator hand-runs `c8s allowlist add`.
+      until an operator hand-runs `c8s allowlist add`. The cvmMode arm also
+      covers a node install that leaves the installer off entirely.
   Gating on nriImagePolicy.enabled alone dropped the seed under both pod and
   node mode.
 */}}

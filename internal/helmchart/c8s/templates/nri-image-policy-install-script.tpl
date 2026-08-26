@@ -70,7 +70,6 @@ fi
 
 CONTAINERD_DIR=/host{{ include "nri-image-policy.containerdConfigDir" $root }}
 CONTAINERD_CONFIG_MODE={{ include "nri-image-policy.containerdConfigMode" $root | quote }}
-RESTART_COMMAND={{ include "nri-image-policy.restartCommand" $root | quote }}
 MARK_BEGIN='# BEGIN c8s-nri-image-policy (managed)'
 MARK_END='# END c8s-nri-image-policy (managed)'
 
@@ -144,10 +143,26 @@ else
   fi
 fi
 
-# NRI does not respawn pre-registered plugins on exit. Binary, config, or
-# containerd registration changes therefore require a restart. Shims survive.
-restarted_containerd=0
+restart_needed=0
 if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_changed" = "1" ]; then
+  restart_needed=1
+fi
+{{ include "nri-image-policy.restartAndWait" (dict "root" $root) }}
+{{- end }}
+
+{{/*
+Restart + readiness tail, shared by the installer and the node-as-CVM pins
+script. NRI does not respawn pre-registered plugins on exit, so a binary,
+config or containerd-registration change reaches the plugin only through a
+containerd restart. Shims survive it.
+
+Caller dict: .root. The script must set restart_needed to 0 or 1 first.
+*/}}
+{{- define "nri-image-policy.restartAndWait" -}}
+{{- $root := .root -}}
+RESTART_COMMAND={{ include "nri-image-policy.restartCommand" $root | quote }}
+restarted_containerd=0
+if [ "$restart_needed" = "1" ]; then
   restarted_containerd=1
   echo "restarting containerd (detached via systemd-run): $RESTART_COMMAND"
   # The restart tears down this pod's own containerd shim. Running it in this
@@ -194,6 +209,34 @@ until health=$(curl --unix-socket "$health_socket" --silent --fail --max-time 2 
   sleep 1
 done
 echo "==> nri-image-policy installer finished; plugin healthy: $health"
+{{- end }}
+
+{{/*
+Pins script for a node-as-CVM (--cvm-mode=node), where the node image bakes the
+plugin binary, its containerd registration and the boot config — floor included,
+whose RKE2 system digests only the image build resolves. This release's CDS pins
+are the one thing that config cannot carry, so the installer patches those two
+keys into it and restarts containerd when they change.
+
+Caller dict: .root.
+*/}}
+{{- define "nri-image-policy.pinsScript" -}}
+{{- $root := .root -}}
+set -eu
+
+echo "==> nri-image-policy pins installer starting"
+
+result=$(/usr/local/bin/c8s nri-image-policy set-cds-pins \
+  --config "/host{{ include "nri-image-policy.hostConfigPath" $root }}" \
+  --cds-measurements {{ join "," $root.Values.cds.measurements | quote }} \
+  --cds-rtmrs {{ join "," $root.Values.cds.rtmrs | quote }})
+echo "CDS pins $result"
+
+restart_needed=0
+if [ "$result" = "updated" ]; then
+  restart_needed=1
+fi
+{{ include "nri-image-policy.restartAndWait" (dict "root" $root) }}
 {{- end }}
 
 {{/*
