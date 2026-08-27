@@ -32,9 +32,9 @@ type AttestRequestBody struct {
 }
 
 // AttestKeyRequestBody is the request body for POST /attest-key. Used by
-// in-cluster c8s components (CDS for its own handoff signer key) that need a
-// CDS-issued EAR bound to a TEE-attested ECDSA public key, without going
-// through the full cert-issuance flow that /attest does.
+// in-cluster c8s components that need a CDS-issued EAR bound to a
+// TEE-attested ECDSA public key, without going through the full
+// cert-issuance flow that /attest does.
 type AttestKeyRequestBody struct {
 	Challenge string              `json:"challenge"`
 	Evidence  AttestationEvidence `json:"evidence"`
@@ -43,11 +43,6 @@ type AttestKeyRequestBody struct {
 	// SHA-384(this key) — the server verifies this binding before issuing
 	// the EAR.
 	PublicKey string `json:"public_key"`
-	// OperatorKeysHash is the canonical hash of the CDS operator public-key
-	// set. When present, it is included in REPORTDATA alongside PublicKey and
-	// Challenge and copied into the issued EAR, so handoff peers can require
-	// the same allowlist-write policy on both replicas.
-	OperatorKeysHash string `json:"operator_keys_hash,omitempty"`
 }
 
 // AttestKeyResponseBody is the response body for POST /attest-key.

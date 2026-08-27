@@ -13,7 +13,7 @@ import (
 // flat flags or a measurements config. In config mode the file travels to the
 // components that match whole images, and the same values are also fanned out
 // flat so the consumers that read a plain digest list — the NRI plugin, the
-// operator's initdata, handoff — keep pinning exactly what they pin today.
+// operator's initdata — keep pinning exactly what they pin today.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
 	if installMeasurementsConfig == "" {
 		digests, err = ratls.ParseHexMeasurementsList(installMeasurements)

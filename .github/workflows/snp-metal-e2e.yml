@@ -124,10 +124,6 @@ jobs:
           AATAG="${{ inputs.aa_ref || 'main' }}"
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
-          # Throwaway operator keypair for the ca-handoff e2e below (handoff requires cds.operatorKeys); the private half never leaves the runner.
-          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/e2e-op.key
-          OPPUB=$(openssl ec -in /tmp/e2e-op.key -pubout 2>/dev/null | sed 's/^/    /')  # the 4 spaces are the operatorKeys block-scalar indent below; keep $OPPUB outdented
-
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
           #    default pins role=cds, so CDS sits Pending forever on a single node.
@@ -152,12 +148,6 @@ jobs:
                                   # resurfaces -> CDS Pending (run 29536583462).
             ratlsPlatform: sev-snp
             measurements: ["RUNTIME_MEASUREMENT"]
-            # ca-handoff e2e in the payload: serve /handoff, gated on the pinned
-            # measurement; the chart requires an operator-key bundle with it.
-            operatorKeys: |-
-          $OPPUB
-            handoff:
-              enabled: true
             # HOLDING ACTION, delete with console delivery (research/guest-transport.md).
             # c8s#385 has CDS derive this from the node list and dropped it here. That
             # cannot work on THIS guest: it boots the June rke2 image, which predates the
@@ -293,7 +283,6 @@ jobs:
             # Under MEAS_ENFORCED the cert is only issued if the node attests the pinned measurement, so this is the enforcement test.
             bash "\$E2E/cw-workload.sh" && { WOK=1; say WORKLOAD_OK; } || FAILED="\$FAILED cw-workload"
             bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
-            bash "\$E2E/ca-handoff.sh" && say E2E_CA_HANDOFF_OK || FAILED="\$FAILED ca-handoff"
             if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
             if [ "\$WOK" != "1" ]; then
               \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'

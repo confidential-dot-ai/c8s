@@ -84,8 +84,7 @@ func TestNewSecretsStoreCarriesEachBound(t *testing.T) {
 	}
 }
 
-// secretsReadyConfig can serve /secrets: sandbox identity is fully configured
-// and no handoff is set.
+// secretsReadyConfig can serve /secrets: sandbox identity is fully configured.
 func secretsReadyConfig() config {
 	return config{
 		ratlsPlatform:              "sev-snp",
@@ -127,8 +126,6 @@ func TestSecretsDisabledWhenItCannotAnswer(t *testing.T) {
 	}{
 		{"no platform", func(*config) {}, nil, "--ratls-platform"},
 		{"no measurements", func(c *config) { c.measurements = nil }, &workloadclaims.DigestsClient{}, "--measurements"},
-		{"handoff peer", func(c *config) { c.handoffPeerURL = "https://cds.example" }, &workloadclaims.DigestsClient{}, "handoff"},
-		{"handoff measurements", func(c *config) { c.handoffMeasurements = []string{"ab"} }, &workloadclaims.DigestsClient{}, "handoff"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := secretsReadyConfig()
@@ -150,17 +147,6 @@ func TestSecretsDisabledWithoutInventoryCIDRs(t *testing.T) {
 	enabled, why := secretsEnabled(secretsReadyConfig(), &workloadclaims.DigestsClient{}, nil)
 	if enabled || !strings.Contains(why, "no node addresses") {
 		t.Fatalf("enabled=%v reason=%q", enabled, why)
-	}
-}
-
-// Handoff is checked before anything else: it is the one case where CDS could
-// answer but must not, so its reason has to be the one an operator sees.
-func TestHandoffReasonWinsOverOtherGaps(t *testing.T) {
-	cfg := secretsReadyConfig()
-	cfg.handoffPeerURL = "https://cds.example"
-	cfg.measurements = nil
-	if _, why := secretsEnabled(cfg, nil, nil); !strings.Contains(why, "handoff") {
-		t.Fatalf("reason = %q, want the handoff refusal", why)
 	}
 }
 

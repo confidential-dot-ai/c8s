@@ -1,4 +1,4 @@
-// Package issuerapi defines the wire types for the CDS signing/handoff HTTP
+// Package issuerapi defines the wire types for the CDS signing HTTP
 // API. Both CDS (server) and its clients import this package to
 // ensure the JSON contract stays in sync.
 package issuerapi
@@ -192,36 +192,4 @@ type SignCSRResponse struct {
 	Certificate PEMData `json:"certificate"`
 	// CACertificate is the PEM-encoded CA bundle for chain building.
 	CACertificate PEMData `json:"ca_certificate"`
-}
-
-// HandoffRequest asks an active CDS replica to wrap its in-memory CA
-// signing material to a recipient-bound X25519 public key.
-type HandoffRequest struct {
-	// EAR is the requester's Entity Attestation Result JWT token.
-	EAR string `json:"ear"`
-	// PublicKey is the recipient's base64url-encoded raw X25519 public key.
-	PublicKey string `json:"public_key"`
-	// Signature is a base64url-encoded ECDSA signature over this request's
-	// handoff public key, made by the private key bound to EAR's tee_public_key
-	// claim.
-	Signature string `json:"signature"`
-}
-
-// HandoffResponse carries the CA payload encrypted to the requester's public
-// key. The issuer EAR lets the requester verify the active replica before
-// accepting the unwrapped signing material.
-type HandoffResponse struct {
-	// IssuerEAR is the active replica's Entity Attestation Result JWT token.
-	IssuerEAR string `json:"issuer_ear"`
-	// PublicKey is the active replica's base64url-encoded ephemeral X25519
-	// public key used for this wrap.
-	PublicKey string `json:"public_key"`
-	// Signature is a base64url-encoded ECDSA signature over this response's
-	// handoff public key, made by the private key bound to IssuerEAR's
-	// tee_public_key claim.
-	Signature string `json:"signature"`
-	// Nonce is the base64url-encoded AES-GCM nonce.
-	Nonce string `json:"nonce"`
-	// Ciphertext is the base64url-encoded wrapped handoff payload.
-	Ciphertext string `json:"ciphertext"`
 }

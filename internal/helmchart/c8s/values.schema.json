@@ -29,17 +29,6 @@
         "dnsSanPatterns": {},
         "earIssuer": {},
         "expectedIssuer": {},
-        "handoff": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {},
-            "peerUrl": {}
-          }
-        },
         "image": {
           "type": [
             "object",

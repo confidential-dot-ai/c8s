@@ -162,7 +162,7 @@ mesh CA key in process memory and persists only the public CA bundle. The
 persisted bundle lets already-issued leaves keep verifying across CDS
 restarts; it does not preserve issuance — a restart generates a new CA key,
 and workloads must re-bootstrap to trust new leaves. See docs/operator.md
-for the singleton-vs-handoff trade-off. Run this chart inside the intended
+for the singleton operational guidance. Run this chart inside the intended
 CVM trust boundary; the supported chart path no longer has external CDS
 URL values.
 

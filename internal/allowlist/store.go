@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -27,9 +26,7 @@ type Store struct {
 	db *sql.DB
 	// gen counts committed mutations in this process. It is the invalidation
 	// signal for a reader that memoizes a whole-document snapshot
-	// (internal/cmds/cds): unlike the version string — an operator-visible ETag
-	// that RestoreSnapshot deliberately moves backwards to the peer's value — it
-	// is monotone, so a restore can never make a stale snapshot look current.
+	// (internal/cmds/cds).
 	gen uint64
 }
 
@@ -158,8 +155,7 @@ func (s *Store) ListAll() (string, map[types.Digest]string, error) {
 }
 
 // LoadAll builds the full allowlist document — floor plus every workload entry —
-// and returns it with the version string (the ETag). It backs GET /allowlist
-// and the handoff snapshot.
+// and returns it with the version string (the ETag). It backs GET /allowlist.
 func (s *Store) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -293,8 +289,7 @@ func (s *Store) queryAll() ([]row, error) {
 }
 
 // commitTx commits a mutating transaction and records the mutation for
-// snapshot-cache invalidation. Every write path goes through it, including
-// RestoreSnapshot, which changes the document without bumping the version.
+// snapshot-cache invalidation. Every write path goes through it.
 // Callers must hold s.mu.
 func (s *Store) commitTx(tx *sql.Tx) error {
 	if err := tx.Commit(); err != nil {
@@ -523,36 +518,6 @@ func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 		return err
 	}
 	if err := bumpVersionTx(tx); err != nil {
-		return err
-	}
-	return s.commitTx(tx)
-}
-
-// RestoreSnapshot atomically replaces floor and workloads with an attested
-// handoff snapshot while preserving the peer's version — state transfer, not an
-// operator mutation, so it does not bump the ETag.
-func (s *Store) RestoreSnapshot(version string, al *pkgallowlist.Allowlist) error {
-	parsedVersion, err := strconv.ParseUint(version, 10, 64)
-	if err != nil || parsedVersion == 0 {
-		return fmt.Errorf("invalid allowlist snapshot version %q", version)
-	}
-	if al == nil {
-		return fmt.Errorf("allowlist snapshot is required")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if err := replaceContentsTx(tx, al); err != nil {
-		return err
-	}
-	if _, err := tx.Exec("UPDATE allowlist_version SET version = ?", version); err != nil {
 		return err
 	}
 	return s.commitTx(tx)

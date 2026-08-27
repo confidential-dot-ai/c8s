@@ -431,57 +431,6 @@ func TestSeedDigestsEmptyIsNoop(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotReplacesStateAndPreservesVersion(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	oldDigest := mustParseDigest(t, digestA)
-	newDigest := mustParseDigest(t, digestB)
-	if err := store.Add(oldDigest, "old/image"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RestoreSnapshot("42", &pkgallowlist.Allowlist{
-		Schema:  pkgallowlist.Schema,
-		Digests: map[string]string{newDigest.String(): "new/image"},
-	}); err != nil {
-		t.Fatalf("RestoreSnapshot: %v", err)
-	}
-
-	version, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != "42" {
-		t.Fatalf("version = %q, want 42", version)
-	}
-	if len(digests) != 1 || digests[newDigest] != "new/image" {
-		t.Fatalf("digests = %#v, want only transferred digest", digests)
-	}
-	if _, ok := digests[oldDigest]; ok {
-		t.Fatal("pre-existing digest survived snapshot restore")
-	}
-}
-
-func TestRestoreSnapshotRejectsInvalidState(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	for _, version := range []string{"", "0", "-1", "not-a-version"} {
-		if err := store.RestoreSnapshot(version, &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: map[string]string{}}); err == nil {
-			t.Fatalf("RestoreSnapshot accepted version %q", version)
-		}
-	}
-	if err := store.RestoreSnapshot("1", nil); err == nil {
-		t.Fatal("RestoreSnapshot accepted nil allowlist")
-	}
-}
-
 func TestPutAndDeleteWorkloadRoundtrip(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
@@ -785,8 +734,7 @@ func TestListAllSkipsCorruptRows(t *testing.T) {
 }
 
 // Generation is the snapshot-cache invalidation signal: it moves on every
-// committed mutation, including a RestoreSnapshot that deliberately moves the
-// version string backwards, and never on a read.
+// committed mutation and never on a read.
 func TestGenerationMovesOnEveryMutation(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
@@ -823,16 +771,6 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 		_, err := store.Delete([]types.Digest{mustParseDigest(t, digestC)})
 		return err
 	})
-	// A restore rewinds the version string; the generation must not rewind with
-	// it, or a cache keyed on the version would serve a stale document.
-	before := store.Generation()
-	if err := store.RestoreSnapshot("1", &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}); err != nil {
-		t.Fatalf("RestoreSnapshot: %v", err)
-	}
-	if store.Generation() <= before {
-		t.Fatal("RestoreSnapshot did not move the generation")
-	}
-
 	// Reads never move it.
 	steady := store.Generation()
 	if _, _, err := store.LoadAll(); err != nil {

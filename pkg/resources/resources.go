@@ -15,10 +15,6 @@ type Resource string
 const (
 	// SignCSR authorises POST /sign-csr.
 	SignCSR Resource = "cds/sign-csr"
-
-	// Handoff authorises POST /handoff (active CA exporting its in-process
-	// state to a joining cds replica).
-	Handoff Resource = "cds/handoff"
 )
 
 // Map matches the on-disk resource-map.json shape:

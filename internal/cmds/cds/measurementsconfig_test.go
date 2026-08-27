@@ -24,7 +24,7 @@ const (
 )
 
 // The gates that can only read the flat list must still see a pin, or a
-// config-mode start would silently unpin /sign-csr, /secrets and handoff.
+// config-mode start would silently unpin /sign-csr and /secrets.
 func TestResolveMeasurementsConfigFillsFlatLists(t *testing.T) {
 	path := writeConfig(t, `{"schema_version":"1","tee":"sev-snp","measurements":[
 		{"name":"a","measurement":"00`+cfgDigestA+`"},

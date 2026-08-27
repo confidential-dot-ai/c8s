@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -179,13 +179,6 @@ test-e2e-cw-label-policy:
 # kube-proxy-free, so VIP traffic never hits the FORWARD guard this asserts.
 test-e2e-mesh-cw-enforcement:
 	./test/e2e/mesh-cw-enforcement.sh
-
-# Live-cluster check that attested CA handoff works end to end: an attested
-# probe pulls the mesh CA over /handoff and proves it is the live trust root.
-# Needs kubectl pointed at a node-as-CVM cluster with cds.handoff.enabled=true.
-# Also runs post-merge in the snp-metal-e2e lane's in-guest payload.
-test-e2e-ca-handoff:
-	./test/e2e/ca-handoff.sh
 
 # Live-cluster check that image admission is fail-closed and that a signed
 # allowlist write opens it. Needs kubectl pointed at a cluster with c8s

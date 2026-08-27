@@ -5,7 +5,7 @@ peer is trusted not because its certificate chains to a CA, but because the
 certificate itself carries hardware attestation evidence proving that the TLS
 key was generated inside a genuine TEE running measured code. Every trust
 decision in c8s that crosses a machine boundary — mesh traffic between pods,
-certificate issuance, allowlist reads, CA handoff — rides on it.
+certificate issuance, allowlist reads — rides on it.
 
 This doc walks the process step by step: what is in an RA-TLS certificate, how
 a handshake verifies it, how the self-signed bootstrap regime upgrades to
@@ -73,12 +73,7 @@ can sign a report, and only code inside the TEE ever holds the private key.
    TDX). The nonce is optional on mesh handshakes (TLS 1.3 already prevents
    replay of the *session*) and mandatory in the CDS issuance flow (it proves
    report freshness). Certificates always use this plain binding
-   (`ReportDataForKey`). One flow folds extra context in — the CDS handoff's
-   operator-key commitment (`ReportDataForKeyWithContext`) — as a
-   domain-separated, length-framed transcript,
-   `SHA-384("c8s-report-data-context-v1\0" ‖ framed(pubkey) ‖ framed(nonce) ‖ framed(context))`
-   with `framed(x) = uint64-BE(len(x)) ‖ x`, so no two distinct field triples
-   share a preimage.
+   (`ReportDataForKey`).
 3. **Evidence.** The component asks its **local attestation-api** (`POST
    /attest`, the Rust service from
    [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs))
@@ -235,12 +230,8 @@ Properties worth noting:
   measurements are pinned.
 - **The mesh CA private key exists only in CDS process memory** (P-384, CN
   `c8s Mesh CA`, 1-year validity, generated at startup). It is never a
-  Kubernetes Secret, never on disk. With `cds.handoff.enabled`, a replacement
-  replica adopts the CA from the surviving peer over the attested `/handoff`
-  flow — the key crosses the wire only as recipient-encrypted ciphertext
-  (X25519-ECDH → HKDF-SHA256 → AES-256-GCM, gated on both sides' EAR
-  measurements and operator-key-policy equality). Without handoff, a
-  (singleton) CDS restart mints a fresh CA and workloads re-bootstrap.
+  Kubernetes Secret, never on disk. A (singleton) CDS restart mints a fresh
+  CA and workloads re-bootstrap.
 - **Issued leaves are capped at 24h** and always carry a SHA-256 digest of
   the issuance evidence as an audit extension. When the CSR itself embeds an
   RA-TLS extension — the mesh client and get-cert both do, bound to the bare
@@ -258,13 +249,11 @@ Properties worth noting:
   runs the same challenge/evidence flow but returns a signed EAR JWT (ES256,
   JWKS at `/.well-known/jwks.json`) for a caller-held key instead of signing
   a CSR. Callers already holding an EAR can have a CSR signed via
-  `POST /sign-csr`. Used by CDS's own handoff machinery.
+  `POST /sign-csr`.
 - **The serving certificate commits only CDS's key and measurement** — not its
   operator-key set, not its allowlist seed. A verifier cross-checks the key set
   CDS *serves* at `/operator-keys`, fetched over that attested serving cert
-  (`c8s cds verify --operator-keys`). The operator-key set is REPORTDATA-bound
-  only on the `/handoff` and `/attest-key` paths
-  (`ReportDataForKeyWithContext`).
+  (`c8s cds verify --operator-keys`).
 
 ### Dual verification and the upgrade path
 
@@ -846,12 +835,12 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 |---|---|---|---|---|---|
 | Self-signed RA-TLS cert (mesh bootstrap / `--cert-mode self-signed`) | ratls-mesh process memory (in the TEE) | itself — trust is the embedded attestation | mesh inbound :15006 and outbound dials (mTLS both ways) | peer's RA-TLS verification: local attestation-api `/verify` + measurement allowlist | pod-to-pod transport before (or without) CDS |
 | CDS RA-TLS serving cert | CDS process memory | itself — attestation bound to CDS's own measurement | CDS API (:8443) | clients pin `--cds-measurements` (get-cert, ratls-mesh, allowlist CLI, nri-image-policy, policy-monitor) | protect the issuance/allowlist API from pod-network impostors |
-| Mesh CA (P-384, CN `c8s Mesh CA`, 1y) | CDS process memory only — never a Secret, never disk | self-signed root, or adopted from a peer via attested `/handoff` (recipient-encrypted) | never served as a leaf; public bundle via `GET /ca` and issuance responses | continuity check: new bundle must be signed by an already-trusted CA | root of trust for the CA-chain fast path |
+| Mesh CA (P-384, CN `c8s Mesh CA`, 1y) | CDS process memory only — never a Secret, never disk | self-signed root | never served as a leaf; public bundle via `GET /ca` and issuance responses | continuity check: new bundle must be signed by an already-trusted CA | root of trust for the CA-chain fast path |
 | CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, key 0600) — inside the pod's TEE in both shapes | mesh CA, after challenge–attest–certify | workload's own listeners; tls-lb upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
 | tls-lb public leaf | tls-lb pod volume (get-cert init container), or an operator-supplied `publicTLS` Secret | mesh CA (default) or external CA | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into SNP REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
 | Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
-| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` and `/handoff` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (CA handoff, EAR-gated signing) |
+| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (EAR-gated signing) |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:
 
@@ -862,9 +851,9 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
   certificates mid-handshake). External clients get a challenge–response
   attestation and a post-quantum over-encrypted channel instead — see
   [c8s-verify-js](https://github.com/confidential-dot-ai/c8s-verify-js).
-- **Attested RKE2 credential release** (`c8s cred-release` /
-  `c8s cds request-handoff`) and the operator/allowlist CLIs are RA-TLS
-  *clients* of the surfaces above rather than new certificate types.
+- **Attested RKE2 credential release** (`c8s cred-release`) and the
+  operator/allowlist CLIs are RA-TLS *clients* of the surfaces above rather
+  than new certificate types.
 
 ## Reading order for the curious
 

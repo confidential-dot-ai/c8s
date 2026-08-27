@@ -53,10 +53,6 @@ func mustJSON(v any) string {
 // signing happens in-process in cds, so these handlers carry no signer
 // dependency.
 func testApp(attestationURL string) http.Handler {
-	return testAppWithOperatorPolicy(attestationURL, "")
-}
-
-func testAppWithOperatorPolicy(attestationURL, operatorKeysHash string) http.Handler {
 	challengeStore := attestation.NewChallengeStore(60 * time.Second)
 
 	earIssuer, err := ear.NewIssuer(testKeyPEM(), "test-issuer", 24*time.Hour)
@@ -68,7 +64,6 @@ func testAppWithOperatorPolicy(attestationURL, operatorKeysHash string) http.Han
 		Challenges:        &challengeStore,
 		AttestationClient: attestationclient.NewClient(attestationURL),
 		EarIssuer:         earIssuer,
-		OperatorKeysHash:  operatorKeysHash,
 	}
 
 	mux := http.NewServeMux()
@@ -135,10 +130,9 @@ func TestAuthenticateRejectsGetMethod(t *testing.T) {
 }
 
 func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
-	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	stub := testattest.New(t)
 
-	app := httptest.NewServer(testAppWithOperatorPolicy(stub.URL, operatorKeysHash))
+	app := httptest.NewServer(testApp(stub.URL))
 	defer app.Close()
 
 	challenge := authenticate(t, app.URL)
@@ -155,8 +149,7 @@ func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
 			Platform: "snp",
 			Evidence: json.RawMessage(`{"quote":"abc"}`),
 		},
-		PublicKey:        base64.StdEncoding.EncodeToString(pubDER),
-		OperatorKeysHash: operatorKeysHash,
+		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
 	})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
@@ -188,9 +181,6 @@ func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
 	wantPubKeyClaim := base64.RawURLEncoding.EncodeToString(pubDER)
 	if got, _ := claims[earclaims.TEEPublicKey].(string); got != wantPubKeyClaim {
 		t.Fatalf("tee_public_key = %q, want %q", got, wantPubKeyClaim)
-	}
-	if got, _ := claims[earclaims.OperatorKeysHash].(string); got != operatorKeysHash {
-		t.Fatalf("operator_keys_hash = %q, want %q", got, operatorKeysHash)
 	}
 }
 
@@ -253,35 +243,6 @@ func TestAttestKeyEmbedsSubmittedEvidence(t *testing.T) {
 	}
 	if string(got.Evidence) != string(submitted.Evidence) {
 		t.Errorf("ear_raw_evidence evidence = %s, want %s", got.Evidence, submitted.Evidence)
-	}
-}
-
-func TestAttestKeyRejectsMismatchedOperatorPolicy(t *testing.T) {
-	const requiredHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	app := httptest.NewServer(testAppWithOperatorPolicy("http://unused", requiredHash))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	pubDER, err := x509.MarshalPKIXPublicKey(generateAttestKeyPubKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge:        challenge,
-		Evidence:         types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		PublicKey:        base64.StdEncoding.EncodeToString(pubDER),
-		OperatorKeysHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Post(app.URL+"/attest-key", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -645,76 +606,63 @@ func TestAttestKeyReportDataMatchNil(t *testing.T) {
 	}
 }
 
-// The verify request must bind this request's public key, challenge, and
-// operator-keys hash: an EAR minted against anything weaker attests a key the
-// caller does not hold or a policy the caller did not commit to.
-func TestAttestKeyBindsChallengeAndOperatorPolicyIntoReportData(t *testing.T) {
-	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	for _, tc := range []struct {
-		name string
-		hash string
-	}{
-		{"with operator policy", operatorKeysHash},
-		{"without operator policy", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stub := testattest.New(t)
-			app := httptest.NewServer(testApp(stub.URL))
-			defer app.Close()
+// The verify request must bind this request's public key and challenge: an
+// EAR minted against anything weaker attests a key the caller does not hold.
+func TestAttestKeyBindsChallengeIntoReportData(t *testing.T) {
+	stub := testattest.New(t)
+	app := httptest.NewServer(testApp(stub.URL))
+	defer app.Close()
 
-			challenge := authenticate(t, app.URL)
-			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			if err != nil {
-				t.Fatalf("generate key: %v", err)
-			}
-			pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-			if err != nil {
-				t.Fatalf("marshal pubkey: %v", err)
-			}
-			body := mustJSON(types.AttestKeyRequestBody{
-				Challenge: challenge,
-				Evidence: types.AttestationEvidence{
-					Platform: "snp",
-					Evidence: json.RawMessage(`{"quote":"abc"}`),
-				},
-				PublicKey:        base64.StdEncoding.EncodeToString(pubDER),
-				OperatorKeysHash: tc.hash,
-			})
+	challenge := authenticate(t, app.URL)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal pubkey: %v", err)
+	}
+	body := mustJSON(types.AttestKeyRequestBody{
+		Challenge: challenge,
+		Evidence: types.AttestationEvidence{
+			Platform: "snp",
+			Evidence: json.RawMessage(`{"quote":"abc"}`),
+		},
+		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
+	})
 
-			resp := postAttestKey(t, app.URL, body)
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				respBody, _ := io.ReadAll(resp.Body)
-				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
-			}
+	resp := postAttestKey(t, app.URL, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
+	}
 
-			reqs := stub.VerifyRequests()
-			if len(reqs) != 1 {
-				t.Fatalf("/verify called %d times, want 1", len(reqs))
-			}
-			if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
-				t.Fatal("/verify carried no expected_report_data")
-			}
-			challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
-			if err != nil {
-				t.Fatalf("decode challenge: %v", err)
-			}
-			want, err := ratls.ReportDataForKeyWithContext(&key.PublicKey, challengeBytes, []byte(tc.hash))
-			if err != nil {
-				t.Fatalf("ReportDataForKeyWithContext: %v", err)
-			}
-			if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
-				t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte binding %x",
-					got, len(got), want[:sha512.Size384])
-			}
-			// The caller's evidence envelope must reach the verifier intact.
-			if reqs[0].Platform != "snp" {
-				t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
-			}
-			if got := string(reqs[0].Evidence); got != `{"quote":"abc"}` {
-				t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"quote":"abc"}`, got)
-			}
-		})
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("/verify called %d times, want 1", len(reqs))
+	}
+	if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
+		t.Fatal("/verify carried no expected_report_data")
+	}
+	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	want, err := ratls.ReportDataForKey(&key.PublicKey, challengeBytes)
+	if err != nil {
+		t.Fatalf("ReportDataForKey: %v", err)
+	}
+	if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
+		t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte binding %x",
+			got, len(got), want[:sha512.Size384])
+	}
+	// The caller's evidence envelope must reach the verifier intact.
+	if reqs[0].Platform != "snp" {
+		t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
+	}
+	if got := string(reqs[0].Evidence); got != `{"quote":"abc"}` {
+		t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"quote":"abc"}`, got)
 	}
 }
 
