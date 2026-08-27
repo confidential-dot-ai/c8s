@@ -70,7 +70,7 @@ jobs:
         env:
           # Provided via the `meat-review` environment (required approval).
           # A missing LLM degrades the advisory to a skip (with a notice), not a red row.
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_MEATTY_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if "$(go env GOPATH)/bin/meat" -json -staged > meat.json 2> meat.err; then
