@@ -6,9 +6,11 @@ on:
   # at the next audit.
   schedule:
     - cron: "17 6 * * 1"
-  push:
+  # No push trigger: a fresh advisory against an unchanged pin would paint
+  # main red without any commit to blame; PRs and the weekly run cover it.
+  pull_request:
     branches: [main]
-    paths: &paths
+    paths:
       - "**.go"
       - "go.mod"
       - "go.sum"
@@ -16,9 +18,6 @@ on:
       - "go.work.sum"
       - "internal/helmchart/c8s/values.yaml"
       - ".github/workflows/grype.yml"
-  pull_request:
-    branches: [main]
-    paths: *paths
 
 permissions:
   contents: read
