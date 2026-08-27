@@ -273,7 +273,8 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 // preflightTLSLBHostPort fails fast when tls-lb's host port is already bound on
 // every node, so the tls-lb pod would sit Pending and `--wait` would time out
 // with an opaque scheduler error. The classic collision is a bundled ingress
-// controller (rke2 ships rke2-ingress-nginx on host 80/443). Reads chart
+// controller (rke2 <= v1.35 ships rke2-ingress-nginx, v1.36+ rke2-traefik,
+// both on host 80/443). Reads chart
 // defaults, so the caller gates it to the default (no -f) path where they apply.
 func preflightTLSLBHostPort(ctx context.Context, chartPath, namespace string) error {
 	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
