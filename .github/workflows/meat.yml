@@ -15,16 +15,31 @@ permissions:
   pull-requests: write
 
 jobs:
+  # Small PRs are quicker to read whole than abridged. Expressions can't add,
+  # so the count lives in its own job, ahead of the environment approval gate.
+  size:
+    name: Measure PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      large: ${{ steps.count.outputs.large }}
+    steps:
+      - id: count
+        env:
+          ADDITIONS: ${{ github.event.pull_request.additions }}
+          DELETIONS: ${{ github.event.pull_request.deletions }}
+        run: echo "large=$(( ADDITIONS + DELETIONS > 700 ))" >> "$GITHUB_OUTPUT"
+
   meat:
     name: Reading diff (advisory)
+    needs: size
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: meat-review
     # Fork PRs can't post comments (read-only token) and must not touch secrets.
-    # Small PRs are quicker to read whole than abridged.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.additions + github.event.pull_request.deletions > 700
+      && needs.size.outputs.large == '1'
     # Advisory: a flaky LLM run never blocks the PR.
     continue-on-error: true
     steps:
