@@ -1028,6 +1028,13 @@ func TestHostPortConflict(t *testing.T) {
 			wantHolder:  "kube-system/rke2-ingress-nginx-abc",
 		},
 		{
+			name:        "single node, traefik holds 443 (rke2 v1.36+ default ingress)",
+			pods:        []corev1.Pod{pod("kube-system", "rke2-traefik-abc", "node-a", 443)},
+			nodes:       []string{"node-a"},
+			wantBlocked: true,
+			wantHolder:  "kube-system/rke2-traefik-abc",
+		},
+		{
 			name: "two nodes, ingress on both",
 			pods: []corev1.Pod{
 				pod("kube-system", "ing-a", "node-a", 443),

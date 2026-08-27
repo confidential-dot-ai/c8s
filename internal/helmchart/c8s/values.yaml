@@ -1131,7 +1131,8 @@ tlsLb:
   # on the node IP (kubelet/CNI portmap DNATs the host port to the in-pod
   # unprivileged listener, so nginx needs no privileged bind). This grabs the
   # node's 443: on clusters whose ingress already owns it (notably RKE2, which
-  # bundles rke2-ingress-nginx on hostPort 80/443) the tls-lb pod stays
+  # bundles an ingress on hostPort 80/443 — rke2-ingress-nginx through v1.35,
+  # rke2-traefik from v1.36) the tls-lb pod stays
   # Pending ("didn't have free ports for the requested pod ports"); set
   # enabled: false there (reach tls-lb through its Service or your own
   # ingress) or point https at a free host port. https is the host port to
