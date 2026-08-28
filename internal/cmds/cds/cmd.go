@@ -1,6 +1,5 @@
 // Package cds implements the Certificate Distribution Service subcommand:
-// the c8s trust root (attestation, EAR issuance, mesh CA, leaf signing,
-// handoff).
+// the c8s trust root (attestation, EAR issuance, mesh CA, leaf signing).
 package cds
 
 import (
@@ -9,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/requesthandoff"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
@@ -76,10 +74,6 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
-	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA and allowlist via /handoff; requires --operator-keys so both replicas attest the same policy (empty = /handoff disabled)")
-	flags.StringVar(&cfg.handoffPeerURL, "handoff-peer-url", "", "https URL of a surviving CDS peer to adopt the mesh CA and allowlist from on startup via attested /handoff (empty = generate a fresh CA). When set, startup fails closed if the peer cannot be reached, denies handoff, or attests a different operator-key policy. Pins the peer with --handoff-measurements.")
-	flags.DurationVar(&cfg.handoffPeerTimeout, "handoff-peer-timeout", 2*time.Minute, "deadline for adopting the CA from --handoff-peer-url before failing startup")
-	flags.StringSliceVar(&cfg.handoffRTMRs, "handoff-rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> the --handoff-peer-url peer's RA-TLS cert must satisfy on the adopt dial; repeatable (the served /handoff endpoint pins its callers through --rtmrs on /attest-key). SNP peers are unaffected. Empty = launch-digest pinning only")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
 	flags.IntVar(&cfg.rateBurst, "rate-burst", 20, "max burst size per source IP")
@@ -118,10 +112,6 @@ func NewCmd() *cobra.Command {
 		DefaultPort: 8443,
 	}))
 
-	// `c8s cds request-handoff` — live-cluster probe for the same /handoff
-	// protocol used by startup adoption.
-	cmd.AddCommand(requesthandoff.NewCmd())
-
 	return cmd
 }
 
@@ -159,10 +149,6 @@ type config struct {
 	allowlistSeed       string
 	inventoryCIDRs      []string
 	operatorKeys        string
-	handoffMeasurements []string
-	handoffRTMRs        []string
-	handoffPeerURL      string
-	handoffPeerTimeout  time.Duration
 	rotationInterval    time.Duration
 	rotationOverlap     time.Duration
 	rotationJitter      float64

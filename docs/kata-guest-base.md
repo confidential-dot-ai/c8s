@@ -113,9 +113,8 @@ in-guest attestation-service at `127.0.0.1:8400`, then signing in the
 same process). The upgrade goroutine swaps ratls-mesh's provider over
 to that CDS-issued leaf in the background.
 
-CDS is a singleton whose in-memory mesh CA key does not survive a restart
-without handoff; `cds.handoff.enabled=true` preserves CA continuity across
-replacement. See [CDS is a singleton until handoff is enabled](operator.md#operational-warning-cds-is-a-singleton-until-handoff-is-enabled)
+CDS is a singleton whose in-memory mesh CA key does not survive a restart.
+See [CDS is a singleton](operator.md#operational-warning-cds-is-a-singleton)
 in [`operator.md`](operator.md) for the mechanism and operational detail.
 
 Because the image-policy allowlist is fully baked into the dm-verity

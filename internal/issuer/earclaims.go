@@ -27,9 +27,6 @@ type EARClaims struct {
 	// TEEPubKey is the base64url-encoded DER PKIX public key from the TEE,
 	// bound to the attestation report via REPORTDATA.
 	TEEPubKey string
-	// OperatorKeysHash is the canonical hash of the operator public-key set
-	// bound into REPORTDATA for a handoff signer EAR.
-	OperatorKeysHash string
 	// VerifierID identifies the verifier that appraised the evidence.
 	VerifierID json.RawMessage
 	// PayloadBodyHash is the optional pbh claim: base64url(SHA-256(body)) that
@@ -56,7 +53,6 @@ func (c *EARClaims) UnmarshalJSON(raw []byte) error {
 		earclaims.Bind(earclaims.ExpiresAt, &c.Expiry),
 		earclaims.Bind(earclaims.EARVerifierID, &c.VerifierID),
 		earclaims.Bind(earclaims.TEEPublicKey, &c.TEEPubKey),
-		earclaims.Bind(earclaims.OperatorKeysHash, &c.OperatorKeysHash),
 		earclaims.Bind(earclaims.PayloadBodyHash, &c.PayloadBodyHash),
 		earclaims.Bind(earclaims.Submods, &rawEvidence),
 		earclaims.Bind(earclaims.Audience, &c.audience),

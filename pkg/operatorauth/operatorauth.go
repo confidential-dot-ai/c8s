@@ -70,11 +70,8 @@ var validMethods = []string{
 }
 
 // KeySetHash returns the lowercase-hex form of KeySetDigest for a non-empty
-// operator public-key set — the string commitment CDS binds into a
-// handoff/attest-key EAR's REPORTDATA (operator_keys_hash claim) to prove both
-// replicas started with the same allowlist-write policy. Empty sets are
-// rejected here (KeySetDigest is used directly where the empty set
-// is a defined value).
+// operator public-key set. Empty sets are rejected here (KeySetDigest is used
+// directly where the empty set is a defined value).
 func KeySetHash(keys []*ecdsa.PublicKey) (string, error) {
 	if len(keys) == 0 {
 		return "", fmt.Errorf("operator key set is empty")
@@ -84,20 +81,6 @@ func KeySetHash(keys []*ecdsa.PublicKey) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(digest), nil
-}
-
-// ValidateKeySetHash accepts only the canonical lowercase hex encoding
-// produced by KeySetHash. Keeping one wire representation avoids two strings
-// naming the same attested policy commitment.
-func ValidateKeySetHash(value string) error {
-	if value == "" {
-		return fmt.Errorf("operator key-set hash is empty")
-	}
-	decoded, err := hex.DecodeString(value)
-	if err != nil || len(decoded) != sha256.Size || strings.ToLower(value) != value {
-		return fmt.Errorf("operator key-set hash must be %d lowercase hex characters", sha256.Size*2)
-	}
-	return nil
 }
 
 // Signer mints operator authorization tokens from an EC private key. Construct

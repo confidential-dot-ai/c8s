@@ -2,7 +2,6 @@ package cds
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,15 +25,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/confidential-dot-ai/c8s/internal/allowlist"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
-
-const testOperatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestCompilePattern(t *testing.T) {
 	t.Run("empty returns nil", func(t *testing.T) {
@@ -90,67 +82,6 @@ func TestCompilePatterns(t *testing.T) {
 			t.Fatal("expected error for invalid regex in list, got nil")
 		}
 	})
-}
-
-func TestBuildHandoffHandler_DisabledWhenNoMeasurements(t *testing.T) {
-	cfg := config{} // handoffMeasurements empty
-	hh, err := buildHandoffHandler(
-		context.Background(),
-		cfg,
-		nil,          // mesh unused on the disabled path
-		nil,          // allowlist store unused on the disabled path
-		"",           // operator policy unused on the disabled path
-		nil,          // keyProvider unused
-		ear.Issuer{}, // earIssuer unused on the disabled path
-		attestationclient.NewClient(""),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error on disabled handoff: %v", err)
-	}
-	if hh != nil {
-		t.Fatalf("expected nil handler when --handoff-measurements unset, got %v", hh)
-	}
-}
-
-func TestBuildHandoffHandler_EnabledReturnsHandler(t *testing.T) {
-	// Cancel the context up front so the background refresh/expiry goroutines
-	// the enabled path spawns return immediately instead of leaking.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
-	if err != nil {
-		t.Fatalf("rotator: %v", err)
-	}
-	ca, err := issuer.NewCA("test ca", time.Hour)
-	if err != nil {
-		t.Fatalf("ca: %v", err)
-	}
-	store, err := allowlist.OpenInMemory()
-	if err != nil {
-		t.Fatalf("allowlist: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	cfg := config{
-		handoffMeasurements: []string{"deadbeef"},
-		earIssuerName:       "cds",
-	}
-	hh, err := buildHandoffHandler(ctx, cfg, ca, &store, testOperatorKeysHash, rotator, earIss, attestationclient.NewClient(""))
-	if err != nil {
-		t.Fatalf("buildHandoffHandler: %v", err)
-	}
-	if hh == nil {
-		t.Fatal("expected a non-nil handoff handler when measurements are set")
-	}
 }
 
 func TestNormalizeHTTPServerConfig_FillsZeroDefaults(t *testing.T) {
@@ -261,7 +192,6 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		rateLimiterMax:             1000,
 		rateLimiterEvictInterval:   time.Minute,
 		rateLimiterIdleTimeout:     5 * time.Minute,
-		handoffPeerTimeout:         2 * time.Minute,
 		ratlsPlatform:              "",
 	}
 }
@@ -279,7 +209,6 @@ func freePort(t *testing.T) int {
 
 func TestRun_ErrorPaths(t *testing.T) {
 	api := newHealthyAttestationApi(t)
-	opKeys := writeOperatorKeysPEM(t)
 
 	for _, tc := range []struct {
 		name    string
@@ -332,16 +261,6 @@ func TestRun_ErrorPaths(t *testing.T) {
 			wantSub: "allowlist database",
 		},
 		{
-			name: "handoff peer unreachable fails closed",
-			mutate: func(_ *testing.T, cfg *config) {
-				cfg.operatorKeys = opKeys
-				cfg.handoffMeasurements = []string{"deadbeef"}
-				cfg.handoffPeerURL = "https://127.0.0.1:1"
-				cfg.handoffPeerTimeout = 100 * time.Millisecond
-			},
-			wantSub: "provision mesh CA",
-		},
-		{
 			name:    "invalid dns san pattern",
 			mutate:  func(_ *testing.T, cfg *config) { cfg.dnsSANPatterns = []string{"("} },
 			wantSub: "--dns-san-pattern",
@@ -378,7 +297,7 @@ func TestRun_ErrorPaths(t *testing.T) {
 	}
 }
 
-// Full plain-HTTP startup: operator keys, measurements, seed, handoff, and key
+// Full plain-HTTP startup: operator keys, measurements, seed, and key
 // rotation all enabled. run() must serve /healthz and exit cleanly on SIGTERM.
 func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	api := newHealthyAttestationApi(t)
@@ -396,7 +315,6 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	cfg.allowedCNPattern = `^.*$`
 	cfg.operatorKeys = writeOperatorKeysPEM(t)
 	cfg.allowlistSeed = seedPath
-	cfg.handoffMeasurements = []string{"deadbeef"}
 	cfg.rotationInterval = time.Hour
 	cfg.rotationOverlap = time.Minute
 	cfg.sanValidation = true
@@ -565,60 +483,6 @@ func TestRun_LogsMeasurementPinning(t *testing.T) {
 	if strings.Contains(string(logged), "--measurements empty") {
 		t.Fatalf("startup log warned about empty measurements despite pinning:\n%s", logged)
 	}
-}
-
-// postAttestKeyPolicyProbe sends an /attest-key request carrying a well-formed
-// but wrong operator-key hash and returns status plus error code.
-func postAttestKeyPolicyProbe(t *testing.T, base string) (int, string) {
-	t.Helper()
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge:        "!!", // fails challenge decoding when the policy gate passes
-		OperatorKeysHash: strings.Repeat("a", 64),
-	})
-	if err != nil {
-		t.Fatalf("marshal attest-key request: %v", err)
-	}
-	resp, err := http.Post(base+"/attest-key", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /attest-key: %v", err)
-	}
-	defer resp.Body.Close()
-	var errResp types.ErrorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-		t.Fatalf("decode /attest-key error: %v", err)
-	}
-	return resp.StatusCode, errResp.Error
-}
-
-// TestRun_AttestKeyOperatorPolicyGate: /attest-key must require the caller to
-// attest the operator-key policy exactly when handoff replicas are configured.
-func TestRun_AttestKeyOperatorPolicyGate(t *testing.T) {
-	t.Run("enforced with handoff measurements", func(t *testing.T) {
-		api := newHealthyAttestationApi(t)
-		cfg := validRunConfig(t, api.URL)
-		cfg.port = freePort(t)
-		cfg.operatorKeys = writeOperatorKeysPEM(t)
-		cfg.handoffMeasurements = []string{"deadbeef"}
-		base := startRunServer(t, cfg)
-
-		status, code := postAttestKeyPolicyProbe(t, base)
-		if status != http.StatusForbidden || code != "operator_policy_mismatch" {
-			t.Fatalf("got %d %q, want 403 operator_policy_mismatch", status, code)
-		}
-	})
-
-	t.Run("not enforced without handoff measurements", func(t *testing.T) {
-		api := newHealthyAttestationApi(t)
-		cfg := validRunConfig(t, api.URL)
-		cfg.port = freePort(t)
-		cfg.operatorKeys = writeOperatorKeysPEM(t)
-		base := startRunServer(t, cfg)
-
-		status, code := postAttestKeyPolicyProbe(t, base)
-		if status != http.StatusBadRequest || code != "invalid_challenge" {
-			t.Fatalf("got %d %q, want 400 invalid_challenge", status, code)
-		}
-	})
 }
 
 // TestRun_AllowlistWriteAcceptsClockSkewedToken: the operator-token verifier

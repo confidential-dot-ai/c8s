@@ -8,7 +8,7 @@ covers and why the kind harness is shaped the way it is.
 | --- | --- | --- | --- |
 | docker-compose | `make test-integration` | Integration | get-cert's RA-TLS flow against mock CDS + mock attestation-api, nginx serving the issued leaf |
 | kind cluster | `make test-integration-cluster` | Integration (cluster) | the full node-mode control plane and workload path (below) |
-| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, CA handoff, allowlist enforcement, control-plane convergence on real TEEs |
+| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, allowlist enforcement, control-plane convergence on real TEEs |
 
 ## The kind harness
 
@@ -75,10 +75,9 @@ a port-forward).
 
 No TEE properties are asserted: hardware verification, measurements that mean
 anything, kata guests, encrypted volumes (volumed needs device-mapper control
-of the node kernel), `get-kubeconfig` (SNP-gated), CDS handoff (two CDS
-replicas), and the `c8s allowlist`/`c8s verify` CLIs (in-process hardware
-verification, above). The metal lanes (snp-metal-e2e, tdx-metal-e2e,
-cvm-e2e) own those.
+of the node kernel), `get-kubeconfig` (SNP-gated), and the
+`c8s allowlist`/`c8s verify` CLIs (in-process hardware verification, above).
+The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those.
 
 ## Running it
 

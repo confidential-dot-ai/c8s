@@ -16,7 +16,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -245,17 +244,6 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}
 }
 
-func TestRouter_HandoffMountedOnlyWhenConfigured(t *testing.T) {
-	// Stub router is built without a HandoffHandler, so /handoff is absent.
-	r := newStubRouter(t)
-	req := httptest.NewRequest(http.MethodPost, "/handoff", bytes.NewReader([]byte(`{}`)))
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("/handoff without --handoff-measurements: got %d, want 404", w.Code)
-	}
-}
-
 func TestRouter_AttestKeyMounted(t *testing.T) {
 	// /attest-key is always mounted; an empty body is rejected as a bad request,
 	// proving the route exists (a missing route would 404, a wrong method 405).
@@ -419,25 +407,6 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		{name: "negative max request size", edit: func(c *config) { c.maxRequestSize = -1 }},
 		{name: "zero readiness interval", edit: func(c *config) { c.readinessInterval = 0 }},
 		{name: "negative readiness interval", edit: func(c *config) { c.readinessInterval = -time.Second }},
-		{name: "handoff measurements without operator keys", edit: func(c *config) {
-			c.handoffMeasurements = []string{"m"}
-		}},
-		{name: "handoff peer url not https", edit: func(c *config) {
-			c.handoffPeerURL = "http://peer:8443"
-			c.handoffMeasurements = []string{"m"}
-			c.operatorKeys = "/operator-keys.pem"
-			c.handoffPeerTimeout = time.Minute
-		}},
-		{name: "handoff peer url without measurements", edit: func(c *config) {
-			c.handoffPeerURL = "https://peer:8443"
-			c.handoffPeerTimeout = time.Minute
-		}},
-		{name: "handoff peer url with non-positive timeout", edit: func(c *config) {
-			c.handoffPeerURL = "https://peer:8443"
-			c.handoffMeasurements = []string{"m"}
-			c.operatorKeys = "/operator-keys.pem"
-			c.handoffPeerTimeout = 0
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := valid
@@ -446,16 +415,6 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 				t.Fatalf("expected error, got nil")
 			}
 		})
-	}
-
-	// A fully-specified peer config is valid.
-	peerValid := valid
-	peerValid.handoffPeerURL = "https://peer:8443"
-	peerValid.handoffMeasurements = []string{"m"}
-	peerValid.operatorKeys = "/operator-keys.pem"
-	peerValid.handoffPeerTimeout = time.Minute
-	if err := validateConfig(peerValid); err != nil {
-		t.Fatalf("valid peer config rejected: %v", err)
 	}
 }
 
@@ -553,81 +512,6 @@ func TestNewRouter_PanicsOnASharedChallengeLimiter(t *testing.T) {
 	}()
 	shared := newTestRateLimiter(t)
 	newRouter(dependencies{RateLimiter: shared, ChallengeLimiter: shared, MaxRequestSize: 1})
-}
-
-// When a HandoffHandler is wired, /handoff is mounted and reachable (a malformed
-// body proves the route exists rather than 404/405).
-func TestRouter_HandoffMountedWhenConfigured(t *testing.T) {
-	r := newStubRouterWithHandoff(t)
-	req := httptest.NewRequest(http.MethodPost, "/handoff", bytes.NewReader([]byte(`{}`)))
-	req.RemoteAddr = "10.0.0.1:1234"
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("/handoff should be mounted: got %d", w.Code)
-	}
-}
-
-func newStubRouterWithHandoff(t *testing.T) http.Handler {
-	t.Helper()
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
-	store, err := allowlist.OpenInMemory()
-	if err != nil {
-		t.Fatalf("allowlist: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ca, err := issuer.NewCA("test ca", time.Hour)
-	if err != nil {
-		t.Fatalf("ca: %v", err)
-	}
-	cs := attestation.NewChallengeStore(time.Minute)
-
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
-	if err != nil {
-		t.Fatalf("rotator: %v", err)
-	}
-	boot, err := issuer.NewLocalHandoffBootstrap(attestationclient.NewClient(""), earIss, testOperatorKeysHash)
-	if err != nil {
-		t.Fatalf("handoff bootstrap: %v", err)
-	}
-	hh, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
-		KeyProvider:         rotator,
-		ExpectedIssuer:      "cds",
-		AllowedMeasurements: map[string]bool{"deadbeef": true},
-		OperatorKeysHash:    testOperatorKeysHash,
-		Signer:              boot.Signer(),
-		EARSource:           boot.EARSource(),
-		Snapshot: func() (issuer.CASnapshot, bool) {
-			version, digests, err := store.ListAll()
-			if err != nil {
-				return issuer.CASnapshot{}, false
-			}
-			return issuer.CASnapshot{Cert: ca.Cert, Key: ca.Key, AllowlistVersion: version, Allowlist: digests}, true
-		},
-	})
-	if err != nil {
-		t.Fatalf("handoff handler: %v", err)
-	}
-
-	deps := dependencies{
-		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
-		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
-		HandoffHandler:   hh,
-		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
-		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
-		RateLimiter:      newTestRateLimiter(t),
-		ChallengeLimiter: newTestRateLimiter(t),
-		MaxRequestSize:   65536,
-	}
-	return newRouter(deps)
 }
 
 // /measurements must report what this CDS enforces, and must report an empty

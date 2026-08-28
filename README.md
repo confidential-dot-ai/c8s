@@ -537,12 +537,8 @@ than let you discover them:
   `ratlsMesh.measurements` are set, the mesh accepts any attested peer. Fine
   for demos, mandatory homework for production.
 
-- **CDS is a singleton by default.** The mesh CA key lives only in CDS process
-  memory; a restart mints a new CA and workloads re-bootstrap. Attested
-  handoff to a successor replica exists behind `cds.handoff.enabled` —
-  one active CDS at a time, not active/active — and CDS does not serve
-  `/secrets` while handoff is configured, so CA continuity and secret release
-  are mutually exclusive today (see [docs/secrets.md](docs/secrets.md)).
+- **CDS is a singleton.** The mesh CA key lives only in CDS process
+  memory; a restart mints a new CA and workloads re-bootstrap.
 
 - **Secrets and volume keys live only in CDS memory.** There is no persistent
   or external key store: a CDS restart destroys every secret and volume key,

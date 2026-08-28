@@ -15,12 +15,6 @@ callback (`--sandbox-inventory-cidr`, or the live node list it derives when that
 is unset). Miss any and CDS logs a warning naming the one it is missing, and
 does not serve `/secrets`.
 
-It also does not serve `/secrets` when **handoff** is configured
-(`--handoff-peer-url` / `--handoff-measurements`). A handoff roll puts two CDS
-pods behind the Service at once, and the surge replica serves an empty store: a
-workload landing on it mints a value diverging from the one its siblings already
-hold, with no error anywhere. Refusing to serve is better than that divergence.
-
 Sizing: `--secrets-max-paths-per-workload` (default 64, chart
 `cds.secretsMaxPathsPerWorkload`) bounds the paths one allowlist entry may hold,
 and is checked before the ceiling. A workload, for this bound, is one allowlist

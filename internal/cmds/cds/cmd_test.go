@@ -30,7 +30,6 @@ func TestNewCmdDurationFlagDefaults(t *testing.T) {
 		{"idle-timeout", "20s"},
 		{"readiness-interval", "10s"},
 		{"min-ca-validity", "1h0m0s"},
-		{"handoff-peer-timeout", "2m0s"},
 		{"rate-limiter-evict-interval", "1m0s"},
 		{"rate-limiter-idle-timeout", "5m0s"},
 		{"token-signer-rotation-interval", "720h0m0s"},
