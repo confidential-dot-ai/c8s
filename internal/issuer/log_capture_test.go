@@ -47,14 +47,3 @@ func (h *captureHandler) find(msg string) (capturedRecord, bool) {
 	}
 	return capturedRecord{}, false
 }
-
-func (h *captureHandler) anyAtLevel(level slog.Level) (capturedRecord, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, r := range h.records {
-		if r.level >= level {
-			return r, true
-		}
-	}
-	return capturedRecord{}, false
-}
