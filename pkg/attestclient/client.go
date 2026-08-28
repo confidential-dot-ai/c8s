@@ -295,6 +295,13 @@ func (c Client) AttestContext(ctx context.Context, req attestRequest) (string, e
 	return string(body), nil
 }
 
+// MeshCA fetches the mesh CA bundle CDS currently serves at /ca.
+// Authenticity comes from the RA-TLS transport the client was constructed
+// over, the same channel that authenticates the CA trailing an issued chain.
+func (c Client) MeshCA(ctx context.Context) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/ca", nil)
+}
+
 // Healthz checks liveness of the CDS service.
 func (c Client) Healthz() (bool, error) {
 	return c.ok("/healthz")

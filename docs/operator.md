@@ -290,6 +290,15 @@ trusts them, and the mesh degrades as old leaves expire. Recovery is to
 restart every workload so its get-cert init container re-runs the CDS
 provisioning flow.
 
+The tls-lb discovery endpoints (`/.well-known/mesh-ca.pem`,
+`/.well-known/cds-cert.pem`, `/v1/discovery`) track the new CA without a
+tls-lb restart: the c8s-cert sidecar polls CDS's `/ca` every
+`tlsLb.certProvisioning.caWatchInterval` (default 1m) over the same
+RA-TLS-verified channel it obtains certificates on, and re-issues its leaf —
+rewriting the served CA bundle and discovery document — as soon as CDS holds
+a CA the served bundle is missing. External clients that pinned the old CA
+must still re-fetch it from the discovery endpoint.
+
 There is **no scheduled in-process CA rotation today** — no cds flag or
 loop drives it, so every CA fingerprint change is a restart-shaped
 re-bootstrap. (An unwired rotator exists at `internal/issuer.CARotator`:

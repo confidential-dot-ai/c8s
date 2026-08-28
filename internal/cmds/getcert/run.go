@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,6 +64,7 @@ type config struct {
 	ContinueOnInitialError bool
 	ReloadWatchPaths       []string
 	ReloadWatchInterval    time.Duration
+	CAWatchInterval        time.Duration
 	DiscoveryOutPath       string
 	DiscoveryCDSCertURL    string
 	DiscoveryMeshCAURL     string
@@ -85,6 +87,7 @@ var procRoot = "/proc"
 
 var (
 	errInvalidDiscoveryPublicTLSMode             = errors.New("invalid discovery public TLS mode")
+	errInvalidCAWatchInterval                    = errors.New("invalid CA watch interval")
 	errInvalidReloadWatchInterval                = errors.New("invalid reload watch interval")
 	errInvalidUnnamedRenewInterval               = errors.New("invalid unnamed renew interval")
 	errReloadWatchRequiresRenewInterval          = errors.New("reload watch requires renew interval")
@@ -136,6 +139,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.BoolVar(&cfg.ContinueOnInitialError, "continue-on-initial-error", false, "In renewal mode, keep running when the first certificate request fails, retrying on a capped backoff until a certificate is issued")
 	flags.StringArrayVar(&cfg.ReloadWatchPaths, "reload-watch", nil, "File path to poll for changes and reload nginx when it changes (repeatable)")
 	flags.DurationVar(&cfg.ReloadWatchInterval, "reload-watch-interval", time.Minute, "Poll interval for --reload-watch paths")
+	flags.DurationVar(&cfg.CAWatchInterval, "ca-watch-interval", 0, "Poll CDS's /ca at this interval and renew immediately when the bundle at --ca-out no longer contains the CA CDS currently holds. A CDS restart regenerates the mesh CA in-memory, so without this the pod serves the dead CA until the next scheduled renewal (0 = disabled; requires --ca-out and --renew-interval)")
 	flags.StringVar(&cfg.DiscoveryOutPath, "discovery-out", "", "Path to write JSON discovery metadata for the issued certificate and attestation evidence")
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
@@ -246,6 +250,10 @@ func run(cfg config) error {
 // --renew-interval, and — while the installed leaf is unnamed and
 // --workload-claims is on — off the fast unnamed interval, so the pod's first
 // post-completion renewal picks up its matched-workload stamp promptly.
+// With --ca-watch-interval it also polls CDS's /ca and renews immediately when
+// the served CA bundle no longer contains the CA CDS holds, so a CDS restart
+// (which regenerates the mesh CA in-memory) does not leave the discovery
+// endpoints serving a dead CA until the next scheduled renewal.
 //
 // Until the first certificate lands the cadence is the initial-retry backoff
 // instead: c8s-cert-wait holds the workload on that certificate
@@ -284,11 +292,35 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 		slog.Info("watching files for nginx reload", "paths", cfg.ReloadWatchPaths, "interval", cfg.ReloadWatchInterval)
 	}
 
+	var caWatchC <-chan time.Time
+	if cfg.CAWatchInterval > 0 {
+		caTicker := time.NewTicker(cfg.CAWatchInterval)
+		defer caTicker.Stop()
+		caWatchC = caTicker.C
+		slog.Info("watching cds mesh CA for changes", "interval", cfg.CAWatchInterval, "ca_path", cfg.CAOutPath)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("shutting down cert renewer")
 			return nil
+		case <-caWatchC:
+			// While no certificate is installed the initial-retry backoff is
+			// already re-asking as fast as allowed.
+			if !haveCert {
+				continue
+			}
+			stale, err := servedCAStale(ctx, client, cfg.CAOutPath)
+			if err != nil {
+				slog.Warn("mesh CA check failed", "error", err)
+				continue
+			}
+			if !stale {
+				continue
+			}
+			slog.Info("cds holds a mesh CA the served bundle is missing, renewing now")
+			renewTimer.Reset(0)
 		case <-renewTimer.C:
 			renewed, err := obtainCertFn(ctx, cfg, client)
 			if err != nil && !haveCert {
@@ -645,6 +677,17 @@ func validateConfig(cfg config) error {
 			return fmt.Errorf("%w: --renew-interval must be greater than 0 when --reload-watch is set", errReloadWatchRequiresRenewInterval)
 		}
 	}
+	if cfg.CAWatchInterval < 0 {
+		return fmt.Errorf("%w: --ca-watch-interval must be 0 (disabled) or positive, got %v", errInvalidCAWatchInterval, cfg.CAWatchInterval)
+	}
+	if cfg.CAWatchInterval > 0 {
+		if cfg.CAOutPath == "" {
+			return fmt.Errorf("%w: --ca-watch-interval requires --ca-out, the served bundle it compares against", errInvalidCAWatchInterval)
+		}
+		if cfg.RenewInterval <= 0 {
+			return fmt.Errorf("%w: --ca-watch-interval requires --renew-interval, the loop that re-issues on a CA change", errInvalidCAWatchInterval)
+		}
+	}
 	// A fast poll is a full attestation round-trip, so a sub-second value is
 	// never what an operator means; 0 is the documented "disabled".
 	if cfg.UnnamedRenewInterval != 0 && cfg.UnnamedRenewInterval < time.Second {
@@ -834,6 +877,37 @@ func caBundleFromChain(chainPEM []byte) ([]byte, error) {
 		return nil, fmt.Errorf("no CA certificate found after the leaf in the issued chain")
 	}
 	return out, nil
+}
+
+// servedCAStale reports whether the bundle written at caOutPath is missing a
+// certificate CDS currently serves at /ca. The fetch rides the same
+// RA-TLS-verified client the issuance flow uses, so the refresh trusts CDS for
+// exactly the reason the initial fetch did. A stale bundle means every client
+// following the documented recovery recipe — re-fetch the mesh CA from the
+// discovery endpoint — pins a CA nothing signs with anymore.
+func servedCAStale(ctx context.Context, client attestclient.Client, caOutPath string) (bool, error) {
+	currentPEM, err := client.MeshCA(ctx)
+	if err != nil {
+		return false, fmt.Errorf("fetch current mesh CA from cds: %w", err)
+	}
+	current, err := certutil.ParsePEMCertificates(currentPEM)
+	if err != nil {
+		return false, fmt.Errorf("parse mesh CA from cds: %w", err)
+	}
+	servedPEM, err := os.ReadFile(caOutPath)
+	if err != nil {
+		return false, fmt.Errorf("read served mesh CA: %w", err)
+	}
+	served, err := certutil.ParsePEMCertificates(servedPEM)
+	if err != nil {
+		return false, fmt.Errorf("parse served mesh CA: %w", err)
+	}
+	for _, cur := range current {
+		if !slices.ContainsFunc(served, cur.Equal) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // writeOutputs writes the certificate, key, and optional discovery metadata.

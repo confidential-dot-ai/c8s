@@ -359,6 +359,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "caWatchInterval": {},
             "renewInterval": {},
             "verbose": {}
           }

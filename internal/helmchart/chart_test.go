@@ -190,6 +190,11 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		"--renew-interval=1h",
 		"--reload-nginx=true",
 		"--continue-on-initial-error",
+		// The CA watch keeps the served mesh CA tracking the live CDS CA: a
+		// CDS restart regenerates the mesh CA in-memory, and without the watch
+		// the /.well-known/mesh-ca.pem discovery endpoint serves the dead CA
+		// until the next scheduled renewal.
+		"--ca-watch-interval=1m",
 	)
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("c8s-cert restartPolicy = %v, want Always (single long-lived sidecar so its pidns anchors shareProcessNamespace under kata)", cert.RestartPolicy)
@@ -2651,6 +2656,7 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",
+		"--set-string", "tlsLb.certProvisioning.caWatchInterval=2m",
 		"--set", "tlsLb.certProvisioning.verbose=true",
 		"--set", "tlsLb.nginx.runAsUser=201",
 		"--set", "tlsLb.nginx.runAsGroup=202",
@@ -2660,7 +2666,7 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
-	assertContainerArgs(t, cert, "--verbose", "--renew-interval=30m")
+	assertContainerArgs(t, cert, "--verbose", "--renew-interval=30m", "--ca-watch-interval=2m")
 	if got := cert.SecurityContext.RunAsUser; got == nil || *got != 201 {
 		t.Fatalf("c8s-cert runAsUser = %v, want 201", got)
 	}

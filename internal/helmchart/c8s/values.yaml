@@ -1314,6 +1314,13 @@ tlsLb:
     # -- How often the c8s-cert sidecar renews the TLS certificate and SIGHUPs
     #    nginx. Must be shorter than the cert TTL issued by CDS.
     renewInterval: "1h"
+    # -- How often the c8s-cert sidecar checks that the mesh CA it serves at
+    #    the discovery endpoints still matches the CA CDS currently holds,
+    #    renewing immediately when it does not. A CDS restart regenerates the
+    #    mesh CA in-memory, so without this the pod serves the dead CA (and a
+    #    discovery document chained to it) until the next scheduled renewal.
+    #    "0" disables the check.
+    caWatchInterval: "1m"
 
   # -- Attestation + over-encryption sidecar (the c8s-verify protocol). When
   # enabled, an in-pod `c8s cds-attest` container serves the *dynamic*
