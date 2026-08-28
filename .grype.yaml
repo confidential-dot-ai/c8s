@@ -2,15 +2,77 @@
 # Each entry names one CVE and the packages it applies to; remove an entry as
 # soon as a fixed package is published upstream.
 ignore:
-  # OpenSSL QUIC server listener DoS. tls-lb's nginx terminates TLS over TCP
-  # (`listen ... ssl`, no UDP port, no http_v3 module), so the QUIC listener
-  # this reaches is never instantiated. Unfixed in every Alpine branch through
-  # edge, so there is no image to move to.
+  # OpenSSL 3.5.7-r0 in the tls-lb nginx image. All of these are fixed in
+  # Alpine's openssl 3.5.8-r0; nginxinc rebuilds nginx-unprivileged roughly
+  # monthly and its newest build predates that package, so drop this whole
+  # block at the first rebuild that carries 3.5.8-r0.
+  #
+  # Each one lives in QUIC, DTLS, CMS, CMP or RFC7250 raw-public-key code.
+  # tls-lb's server block declares a single listener, `listen <httpsPort> ssl`
+  # (templates/tls-lb-configmap.yaml), so nginx binds TCP only: it never opens
+  # a QUIC connection, speaks DTLS, parses a CMS or CMP message, or negotiates
+  # a certificate type other than X.509.
+  #
+  # QUIC listener DoS
   - vulnerability: CVE-2026-14456
     package:
       name: libcrypto3
       type: apk
   - vulnerability: CVE-2026-14456
+    package:
+      name: libssl3
+      type: apk
+  # Null dereference selecting a signature algorithm for a raw public key
+  - vulnerability: CVE-2026-14457
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-14457
+    package:
+      name: libssl3
+      type: apk
+  # Double free processing a QUIC INITIAL packet
+  - vulnerability: CVE-2026-18798
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-18798
+    package:
+      name: libssl3
+      type: apk
+  # Unbounded buffering of DTLS records for future epochs
+  - vulnerability: CVE-2026-54874
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-54874
+    package:
+      name: libssl3
+      type: apk
+  # Heap buffer overflow in CMS key unwrapping
+  - vulnerability: CVE-2026-63072
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-63072
+    package:
+      name: libssl3
+      type: apk
+  # Memory exhaustion retaining QUIC ACK-only packets
+  - vulnerability: CVE-2026-63075
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-63075
+    package:
+      name: libssl3
+      type: apk
+  # Invalid dereference in a CMP server handling a crafted protectionAlg
+  - vulnerability: CVE-2026-63076
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-63076
     package:
       name: libssl3
       type: apk
