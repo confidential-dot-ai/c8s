@@ -18,6 +18,7 @@ on:
       - "go.work.sum"
       - "internal/helmchart/c8s/values.yaml"
       - ".github/workflows/grype.yml"
+      - ".grype.yaml"
 
 permissions:
   contents: read
