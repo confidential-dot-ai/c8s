@@ -5963,7 +5963,7 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
 		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
 	}
-	const nginxD = "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
+	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
 	if _, ok := seed.Digests[nginxD]; !ok {
 		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
 	}
