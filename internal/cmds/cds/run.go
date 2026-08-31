@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -415,7 +417,26 @@ func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {
 		WriteTimeout:      cfg.writeTimeout,
 		IdleTimeout:       cfg.idleTimeout,
 		MaxHeaderBytes:    cfg.maxHeaderBytes,
+		ErrorLog:          log.New(serverLogFilter{}, "", 0),
 	}
+}
+
+// serverLogFilter routes net/http server error lines to slog. The kubelet's
+// tcpSocket probes (the only probe shape a mutual RA-TLS port supports) open
+// the port and drop it every few seconds, which net/http reports as a TLS
+// handshake EOF or reset — demote exactly those to debug so real handshake
+// faults keep a visible log level.
+type serverLogFilter struct{}
+
+func (serverLogFilter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if strings.Contains(msg, "TLS handshake error") &&
+		(strings.HasSuffix(msg, ": EOF") || strings.HasSuffix(msg, ": connection reset by peer")) {
+		slog.Debug(msg)
+	} else {
+		slog.Info(msg)
+	}
+	return len(p), nil
 }
 
 func normalizeHTTPServerConfig(cfg config) config {

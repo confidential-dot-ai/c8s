@@ -681,6 +681,11 @@ Poll timing never changes the match decision.
 
 Every delay is also capped at half the installed leaf's remaining lifetime, and
 a failed renewal retries on a short backoff rather than after a full interval.
+Once the installed leaf has **expired** and renewals still fail, get-cert exits
+instead of retrying forever: as a native sidecar it restarts with fresh client
+state and re-runs the full issuance. A locked guest denies exec probes, so a
+process that keeps running while serving a dead certificate would otherwise
+never be restarted by anything.
 The named-leaf TTL is the shortest CDS issues and `certutil` does not backdate
 `NotBefore`, so a renewal interval alone — the chart's `renewInterval` — is not
 a safe schedule: it must stay strictly below `cds.namedCertTTL`, and the

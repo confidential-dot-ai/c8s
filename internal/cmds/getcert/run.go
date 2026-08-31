@@ -304,6 +304,16 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				// close to expiry. Sleeping out --renew-interval here would
 				// leave the workload serving a dead certificate.
 				failures++
+				if leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter) {
+					// The installed leaf is dead and renewal from this process
+					// keeps failing, so retrying in-process serves an expired
+					// certificate indefinitely. Exit instead: as a native
+					// sidecar (restartPolicy: Always) the container restarts
+					// with fresh client state and re-runs the full issuance —
+					// the recovery a locked guest cannot get from an exec
+					// liveness probe (ExecProcessRequest is policy-denied).
+					return fmt.Errorf("installed certificate expired at %s and %d consecutive renewals failed (last: %w); exiting for a clean restart", leaf.NotAfter.Format(time.RFC3339), failures, err)
+				}
 				retry := renewalRetryInterval(cfg, leaf, failures)
 				slog.Error("certificate renewal failed, retrying", "error", err, "retry_in", retry, "failures", failures)
 				renewTimer.Reset(retry)
@@ -350,6 +360,13 @@ const (
 	// maxInitialRetryInterval caps the backoff between attempts at the first
 	// certificate.
 	maxInitialRetryInterval = time.Minute
+
+	// expiredExitFailures is how many consecutive renewal failures the loop
+	// tolerates once the installed leaf has expired before exiting for a clean
+	// sidecar restart. Small, because every request in a renewal attempt is
+	// individually timed out — a failing attempt resolves in seconds — and an
+	// expired leaf means clients are already failing closed against this pod.
+	expiredExitFailures = 3
 
 	// unnamedBackoffAfter is how many consecutive unnamed renewals run at the
 	// fast poll before it doubles toward --renew-interval. A pod can be
