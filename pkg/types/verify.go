@@ -92,6 +92,16 @@ type HandshakeResponse struct {
 	SessionID string `json:"session_id"`
 }
 
+// HeaderField is one HTTP header field in a tunnel envelope, on the wire a
+// two-element CBOR array [name, value]. A pair list preserves duplicate fields
+// (Set-Cookie) and field order, which a header map cannot. CBOR only — the
+// envelope never rides as JSON.
+type HeaderField struct {
+	_     struct{} `cbor:",toarray"`
+	Name  string
+	Value string
+}
+
 // TunnelRequest is the plaintext application request carried inside an
 // over-encrypted record sent to POST /.well-known/c8s/tunnel. The whole request
 // — method, path, headers, and body — is sealed, so a TLS-terminating proxy in
@@ -99,15 +109,15 @@ type HandshakeResponse struct {
 // reconstructed request as plaintext to the backend (the cluster raTLS mesh wraps
 // that hop).
 type TunnelRequest struct {
-	Method  string            `cbor:"method" json:"method"`
-	Path    string            `cbor:"path" json:"path"`
-	Headers map[string]string `cbor:"headers,omitempty" json:"headers,omitempty"`
-	Body    []byte            `cbor:"body,omitempty" json:"body,omitempty"` // raw body, CBOR byte string
+	Method  string        `cbor:"method"`
+	Path    string        `cbor:"path"`
+	Headers []HeaderField `cbor:"headers,omitempty"`
+	Body    []byte        `cbor:"body,omitempty"` // raw body, CBOR byte string
 }
 
 // TunnelResponse is the backend response, sealed back to the client.
 type TunnelResponse struct {
-	Status  int               `cbor:"status" json:"status"`
-	Headers map[string]string `cbor:"headers,omitempty" json:"headers,omitempty"`
-	Body    []byte            `cbor:"body,omitempty" json:"body,omitempty"` // raw body, CBOR byte string
+	Status  int           `cbor:"status"`
+	Headers []HeaderField `cbor:"headers,omitempty"`
+	Body    []byte        `cbor:"body,omitempty"` // raw body, CBOR byte string
 }

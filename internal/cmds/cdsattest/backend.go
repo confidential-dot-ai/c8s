@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +49,7 @@ func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.Tu
 		len(req.Body), req.Method, req.Path, string(req.Body))
 	return types.TunnelResponse{
 		Status:  http.StatusOK,
-		Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"},
+		Headers: []types.HeaderField{{Name: "Content-Type", Value: "text/plain; charset=utf-8"}},
 		Body:    []byte(msg),
 	}, nil
 }
@@ -224,11 +225,11 @@ func (b *HTTPBackend) Forward(ctx context.Context, env types.TunnelRequest) (typ
 	if err != nil {
 		return types.TunnelResponse{}, fmt.Errorf("build upstream request: %w", err)
 	}
-	for k, v := range env.Headers {
-		if hopByHopHeaders[strings.ToLower(k)] {
+	for _, f := range env.Headers {
+		if hopByHopHeaders[strings.ToLower(f.Name)] {
 			continue
 		}
-		req.Header.Set(k, v)
+		req.Header.Add(f.Name, f.Value)
 	}
 
 	resp, err := b.client.Do(req)
@@ -245,16 +246,30 @@ func (b *HTTPBackend) Forward(ctx context.Context, env types.TunnelRequest) (typ
 		return types.TunnelResponse{}, fmt.Errorf("upstream response exceeds %d byte limit", maxUpstreamResponseBytes)
 	}
 
-	headers := make(map[string]string, len(resp.Header))
-	for k := range resp.Header {
-		if hopByHopHeaders[strings.ToLower(k)] {
-			continue
-		}
-		headers[k] = resp.Header.Get(k)
-	}
 	return types.TunnelResponse{
 		Status:  resp.StatusCode,
-		Headers: headers,
+		Headers: responseHeaderFields(resp.Header),
 		Body:    respBody,
 	}, nil
+}
+
+// responseHeaderFields flattens the upstream header map into ordered pairs:
+// names sorted (the map holds no order to preserve), values of one name in
+// their upstream order, hop-by-hop fields dropped.
+func responseHeaderFields(h http.Header) []types.HeaderField {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		if hopByHopHeaders[strings.ToLower(name)] {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var fields []types.HeaderField
+	for _, name := range names {
+		for _, value := range h[name] {
+			fields = append(fields, types.HeaderField{Name: name, Value: value})
+		}
+	}
+	return fields
 }
