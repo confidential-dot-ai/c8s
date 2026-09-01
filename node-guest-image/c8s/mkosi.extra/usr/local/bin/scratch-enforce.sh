@@ -1,12 +1,8 @@
 #!/bin/sh
 # scratch-enforce: refuse to bring up a node CVM that booted without its
-# confai-scratch write-storage disk.
-#
-# The confos initrd tolerates a missing disk and falls back to a 2G tmpfs
-# rootfs upper: the node comes up Ready, then wedges once rke2 fills it — a
-# flapping node instead of a failed boot. The c8s node needs the disk, so
-# the unit running this script fails the boot instead (FailureAction powers
-# the VM off; rke2 Requires= it and never starts).
+# confai-scratch write-storage disk — the initrd's silent fallback is a 2G
+# tmpfs rootfs upper the node later wedges on (see ../README.md "Launch
+# requirements"). The unit running this fails the boot instead.
 #
 # The gate is what the initrd actually did, not disk presence: on success
 # the rootfs upper sits on a plain-mode dm mapping named "scratch". Sysfs,

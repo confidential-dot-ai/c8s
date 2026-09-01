@@ -3,13 +3,14 @@
 # that fallback; the c8s node must not (rke2 wedges when the tmpfs fills).
 [Unit]
 Description=Refuse to start the node unless the rootfs upper is on the scratch disk
+# No After=: the dm mapping exists from the initrd or not at all, so the
+# one sysfs scan needs no other unit up.
 Before=rke2-server.service rke2-agent.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/scratch-enforce.sh
-# One sysfs scan; the dm device exists since the initrd or not at all.
 TimeoutStartSec=30
 # Fail closed: power off rather than leave a node that registers Ready and
 # then wedges — a powered-off node does not flap.

@@ -43,15 +43,17 @@ Layout:
 ## Launch requirements
 
 Every node VM needs a write-storage disk with virtio-blk serial
-`confai-scratch`, at least 64G. The initrd encrypts it and uses it as the
-rootfs upper. Without it, the guest boots anyway on a 2G RAM tmpfs, comes
-up Ready, and wedges once RKE2 fills it — that's a flapping node, not a
-boot error. `scratch-enforce.service` closes that hole: it powers the VM
-off before rke2 starts when the initrd fell back to tmpfs. The serial is what matters: labels don't work, and the disk
-must be one of `/dev/vdb`–`vdd`. In KubeVirt that's `disk: {bus: virtio}`
-plus `serial: confai-scratch` (see the vendored `tdx-metal-e2e.yml`); with
-confidential-metal, pass `--datadisk-gi` — its default is 0, meaning no
-disk.
+`confai-scratch`, at least 64G. The serial is what matters: labels don't
+work, and the disk must be one of `/dev/vdb`–`vdd`. In KubeVirt that's
+`disk: {bus: virtio}` plus `serial: confai-scratch` (see the vendored
+`tdx-metal-e2e.yml`); confidential-metal attaches one by default
+(`--datadisk-gi`, 0 opts out).
+
+The initrd encrypts the disk and mounts it as the rootfs upper, via a dm
+mapping named `scratch`. Without the disk it falls back to a 2G RAM tmpfs:
+the guest comes up Ready, then wedges once RKE2 fills it — a flapping
+node, not a boot error. `scratch-enforce.service` closes that hole by
+checking for the dm mapping and powering the VM off before rke2 starts.
 
 A second disk with serial `confai-containerd` is recommended so the image
 cache stays off guest RAM. `confai-models`, `opkeydata`, and `joindata`

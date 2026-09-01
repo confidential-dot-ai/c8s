@@ -81,16 +81,19 @@ fi
 # tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
 # tripwire are a c8s-local patch until the source takes the same
 # edit — a re-vendor would silently delete them.
-for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert'; do
+# 'serial: confai-scratch' rides along: without it the initrd ignores the
+# e2e VM's write-storage disk and scratch-enforce powers the VM off.
+for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch'; do
   if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
-    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped the cidata bait/tripwire — re-apply the c8s-local patch"
+    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
     exit 1
   fi
 done
-# The e2e VM must keep the serial the initrd matches its write-storage disk
-# on; scratch-enforce would power the VM off without it.
-if ! grep -qF 'serial: confai-scratch' .github/workflows/tdx-metal-e2e.yml; then
-  echo "::error::tdx-metal-e2e.yml lost 'serial: confai-scratch': re-vendoring dropped the scratch disk serial — re-apply the c8s-local patch"
+
+# scratch-enforce keys on the initrd's dm mapping name; a confos rename
+# would power off every healthy node. Pin the contract at the pinned ref.
+if ! grep -qF '"$SCRATCH_DEV" scratch' confos/mkosi/initrd/mkosi.extra/init; then
+  echo "::error::confos initrd no longer opens the scratch disk as dm 'scratch'; scratch-enforce.sh gates on that name — update both together"
   exit 1
 fi
 

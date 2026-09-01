@@ -26,6 +26,11 @@ ok() {
     fi
 }
 
+not() { ! "$@"; }
+
+# stderr_has PATTERN — the last run's stderr (captured in $WORK) names the cause.
+stderr_has() { grep -q "$1" "$WORK/stderr"; }
+
 # summarize TITLE — print totals; exit 1 if anything failed.
 summarize() {
     note ""

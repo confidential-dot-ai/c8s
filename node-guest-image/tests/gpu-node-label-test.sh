@@ -12,8 +12,6 @@ SCRIPT=${GPU_LABEL_SCRIPT:-"$TESTS_DIR/../c8s/mkosi.extra/usr/local/bin/gpu-node
 [[ -x "$SCRIPT" ]] || { echo "script not found: $SCRIPT"; exit 2; }
 
 # negation wrapper: ok runs "$@" directly, so a bare ! is not a command.
-not() { ! "$@"; }
-
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 FRAGMENT="$WORK/etc/rancher/rke2/config.yaml.d/20-gpu-node-label.yaml"

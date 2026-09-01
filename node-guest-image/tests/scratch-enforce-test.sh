@@ -9,8 +9,6 @@ TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT=${SCRATCH_SCRIPT:-"$TESTS_DIR/../c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh"}
 [[ -x "$SCRIPT" ]] || { echo "script not found: $SCRIPT"; exit 2; }
 
-not() { ! "$@"; }
-
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -28,7 +26,6 @@ set_dm() { # set_dm NAME... — one dm-N per name; none = tmpfs fallback boot
         i=$((i + 1))
     done
 }
-stderr_has() { grep -q "$1" "$WORK/stderr"; }
 
 CASE="scratch upper"
 set_dm scratch
