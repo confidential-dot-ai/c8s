@@ -18,16 +18,22 @@ const (
 	identityNonceBytes = 32
 )
 
-// IdentityTranscriptHash commits the hybrid server key, client nonce, exact
-// mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data. Every variable-length field is length-prefixed to make the
-// transcript unambiguous across the Go and browser implementations.
-func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte, error) {
-	if len(pub.X25519) != X25519PubBytes {
-		return nil, fmt.Errorf("overenc: identity transcript X25519 key must be %d bytes, got %d", X25519PubBytes, len(pub.X25519))
+// IdentityTranscriptHash commits the complete key exchange — the client's
+// X-Wing encapsulation key, the server's ciphertext, the session id, and the
+// client nonce — together with the exact mesh leaf and issuing mesh CA to one
+// SHA-384 value suitable for TEE report_data. The evidence therefore covers
+// both sides of the exchange, not only the server's contribution. Every
+// variable-length field is length-prefixed to make the transcript unambiguous
+// across the Go and browser implementations.
+func IdentityTranscriptHash(xwingEK, xwingCT, sessionID, nonce, leafDER, caDER []byte) ([]byte, error) {
+	if len(xwingEK) != XWingEKBytes {
+		return nil, fmt.Errorf("overenc: identity transcript X-Wing key must be %d bytes, got %d", XWingEKBytes, len(xwingEK))
 	}
-	if len(pub.MLKEM768) != MLKEM768EKBytes {
-		return nil, fmt.Errorf("overenc: identity transcript ML-KEM key must be %d bytes, got %d", MLKEM768EKBytes, len(pub.MLKEM768))
+	if len(xwingCT) != XWingCTBytes {
+		return nil, fmt.Errorf("overenc: identity transcript X-Wing ciphertext must be %d bytes, got %d", XWingCTBytes, len(xwingCT))
+	}
+	if len(sessionID) != SessionIDBytes {
+		return nil, fmt.Errorf("overenc: identity transcript session id must be %d bytes, got %d", SessionIDBytes, len(sessionID))
 	}
 	if len(nonce) != identityNonceBytes {
 		return nil, fmt.Errorf("overenc: identity transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
@@ -44,8 +50,9 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 		[]byte(identityTranscriptDomain),
 		caHash[:],
 		leafHash[:],
-		pub.X25519,
-		pub.MLKEM768,
+		xwingEK,
+		xwingCT,
+		sessionID,
 		nonce,
 	} {
 		var err error

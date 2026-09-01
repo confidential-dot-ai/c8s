@@ -101,8 +101,8 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	if b.Version != types.BindingAttestLB {
 		t.Errorf("version = %q, want %q", b.Version, types.BindingAttestLB)
 	}
-	if b.SessionPubKey != nil {
-		t.Errorf("attest-lb must mint no session key, got %+v", b.SessionPubKey)
+	if b.XWingCT != "" || b.SessionID != "" {
+		t.Errorf("attest-lb must mint no session, got ct %q id %q", b.XWingCT, b.SessionID)
 	}
 	if b.Nonce != b64url(nonce) {
 		t.Errorf("nonce not echoed: got %q", b.Nonce)
@@ -149,11 +149,9 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	_, servingDER := writeTestServingLeaf(t)
 	nonce := make([]byte, 32)
-	pub := overenc.PublicKey{
-		X25519:   make([]byte, overenc.X25519PubBytes),
-		MLKEM768: make([]byte, overenc.MLKEM768EKBytes),
-	}
-	pq, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	pq, err := overenc.IdentityTranscriptHash(
+		make([]byte, overenc.XWingEKBytes), make([]byte, overenc.XWingCTBytes),
+		make([]byte, overenc.SessionIDBytes), nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,10 +191,18 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 	}
 
 	// attest-pq stays available on the same front door.
-	pqResp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
+	ck, err := overenc.GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   b64url(make([]byte, 32)),
+		XWingEK: b64url(ck.EncapsulationKey()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pqResp := postAttestPQ(t, ts.URL, body)
 	pqResp.Body.Close()
 	if pqResp.StatusCode != http.StatusOK {
 		t.Fatalf("attest-pq on a webpki front door: status = %d, want 200", pqResp.StatusCode)

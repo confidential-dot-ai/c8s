@@ -102,8 +102,8 @@ func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
 	return nil
 }
 
-func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
-	transcriptHash, err := overenc.IdentityTranscriptHash(pub, nonce, m.leaf.Raw, m.ca.Raw)
+func (m *meshIdentity) bind(xwingEK, xwingCT, sessionID, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.IdentityTranscriptHash(xwingEK, xwingCT, sessionID, nonce, m.leaf.Raw, m.ca.Raw)
 	if err != nil {
 		return nil, nil, err
 	}
