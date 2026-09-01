@@ -301,47 +301,24 @@ a floating tag would be root on every GPU node — so the digest is what's used.
 
 {{- /*
 c8s.attestationApiURL — the attestation-api endpoint injected into the operator
-and CDS. Three shapes:
+and CDS. Two shapes:
 
   - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
     on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
     INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
-  - otherwise, when attestationApi.enabled=true (the chart DaemonSet shape —
-    the raw-values default, kept by gke/aks installs): the on-node Unix socket
-    its attest-proxy sidecar serves
-    (c8s.attestationApiSocket). Evidence generation is never published on a
-    routable address: the API binds pod loopback, and only on-node callers —
-    host processes, and pods the socket directory is mounted into — can
-    reach it. Chart components mount the directory at its host path, so this
-    URL is verbatim everywhere; the webhook rebases it for injected sidecars,
-    which see the directory at workloadclaims.SidecarSocketDir.
-  - otherwise (attestationApi.enabled=false outside kata, i.e. cvmMode=node —
-    require_attestation_api forbids it elsewhere): the node image bakes a HOST
-    attestation-api serving :8400 in the host network namespace. Pod-netns
-    consumers dial the node's own IP via the $(HOST_IP) downward-API env var
-    (c8s.attestationApiHostIPEnv), which the kubelet expands per-node before
-    the process sees the arg. The operator forwards this string verbatim to
-    the tenant get-cert sidecars it injects, so it must stay unexpanded there
-    (the operator container deliberately omits HOST_IP); each tenant pod
-    expands it against its own node.
+  - otherwise: the on-node Unix socket served by either the chart DaemonSet's
+    proxy sidecar or the measured node image's proxy service. Evidence
+    generation binds loopback. Only on-node callers with the read-only socket
+    directory mount and GID 65532 can reach it. Chart components mount the
+    directory at its host path, so this URL is verbatim everywhere. The webhook
+    rebases it for injected sidecars, which see the directory at
+    workloadclaims.SidecarSocketDir.
 */ -}}
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if .Values.attestationApi.enabled -}}
+{{- else -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
-{{- else -}}
-http://$(HOST_IP):{{ .Values.attestationApi.port }}
-{{- end -}}
-{{- end -}}
-
-{{- /* The operator must carry a stable value because it has no HOST_IP env.
-The webhook converts this token to $(HOST_IP) in each injected tenant Pod. */ -}}
-{{- define "c8s.operatorAttestationApiURL" -}}
-{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) -}}
-http://__C8S_HOST_IP__:{{ .Values.attestationApi.port }}
-{{- else -}}
-{{ include "c8s.attestationApiURL" . }}
 {{- end -}}
 {{- end -}}
 
@@ -356,27 +333,31 @@ pod (read-only) and the one the webhook mounts into get-cert sidecars.
 {{- end -}}
 
 {{- /*
-c8s.attestationApiHostSocket — "true" when consumers reach the chart-managed
-attestation-api over the on-node Unix socket, i.e. the DaemonSet renders and
-the in-guest (kata) endpoint does not apply.
+c8s.attestationApiHostSocket — "true" when consumers reach an on-node Unix
+socket. The socket is served by the chart DaemonSet or by the explicit,
+version-gated companion baked into a node-CVM image. Kata uses guest loopback.
 */ -}}
 {{- define "c8s.attestationApiHostSocket" -}}
-{{- if and .Values.attestationApi.enabled (not .Values.kata.enabled) -}}true{{- end -}}
+{{- if and (not .Values.kata.enabled) (or .Values.attestationApi.enabled .Values.attestationApi.bakedNodeSocket) -}}true{{- end -}}
 {{- end -}}
 
 {{- /*
 c8s.attestationApiSocketVolume / Mount — the hostPath pair a chart component
 pod needs to reach the on-node socket. Mounted at the host path so
 c8s.attestationApiURL is verbatim in-container. ReadOnly on the mount;
-DirectoryOrCreate so a consumer scheduled before the DaemonSet does not wedge
-(the socket file's own mode gates connect, not the dir's).
+DirectoryOrCreate so a consumer scheduled before the socket publisher does not
+wedge. The socket file's owner and mode gate each connection.
 */ -}}
 {{- define "c8s.attestationApiSocketVolume" -}}
 {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
 - name: attestation-api-socket
   hostPath:
     path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+    {{- if .Values.attestationApi.bakedNodeSocket }}
+    type: Directory
+    {{- else }}
     type: DirectoryOrCreate
+    {{- end }}
 {{- end }}
 {{- end -}}
 
@@ -386,22 +367,6 @@ DirectoryOrCreate so a consumer scheduled before the DaemonSet does not wedge
   mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
   readOnly: true
 {{- end }}
-{{- end -}}
-
-{{- /*
-c8s.attestationApiHostIPEnv — the HOST_IP downward-API env var that expands the
-$(HOST_IP) placeholder in c8s.attestationApiURL. Rendered only when that URL
-carries the placeholder: cvmMode=node with the chart DaemonSet off, where
-pod-netns consumers reach the node-baked host attestation-api via the node's
-own IP. Empty in every other shape.
-*/ -}}
-{{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
-- name: HOST_IP
-  valueFrom:
-    fieldRef:
-      fieldPath: status.hostIP
-{{- end -}}
 {{- end -}}
 
 {{- /*
@@ -497,12 +462,6 @@ Caller passes a dict:
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
-  {{- with (include "c8s.attestationApiHostIPEnv" $root) }}
-  # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node IP so
-  # this pod-netns sidecar reaches the node-baked host attestation-api.
-  env:
-    {{- . | nindent 4 }}
-  {{- end }}
   volumeMounts:
     - name: {{ .volume }}
       mountPath: {{ .mountPath }}

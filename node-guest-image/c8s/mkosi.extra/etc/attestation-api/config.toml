@@ -3,7 +3,7 @@
 # the client must verify the CPU and GPU evidence.
 
 [server]
-bind = "0.0.0.0:8400"
+bind = "127.0.0.1:8400"
 
 [server.tls]
 enabled = false

@@ -194,3 +194,82 @@ func TestValidateVerifierSocketRejectsForeignOwner(t *testing.T) {
 		t.Errorf("root-owned socket rejected: %v", err)
 	}
 }
+
+// A client can outlive a socket publisher restart. It must validate the path
+// at request time, not only when NewClient receives the URL.
+func TestUnixClientRejectsUnsafeSocketChangeAfterConstruction(t *testing.T) {
+	newSocketClient := func(t *testing.T) (Client, string, net.Listener) {
+		t.Helper()
+		sock := filepath.Join(t.TempDir(), "attest.sock")
+		listener, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewClient("unix://" + sock), sock, listener
+	}
+	assertHealthFails := func(t *testing.T, client Client) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if _, err := client.Health(ctx); err == nil {
+			t.Fatal("Health reached an unsafe replacement socket")
+		}
+	}
+
+	t.Run("removed", func(t *testing.T) {
+		client, _, listener := newSocketClient(t)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		assertHealthFails(t, client)
+	})
+
+	t.Run("replaced by regular file", func(t *testing.T) {
+		client, sock, listener := newSocketClient(t)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sock, []byte("not a socket"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertHealthFails(t, client)
+	})
+
+	t.Run("replaced by symlink", func(t *testing.T) {
+		client, sock, listener := newSocketClient(t)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "target.sock")
+		targetListener, err := net.Listen("unix", target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer targetListener.Close()
+		if err := os.Symlink(target, sock); err != nil {
+			t.Fatal(err)
+		}
+		assertHealthFails(t, client)
+	})
+
+	t.Run("made world writable", func(t *testing.T) {
+		client, sock, listener := newSocketClient(t)
+		defer listener.Close()
+		if err := os.Chmod(sock, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		assertHealthFails(t, client)
+	})
+
+	t.Run("changed to foreign owner", func(t *testing.T) {
+		if os.Getuid() != 0 {
+			t.Skip("chown to a foreign uid requires root")
+		}
+		client, sock, listener := newSocketClient(t)
+		defer listener.Close()
+		if err := os.Chown(sock, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		assertHealthFails(t, client)
+	})
+}

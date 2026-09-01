@@ -1145,6 +1145,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		if mode == "node" {
 			out = append(out,
 				"--set", "attestationApi.enabled=false",
+				"--set", "attestationApi.bakedNodeSocket=true",
 				"--set", "nriImagePolicy.enabled=false",
 			)
 		}

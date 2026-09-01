@@ -1003,7 +1003,12 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	}
 	ensureVolume(pod, certsVolume(effective.Cert.Volume))
 	if vol, ok := workloadClaimsVolume(cfg); ok {
-		ensureVolume(pod, vol)
+		// This reserved volume carries both the admission inventory and the
+		// attestation socket. The Pod author must not select its source or mount
+		// it into an application container. Rebuild the source and remove all
+		// existing mounts before the c8s sidecars are rebuilt below.
+		replaceVolume(pod, vol)
+		removeVolumeMounts(pod, vol.Name)
 		// The inventory socket is group-owned by InventorySocketGID and the non-root
 		// get-cert sidecar connects to it; without this supplemental group the
 		// connect fails closed and the pod hangs on its initial cert.
@@ -1225,16 +1230,6 @@ func getCertEnv(inj *injection) []corev1.EnvVar {
 		}},
 		{Name: "C8S_POD_UID", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
-		}},
-		// cvmMode=node: the chart passes the operator a verbatim
-		// --attestation-api-url=http://$(HOST_IP):8400, which reaches this arg
-		// (certContainer) through sidecarAttestationApiURL — its pass-through of
-		// non-unix URLs is what keeps $(HOST_IP) unexpanded. The kubelet expands
-		// $(HOST_IP) against THIS tenant pod's node, so the sidecar reaches the
-		// node-baked host attestation-api on whichever node it lands. Unused
-		// (harmless) in modes whose URL has no $(HOST_IP).
-		{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"},
 		}},
 	}
 }
@@ -1645,9 +1640,6 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 // the inventory's host directory onto the sidecar's mount of that directory
 // (workloadClaimsMounts); every other shape passes through verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
-	if strings.Contains(cfg.AttestationApiURL, "__C8S_HOST_IP__") {
-		return strings.ReplaceAll(cfg.AttestationApiURL, "__C8S_HOST_IP__", "$(HOST_IP)")
-	}
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL
@@ -1675,6 +1667,21 @@ func ensureVolume(pod *corev1.Pod, v corev1.Volume) {
 		}
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, v)
+}
+
+// removeVolumeMounts removes a reserved volume from user containers. The
+// injected c8s init sidecars are rebuilt after this call with one read-only
+// mount. This is also safe on admission reinvocation.
+func removeVolumeMounts(pod *corev1.Pod, volumeName string) {
+	remove := func(containers []corev1.Container) {
+		for i := range containers {
+			containers[i].VolumeMounts = slices.DeleteFunc(containers[i].VolumeMounts, func(mount corev1.VolumeMount) bool {
+				return mount.Name == volumeName
+			})
+		}
+	}
+	remove(pod.Spec.Containers)
+	remove(pod.Spec.InitContainers)
 }
 
 func ensureFSGroup(pod *corev1.Pod, fsGroup int64) {

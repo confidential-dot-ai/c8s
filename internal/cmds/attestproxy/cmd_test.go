@@ -83,8 +83,13 @@ func TestProxySocketPermissions(t *testing.T) {
 	if got := fi.Mode().Perm(); got != 0o660 {
 		t.Fatalf("socket mode = %#o, want 0660", got)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Gid) != os.Getegid() {
-		t.Fatalf("socket gid = %d, want %d", st.Gid, os.Getegid())
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if int(st.Uid) != os.Geteuid() {
+			t.Fatalf("socket uid = %d, want proxy process uid %d", st.Uid, os.Geteuid())
+		}
+		if int(st.Gid) != os.Getegid() {
+			t.Fatalf("socket gid = %d, want %d", st.Gid, os.Getegid())
+		}
 	}
 }
 

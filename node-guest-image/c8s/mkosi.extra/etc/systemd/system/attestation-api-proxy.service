@@ -1,0 +1,33 @@
+[Unit]
+Description=Publish the local attestation API on the c8s Unix socket
+Documentation=https://github.com/confidential-dot-ai/c8s
+# Start after the private upstream. The proxy stays active during a transient
+# upstream restart and returns HTTP 502 until the evidence service is ready.
+After=attestation-api.service
+Requires=attestation-api.service
+Before=rke2-server.service rke2-agent.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+# tmpfiles creates this measured runtime directory. Do not let ListenUnix fail
+# later with an unclear missing-parent error.
+ExecStartPre=/bin/sh -c 'test -d /var/run/nri-image-policy'
+ExecStart=/usr/local/bin/c8s attest-proxy --socket=/var/run/nri-image-policy/attestation-api.sock --socket-gid=65532 --upstream=http://127.0.0.1:8400
+# The proxy probe checks the socket owner, type, and mode on each dial. It also
+# checks the upstream health route. Retry for a short time because systemd
+# service activation does not prove that the upstream has opened its port.
+ExecStartPost=/bin/sh -c 'for _ in $(seq 1 30); do /usr/local/bin/c8s attest-proxy healthcheck --socket=/var/run/nri-image-policy/attestation-api.sock && exit 0; sleep 1; done; exit 1'
+TimeoutStartSec=45
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/run/nri-image-policy
+
+[Install]
+WantedBy=multi-user.target

@@ -239,10 +239,6 @@ spec:
             - --ready-address=127.0.0.1:{{ .Values.tlsLb.publicTLS.readyPort }}
             - --poll-interval={{ .Values.tlsLb.publicTLS.pollInterval }}
             - --reload-nginx
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -326,12 +322,6 @@ spec:
             - --upstream-server-name={{ $attestUpstreamServerName }}
             {{- end }}
             {{- end }}
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
-          # IP so this pod-netns pod reaches the node-baked host attestation-api.
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
           {{- if .Values.tlsLb.attest.expectedWorkload }}
           # Workload-verified ingress gate (docs/getcert-workload-binding.md):
           # ready only while the installed mesh identity leaf is a usable
@@ -402,12 +392,6 @@ spec:
             - --cds-rtmrs={{ join "," . }}
             {{- end }}
             {{- end }}
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: the proxy verifies CDS through the node-baked
-          # attestation-api, reached from this pod via its node IP.
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
           {{- if or (eq (include "c8s.attestationApiHostSocket" .) "true") .Values.cds.measurementsConfig }}
           volumeMounts:
             {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}

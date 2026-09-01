@@ -163,7 +163,7 @@ func containerArgValue(args []string, flag string) (string, bool) {
 func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	// gke keeps the host-side attestation-api enabled, reachable only via the
 	// on-node Unix socket (node disables it and points components at the baked
-	// host attestation-api via HOST_IP; that path is covered separately).
+	// Unix socket; that path is covered separately).
 	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1599,7 +1599,7 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 // deleted Service's DNS name.
 func assertNoLegacyAttestationStrings(t *testing.T, manifest string) {
 	t.Helper()
-	for _, legacy := range []string{"30840", "0.0.0.0", "c8s-attestation-api.c8s-system.svc"} {
+	for _, legacy := range []string{"30840", "0.0.0.0", "c8s-attestation-api.c8s-system.svc", "$(HOST_IP)", "__C8S_HOST_IP__"} {
 		if strings.Contains(manifest, legacy) {
 			t.Fatalf("render must not contain legacy routable-attestation string %q", legacy)
 		}
@@ -1698,6 +1698,70 @@ func TestChartRejectsAttestationApiOffOnNonKata(t *testing.T) {
 	}
 	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
 		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
+	}
+}
+
+func TestChartRequiresExplicitBakedNodeSocket(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template accepted a node image with no baked socket compatibility gate\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_baked_node_socket" {
+		t.Fatalf("validation error kind = %q, want require_baked_node_socket\n%s", kind, out)
+	}
+}
+
+func TestChartRejectsChangedBakedNodeSocketPath(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "attestationApi.bakedNodeSocket=true",
+		"--set-string", "nriImagePolicy.hostPaths.runtimeDir=/tmp/spoofed-attestation",
+	)
+	if err == nil {
+		t.Fatalf("helm template accepted a changed baked-node socket hostPath\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "baked_node_socket_path" {
+		t.Fatalf("validation error kind = %q, want baked_node_socket_path\n%s", kind, out)
+	}
+}
+
+func TestChartRejectsBakedNodeAttestationURLOverride(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "attestationApi.bakedNodeSocket=true",
+		"--set-string", "tlsLb.attest.attestationApiURL=http://203.0.113.9:8400",
+	)
+	if err == nil {
+		t.Fatalf("helm template accepted a routable node-mode attestation endpoint\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "baked_node_socket_override" {
+		t.Fatalf("validation error kind = %q, want baked_node_socket_override\n%s", kind, out)
+	}
+}
+
+func TestChartRejectsBakedNodeSocketOutsideExactShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"chart API also enabled", []string{"--set", "attestationApi.bakedNodeSocket=true"}},
+		{"non-node mode", []string{"--set-string", "attestationApi.cvmMode=gke", "--set", "attestationApi.enabled=false", "--set", "attestationApi.bakedNodeSocket=true"}},
+		{"kata guest", []string{"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false", "--set", "nriImagePolicy.enabled=false", "--set", "attestationApi.bakedNodeSocket=true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("helm template accepted an invalid baked-node socket shape\n%s", out)
+			}
+			if kind := parseValidationErrorKind(out); kind != "baked_node_socket_shape" {
+				t.Fatalf("validation error kind = %q, want baked_node_socket_shape\n%s", kind, out)
+			}
+		})
 	}
 }
 
@@ -2032,44 +2096,18 @@ func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 	}
 }
 
-// hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
-// from the status.hostIP downward-API field — the substitution source for the
-// $(HOST_IP) placeholder in the node-mode attestation-api URL.
-func hasHostIPEnv(c corev1.Container) bool {
-	for _, e := range c.Env {
-		if e.Name == "HOST_IP" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
-			e.ValueFrom.FieldRef.FieldPath == "status.hostIP" {
-			return true
-		}
-	}
-	return false
-}
-
-// TestChartNodeModeAttestationApiURLUsesHostIP proves cvmMode=node points the
-// pod-netns components (cds, tls-lb's cert sidecar, ratls-mesh) at the
-// node-baked host attestation-api via the $(HOST_IP) downward-API env var, since
-// there is no in-cluster Service and pods cannot reach host loopback. The
-// operator is the exception: it forwards its --attestation-api-url verbatim into
-// the tenant get-cert sidecars it injects, so the placeholder must stay
-// UNEXPANDED there — the operator container deliberately omits HOST_IP so each
-// tenant pod expands it against its own node.
-// KNOWN-GAP (ATTEST-ORACLE, node mode): the http://$(HOST_IP):8400 wiring
-// this test pins reaches the node image's baked attestation-api, which still
-// binds 0.0.0.0:8400 with no auth — the oracle shape this branch removes
-// everywhere the chart controls. Closing node mode needs the
-// confidential-os-builder companion (loopback bind + baked attest-proxy
-// systemd unit + image-policy socket URL), tracked cross-repo; when it
-// lands, the chart's node-mode branch and this test flip to the socket shape
-// together.
-func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
-	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
-	const operatorURL = "--attestation-api-url=http://__C8S_HOST_IP__:8400"
+// TestChartNodeModeUsesBakedAttestationSocket proves cvmMode=node uses the
+// version-gated Unix socket in the measured node image. No Pod or CRI
+// environment value selects the attestation endpoint.
+func TestChartNodeModeUsesBakedAttestationSocket(t *testing.T) {
+	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
 	// The exact shape `c8s install --cvm-mode=node` produces: the node image
-	// bakes attestation-api and nri-image-policy, so both chart components
-	// are off and consumers dial the baked host service via $(HOST_IP).
+	// bakes attestation-api, its socket proxy, and nri-image-policy. The chart
+	// components are off.
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
 		"--set", "attestationApi.enabled=false",
+		"--set", "attestationApi.bakedNodeSocket=true",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "tlsLb.attest.enabled=true",
 	)
@@ -2077,64 +2115,70 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 		t.Fatalf("helm template (cvmMode=node): %v\n%s", err, out)
 	}
 
-	// No chart-managed evidence source renders in this shape at all.
+	// No chart-managed evidence source renders in this shape.
 	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") ||
 		renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
 		t.Fatalf("cvmMode=node install shape renders no attestation-api Service or DaemonSet\n%s", out)
 	}
 
-	// cds: pod-netns, dials the host attestation-api via $(HOST_IP).
+	assertSocketMount := func(c corev1.Container) {
+		t.Helper()
+		for _, mount := range c.VolumeMounts {
+			if mount.Name == "attestation-api-socket" && mount.MountPath == "/var/run/nri-image-policy" && mount.ReadOnly {
+				return
+			}
+		}
+		t.Errorf("container %s carries the socket URL but no read-only attestation-api-socket mount; mounts %+v", c.Name, c.VolumeMounts)
+	}
+
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
-	assertContainerArgs(t, cds, hostIPURL)
-	if !hasHostIPEnv(cds) {
-		t.Errorf("cds container missing HOST_IP downward-API env; have %+v", cds.Env)
-	}
+	assertContainerArgs(t, cds, socketURL)
+	assertSocketMount(cds)
+	cdsDeployment := renderedDeployment(t, out, "c8s-cds")
+	assertPodVolume(t, &cdsDeployment.Spec.Template.Spec, "attestation-api-socket", func(volume corev1.Volume) bool {
+		return volume.HostPath != nil && volume.HostPath.Path == "/var/run/nri-image-policy" &&
+			volume.HostPath.Type != nil && *volume.HostPath.Type == corev1.HostPathDirectory
+	})
 
-	// tls-lb c8s-cert sidecar (via c8s.getCertContainers).
 	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
-	assertContainerArgs(t, cert, hostIPURL)
-	if !hasHostIPEnv(cert) {
-		t.Errorf("tls-lb c8s-cert missing HOST_IP downward-API env; have %+v", cert.Env)
-	}
+	assertContainerArgs(t, cert, socketURL)
+	assertSocketMount(cert)
 
-	// tls-lb cds-attest sidecar (rendered under tlsLb.attest.enabled).
 	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
-	assertContainerArgs(t, attest, hostIPURL)
-	if !hasHostIPEnv(attest) {
-		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
-	}
+	assertContainerArgs(t, attest, socketURL)
+	assertSocketMount(attest)
 
-	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
-	// the RA-TLS hop to CDS.
 	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
-	assertContainerArgs(t, allowlistProxy, hostIPURL)
-	if !hasHostIPEnv(allowlistProxy) {
-		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
-	}
+	assertContainerArgs(t, allowlistProxy, socketURL)
+	assertSocketMount(allowlistProxy)
 
-	// ratls-mesh: hostNetwork, so HOST_IP is its own node IP.
 	mesh := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh")
-	if !slices.Contains(mesh.Args, "http://$(HOST_IP):8400") {
-		t.Errorf("ratls-mesh missing http://$(HOST_IP):8400 arg; have %v", mesh.Args)
+	if !slices.Contains(mesh.Args, "unix:///var/run/nri-image-policy/attestation-api.sock") {
+		t.Errorf("ratls-mesh missing Unix socket URL; have %v", mesh.Args)
 	}
-	if !hasHostIPEnv(mesh) {
-		t.Errorf("ratls-mesh missing HOST_IP downward-API env; have %+v", mesh.Env)
+	assertSocketMount(mesh)
+	if sc := renderedDaemonSet(t, out, "c8s-ratls-mesh").Spec.Template.Spec.SecurityContext; sc == nil || !slices.Contains(sc.SupplementalGroups, int64(65532)) {
+		t.Errorf("ratls-mesh pod must carry supplementalGroups [65532] to connect to the socket; got %+v", sc)
 	}
 
-	// operator: forwards the string verbatim; the placeholder must NOT be
-	// expanded here, so the container must NOT define HOST_IP.
-	if !slices.Contains(renderedOperatorArgs(t, out), operatorURL) {
-		t.Errorf("operator missing stable forwarding token %q\n%v", operatorURL, renderedOperatorArgs(t, out))
+	if !slices.Contains(renderedOperatorArgs(t, out), socketURL) {
+		t.Errorf("operator missing socket URL %q\n%v", socketURL, renderedOperatorArgs(t, out))
 	}
-	op := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
-	if hasHostIPEnv(op) {
-		t.Errorf("operator MUST NOT define HOST_IP (it forwards $(HOST_IP) verbatim to tenant sidecars); env %+v", op.Env)
+	for _, workload := range renderedPodSpecs(t, out) {
+		containers := append(append([]corev1.Container{}, workload.spec.InitContainers...), workload.spec.Containers...)
+		for _, container := range containers {
+			for _, env := range container.Env {
+				if env.Name == "HOST_IP" {
+					t.Errorf("node mode must not render HOST_IP; %s %s container %s carries it", workload.kind, workload.name, container.Name)
+				}
+			}
+		}
 	}
+	assertNoLegacyAttestationStrings(t, out)
 }
 
-// TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
-// not leak into the other cvmModes: pod/gke/aks dial the on-node Unix socket
-// and render no HOST_IP env anywhere. The consumers that must carry both the
+// TestChartNonNodeModeUsesAttestationSocket proves pod/gke/aks use their
+// selected local endpoint and render no HOST_IP env. The consumers that carry
 // socket URL and the socket-directory mount are asserted per shape.
 func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
@@ -4596,8 +4640,10 @@ func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
 	}
 	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
 	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
-	if hasHostIPEnv(proxy) {
-		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
+	for _, env := range proxy.Env {
+		if env.Name == "HOST_IP" {
+			t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
+		}
 	}
 }
 
@@ -5346,9 +5392,8 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 // (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
 // --jwks-url, since signing happens in the same binary).
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
-	// gke: host-side attestation-api over the on-node Unix socket. node points
-	// CDS at the baked host attestation-api via HOST_IP (covered separately),
-	// so pin the socket mode here.
+	// gke uses the chart-managed host socket. Node mode uses the same path from
+	// the measured image. Pin one socket consumer here.
 	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -6314,6 +6359,7 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
 		"--set", "attestationApi.enabled=false",
+		"--set", "attestationApi.bakedNodeSocket=true",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
 		"--set-string", "image.digest="+opD,

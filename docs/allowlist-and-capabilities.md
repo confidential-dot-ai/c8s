@@ -433,14 +433,24 @@ also models the effective CRI inputs. `enableServiceLinks: false` removes
 workload Service variables. The exact environment admits only declared names
 and the kubelet `KUBERNETES_` API family.
 
-Kubernetes expands `$(NAME)` before NRI sees argv. The generated policy records
-an environment binding for `HOST_IP` or `NODE_IP` only when the rendered Pod has
-one `status.hostIP` downward-API env item with that name. NRI and policy-monitor
-observe the final argv and the effective CRI environment together. They admit
-the argv only when its expanded bytes match the one observed value. A missing,
-changed, or duplicate binding value fails closed. The operator carries a stable
-non-Kubernetes token and the webhook converts it to `$(HOST_IP)` only in the
-tenant Pod that kubelet will expand.
+Kubernetes expands `$(NAME)` before NRI sees argv. The generated policy can
+record an environment binding for `HOST_IP` or `NODE_IP` when the rendered Pod
+has one `status.hostIP` downward-API env item with that name. NRI and
+policy-monitor observe the final argv and the effective CRI environment
+together. They admit the argv only when its expanded bytes match the one
+observed value. A missing, changed, or duplicate binding value fails closed.
+This check proves value consistency. It does not prove that CRI obtained the
+value from the downward API. Do not use this binding to select a
+security-sensitive peer.
+
+Node mode does not use `HOST_IP` for attestation. The measured node image binds
+the attestation API to `127.0.0.1:8400`. A measured `attestation-api-proxy`
+systemd service publishes it on
+`/var/run/nri-image-policy/attestation-api.sock` as `root:65532` with mode
+`0660`. Chart consumers mount that directory read-only. The webhook rebases the
+same Unix URL onto its read-only sidecar mount. The
+`attestationApi.bakedNodeSocket` value is an explicit image-version gate. A
+node-mode render with the chart API disabled fails if this gate is not set.
 
 The guest-baked seed remains a flat `sha256_digests` list — it is the floor,
 measured into the SNP launch digest, and keeping it digest-only means a policy

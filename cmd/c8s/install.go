@@ -1829,6 +1829,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	if cvmMode == "node" {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
+			"--set", "attestationApi.bakedNodeSocket=true",
 			"--set", "nriImagePolicy.enabled=false",
 		)
 	}

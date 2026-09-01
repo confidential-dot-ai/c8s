@@ -373,6 +373,11 @@ attestationApi:
   ## in-guest loopback endpoint for in-CVM consumers. Must be false under
   ## kata.enabled (`c8s install --cvm-mode=pod` sets it).
   enabled: true
+  ## The measured node image contains the loopback attestation API and a c8s
+  ## proxy that publishes /var/run/nri-image-policy/attestation-api.sock.
+  ## This compatibility bit is an explicit image-version gate. Set it only
+  ## with cvmMode=node and enabled=false. The install CLI sets it for node mode.
+  bakedNodeSocket: false
   image:
     repository: ghcr.io/confidential-dot-ai/attestation-api
     tag: ""

@@ -57,6 +57,61 @@ func TestWorkloadClaims_NodeCVMMountsInventorySocket(t *testing.T) {
 	}
 }
 
+// A Pod author can guess the reserved volume name. The webhook must replace a
+// spoofed source and must not give the application access to either socket.
+func TestWorkloadClaims_NodeCVMReplacesSpoofedSocketVolume(t *testing.T) {
+	const hostDir = "/var/run/nri-image-policy"
+	pod := newInjectablePod()
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name:         workloadClaimsVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+		Name: workloadClaimsVolumeName, MountPath: "/tmp/fake-socket",
+	}}
+	pod.Spec.InitContainers = []corev1.Container{{
+		Name: "user-init",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: workloadClaimsVolumeName, MountPath: "/tmp/replace-socket",
+		}},
+	}}
+
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage:          "img",
+		CDSURL:                "http://cds:8443",
+		AttestationApiURL:     "unix://" + hostDir + "/attestation-api.sock",
+		CertDir:               "/etc/c8s/certs",
+		WorkloadClaimsHostDir: hostDir,
+	})
+
+	volume := findVolume(pod, workloadClaimsVolumeName)
+	if volume == nil || volume.HostPath == nil || volume.HostPath.Path != hostDir ||
+		volume.HostPath.Type == nil || *volume.HostPath.Type != corev1.HostPathDirectory {
+		t.Fatalf("spoofed socket volume was not replaced with the fixed host directory: %#v", volume)
+	}
+	for _, container := range pod.Spec.Containers {
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == workloadClaimsVolumeName {
+				t.Fatalf("application container %q retained reserved socket mount %#v", container.Name, mount)
+			}
+		}
+	}
+	for _, container := range pod.Spec.InitContainers {
+		for _, mount := range container.VolumeMounts {
+			if container.Name == "user-init" && mount.Name == workloadClaimsVolumeName {
+				t.Fatalf("user init container retained reserved socket mount %#v", mount)
+			}
+		}
+	}
+	cert := pod.Spec.InitContainers[0]
+	for _, mount := range cert.VolumeMounts {
+		if mount.Name == workloadClaimsVolumeName && mount.MountPath == workloadclaims.SidecarSocketDir && mount.ReadOnly {
+			return
+		}
+	}
+	t.Fatalf("injected c8s-cert missing read-only socket mount: %#v", cert.VolumeMounts)
+}
+
 // The webhook passes the pod's own init-container names so get-cert can split
 // / get-cert no longer classifies containers by role — CDS resolves a sandbox's
 // images from the inventory — so the webhook must not pass per-init-container

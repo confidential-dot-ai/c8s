@@ -25,6 +25,15 @@
 {{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
 {{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}
 {{- end -}}
+{{- if and .Values.attestationApi.bakedNodeSocket (or .Values.kata.enabled .Values.attestationApi.enabled (ne .Values.attestationApi.cvmMode "node")) -}}
+{{- fail "VALIDATION_ERROR kind=baked_node_socket_shape: attestationApi.bakedNodeSocket=true requires attestationApi.cvmMode=node, attestationApi.enabled=false, and kata.enabled=false. This bit asserts that the measured node image contains the loopback attestation API and its Unix-socket proxy." -}}
+{{- end -}}
+{{- if and .Values.attestationApi.bakedNodeSocket (ne .Values.nriImagePolicy.hostPaths.runtimeDir "/var/run/nri-image-policy") -}}
+{{- fail (printf "VALIDATION_ERROR kind=baked_node_socket_path: attestationApi.bakedNodeSocket=true requires nriImagePolicy.hostPaths.runtimeDir=/var/run/nri-image-policy, the fixed path in the measured node service (got %q). The chart must not select a different hostPath." .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
+{{- end -}}
+{{- if and .Values.attestationApi.bakedNodeSocket .Values.tlsLb.attest.attestationApiURL -}}
+{{- fail (printf "VALIDATION_ERROR kind=baked_node_socket_override: attestationApi.bakedNodeSocket=true forbids tlsLb.attest.attestationApiURL=%q. The node-mode attestation endpoint is the fixed measured Unix socket and cannot be overridden." .Values.tlsLb.attest.attestationApiURL) -}}
+{{- end -}}
 {{- if and .Values.kata.enabled (ne .Values.webhook.failurePolicy "Fail") -}}
 {{- fail (printf "kata.enabled=true requires webhook.failurePolicy=Fail (got %q): kata is enforcing — the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
 {{- end -}}
@@ -114,6 +123,9 @@
 */ -}}
 {{- if and (not .Values.attestationApi.enabled) (not .Values.kata.enabled) (ne .Values.attestationApi.cvmMode "node") -}}
 {{- fail "VALIDATION_ERROR kind=require_attestation_api: attestationApi.enabled=false requires kata.enabled=true or attestationApi.cvmMode=node. On a non-kata, non-node cluster the host attestation-api DaemonSet is the only evidence source for get-cert/ratls-mesh/CDS (`c8s install --cvm-mode=pod` and `--cvm-mode=node` set attestationApi.enabled=false for you)." -}}
+{{- end -}}
+{{- if and (not .Values.attestationApi.enabled) (not .Values.kata.enabled) (eq .Values.attestationApi.cvmMode "node") (not .Values.attestationApi.bakedNodeSocket) -}}
+{{- fail "VALIDATION_ERROR kind=require_baked_node_socket: node mode with attestationApi.enabled=false requires attestationApi.bakedNodeSocket=true. Upgrade to a measured node image that publishes /var/run/nri-image-policy/attestation-api.sock, then set this explicit compatibility gate." -}}
 {{- end -}}
 {{- /*
   Catch-all upstream check. No upstream is a legal state: tls-lb installs and

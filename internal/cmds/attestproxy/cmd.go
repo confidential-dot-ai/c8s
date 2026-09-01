@@ -44,14 +44,14 @@ type config struct {
 	readHeaderTimeout time.Duration
 }
 
-// NewCmd returns the attest-proxy subcommand. It runs as a sidecar in the
-// attestation-api DaemonSet pod, publishing the pod-loopback API on the
-// node-local socket.
+// NewCmd returns the attest-proxy subcommand. It runs as a chart sidecar or a
+// measured node service. It publishes the loopback API on the node-local
+// socket.
 func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:          "attest-proxy",
-		Short:        "Serve the pod-local attestation-api on a node-local Unix socket",
+		Short:        "Serve the local attestation-api on a node-local Unix socket",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -67,9 +67,9 @@ func NewCmd() *cobra.Command {
 	return cmd
 }
 
-// newHealthcheckCmd returns the probe subcommand the DaemonSet's exec probes
-// run: it dials the socket through the attestation client (owner/mode checks
-// included), so a passing probe covers socket, proxy, and upstream at once.
+// newHealthcheckCmd returns the probe subcommand used by the chart and the
+// measured node service. It dials the socket through the attestation client
+// with owner and mode checks. A pass covers socket, proxy, and upstream.
 func newHealthcheckCmd() *cobra.Command {
 	var socket string
 	cmd := &cobra.Command{
