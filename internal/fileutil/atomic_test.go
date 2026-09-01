@@ -40,13 +40,23 @@ func TestWriteAtomicOverwritesExisting(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := WriteAtomic(path, []byte("new"), 0o644); err != nil {
+	if err := WriteAtomic(path, []byte("new"), 0o600); err != nil {
 		t.Fatalf("WriteAtomic: %v", err)
 	}
 
 	got, _ := os.ReadFile(path)
 	if string(got) != "new" {
 		t.Errorf("content = %q, want new", got)
+	}
+	// The rename replaces the wider-mode original: overwriting tightens
+	// permissions rather than inheriting them, a contract secret writers
+	// rely on.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("mode after overwrite = %o, want 600", info.Mode().Perm())
 	}
 }
 
