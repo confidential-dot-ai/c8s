@@ -3,9 +3,11 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -14,13 +16,17 @@ import (
 
 const (
 	attestationCLIVersion = "attestation-cli 0.5.0"
+	attestationRSCommit   = "41ad0c5495ec3cf4dc7a69d2870084bdf6b92f98"
 	maxGPUVerifierOutput  = 2 << 20
 )
 
 type gpuVerdict struct {
-	Verified       bool
-	NonceBindingOK bool
-	DeviceUEIDs    []string
+	Verified                    bool
+	NonceBindingOK              bool
+	GPUDeviceUEIDs              []string
+	SwitchDeviceUEIDs           []string
+	VerifierSHA256              string
+	VerifierAttestationRSCommit string
 }
 
 type gpuVerifierResult struct {
@@ -31,8 +37,9 @@ type gpuVerifierResult struct {
 			OverallOK      bool `json:"overall_ok"`
 			NonceBindingOK bool `json:"nonce_binding_ok"`
 			Devices        []struct {
-				UEID string `json:"ueid"`
-				Arch string `json:"arch"`
+				UEID    string `json:"ueid"`
+				Arch    string `json:"arch"`
+				HWModel string `json:"hwmodel"`
 			} `json:"devices"`
 		} `json:"nvidia_gpu"`
 	} `json:"claims"`
@@ -48,14 +55,20 @@ func validateNvidiaGPUConfig(cfg config) error {
 	if cfg.nvidiaGPUExpectedCount < 0 {
 		return fmt.Errorf("--nvidia-gpu-expected-count must not be negative")
 	}
+	if cfg.nvidiaSwitchExpectedCount < 0 {
+		return fmt.Errorf("--nvidia-switch-expected-count must not be negative")
+	}
 	if cfg.nvidiaGPUExpectedCount != 0 && cfg.nvidiaGPUUserNonce == "" {
 		return fmt.Errorf("--nvidia-gpu-expected-count requires --nvidia-gpu-user-nonce")
 	}
+	if cfg.nvidiaSwitchExpectedCount != 0 && cfg.nvidiaGPUUserNonce == "" {
+		return fmt.Errorf("--nvidia-switch-expected-count requires --nvidia-gpu-user-nonce")
+	}
 	for _, arch := range cfg.nvidiaGPUExpectedArchs {
 		switch arch {
-		case "HOPPER", "BLACKWELL", "LS10":
+		case "HOPPER", "BLACKWELL":
 		default:
-			return fmt.Errorf("--nvidia-gpu-expected-arch must be HOPPER, BLACKWELL, or LS10, got %q", arch)
+			return fmt.Errorf("--nvidia-gpu-expected-arch must be HOPPER or BLACKWELL, got %q", arch)
 		}
 	}
 	if cfg.nvidiaGPUUserNonce == "" {
@@ -70,6 +83,12 @@ func validateNvidiaGPUConfig(cfg config) error {
 	}
 	if cfg.nvidiaGPUUserNonce != strings.ToLower(cfg.nvidiaGPUUserNonce) {
 		return fmt.Errorf("--nvidia-gpu-user-nonce must use lowercase hex")
+	}
+	if len(cfg.attestationCLISHA256) != sha256.Size*2 {
+		return fmt.Errorf("--attestation-cli-sha256 must be one lowercase SHA-256 digest")
+	}
+	if _, err := hex.DecodeString(cfg.attestationCLISHA256); err != nil || cfg.attestationCLISHA256 != strings.ToLower(cfg.attestationCLISHA256) {
+		return fmt.Errorf("--attestation-cli-sha256 must be one lowercase SHA-256 digest")
 	}
 	return nil
 }
@@ -110,6 +129,15 @@ func verifyNvidiaGPU(ctx context.Context, cfg config, ev *evidence) (*gpuVerdict
 			return nil, fmt.Errorf("attestation-cli v0.5.0 is required for NVIDIA NRAS verification: %w", err)
 		}
 	}
+	verifierBytes, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil, fmt.Errorf("read NVIDIA verifier: %w", readErr)
+	}
+	verifierSum := sha256.Sum256(verifierBytes)
+	verifierDigest := hex.EncodeToString(verifierSum[:])
+	if verifierDigest != cfg.attestationCLISHA256 {
+		return nil, fmt.Errorf("NVIDIA verifier SHA-256 is %q, want %q", verifierDigest, cfg.attestationCLISHA256)
+	}
 	version, err := exec.CommandContext(ctx, path, "--version").Output()
 	if err != nil || strings.TrimSpace(string(version)) != attestationCLIVersion {
 		return nil, fmt.Errorf("NVIDIA verifier must be %q, got %q", attestationCLIVersion, strings.TrimSpace(string(version)))
@@ -120,7 +148,9 @@ func verifyNvidiaGPU(ctx context.Context, cfg config, ev *evidence) (*gpuVerdict
 		args = append(args, "--nvidia-gpu-required")
 	}
 	if len(cfg.nvidiaGPUExpectedArchs) != 0 {
-		args = append(args, "--nvidia-gpu-expected-archs", strings.Join(cfg.nvidiaGPUExpectedArchs, ","))
+		// attestation-rs verifies raw evidence groups. c8s also compares these
+		// groups with the architecture derived from each signed hwmodel below.
+		args = append(args, "--nvidia-gpu-expected-archs", strings.Join(append(append([]string(nil), cfg.nvidiaGPUExpectedArchs...), "LS10"), ","))
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = bytes.NewReader(envelope)
@@ -145,7 +175,27 @@ func verifyNvidiaGPU(ctx context.Context, cfg config, ev *evidence) (*gpuVerdict
 	if len(devices) == 0 {
 		return nil, fmt.Errorf("attestation-cli returned no signed NVIDIA device identities")
 	}
-	ueids := make([]string, 0, len(devices))
+	var rawBundle struct {
+		Devices []struct {
+			Arch string `json:"arch"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(ev.nvidiaGPU, &rawBundle); err != nil {
+		return nil, fmt.Errorf("parse raw NVIDIA evidence inventory: %w", err)
+	}
+	rawArchCounts := make(map[string]int)
+	for i, device := range rawBundle.Devices {
+		arch := strings.ToUpper(strings.TrimSpace(device.Arch))
+		switch arch {
+		case "HOPPER", "BLACKWELL", "LS10":
+			rawArchCounts[arch]++
+		default:
+			return nil, fmt.Errorf("raw NVIDIA evidence has unsupported architecture %q at index %d", device.Arch, i)
+		}
+	}
+	signedArchCounts := make(map[string]int)
+	gpuUEIDs := make([]string, 0, len(devices))
+	switchUEIDs := make([]string, 0, len(devices))
 	seen := make(map[string]struct{}, len(devices))
 	for i, device := range devices {
 		ueid := strings.TrimSpace(device.UEID)
@@ -156,12 +206,57 @@ func verifyNvidiaGPU(ctx context.Context, cfg config, ev *evidence) (*gpuVerdict
 			return nil, fmt.Errorf("attestation-cli returned duplicate signed NVIDIA device UEID")
 		}
 		seen[ueid] = struct{}{}
-		ueids = append(ueids, ueid)
+		arch := archFromSignedHWModel(device.HWModel)
+		if arch == "" {
+			return nil, fmt.Errorf("attestation-cli returned an unrecognized signed NVIDIA hwmodel %q at index %d", device.HWModel, i)
+		}
+		if strings.ToUpper(strings.TrimSpace(device.Arch)) != arch {
+			return nil, fmt.Errorf("signed NVIDIA hwmodel architecture %q does not match verifier architecture %q", arch, device.Arch)
+		}
+		signedArchCounts[arch]++
+		if arch == "LS10" {
+			switchUEIDs = append(switchUEIDs, ueid)
+		} else {
+			gpuUEIDs = append(gpuUEIDs, ueid)
+		}
 	}
-	if cfg.nvidiaGPUExpectedCount != 0 && len(ueids) != cfg.nvidiaGPUExpectedCount {
-		return nil, fmt.Errorf("verified NVIDIA device count is %d, want %d", len(ueids), cfg.nvidiaGPUExpectedCount)
+	if !archCountsEqual(rawArchCounts, signedArchCounts) {
+		return nil, fmt.Errorf("signed NVIDIA hwmodel architectures do not match raw evidence groups")
 	}
-	return &gpuVerdict{Verified: true, NonceBindingOK: true, DeviceUEIDs: ueids}, nil
+	if cfg.nvidiaGPUExpectedCount != 0 && len(gpuUEIDs) != cfg.nvidiaGPUExpectedCount {
+		return nil, fmt.Errorf("verified NVIDIA GPU count is %d, want %d", len(gpuUEIDs), cfg.nvidiaGPUExpectedCount)
+	}
+	if cfg.nvidiaSwitchExpectedCount != 0 && len(switchUEIDs) != cfg.nvidiaSwitchExpectedCount {
+		return nil, fmt.Errorf("verified NVIDIA switch count is %d, want %d", len(switchUEIDs), cfg.nvidiaSwitchExpectedCount)
+	}
+	return &gpuVerdict{
+		Verified: true, NonceBindingOK: true,
+		GPUDeviceUEIDs: gpuUEIDs, SwitchDeviceUEIDs: switchUEIDs,
+		VerifierSHA256: verifierDigest, VerifierAttestationRSCommit: attestationRSCommit,
+	}, nil
+}
+
+func archFromSignedHWModel(model string) string {
+	upper := strings.ToUpper(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(upper, "HOPPER"), strings.HasPrefix(upper, "GH100"):
+		return "HOPPER"
+	case strings.Contains(upper, "BLACKWELL"), strings.HasPrefix(upper, "GB"):
+		return "BLACKWELL"
+	case strings.Contains(upper, "LS10"), strings.Contains(upper, "SWITCH"):
+		return "LS10"
+	default:
+		return ""
+	}
+}
+
+func archCountsEqual(a, b map[string]int) bool {
+	for _, arch := range []string{"HOPPER", "BLACKWELL", "LS10"} {
+		if a[arch] != b[arch] {
+			return false
+		}
+	}
+	return true
 }
 
 type cappedBuffer struct {

@@ -242,10 +242,9 @@ c8s secrets explain --sandbox "$ID" --url "$CDS" --measurements "$M" \
 sandbox    0123456789abcdef…
 inventory  10.0.0.7
 reported   3 container(s)
-dropped    1 injected by c8s
-candidates 2
+candidates 3
     sha256:1111…  [/serve]
-  - sha256:9999…  [get-secret]
+    sha256:9999…  [get-secret]
     sha256:8888…  [sh -c sleep 1]
 
 vllm-llama  NEAR MISS
@@ -277,8 +276,8 @@ it: a literal segment beats the wildcard in routing, so mounting it below
 3. The sandbox token verifies against the inventory **bound to that sandbox**,
    carries this request's challenge, and names the same sandbox as the leaf.
 4. That inventory reports what the sandbox has run.
-5. The reported set, minus injected containers, matches exactly one workload
-   entry.
+5. The complete reported set, including injected c8s helpers, matches exactly
+   one workload entry.
 6. That entry's grant covers the requested path.
 
 Any failure refuses. So does an unreachable inventory, an unknown sandbox, an
@@ -302,25 +301,21 @@ a whole certificate lifetime — worse than what it prevents. The sandbox is
 instead unusable for secrets, which costs one workload rather than every pod on
 the node.
 
-### The injected drop set
+### Injected c8s helpers
 
-c8s injects its own containers into every confidential pod. They are not part of
-a workload's declared set, so they are removed before matching — an entry never
-has to enumerate c8s's own sidecars.
+The workload entry must declare each injected c8s container exactly. CDS keeps
+these containers in the candidate set. It does not trust a floor digest or an
+argv prefix as proof that a helper is legitimate.
 
-A container is dropped when its digest is an allowlist **floor** entry *and* its
-entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
-Both halves are load-bearing. Floor membership alone would let a pod add busybox running a
-shell — also a floor entry — and have it ignored.
+This rule prevents a hidden-helper attack. Without it, an untrusted Pod could
+add the pinned c8s image as `/c8s workload-proxy` with attacker arguments. The
+container would share the certificate volume, but the old drop rule would hide
+it from matching. With complete-set matching, that Pod gets no named
+certificate and no application secret.
 
-The floor is the source. It already carries the injected image, since it could
-not run otherwise, and it is **additive**: a digest once served is never
-dropped. So an image bump leaves the previous digest in place alongside the new
-one, and pods still running the old image keep matching while they recycle.
-
-What this rests on: no floor image other than c8s's has an executable at one of
-those entrypoints. Floor contents are operator-controlled and auditable, but
-that is a property of the deployment rather than something enforced here.
+During an image update, an entry can name the old and new exact helper forms as
+init containers. A declared init container can be absent after it exits. Remove
+the old form after all old Pods are gone.
 
 ## The grant
 

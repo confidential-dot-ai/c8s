@@ -157,7 +157,8 @@ type Config struct {
 	MeshIdentityKeyFile  string
 	MeshIdentityCAFile   string
 	// ExpectedWorkload gates /readyz on the installed mesh identity leaf
-	// carrying a matched-workload stamp with this exact name. Empty keeps
+	// carrying a matched-workload stamp with this stable identity. A v1 stamp
+	// uses its exact policy entry name. Empty keeps
 	// /readyz unconditionally 200.
 	ExpectedWorkload string
 	Backend          Backend // over-encrypted application backend (nil => EchoBackend)
@@ -590,7 +591,7 @@ func (s *Server) servingLeafDER() ([]byte, error) {
 // the attestation endpoints would serve loads — leaf matching its private key,
 // leaf and issuing CA both inside their validity windows, chain to a configured
 // mesh CA — *and* that leaf carries a valid matched-workload stamp naming that
-// workload. So ingress never routes external traffic to a front door whose
+// stable workload identity. So ingress never routes external traffic to a front door whose
 // committed identity is unusable or unnamed (initial deploy, or a post-foreign
 // renewal). Absent, malformed, or duplicate stamps fail closed. Without the
 // flag, today's always-ready behavior is kept.
@@ -642,11 +643,11 @@ func (s *Server) computeReadiness() (int, string) {
 		return notReady("matched-workload stamp malformed", "error", err)
 	case workload == nil:
 		return notReady("mesh identity leaf carries no matched-workload stamp")
-	case workload.Name != s.cfg.ExpectedWorkload:
+	case workload.EffectiveIdentity() != s.cfg.ExpectedWorkload:
 		// Both names are this front door's configuration and this body is
 		// reachable from the public internet; name them only in the log.
 		return notReady("mesh identity leaf is stamped for a different workload",
-			"stamped", workload.Name, "expected", s.cfg.ExpectedWorkload)
+			"stamped_policy", workload.Name, "stamped_identity", workload.EffectiveIdentity(), "expected", s.cfg.ExpectedWorkload)
 	}
 	return http.StatusOK, ""
 }

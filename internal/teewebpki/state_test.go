@@ -125,6 +125,15 @@ func TestHandlerReleasesStateOnlyToExpectedMatchedWorkload(t *testing.T) {
 		t.Fatal("handler did not return the protected cluster TLS seed")
 	}
 
+	rollout := matchedWorkloadCertificateWithIdentity(t, "c8s-tls-lb-2026-09-01", "c8s-tls-lb")
+	request = httptest.NewRequest(http.MethodGet, Route, nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{rollout}, VerifiedChains: [][]*x509.Certificate{{rollout}}}
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("rollout policy with stable tls-lb identity = %d: %s", response.Code, response.Body.String())
+	}
+
 	wrong := matchedWorkloadCertificate(t, "another-workload")
 	request = httptest.NewRequest(http.MethodGet, Route, nil)
 	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{wrong}, VerifiedChains: [][]*x509.Certificate{{wrong}}}
@@ -136,9 +145,14 @@ func TestHandlerReleasesStateOnlyToExpectedMatchedWorkload(t *testing.T) {
 }
 
 func matchedWorkloadCertificate(t *testing.T, name string) *x509.Certificate {
+	return matchedWorkloadCertificateWithIdentity(t, name, "")
+}
+
+func matchedWorkloadCertificateWithIdentity(t *testing.T, name, identity string) *x509.Certificate {
 	t.Helper()
 	ext, err := ratls.MarshalMatchedWorkloadExtension(&ratls.MatchedWorkload{
 		Name:             name,
+		Identity:         identity,
 		AllowlistVersion: "1",
 		AllowlistDigest:  bytes.Repeat([]byte{0x42}, 32),
 	})

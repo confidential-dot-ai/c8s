@@ -113,6 +113,7 @@ const defaultGetCertRunAsGroup int64 = 65532
 const defaultGetCertRunAsNonRoot = true
 const discoveryPublicTLSModeCDS = "cds"
 const discoveryPublicTLSModeWebPKI = "webpki"
+const discoveryPublicTLSModeTEEWebPKI = "tee-webpki"
 
 // reservedSecretContainerName is the injected secret fetcher. Reserved like
 // the cert containers: a pod that declared the name itself would have the
@@ -641,10 +642,10 @@ func (d discoverySpec) validate() error {
 	}
 
 	switch d.PublicTLSMode {
-	case discoveryPublicTLSModeCDS, discoveryPublicTLSModeWebPKI:
+	case discoveryPublicTLSModeCDS, discoveryPublicTLSModeWebPKI, discoveryPublicTLSModeTEEWebPKI:
 		return nil
 	default:
-		return fmt.Errorf("%w: %s must be %q or %q, got %q", errInvalidInjectionAnnotation, AnnotationDiscoveryPublicTLSMode, discoveryPublicTLSModeCDS, discoveryPublicTLSModeWebPKI, d.PublicTLSMode)
+		return fmt.Errorf("%w: %s must be %q, %q, or %q, got %q", errInvalidInjectionAnnotation, AnnotationDiscoveryPublicTLSMode, discoveryPublicTLSModeCDS, discoveryPublicTLSModeWebPKI, discoveryPublicTLSModeTEEWebPKI, d.PublicTLSMode)
 	}
 }
 

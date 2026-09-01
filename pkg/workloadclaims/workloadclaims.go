@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // SandboxPath is the token route on the local Unix socket; SandboxDigestsPrefix
@@ -40,9 +43,11 @@ import (
 // peer credentials; see sandboxtoken.go). GET SandboxDigestsPrefix+<sandboxID>
 // lists the tracked container image digests of that sandbox.
 const (
-	SandboxPath          = "/sandbox"
-	SandboxDigestsPrefix = "/digests/"
-	IdentityPath         = "/identity"
+	SandboxPath            = "/sandbox"
+	SandboxDigestsPrefix   = "/digests/"
+	IdentityPath           = "/identity"
+	RuntimeInventoryPath   = "/inventory/v1"
+	RuntimeInventorySchema = "c8s/runtime-inventory/v1"
 )
 
 // InventoryIdentity is the IdentityPath answer: the inventory's sandbox-token
@@ -190,10 +195,113 @@ type AllowlistRefreshReporter interface {
 // SandboxContainer is one admitted container: the bytes, and what they were
 // told to run.
 type SandboxContainer struct {
+	Name   string `json:"name,omitempty"`
 	Digest string `json:"digest"`
 	// Argv is the effective OCI process.args — the merged image-config and
 	// pod-spec command, which is what the argv policy is written against.
 	Argv []string `json:"argv,omitempty"`
+	// BindMounts contains observed bind-mount destinations. EnvNames contains
+	// environment variable names only. Values are never stored or returned.
+	// The booleans make an observed empty set different from old or incomplete
+	// inventory data. Exact policy requires the applicable boolean.
+	BindMounts     []string          `json:"bind_mounts,omitempty"`
+	BindMountKinds map[string]string `json:"bind_mount_kinds,omitempty"`
+	EnvNames       []string          `json:"env_names,omitempty"`
+	MountsObserved bool              `json:"mounts_observed,omitempty"`
+	EnvObserved    bool              `json:"env_observed,omitempty"`
+}
+
+// RuntimeContainer is one live container observed by the trusted node NRI.
+// Names and IDs are observations. The TDX evidence binds them to the same
+// transcript as the bytes and effective process configuration.
+type RuntimeContainer struct {
+	Namespace      string            `json:"namespace"`
+	PodName        string            `json:"pod_name"`
+	PodUID         string            `json:"pod_uid"`
+	SandboxID      string            `json:"sandbox_id"`
+	ContainerName  string            `json:"container_name"`
+	ContainerID    string            `json:"container_id"`
+	Digest         string            `json:"digest"`
+	Argv           []string          `json:"argv"`
+	BindMounts     []string          `json:"bind_mounts"`
+	BindMountKinds map[string]string `json:"bind_mount_kinds"`
+	EnvNames       []string          `json:"env_names"`
+	MountsObserved bool              `json:"mounts_observed"`
+	EnvObserved    bool              `json:"env_observed"`
+}
+
+// Key is the deterministic order key for a node-wide inventory.
+func (c RuntimeContainer) Key() string {
+	parts := []string{c.Namespace, c.PodName, c.PodUID, c.SandboxID, c.ContainerName, c.ContainerID, c.Digest}
+	parts = append(parts, strconv.Itoa(len(c.Argv)))
+	parts = append(parts, c.Argv...)
+	parts = append(parts, strconv.FormatBool(c.MountsObserved))
+	parts = append(parts, strconv.Itoa(len(c.BindMounts)))
+	for _, mount := range c.BindMounts {
+		parts = append(parts, mount, c.BindMountKinds[mount])
+	}
+	parts = append(parts, strconv.FormatBool(c.EnvObserved))
+	parts = append(parts, strconv.Itoa(len(c.EnvNames)))
+	parts = append(parts, c.EnvNames...)
+	return strings.Join(parts, "\x00")
+}
+
+// RuntimeInventory is the complete live node view at one instant. The policy
+// digest is SHA-256 over the canonical policy that NRI enforces.
+type RuntimeInventory struct {
+	Schema        string             `json:"schema"`
+	Generation    uint64             `json:"generation"`
+	PolicySHA256  string             `json:"policy_sha256"`
+	PolicyVersion uint64             `json:"policy_version"`
+	Containers    []RuntimeContainer `json:"containers"`
+}
+
+// RuntimeInventoryResolver is implemented by the trusted node NRI inventory.
+type RuntimeInventoryResolver interface {
+	RuntimeInventory() (RuntimeInventory, error)
+}
+
+// RuntimeInventoryAttester obtains fresh CPU TEE evidence for reportData.
+// The node NRI uses its local attestation service. The request must not cross
+// the untrusted Kubernetes control plane.
+type RuntimeInventoryAttester func(context.Context, []byte) (types.AttestResponse, error)
+
+// RuntimeInventoryRequest asks for a fresh node view. Nonce must be 32 bytes.
+type RuntimeInventoryRequest struct {
+	Nonce []byte `json:"nonce"`
+}
+
+// RuntimeInventoryResponse binds Inventory and Nonce to fresh CPU TEE
+// evidence. ReportData is included so an offline verifier can give a clear
+// mismatch result, but it must always recompute it.
+type RuntimeInventoryResponse struct {
+	Nonce      []byte           `json:"nonce"`
+	Inventory  RuntimeInventory `json:"inventory"`
+	ReportData []byte           `json:"report_data"`
+	Platform   string           `json:"platform"`
+	Evidence   json.RawMessage  `json:"evidence"`
+}
+
+// RuntimeInventoryReportData returns the 48-byte TDX/SNP REPORTDATA transcript
+// for a node inventory. The canonical JSON contains only ordered fields and
+// sorted slices.
+func RuntimeInventoryReportData(nonce []byte, inventory RuntimeInventory) ([]byte, error) {
+	if len(nonce) != 32 {
+		return nil, fmt.Errorf("runtime inventory nonce must be 32 bytes")
+	}
+	if inventory.Schema != RuntimeInventorySchema {
+		return nil, fmt.Errorf("unsupported runtime inventory schema %q", inventory.Schema)
+	}
+	canonical, err := json.Marshal(inventory)
+	if err != nil {
+		return nil, fmt.Errorf("marshal runtime inventory: %w", err)
+	}
+	h := sha512.New384()
+	h.Write([]byte(RuntimeInventorySchema))
+	h.Write([]byte{0})
+	h.Write(nonce)
+	h.Write(canonical)
+	return h.Sum(nil), nil
 }
 
 // SandboxResolver is the surface an inventory implements — nri-image-policy on
@@ -309,7 +417,7 @@ func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, 
 // sandbox — so l MUST be a mutually-attested RA-TLS listener that admits only
 // CDS (BuildDigestsTLSConfig). Over a plain listener this would disclose the
 // node's running images to anyone who can reach the port.
-func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver, identity []byte) error {
+func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver, identity []byte, inventoryAttesters ...RuntimeInventoryAttester) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+IdentityPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -337,6 +445,51 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver,
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	if runtimeResolver, ok := resolver.(RuntimeInventoryResolver); ok && len(inventoryAttesters) == 1 && inventoryAttesters[0] != nil {
+		attest := inventoryAttesters[0]
+		mux.HandleFunc("POST "+RuntimeInventoryPath, func(w http.ResponseWriter, r *http.Request) {
+			var req RuntimeInventoryRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+				http.Error(w, "invalid runtime inventory request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Nonce) != 32 {
+				http.Error(w, "runtime inventory nonce must be 32 bytes", http.StatusBadRequest)
+				return
+			}
+			for attempt := 0; attempt < 3; attempt++ {
+				inventory, err := runtimeResolver.RuntimeInventory()
+				if err != nil {
+					http.Error(w, "runtime inventory unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				reportData, err := RuntimeInventoryReportData(req.Nonce, inventory)
+				if err != nil {
+					http.Error(w, "runtime inventory is invalid", http.StatusInternalServerError)
+					return
+				}
+				evidence, err := attest(r.Context(), reportData)
+				if err != nil {
+					http.Error(w, "runtime inventory attestation unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				after, err := runtimeResolver.RuntimeInventory()
+				if err != nil {
+					continue
+				}
+				if after.Generation != inventory.Generation || after.PolicySHA256 != inventory.PolicySHA256 || after.PolicyVersion != inventory.PolicyVersion {
+					continue
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(RuntimeInventoryResponse{
+					Nonce: req.Nonce, Inventory: inventory, ReportData: reportData,
+					Platform: evidence.Platform, Evidence: evidence.Evidence,
+				})
+				return
+			}
+			http.Error(w, "runtime inventory changed during attestation", http.StatusConflict)
+		})
+	}
 	return serveUntil(ctx, l, mux)
 }
 

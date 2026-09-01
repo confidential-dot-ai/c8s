@@ -200,7 +200,7 @@ func requireAttestationApi(url string) error {
 // rather than after the warm-up window. Warm-up failure is logged, not fatal:
 // the endpoint provisions on the first handshake instead, and taking the
 // inventory down would cost far more than a slow first callback.
-func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins) error {
+func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins, inventoryAttesters ...RuntimeInventoryAttester) error {
 	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsPins, 0)
 	if err != nil {
 		return err
@@ -218,7 +218,7 @@ func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver San
 			logger.Error("sandbox-digests cert warm-up failed; the endpoint will provision on first handshake", "error", err)
 		}
 		logger.Info("starting sandbox-digests endpoint", "addr", addr)
-		if err := ServeDigests(ctx, l, resolver, identity); err != nil {
+		if err := ServeDigests(ctx, l, resolver, identity, inventoryAttesters...); err != nil {
 			logger.Error("sandbox-digests endpoint error", "error", err)
 		}
 	}()

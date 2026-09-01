@@ -3,10 +3,11 @@ package workloadclaims
 import (
 	"cmp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
-// Key identifies this (digest, argv) pair in an inventory's admission
+// Key identifies one complete observed container policy tuple in an inventory's admission
 // high-water mark, where it is the deduplication key.
 //
 // The encoding MUST be injective, so it is /proc/cmdline's: NUL after every
@@ -22,19 +23,63 @@ import (
 // sandbox can then be named for a workload it did not actually run.
 func (c SandboxContainer) Key() string {
 	var b strings.Builder
-	b.Grow(len(c.Digest) + 1 + len(c.Argv))
+	b.Grow(len(c.Name) + len(c.Digest) + 2 + len(c.Argv))
+	b.WriteString(c.Name)
+	b.WriteByte(0)
 	b.WriteString(c.Digest)
 	b.WriteByte(0)
 	for _, a := range c.Argv {
 		b.WriteString(a)
 		b.WriteByte(0)
 	}
+	b.WriteString(strconv.FormatBool(c.MountsObserved))
+	b.WriteByte(0)
+	for _, m := range c.BindMounts {
+		b.WriteString(m)
+		b.WriteByte(0)
+		b.WriteString(c.BindMountKinds[m])
+		b.WriteByte(0)
+	}
+	b.WriteString(strconv.FormatBool(c.EnvObserved))
+	b.WriteByte(0)
+	for _, n := range c.EnvNames {
+		b.WriteString(n)
+		b.WriteByte(0)
+	}
 	return b.String()
 }
 
-// Compare orders containers by digest, then argv — the stable order the
+// Compare orders containers by the complete observed policy tuple — the stable order the
 // digests endpoint serves, so identical sandboxes report identical
 // inventories.
 func (c SandboxContainer) Compare(o SandboxContainer) int {
-	return cmp.Or(strings.Compare(c.Digest, o.Digest), slices.Compare(c.Argv, o.Argv))
+	return cmp.Or(
+		strings.Compare(c.Name, o.Name),
+		strings.Compare(c.Digest, o.Digest),
+		slices.Compare(c.Argv, o.Argv),
+		compareBool(c.MountsObserved, o.MountsObserved),
+		slices.Compare(c.BindMounts, o.BindMounts),
+		compareMountKinds(c.BindMounts, c.BindMountKinds, o.BindMounts, o.BindMountKinds),
+		compareBool(c.EnvObserved, o.EnvObserved),
+		slices.Compare(c.EnvNames, o.EnvNames),
+	)
+}
+
+func compareMountKinds(aNames []string, a map[string]string, bNames []string, b map[string]string) int {
+	for i := 0; i < len(aNames) && i < len(bNames); i++ {
+		if c := strings.Compare(a[aNames[i]], b[bNames[i]]); c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
+func compareBool(a, b bool) int {
+	if a == b {
+		return 0
+	}
+	if !a {
+		return -1
+	}
+	return 1
 }

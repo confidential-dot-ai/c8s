@@ -499,16 +499,19 @@ func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 		name         string
 		socketDir    string
 		procRoot     string
+		pullURL      string
 		wantBroker   bool
 		wantProcRoot string
 	}{
-		{"broker disabled without socket dir", "", "", false, ""},
-		{"default proc root", "/run/c8s", "", true, "/proc"},
-		{"explicit proc root", "/run/c8s", "/hostproc", true, "/hostproc"},
+		{"broker disabled without socket dir or pull", "", "", "", false, ""},
+		{"transition inventory without claims service", "", "", "https://cds/allowlist", true, "/proc"},
+		{"default proc root", "/run/c8s", "", "", true, "/proc"},
+		{"explicit proc root", "/run/c8s", "/hostproc", "", true, "/hostproc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config{
 				Policy:         policyConfig{Mode: ModeFailClosed},
+				Allowlist:      allowlistConfig{Pull: pullConfig{URL: tc.pullURL}},
 				WorkloadClaims: workloadClaimsConfig{SocketDir: tc.socketDir, ProcRoot: tc.procRoot},
 			}
 			p, err := newPlugin(cfg, &fakeContainerd{}, store, audit.NewLogger(), discardLogger())

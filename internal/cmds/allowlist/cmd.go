@@ -78,13 +78,12 @@ configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
 The default chart publishes /allowlist through tls-lb. Point --url at that
-front door only when it uses CDS-issued public TLS (discovery reports
-public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
-WebPKI front door cannot yet bind its public certificate to the attestation
-evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
-example through a port-forward) and pin the CDS launch digest. To generate an
-operator key and pin its public half, see the c8s README ("Managing the image
-allowlist").`,
+front door only when discovery reports public_tls.mode=cds, and use the tls-lb
+launch digest with --measurements. tee-webpki binds its public leaf through
+attest-lb, which this operator client does not yet run. For webpki or
+tee-webpki, use a direct CDS RA-TLS URL, such as a port-forward, and pin the CDS
+launch digest. To generate an operator key and pin its public half, see the c8s
+README ("Managing the image allowlist").`,
 		SilenceUsage: true,
 	}
 
@@ -101,6 +100,9 @@ allowlist").`,
 		newUploadCmd(o),
 		newWorkloadCmd(o),
 		newLintCmd(o),
+		newCanonicalizeCmd(),
+		newDigestCmd(),
+		newDeriveSystemCmd(),
 		newInspectImageCmd(o),
 	)
 	return cmd

@@ -110,6 +110,10 @@ func run(cfg config) error {
 	// Create one store before CA adoption. A successor must restore application
 	// secrets before it starts any handler that can read them.
 	secretsStore := newSecretsStore(cfg)
+	// Create the ledger before adoption so a successor restores the same
+	// first-write-wins sandbox bindings before it serves.
+	sandboxBindings := sandboxledger.New(issuer.CapTTL(cfg.certTTL, issuer.MaxLeafTTL), cfg.sandboxLedgerMax)
+	var restoredEARSigner *earsigner.Snapshot
 
 	var (
 		teeWebPKIStore    *teewebpki.Store
@@ -134,6 +138,7 @@ func run(cfg config) error {
 	// A cold start creates a mesh CA. A planned successor receives the live CA
 	// and protected state from the active CDS. It never falls back to a new CA.
 	var activatePredecessor func(context.Context) error
+	var confirmPredecessor func(context.Context) error
 	mesh, adopted, err := issuer.ProvisionCA(ctx, issuer.CAProvisionConfig{
 		CommonName: cfg.caCommonName, Validity: cfg.caCertValidity, Curve: elliptic.P384(),
 		PeerURL:           strings.TrimRight(cfg.handoffPeerURL, "/"),
@@ -146,8 +151,17 @@ func run(cfg config) error {
 		RestoreAllowlist:        allowlistStore.RestoreSnapshot,
 		RestoreTEEWebPKI:        restoreTEEWebPKI,
 		RestoreSecrets:          secretsStore.RestoreSnapshot,
-		OnAdopt: func(activate func(context.Context) error) {
+		RestoreEARSigner: func(snapshot earsigner.Snapshot) error {
+			if err := earsigner.ValidateSnapshot(snapshot); err != nil {
+				return err
+			}
+			restoredEARSigner = &snapshot
+			return nil
+		},
+		RestoreSandboxLedger: sandboxBindings.RestoreSnapshot,
+		OnAdopt: func(activate, confirm func(context.Context) error) {
 			activatePredecessor = activate
+			confirmPredecessor = confirm
 		},
 	}, slog.Default())
 	if err != nil {
@@ -201,21 +215,32 @@ func run(cfg config) error {
 		return err
 	}
 
-	earKeyPEM, err := earsigner.Generate()
-	if err != nil {
-		return fmt.Errorf("generate token-signing key: %w", err)
+	var earKeyPEM []byte
+	if restoredEARSigner != nil {
+		earKeyPEM = []byte(restoredEARSigner.Active.PrivateKeyPEM)
+	} else {
+		earKeyPEM, err = earsigner.Generate()
+		if err != nil {
+			return fmt.Errorf("generate token-signing key: %w", err)
+		}
 	}
 	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
 	if err != nil {
 		return fmt.Errorf("create EAR issuer: %w", err)
 	}
 
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
+	rotatorConfig := earsigner.RotatorConfig{
 		Interval: cfg.rotationInterval,
 		Overlap:  cfg.rotationOverlap,
 		Jitter:   cfg.rotationJitter,
 		Logger:   slog.Default(),
-	}, earKeyPEM, earIssuer.SwapKey)
+	}
+	var rotator *earsigner.Rotator
+	if restoredEARSigner != nil {
+		rotator, err = earsigner.NewRotatorFromSnapshot(rotatorConfig, *restoredEARSigner, earIssuer.SwapKey)
+	} else {
+		rotator, err = earsigner.NewRotator(rotatorConfig, earKeyPEM, earIssuer.SwapKey)
+	}
 	if err != nil {
 		return fmt.Errorf("create EAR key rotator: %w", err)
 	}
@@ -301,7 +326,6 @@ func run(cfg config) error {
 	// The ledger is written on every issuance, not only when secrets are on:
 	// enabling the feature later would otherwise start with an empty ledger and
 	// fail closed for every pod until its certificate next renews.
-	sandboxBindings := sandboxledger.New(issuer.CapTTL(cfg.certTTL, issuer.MaxLeafTTL), cfg.sandboxLedgerMax)
 	go sandboxBindings.EvictionLoop(ctx.Done(), cfg.rateLimiterEvictInterval)
 
 	var (
@@ -343,14 +367,14 @@ func run(cfg config) error {
 		slog.Warn("NOT serving /secrets: any workload depending on a secret will fail to start", "reason", why)
 	}
 
-	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, secretsStore, teeWebPKIStore, operatorKeysHash, rotator, earIssuer, asClient)
+	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, secretsStore, sandboxBindings, teeWebPKIStore, operatorKeysHash, writeAuthorizer, rotator, earIssuer, asClient)
 	if err != nil {
 		return err
 	}
 	var successorActive atomic.Bool
 	successorActive.Store(!adopted)
 	if adopted {
-		if handoffHandler == nil || activatePredecessor == nil {
+		if handoffHandler == nil || activatePredecessor == nil || confirmPredecessor == nil {
 			return fmt.Errorf("adopted CDS has no handoff leadership controller")
 		}
 		handoffHandler.StartFrozen()
@@ -487,7 +511,9 @@ func run(cfg config) error {
 			default:
 			}
 			// The successor now accepts direct RA-TLS connections, but /readyz is
-			// false and mutations are frozen. Retire the old CDS, then promote.
+			// false and mutations are frozen. Drain the selected predecessor over
+			// its pinned path. Promote locally, then send the one-way confirmation.
+			// The old CDS stays frozen and readable until it processes confirmation.
 			activateCtx, cancel := context.WithTimeout(ctx, cfg.handoffPeerTimeout)
 			activateErr := activatePredecessor(activateCtx)
 			cancel()
@@ -497,8 +523,19 @@ func run(cfg config) error {
 				shutdownCancel()
 				return fmt.Errorf("activate adopted CDS state: %w", activateErr)
 			}
-			handoffHandler.Promote()
-			successorActive.Store(true)
+			// The predecessor granted takeover and is no longer mutable. Promote
+			// the restored state, then try to confirm through the selected direct
+			// path. Confirmation is one-way and idempotent. An error is ambiguous:
+			// the predecessor can have retired before its response was lost, or it
+			// can still be frozen. In both cases the successor is the only mutable
+			// CDS. It must not exit and destroy the only active copy of the state.
+			confirmCtx, confirmCancel := context.WithTimeout(ctx, cfg.handoffPeerTimeout)
+			confirmErr := completeAdoption(confirmCtx, handoffHandler.Promote, confirmPredecessor, &successorActive)
+			confirmCancel()
+			if confirmErr != nil {
+				slog.Warn("CDS takeover confirmation was not acknowledged; predecessor is frozen or retired and the successor remains active",
+					"error", confirmErr)
+			}
 			slog.Info("CDS successor activated", "addr", addr)
 			if err := <-serveErrors; err != nil && err != http.ErrServerClosed {
 				return err
@@ -523,6 +560,19 @@ func run(cfg config) error {
 	return nil
 }
 
+// completeAdoption promotes before sending the idempotent, one-way confirmation.
+// It marks the successor active even when the confirmation result is ambiguous.
+// Activate already made the predecessor non-mutable. A confirmation failure can
+// therefore leave it frozen, or mean that it retired before the response was
+// lost. Shutting down the promoted successor in either case can destroy the only
+// active state copy.
+func completeAdoption(ctx context.Context, promote func(), confirm func(context.Context) error, successorActive *atomic.Bool) error {
+	promote()
+	err := confirm(ctx)
+	successorActive.Store(true)
+	return err
+}
+
 func handoffOperatorPolicy(cfg config, operatorKeysHash string) string {
 	if len(cfg.handoffMeasurements) == 0 {
 		return ""
@@ -530,7 +580,7 @@ func handoffOperatorPolicy(cfg config, operatorKeysHash string) string {
 	return operatorKeysHash
 }
 
-func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, secretsStore *secrets.MemoryStore, teeStore *teewebpki.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
+func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, secretsStore *secrets.MemoryStore, sandboxBindings *sandboxledger.Ledger, teeStore *teewebpki.Store, operatorKeysHash string, writeAuthorizer allowlist.WriteAuthorizer, rotator *earsigner.Rotator, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
 	allowed := parseReferenceDigests(cfg.handoffMeasurements)
 	if len(allowed) == 0 {
 		return nil, nil
@@ -540,14 +590,22 @@ func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allow
 		return nil, fmt.Errorf("prepare handoff bootstrap: %w", err)
 	}
 	handler, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
-		Logger: slog.Default(), KeyProvider: keyProvider,
+		Logger: slog.Default(), KeyProvider: rotator,
 		ExpectedIssuer: cfg.earIssuerName, AllowedMeasurements: allowed,
 		OperatorKeysHash:          operatorKeysHash,
 		ExpectedSuccessorWorkload: cfg.handoffSuccessorWorkload,
 		RequestEARMaxAge:          cfg.handoffEARMaxAge,
 		EndpointDrainDelay:        cfg.handoffEndpointDrainDelay,
+		TransferLease:             cfg.handoffTransferLease,
 		Signer:                    boot.Signer(), EARSource: boot.EARSource(),
 		Snapshot: func() (issuer.CASnapshot, bool) {
+			// Freeze state that changes outside HTTP mutation handlers before the
+			// handoff snapshot. The leadership gate already blocks routed writes.
+			earSnapshot, err := rotator.Freeze()
+			if err != nil {
+				return issuer.CASnapshot{}, false
+			}
+			ledgerSnapshot := sandboxBindings.Freeze()
 			snapshot, ok := snapshotHandoffState(allowlistStore, mesh)
 			if ok {
 				secretSnapshot, err := secretsStore.Snapshot()
@@ -556,6 +614,8 @@ func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allow
 					return issuer.CASnapshot{}, false
 				}
 				snapshot.Secrets = &secretSnapshot
+				snapshot.EARSigner = &earSnapshot
+				snapshot.SandboxLedger = &ledgerSnapshot
 			}
 			if ok && teeStore != nil {
 				// HandleHandoff holds the global mutation write lock while this
@@ -569,6 +629,11 @@ func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allow
 			}
 			return snapshot, ok
 		},
+		Resume: func() {
+			rotator.Resume()
+			sandboxBindings.Resume()
+		},
+		AuthorizeWrite: writeAuthorizer,
 	})
 	if err != nil {
 		return nil, err
@@ -644,6 +709,9 @@ func validateSecretsConfig(cfg config) error {
 	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxPathsPerWorkload <= 0 || cfg.sandboxLedgerMax <= 0 {
 		return fmt.Errorf("--secrets-max-paths, --secrets-max-paths-per-workload and --sandbox-ledger-max-entries must be positive")
 	}
+	if cfg.sandboxLedgerMax > sandboxledger.MaxSnapshotEntries {
+		return fmt.Errorf("--sandbox-ledger-max-entries must not exceed %d for bounded CDS handoff", sandboxledger.MaxSnapshotEntries)
+	}
 	if cfg.secretsMaxPathsPerWorkload >= cfg.secretsMaxPaths {
 		return fmt.Errorf("--secrets-max-paths-per-workload (%d) must be below --secrets-max-paths (%d), or one workload can fill the store", cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxPaths)
 	}
@@ -691,6 +759,9 @@ func validateConfig(cfg config) error {
 		}
 		if cfg.handoffEndpointDrainDelay <= 0 {
 			return fmt.Errorf("--handoff-endpoint-drain-delay must be positive")
+		}
+		if cfg.handoffTransferLease <= cfg.handoffEndpointDrainDelay {
+			return fmt.Errorf("--handoff-transfer-lease must exceed --handoff-endpoint-drain-delay")
 		}
 		writeTimeout := cfg.writeTimeout
 		if writeTimeout == 0 {

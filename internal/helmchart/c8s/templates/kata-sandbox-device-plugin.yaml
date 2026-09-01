@@ -54,6 +54,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: kata-sandbox-device-plugin
     spec:
+      enableServiceLinks: false
       serviceAccountName: {{ include "c8s.kataName" . }}-sandbox-device-plugin
       hostPID: true
       priorityClassName: system-node-critical

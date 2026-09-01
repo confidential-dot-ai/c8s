@@ -41,6 +41,7 @@ spec:
       annotations:
         checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository (include "c8s.kataGuestImageNvidiaTag" .) | sha256sum }}
     spec:
+      enableServiceLinks: false
       serviceAccountName: {{ include "c8s.kataName" . }}-image-puller
       nodeSelector:
         kubernetes.io/os: linux

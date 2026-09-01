@@ -132,7 +132,7 @@ func (h Handler) authorize(r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if matched == nil || matched.Name != h.ExpectedWorkload {
+	if matched == nil || matched.EffectiveIdentity() != h.ExpectedWorkload {
 		return fmt.Errorf("matched workload does not equal %q", h.ExpectedWorkload)
 	}
 	return nil

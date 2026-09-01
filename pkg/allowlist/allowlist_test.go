@@ -203,6 +203,31 @@ func TestParseJSON_RejectsBadWorkloadName(t *testing.T) {
 	}
 }
 
+func TestWorkloadIdentityDefaultsAndValidation(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"api-v1":{"identity":"api","containers":[{"digest":"`+digestA+`"}]},
+		"api-v2":{"identity":"api","containers":[{"digest":"`+digestB+`"}]},
+		"router":{"containers":[{"digest":"`+digestC+`"}]}
+	}}`)
+	if got := WorkloadIdentity("api-v1", al.Workloads["api-v1"]); got != "api" {
+		t.Fatalf("explicit identity = %q, want api", got)
+	}
+	if got := WorkloadIdentity("router", al.Workloads["router"]); got != "router" {
+		t.Fatalf("default identity = %q, want router", got)
+	}
+	if WorkloadIdentity("api-v1", al.Workloads["api-v1"]) != WorkloadIdentity("api-v2", al.Workloads["api-v2"]) {
+		t.Fatal("operator-authored rollout entries did not share their stable identity")
+	}
+
+	bad := `{"schema":"c8s.allowlist/v1","workloads":{"api-v1":{"identity":"api/other","containers":[{"digest":"` + digestA + `"}]}}}`
+	if _, err := ParseJSON([]byte(bad)); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("invalid identity accepted: %v", err)
+	}
+	if _, err := ParseWorkloadJSON([]byte(`{"identity":"api/other","containers":[{"digest":"` + digestA + `"}]}`)); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("invalid identity accepted on single-entry write: %v", err)
+	}
+}
+
 func TestParseWorkloadJSON(t *testing.T) {
 	w, err := ParseWorkloadJSON([]byte(`{"initContainers":[{"digest":"` + digestC + `"}],"containers":[
 		{"digest":"` + digestB + `"},{"digest":"` + digestA + `"}]}`))

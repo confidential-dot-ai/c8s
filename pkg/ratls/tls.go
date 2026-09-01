@@ -910,7 +910,10 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 					return fmt.Errorf("ratls: CA-signed peer failed the sandbox-ID pin: %w", err)
 				}
 				if err := CheckWorkloadPin(cert, policy.WorkloadName); err != nil {
-					return fmt.Errorf("ratls: CA-signed peer failed the workload pin: %w", err)
+					return fmt.Errorf("ratls: CA-signed peer failed the workload policy pin: %w", err)
+				}
+				if err := CheckWorkloadIdentityPin(cert, policy.WorkloadIdentity); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed the workload identity pin: %w", err)
 				}
 			}
 			// A valid CA chain authenticates the issuer; what else must hold
@@ -931,6 +934,7 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				evidencePolicy := *policy
 				evidencePolicy.SandboxID = ""
 				evidencePolicy.WorkloadName = ""
+				evidencePolicy.WorkloadIdentity = ""
 				if _, err := VerifyCert(cert, &evidencePolicy, nil); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
 				}

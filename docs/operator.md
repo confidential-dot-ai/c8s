@@ -355,7 +355,7 @@ AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
 classify. CPU-only verification needs outbound HTTPS to AMD KDS
 (`kdsintf.amd.com`) so it can fetch the VCEK for a bare report. It needs no
 container runtime. NVIDIA GPU verification also needs the exact
-`attestation-cli` v0.5.0 NRAS helper described in
+`attestation-cli` v0.5.0 NRAS helper and its SHA-256 described in
 [`docs/tee-webpki.md`](tee-webpki.md).
 
 ```bash

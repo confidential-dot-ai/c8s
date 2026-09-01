@@ -33,6 +33,7 @@ spec:
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
+      enableServiceLinks: false
       hostPID: true
       {{- with .Values.nriImagePolicy.priorityClassName }}
       priorityClassName: {{ . }}

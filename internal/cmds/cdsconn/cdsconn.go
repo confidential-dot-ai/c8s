@@ -49,7 +49,7 @@ type Options struct {
 // BindFlags registers the connection and credential flags on a command's
 // persistent flag set, so every operator CLI spells them the same way.
 func BindFlags(pf *pflag.FlagSet, o *Options) {
-	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound")
+	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS tls-lb or direct CDS base URL (required); webpki and tee-webpki need a different public-leaf verification flow")
 	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
 	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
 	pf.DurationVar(&o.Timeout, "timeout", 15*time.Second, "per-request timeout")

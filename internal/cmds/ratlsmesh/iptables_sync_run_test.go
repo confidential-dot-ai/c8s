@@ -62,7 +62,11 @@ func TestRunIptablesSyncValidationErrors(t *testing.T) {
 		{"bad ipset maxelem", func(c *iptablesSyncConfig) { c.ipsetMaxElem = 0 }, "", "ipset-maxelem must be positive"},
 		{"missing node IP", func(c *iptablesSyncConfig) {}, "", "node IP required"},
 		{"node IP from env invalid", func(c *iptablesSyncConfig) {}, "not-an-ip", "not a valid IP address"},
-		{"node IP not local", func(c *iptablesSyncConfig) { c.nodeIPs = []string{"203.0.113.7"} }, "", "not bound to any local interface"},
+		{"node IP not local", func(c *iptablesSyncConfig) {
+			// Set both families so the check cannot fail first while it tries to
+			// auto-discover a missing family on the test host.
+			c.nodeIPs = []string{"203.0.113.7", "2001:db8::7"}
+		}, "", "not bound to any local interface"},
 		{"bad exclude uids", func(c *iptablesSyncConfig) {
 			c.nodeIPs = []string{localIPv4(t)}
 			c.excludeUIDs = "root"

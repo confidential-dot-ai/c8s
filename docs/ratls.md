@@ -480,19 +480,19 @@ reported by the requester, the binding holds at **first** issuance: get-cert's
 own sidecar container is already tracked when it asks for the token, and step 6
 reads whatever the sandbox is running at that instant.
 
-The gate is **membership only** — it does not require the running set to match a
-whole workload entry. Issuance lands at arbitrary points in the pod lifecycle
-(a user init container running, main containers coming up one at a time, one
-restarting, completed init containers reaped), and in each the running set is a
-strict subset of what the pod declares. Requiring the whole set would deny
-ordinary lifecycle states, permanently so once init containers are reaped.
-Membership is subset-safe, so it holds in all of them.
+The base issuance gate is **membership only**. It lets a Pod get an unnamed
+mesh certificate during normal start and restart states. Such a leaf states
+only that the key belongs to the sandbox.
 
-The consequence: a leaf's sandbox ID says *this key belongs to pod X*, not *pod
-X runs exactly workload Y*. Whole-set enforcement belongs where the pod is
-complete and the stake is high — secrets release — and is not implemented yet.
-Per-container digest and argv policy is still enforced continuously at
-admission by nri-image-policy / policy-monitor
+A named leaf has a stronger rule. The trusted high-water inventory must contain
+every main container, every still-running init container, and every c8s helper.
+This complete set must match one exact named workload entry. A verifier or CDS
+key-release rule that requires the workload name rejects an unnamed leaf. Thus,
+normal mesh bootstrap remains available, while a protected TLS key or
+application secret is released only to the exact workload.
+
+Per-container digest and argv policy is also enforced continuously by
+nri-image-policy or policy-monitor
 ([allowlist-and-capabilities.md](allowlist-and-capabilities.md)).
 
 ### What vouches for the ID
@@ -618,12 +618,22 @@ MatchedWorkload ::= SEQUENCE {
 }
 ```
 
+Version 2 adds one field after `name`:
+
+```text
+formatVersion    INTEGER,           -- 2
+name             IA5String,         -- exact policy entry
+identity         IA5String,         -- stable logical peer identity
+allowlistVersion IA5String,
+allowlistDigest  OCTET STRING (32)
+```
+
 Parsers are strict (`pkg/ratls/matchedworkload.go`): minimal DER only, no
-trailing bytes or fields, exactly one extension with this OID, format version
-1, and the same name grammar and 63-byte bound `pkg/allowlist` enforces on
-entry names — so the `confidential.ai/cw` selector, an allowlist entry, and
-this stamp admit exactly the same values. Anything else fails closed; a
-verifier must never read damage as absence.
+trailing bytes or fields, exactly one extension with this OID, and format
+version 1 or 2. Version 1 has no `identity`; its identity is `name`. Version 2
+uses the same grammar and 63-byte bound for both names. An old v1-only verifier
+accepts unchanged v1 stamps and rejects v2. It does not misread the new field.
+Anything else fails closed; a verifier must never read damage as absence.
 
 ### How CDS decides
 
@@ -644,12 +654,14 @@ verify, CDS makes one unified inventory decision
    two views against each other; a disagreement is logged loudly (bounded to
    the sandbox and inventory identities), suppresses the stamp, and preserves
    the membership-only decision from the independent digests view;
-5. drop the platform's injected containers using the same
+5. keep all reported containers, including c8s helpers, using the same
    `secrets.WorkloadContainers` implementation secrets release uses;
 6. run `allowlist.MatchWorkload` — argv-aware, "nothing foreign, every main
    present" — once against the snapshot.
 
-A unique match stamps `(name, snapshot version, snapshot digest)`. Everything
+A unique match stamps `(exact entry name, stable identity, snapshot version,
+snapshot digest)`. `identity` comes only from that exact operator-authorized
+entry and defaults to its name. Everything
 else — an old inventory with no containers view, a malformed answer, no match
 mid-lifecycle, an ambiguous match — issues the existing **membership-only
 (unnamed) leaf**: incomplete pods need a mesh certificate to bootstrap, so the
@@ -686,6 +698,28 @@ The named-leaf TTL is the shortest CDS issues and `certutil` does not backdate
 a safe schedule: it must stay strictly below `cds.namedCertTTL`, and the
 leaf-derived cap is the backstop when it does not.
 
+A zero-downtime policy rollout uses two exact entries in one active allowlist.
+The old and new entries can share a stable identity, but each keeps its own
+image, argv, and entry name. This is necessary because every policy refresh
+must still cover all live Pods. Mesh peers pin the shared identity. Receipts
+retain the exact entry name and the active allowlist digest and version. Drain
+the old Pods within the named-leaf TTL, then remove the old entry.
+
+Use this explicit migration. Each pin has one meaning. No pin accepts either
+an exact name or a stable identity.
+
+1. Roll proxies and verifiers that read v1 and v2. Keep the old exact-policy
+   pin and keep `identity` absent. Leaves stay v1.
+2. Add `identity` to the same exact entry. Renew the leaf. It becomes v2. The
+   old exact-policy pin still accepts it.
+3. Change the proxy from the exact-policy pin to the explicit stable-identity
+   pin.
+4. Add the new versioned exact entry with the same identity. Run old and new
+   entries together during the drain.
+
+A v1-only client rejects v2. This fail-closed result is safe, but it is not
+service compatibility. Do not add identities before step 1 is complete.
+
 ### What vouches for the name
 
 Exactly the sandbox-ID posture: the stamp rides the leaf's **signed area**, is
@@ -693,7 +727,8 @@ vouched by the mesh CA signature, and is *not* part of any hardware
 transcript.
 
 - `ratls.VerifyCert` and `ratls.VerifyAttestation` **fail closed** when
-  `VerifyPolicy.WorkloadName` is set — neither checks CA provenance.
+  `VerifyPolicy.WorkloadName` or `VerifyPolicy.WorkloadIdentity` is set —
+  neither checks CA provenance.
 - The pin is enforced only on the chain-verified branch of
   `dualVerifyPeerCallback` (`CheckWorkloadPin`), and is cleared before the
   `RequireCAEvidence` re-verification. A self-signed RA-TLS peer can never
@@ -714,9 +749,12 @@ hardware-bound.
 
 ### Verifying from outside
 
-`c8s verify --workload <name>` pins the name; `c8s verify --allowlist <file>`
-hashes the file's exact canonical bytes (as served by `GET /allowlist` — no
-reserialization), checks the stamped digest, then resolves the stamped name in
+`c8s verify --workload <name>` pins the exact policy entry.
+`c8s verify --workload-identity <name>` pins the stable identity. For a v1
+leaf, the identity is the exact entry name. The two options are separate. If
+both are present, both must match. `c8s verify --allowlist <file>` hashes the file's exact
+canonical bytes (as served by `GET /allowlist` — no reserialization), checks
+the stamped digest, then resolves the exact stamped entry name in
 the document. Both **require `--mesh-ca`**, exactly like `--sandbox-id`, and
 the chain check runs before the stamp is reported. The verdict distinguishes
 `workload_absent`, `workload_malformed`, `workload_name_mismatch`,
@@ -726,8 +764,9 @@ exit codes are unchanged.
 ### Cross-implementation note
 
 A non-Go verifier needs the strict DER parse above plus a mesh-CA chain check.
-The one canonical encoding of `{v1, "api", "7", 0x11×32}` is pinned as a
-golden vector in `pkg/ratls/matchedworkload_test.go` and shared with the other
+The canonical v1 encoding of `{v1, "api", "7", 0x11×32}` remains pinned as a
+golden vector in `pkg/ratls/matchedworkload_test.go`. A v2 compatibility test
+pins the explicit identity behavior. These are shared with the other
 parsers so they cannot drift.
 
 ## Operation under the two confidential shapes

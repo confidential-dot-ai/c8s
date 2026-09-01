@@ -20,12 +20,18 @@ import (
 // /explain/... unreachable.
 const ExplainRoute = "/secrets-explain/{sandboxID}"
 
-// ReportedContainer is one container the inventory named, and whether the
-// release path drops it as a platform-injected one.
+// ReportedContainer is one container the inventory named. Injected remains in
+// the response for wire compatibility. It is always false because exact policy
+// now matches all c8s helpers instead of dropping them.
 type ReportedContainer struct {
-	Digest   string   `json:"digest"`
-	Argv     []string `json:"argv"`
-	Injected bool     `json:"injected"`
+	Digest         string            `json:"digest"`
+	Argv           []string          `json:"argv"`
+	BindMounts     []string          `json:"bindMounts,omitempty"`
+	BindMountKinds map[string]string `json:"bindMountKinds,omitempty"`
+	EnvNames       []string          `json:"envNames,omitempty"`
+	MountsObserved bool              `json:"mountsObserved"`
+	EnvObserved    bool              `json:"envObserved"`
+	Injected       bool              `json:"injected"`
 }
 
 // EntryVerdict is one workload entry measured against the candidate set.
@@ -156,17 +162,22 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 
 	var candidates []pkgallowlist.RunningContainer
 	for _, c := range reported {
-		injected := isInjected(al, c)
-		entry := ReportedContainer{Digest: c.Digest, Argv: c.Argv, Injected: injected}
-		resp.Reported = append(resp.Reported, entry)
-		if injected {
-			continue
+		entry := ReportedContainer{
+			Digest: c.Digest, Argv: c.Argv,
+			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
+			Injected: false,
 		}
+		resp.Reported = append(resp.Reported, entry)
 		resp.Candidates = append(resp.Candidates, entry)
-		candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
+		candidates = append(candidates, pkgallowlist.RunningContainer{
+			Digest: c.Digest, Argv: c.Argv,
+			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
+		})
 	}
 	if len(candidates) == 0 {
-		resp.Refusal = "every container the sandbox reports is a platform-injected one, so there is nothing to match"
+		resp.Refusal = "the sandbox reports no containers, so there is nothing to match"
 		return resp
 	}
 
@@ -179,7 +190,11 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 			HasGrant: al.Workloads[name].Secrets != nil,
 		}
 		for _, f := range d.Foreign {
-			v.Foreign = append(v.Foreign, ReportedContainer{Digest: f.Digest, Argv: f.Argv})
+			v.Foreign = append(v.Foreign, ReportedContainer{
+				Digest: f.Digest, Argv: f.Argv,
+				BindMounts: f.BindMounts, BindMountKinds: f.BindMountKinds, EnvNames: f.EnvNames,
+				MountsObserved: f.MountsObserved, EnvObserved: f.EnvObserved,
+			})
 		}
 		for _, m := range d.MissingMains {
 			v.MissingMains = append(v.MissingMains, MissingContainer{Digest: m.Digest.String(), Image: m.Image})

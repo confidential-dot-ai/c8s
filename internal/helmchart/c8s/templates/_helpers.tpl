@@ -419,7 +419,7 @@ other value is used verbatim (adopt from a distinct peer).
 */ -}}
 {{- define "c8s.cdsHandoffPeerURL" -}}
 {{- if eq .Values.cds.handoff.peerUrl "self" -}}
-{{ include "c8s.cdsURL" . }}
+https://{{ include "c8s.cdsName" . }}-handoff.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
 {{- else -}}
 {{ .Values.cds.handoff.peerUrl }}
 {{- end -}}
@@ -633,10 +633,9 @@ cache_max_entries = 1024
 {{- end -}}
 
 {{/*
-  c8s.imageAllowlist returns the merged image-digest allowlist as a dict
-  (sha256 -> image reference). It is the single source the NRI allowlist is
-  built from — both CDS's served seed (c8s.allowlistSeedJSON) and each plugin's
-  always_allow (nri-image-policy.bootConfig) render from it.
+  c8s.imageAllowlist returns the local cold-boot image floor as a dict
+  (sha256 -> image reference). Only each NRI plugin's always_allow renders from
+  it. CDS does not serve this floor as active policy.
 
   Contents, lowest precedence first:
     1. derived c8s component images (from c8s.components) whose image.digest is
@@ -655,6 +654,7 @@ cache_max_entries = 1024
 {{- if and (get $c "enabled") (get $img "digest") -}}
 {{- $_ := set $digests (get $img "digest") (printf "%s@%s" (get $img "repository") (get $img "digest")) -}}
 {{- end -}}
+
 {{- end -}}
 {{- end -}}
 {{- $cdsImg := .Values.cds.image -}}
@@ -700,14 +700,87 @@ cache_max_entries = 1024
 {{- end -}}
 
 {{/*
+  c8s.activeDigestAllowlist is the operator-authored digest floor in the CDS
+  active policy. It deliberately excludes chart-derived c8s system images.
+  Those bytes use the local cold-boot floor only. The steady policy must name
+  them with exact workload entries.
+*/}}
+{{- define "c8s.activeDigestAllowlist" -}}
+{{- $digests := dict -}}
+{{- range $digest, $image := .Values.nriImagePolicy.bootstrapAllowlist.digests -}}
+{{- $_ := set $digests $digest $image -}}
+{{- end -}}
+{{ $digests | toJson }}
+{{- end -}}
+
+{{/*
+  c8s.bootstrapWorkloads adds the exact nginx identity used for tls-lb key
+  release. nginx remains in the digest floor for bootstrap admission. The
+  named entry adds the stricter argv check used before CDS stamps the
+  c8s-tls-lb mesh identity and releases tee-webpki state.
+*/}}
+{{- define "c8s.bootstrapWorkloads" -}}
+{{- $workloads := deepCopy (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
+{{- $name := .Values.tlsLb.attest.expectedWorkload | default "" -}}
+{{- if and .Values.tlsLb.enabled $name -}}
+{{- $image := .Values.tlsLb.nginx.image -}}
+{{- if not $image.digest -}}
+{{- fail "tlsLb.attest.expectedWorkload requires a digest-pinned tlsLb.nginx.image" -}}
+{{- end -}}
+{{- if or (not (kindIs "slice" .Values.tlsLb.nginx.command)) (eq (len .Values.tlsLb.nginx.command) 0) -}}
+{{- fail "tlsLb.attest.expectedWorkload requires a non-empty tlsLb.nginx.command list" -}}
+{{- end -}}
+{{- if or (not (kindIs "slice" .Values.tlsLb.nginx.args)) (eq (len .Values.tlsLb.nginx.args) 0) -}}
+{{- fail "tlsLb.attest.expectedWorkload requires a non-empty tlsLb.nginx.args list" -}}
+{{- end -}}
+{{- $mountDestinations := list "/dev/termination-log" "/etc/hostname" "/etc/hosts" "/etc/resolv.conf" "/dev/shm" .Values.tlsLb.tlsMountPath "/var/cache/nginx" "/tmp" -}}
+{{- $mountKinds := dict .Values.tlsLb.tlsMountPath "empty-dir" "/var/cache/nginx" "empty-dir" "/tmp" "empty-dir" -}}
+{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
+{{- if ne $publicTLSMode "cds" -}}
+{{- $mountDestinations = append $mountDestinations .Values.tlsLb.publicTLS.mountPath -}}
+{{- if eq $publicTLSMode "tee-webpki" -}}
+{{- $_ := set $mountKinds .Values.tlsLb.publicTLS.mountPath "empty-dir" -}}
+{{- else -}}
+{{- $_ := set $mountKinds .Values.tlsLb.publicTLS.mountPath "secret" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.tlsLb.discovery.enabled -}}
+{{- $mountDestinations = append $mountDestinations .Values.tlsLb.discovery.mountPath -}}
+{{- $_ := set $mountKinds .Values.tlsLb.discovery.mountPath "empty-dir" -}}
+{{- end -}}
+{{- if eq .Values.tlsLb.nginx.configMode "configmap" -}}
+{{- $mountDestinations = append $mountDestinations "/etc/nginx/nginx.conf" -}}
+{{- $_ := set $mountKinds "/etc/nginx/nginx.conf" "configmap" -}}
+{{- end -}}
+{{- $container := dict
+      "digest" $image.digest
+      "image" (printf "%s@%s" $image.repository $image.digest)
+      "command" (dict "policy" "exact" "argv" .Values.tlsLb.nginx.command)
+      "args" (dict "policy" "exact" "argv" .Values.tlsLb.nginx.args)
+      "mounts" (dict "policy" "exact" "destinations" (uniq (sortAlpha $mountDestinations)) "kinds" $mountKinds)
+      "env" (dict "policy" "exact" "names" .Values.tlsLb.nginx.effectiveEnvNames) -}}
+{{- $derived := dict "initContainers" (list) "containers" (list $container) -}}
+{{- /* A two-pass c8s install supplies the full rendered Pod entry, including
+       c8s-cert and cds-attest. A raw Helm render has no OCI config lookup, so
+       it receives this safe nginx-only bootstrap identity. Never replace an
+       explicit full entry with the partial fallback. The observed Pod must
+       still match that entry before CDS releases tee-webpki state. */ -}}
+{{- if not (hasKey $workloads $name) -}}
+{{- $_ := set $workloads $name $derived -}}
+{{- end -}}
+{{- end -}}
+{{ $workloads | toJson }}
+{{- end -}}
+
+{{/*
   c8s.allowlistSeedJSON renders the allowlist document CDS's --allowlist-seed
-  expects: the c8s.imageAllowlist floor under "digests", plus any
+  expects: the operator active digest floor under "digests", plus any
   bootstrapAllowlist.workloads under "workloads" ({} by default). CDS seeds its
   served /allowlist from it so the first worker pull returns a real list rather
   than an empty set. The document validates against pkg/allowlist.ParseJSON.
 */}}
 {{- define "c8s.allowlistSeedJSON" -}}
-{{ dict "schema" "c8s.allowlist/v1" "digests" (include "c8s.imageAllowlist" . | fromJson) "workloads" (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) | toJson }}
+{{ dict "schema" "c8s.allowlist/v1" "digests" (include "c8s.activeDigestAllowlist" . | fromJson) "workloads" (include "c8s.bootstrapWorkloads" . | fromJson) | toJson }}
 {{- end -}}
 
 {{/*

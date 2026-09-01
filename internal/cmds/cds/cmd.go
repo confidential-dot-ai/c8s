@@ -82,7 +82,8 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.handoffClientCert, "handoff-client-cert", "", "successor mesh certificate used for handoff mTLS")
 	flags.StringVar(&cfg.handoffClientKey, "handoff-client-key", "", "private key for --handoff-client-cert")
 	flags.DurationVar(&cfg.handoffEARMaxAge, "handoff-ear-max-age", issuer.DefaultHandoffEARMaxAge, "maximum age of successor handoff evidence")
-	flags.DurationVar(&cfg.handoffEndpointDrainDelay, "handoff-endpoint-drain-delay", issuer.DefaultEndpointDrainDelay, "time a frozen predecessor stays readable but NotReady before retirement")
+	flags.DurationVar(&cfg.handoffEndpointDrainDelay, "handoff-endpoint-drain-delay", issuer.DefaultEndpointDrainDelay, "time a frozen predecessor stays readable but NotReady before it grants takeover")
+	flags.DurationVar(&cfg.handoffTransferLease, "handoff-transfer-lease", issuer.DefaultHandoffTransferLease, "maximum pre-activation freeze before the predecessor safely resumes")
 	flags.BoolVar(&cfg.teeWebPKIEnabled, "tee-webpki", false, "hold one cluster TLS key and public certificate state in CDS memory")
 	flags.StringVar(&cfg.teeWebPKIWorkload, "tee-webpki-workload", "c8s-tls-lb", "matched-workload name allowed to read protected cluster TLS state")
 
@@ -169,6 +170,7 @@ type config struct {
 	handoffClientKey          string
 	handoffEARMaxAge          time.Duration
 	handoffEndpointDrainDelay time.Duration
+	handoffTransferLease      time.Duration
 	teeWebPKIEnabled          bool
 	teeWebPKIWorkload         string
 	rotationInterval          time.Duration

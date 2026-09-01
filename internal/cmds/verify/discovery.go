@@ -181,10 +181,10 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed
 		return nil, fmt.Errorf("parse discovery document: %w", err)
 	}
 	switch d.PublicTLS.Mode {
-	case "", "cds", "webpki":
+	case "", "cds", "webpki", "tee-webpki":
 	default:
 		return nil, &securityError{err: fmt.Errorf(
-			"unknown public_tls.mode %q in discovery document (this build knows cds and webpki) — failing closed on a document it cannot classify", d.PublicTLS.Mode)}
+			"unknown public_tls.mode %q in discovery document (this build knows cds, webpki, and tee-webpki) — failing closed on a document it cannot classify", d.PublicTLS.Mode)}
 	}
 	cert, rd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {

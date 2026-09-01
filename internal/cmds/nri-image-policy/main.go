@@ -26,9 +26,11 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -154,7 +156,7 @@ func Run(args []string) error {
 		pluginErrCh <- plugin.Run(ctx)
 	}()
 
-	if plugin.inventory != nil {
+	if plugin.inventory != nil && cfg.WorkloadClaims.SocketDir != "" {
 		signer, err := sandboxTokenSigner(cfg, logger)
 		if err != nil {
 			return err
@@ -282,11 +284,9 @@ func entriesOf(wl *allowlist.Allowlist) int {
 	return len(wl.Digests)
 }
 
-// mergeAllowlists unions the floor (a) with a pulled document (b): b's floor
-// digests and workloads overlay a's. Either may be nil. Floor entries in a
-// cannot be removed by b — they are the static always_allow floor. The result
-// feeds BuildIndex, so a's digests stay digest-only-admissible while b's
-// workloads carry their argv policy.
+// mergeAllowlists returns a detached union of two policy documents. It is used
+// to build the initial static policy and by tests. The live policy store does
+// not union that static policy into an authenticated CDS policy.
 func mergeAllowlists(a, b *allowlist.Allowlist) *allowlist.Allowlist {
 	out := &allowlist.Allowlist{
 		Schema:    allowlist.Schema,
@@ -323,7 +323,8 @@ type pullArgs struct {
 // pullInitial fetches the startup allowlist with bounded retries and
 // returns the response ETag for the steady-state poll loop.
 //
-// INVARIANT: a nil error return means args.store holds floor ∪ pulled.
+// INVARIANT: a nil error return means args.store holds the authenticated CDS
+// policy and no longer holds the static cold-boot policy.
 // Context cancellation surfaces as ctx.Err(); callers must not mark the
 // plugin ready on that path.
 func pullInitial(ctx context.Context, args pullArgs) (string, error) {
@@ -349,14 +350,20 @@ func pullInitial(ctx context.Context, args pullArgs) (string, error) {
 				err = errInitialAllowlistNil
 			} else {
 				version := parseVersion(etag)
-				args.store.apply(wl, version)
-				args.logger.Info("initial allowlist pulled from CDS",
-					"floor_entries", len(wl.Digests),
-					"workloads", len(wl.Workloads),
-					"version", version,
-					"etag", etag,
-				)
-				return etag, nil
+				applied, applyErr := args.store.applyChecked(wl, version)
+				if applyErr != nil {
+					err = applyErr
+				} else if !applied {
+					err = fmt.Errorf("initial allowlist version %d was rejected as a rollback", version)
+				} else {
+					args.logger.Info("initial allowlist pulled from CDS",
+						"floor_entries", len(wl.Digests),
+						"workloads", len(wl.Workloads),
+						"version", version,
+						"etag", etag,
+					)
+					return etag, nil
+				}
 			}
 		}
 
@@ -416,7 +423,13 @@ func runPullLoop(ctx context.Context, args pullLoopArgs) {
 			continue
 		}
 		version := parseVersion(newETag)
-		if !args.store.apply(wl, version) {
+		applied, applyErr := args.store.applyChecked(wl, version)
+		if applyErr != nil {
+			args.logger.Warn("pull loop: policy does not cover the live runtime; keeping current index",
+				"error", applyErr, "pulled_version", version, "etag", newETag)
+			continue
+		}
+		if !applied {
 			args.logger.Warn("pull loop: ignoring rolled-back allowlist; keeping current index",
 				"pulled_version", version, "etag", newETag)
 			continue
@@ -556,7 +569,13 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs})
+		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs},
+		func(ctx context.Context, reportData []byte) (types.AttestResponse, error) {
+			return attestationclient.NewClient(attestationApiURL).Attest(ctx, types.AttestRequest{
+				ReportData: types.NewBase64Bytes(reportData),
+				Platform:   types.Platform(cfg.NormalizedPlatform()),
+			})
+		})
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).

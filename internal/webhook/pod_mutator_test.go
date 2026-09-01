@@ -240,7 +240,7 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 			AnnotationDiscoveryOut:           "/discovery/discovery.json",
 			AnnotationDiscoveryCDSCertURL:    "/.well-known/cds-cert.pem",
 			AnnotationDiscoveryMeshCAURL:     "/.well-known/mesh-ca.pem",
-			AnnotationDiscoveryPublicTLSMode: "webpki",
+			AnnotationDiscoveryPublicTLSMode: "tee-webpki",
 			AnnotationGetCertRunAsUser:       "101",
 			AnnotationGetCertRunAsGroup:      "101",
 			AnnotationGetCertRunAsNonRoot:    "true",
@@ -290,7 +290,7 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 		"--reload-watch=/edge-tls/public.key",
 		"--discovery-out=/discovery/discovery.json",
 		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
-		"--discovery-public-tls-mode=webpki",
+		"--discovery-public-tls-mode=tee-webpki",
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
 		"--verbose",
 	} {

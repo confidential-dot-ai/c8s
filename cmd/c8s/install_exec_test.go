@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -750,15 +751,21 @@ type installStubs struct {
 	f        *fakeBin
 	computed string
 	applied  string
+	realHelm string
 }
 
 func newInstallStubs(t *testing.T, kubectlBody string, helmUpgradeFails bool) *installStubs {
 	t.Helper()
+	realHelm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm CLI not found")
+	}
 	f := newFakeBin(t)
 	s := &installStubs{
 		f:        f,
 		computed: filepath.Join(f.dir, "computed.yaml"),
 		applied:  filepath.Join(f.dir, "applied.json"),
+		realHelm: realHelm,
 	}
 	fail := ""
 	if helmUpgradeFails {
@@ -766,6 +773,7 @@ func newInstallStubs(t *testing.T, kubectlBody string, helmUpgradeFails bool) *i
 	}
 	f.tool(t, "helm", `case "$1" in
 show) /bin/cat "$3/values.yaml" ;;
+template) exec "`+realHelm+`" "$@" ;;
 upgrade)
   prev=; last=
   for a in "$@"; do
@@ -777,7 +785,10 @@ upgrade)
   ;;
 esac`)
 	f.tool(t, "kubectl", kubectlBody)
-	f.tool(t, "crane", "echo "+testDigest)
+	f.tool(t, "crane", `case "$1" in
+config) echo '{"config":{"Entrypoint":["/c8s"],"Cmd":[],"Env":[]}}' ;;
+*) echo "`+testDigest+`" ;;
+esac`)
 	return s
 }
 
@@ -815,8 +826,8 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 		t.Fatalf("no helm upgrade logged:\n%s", strings.Join(calls, "\n"))
 	}
 	args := strings.Fields(calls[hi])[1:]
-	if len(args) != 8 || args[0] != "upgrade" || args[1] != "--install" || args[2] != "c8s" ||
-		args[4] != "--namespace" || args[5] != "c8s-system" || args[6] != "-f" {
+	if len(args) != 10 || args[0] != "upgrade" || args[1] != "--install" || args[2] != "c8s" ||
+		args[4] != "--namespace" || args[5] != "c8s-system" || args[6] != "-f" || args[8] != "-f" {
 		t.Fatalf("helm argv = %v", args)
 	}
 
@@ -1122,6 +1133,7 @@ func helmValuesCapture(t *testing.T, s *installStubs, captureFile string) {
 	t.Helper()
 	s.f.tool(t, "helm", `case "$1" in
 show) /bin/cat "$3/values.yaml" ;;
+template) exec "`+s.realHelm+`" "$@" ;;
 upgrade)
   prev=; last=
   for a in "$@"; do
@@ -1164,15 +1176,16 @@ func TestInstallValuesFromStdin(t *testing.T) {
 	// reads effectiveValues — volumed is pinned only when enabled there.
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/volumed:main")
 
-	// Helm received the piped values as a real -f file, followed by the
-	// computed values file (which wins on shared keys).
+	// Helm received the piped values as a real -f file, followed by the exact
+	// system-policy overlay and the computed values file (which wins on shared
+	// keys).
 	data, err := os.ReadFile(capture)
 	if err != nil {
 		t.Fatalf("read values capture: %v", err)
 	}
 	sections := strings.Split(string(data), "== ")
-	if len(sections) != 3 { // leading empty + stdin file + computed file
-		t.Fatalf("helm received %d -f files, want 2:\n%s", len(sections)-1, data)
+	if len(sections) != 4 { // leading empty + stdin + system policy + computed
+		t.Fatalf("helm received %d -f files, want 3:\n%s", len(sections)-1, data)
 	}
 	stdinSection := sections[1]
 	header, content, _ := strings.Cut(stdinSection, "\n")

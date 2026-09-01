@@ -61,8 +61,8 @@ func (s *syncer) sync(ctx context.Context) (bool, error) {
 	}
 
 	if len(state.CertificatePEM) == 0 {
-		// Do not create a temporary certificate. The init helper must keep nginx
-		// stopped until a public chain for the protected key is available.
+		// Do not create a temporary certificate. Without a public chain, nginx
+		// cannot bind its serving socket successfully.
 		_ = os.Remove(s.cfg.OutCert)
 		return false, nil
 	}

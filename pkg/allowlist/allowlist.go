@@ -2,8 +2,10 @@
 // canonical serialization.
 //
 // The allowlist has two layers. Digests is the floor: a digest -> image-label
-// map whose images are admitted by digest alone. The measured guest seed and
-// standalone/injected component images live here. Workloads carries policy:
+// map whose images are admitted by digest alone. The measured pod-CVM guest
+// seed and explicit compatibility entries can live here. Node-CVM has a
+// separate local cold-boot floor that is not part of this active document.
+// Workloads carries policy:
 // each named entry pins an init/main container set, every container carries
 // entrypoint/cmd (argv) policy, and the entry as a whole carries a secret-store
 // grant. Policy is always looked up by container digest — the entry name and
@@ -25,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -56,7 +59,10 @@ type Allowlist struct {
 // normalizes to: an entry that releases nothing carries no "secrets" key at
 // all, so a consumer that does not know the field never sees it.
 type Workload struct {
-	Label          string         `json:"label,omitempty"`
+	Label string `json:"label,omitempty"`
+	// Identity is the stable logical mesh identity. Different exact entries
+	// can share it during a bounded rollout. Empty means the entry name.
+	Identity       string         `json:"identity,omitempty"`
 	InitContainers []Container    `json:"initContainers"`
 	Containers     []Container    `json:"containers"`
 	Secrets        *SecretsPolicy `json:"secrets,omitempty"`
@@ -99,6 +105,11 @@ type ArgvPolicy struct {
 type MountPolicy struct {
 	Policy       string   `json:"policy"`
 	Destinations []string `json:"destinations,omitempty"`
+	// Kinds optionally pins the Kubernetes volume source class at a
+	// confidentiality-critical destination. It never contains the host source
+	// path. Supported values are empty-dir, configmap, secret, projected,
+	// downward-api, host-path, node, and unknown.
+	Kinds map[string]string `json:"kinds,omitempty"`
 }
 
 // EnvPolicy governs the environment variable NAMES a container may run with.
@@ -162,6 +173,9 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	var w Workload
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("decode workload: %w", err)
+	}
+	if w.Identity != "" && !ValidWorkloadName(w.Identity) {
+		return nil, fmt.Errorf("entry identity %q must be at most %d bytes and match [A-Za-z0-9][A-Za-z0-9._-]*", w.Identity, MaxWorkloadNameLen)
 	}
 	if err := normalizeContainers("entry", "initContainers", w.InitContainers); err != nil {
 		return nil, err
@@ -251,6 +265,9 @@ func (a *Allowlist) normalize(strict bool) error {
 			delete(a.Workloads, name)
 			continue
 		}
+		if w.Identity != "" && !ValidWorkloadName(w.Identity) {
+			return fmt.Errorf("workload %q identity %q must be at most %d bytes and match [A-Za-z0-9][A-Za-z0-9._-]*", name, w.Identity, MaxWorkloadNameLen)
+		}
 		if err := normalizeContainers(name, "initContainers", w.InitContainers); err != nil {
 			return err
 		}
@@ -265,6 +282,15 @@ func (a *Allowlist) normalize(strict bool) error {
 		a.Workloads[name] = w
 	}
 	return nil
+}
+
+// WorkloadIdentity returns the stable logical identity of an exact policy
+// entry. Empty retains the historical entry-name identity.
+func WorkloadIdentity(entryName string, workload Workload) string {
+	if workload.Identity != "" {
+		return workload.Identity
+	}
+	return entryName
 }
 
 func normalizeContainers(workload, field string, cs []Container) error {
@@ -296,8 +322,8 @@ func normalizeContainers(workload, field string, cs []Container) error {
 func normalizeMounts(p *MountPolicy) error {
 	switch p.Policy {
 	case PolicyAny, "":
-		if len(p.Destinations) != 0 {
-			return fmt.Errorf("any policy takes no destinations")
+		if len(p.Destinations) != 0 || len(p.Kinds) != 0 {
+			return fmt.Errorf("any policy takes no destinations or kinds")
 		}
 		p.Policy = PolicyAny
 		p.Destinations = nil
@@ -311,6 +337,18 @@ func normalizeMounts(p *MountPolicy) error {
 			}
 		}
 		p.Destinations = sortedUnique(p.Destinations)
+		allowedKinds := map[string]struct{}{"empty-dir": {}, "configmap": {}, "secret": {}, "projected": {}, "downward-api": {}, "host-path": {}, "node": {}, "unknown": {}}
+		for destination, kind := range p.Kinds {
+			if !path.IsAbs(destination) {
+				return fmt.Errorf("kind destination %q is not an absolute path", destination)
+			}
+			if _, ok := allowedKinds[kind]; !ok {
+				return fmt.Errorf("unsupported mount kind %q at %s", kind, destination)
+			}
+			if !slices.Contains(p.Destinations, destination) {
+				return fmt.Errorf("mount kind destination %q is not in destinations", destination)
+			}
+		}
 	default:
 		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
 	}
@@ -328,9 +366,6 @@ func normalizeEnv(p *EnvPolicy) error {
 		p.Policy = PolicyAny
 		p.Names = nil
 	case PolicyExact:
-		if len(p.Names) == 0 {
-			return fmt.Errorf("exact policy requires at least one name")
-		}
 		for _, n := range p.Names {
 			if n == "" || strings.ContainsRune(n, '=') {
 				return fmt.Errorf("environment name %q is empty or contains '='", n)
@@ -467,7 +502,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env})
 	return string(b)
 }
 

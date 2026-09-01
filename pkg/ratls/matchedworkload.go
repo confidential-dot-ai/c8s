@@ -36,9 +36,10 @@ import (
 //	1.3.6.1.4.1.66378.1.5 - matched workload extension
 var OIDMatchedWorkload = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 5}
 
-// matchedWorkloadVersion is the only encoding version this package emits or
-// parses. An unknown version fails closed wherever workload identity is read.
-const matchedWorkloadVersion = 1
+const (
+	matchedWorkloadVersionV1 = 1
+	matchedWorkloadVersionV2 = 2
+)
 
 // allowlistDigestSize is the exact length of the canonical-allowlist SHA-256.
 const allowlistDigestSize = 32
@@ -54,6 +55,9 @@ type MatchedWorkload struct {
 	// Name is the matched entry name (allowlist workload-name grammar,
 	// at most allowlist.MaxWorkloadNameLen bytes).
 	Name string
+	// Identity is the stable logical mesh identity authorized by this exact
+	// allowlist entry. Empty means Name and uses the v1 wire form.
+	Identity string
 	// AllowlistVersion is the store's monotonic version counter at the
 	// snapshot the match used — a canonical positive decimal integer.
 	AllowlistVersion string
@@ -62,17 +66,30 @@ type MatchedWorkload struct {
 	AllowlistDigest []byte
 }
 
-// matchedWorkloadASN1 is the DER encoding:
+// Version 1 is the historical DER encoding. It uses Name as the logical
+// identity. Version 2 adds an explicit stable identity after Name.
 //
 //	MatchedWorkload ::= SEQUENCE {
-//	    formatVersion    INTEGER,           -- exactly 1
+//	    formatVersion    INTEGER,           -- 1
 //	    name             IA5String,         -- 1..63 bytes, workload-name grammar
 //	    allowlistVersion IA5String,         -- 1..20 decimal digits, no leading zero
 //	    allowlistDigest  OCTET STRING (32)  -- SHA-256(Allowlist.Canonical())
 //	}
-type matchedWorkloadASN1 struct {
+//
+// Version 2 inserts `identity IA5String` after `name`.
+type matchedWorkloadASN1V1 struct {
 	FormatVersion    int
 	Name             string `asn1:"ia5"`
+	AllowlistVersion string `asn1:"ia5"`
+	AllowlistDigest  []byte
+}
+
+// Version 2 keeps the exact policy entry name and adds its stable identity.
+// The allowlist digest proves which operator-authorized entry supplied both.
+type matchedWorkloadASN1V2 struct {
+	FormatVersion    int
+	Name             string `asn1:"ia5"`
+	Identity         string `asn1:"ia5"`
 	AllowlistVersion string `asn1:"ia5"`
 	AllowlistDigest  []byte
 }
@@ -81,6 +98,9 @@ type matchedWorkloadASN1 struct {
 func (m *MatchedWorkload) Validate() error {
 	if !allowlist.ValidWorkloadName(m.Name) {
 		return fmt.Errorf("ratls: matched-workload name %q is not a valid workload entry name (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", m.Name, allowlist.MaxWorkloadNameLen)
+	}
+	if m.Identity != "" && !allowlist.ValidWorkloadName(m.Identity) {
+		return fmt.Errorf("ratls: matched-workload identity %q is not valid (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", m.Identity, allowlist.MaxWorkloadNameLen)
 	}
 	if !allowlistVersionPattern.MatchString(m.AllowlistVersion) {
 		return fmt.Errorf("ratls: matched-workload allowlist version %q is not a canonical positive decimal integer", m.AllowlistVersion)
@@ -91,18 +111,39 @@ func (m *MatchedWorkload) Validate() error {
 	return nil
 }
 
+// EffectiveIdentity returns the stable peer identity. A v1 stamp and a v2
+// stamp without an explicit identity use the exact policy entry name.
+func (m *MatchedWorkload) EffectiveIdentity() string {
+	if m == nil {
+		return ""
+	}
+	if m.Identity != "" {
+		return m.Identity
+	}
+	return m.Name
+}
+
 // MarshalMatchedWorkloadExtension encodes m as the non-critical
 // matched-workload extension.
 func MarshalMatchedWorkloadExtension(m *MatchedWorkload) (pkix.Extension, error) {
 	if err := m.Validate(); err != nil {
 		return pkix.Extension{}, err
 	}
-	value, err := asn1.Marshal(matchedWorkloadASN1{
-		FormatVersion:    matchedWorkloadVersion,
-		Name:             m.Name,
-		AllowlistVersion: m.AllowlistVersion,
-		AllowlistDigest:  m.AllowlistDigest,
-	})
+	var (
+		value []byte
+		err   error
+	)
+	if m.Identity == "" {
+		value, err = asn1.Marshal(matchedWorkloadASN1V1{
+			FormatVersion: matchedWorkloadVersionV1, Name: m.Name,
+			AllowlistVersion: m.AllowlistVersion, AllowlistDigest: m.AllowlistDigest,
+		})
+	} else {
+		value, err = asn1.Marshal(matchedWorkloadASN1V2{
+			FormatVersion: matchedWorkloadVersionV2, Name: m.Name, Identity: m.Identity,
+			AllowlistVersion: m.AllowlistVersion, AllowlistDigest: m.AllowlistDigest,
+		})
+	}
 	if err != nil {
 		return pkix.Extension{}, fmt.Errorf("ratls: marshal matched workload: %w", err)
 	}
@@ -114,33 +155,59 @@ func MarshalMatchedWorkloadExtension(m *MatchedWorkload) (pkix.Extension, error)
 // or fields, byte-exact against re-encoding — no two distinct extension values
 // may parse to the same MatchedWorkload.
 func UnmarshalMatchedWorkload(der []byte) (*MatchedWorkload, error) {
-	var raw matchedWorkloadASN1
-	rest, err := asn1.Unmarshal(der, &raw)
+	var sequence asn1.RawValue
+	rest, err := asn1.Unmarshal(der, &sequence)
 	if err != nil {
 		return nil, fmt.Errorf("ratls: unmarshal matched workload: %w", err)
 	}
 	if len(rest) > 0 {
 		return nil, fmt.Errorf("ratls: %d trailing bytes after matched-workload extension", len(rest))
 	}
-	if raw.FormatVersion != matchedWorkloadVersion {
-		return nil, fmt.Errorf("ratls: unsupported matched-workload version %d (supported: %d)", raw.FormatVersion, matchedWorkloadVersion)
+	if sequence.Tag != asn1.TagSequence || !sequence.IsCompound {
+		return nil, fmt.Errorf("ratls: matched-workload extension is not a DER sequence")
 	}
-	reencoded, err := asn1.Marshal(raw)
+	var version int
+	if _, err := asn1.Unmarshal(sequence.Bytes, &version); err != nil {
+		return nil, fmt.Errorf("ratls: read matched-workload version: %w", err)
+	}
+	var (
+		m         MatchedWorkload
+		reencoded []byte
+	)
+	switch version {
+	case matchedWorkloadVersionV1:
+		var raw matchedWorkloadASN1V1
+		if rest, err = asn1.Unmarshal(der, &raw); err != nil {
+			return nil, fmt.Errorf("ratls: unmarshal matched-workload v1: %w", err)
+		}
+		if len(rest) != 0 {
+			return nil, fmt.Errorf("ratls: %d trailing bytes after matched-workload v1", len(rest))
+		}
+		m = MatchedWorkload{Name: raw.Name, AllowlistVersion: raw.AllowlistVersion, AllowlistDigest: raw.AllowlistDigest}
+		reencoded, err = asn1.Marshal(raw)
+	case matchedWorkloadVersionV2:
+		var raw matchedWorkloadASN1V2
+		if rest, err = asn1.Unmarshal(der, &raw); err != nil {
+			return nil, fmt.Errorf("ratls: unmarshal matched-workload v2: %w", err)
+		}
+		if len(rest) != 0 {
+			return nil, fmt.Errorf("ratls: %d trailing bytes after matched-workload v2", len(rest))
+		}
+		m = MatchedWorkload{Name: raw.Name, Identity: raw.Identity, AllowlistVersion: raw.AllowlistVersion, AllowlistDigest: raw.AllowlistDigest}
+		reencoded, err = asn1.Marshal(raw)
+	default:
+		return nil, fmt.Errorf("ratls: unsupported matched-workload version %d (supported: %d, %d)", version, matchedWorkloadVersionV1, matchedWorkloadVersionV2)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ratls: re-encode matched workload: %w", err)
 	}
 	if !bytes.Equal(reencoded, der) {
-		return nil, fmt.Errorf("ratls: matched-workload extension is not the exact v%d encoding (%d bytes, canonical is %d)", matchedWorkloadVersion, len(der), len(reencoded))
-	}
-	m := &MatchedWorkload{
-		Name:             raw.Name,
-		AllowlistVersion: raw.AllowlistVersion,
-		AllowlistDigest:  raw.AllowlistDigest,
+		return nil, fmt.Errorf("ratls: matched-workload extension is not the exact v%d encoding (%d bytes, canonical is %d)", version, len(der), len(reencoded))
 	}
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
-	return m, nil
+	return &m, nil
 }
 
 // MatchedWorkloadFromCert returns the certificate's matched-workload stamp, or
@@ -165,8 +232,8 @@ func MatchedWorkloadFromCert(cert *x509.Certificate) (*MatchedWorkload, error) {
 	return found, nil
 }
 
-// CheckWorkloadPin enforces expectedName against a leaf whose CA chain the
-// caller has ALREADY verified. The stamp is placed by CDS in the signed area,
+// CheckWorkloadPin enforces expectedName against a leaf's exact allowlist
+// policy entry name whose CA chain the caller has ALREADY verified. The stamp is placed by CDS in the signed area,
 // so the mesh CA signature — not the hardware evidence — is what authenticates
 // it. Calling this on an unverified (e.g. self-signed) leaf would pin an
 // attacker-chosen string.
@@ -184,7 +251,29 @@ func CheckWorkloadPin(cert *x509.Certificate, expectedName string) error {
 		return fmt.Errorf("%w: workload pin set but certificate carries no matched-workload extension", ErrPolicyViolation)
 	}
 	if m.Name != expectedName {
-		return fmt.Errorf("%w: certificate matched workload %q does not match pinned %q", ErrPolicyViolation, m.Name, expectedName)
+		return fmt.Errorf("%w: certificate matched workload policy %q (identity %q) does not match pinned policy %q", ErrPolicyViolation, m.Name, m.EffectiveIdentity(), expectedName)
+	}
+	return nil
+}
+
+// CheckWorkloadIdentityPin enforces expectedIdentity against a leaf's stable
+// operator-authorized workload identity. The caller must first verify the CA
+// chain. Empty expectedIdentity is a no-op. This check is separate from
+// CheckWorkloadPin so a verifier never accepts either an exact policy name or
+// a stable identity as interchangeable input.
+func CheckWorkloadIdentityPin(cert *x509.Certificate, expectedIdentity string) error {
+	if expectedIdentity == "" {
+		return nil
+	}
+	m, err := MatchedWorkloadFromCert(cert)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
+	}
+	if m == nil {
+		return fmt.Errorf("%w: workload identity pin set but certificate carries no matched-workload extension", ErrPolicyViolation)
+	}
+	if m.EffectiveIdentity() != expectedIdentity {
+		return fmt.Errorf("%w: certificate matched workload identity %q (policy %q) does not match pinned identity %q", ErrPolicyViolation, m.EffectiveIdentity(), m.Name, expectedIdentity)
 	}
 	return nil
 }

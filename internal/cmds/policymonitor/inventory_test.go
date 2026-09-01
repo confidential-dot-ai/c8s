@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -24,9 +25,9 @@ const (
 	pmSandboxID     = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
 )
 
-// The sandbox inventory reports every recorded container, injected sidecars
-// included: it answers what runs in the sandbox, and CDS drops the injected
-// images itself (they are allowlist floor entries).
+// The sandbox inventory reports every recorded container, including c8s
+// helper containers. CDS matches this complete set against an exact named
+// workload.
 func TestKataInventoryIncludesInjectedSidecars(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
@@ -203,6 +204,26 @@ func TestKataInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
 	}
 	if len(containers) != 2 {
 		t.Fatalf("containers = %+v, want both admissions recorded", containers)
+	}
+}
+
+func TestKataInventoryPreservesObservedMountAndEnvPolicy(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	running := allowlistpkg.RunningContainer{
+		BindMounts: []string{"/config"}, EnvNames: []string{"PATH"},
+		MountsObserved: true, EnvObserved: true,
+	}
+	b.record(testCID("app"), pmDigestApp, []string{"/app"}, running)
+
+	_, containers, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known || len(containers) != 1 {
+		t.Fatalf("inventory: known=%v containers=%v err=%v", known, containers, err)
+	}
+	got := containers[0]
+	if !got.MountsObserved || !got.EnvObserved ||
+		!slices.Equal(got.BindMounts, []string{"/config"}) || !slices.Equal(got.EnvNames, []string{"PATH"}) {
+		t.Fatalf("runtime policy was not preserved: %+v", got)
 	}
 }
 

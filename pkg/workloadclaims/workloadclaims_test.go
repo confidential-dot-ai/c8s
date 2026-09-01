@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -86,6 +88,40 @@ func serveDigestsOnUnix(t *testing.T, resolver SandboxResolver) string {
 	t.Cleanup(cancel)
 	go func() { _ = ServeDigests(ctx, l, resolver, []byte("test-identity")) }()
 	return sock
+}
+
+func serveRuntimeInventoryOnUnix(t *testing.T, resolver SandboxResolver, attester RuntimeInventoryAttester) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "runtime-inventory.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeDigests(ctx, l, resolver, []byte("test-identity"), attester) }()
+	return sock
+}
+
+type runtimeResolver struct {
+	fakeResolver
+	mu          sync.Mutex
+	inventories []RuntimeInventory
+	calls       int
+}
+
+func (r *runtimeResolver) RuntimeInventory() (RuntimeInventory, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.inventories) == 0 {
+		return RuntimeInventory{}, fmt.Errorf("no inventory")
+	}
+	i := r.calls
+	if i >= len(r.inventories) {
+		i = len(r.inventories) - 1
+	}
+	r.calls++
+	return r.inventories[i], nil
 }
 
 func testSigner(t *testing.T) *SandboxTokenSigner {
@@ -314,6 +350,96 @@ func TestServeDigestsServesIdentity(t *testing.T) {
 		t.Fatalf("identity = %x, want the served key", out.PublicKey)
 	}
 	_ = signer
+}
+
+func TestRuntimeInventoryIsNonceAndTDXBound(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	inventory := RuntimeInventory{
+		Schema: RuntimeInventorySchema, Generation: 7,
+		PolicySHA256:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PolicyVersion: 4,
+		Containers:    []RuntimeContainer{{Namespace: "c8s-system", PodName: "cds", ContainerName: "cds", Digest: digestA, Argv: []string{"/c8s", "cds"}}},
+	}
+	resolver := &runtimeResolver{fakeResolver: fakeResolver{}, inventories: []RuntimeInventory{inventory}}
+	var gotReportData []byte
+	attester := func(_ context.Context, reportData []byte) (types.AttestResponse, error) {
+		gotReportData = append([]byte(nil), reportData...)
+		return types.AttestResponse{Platform: "tdx", Evidence: json.RawMessage(`{"quote":"fresh"}`)}, nil
+	}
+	sock := serveRuntimeInventoryOnUnix(t, resolver, attester)
+	body, err := json.Marshal(RuntimeInventoryRequest{Nonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodPost, RuntimeInventoryPath, bytes.NewReader(body), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		text, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, text)
+	}
+	var out RuntimeInventoryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	want, err := RuntimeInventoryReportData(nonce, inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotReportData, want) || !bytes.Equal(out.ReportData, want) {
+		t.Fatalf("report_data = %x / %x, want %x", gotReportData, out.ReportData, want)
+	}
+	if out.Platform != "tdx" || string(out.Evidence) != `{"quote":"fresh"}` {
+		t.Fatalf("evidence = %s/%s", out.Platform, out.Evidence)
+	}
+	otherNonce := bytes.Repeat([]byte{0x43}, 32)
+	other, _ := RuntimeInventoryReportData(otherNonce, inventory)
+	if bytes.Equal(other, want) {
+		t.Fatal("a different nonce produced the same report_data")
+	}
+}
+
+func TestRuntimeInventoryRetriesGenerationChange(t *testing.T) {
+	first := RuntimeInventory{Schema: RuntimeInventorySchema, Generation: 1, PolicySHA256: "sha256:first", Containers: []RuntimeContainer{}}
+	second := RuntimeInventory{Schema: RuntimeInventorySchema, Generation: 2, PolicySHA256: "sha256:second", Containers: []RuntimeContainer{}}
+	resolver := &runtimeResolver{inventories: []RuntimeInventory{first, second, second, second}}
+	attestCalls := 0
+	sock := serveRuntimeInventoryOnUnix(t, resolver, func(_ context.Context, _ []byte) (types.AttestResponse, error) {
+		attestCalls++
+		return types.AttestResponse{Platform: "tdx", Evidence: json.RawMessage(`{}`)}, nil
+	})
+	body, _ := json.Marshal(RuntimeInventoryRequest{Nonce: make([]byte, 32)})
+	resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodPost, RuntimeInventoryPath, bytes.NewReader(body), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out RuntimeInventoryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || out.Inventory.Generation != 2 || attestCalls != 2 {
+		t.Fatalf("status=%d generation=%d attest_calls=%d", resp.StatusCode, out.Inventory.Generation, attestCalls)
+	}
+}
+
+func TestRuntimeInventoryRejectsInvalidNonce(t *testing.T) {
+	resolver := &runtimeResolver{inventories: []RuntimeInventory{{Schema: RuntimeInventorySchema}}}
+	sock := serveRuntimeInventoryOnUnix(t, resolver, func(context.Context, []byte) (types.AttestResponse, error) {
+		t.Fatal("attester called for invalid nonce")
+		return types.AttestResponse{}, nil
+	})
+	body, _ := json.Marshal(RuntimeInventoryRequest{Nonce: []byte("short")})
+	resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodPost, RuntimeInventoryPath, bytes.NewReader(body), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
 }
 
 // An inventory constructed without a signer answers the token route 404;

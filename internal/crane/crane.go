@@ -99,6 +99,7 @@ type ImageConfig struct {
 	Config struct {
 		Entrypoint []string `json:"Entrypoint"`
 		Cmd        []string `json:"Cmd"`
+		Env        []string `json:"Env"`
 	} `json:"config"`
 }
 

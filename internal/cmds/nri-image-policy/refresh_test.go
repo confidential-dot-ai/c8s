@@ -186,6 +186,52 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 	}
 }
 
+func TestPolicyStoreDropsBootstrapAfterFirstAuthenticatedPull(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold-boot"}))
+	if !admitsDigest(store, pushDigestA) {
+		t.Fatal("cold-boot digest is not admitted before the first pull")
+	}
+	if !store.apply(floorAllowlist(map[string]string{pushDigestB: "steady"}), 1) {
+		t.Fatal("first authenticated pull was rejected")
+	}
+	if admitsDigest(store, pushDigestA) {
+		t.Fatal("cold-boot digest remained admitted after the first pull")
+	}
+	if !admitsDigest(store, pushDigestB) {
+		t.Fatal("authenticated CDS digest was not admitted")
+	}
+}
+
+func TestPolicyStoreUsesAuthenticatedPolicyExactlyWhenDigestOverlapsBootstrap(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold-boot"}))
+	pulled := floorAllowlist(map[string]string{pushDigestA: "operator-active", pushDigestB: "steady"})
+	if !store.apply(pulled, 1) {
+		t.Fatal("authenticated pull was rejected")
+	}
+	if !admitsDigest(store, pushDigestA) {
+		t.Fatal("an operator-authored active digest was removed because it also existed in cold boot")
+	}
+	if !admitsDigest(store, pushDigestB) {
+		t.Fatal("unrelated steady digest was removed")
+	}
+	if got, want := store.current().digest, allowlistDigest(pulled); got != want {
+		t.Fatalf("enforced policy digest = %q, CDS canonical digest %q", got, want)
+	}
+}
+
+func TestPolicyStoreKeepsLastAuthenticatedPolicyAfterRejectedPull(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold-boot"}))
+	if !store.apply(floorAllowlist(map[string]string{pushDigestB: "steady"}), 5) {
+		t.Fatal("authenticated policy was rejected")
+	}
+	if store.apply(floorAllowlist(map[string]string{pushDigestC: "rollback"}), 4) {
+		t.Fatal("rollback policy was accepted")
+	}
+	if !admitsDigest(store, pushDigestB) || admitsDigest(store, pushDigestA) || admitsDigest(store, pushDigestC) {
+		t.Fatal("rejected pull changed the last authenticated policy")
+	}
+}
+
 // After a restart the store is fresh (version 0), so it trusts the first pull it
 // sees whatever its version — even one below what a prior process had applied.
 // Rollback protection is per-process-lifetime; state re-syncs from CDS.
@@ -360,7 +406,7 @@ func TestPullLoop5xxLeavesIndexUntouched(t *testing.T) {
 	<-done
 }
 
-func TestPullLoopMergesBootstrapWithPulled(t *testing.T) {
+func TestPullLoopReplacesBootstrapWithPulled(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"1"},
 		bodyByV:  map[string][]byte{"1": canonicalBody(t, floorAllowlist(map[string]string{pushDigestB: "pulled-image"}))},
@@ -393,8 +439,8 @@ func TestPullLoopMergesBootstrapWithPulled(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("bootstrap floor entry lost after pull")
+	if admitsDigest(store, pushDigestA) {
+		t.Fatal("bootstrap floor entry remained after authenticated pull")
 	}
 
 	cancel()
@@ -495,8 +541,8 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 	if !admitsDigest(store, pushDigestB) {
 		t.Fatal("store missing pulled entry")
 	}
-	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("store missing bootstrap floor entry")
+	if admitsDigest(store, pushDigestA) {
+		t.Fatal("store retained bootstrap floor entry after authenticated pull")
 	}
 }
 

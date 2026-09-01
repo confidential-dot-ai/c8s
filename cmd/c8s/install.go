@@ -30,8 +30,10 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
+	"github.com/confidential-dot-ai/c8s/internal/systempolicy"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -1228,8 +1230,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		defer os.Remove(computedValues)
-		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
-
 		// Fail fast on the default path if the CDS node is unlabelled, before
 		// mutating the cluster. Skipped when -f is supplied: a custom values
 		// file may disable image policy or change the selector, and the operator
@@ -1271,6 +1271,24 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return err
 		}
+
+		releaseValues := slices.Clone(installValues)
+		if installResolveDigests {
+			// The local image floor exists only for cold boot. Derive the exact
+			// steady c8s workload policy from the same digest-pinned manifest Helm
+			// will apply, then add it as a later values layer. The final rendered
+			// CDS seed and every node pull therefore use exact image, argv, mount,
+			// and environment policy for c8s system Pods.
+			systemPolicyValues, err := writeSystemPolicyValues(cmd.Context(), chartPath, computedValues, installValues, values)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(systemPolicyValues)
+			releaseValues = append(releaseValues, systemPolicyValues)
+		} else {
+			fmt.Fprintln(os.Stderr, "warning: --resolve-digests=false skips automatic exact c8s system-policy derivation; supply nriImagePolicy.bootstrapAllowlist.workloads from `c8s allowlist derive-system` before enforcement leaves its cold-boot floor")
+		}
+		helmArgs := buildInstallHelmArgs(chartPath, computedValues, releaseValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
 
 		// Fail fast when the policy this install renders would deny the
 		// cluster's own platform pods: registering the plugin restarts
@@ -1502,6 +1520,139 @@ func writeComputedValues(setArgs []string) (string, error) {
 		return "", fmt.Errorf("close computed values: %w", err)
 	}
 	return f.Name(), nil
+}
+
+// writeSystemPolicyValues renders the release once, derives exact named policy
+// for every steady c8s Pod, and writes a values overlay that Helm applies to the
+// final render. The first render is read-only. The overlay changes only the CDS
+// allowlist seed; it does not change a Pod template, so policy derivation does
+// not form a render cycle.
+func writeSystemPolicyValues(ctx context.Context, chartPath, computedValues string, valueFiles []string, values map[string]any) (string, error) {
+	args := []string{
+		"template", installRelease, chartPath,
+		"--namespace", installNamespace,
+		"--kube-version", "1.30.0",
+	}
+	for _, file := range valueFiles {
+		args = append(args, "-f", file)
+	}
+	args = append(args, "-f", computedValues)
+	cmd := exec.CommandContext(ctx, "helm", args...)
+	manifest, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("render c8s system policy input: %w: %s", err, strings.TrimSpace(string(manifest)))
+	}
+
+	derived, err := systempolicy.Derive(ctx, manifest, func(ctx context.Context, image string) (systempolicy.ImageConfig, error) {
+		config, err := crane.Config(ctx, image)
+		if err != nil {
+			return systempolicy.ImageConfig{}, err
+		}
+		return systempolicy.ImageConfig{
+			Entrypoint: config.Config.Entrypoint,
+			Cmd:        config.Config.Cmd,
+			Env:        config.Config.Env,
+		}, nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("derive c8s system policy: %w", err)
+	}
+	if len(derived) == 0 {
+		return "", fmt.Errorf("derive c8s system policy: rendered chart contains no steady workloads")
+	}
+
+	existing, err := systemPoliciesFromValues(values)
+	if err != nil {
+		return "", err
+	}
+	for name, policy := range derived {
+		if current, ok := existing[name]; ok {
+			same, err := equalWorkloadPolicy(current, policy)
+			if err != nil {
+				return "", err
+			}
+			if !same {
+				return "", fmt.Errorf("derived c8s system workload %q conflicts with nriImagePolicy.bootstrapAllowlist.workloads", name)
+			}
+		}
+	}
+
+	// Convert through JSON so lower-camel JSON field names stay exact when the
+	// generic values map is written as YAML. yaml.v3 does not use json tags on
+	// typed structs.
+	raw, err := json.Marshal(derived)
+	if err != nil {
+		return "", err
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return "", err
+	}
+	overlay := map[string]any{
+		"nriImagePolicy": map[string]any{
+			"bootstrapAllowlist": map[string]any{
+				"workloads": generic,
+			},
+		},
+	}
+	out, err := yaml.Marshal(overlay)
+	if err != nil {
+		return "", fmt.Errorf("marshal system policy values: %w", err)
+	}
+	f, err := os.CreateTemp("", "c8s-system-policy-values-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create system policy values: %w", err)
+	}
+	name := f.Name()
+	if _, err := f.Write(out); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("write system policy values: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		return "", fmt.Errorf("close system policy values: %w", err)
+	}
+	return name, nil
+}
+
+func systemPoliciesFromValues(values map[string]any) (map[string]pkgallowlist.Workload, error) {
+	value, ok := valueAtPath(values, "nriImagePolicy.bootstrapAllowlist.workloads")
+	if !ok || value == nil {
+		return map[string]pkgallowlist.Workload{}, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal configured workloads: %w", err)
+	}
+	var workloads map[string]pkgallowlist.Workload
+	if err := json.Unmarshal(raw, &workloads); err != nil {
+		return nil, fmt.Errorf("parse configured workloads: %w", err)
+	}
+	return workloads, nil
+}
+
+func equalWorkloadPolicy(a, b pkgallowlist.Workload) (bool, error) {
+	canonical := func(workload pkgallowlist.Workload) ([]byte, error) {
+		raw, err := json.Marshal(workload)
+		if err != nil {
+			return nil, err
+		}
+		normalized, err := pkgallowlist.ParseWorkloadJSON(raw)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(normalized)
+	}
+	aBytes, err := canonical(a)
+	if err != nil {
+		return false, err
+	}
+	bBytes, err := canonical(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aBytes, bBytes), nil
 }
 
 // resolveImageTag returns the tag to resolve component images at: the explicit

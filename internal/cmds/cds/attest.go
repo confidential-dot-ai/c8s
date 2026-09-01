@@ -516,7 +516,11 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 		if err != nil {
 			return unnamed(slog.LevelError, "inventory reported a malformed container digest", "error", err)
 		}
-		canonical = append(canonical, workloadclaims.SandboxContainer{Digest: digest.String(), Argv: c.Argv})
+		canonical = append(canonical, workloadclaims.SandboxContainer{
+			Digest: digest.String(), Argv: c.Argv,
+			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
+		})
 		containerSet[digest.String()] = struct{}{}
 	}
 	// The two views describe the same sandbox and must agree. The inventory is
@@ -528,8 +532,8 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 		return unnamed(slog.LevelError, "inventory digests and containers views disagree")
 	}
 
-	candidates := secrets.WorkloadContainers(snapshot.Allowlist, canonical)
-	name, _, err := snapshot.Allowlist.MatchWorkload(candidates)
+	candidates := secrets.WorkloadContainers(canonical)
+	name, workload, err := snapshot.Allowlist.MatchWorkload(candidates)
 	if err != nil {
 		// ErrNoMatch mid-lifecycle and ErrAmbiguous are ordinary unnamed
 		// states, not faults.
@@ -537,6 +541,7 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 	}
 	matched := &ratls.MatchedWorkload{
 		Name:             name,
+		Identity:         workload.Identity,
 		AllowlistVersion: snapshot.Version,
 		AllowlistDigest:  snapshot.Digest,
 	}

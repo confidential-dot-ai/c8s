@@ -104,11 +104,57 @@ func TestAttest_MatchedWorkload_StampsUniqueMatch(t *testing.T) {
 	}
 }
 
-// The platform's injected sidecar (floor digest + injected entrypoint) is
-// dropped before matching — the same drop set secrets release uses — so a pod
-// running its workload plus the cert sidecar still matches its entry.
-func TestAttest_MatchedWorkload_DropsInjectedContainers(t *testing.T) {
+func TestAttest_MatchedWorkload_RolloutEntriesShareStableIdentity(t *testing.T) {
+	oldEntry := namedEntry(t, wlDigestA)
+	oldEntry.Identity = "api"
+	newEntry := namedEntry(t, wlDigestB)
+	newEntry.Identity = "api"
+	store := fakeStore{workloads: map[string]pkgallowlist.Workload{
+		"api-old": oldEntry,
+		"api-new": newEntry,
+	}}
+
+	oldMatched := issueWithInventory(t, store, []string{wlDigestA}, containersView(wlDigestA), nil)
+	newMatched := issueWithInventory(t, store, []string{wlDigestB}, containersView(wlDigestB), nil)
+	if oldMatched == nil || newMatched == nil {
+		t.Fatalf("rollout match old=%+v new=%+v", oldMatched, newMatched)
+	}
+	if oldMatched.Name != "api-old" || newMatched.Name != "api-new" {
+		t.Fatalf("exact policies old=%q new=%q", oldMatched.Name, newMatched.Name)
+	}
+	if oldMatched.EffectiveIdentity() != "api" || newMatched.EffectiveIdentity() != "api" {
+		t.Fatalf("stable identities old=%q new=%q", oldMatched.EffectiveIdentity(), newMatched.EffectiveIdentity())
+	}
+	if !bytes.Equal(oldMatched.AllowlistDigest, newMatched.AllowlistDigest) {
+		t.Fatal("receipts did not bind the same operator-authorized overlap policy")
+	}
+}
+
+func TestAttest_MatchedWorkload_SharedIdentityDoesNotResolveAmbiguousPolicy(t *testing.T) {
+	first := namedEntry(t, wlDigestA)
+	first.Identity = "api"
+	second := namedEntry(t, wlDigestA)
+	second.Identity = "api"
+	store := fakeStore{workloads: map[string]pkgallowlist.Workload{
+		"api-a": first,
+		"api-b": second,
+	}}
+	if matched := issueWithInventory(t, store, []string{wlDigestA}, containersView(wlDigestA), nil); matched != nil {
+		t.Fatalf("ambiguous exact entries earned a shared identity: %+v", matched)
+	}
+}
+
+// A named workload declares its injected helper exactly. The helper remains in
+// the inventory set and contributes to the identity.
+func TestAttest_MatchedWorkload_MatchesExactInjectedContainer(t *testing.T) {
 	store := completeAPIStore(t)
+	entry := store.workloads["api"]
+	entry.InitContainers = []pkgallowlist.Container{{
+		Digest:  wlDigest(t, wlDigestC),
+		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"get-cert", "--renew-interval=6h"}},
+		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+	}}
+	store.workloads["api"] = entry
 	containers := []workloadclaims.SandboxContainer{
 		{Digest: wlDigestA},
 		{Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
@@ -116,6 +162,28 @@ func TestAttest_MatchedWorkload_DropsInjectedContainers(t *testing.T) {
 	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
 	if matched == nil || matched.Name != "api" {
 		t.Fatalf("matched = %+v, want api", matched)
+	}
+}
+
+// A useful c8s helper is not hidden by its floor digest or /c8s entrypoint. An
+// extra workload-proxy with attacker settings prevents a named certificate.
+func TestAttest_MatchedWorkload_RejectsExtraC8SHelperArguments(t *testing.T) {
+	store := completeAPIStore(t)
+	entry := store.workloads["api"]
+	entry.InitContainers = []pkgallowlist.Container{{
+		Digest:  wlDigest(t, wlDigestC),
+		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"get-cert", "--renew-interval=6h"}},
+		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+	}}
+	store.workloads["api"] = entry
+	containers := []workloadclaims.SandboxContainer{
+		{Digest: wlDigestA},
+		{Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
+		{Digest: wlDigestC, Argv: []string{"/c8s", "workload-proxy", "--upstream=http://attacker.invalid"}},
+	}
+	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
+	if matched != nil {
+		t.Fatalf("attacker-configured c8s helper received named certificate: %+v", matched)
 	}
 }
 

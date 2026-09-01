@@ -18,17 +18,21 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/issuerapi"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -42,9 +46,13 @@ import (
 // response body is read into HandoffStatusError. A few KB is plenty for an
 // error message.
 const (
-	maxHandoffErrorBytes     = 8 << 10
-	maxHandoffPlaintextBytes = 20 << 20
-	maxHandoffResponseBytes  = 32 << 20
+	maxHandoffErrorBytes = 8 << 10
+	// The encrypted state can contain 16 MiB of encoded application secrets,
+	// a 1 MiB allowlist, 10,000 bounded ledger entries, tee-webpki state, EAR
+	// overlap keys, and CA material. Forty-eight MiB leaves a small format
+	// margin. The JSON response needs the ciphertext's base64 expansion.
+	maxHandoffPlaintextBytes = 48 << 20
+	maxHandoffResponseBytes  = 68 << 20
 )
 
 const (
@@ -64,14 +72,24 @@ const DefaultHandoffEARMaxAge = 5 * time.Minute
 
 // DefaultEndpointDrainDelay gives Kubernetes time to remove a predecessor
 // from Service endpoints after its readiness becomes false. The predecessor
-// stays frozen and continues read and certificate service during this delay.
+// stays frozen and continues read-only service during this delay.
 // This is a graceful-drain bound. It is not proof of an atomic endpoint switch.
 const DefaultEndpointDrainDelay = 5 * time.Second
+
+// DefaultHandoffTransferLease limits how long a predecessor stays frozen when
+// a selected successor receives state but never starts activation. The lease
+// does not run after activation starts because the successor can then be
+// mutable. Automatic thaw at that point could create two mutable CDS replicas.
+const DefaultHandoffTransferLease = 5 * time.Minute
 
 type HandoffRequest = issuerapi.HandoffRequest
 type HandoffResponse = issuerapi.HandoffResponse
 type HandoffActivateRequest = issuerapi.HandoffActivateRequest
 type HandoffActivateResponse = issuerapi.HandoffActivateResponse
+type HandoffConfirmRequest = issuerapi.HandoffConfirmRequest
+type HandoffConfirmResponse = issuerapi.HandoffConfirmResponse
+type HandoffAbortRequest = issuerapi.HandoffAbortRequest
+type HandoffAbortResponse = issuerapi.HandoffAbortResponse
 
 var (
 	tokenValidationFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -128,9 +146,13 @@ type HandoffDeps struct {
 	// result may be. Zero uses DefaultHandoffEARMaxAge.
 	RequestEARMaxAge time.Duration
 	// EndpointDrainDelay is the minimum time a predecessor remains readable but
-	// NotReady before it retires. Zero uses DefaultEndpointDrainDelay.
+	// NotReady before it grants takeover. Zero uses DefaultEndpointDrainDelay.
 	EndpointDrainDelay time.Duration
-	Bundle             *BundleManager // optional; nil falls back to caCert-only bundle PEM
+	// TransferLease is the maximum pre-activation freeze. Zero uses
+	// DefaultHandoffTransferLease. The predecessor thaws only if activation has
+	// not started.
+	TransferLease time.Duration
+	Bundle        *BundleManager // optional; nil falls back to caCert-only bundle PEM
 
 	// Signer (bootstrapped via HandoffBootstrap) signs the response transcript.
 	Signer *ecdsa.PrivateKey
@@ -143,6 +165,12 @@ type HandoffDeps struct {
 	// Snapshot returns the active CA material. ok=false means no bundle is
 	// loaded (handler returns 503).
 	Snapshot func() (snap CASnapshot, ok bool)
+	// Resume releases store-level freezes after a transfer fails or its
+	// pre-activation lease expires.
+	Resume func()
+	// AuthorizeWrite verifies the operator signature on an explicit handoff
+	// abort. Nil disables abort.
+	AuthorizeWrite func(*http.Request, []byte) error
 }
 
 // CASnapshot is the active CA material a handoff response transfers: the CA
@@ -163,6 +191,10 @@ type CASnapshot struct {
 	// Secrets carries every application secret and its holder accounting. It
 	// stays inside the recipient-bound ciphertext.
 	Secrets *secrets.Snapshot
+	// EARSigner carries the active EAR signer and live overlap keys.
+	EARSigner *earsigner.Snapshot
+	// SandboxLedger carries first-write-wins inventory bindings.
+	SandboxLedger *sandboxledger.Snapshot
 }
 
 func (s CASnapshot) hasCAKeyPair() bool {
@@ -186,6 +218,7 @@ const (
 	leadershipActive leadershipPhase = iota
 	leadershipFrozen
 	leadershipDraining
+	leadershipTakeoverReady
 	leadershipRetired
 )
 
@@ -202,10 +235,13 @@ type leadershipGate struct {
 // CDS process starts with a fresh gate, so the successor can authorize one
 // later roll after it becomes the active CDS.
 type transferGate struct {
-	mu       sync.Mutex
-	request  [sha256.Size]byte
-	response *HandoffResponse
-	peerLeaf [sha256.Size]byte
+	mu         sync.Mutex
+	request    [sha256.Size]byte
+	response   *HandoffResponse
+	peerKey    [sha256.Size]byte
+	snapshot   *CASnapshot
+	generation uint64
+	aborted    [sha256.Size]byte
 }
 
 // NewHandoffHandler validates the dependencies and returns a HandoffHandler.
@@ -250,6 +286,12 @@ func NewHandoffHandler(deps HandoffDeps) (*HandoffHandler, error) {
 	if deps.EndpointDrainDelay < 0 {
 		return nil, fmt.Errorf("handoff endpoint drain delay must be positive")
 	}
+	if deps.TransferLease == 0 {
+		deps.TransferLease = DefaultHandoffTransferLease
+	}
+	if deps.TransferLease <= deps.EndpointDrainDelay {
+		return nil, fmt.Errorf("handoff transfer lease must exceed endpoint drain delay")
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -266,7 +308,7 @@ func (hh *HandoffHandler) Active() bool {
 	return hh.leader.phase == leadershipActive
 }
 
-// Serving reports whether this CDS can continue read and certificate service.
+// Serving reports whether this CDS can continue read-only service.
 // A frozen predecessor serves until the successor confirms activation.
 func (hh *HandoffHandler) Serving() bool {
 	hh.leader.mu.RLock()
@@ -279,7 +321,7 @@ func (hh *HandoffHandler) Serving() bool {
 func (hh *HandoffHandler) ReadyForTraffic() bool {
 	hh.leader.mu.RLock()
 	defer hh.leader.mu.RUnlock()
-	return hh.leader.phase != leadershipDraining && hh.leader.phase != leadershipRetired
+	return hh.leader.phase != leadershipDraining && hh.leader.phase != leadershipTakeoverReady && hh.leader.phase != leadershipRetired
 }
 
 // StartFrozen configures an adopted successor before it starts serving.
@@ -327,6 +369,8 @@ type handoffPayload struct {
 	Workloads         map[string]allowlist.Workload `json:"workloads,omitempty"`
 	TEEWebPKI         *teewebpki.Snapshot           `json:"tee_webpki,omitempty"`
 	Secrets           *secrets.Snapshot             `json:"secrets,omitempty"`
+	EARSigner         *earsigner.Snapshot           `json:"ear_signer,omitempty"`
+	SandboxLedger     *sandboxledger.Snapshot       `json:"sandbox_ledger,omitempty"`
 }
 
 // HandoffMaterial is the unwrapped result of a successful handoff.
@@ -340,17 +384,29 @@ type HandoffMaterial struct {
 	Workloads        map[string]allowlist.Workload
 	TEEWebPKI        *teewebpki.Snapshot
 	Secrets          *secrets.Snapshot
+	EARSigner        *earsigner.Snapshot
+	SandboxLedger    *sandboxledger.Snapshot
 	TransferID       string
 	activate         func(context.Context) error
+	confirm          func(context.Context) error
 }
 
-// Activate makes the predecessor inactive after all state is restored. A
-// successor must not become Ready before this call succeeds.
+// Activate drains the predecessor and grants this successor permission to
+// promote. The predecessor stays frozen and readable until Confirm succeeds.
 func (m *HandoffMaterial) Activate(ctx context.Context) error {
 	if m == nil || m.activate == nil {
 		return fmt.Errorf("handoff activation is unavailable")
 	}
 	return m.activate(ctx)
+}
+
+// Confirm tells the frozen predecessor that this successor promoted the
+// restored state. Only this call retires the predecessor.
+func (m *HandoffMaterial) Confirm(ctx context.Context) error {
+	if m == nil || m.confirm == nil {
+		return fmt.Errorf("handoff confirmation is unavailable")
+	}
+	return m.confirm(ctx)
 }
 
 // HandoffClientDeps carries the EAR verification context the requester needs to
@@ -466,18 +522,37 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 	}
 	hh.transfer.mu.Lock()
 	defer hh.transfer.mu.Unlock()
+	peerKeyHash := sha256.Sum256(peerLeaf.RawSubjectPublicKeyInfo)
 	if hh.transfer.response != nil {
-		if hh.transfer.request != requestID {
+		if hh.transfer.request == requestID {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(*hh.transfer.response)
+			return
+		}
+		// A container restart can create a new X25519 recipient key while it
+		// keeps the selected CDS-issued mesh leaf. Re-encrypt the same frozen
+		// snapshot to that new request. A different mesh leaf cannot replace the
+		// selected successor automatically.
+		if hh.transfer.peerKey != peerKeyHash || hh.transfer.snapshot == nil {
 			http.Error(w, "conflict: a different successor already received this CDS state", http.StatusConflict)
 			return
 		}
+		resp, err := hh.wrap(req, *hh.transfer.snapshot, issuerEAR)
+		if err != nil {
+			hh.deps.Logger.Error("handoff rewrap failed", "error", err)
+			http.Error(w, "internal error: handoff rewrap failed", http.StatusInternalServerError)
+			return
+		}
+		hh.transfer.request = requestID
+		hh.transfer.response = &resp
+		hh.armTransferLeaseLocked()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(*hh.transfer.response)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
 	// Stop new mutations and wait for any current mutation to finish. Keep
-	// read and certificate service available while the successor restores.
+	// read-only service available while the successor restores.
 	hh.leader.mu.Lock()
 	if hh.leader.phase != leadershipActive {
 		hh.leader.mu.Unlock()
@@ -502,7 +577,9 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 	}
 	hh.transfer.request = requestID
 	hh.transfer.response = &resp
-	hh.transfer.peerLeaf = sha256.Sum256(peerLeaf.Raw)
+	hh.transfer.peerKey = peerKeyHash
+	hh.transfer.snapshot = &snap
+	hh.armTransferLeaseLocked()
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -510,24 +587,58 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// armTransferLeaseLocked starts or refreshes the pre-activation recovery
+// lease. The caller holds transfer.mu. Once activation starts, expiry cannot
+// thaw the predecessor because the successor can already have promoted.
+func (hh *HandoffHandler) armTransferLeaseLocked() {
+	hh.transfer.generation++
+	generation := hh.transfer.generation
+	time.AfterFunc(hh.deps.TransferLease, func() {
+		resumed := false
+		hh.transfer.mu.Lock()
+		if hh.transfer.generation != generation {
+			hh.transfer.mu.Unlock()
+			return
+		}
+		hh.leader.mu.Lock()
+		if hh.leader.phase != leadershipFrozen {
+			hh.leader.mu.Unlock()
+			hh.transfer.mu.Unlock()
+			return
+		}
+		hh.leader.phase = leadershipActive
+		hh.transfer.request = [sha256.Size]byte{}
+		hh.transfer.response = nil
+		hh.transfer.peerKey = [sha256.Size]byte{}
+		hh.transfer.snapshot = nil
+		resumed = true
+		hh.leader.mu.Unlock()
+		hh.transfer.mu.Unlock()
+		if resumed && hh.deps.Resume != nil {
+			hh.deps.Resume()
+		}
+	})
+}
+
 // resumeAfterFailedTransfer makes the predecessor mutable again when no
 // encrypted transfer response exists. The caller holds transfer.mu, so no
 // retry or activation can observe a half-committed transfer.
 func (hh *HandoffHandler) resumeAfterFailedTransfer() {
+	resumed := false
 	hh.leader.mu.Lock()
 	if hh.leader.phase == leadershipFrozen && hh.transfer.response == nil {
 		hh.leader.phase = leadershipActive
+		resumed = true
 	}
 	hh.leader.mu.Unlock()
+	if resumed && hh.deps.Resume != nil {
+		hh.deps.Resume()
+	}
 }
 
-// HandleActivate gives leadership to the one successor that received state.
-// The old CDS first becomes NotReady. It stays frozen and readable for the
-// endpoint drain delay. It then retires before it returns success. The
-// successor already listens in a frozen, NotReady state. This ordering
-// prevents two mutable CDS instances and lets normal Kubernetes endpoint
-// propagation finish before old-CDS reads stop. It does not prove an atomic
-// endpoint switch.
+// HandleActivate gives takeover permission to the selected successor. The old
+// CDS becomes NotReady, then stays frozen and readable. It does not retire
+// until the restored successor is active and sends an authenticated Confirm.
 func (hh *HandoffHandler) HandleActivate(w http.ResponseWriter, r *http.Request) {
 	peerLeaf, err := hh.authorizeSuccessor(r)
 	if err != nil {
@@ -558,7 +669,7 @@ func (hh *HandoffHandler) HandleActivate(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "conflict: transfer is not active", http.StatusConflict)
 		return
 	}
-	if sha256.Sum256(peerLeaf.Raw) != hh.transfer.peerLeaf {
+	if sha256.Sum256(peerLeaf.RawSubjectPublicKeyInfo) != hh.transfer.peerKey {
 		http.Error(w, "conflict: activation identity differs from the successor", http.StatusConflict)
 		return
 	}
@@ -571,7 +682,7 @@ func (hh *HandoffHandler) HandleActivate(w http.ResponseWriter, r *http.Request)
 		hh.leader.phase = leadershipDraining
 		hh.leader.drainDone = make(chan struct{})
 		go hh.finishEndpointDrain(hh.leader.drainDone)
-	case leadershipDraining, leadershipRetired:
+	case leadershipDraining, leadershipTakeoverReady, leadershipRetired:
 		// Continue the existing drain or return the prior result.
 	default:
 		hh.leader.mu.Unlock()
@@ -602,10 +713,150 @@ func (hh *HandoffHandler) finishEndpointDrain(done chan struct{}) {
 	<-timer.C
 	hh.leader.mu.Lock()
 	if hh.leader.phase == leadershipDraining && hh.leader.drainDone == done {
-		hh.leader.phase = leadershipRetired
+		hh.leader.phase = leadershipTakeoverReady
 		close(done)
 	}
 	hh.leader.mu.Unlock()
+}
+
+// HandleConfirm retires the predecessor only after the selected successor
+// states that it promoted the restored state. A crash before this request
+// leaves the predecessor frozen and readable. It does not destroy the only
+// in-memory trust state.
+func (hh *HandoffHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
+	peerLeaf, err := hh.authorizeSuccessor(r)
+	if err != nil {
+		http.Error(w, "forbidden: successor is not an admitted live-cluster workload", http.StatusForbidden)
+		return
+	}
+	var req HandoffConfirmRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || req.TransferID == "" || req.Signature == "" {
+		http.Error(w, "bad request: transfer_id and signature are required", http.StatusBadRequest)
+		return
+	}
+	requestID, err := decodeB64(req.TransferID, "transfer id")
+	if err != nil || len(requestID) != sha256.Size {
+		http.Error(w, "bad request: invalid transfer_id", http.StatusBadRequest)
+		return
+	}
+	message, err := handoffTranscript("confirm", req.TransferID)
+	if err != nil || verifyClusterSignature(peerLeaf, req.Signature, message) != nil {
+		http.Error(w, "unauthorized: invalid confirmation proof", http.StatusUnauthorized)
+		return
+	}
+
+	hh.transfer.mu.Lock()
+	defer hh.transfer.mu.Unlock()
+	if hh.transfer.response == nil || !bytes.Equal(requestID, hh.transfer.request[:]) {
+		http.Error(w, "conflict: transfer is not active", http.StatusConflict)
+		return
+	}
+	if sha256.Sum256(peerLeaf.RawSubjectPublicKeyInfo) != hh.transfer.peerKey {
+		http.Error(w, "conflict: confirmation identity differs from the successor", http.StatusConflict)
+		return
+	}
+	hh.leader.mu.Lock()
+	switch hh.leader.phase {
+	case leadershipTakeoverReady:
+		hh.leader.phase = leadershipRetired
+	case leadershipRetired:
+		// A lost success response is safe to retry.
+	default:
+		hh.leader.mu.Unlock()
+		http.Error(w, "service unavailable: predecessor drain is not complete", http.StatusServiceUnavailable)
+		return
+	}
+	hh.leader.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(HandoffConfirmResponse{Confirmed: true})
+}
+
+// HandleAbort resumes a frozen predecessor after an operator has removed and
+// verified the selected successor is gone. It is an explicit recovery action:
+// aborting while a promoted successor still runs creates split brain.
+func (hh *HandoffHandler) HandleAbort(w http.ResponseWriter, r *http.Request) {
+	if hh.deps.AuthorizeWrite == nil {
+		http.Error(w, "operator recovery is disabled", http.StatusForbidden)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<10))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := hh.deps.AuthorizeWrite(r, body); err != nil {
+		http.Error(w, "forbidden: invalid operator authorization", http.StatusForbidden)
+		return
+	}
+	var req HandoffAbortRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || req.TransferID == "" {
+		http.Error(w, "bad request: transfer_id is required", http.StatusBadRequest)
+		return
+	}
+	requestID, err := decodeB64(req.TransferID, "transfer id")
+	if err != nil || len(requestID) != sha256.Size {
+		http.Error(w, "bad request: invalid transfer_id", http.StatusBadRequest)
+		return
+	}
+	var id [sha256.Size]byte
+	copy(id[:], requestID)
+
+	hh.transfer.mu.Lock()
+	if hh.transfer.response == nil && hh.transfer.aborted == id {
+		hh.transfer.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(HandoffAbortResponse{Aborted: true})
+		return
+	}
+	if hh.transfer.response == nil || hh.transfer.request != id {
+		hh.transfer.mu.Unlock()
+		http.Error(w, "conflict: transfer is not active", http.StatusConflict)
+		return
+	}
+	hh.leader.mu.Lock()
+	switch hh.leader.phase {
+	case leadershipFrozen, leadershipDraining, leadershipTakeoverReady:
+		// An operator can recover these phases only after it removes and verifies
+		// the selected successor is gone.
+	case leadershipActive:
+		hh.leader.mu.Unlock()
+		hh.transfer.mu.Unlock()
+		http.Error(w, "conflict: handoff cannot be aborted in this phase", http.StatusConflict)
+		return
+	case leadershipRetired:
+		hh.leader.mu.Unlock()
+		hh.transfer.mu.Unlock()
+		http.Error(w, "conflict: confirmed handoff cannot be aborted", http.StatusConflict)
+		return
+	default:
+		hh.leader.mu.Unlock()
+		hh.transfer.mu.Unlock()
+		http.Error(w, "conflict: unknown handoff phase", http.StatusConflict)
+		return
+	}
+	wasDraining := hh.leader.phase == leadershipDraining
+	hh.leader.phase = leadershipActive
+	if wasDraining && hh.leader.drainDone != nil {
+		close(hh.leader.drainDone)
+	}
+	hh.leader.drainDone = nil
+	hh.transfer.generation++
+	hh.transfer.request = [sha256.Size]byte{}
+	hh.transfer.response = nil
+	hh.transfer.peerKey = [sha256.Size]byte{}
+	hh.transfer.snapshot = nil
+	hh.transfer.aborted = id
+	hh.leader.mu.Unlock()
+	hh.transfer.mu.Unlock()
+	if hh.deps.Resume != nil {
+		hh.deps.Resume()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(HandoffAbortResponse{Aborted: true})
 }
 
 func (hh *HandoffHandler) authorizeSuccessor(r *http.Request) (*x509.Certificate, error) {
@@ -616,10 +867,10 @@ func (hh *HandoffHandler) authorizeSuccessor(r *http.Request) (*x509.Certificate
 	if err != nil {
 		return nil, err
 	}
-	if matched == nil || matched.Name != hh.deps.ExpectedSuccessorWorkload {
+	if matched == nil || matched.EffectiveIdentity() != hh.deps.ExpectedSuccessorWorkload {
 		got := ""
 		if matched != nil {
-			got = matched.Name
+			got = matched.EffectiveIdentity()
 		}
 		return nil, fmt.Errorf("matched workload %q does not equal %q", got, hh.deps.ExpectedSuccessorWorkload)
 	}
@@ -697,6 +948,8 @@ func (hh *HandoffHandler) wrap(req HandoffRequest, snap CASnapshot, issuerEAR st
 		Workloads:        snap.Workloads,
 		TEEWebPKI:        snap.TEEWebPKI,
 		Secrets:          snap.Secrets,
+		EARSigner:        snap.EARSigner,
+		SandboxLedger:    snap.SandboxLedger,
 	}
 	if err := validateAllowlistSnapshot(payload.AllowlistVersion, payload.Allowlist); err != nil {
 		return HandoffResponse{}, err
@@ -709,6 +962,16 @@ func (hh *HandoffHandler) wrap(req HandoffRequest, snap CASnapshot, issuerEAR st
 	if payload.Secrets != nil {
 		if err := secrets.ValidateSnapshot(*payload.Secrets); err != nil {
 			return HandoffResponse{}, fmt.Errorf("validate secret handoff state: %w", err)
+		}
+	}
+	if payload.EARSigner != nil {
+		if err := earsigner.ValidateSnapshot(*payload.EARSigner); err != nil {
+			return HandoffResponse{}, fmt.Errorf("validate EAR signer handoff state: %w", err)
+		}
+	}
+	if payload.SandboxLedger != nil {
+		if err := sandboxledger.ValidateSnapshot(*payload.SandboxLedger, sandboxledger.MaxSnapshotEntries); err != nil {
+			return HandoffResponse{}, fmt.Errorf("validate sandbox ledger handoff state: %w", err)
 		}
 	}
 	if snap.ParentCert != nil {
@@ -804,6 +1067,8 @@ type preparedHandoffRequest struct {
 	recipient    *ecdh.PrivateKey
 	transferID   string
 	client       *http.Client
+	pinnedClient *http.Client
+	peerAddress  string
 	// activationRetryInterval is fixed in production. Tests shorten it.
 	activationRetryInterval time.Duration
 }
@@ -884,13 +1149,29 @@ func prepareHandoffRequest(deps HandoffClientDeps, peerURL, requesterEAR string,
 }
 
 func (p *preparedHandoffRequest) execute(ctx context.Context) (*HandoffMaterial, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.peerURL+"/handoff", bytes.NewReader(p.body))
+	var peerAddress string
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		if info.Conn != nil {
+			peerAddress = info.Conn.RemoteAddr().String()
+		}
+	}}
+	requestCtx := httptrace.WithClientTrace(ctx, trace)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, p.peerURL+"/handoff", bytes.NewReader(p.body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.client.Do(req)
+	client := p.client
+	if p.pinnedClient != nil {
+		client = p.pinnedClient
+	}
+	resp, err := client.Do(req)
+	if peerAddress != "" && p.pinnedClient == nil {
+		if pinErr := p.pinPredecessor(peerAddress); pinErr != nil {
+			return nil, pinErr
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("request handoff: %w", err)
 	}
@@ -919,15 +1200,64 @@ func (p *preparedHandoffRequest) execute(ctx context.Context) (*HandoffMaterial,
 	}
 	material.TransferID = p.transferID
 	material.activate = func(ctx context.Context) error { return p.activate(ctx) }
+	material.confirm = func(ctx context.Context) error { return p.confirm(ctx) }
 	return material, nil
 }
 
+// pinPredecessor keeps all state-transfer control requests on the exact RA-TLS
+// peer that returned the protected snapshot. The URL host stays unchanged, so
+// TLS verification and SNI keep their original policy. Only TCP dialing is
+// pinned. This path does not depend on the normal CDS Service endpoint after
+// predecessor readiness becomes false.
+func (p *preparedHandoffRequest) pinPredecessor(address string) error {
+	base := p.client
+	if base == nil {
+		base = http.DefaultClient
+	}
+	transport := base.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		return fmt.Errorf("handoff requires an HTTP transport that can pin the selected predecessor")
+	}
+	clone := httpTransport.Clone()
+	baseDial := clone.DialContext
+	if baseDial == nil {
+		baseDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+	}
+	clone.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return baseDial(ctx, network, address)
+	}
+	clone.CloseIdleConnections()
+	p.pinnedClient = &http.Client{
+		Transport:     clone,
+		CheckRedirect: base.CheckRedirect,
+		Jar:           base.Jar,
+		Timeout:       base.Timeout,
+	}
+	p.peerAddress = address
+	return nil
+}
+
 func (p *preparedHandoffRequest) activate(ctx context.Context) error {
+	return p.sendTakeoverControl(ctx, "activate")
+}
+
+func (p *preparedHandoffRequest) confirm(ctx context.Context) error {
+	return p.sendTakeoverControl(ctx, "confirm")
+}
+
+func (p *preparedHandoffRequest) sendTakeoverControl(ctx context.Context, action string) error {
+	if p.pinnedClient == nil || p.peerAddress == "" {
+		return fmt.Errorf("%s handoff: selected predecessor address is not pinned", action)
+	}
 	_, clusterKey, err := handoffClusterIdentity(p.deps.ClusterIdentity)
 	if err != nil {
 		return err
 	}
-	message, err := handoffTranscript("activate", p.transferID)
+	message, err := handoffTranscript(action, p.transferID)
 	if err != nil {
 		return err
 	}
@@ -944,7 +1274,7 @@ func (p *preparedHandoffRequest) activate(ctx context.Context) error {
 		interval = DefaultPullRetryInterval
 	}
 	for {
-		retry, err := p.activateOnce(ctx, body)
+		retry, err := p.takeoverControlOnce(ctx, action, body)
 		if err == nil || !retry {
 			return err
 		}
@@ -952,26 +1282,26 @@ func (p *preparedHandoffRequest) activate(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return fmt.Errorf("activate handoff: %w", ctx.Err())
+			return fmt.Errorf("%s handoff: %w", action, ctx.Err())
 		case <-timer.C:
 		}
 	}
 }
 
-// activateOnce returns retry=true for errors where the predecessor can have
-// completed retirement but the client did not receive its confirmation.
-func (p *preparedHandoffRequest) activateOnce(ctx context.Context, body []byte) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.peerURL+"/handoff/activate", bytes.NewReader(body))
+// takeoverControlOnce returns retry=true for errors where the predecessor can
+// have completed the requested transition but the client did not receive it.
+func (p *preparedHandoffRequest) takeoverControlOnce(ctx context.Context, action string, body []byte) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.peerURL+"/handoff/"+action, bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.client.Do(req)
+	resp, err := p.pinnedClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false, fmt.Errorf("activate handoff: %w", ctx.Err())
+			return false, fmt.Errorf("%s handoff: %w", action, ctx.Err())
 		}
-		return true, fmt.Errorf("activate handoff: %w", err)
+		return true, fmt.Errorf("%s handoff: %w", action, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -979,12 +1309,25 @@ func (p *preparedHandoffRequest) activateOnce(ctx context.Context, body []byte) 
 		statusErr := &HandoffStatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(responseBody))}
 		return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500, statusErr
 	}
-	var out HandoffActivateResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHandoffErrorBytes)).Decode(&out); err != nil {
-		return true, fmt.Errorf("decode handoff activation response: %w", err)
-	}
-	if !out.Activated {
-		return false, fmt.Errorf("predecessor did not confirm handoff activation")
+	switch action {
+	case "activate":
+		var out HandoffActivateResponse
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxHandoffErrorBytes)).Decode(&out); err != nil {
+			return true, fmt.Errorf("decode handoff activation response: %w", err)
+		}
+		if !out.Activated {
+			return false, fmt.Errorf("predecessor did not grant handoff activation")
+		}
+	case "confirm":
+		var out HandoffConfirmResponse
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxHandoffErrorBytes)).Decode(&out); err != nil {
+			return true, fmt.Errorf("decode handoff confirmation response: %w", err)
+		}
+		if !out.Confirmed {
+			return false, fmt.Errorf("predecessor did not confirm handoff takeover")
+		}
+	default:
+		return false, fmt.Errorf("unsupported handoff control action %q", action)
 	}
 	return false, nil
 }
@@ -1106,6 +1449,16 @@ func ParseHandoffPayload(plain []byte) (*HandoffMaterial, error) {
 			return nil, fmt.Errorf("validate secret handoff state: %w", err)
 		}
 	}
+	if payload.EARSigner != nil {
+		if err := earsigner.ValidateSnapshot(*payload.EARSigner); err != nil {
+			return nil, fmt.Errorf("validate EAR signer handoff state: %w", err)
+		}
+	}
+	if payload.SandboxLedger != nil {
+		if err := sandboxledger.ValidateSnapshot(*payload.SandboxLedger, sandboxledger.MaxSnapshotEntries); err != nil {
+			return nil, fmt.Errorf("validate sandbox ledger handoff state: %w", err)
+		}
+	}
 
 	caKey, err := certutil.ParseECPrivateKey([]byte(payload.CAKey))
 	if err != nil {
@@ -1141,6 +1494,8 @@ func ParseHandoffPayload(plain []byte) (*HandoffMaterial, error) {
 		Workloads:        payload.Workloads,
 		TEEWebPKI:        payload.TEEWebPKI,
 		Secrets:          payload.Secrets,
+		EARSigner:        payload.EARSigner,
+		SandboxLedger:    payload.SandboxLedger,
 	}, nil
 }
 

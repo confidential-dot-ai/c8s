@@ -87,7 +87,6 @@ env:
   # measurement, and the committed kernel/config-x86_64.snapshot lockfile must
   # be refreshed in the same PR (kernel-snapshot.yml produces it).
   CONFOS_REF: "14e770f26f912d360f1a60a464145c3ee5615124" # v0.4.2 — apt pockets snapshot-pinned by URI, mirror-guarded (confos#96); rolls the kata kernel measurement once
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA; rolls the SNP launch measurement
 
 jobs:
   build:
@@ -145,6 +144,14 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
+
+      - name: Load the attestation-rs source lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$(tr -d '[:space:]' < c8s/node-guest-image/attestation-rs.ref)"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+          echo "ATTESTATION_RS_REF=$ref" >> "$GITHUB_ENV"
 
       - name: Checkout attestation-rs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

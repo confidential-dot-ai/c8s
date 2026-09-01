@@ -21,8 +21,7 @@ func newExplainCmd(o *options) *cobra.Command {
 		Use:   "explain",
 		Short: "Show why a sandbox does or does not receive its secrets",
 		Long: `Report the release decision for one sandbox: what its node's inventory says it
-is running, which of those containers c8s injected and drops, what is left to
-match, how each workload entry measures against that, and the grant that
+is running, how the complete container set matches each workload entry, and the grant that
 resolves.
 
 A refused release tells the pod only that it was refused, and the input that

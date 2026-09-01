@@ -16,25 +16,32 @@ attestation).
 
 ## The model
 
-The allowlist has two layers.
+The active allowlist has two layers. Node-CVM also has a separate local
+cold-boot floor.
 
 - **Floor** — `digests`: a `digest -> image-label` map. An image whose digest is
   in the floor may run, **by digest alone**, regardless of its command line. The
-  measured guest seed and the standalone/injected c8s components (cds, get-cert,
-  the operator, ratls-mesh, nri-image-policy, the tls-lb, the containerd-prep
-  helper) live here. Floor entries carry no process or path policy.
+  active compatibility entries can live here. Floor entries carry no process
+  or path policy. New production policies must use exact workload entries.
 
 - **Workloads** — `workloads`: named entries, each pinning an init/main
   container set. Every container binds a **digest** to the process policy
   (`command`, `args`) permitted for those bytes, and the entry as a whole may
   carry a secret-store grant (`secrets`). The
-  entry name is operator-chosen; the entry `label` and per-container `image` are
-  informational. Policy is always resolved by container digest.
+  entry name is operator-chosen. Optional `identity` is a stable mesh peer name.
+  It defaults to the exact entry name. The entry `label` and per-container
+  `image` are informational. Policy is always resolved by container digest.
 
 The floor answers "may these bytes run at all"; the workload layer answers "and
 with what command line, and what filesystem access". A digest may appear in the
 floor, in one workload entry, or in several — see [union
 semantics](#a-digest-may-run-many-ways).
+
+On node-CVM, the local cold-boot floor admits the pinned c8s system bytes before
+CDS is reachable. It is not part of the active allowlist. After the first
+authenticated CDS pull, NRI removes that floor and applies the active policy as
+one unit. The new policy must give every live Pod one exact named entry. If
+it does not, NRI keeps the cold-boot policy and retries.
 
 ### Document shape
 
@@ -46,8 +53,9 @@ semantics](#a-digest-may-run-many-ways).
     "sha256:<get-cert>":  "ghcr.io/confidential-dot-ai/get-cert"
   },
   "workloads": {
-    "vllm-llama": {
+    "vllm-llama-2026-09-01": {
       "label": "docker.io/vllm/vllm-openai:v0.6.3",
+      "identity": "vllm-llama",
       "initContainers": [],
       "containers": [
         {
@@ -83,6 +91,23 @@ must not fail the whole document for every puller in the cluster. An over-long
 entry is dropped from a served parse with a warning: its digests stop being
 admitted by that consumer (fail-closed), and it could never have been stamped on
 a leaf in the first place.
+
+`identity` uses the same grammar and length bound. It is part of the canonical,
+operator-authorized policy. The matched-workload receipt keeps both the exact
+entry name and the stable identity. Mesh peers pin the identity. Secret grants
+and allowlist resolution use the exact entry name.
+
+For a rolling update, keep the old and new exact entries in one active policy.
+They can share one identity. This lets the fail-closed node policy cover both
+live versions. Their container sets must still resolve without ambiguity. After
+the old Pods drain and their named certificates expire, remove the old entry.
+
+Use four steps. First, roll c8s, verifiers, and mesh proxies that read v1 and
+v2. Keep `identity` absent and keep the exact-policy pin. Second, add `identity`
+to the same exact entry and renew the v2 leaf. The exact pin still matches.
+Third, change the proxy to the explicit stable-identity pin. Fourth, add the
+new versioned entry with the same identity. A v1-only peer rejects v2. Do not
+start the second step before the first step is complete.
 
 **Migration.** An over-long entry created before the bound is still served by
 CDS and still counts toward the document's canonical digest, but no pod can be
@@ -199,15 +224,12 @@ a `deny` default would refuse every real pod and adopting the field would mean
 adopting an outage. That makes these opt-in: a digest with no policy is
 constrained exactly as much as it was before.
 
-Two limits worth stating. They bind only digests a `workloads` entry names —
+Two limits apply. They bind only digests a `workloads` entry names.
 floor digests are admitted on the digest alone, so `c8s allowlist add` does not
-produce a mount-gated image. And **the in-guest `policy-monitor` is the enforcer
-that honours them**: it reads the guest's own OCI spec, so it sees both the
-mount table and the environment. The host NRI plugin sees the CRI container and
-reports neither, and an unobserved field is treated as nothing-to-refuse rather
-than as a violation — so under `--cvm-mode=node`, where that plugin is the only
-enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
-lint` warns when a document carries one; `--cvm-mode=pod` silences it.
+produce a mount-gated image. The host NRI plugin reads these fields from the
+effective CRI container. The in-guest `policy-monitor` reads them from the guest
+OCI spec. Both inventories send the observed names and destinations to CDS.
+An exact policy fails closed if an old inventory does not report the field.
 
 ## Secret grants (`secrets`)
 
@@ -242,9 +264,9 @@ install still setting the per-container `paths` field needs
 Three independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), at CreateContainer, per container.
-   Resolves the image digest and checks the effective argv against the allowlist
-   index. Digest and argv are its whole scope: it reports no mount table and no
-   environment, so `mounts` and `env` policy is vacuously satisfied here. Fail-closed before the allowlist first loads. Runs on the untrusted
+   Resolves the image digest. It checks effective argv, bind-mount destinations,
+   and environment variable names against the allowlist. It does not retain
+   environment values. It fails closed before the allowlist first loads. It runs on the untrusted
    side of the TEE boundary for kata pods, so it is defense-in-depth there, and
    the primary gate for non-kata (base-mode) pods.
 
@@ -272,32 +294,30 @@ Three independent points enforce, at different strengths:
 
 ### What each layer can and cannot promise
 
-Per-container digest+argv admission holds at all three points. **Combinations**
-("only this image set may run together") are **not enforced anywhere today**.
-NRI and policy-monitor see containers one at a time and cannot detect a
-*missing* container, so they cannot enforce a combination; CDS sees the whole
-reported set but only at issuance, which lands mid-lifecycle when that set is
-still a subset of the declared one, so it checks membership rather than
-composition ([getcert-workload-binding.md](getcert-workload-binding.md),
-Corner 4). The honest guarantee is therefore: **per-container digest + argv
-everywhere; no combination gating.**
+Per-container digest and argv admission holds at all three points. NRI and
+policy-monitor see containers one at a time. They cannot deny a missing
+container during Pod start.
 
-Combination gating wants a point where the pod is complete and the decision is
-worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
-it happens once every main container is up, so it can require a whole entry
-rather than membership. That gates a secret, not container start — making a
-combination itself *attested* is the RTMR3 per-workload-measurement path, which
-is not implemented and is out of scope here.
+CDS applies a complete-set rule when it grants a named certificate or an
+application secret. The trusted high-water inventory must contain every main
+container and every observed helper. It must match one named workload entry.
+An ordinary unnamed mesh certificate can still be issued during partial Pod
+startup, but it cannot satisfy a workload-name pin or receive a protected
+secret. This gates identity and secret release. It does not measure the
+container combination into RTMR3.
 
-### The injected-container carve-out
+### Injected c8s containers
 
-c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: injected component images are allowlist floor entries, so a workload
-entry never has to enumerate c8s's own sidecars. Nothing rests on the container
-*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
-which is exactly why standalone/injected images are digest-only floor entries:
-their argv is not fixed and must not be argv-policed.
+An exact workload entry must include every c8s container that the webhook
+injects. This includes `c8s-cert`, `c8s-cert-wait`, secret fetchers, and volume
+fetchers. Each entry pins the effective digest, argv, mounts, and environment
+names. CDS does not remove a helper by digest or by an argv prefix. Such a rule
+would let an untrusted Pod add `/c8s workload-proxy` with attacker settings and
+still get the named certificate or application secret.
+
+The injected arguments are deterministic functions of the deployment values
+and Pod template. Generate policy from the final rendered or mutated Pod. Do not
+write one broad c8s helper rule for all workloads.
 
 ## Distribution and trust
 
@@ -324,10 +344,14 @@ Consumers poll `GET /allowlist` and refresh on a changed version (the ETag
 counter). The two layers refresh differently, because they have different
 failure modes:
 
-- The **floor is additive**. A digest, once served, is never dropped by a
-  consumer; a CDS outage or a stale read degrades to "the same set or larger,
-  never smaller", never to "open". In-guest this floor is anchored by the
-  measured baked seed, so enforcement starts at t=0 offline.
+- On **node-CVM**, the local cold-boot floor exists only until the first
+  authenticated CDS policy is safe to apply. A failed initial pull keeps that
+  floor. A successful pull replaces it. A failed later refresh keeps the last
+  authenticated policy. The floor does not return.
+
+- In **pod-CVM**, the measured guest floor remains additive. It is anchored by
+  the guest image and starts enforcement at time zero. The CDS workload overlay
+  still swaps by version.
 
 - The **workload policy overlay swaps wholesale, gated by a monotonic epoch**
   (the version counter). A consumer applies a pulled overlay only if its version
@@ -344,13 +368,17 @@ failure modes:
 
 ## Bootstrap
 
-The floor is rendered by the chart from resolved component digests and handed to
-CDS as the seed (`--allowlist-seed`). Standalone/injected components are
-digest-only floor entries — the default bootstrap has an empty `workloads` map.
-This is correct precisely because those components have no fixed argv to pin
-(get-cert's arguments are per-pod; cds runs with its own flag set), and forcing
-them into workload entries would invite a policy that denies them their own
-command line and bricks the platform on its first boot.
+The chart renders resolved c8s component digests into each node-CVM NRI
+plugin's local cold-boot floor. It does not copy those chart-derived entries to
+CDS. `c8s install --resolve-digests` first renders the chart, reads each pinned
+image's OCI process configuration, and derives one exact named entry for every
+steady Deployment, DaemonSet, and StatefulSet. It then renders the release a
+second time with those entries in the CDS seed.
+
+Use `c8s allowlist derive-system <rendered.yaml> --base <application.json>` for
+a manual Helm flow. `enableServiceLinks: false` is required. The command rejects
+floating images, `envFrom`, unsupported volume sources, and empty effective
+argv. It includes init containers and native sidecars.
 
 The guest-baked seed remains a flat `sha256_digests` list — it is the floor,
 measured into the SNP launch digest, and keeping it digest-only means a policy
@@ -366,6 +394,9 @@ supply via `--operator-key` (or `C8S_OPERATOR_KEY`). Persistent flags: `--url`,
 
 ```
 c8s allowlist
+  canonicalize <file|->              write canonical bytes without network use
+  digest <file|->                    hash the canonical bytes without network use
+  derive-system <rendered.yaml|->    derive exact named c8s system Pod policy
   list                              floor table + workload summary
   export [file]                     write the full canonical document
   diff <file> [--exit-code]         entry/field diff vs the live allowlist
@@ -406,10 +437,8 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 (both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry, a digest that is
 floor-listed while also carrying a workload policy — the floor admits it by
-digest alone, so the argv policy is silently not enforced — tag-form labels
-(which can move under the operator), a `mounts` or `env` policy no host-path
-enforcer can observe (pass `--cvm-mode=pod` when the allowlist targets kata),
-and a summary of how many `any` policies a document carries. `--online` cross-checks digests against the registry with
+digest alone, so the process policy is not enforced — tag-form labels
+(which can move under the operator), and a summary of how many `any` policies a document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an

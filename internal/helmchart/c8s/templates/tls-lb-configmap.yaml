@@ -1,4 +1,4 @@
-{{- if .Values.tlsLb.enabled }}
+{{- if and .Values.tlsLb.enabled (eq .Values.tlsLb.nginx.configMode "configmap") }}
 {{- $sans := include "tls-lb.sanList" . | fromJsonArray -}}
 {{- range $s := $sans -}}{{- include "tls-lb.validateSan" $s -}}{{- end -}}
 {{- $serverNames := join " " $sans -}}

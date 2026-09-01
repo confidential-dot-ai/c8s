@@ -44,6 +44,8 @@ type dependencies struct {
 type handoffController interface {
 	HandleHandoff(http.ResponseWriter, *http.Request)
 	HandleActivate(http.ResponseWriter, *http.Request)
+	HandleConfirm(http.ResponseWriter, *http.Request)
+	HandleAbort(http.ResponseWriter, *http.Request)
 	Serving() bool
 	GuardMutation(http.Handler) http.Handler
 }
@@ -72,13 +74,15 @@ func newRouter(deps dependencies) http.Handler {
 	r.Get("/.well-known/jwks.json", server.HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
-	r.Method(http.MethodPost, "/authenticate", deps.challengeProtected(attestation.HandleAuthenticate(deps.AttestHandler.Challenges)))
-	r.Method(http.MethodPost, "/attest", deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest)))
-	r.Method(http.MethodPost, "/attest-key", deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey)))
-	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
+	r.Method(http.MethodPost, "/authenticate", deps.mutation(deps.challengeProtected(attestation.HandleAuthenticate(deps.AttestHandler.Challenges))))
+	r.Method(http.MethodPost, "/attest", deps.mutation(deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest))))
+	r.Method(http.MethodPost, "/attest-key", deps.mutation(deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey))))
+	r.Method(http.MethodPost, "/sign-csr", deps.mutation(deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR))))
 	if deps.HandoffHandler != nil {
 		r.Method(http.MethodPost, "/handoff", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleHandoff)))
 		r.Method(http.MethodPost, "/handoff/activate", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleActivate)))
+		r.Method(http.MethodPost, "/handoff/confirm", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleConfirm)))
+		r.Method(http.MethodPost, "/handoff/abort", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleAbort)))
 	}
 	if deps.TEEWebPKIHandler != nil {
 		r.Method(http.MethodGet, teewebpki.CSRRoute, deps.protected(http.HandlerFunc(deps.TEEWebPKIHandler.ServeCSR)))
@@ -106,8 +110,8 @@ func newRouter(deps dependencies) http.Handler {
 		if deps.SecretsOperator == nil || deps.SecretsExplain == nil {
 			panic("cds: dependencies.SecretsOperator and SecretsExplain must be set alongside SecretsHandler")
 		}
-		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.perSandbox(attestation.HandleAuthenticate(deps.SecretsChallenges)))
-		r.Method(http.MethodGet, secrets.Route, deps.perSandbox(deps.SecretsHandler))
+		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.mutation(deps.perSandbox(attestation.HandleAuthenticate(deps.SecretsChallenges))))
+		r.Method(http.MethodGet, secrets.Route, deps.mutation(deps.perSandbox(deps.SecretsHandler)))
 		r.Method(http.MethodPost, secrets.Route, deps.mutation(deps.perSandbox(deps.SecretsHandler)))
 		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
 		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
@@ -126,7 +130,7 @@ func (deps dependencies) activeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if deps.HandoffHandler == nil || deps.HandoffHandler.Serving() || r.URL.Path == "/healthz" ||
 			r.URL.Path == "/readyz" || r.URL.Path == "/metrics" ||
-			r.URL.Path == "/handoff" || r.URL.Path == "/handoff/activate" {
+			r.URL.Path == "/handoff" || r.URL.Path == "/handoff/activate" || r.URL.Path == "/handoff/confirm" || r.URL.Path == "/handoff/abort" {
 			next.ServeHTTP(w, r)
 			return
 		}

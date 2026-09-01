@@ -35,7 +35,10 @@ func containerWith(t *testing.T, mounts MountPolicy, env EnvPolicy) Container {
 }
 
 func running(digest string, mounts, env []string) RunningContainer {
-	return RunningContainer{Digest: digest, BindMounts: mounts, EnvNames: env}
+	return RunningContainer{
+		Digest: digest, BindMounts: mounts, EnvNames: env,
+		MountsObserved: true, EnvObserved: true,
+	}
 }
 
 // The threat this policy exists for: the host stages bytes in the sandbox
@@ -53,6 +56,28 @@ func TestMountPolicyRefusesAnUndeclaredDestination(t *testing.T) {
 	}
 	if c.admits(running(digest, []string{"/etc/hosts", "/usr/local/bin/get-cert"}, nil)) {
 		t.Error("a bind over an image path was admitted")
+	}
+}
+
+func TestMountPolicyRefusesWrongSourceKindAtDeclaredDestination(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	c := containerWith(t,
+		MountPolicy{
+			Policy:       PolicyExact,
+			Destinations: []string{"/run/tls"},
+			Kinds:        map[string]string{"/run/tls": "empty-dir"},
+		},
+		EnvPolicy{Policy: PolicyAny})
+
+	allowed := running(digest, []string{"/run/tls"}, nil)
+	allowed.BindMountKinds = map[string]string{"/run/tls": "empty-dir"}
+	if !c.admits(allowed) {
+		t.Error("the declared empty-dir was refused")
+	}
+	malicious := allowed
+	malicious.BindMountKinds = map[string]string{"/run/tls": "host-path"}
+	if c.admits(malicious) {
+		t.Error("a host-path substitution at the same destination was admitted")
 	}
 }
 
@@ -85,17 +110,16 @@ func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 	}
 }
 
-// An enforcer that cannot see a field leaves it nil. That is not a violation —
-// the host-side NRI plugin gates images on a node CVM and never sees a guest's
-// mount table, and refusing there would deny every pod it checks.
-func TestUnobservedFieldsAreNotViolations(t *testing.T) {
+// An exact rule is a security promise. A runtime that cannot observe its input
+// must refuse it instead of treating missing evidence as an empty set.
+func TestExactPolicyRefusesUnobservedFields(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
 		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}},
 		EnvPolicy{Policy: PolicyExact, Names: []string{"PATH"}})
 
-	if !c.admits(RunningContainer{Digest: digest}) {
-		t.Error("an enforcer that observes neither field was refused")
+	if c.admits(RunningContainer{Digest: digest}) {
+		t.Error("exact policy admitted an enforcer that observes neither field")
 	}
 }
 
@@ -107,8 +131,9 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 		{"exact mounts with no destinations", Container{Mounts: MountPolicy{Policy: PolicyExact}}},
 		{"any mounts carrying destinations", Container{Mounts: MountPolicy{Policy: PolicyAny, Destinations: []string{"/x"}}}},
 		{"relative destination", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"etc/hosts"}}}},
+		{"kind outside destinations", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/x"}, Kinds: map[string]string{"/y": "empty-dir"}}}},
+		{"unknown mount kind", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/x"}, Kinds: map[string]string{"/x": "magic"}}}},
 		{"unknown mount policy", Container{Mounts: MountPolicy{Policy: "sometimes"}}},
-		{"exact env with no names", Container{Env: EnvPolicy{Policy: PolicyExact}}},
 		{"any env carrying names", Container{Env: EnvPolicy{Policy: PolicyAny, Names: []string{"PATH"}}}},
 		{"name containing =", Container{Env: EnvPolicy{Policy: PolicyExact, Names: []string{"PATH=/bin"}}}},
 		{"unknown env policy", Container{Env: EnvPolicy{Policy: "sometimes"}}},

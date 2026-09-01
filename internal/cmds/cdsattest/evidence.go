@@ -23,8 +23,9 @@ type CollectedEvidence struct {
 
 // EvidenceProvider yields evidence whose report_data equals the endpoint's
 // transcript hash. It also returns raw NVIDIA evidence when requested. The
-// attestation-api derives every GPU nonce from the same report_data. Thus the
-// CPU TEE and all GPUs commit to one client request.
+// attestation-api derives every GPU and NVSwitch nonce from the same
+// report_data. Thus the CPU TEE and all visible NVIDIA devices commit to one
+// client request. This is node-wide evidence. It does not prove pod allocation.
 type EvidenceProvider interface {
 	Evidence(ctx context.Context, reportData []byte) (CollectedEvidence, error)
 }
@@ -33,9 +34,9 @@ var _ EvidenceProvider = LiveEvidenceProvider{}
 
 // LiveEvidenceProvider asks the local attestation-api for a fresh report
 // bound to reportData. This is the production path. It calls the attestation
-// API in the same node CVM. A GPU-worker receipt sidecar can enable GPU
-// collection for that node. A TLS-LB on a different node must not claim those
-// GPUs.
+// API in the same node CVM. A receipt sidecar can enable node-wide GPU and
+// NVSwitch collection. Two sidecars on one node can receive the same device
+// set. A TLS-LB on a different node must not claim those devices.
 type LiveEvidenceProvider struct {
 	Client            attestationclient.Client
 	Platform          types.Platform // e.g. types.PlatformSnp

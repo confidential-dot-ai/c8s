@@ -114,29 +114,32 @@ type config struct {
 	observedServingCert string
 	attestationNonce    string
 
-	measurements           []string
-	measurementsFile       string
-	imageManifest          string
-	expectedRTMR3Hex       string
-	operatorPubkey         string
-	rtmrs                  []string
-	operatorKeys           string
-	measurementsConfig     string
-	sandboxID              string
-	workload               string
-	allowlistFile          string
-	meshCA                 string
-	initDataHex            string
-	allowDebug             bool
-	minTCBBootloader       uint
-	minTCBTEE              uint
-	minTCBSNP              uint
-	minTCBMicrocode        uint
-	expectedRDHex          string
-	nvidiaGPUUserNonce     string
-	nvidiaGPURequired      bool
-	nvidiaGPUExpectedArchs []string
-	nvidiaGPUExpectedCount int
+	measurements              []string
+	measurementsFile          string
+	imageManifest             string
+	expectedRTMR3Hex          string
+	operatorPubkey            string
+	rtmrs                     []string
+	operatorKeys              string
+	measurementsConfig        string
+	sandboxID                 string
+	workload                  string
+	workloadIdentity          string
+	allowlistFile             string
+	meshCA                    string
+	initDataHex               string
+	allowDebug                bool
+	minTCBBootloader          uint
+	minTCBTEE                 uint
+	minTCBSNP                 uint
+	minTCBMicrocode           uint
+	expectedRDHex             string
+	nvidiaGPUUserNonce        string
+	nvidiaGPURequired         bool
+	nvidiaGPUExpectedArchs    []string
+	nvidiaGPUExpectedCount    int
+	nvidiaSwitchExpectedCount int
+	attestationCLISHA256      string
 	// attestationCLIPath is test-only. Production resolves the pinned helper
 	// from PATH.
 	attestationCLIPath string
@@ -225,7 +228,8 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
-	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
+	f.StringVar(&cfg.workload, "workload", "", "expected exact allowlist policy entry name on the target's leaf; requires --mesh-ca, since CDS's signature vouches for the stamp (docs/ratls.md)")
+	f.StringVar(&cfg.workloadIdentity, "workload-identity", "", "expected stable operator-authorized workload identity on the target's leaf; a v1 leaf uses its exact policy entry name. This is an explicit identity pin, not an alias for --workload. Requires --mesh-ca")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
@@ -236,10 +240,12 @@ responder chose).`,
 	f.UintVar(&cfg.minTCBSNP, "min-tcb-snp", 0, "minimum SNP firmware TCB component"+tcbSNPOnly)
 	f.UintVar(&cfg.minTCBMicrocode, "min-tcb-microcode", 0, "minimum microcode TCB component"+tcbSNPOnly)
 	f.StringVar(&cfg.expectedRDHex, "expected-report-data", "", "hex REPORTDATA / TPM-nonce anchor override for bare evidence files (1–64 bytes, exactly as bound by the producer)")
-	f.StringVar(&cfg.nvidiaGPUUserNonce, "nvidia-gpu-user-nonce", "", "hex report-data transcript used as the NVIDIA GPU nonce seed; requires the pinned attestation-cli v0.5.0 NRAS verifier")
+	f.StringVar(&cfg.nvidiaGPUUserNonce, "nvidia-gpu-user-nonce", "", "hex report-data transcript used as the NVIDIA GPU nonce seed; requires the digest-pinned attestation-cli v0.5.0 NRAS verifier")
 	f.BoolVar(&cfg.nvidiaGPURequired, "nvidia-gpu-required", false, "fail unless NVIDIA GPU evidence exists and verifies with NRAS; requires --nvidia-gpu-user-nonce")
-	f.StringSliceVar(&cfg.nvidiaGPUExpectedArchs, "nvidia-gpu-expected-arch", nil, "accepted NVIDIA GPU architecture: HOPPER, BLACKWELL, or LS10 (repeatable / comma-separated); requires --nvidia-gpu-user-nonce")
-	f.IntVar(&cfg.nvidiaGPUExpectedCount, "nvidia-gpu-expected-count", 0, "exact number of unique signed NVIDIA device identities required; 0 does not set a count policy")
+	f.StringSliceVar(&cfg.nvidiaGPUExpectedArchs, "nvidia-gpu-expected-arch", nil, "accepted NVIDIA GPU architecture: HOPPER or BLACKWELL (repeatable / comma-separated); NVSwitch is checked separately; requires --nvidia-gpu-user-nonce")
+	f.IntVar(&cfg.nvidiaGPUExpectedCount, "nvidia-gpu-expected-count", 0, "exact number of unique signed NVIDIA GPU identities required; 0 does not set a count policy")
+	f.IntVar(&cfg.nvidiaSwitchExpectedCount, "nvidia-switch-expected-count", 0, "exact number of unique signed NVIDIA NVSwitch identities required; 0 does not set a count policy")
+	f.StringVar(&cfg.attestationCLISHA256, "attestation-cli-sha256", "", "lowercase SHA-256 of the attestation-cli binary built from node-guest-image/attestation-rs.ref; required for NVIDIA verification")
 
 	f.StringVarP(&cfg.output, "output", "o", "text", "output format: text or json")
 	f.BoolVar(&cfg.showEvidence, "show-evidence", false, "print the raw report fields")
@@ -433,8 +439,12 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 		} else if gpu != nil {
 			oc.GPUVerified = &gpu.Verified
 			oc.NonceBindingOK = &gpu.NonceBindingOK
-			oc.GPUDeviceCount = len(gpu.DeviceUEIDs)
-			oc.GPUDeviceUEIDs = append([]string(nil), gpu.DeviceUEIDs...)
+			oc.GPUDeviceCount = len(gpu.GPUDeviceUEIDs)
+			oc.GPUDeviceUEIDs = append([]string(nil), gpu.GPUDeviceUEIDs...)
+			oc.SwitchDeviceCount = len(gpu.SwitchDeviceUEIDs)
+			oc.SwitchDeviceUEIDs = append([]string(nil), gpu.SwitchDeviceUEIDs...)
+			oc.GPUVerifierSHA256 = gpu.VerifierSHA256
+			oc.GPUVerifierAttestationRSCommit = gpu.VerifierAttestationRSCommit
 		}
 	}
 	oc.OperatorKeys = opKeys.fingerprints
@@ -675,10 +685,18 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	// both workload-policy flags demand the chain check that authenticates it.
 	if cfg.workload != "" {
 		if !pkgallowlist.ValidWorkloadName(cfg.workload) {
-			return nil, fmt.Errorf("--workload: %q is not a valid workload entry name (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", cfg.workload, pkgallowlist.MaxWorkloadNameLen)
+			return nil, fmt.Errorf("--workload: %q is not a valid workload policy name (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", cfg.workload, pkgallowlist.MaxWorkloadNameLen)
 		}
 		if cfg.meshCA == "" {
 			return nil, fmt.Errorf("--workload requires --mesh-ca: the matched workload is vouched by CDS's signature on the leaf, not by the hardware evidence")
+		}
+	}
+	if cfg.workloadIdentity != "" {
+		if !pkgallowlist.ValidWorkloadName(cfg.workloadIdentity) {
+			return nil, fmt.Errorf("--workload-identity: %q is not a valid stable workload identity (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", cfg.workloadIdentity, pkgallowlist.MaxWorkloadNameLen)
+		}
+		if cfg.meshCA == "" {
+			return nil, fmt.Errorf("--workload-identity requires --mesh-ca: the matched workload identity is vouched by CDS's signature on the leaf, not by the hardware evidence")
 		}
 	}
 	// The file itself is read by run, once, and threaded through — see
@@ -1159,6 +1177,14 @@ type Outcome struct {
 	// claims. Raw bundle UUIDs never contribute to this inventory.
 	GPUDeviceCount int      `json:"gpu_device_count,omitempty"`
 	GPUDeviceUEIDs []string `json:"gpu_device_ueids,omitempty"`
+	// SwitchDeviceCount and SwitchDeviceUEIDs report verified NVSwitch claims.
+	// They are separate because an LS10 switch is not a GPU.
+	SwitchDeviceCount int      `json:"switch_device_count,omitempty"`
+	SwitchDeviceUEIDs []string `json:"switch_device_ueids,omitempty"`
+	// GPUVerifierSHA256 pins the exact helper binary. The commit identifies the
+	// reviewed attestation-rs source used for both collection and verification.
+	GPUVerifierSHA256              string `json:"gpu_verifier_sha256,omitempty"`
+	GPUVerifierAttestationRSCommit string `json:"gpu_verifier_attestation_rs_commit,omitempty"`
 
 	// InitData is the init-data digest the verified evidence commits, and
 	// InitDataNote says what stands behind it: compared against --init-data,
@@ -1218,13 +1244,17 @@ type Outcome struct {
 	SandboxID     string `json:"sandbox_id,omitempty"`
 	SandboxIDNote string `json:"sandbox_id_note,omitempty"`
 
-	// Workload is the allowlist entry the leaf's matched-workload stamp names,
-	// with the allowlist version and policy digest it was decided under.
+	// Workload is the exact allowlist policy entry. WorkloadIdentity is the
+	// stable peer identity that this entry authorizes. A v1 stamp uses the
+	// policy entry name for both.
 	// CA-vouched like the sandbox ID; WorkloadNote carries the §8 verdict
 	// (workload_verified, or why it is only reported). Failures land in Error
 	// with the same taxonomy (workload_absent, workload_malformed,
-	// workload_name_mismatch, allowlist_digest_mismatch, workload_unresolved).
+	// workload_name_mismatch, workload_identity_mismatch,
+	// allowlist_digest_mismatch, workload_unresolved,
+	// workload_identity_mismatch).
 	Workload                 string `json:"workload,omitempty"`
+	WorkloadIdentity         string `json:"workload_identity,omitempty"`
 	WorkloadAllowlistVersion string `json:"workload_allowlist_version,omitempty"`
 	WorkloadAllowlistDigest  string `json:"workload_allowlist_digest,omitempty"`
 	WorkloadNote             string `json:"workload_note,omitempty"`
@@ -1351,6 +1381,7 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 	// the chain) verified, and always say what stands behind it.
 	if oc.Verified && ev.workload != nil {
 		oc.Workload = ev.workload.Name
+		oc.WorkloadIdentity = ev.workload.EffectiveIdentity()
 		oc.WorkloadAllowlistVersion = ev.workload.AllowlistVersion
 		oc.WorkloadAllowlistDigest = hex.EncodeToString(ev.workload.AllowlistDigest)
 		if cfg.meshCA == "" {
@@ -1360,11 +1391,11 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 		}
 	}
 
-	if cfg.workload == "" && held == nil {
+	if cfg.workload == "" && cfg.workloadIdentity == "" && held == nil {
 		return
 	}
 	if ev.leaf == nil {
-		fail("--workload/--allowlist need the target's leaf certificate (this evidence source carries none — use a cert, discovery, or attest-pq target)")
+		fail("--workload/--workload-identity/--allowlist need the target's leaf certificate (this evidence source carries none — use a cert, discovery, or attest-pq target)")
 		return
 	}
 	if ev.workload == nil {
@@ -1372,7 +1403,11 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 		return
 	}
 	if cfg.workload != "" && ev.workload.Name != cfg.workload {
-		fail("workload_name_mismatch: leaf matched workload %q does not match pinned %q", ev.workload.Name, cfg.workload)
+		fail("workload_name_mismatch: leaf matched exact policy %q (identity %q) does not match pinned policy %q", ev.workload.Name, ev.workload.EffectiveIdentity(), cfg.workload)
+		return
+	}
+	if cfg.workloadIdentity != "" && ev.workload.EffectiveIdentity() != cfg.workloadIdentity {
+		fail("workload_identity_mismatch: leaf matched workload identity %q (policy %q) does not match pinned identity %q", ev.workload.EffectiveIdentity(), ev.workload.Name, cfg.workloadIdentity)
 		return
 	}
 	if held != nil {
@@ -1381,8 +1416,14 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 			fail("allowlist_digest_mismatch: stamped policy digest %x does not match SHA-256 %x of the held --allowlist bytes", ev.workload.AllowlistDigest, digest[:])
 			return
 		}
-		if _, ok := held.doc.Workloads[ev.workload.Name]; !ok {
+		entry, ok := held.doc.Workloads[ev.workload.Name]
+		if !ok {
 			fail("workload_unresolved: stamped name %q does not resolve in the held allowlist document", ev.workload.Name)
+			return
+		}
+		expectedIdentity := pkgallowlist.WorkloadIdentity(ev.workload.Name, entry)
+		if ev.workload.EffectiveIdentity() != expectedIdentity {
+			fail("workload_identity_mismatch: stamped identity %q for policy %q does not match operator-authorized identity %q in the held allowlist", ev.workload.EffectiveIdentity(), ev.workload.Name, expectedIdentity)
 			return
 		}
 	}
@@ -1751,6 +1792,8 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  GPU verified: %t   nonce binding=%t\n", *oc.GPUVerified, *oc.NonceBindingOK)
 		if *oc.GPUVerified {
 			fmt.Fprintf(out, "  GPU devices:  %d   signed UEIDs=%s\n", oc.GPUDeviceCount, strings.Join(oc.GPUDeviceUEIDs, ","))
+			fmt.Fprintf(out, "  NVSwitches:   %d   signed UEIDs=%s\n", oc.SwitchDeviceCount, strings.Join(oc.SwitchDeviceUEIDs, ","))
+			fmt.Fprintf(out, "  GPU verifier: sha256:%s   attestation-rs=%s\n", oc.GPUVerifierSHA256, oc.GPUVerifierAttestationRSCommit)
 		}
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
@@ -1766,6 +1809,7 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.Workload != "" {
 		fmt.Fprintf(out, "  workload:     %s  (allowlist version %s, digest %s)\n", oc.Workload, oc.WorkloadAllowlistVersion, oc.WorkloadAllowlistDigest)
+		fmt.Fprintf(out, "  identity:     %s\n", oc.WorkloadIdentity)
 		fmt.Fprintf(out, "                %s\n", oc.WorkloadNote)
 	}
 	if len(oc.OperatorKeys) > 0 {

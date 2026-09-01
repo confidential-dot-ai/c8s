@@ -2,10 +2,14 @@ package nriimagepolicy
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -35,28 +39,31 @@ const (
 	verdictSkip // no admission check applied (missing image annotation)
 )
 
-// policySnapshot is an immutable admission view: an Index built from the
-// always_allow floor unioned with the last-applied CDS pull, tagged with that
-// pull's version (the ETag counter). Swapped as a unit.
+// policySnapshot is an immutable admission view, tagged with the last applied
+// CDS version (the ETag counter). Before the first authenticated CDS pull, it
+// contains the static cold-boot policy. After that pull, it contains only the
+// CDS policy. Swapped as a unit.
 type policySnapshot struct {
 	index   *allowlist.Index
 	version uint64
+	digest  string
 }
 
 // policyStore holds the current admission snapshot. A single writer (the pull
 // loop) swaps it via apply; CreateContainer reads it concurrently via current.
-// The always_allow floor is unioned into every snapshot, so a failed or
-// withheld pull never drops it.
+// The static policy is a cold-boot aid only. It is not a permanent admission
+// bypass. A failed refresh keeps the last authenticated CDS snapshot.
 type policyStore struct {
-	bootstrap *allowlist.Allowlist // static floor, unioned into every snapshot
-	snap      atomic.Pointer[policySnapshot]
+	transitionGuard func(*allowlist.Allowlist, *allowlist.Index) error
+	snap            atomic.Pointer[policySnapshot]
 }
 
 // newPolicyStore seeds the store with the floor alone (version 0) so admission
 // enforces the floor before the first pull lands and after any pull failure.
 func newPolicyStore(bootstrap *allowlist.Allowlist) *policyStore {
-	s := &policyStore{bootstrap: bootstrap}
-	s.snap.Store(&policySnapshot{index: mergeAllowlists(bootstrap, nil).BuildIndex()})
+	s := &policyStore{}
+	initial := mergeAllowlists(bootstrap, nil)
+	s.snap.Store(&policySnapshot{index: initial.BuildIndex(), digest: allowlistDigest(initial)})
 	return s
 }
 
@@ -67,10 +74,15 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
-// apply installs floor ∪ pulled at version, unless version is below the applied
-// one — an epoch rollback a withheld/rolled-back CDS must not use to loosen a
-// tightened policy. Reports whether it applied. Single-writer: only the pull
-// loop calls it, so the read-compare-store needs no lock against other writers.
+func (s *policyStore) setTransitionGuard(guard func(*allowlist.Allowlist, *allowlist.Index) error) {
+	s.transitionGuard = guard
+}
+
+// apply replaces the cold-boot policy with the authenticated CDS policy at
+// version, unless version is below the applied one. The bootstrap digests do
+// not survive this transition unless CDS also names them. Reports whether it
+// applied. Single-writer: only the pull loop calls it, so the
+// read-compare-store needs no lock against other writers.
 //
 // The applied version is process-local (newPolicyStore starts at 0), so
 // rollback is only rejected within a process lifetime: after a restart the first
@@ -79,14 +91,50 @@ func (s *policyStore) current() *policySnapshot {
 // the untrusted host a persisted file is itself host-controlled. See
 // docs/allowlist-and-capabilities.md.
 func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
+	applied, _ := s.applyChecked(pulled, version)
+	return applied
+}
+
+// applyChecked swaps one authenticated policy only if it still admits every
+// live container. This makes the cold-boot floor a one-way bootstrap state:
+// a partial steady policy cannot strand a running c8s component at its next
+// restart. The caller logs the error and keeps the last authenticated policy.
+func (s *policyStore) applyChecked(pulled *allowlist.Allowlist, version uint64) (bool, error) {
 	if cur := s.snap.Load(); cur != nil && version < cur.version {
-		return false
+		return false, nil
+	}
+	if pulled == nil {
+		return false, fmt.Errorf("authenticated policy is nil")
+	}
+	index := pulled.BuildIndex()
+	if s.transitionGuard != nil {
+		if err := s.transitionGuard(pulled, index); err != nil {
+			return false, fmt.Errorf("policy does not cover the live runtime: %w", err)
+		}
 	}
 	s.snap.Store(&policySnapshot{
-		index:   mergeAllowlists(s.bootstrap, pulled).BuildIndex(),
+		index:   index,
 		version: version,
+		// Hash the exact normalized document that CDS served. Rebuilding it
+		// through a merge changes JSON null maps to empty maps and produces a
+		// different canonical digest for the same pull.
+		digest: allowlistDigest(pulled),
 	})
-	return true
+	return true, nil
+}
+
+func allowlistDigest(policy *allowlist.Allowlist) string {
+	if policy == nil {
+		policy = mergeAllowlists(nil, nil)
+	}
+	canonical, err := policy.Canonical()
+	if err != nil {
+		// The policy was parsed or chart-generated before it reaches this store.
+		// Keep an impossible digest if an internal caller violates that invariant.
+		return ""
+	}
+	digest := sha256.Sum256(canonical)
+	return fmt.Sprintf("sha256:%x", digest)
 }
 
 // containerdOps is the containerd surface admission drives; internal/containerd's
@@ -139,12 +187,17 @@ func newPlugin(
 		logger:     logger,
 		containerd: ctrd,
 	}
-	if cfg.WorkloadClaims.SocketDir != "" {
+	// Every node that pulls active policy keeps a live runtime inventory. The
+	// inventory is the barrier that prevents removal of the local cold-boot
+	// floor before the authenticated policy covers every running container. The
+	// Unix claims service is optional; the transition barrier is not.
+	if cfg.PullEnabled() || cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
 		if procRoot == "" {
 			procRoot = "/proc"
 		}
-		p.inventory = newAdmissionInventory(procRoot)
+		p.inventory = newAdmissionInventory(procRoot, store)
+		store.setTransitionGuard(p.inventory.admitsLiveRuntime)
 	}
 
 	// Check if running as pre-installed plugin (containerd sets these env vars)
@@ -229,7 +282,7 @@ func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 // Only subscribed when the inventory is enabled (see Configure).
 func (p *plugin) RunPodSandbox(ctx context.Context, pod *api.PodSandbox) error {
 	if p.inventory != nil {
-		p.inventory.recordSandbox(pod.GetId())
+		p.inventory.recordPod(pod)
 	}
 	return nil
 }
@@ -277,7 +330,61 @@ func (p *plugin) recordDigest(ctr *api.Container, digest string) {
 	if p.inventory == nil {
 		return
 	}
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs())
+	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), observeCRIContainer(ctr))
+}
+
+// containerObservation carries the fields NRI reports from the effective OCI
+// container. Environment values are not retained. A bind mount is a mount with
+// type "bind", or an absolute source for runtimes that omit the type.
+type containerObservation struct {
+	bindMounts     []string
+	bindMountKinds map[string]string
+	envNames       []string
+}
+
+func observeCRIContainer(ctr *api.Container) containerObservation {
+	out := containerObservation{bindMountKinds: map[string]string{}}
+	for _, m := range ctr.GetMounts() {
+		if m == nil || (m.GetType() != "bind" && !filepath.IsAbs(m.GetSource())) {
+			continue
+		}
+		if destination := m.GetDestination(); filepath.IsAbs(destination) {
+			out.bindMounts = append(out.bindMounts, destination)
+			out.bindMountKinds[destination] = classifyMountSource(m.GetSource())
+		}
+	}
+	for _, entry := range ctr.GetEnv() {
+		name, _, _ := strings.Cut(entry, "=")
+		if name != "" {
+			out.envNames = append(out.envNames, name)
+		}
+	}
+	sort.Strings(out.bindMounts)
+	out.bindMounts = slices.Compact(out.bindMounts)
+	sort.Strings(out.envNames)
+	out.envNames = slices.Compact(out.envNames)
+	return out
+}
+
+func classifyMountSource(source string) string {
+	switch {
+	case strings.Contains(source, "/volumes/kubernetes.io~empty-dir/"):
+		return "empty-dir"
+	case strings.Contains(source, "/volumes/kubernetes.io~configmap/"):
+		return "configmap"
+	case strings.Contains(source, "/volumes/kubernetes.io~secret/"):
+		return "secret"
+	case strings.Contains(source, "/volumes/kubernetes.io~projected/"):
+		return "projected"
+	case strings.Contains(source, "/volumes/kubernetes.io~downward-api/"):
+		return "downward-api"
+	case strings.Contains(source, "/var/lib/kubelet/pods/"):
+		return "host-path"
+	case filepath.IsAbs(source):
+		return "node"
+	default:
+		return "unknown"
+	}
 }
 
 // resolveDigest returns the canonical store digest for imageRef using the same
@@ -337,7 +444,7 @@ func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName stri
 // container's effective OCI process.args (NRI api.Container.Args): floor digests
 // are admitted regardless of it, workload digests only when it satisfies an
 // entry's entrypoint/cmd policy. Returns the verdict and an error string.
-func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string) (imageVerdict, string) {
+func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed ...containerObservation) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
 		"pod", podName,
@@ -405,12 +512,19 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		return verdictDeny, fmt.Sprintf("no allowlist available for %s", imageRef)
 	}
 
-	// Floor digests admit regardless of argv; workload digests require the
-	// effective argv to satisfy some entry's entrypoint/cmd policy. Mount and env
-	// policy are left unobserved here: this plugin gates images on a node CVM,
-	// where it sees the CRI container rather than a guest's mount table, and an
-	// unobserved field is not a violation (allowlist.RunningContainer).
-	if !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	// Floor digests admit regardless of process policy. Workload digests require
+	// the effective argv, bind destinations, and environment names to satisfy one
+	// entry. NRI supplies all three from the effective OCI container. Values of
+	// environment variables are not copied or logged.
+	running := allowlist.RunningContainer{Digest: digest, Argv: argv}
+	if len(observed) == 1 {
+		running.BindMounts = observed[0].bindMounts
+		running.BindMountKinds = observed[0].bindMountKinds
+		running.EnvNames = observed[0].envNames
+		running.MountsObserved = true
+		running.EnvObserved = true
+	}
+	if !snap.index.AdmitsContainer(running) {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.
@@ -457,7 +571,7 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
+		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), observeCRIContainer(ctr))
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
@@ -586,7 +700,7 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 	// deferred: sandbox existence needs no allowlist.
 	if p.inventory != nil {
 		for _, pod := range pods {
-			p.inventory.recordSandbox(pod.GetId())
+			p.inventory.recordPod(pod)
 		}
 	}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/containerd/nri/pkg/api"
+	"google.golang.org/protobuf/proto"
 )
 
 func newTestPlugin(cfg *config) *plugin {
@@ -1418,13 +1419,10 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 }
 
-// TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath pins the host
-// path's field scope. Both policies are `exact` with an empty list, so an
-// enforcer that reported any bind destination or any environment name would
-// refuse this container; admitting it is the assertion that this plugin passes
-// neither. Node-as-CVM operators are warned about the consequence by
-// `c8s allowlist lint`.
-func TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+// The node-CVM path must not turn missing runtime evidence into an observed
+// empty set. Exact policy fails closed if a caller bypasses checkContainer and
+// does not supply the NRI observation.
+func TestCheckImage_ExactMountAndEnvPolicyRequiresObservation(t *testing.T) {
 	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 	c := al.Workloads["w"].Containers[0]
 	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
@@ -1435,17 +1433,86 @@ func TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 
 	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
-	if verdict != verdictAllow {
-		t.Fatalf("host path must leave mounts and env unobserved, got verdict %d (reason=%q)", verdict, reason)
+	if verdict != verdictDeny {
+		t.Fatalf("unobserved exact policy got verdict %d (reason=%q), want deny", verdict, reason)
 	}
 
-	// Non-vacuity: the same entry refuses a container that does report one, so
-	// the admit above is this plugin's silence rather than a dead policy.
+	// Non-vacuity: an observed disallowed mount is also refused.
 	if p.policy.current().index.AdmitsContainer(allowlist.RunningContainer{
-		Digest:     pushDigestB,
-		Argv:       []string{"/bin/app", "--serve"},
-		BindMounts: []string{"/injected"},
+		Digest:         pushDigestB,
+		Argv:           []string{"/bin/app", "--serve"},
+		BindMounts:     []string{"/injected"},
+		MountsObserved: true,
+		EnvObserved:    true,
 	}) {
 		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
+	}
+}
+
+func TestObserveCRIContainerReportsBindDestinationsAndEnvNames(t *testing.T) {
+	ctr := &api.Container{
+		Mounts: []*api.Mount{
+			{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~empty-dir/a", Destination: "/app/a"},
+			{Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~configmap/b", Destination: "/app/b"},
+			{Type: "tmpfs", Source: "tmpfs", Destination: "/tmp"},
+			{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~empty-dir/a", Destination: "/app/a"},
+		},
+		Env: []string{"PATH=/bin", "TOKEN=secret", "PATH=/usr/bin", "EMPTY="},
+	}
+	got := observeCRIContainer(ctr)
+	if !slices.Equal(got.bindMounts, []string{"/app/a", "/app/b"}) {
+		t.Fatalf("bind mounts = %v", got.bindMounts)
+	}
+	if got.bindMountKinds["/app/a"] != "empty-dir" || got.bindMountKinds["/app/b"] != "configmap" {
+		t.Fatalf("bind mount kinds = %v", got.bindMountKinds)
+	}
+	if !slices.Equal(got.envNames, []string{"EMPTY", "PATH", "TOKEN"}) {
+		t.Fatalf("env names = %v", got.envNames)
+	}
+	for _, item := range got.envNames {
+		if strings.Contains(item, "secret") {
+			t.Fatal("environment value entered the observation")
+		}
+	}
+}
+
+func TestCheckContainerEnforcesObservedMountAndEnvPolicy(t *testing.T) {
+	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
+	c := al.Workloads["w"].Containers[0]
+	c.Mounts = allowlist.MountPolicy{
+		Policy:       allowlist.PolicyExact,
+		Destinations: []string{"/config"},
+		Kinds:        map[string]string{"/config": "configmap"},
+	}
+	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH"}}
+	al.Workloads["w"] = allowlist.Workload{Containers: []allowlist.Container{c}}
+	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "bootstrap"}}}, al)
+	pod := &api.PodSandbox{Namespace: "default", Name: "app"}
+	base := &api.Container{
+		Name: "app", Args: []string{"/bin/app", "--serve"},
+		Mounts: []*api.Mount{{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~configmap/config", Destination: "/config"}},
+		Env:    []string{"PATH=/bin"},
+	}
+
+	if verdict, reason := p.checkContainer(context.Background(), p.cfg, pod, base, "repo@"+pushDigestB); verdict != verdictAllow {
+		t.Fatalf("declared runtime fields: verdict=%d reason=%q", verdict, reason)
+	}
+
+	withInjectedEnv := proto.Clone(base).(*api.Container)
+	withInjectedEnv.Env = []string{"PATH=/bin", "LD_PRELOAD=/host/code.so"}
+	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, withInjectedEnv, "repo@"+pushDigestB); verdict != verdictDeny {
+		t.Fatal("undeclared environment name was admitted")
+	}
+
+	withInjectedMount := proto.Clone(base).(*api.Container)
+	withInjectedMount.Mounts = append(slices.Clone(base.Mounts), &api.Mount{Type: "bind", Source: "/host/code", Destination: "/bin/app"})
+	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, withInjectedMount, "repo@"+pushDigestB); verdict != verdictDeny {
+		t.Fatal("undeclared bind destination was admitted")
+	}
+
+	withSubstitutedMount := proto.Clone(base).(*api.Container)
+	withSubstitutedMount.Mounts = []*api.Mount{{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~host-path/config", Destination: "/config"}}
+	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, withSubstitutedMount, "repo@"+pushDigestB); verdict != verdictDeny {
+		t.Fatal("host-path substitution at a declared destination was admitted")
 	}
 }

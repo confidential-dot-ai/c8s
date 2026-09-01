@@ -10,15 +10,17 @@ import "fmt"
 // A local type rather than the inventory's own keeps this package a pure
 // function of the allowlist — the caller converts.
 //
-// An enforcer that cannot observe a field leaves it nil, which an exact policy
-// treats as "nothing to refuse" rather than as a violation. The in-guest
-// policy-monitor reads the guest OCI spec and fills all four; the host-side NRI
-// plugin gates images on a node CVM and fills Digest and Argv only.
+// MountsObserved and EnvObserved distinguish an observed empty set from a
+// field the enforcer cannot see. An exact policy fails closed when its field
+// was not observed. An Any policy does not require the observation.
 type RunningContainer struct {
-	Digest     string
-	Argv       []string
-	BindMounts []string
-	EnvNames   []string
+	Digest         string
+	Argv           []string
+	BindMounts     []string
+	BindMountKinds map[string]string
+	EnvNames       []string
+	MountsObserved bool
+	EnvObserved    bool
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -40,8 +42,9 @@ var (
 // ordinary pods outright. "Nothing foreign, every main present" admits both
 // while still refusing a set containing anything the entry does not name.
 //
-// running must already have had injected-component containers removed — this
-// package does not know which images the platform injects.
+// running must contain every observed container, including platform-injected
+// helpers. Omitting helpers would let a digest-floor c8s image run an
+// attacker-selected command without changing the matched workload identity.
 //
 // Argv is matched against the entry's own policies rather than via Index, whose
 // admission is a union across every entry listing a digest: an entry pinning an
@@ -151,21 +154,35 @@ func (c Container) admits(r RunningContainer) bool {
 	if !ok || !c.Args.matchArgs(rest) {
 		return false
 	}
-	return c.Mounts.admits(r.BindMounts) && c.Env.admits(r.EnvNames)
+	return c.Mounts.admits(r.BindMounts, r.BindMountKinds, r.MountsObserved) && c.Env.admits(r.EnvNames, r.EnvObserved)
 }
 
 // admits reports whether every bind destination is one this policy names.
-func (p MountPolicy) admits(destinations []string) bool {
+func (p MountPolicy) admits(destinations []string, kinds map[string]string, observed bool) bool {
 	if p.Policy != PolicyExact {
 		return true
 	}
-	return everyIn(destinations, p.Destinations)
+	if !observed {
+		return false
+	}
+	if !everyIn(destinations, p.Destinations) {
+		return false
+	}
+	for destination, expected := range p.Kinds {
+		if kinds[destination] != expected {
+			return false
+		}
+	}
+	return true
 }
 
 // admits reports whether every environment name is one this policy names.
-func (p EnvPolicy) admits(names []string) bool {
+func (p EnvPolicy) admits(names []string, observed bool) bool {
 	if p.Policy != PolicyExact {
 		return true
+	}
+	if !observed {
+		return false
 	}
 	return everyIn(names, p.Names)
 }

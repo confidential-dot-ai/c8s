@@ -492,19 +492,18 @@ configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
 The default chart publishes /allowlist through tls-lb. Point --url at that
-front door only when it uses CDS-issued public TLS (discovery reports
-public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
-WebPKI front door cannot yet bind its public certificate to the attestation
-evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
-example through a port-forward) and pin the CDS launch digest. To generate an
-operator key and pin its public half, see the c8s README ("Managing the image
-allowlist").`
+front door only when discovery reports public_tls.mode=cds, and use the tls-lb
+launch digest with --measurements. tee-webpki binds its public leaf through
+attest-lb, which this operator client does not yet run. For webpki or
+tee-webpki, use a direct CDS RA-TLS URL, such as a port-forward, and pin the CDS
+launch digest. To generate an operator key and pin its public half, see the c8s
+README ("Managing the image allowlist").`
 	if cmd.Long != wantLong {
 		t.Fatalf("allowlist long help mismatch\n--- got ---\n%s\n--- want ---\n%s", cmd.Long, wantLong)
 	}
 
 	wantFlags := map[string]string{
-		"url":          "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound",
+		"url":          "CDS-issued-TLS tls-lb or direct CDS base URL (required); webpki and tee-webpki need a different public-leaf verification flow",
 		"measurements": "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)",
 	}
 	for name, want := range wantFlags {

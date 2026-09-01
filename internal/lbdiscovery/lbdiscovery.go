@@ -183,14 +183,15 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 		return nil, fmt.Errorf("parse discovery document: %w", err)
 	}
 
-	// Only a cds-mode front door serves the CDS-issued leaf the evidence
-	// binds; empty means a pre-mode-field document (cds in practice). Anything
-	// else fails closed here rather than returning a client whose handshakes
-	// can never match the attested cert.
+	// Only a cds-mode front door serves the CDS-issued leaf in this discovery
+	// document. tee-webpki binds its public leaf through attest-lb instead.
+	// Empty means a pre-mode-field document (cds in practice).
 	switch d.PublicTLS.Mode {
 	case "", "cds":
 	case "webpki":
 		return nil, fmt.Errorf("front door public_tls.mode=webpki is not supported: it serves an operator WebPKI certificate this client cannot yet bind to the attestation evidence; use a cds-mode front door or port-forward CDS directly")
+	case "tee-webpki":
+		return nil, fmt.Errorf("front door public_tls.mode=tee-webpki requires attest-lb verification of the observed public leaf; this discovery client does not perform that flow; use c8s verify --mode attest-lb or reach CDS directly")
 	default:
 		return nil, fmt.Errorf("unknown public_tls.mode %q in discovery document", d.PublicTLS.Mode)
 	}

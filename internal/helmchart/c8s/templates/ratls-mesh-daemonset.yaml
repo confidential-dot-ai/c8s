@@ -62,6 +62,7 @@ spec:
         prometheus.io/port: {{ .Values.ratlsMesh.ports.health | quote }}
         prometheus.io/path: "/metrics"
     spec:
+      enableServiceLinks: false
       {{- with .Values.ratlsMesh.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}

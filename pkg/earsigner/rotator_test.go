@@ -180,6 +180,55 @@ func TestRun_Rotation(t *testing.T) {
 	}
 }
 
+func TestSnapshotRestorePreservesActiveAndOverlapKeys(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := make(chan struct{}, 1)
+	cfg := earsigner.RotatorConfig{
+		Interval: 5 * time.Millisecond,
+		Overlap:  time.Hour,
+		Logger:   discardLogger(),
+	}
+	r, err := earsigner.NewRotator(cfg, keyPEM, func(*ecdsa.PrivateKey, string) {
+		select {
+		case swapped <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	select {
+	case <-swapped:
+	case <-time.After(time.Second):
+		t.Fatal("rotation did not start")
+	}
+	snapshot, err := r.Freeze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-done
+	if len(snapshot.Retiring) == 0 {
+		t.Fatal("snapshot did not include the overlap key")
+	}
+
+	restored, err := earsigner.NewRotatorFromSnapshot(cfg, snapshot, func(*ecdsa.PrivateKey, string) {})
+	if err != nil {
+		t.Fatalf("NewRotatorFromSnapshot: %v", err)
+	}
+	for _, item := range append([]earsigner.SnapshotKey{snapshot.Active}, snapshot.Retiring...) {
+		if _, err := restored.PublicKey(item.KID); err != nil {
+			t.Fatalf("restored key %q: %v", item.KID, err)
+		}
+	}
+}
+
 // TestPublicKey_RetiringKeyExpires proves that a retiring key is rejected once
 // it passes its overlap deadline, even if a later rotation has not yet evicted
 // it from the retiring set. Without the lookup-time deadline check a retired

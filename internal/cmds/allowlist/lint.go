@@ -24,8 +24,7 @@ func newLintCmd(o *options) *cobra.Command {
 findings: entries with no containers, a container that can never start, digests
 whose effective policy is unconstrained, a digest that is floor-listed while also
 carrying a workload policy (the floor short-circuits it), tag-form image labels
-(TOCTOU), root-subtree path grants, and mount/env policy on a deployment whose
-enforcer cannot observe those fields. --online additionally checks each digest
+(TOCTOU), and root-subtree path grants. --online additionally checks each digest
 exists in its registry via crane.
 
 Two entries declaring the same containers with the same argv policy are an
@@ -43,7 +42,6 @@ same.`,
 				return err
 			}
 			findings := lintOffline(al)
-			findings = append(findings, unobservedFieldPolicies(al, cvmMode)...)
 			if online {
 				if err := crane.Require(); err != nil {
 					return err
@@ -69,7 +67,7 @@ same.`,
 	}
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
-	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode the allowlist targets (pod, node, gke, aks); pod silences the mount/env scope warning")
+	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode (accepted for compatibility; mount/env policy is enforced in all modes)")
 	return cmd
 }
 
@@ -217,34 +215,6 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 
 	if anyCount > 0 {
 		warnings = append(warnings, warnf("%d 'any' (unconstrained) policy value(s) across all entries", anyCount))
-	}
-	return warnings
-}
-
-// unobservedFieldPolicies reports mount and env policy that the deployment's
-// enforcer cannot see. Only the in-guest policy-monitor reads the guest OCI
-// spec; the host NRI plugin sees the CRI container, reports neither field, and
-// an unobserved field is vacuously satisfied — so outside pod mode such a
-// policy admits every container with no signal at write, install or deny time.
-func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
-	if cvmMode == "pod" {
-		return nil
-	}
-	var warnings []finding
-	for _, name := range sortedWorkloadNames(al.Workloads) {
-		for _, c := range allContainers(al.Workloads[name]) {
-			var fields []string
-			if c.Mounts.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "mounts")
-			}
-			if c.Env.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "env")
-			}
-			if fields == nil {
-				continue
-			}
-			warnings = append(warnings, warnf("workload %q container %s constrains %s; only the in-guest policy-monitor observes those fields, so on a deployment enforced by the host NRI plugin this policy admits every container (pass --cvm-mode=pod if this allowlist targets kata)", name, c.Digest.String(), strings.Join(fields, " and ")))
-		}
 	}
 	return warnings
 }

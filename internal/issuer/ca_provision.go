@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -70,9 +72,15 @@ type CAProvisionConfig struct {
 	// snapshot before the successor starts. When set, a missing snapshot is a
 	// fatal downgrade because continuing would destroy live secret state.
 	RestoreSecrets func(snapshot secrets.Snapshot) error
-	// OnAdopt receives the activation function after every state restorer
-	// succeeds. The caller starts the successor server before it invokes this.
-	OnAdopt func(activate func(context.Context) error)
+	// RestoreEARSigner stores the active and overlap EAR signer state before the
+	// successor creates its token issuer.
+	RestoreEARSigner func(snapshot earsigner.Snapshot) error
+	// RestoreSandboxLedger installs the first-write-wins inventory bindings.
+	RestoreSandboxLedger func(snapshot sandboxledger.Snapshot) error
+	// OnAdopt receives the activation and confirmation functions after every
+	// state restorer succeeds. The caller starts the successor server, drains
+	// the predecessor, promotes locally, then confirms takeover.
+	OnAdopt func(activate, confirm func(context.Context) error)
 }
 
 // caPuller adopts a CA from the configured peer. It is a seam so the
@@ -151,10 +159,26 @@ func provisionCA(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logger
 			return nil, false, fmt.Errorf("restore application-secret snapshot from peer %s: %w", cfg.PeerURL, err)
 		}
 	}
+	if cfg.RestoreEARSigner != nil {
+		if material.EARSigner == nil {
+			return nil, false, fmt.Errorf("peer %s handed off no EAR signer state", cfg.PeerURL)
+		}
+		if err := cfg.RestoreEARSigner(*material.EARSigner); err != nil {
+			return nil, false, fmt.Errorf("restore EAR signer snapshot from peer %s: %w", cfg.PeerURL, err)
+		}
+	}
+	if cfg.RestoreSandboxLedger != nil {
+		if material.SandboxLedger == nil {
+			return nil, false, fmt.Errorf("peer %s handed off no sandbox ledger state", cfg.PeerURL)
+		}
+		if err := cfg.RestoreSandboxLedger(*material.SandboxLedger); err != nil {
+			return nil, false, fmt.Errorf("restore sandbox ledger snapshot from peer %s: %w", cfg.PeerURL, err)
+		}
+	}
 	if cfg.OnAdopt == nil {
 		return nil, false, fmt.Errorf("adopting a CA requires an activation receiver")
 	}
-	cfg.OnAdopt(material.Activate)
+	cfg.OnAdopt(material.Activate, material.Confirm)
 	return &CA{Cert: material.CACert, Key: material.CAKey}, true, nil
 }
 

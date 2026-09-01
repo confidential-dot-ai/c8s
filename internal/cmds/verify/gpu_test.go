@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -16,16 +17,16 @@ func TestVerifyNvidiaGPUUsesPinnedVerifierAndNonce(t *testing.T) {
 	nonceHex := strings.Repeat("ab", 48)
 	path := writeGPUVerifier(t, `
 [ "$5" = "--nvidia-gpu-expected-archs" ]
-[ "$6" = "BLACKWELL" ]
+[ "$6" = "BLACKWELL,LS10" ]
 `, `{
   "signature_valid": true,
   "report_data_match": true,
   "claims": {"nvidia_gpu": {"overall_ok": true, "nonce_binding_ok": true,
-    "devices": [{"ueid":"gpu-a","arch":"BLACKWELL"},{"ueid":"gpu-b","arch":"BLACKWELL"}]}}
+    "devices": [{"ueid":"gpu-a","arch":"BLACKWELL","hwmodel":"GB200 BLACKWELL"},{"ueid":"gpu-b","arch":"BLACKWELL","hwmodel":"GB200 BLACKWELL"}]}}
 }`)
 	ev := &evidence{
 		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
-		nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"BLACKWELL"}],"binding":{"concat":{"algo":"sha256"}}}`),
+		nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"BLACKWELL"},{"arch":"BLACKWELL"}],"binding":{"concat":{"algo":"sha256"}}}`),
 		gpuAttested: types.GPUAttestedEvidenceCollected,
 		erd:         mustDecodeHex(t, nonceHex),
 	}
@@ -35,11 +36,12 @@ func TestVerifyNvidiaGPUUsesPinnedVerifierAndNonce(t *testing.T) {
 		nvidiaGPUExpectedArchs: []string{"BLACKWELL"},
 		nvidiaGPUExpectedCount: 2,
 		attestationCLIPath:     path,
+		attestationCLISHA256:   verifierDigest(t, path),
 	}, ev)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || !got.Verified || !got.NonceBindingOK || len(got.DeviceUEIDs) != 2 {
+	if got == nil || !got.Verified || !got.NonceBindingOK || len(got.GPUDeviceUEIDs) != 2 || len(got.SwitchDeviceUEIDs) != 0 {
 		t.Fatalf("GPU verdict = %+v", got)
 	}
 }
@@ -51,21 +53,22 @@ func TestVerifyNvidiaGPURejectsDuplicateOrMissingSignedDeviceIdentity(t *testing
 		devices string
 		want    string
 	}{
-		{name: "duplicate UEID", devices: `[{"ueid":"gpu-a"},{"ueid":"gpu-a"}]`, want: "duplicate signed NVIDIA device UEID"},
-		{name: "empty UEID", devices: `[{"ueid":""}]`, want: "empty signed NVIDIA device UEID"},
+		{name: "duplicate UEID", devices: `[{"ueid":"gpu-a","arch":"BLACKWELL","hwmodel":"GB200"},{"ueid":"gpu-a","arch":"BLACKWELL","hwmodel":"GB200"}]`, want: "duplicate signed NVIDIA device UEID"},
+		{name: "empty UEID", devices: `[{"ueid":"","arch":"BLACKWELL","hwmodel":"GB200"}]`, want: "empty signed NVIDIA device UEID"},
 		{name: "no devices", devices: `[]`, want: "no signed NVIDIA device identities"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := `{"signature_valid":true,"report_data_match":true,"claims":{"nvidia_gpu":{"overall_ok":true,"nonce_binding_ok":true,"devices":` + tc.devices + `}}}`
 			path := writeGPUVerifier(t, "", result)
 			_, err := verifyNvidiaGPU(context.Background(), config{
-				nvidiaGPUUserNonce: nonceHex,
-				nvidiaGPURequired:  true,
-				attestationCLIPath: path,
+				nvidiaGPUUserNonce:   nonceHex,
+				nvidiaGPURequired:    true,
+				attestationCLIPath:   path,
+				attestationCLISHA256: verifierDigest(t, path),
 			}, &evidence{
 				platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
 				// A repeated raw device blob must not inflate the verified count.
-				nvidiaGPU:   json.RawMessage(`{"devices":[{"uuid":"untrusted"},{"uuid":"untrusted"}]}`),
+				nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"BLACKWELL","uuid":"untrusted"},{"arch":"BLACKWELL","uuid":"untrusted"}]}`),
 				gpuAttested: types.GPUAttestedEvidenceCollected,
 				erd:         mustDecodeHex(t, nonceHex),
 			})
@@ -82,17 +85,17 @@ func TestVerifyNvidiaGPUEnforcesSignedDeviceCount(t *testing.T) {
   "signature_valid": true,
   "report_data_match": true,
   "claims": {"nvidia_gpu": {"overall_ok": true, "nonce_binding_ok": true,
-    "devices": [{"ueid":"gpu-a","arch":"BLACKWELL"}]}}
+    "devices": [{"ueid":"gpu-a","arch":"BLACKWELL","hwmodel":"GB200 BLACKWELL"}]}}
 }`)
 	_, err := verifyNvidiaGPU(context.Background(), config{
 		nvidiaGPUUserNonce: nonceHex, nvidiaGPURequired: true,
-		nvidiaGPUExpectedCount: 2, attestationCLIPath: path,
+		nvidiaGPUExpectedCount: 2, attestationCLIPath: path, attestationCLISHA256: verifierDigest(t, path),
 	}, &evidence{
 		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
-		nvidiaGPU: json.RawMessage(`{"devices":[{}]}`), gpuAttested: types.GPUAttestedEvidenceCollected,
+		nvidiaGPU: json.RawMessage(`{"devices":[{"arch":"BLACKWELL"}]}`), gpuAttested: types.GPUAttestedEvidenceCollected,
 		erd: mustDecodeHex(t, nonceHex),
 	})
-	if err == nil || !strings.Contains(err.Error(), "verified NVIDIA device count is 1, want 2") {
+	if err == nil || !strings.Contains(err.Error(), "verified NVIDIA GPU count is 1, want 2") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -142,9 +145,10 @@ func TestVerifyNvidiaGPURejectsUnverifiedClaims(t *testing.T) {
   "claims": {"nvidia_gpu": {"overall_ok": true, "nonce_binding_ok": false}}
 }`)
 	_, err := verifyNvidiaGPU(context.Background(), config{
-		nvidiaGPUUserNonce: nonceHex,
-		nvidiaGPURequired:  true,
-		attestationCLIPath: path,
+		nvidiaGPUUserNonce:   nonceHex,
+		nvidiaGPURequired:    true,
+		attestationCLIPath:   path,
+		attestationCLISHA256: verifierDigest(t, path),
 	}, &evidence{
 		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
 		nvidiaGPU:   json.RawMessage(`{"devices":[{}]}`),
@@ -160,7 +164,7 @@ func TestVerifyNvidiaGPURejectsUnexpectedArchitecture(t *testing.T) {
 	nonceHex := strings.Repeat("ab", 48)
 	path := writeGPUVerifier(t, `
 [ "$5" = "--nvidia-gpu-expected-archs" ]
-[ "$6" = "BLACKWELL" ]
+[ "$6" = "BLACKWELL,LS10" ]
 echo "GPU architecture is not in the expected set" >&2
 exit 1
 `, "")
@@ -169,6 +173,7 @@ exit 1
 		nvidiaGPURequired:      true,
 		nvidiaGPUExpectedArchs: []string{"BLACKWELL"},
 		attestationCLIPath:     path,
+		attestationCLISHA256:   verifierDigest(t, path),
 	}, &evidence{
 		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
 		nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"HOPPER"}]}`),
@@ -180,12 +185,99 @@ exit 1
 	}
 }
 
+func TestVerifyNvidiaGPUSeparatesGPUsAndSwitches(t *testing.T) {
+	nonceHex := strings.Repeat("ab", 48)
+	path := writeGPUVerifier(t, "", `{
+  "signature_valid": true,
+  "report_data_match": true,
+  "claims": {"nvidia_gpu": {"overall_ok": true, "nonce_binding_ok": true,
+    "devices": [
+      {"ueid":"gpu-a","arch":"BLACKWELL","hwmodel":"GB200 BLACKWELL"},
+      {"ueid":"gpu-b","arch":"BLACKWELL","hwmodel":"GB200 BLACKWELL"},
+      {"ueid":"switch-a","arch":"LS10","hwmodel":"LS10 NVSwitch"}
+    ]}}
+}`)
+	got, err := verifyNvidiaGPU(context.Background(), config{
+		nvidiaGPUUserNonce: nonceHex, nvidiaGPURequired: true,
+		nvidiaGPUExpectedCount: 2, nvidiaSwitchExpectedCount: 1,
+		attestationCLIPath: path, attestationCLISHA256: verifierDigest(t, path),
+	}, &evidence{
+		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
+		nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"BLACKWELL"},{"arch":"BLACKWELL"},{"arch":"LS10"}]}`),
+		gpuAttested: types.GPUAttestedEvidenceCollected, erd: mustDecodeHex(t, nonceHex),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.GPUDeviceUEIDs) != 2 || len(got.SwitchDeviceUEIDs) != 1 {
+		t.Fatalf("separated verdict = %+v", got)
+	}
+}
+
+func TestVerifyNvidiaGPURequiresSignedHWModelAndRawMatch(t *testing.T) {
+	nonceHex := strings.Repeat("ab", 48)
+	tests := []struct {
+		name    string
+		hwmodel string
+		rawArch string
+		want    string
+	}{
+		{name: "missing signed architecture", hwmodel: "unknown model", rawArch: "BLACKWELL", want: "unrecognized signed NVIDIA hwmodel"},
+		{name: "raw architecture mismatch", hwmodel: "GB200 BLACKWELL", rawArch: "HOPPER", want: "do not match raw evidence groups"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := `{"signature_valid":true,"report_data_match":true,"claims":{"nvidia_gpu":{"overall_ok":true,"nonce_binding_ok":true,"devices":[{"ueid":"device-a","arch":"BLACKWELL","hwmodel":"` + tc.hwmodel + `"}]}}}`
+			path := writeGPUVerifier(t, "", result)
+			_, err := verifyNvidiaGPU(context.Background(), config{
+				nvidiaGPUUserNonce: nonceHex, nvidiaGPURequired: true,
+				attestationCLIPath: path, attestationCLISHA256: verifierDigest(t, path),
+			}, &evidence{
+				platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
+				nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"` + tc.rawArch + `"}]}`),
+				gpuAttested: types.GPUAttestedEvidenceCollected, erd: mustDecodeHex(t, nonceHex),
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerifyNvidiaGPURejectsWrongVerifierDigest(t *testing.T) {
+	nonceHex := strings.Repeat("ab", 48)
+	path := writeGPUVerifier(t, "", "{}")
+	_, err := verifyNvidiaGPU(context.Background(), config{
+		nvidiaGPUUserNonce: nonceHex, nvidiaGPURequired: true,
+		attestationCLIPath: path, attestationCLISHA256: strings.Repeat("00", sha256.Size),
+	}, &evidence{
+		platform: "tdx", rawEvidence: json.RawMessage(`{"quote":"cpu"}`),
+		nvidiaGPU:   json.RawMessage(`{"devices":[{"arch":"BLACKWELL"}]}`),
+		gpuAttested: types.GPUAttestedEvidenceCollected, erd: mustDecodeHex(t, nonceHex),
+	})
+	if err == nil || !strings.Contains(err.Error(), "verifier SHA-256") {
+		t.Fatalf("error = %v, want verifier digest rejection", err)
+	}
+}
+
+func TestAttestationRSCommitMatchesGuestProducerLock(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "node-guest-image", "attestation-rs.ref"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != attestationRSCommit {
+		t.Fatalf("attestation-rs source lock = %q, verifier reports %q", got, attestationRSCommit)
+	}
+}
+
 func TestValidateNvidiaGPUConfig(t *testing.T) {
 	for _, tc := range []config{
 		{nvidiaGPURequired: true},
 		{nvidiaGPUExpectedArchs: []string{"BLACKWELL"}},
 		{nvidiaGPUExpectedCount: -1},
+		{nvidiaSwitchExpectedCount: -1},
 		{nvidiaGPUExpectedCount: 8},
+		{nvidiaGPUUserNonce: strings.Repeat("ab", 48), nvidiaGPUExpectedArchs: []string{"LS10"}},
 		{nvidiaGPUUserNonce: strings.Repeat("ab", 48), nvidiaGPUExpectedArchs: []string{"BLACKWELL", "AMPERE"}},
 		{nvidiaGPUUserNonce: "zz"},
 		{nvidiaGPUUserNonce: strings.Repeat("ab", 15)},
@@ -196,6 +288,11 @@ func TestValidateNvidiaGPUConfig(t *testing.T) {
 		}
 	}
 	if err := validateNvidiaGPUConfig(config{nvidiaGPUUserNonce: strings.Repeat("ab", 48), nvidiaGPURequired: true}); err != nil {
+		if !strings.Contains(err.Error(), "--attestation-cli-sha256") {
+			t.Fatal(err)
+		}
+	}
+	if err := validateNvidiaGPUConfig(config{nvidiaGPUUserNonce: strings.Repeat("ab", 48), nvidiaGPURequired: true, attestationCLISHA256: strings.Repeat("ab", 32)}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -220,6 +317,16 @@ printf '%s\n' '` + result + `'
 		t.Fatal(err)
 	}
 	return path
+}
+
+func verifierDigest(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func mustDecodeHex(t *testing.T, value string) []byte {

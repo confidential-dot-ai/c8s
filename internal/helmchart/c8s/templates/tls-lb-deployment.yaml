@@ -10,6 +10,12 @@
 {{- fail "tlsLb.publicTLS.mode=tee-webpki forbids publicTLS.secretName; the private key must come from CDS" -}}
 {{- end -}}
 {{- if eq $publicTLSMode "tee-webpki" -}}
+{{- if ne .Values.tlsLb.nginx.configMode "image" -}}
+{{- fail "tlsLb.publicTLS.mode=tee-webpki requires tlsLb.nginx.configMode=image; a ConfigMap can change routing without changing the attested image" -}}
+{{- end -}}
+{{- if or (.Values.tlsLb.upstream.address | trim) (gt (len .Values.tlsLb.routes) 0) -}}
+{{- fail "tlsLb.nginx.configMode=image requires empty tlsLb.upstream.address and tlsLb.routes; routing comes only from the digest-pinned image" -}}
+{{- end -}}
 {{- if not .Values.cds.teeWebPKI.enabled -}}
 {{- fail "tlsLb.publicTLS.mode=tee-webpki requires cds.teeWebPKI.enabled=true" -}}
 {{- end -}}
@@ -105,6 +111,8 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
       {{- if .Values.kata.enabled }}
       # Chart-managed mesh component: the webhook excludes the release
       # namespace, so the chart pins the RuntimeClass directly (same pattern as
@@ -121,46 +129,14 @@ spec:
       shareProcessNamespace: true
       initContainers:
         {{- include "tls-lb.getCertContainers" . | nindent 8 }}
-        {{- if eq $publicTLSMode "tee-webpki" }}
-        - name: tee-webpki-init
-          image: {{ include "c8s.image" . }}
-          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
-          args:
-            - tee-webpki
-            - --once
-            - --cds-url={{ include "c8s.cdsURL" . }}
-            - --cds-measurements={{ join "," .Values.cds.measurements }}
-            {{- with .Values.cds.rtmrs }}
-            - --cds-rtmrs={{ join "," . }}
-            {{- end }}
-            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
-            - --mesh-cert={{ .Values.tlsLb.tlsMountPath }}/cert.pem
-            - --mesh-key={{ .Values.tlsLb.tlsMountPath }}/key.pem
-            {{- range (include "tls-lb.sanList" . | fromJsonArray) }}
-            - --dns-name={{ . }}
-            {{- end }}
-            - --out-cert={{ include "tls-lb.publicCertPath" . }}
-            - --out-key={{ include "tls-lb.publicKeyPath" . }}
-            - --out-csr={{ .Values.tlsLb.publicTLS.mountPath }}/tls.csr
-            - --wait-timeout={{ .Values.tlsLb.publicTLS.issueTimeout }}
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: tls-certs
-              mountPath: {{ .Values.tlsLb.tlsMountPath }}
-              readOnly: true
-            - name: public-tls
-              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
-            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-          securityContext:
-            {{- include "c8s.getCertSecurityContext" (dict "runAsUser" .Values.tlsLb.nginx.runAsUser "runAsGroup" .Values.tlsLb.nginx.runAsGroup "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot) | nindent 12 }}
-        {{- end }}
       containers:
         - name: nginx
           image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}
           imagePullPolicy: {{ .Values.tlsLb.nginx.image.pullPolicy }}
+          # Keep the effective argv explicit. The chart derives the exact
+          # c8s-tls-lb workload policy from these fixed values.
+          command: {{ .Values.tlsLb.nginx.command | toJson }}
+          args: {{ .Values.tlsLb.nginx.args | toJson }}
           ports:
             - name: https
               containerPort: {{ .Values.tlsLb.nginx.httpsPort }}
@@ -226,10 +202,12 @@ spec:
               mountPath: {{ .Values.tlsLb.discovery.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if eq .Values.tlsLb.nginx.configMode "configmap" }}
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
               readOnly: true
+            {{- end }}
             - name: nginx-cache
               mountPath: /var/cache/nginx
             - name: nginx-tmp
@@ -497,9 +475,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Mi
+        {{- if eq .Values.tlsLb.nginx.configMode "configmap" }}
         - name: nginx-config
           configMap:
             name: {{ include "tls-lb.fullname" . }}-nginx
+        {{- end }}
         {{- if eq (include "tls-lb.mountInventorySocket" .) "true" }}
         # The readiness gate needs a stamped mesh leaf, so get-cert redeems a
         # sandbox token over the node inventory's Unix socket (see

@@ -555,8 +555,10 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	// What the container actually runs, as the allowlist describes it. Floor
 	// digests ignore all of it; workload digests are gated on the whole set.
 	rc := allowlistpkg.RunningContainer{
-		Digest:     digest,
-		BindMounts: bindMountDestinations(spec.Mounts),
+		Digest:         digest,
+		BindMounts:     bindMountDestinations(spec.Mounts),
+		MountsObserved: true,
+		EnvObserved:    true,
 	}
 	if spec.Process != nil {
 		rc.Argv = spec.Process.Args
@@ -573,7 +575,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		m.refresh.awaitSettled(ctx, refreshSettleBudget)
 	}
 	if m.inventory != nil {
-		m.inventory.record(cid, digest, rc.Argv)
+		m.inventory.record(cid, digest, rc.Argv, rc)
 	}
 	if m.admits(rc) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)

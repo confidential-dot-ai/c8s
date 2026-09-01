@@ -219,7 +219,31 @@ type HandoffActivateRequest struct {
 	Signature  string `json:"signature"`
 }
 
-// HandoffActivateResponse confirms that the predecessor is inactive.
+// HandoffActivateResponse confirms that the predecessor finished endpoint
+// drain and grants the selected successor permission to promote. The
+// predecessor stays frozen and readable until HandoffConfirmRequest arrives.
 type HandoffActivateResponse struct {
 	Activated bool `json:"activated"`
+}
+
+// HandoffConfirmRequest confirms that the selected successor promoted the
+// restored state. Only this message retires the frozen predecessor.
+type HandoffConfirmRequest struct {
+	TransferID string `json:"transfer_id"`
+	Signature  string `json:"signature"`
+}
+
+// HandoffConfirmResponse confirms that the predecessor is retired.
+type HandoffConfirmResponse struct {
+	Confirmed bool `json:"confirmed"`
+}
+
+// HandoffAbortRequest is an operator-authorized recovery request. The operator
+// must first prove outside this protocol that the selected successor is gone.
+type HandoffAbortRequest struct {
+	TransferID string `json:"transfer_id"`
+}
+
+type HandoffAbortResponse struct {
+	Aborted bool `json:"aborted"`
 }

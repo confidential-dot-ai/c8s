@@ -7,6 +7,12 @@
   the case where the operator turned handoff on but forgot to pin
   cds.measurements.
 */}}
+{{- if not (kindIs "bool" .Values.cds.handoff.enabled) -}}
+{{- fail "VALIDATION_ERROR kind=cds_handoff_enabled_type: cds.handoff.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.cds.teeWebPKI.enabled) -}}
+{{- fail "VALIDATION_ERROR kind=cds_tee_webpki_enabled_type: cds.teeWebPKI.enabled must be a boolean" -}}
+{{- end -}}
 {{- if .Values.cds.handoff.enabled -}}
   {{- if not .Values.cds.measurements -}}
     {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}
@@ -18,6 +24,12 @@
 {{- end -}}
 {{- if and .Values.cds.teeWebPKI.enabled (not .Values.cds.handoff.enabled) -}}
 {{- fail "cds.teeWebPKI.enabled requires cds.handoff.enabled=true; a CDS restart must not create a different public TLS key" -}}
+{{- end -}}
+{{- if and .Values.cds.teeWebPKI.enabled (not .Values.tlsLb.attest.activeOperatorPolicy) -}}
+{{- fail "VALIDATION_ERROR kind=tee_webpki_operator_policy: cds.teeWebPKI.enabled requires tlsLb.attest.activeOperatorPolicy=true" -}}
+{{- end -}}
+{{- if and .Values.cds.teeWebPKI.enabled (ne .Values.tlsLb.attest.expectedWorkload .Values.cds.teeWebPKI.workload) -}}
+{{- fail "VALIDATION_ERROR kind=tee_webpki_workload_identity: cds.teeWebPKI.enabled requires tlsLb.attest.expectedWorkload to equal cds.teeWebPKI.workload" -}}
 {{- end -}}
 {{- if .Values.cds.handoff.peerUrl -}}
   {{- /* Without enabled no pod serves /handoff (--handoff-measurements renders
@@ -115,9 +127,10 @@ spec:
   {{- if .Values.cds.handoff.peerUrl }}
   # The new pod adopts state from the old pod. Activation makes the old CDS
   # NotReady. The old CDS stays frozen and readable during the endpoint drain
-  # delay. It then retires before the new CDS becomes mutable. The new CDS
-  # already listens in a frozen, NotReady state. This proves at most one
-  # mutable CDS. It does not prove zero downtime or an atomic endpoint switch.
+  # delay. The restored CDS becomes mutable and sends an idempotent confirmation
+  # over the selected direct path. A confirmed old CDS retires. If the response
+  # is lost, the new CDS becomes Ready because the old CDS is frozen or retired.
+  # This keeps at most one mutable CDS without shutting down the only active copy.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -148,6 +161,7 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
+      enableServiceLinks: false
       {{- if .Values.kata.enabled }}
       # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
       # keys live only in SEV-SNP-encrypted guest memory, and peers verify cds's
@@ -162,8 +176,8 @@ spec:
       automountServiceAccountToken: {{ empty .Values.cds.sandboxInventoryCIDRs }}
       {{- /* CDS is a singleton trust root reached over a node-local NodePort
              and (with persistence) an RWO volume, so pin it to a known node.
-             The CDS digest is always in the NRI floor (c8s.imageAllowlist),
-             so image policy admits CDS on whichever node it lands. */}}
+             The CDS digest is in the local NRI cold-boot floor. The first
+             authenticated policy replaces that floor with exact named policy. */}}
       {{- with .Values.cds.node.selector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -282,6 +296,7 @@ spec:
             - --handoff-measurements={{ join "," .Values.cds.measurements }}
             - --handoff-successor-workload={{ .Values.cds.handoff.successorWorkload }}
             - --handoff-endpoint-drain-delay={{ .Values.cds.handoff.endpointDrainDelay }}
+            - --handoff-transfer-lease={{ .Values.cds.handoff.transferLease }}
             {{- with .Values.cds.rtmrs }}
             - --handoff-rtmrs={{ join "," . }}
             {{- end }}
@@ -467,3 +482,29 @@ spec:
       {{- if and (not .Values.kata.enabled) (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
       nodePort: {{ .Values.cds.service.nodePort }}
       {{- end }}
+{{- if .Values.cds.handoff.enabled }}
+---
+# This headless Service stays resolvable while the selected predecessor is
+# NotReady. Only handoff control traffic uses it. The client pins the exact
+# predecessor address that returned the encrypted state.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "c8s.cdsName" . }}-handoff
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: cds-handoff
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: cds
+  ports:
+    - name: https
+      port: {{ .Values.cds.port }}
+      targetPort: https
+{{- end }}

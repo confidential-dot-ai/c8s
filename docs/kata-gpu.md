@@ -331,8 +331,9 @@ reach.
 
 - **Node-as-CVM GPU is separate.** For the node-as-CVM shape, GPU drivers are
   baked into the node guest OS image and measured into the node's launch
-  digest. A local GPU-worker `cds-attest` sidecar can collect nonce-bound
-  NVIDIA evidence. `c8s verify` checks that evidence with NRAS. This is a
+  digest. A local `cds-attest` sidecar can collect nonce-bound NVIDIA evidence
+  for all GPUs and NVSwitches visible to that node. It does not prove pod-level
+  GPU allocation. `c8s verify` checks that evidence with NRAS. This is a
   different mechanism that does not use this puller/runtime.
 
 ## Uninstall

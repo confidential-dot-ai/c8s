@@ -119,6 +119,9 @@ func TestBuildPolicyWorkloadFlagsRequireMeshCA(t *testing.T) {
 	if _, err := buildPolicy(config{workload: "api"}); err == nil {
 		t.Fatal("--workload accepted without --mesh-ca")
 	}
+	if _, err := buildPolicy(config{workloadIdentity: "api"}); err == nil {
+		t.Fatal("--workload-identity accepted without --mesh-ca")
+	}
 	if _, err := buildPolicy(config{allowlistFile: "whatever.json"}); err == nil {
 		t.Fatal("--allowlist accepted without --mesh-ca")
 	}
@@ -134,6 +137,12 @@ func TestBuildPolicyWorkloadFlagsRequireMeshCA(t *testing.T) {
 	if _, err := buildPolicy(config{workload: "api", meshCA: meshCA}); err != nil {
 		t.Fatalf("a valid name with a loadable CA must build: %v", err)
 	}
+	if _, err := buildPolicy(config{workloadIdentity: "not/a/name", meshCA: meshCA}); err == nil || !strings.Contains(err.Error(), "--workload-identity") {
+		t.Fatalf("err = %v, want invalid stable-identity refusal", err)
+	}
+	if _, err := buildPolicy(config{workloadIdentity: "api", meshCA: meshCA}); err != nil {
+		t.Fatalf("a valid stable identity with a loadable CA must build: %v", err)
+	}
 }
 
 func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
@@ -144,8 +153,8 @@ func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
 
 	oc := Outcome{Verified: true}
 	applyWorkloadPolicy(&oc, config{}, ev, nil)
-	if oc.Workload != "api" || oc.WorkloadAllowlistVersion != "4" {
-		t.Fatalf("workload = %q v%q, want api v4", oc.Workload, oc.WorkloadAllowlistVersion)
+	if oc.Workload != "api" || oc.WorkloadIdentity != "api" || oc.WorkloadAllowlistVersion != "4" {
+		t.Fatalf("workload = %q identity=%q v%q, want api/api v4", oc.Workload, oc.WorkloadIdentity, oc.WorkloadAllowlistVersion)
 	}
 	if !strings.Contains(oc.WorkloadNote, "not verified") {
 		t.Fatalf("note = %q, want it to say the name is unverified without --mesh-ca", oc.WorkloadNote)
@@ -156,6 +165,35 @@ func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
 	applyWorkloadPolicy(&failed, config{}, ev, nil)
 	if failed.Workload != "" {
 		t.Fatalf("Workload = %q on a failed verdict, want empty", failed.Workload)
+	}
+}
+
+func TestApplyWorkloadPolicyReportsExactPolicyAndStableIdentity(t *testing.T) {
+	_, digest := testHeldAllowlist(t)
+	matched := &ratls.MatchedWorkload{
+		Name: "api-2026-09-01", Identity: "api",
+		AllowlistVersion: "5", AllowlistDigest: digest,
+	}
+	leaf, _ := caSignedWorkloadLeaf(t, matched)
+	oc := Outcome{Verified: true}
+	applyWorkloadPolicy(&oc, config{workloadIdentity: "api"}, &evidence{leaf: leaf, workload: matched}, nil)
+	if !oc.Verified {
+		t.Fatalf("stable identity pin failed: %s", oc.Error)
+	}
+	if oc.Workload != "api-2026-09-01" || oc.WorkloadIdentity != "api" {
+		t.Fatalf("policy=%q identity=%q, want api-2026-09-01/api", oc.Workload, oc.WorkloadIdentity)
+	}
+
+	oc = Outcome{Verified: true}
+	applyWorkloadPolicy(&oc, config{workload: "api-2026-09-01"}, &evidence{leaf: leaf, workload: matched}, nil)
+	if !oc.Verified {
+		t.Fatalf("exact policy pin failed: %+v", oc)
+	}
+
+	oc = Outcome{Verified: true}
+	applyWorkloadPolicy(&oc, config{workloadIdentity: "api-2026-09-01"}, &evidence{leaf: leaf, workload: matched}, nil)
+	if oc.Verified || !strings.Contains(oc.Error, "workload_identity_mismatch") {
+		t.Fatalf("exact policy name substituted for stable identity: %+v", oc)
 	}
 }
 
@@ -178,6 +216,7 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 	canonical, digest := testHeldAllowlist(t)
 	matched := &ratls.MatchedWorkload{Name: "api", AllowlistVersion: "4", AllowlistDigest: digest}
 	leaf, caPath := caSignedWorkloadLeaf(t, matched)
+	maliciousIdentity := &ratls.MatchedWorkload{Name: "api", Identity: "admin", AllowlistVersion: "4", AllowlistDigest: digest}
 	unstamped, _ := caSignedWorkloadLeaf(t, nil)
 
 	allowlistPath := filepath.Join(t.TempDir(), "allowlist.json")
@@ -212,6 +251,22 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 			t.Fatalf("verdict = %v %q, want workload_name_mismatch", oc.Verified, oc.Error)
 		}
 	})
+	t.Run("stable identity pin passes", func(t *testing.T) {
+		stable := &ratls.MatchedWorkload{Name: "api-v2", Identity: "api", AllowlistVersion: "4", AllowlistDigest: digest}
+		stableLeaf, stableCA := caSignedWorkloadLeaf(t, stable)
+		oc := run(config{workloadIdentity: "api", meshCA: stableCA}, &evidence{leaf: stableLeaf, workload: stable})
+		if !oc.Verified {
+			t.Fatalf("stable identity verdict failed: %s", oc.Error)
+		}
+	})
+	t.Run("stable identity pin rejects unrelated substitution", func(t *testing.T) {
+		stable := &ratls.MatchedWorkload{Name: "api-v2", Identity: "admin", AllowlistVersion: "4", AllowlistDigest: digest}
+		stableLeaf, stableCA := caSignedWorkloadLeaf(t, stable)
+		oc := run(config{workloadIdentity: "api", meshCA: stableCA}, &evidence{leaf: stableLeaf, workload: stable})
+		if oc.Verified || !strings.Contains(oc.Error, "workload_identity_mismatch") {
+			t.Fatalf("verdict = %v %q, want workload_identity_mismatch", oc.Verified, oc.Error)
+		}
+	})
 	t.Run("absent stamp", func(t *testing.T) {
 		oc := Outcome{Verified: true}
 		applyWorkloadPolicy(&oc, config{workload: "api", meshCA: caPath}, &evidence{leaf: unstamped}, nil)
@@ -223,6 +278,12 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 		oc := run(config{allowlistFile: allowlistPath, meshCA: caPath}, &evidence{leaf: leaf, workload: matched})
 		if !oc.Verified {
 			t.Fatalf("verdict failed: %s", oc.Error)
+		}
+	})
+	t.Run("allowlist rejects identity not authorized by exact entry", func(t *testing.T) {
+		oc := run(config{allowlistFile: allowlistPath, meshCA: caPath}, &evidence{leaf: leaf, workload: maliciousIdentity})
+		if oc.Verified || !strings.Contains(oc.Error, "workload_identity_mismatch") {
+			t.Fatalf("verdict = %v %q, want workload_identity_mismatch", oc.Verified, oc.Error)
 		}
 	})
 	t.Run("allowlist digest mismatch", func(t *testing.T) {

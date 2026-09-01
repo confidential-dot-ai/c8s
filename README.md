@@ -105,9 +105,10 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - **Confidential GPUs.** NVIDIA GPU passthrough into confidential pods on
   SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
   NVIDIA GPU and NVSwitch evidence. On a node-as-CVM GPU worker,
-  `cds-attest --nvidia-gpu-evidence` returns local GPU evidence in the same
-  nonce-bound receipt as the CPU TEE evidence. Cluster-wide receipt checks are
-  not part of c8s, see [Known gaps](#known-gaps-and-open-items).
+  `cds-attest --nvidia-gpu-evidence` returns node-wide GPU and NVSwitch evidence
+  in the same nonce-bound receipt as the CPU TEE evidence. It does not prove
+  which GPUs Kubernetes assigned to one pod. Cluster-wide receipt checks are not
+  part of c8s, see [Known gaps](#known-gaps-and-open-items).
 
 - **Verifiable from a browser.** A challenge-response protocol and a
   post-quantum over-encrypted channel let end users verify the cluster with
@@ -561,13 +562,21 @@ than let you discover them:
   can bind the node's privileged inventory port can vouch for a sandbox it
   does not run.
 
-- **The image allowlist gates digest and command line, not the rest of the
-  pod spec.** Each container's `command` prefix and `args` remainder are
-  enforced against the effective argv, and bind-mount destinations and env
-  variable names are enforceable in the guest; capabilities and the
-  remaining pod-spec fields are not. Nothing enforces which images run
-  *together* — every running image must be allowlisted, but no gate requires
-  the set in one pod to match a single workload entry.
+- **The image allowlist gates a limited runtime policy, not the full pod
+  spec.** It enforces effective argv, bind-mount destinations, and environment
+  variable names in node-CVM and kata modes. Capabilities, privilege, devices,
+  user IDs, seccomp, host namespaces, and the
+  remaining pod-spec fields are not. Container-start admission uses the union
+  of exact container policies. The first node policy transition and CDS named
+  certificate or secret release also require each complete Pod to match one
+  named workload entry.
+
+- **The application must aggregate the cluster inventory.** `attest-lb` proves
+  the answering TLS-LB. Each node-CVM NRI endpoint can return a nonce-bound,
+  TEE-bound live inventory with the active policy digest. c8s derives exact
+  named policy for its steady system Pods. The public application must collect
+  one proof from each required node. External control agents, such as
+  Tailscale, are outside this evidence.
 
 - **Secrets and encrypted volumes under pod-as-CVM carry weaker guarantees
   than on a node.** Both work — the injected fetchers redeem their sandbox
@@ -629,11 +638,12 @@ than let you discover them:
   verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
   CPU TEE evidence). A node-as-CVM worker can now collect and return this
   evidence through its local `cds-attest` receipt sidecar. `c8s verify` checks
-  one such bundle with the pinned NRAS verifier, including nonce and expected
-  GPU architecture. c8s does not know the required worker set. The application
-  must collect one receipt from each required GPU worker and reject a missing
-  or invalid GPU bundle. The pod-as-CVM GPU path does not yet have the same
-  collection wiring.
+  one such bundle with a digest-pinned NRAS verifier. It checks the nonce,
+  signed hardware model, GPU architecture, GPU count, and NVSwitch count. c8s
+  does not know the required node set or a pod's GPU allocation. The application
+  must collect one receipt from each required GPU node and reject a missing or
+  invalid bundle. Two sidecars on one node can report the same node-wide set.
+  The pod-as-CVM GPU path does not yet have the same collection wiring.
 
 - **The browser over-encryption channel does not stream.** Requests and
   responses are buffered per envelope; responses over 32 MiB fail rather than

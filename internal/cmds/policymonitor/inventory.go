@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -55,7 +56,7 @@ func newAdmissionInventory() *admissionInventory {
 // actually ran, not what passed the checks. A container with no resolved
 // digest is tracked as unresolved and closes the sandbox's answer. argv is
 // the effective OCI process.args the allowlist was evaluated against.
-func (b *admissionInventory) record(cid, digest string, argv []string) {
+func (b *admissionInventory) record(cid, digest string, argv []string, observed ...allowlistpkg.RunningContainer) {
 	if cid == "" {
 		return
 	}
@@ -67,8 +68,26 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 	}
 	delete(b.unresolved, cid)
 	b.containers[cid] = digest
-	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv)}
+	if len(observed) == 1 {
+		c.BindMounts = slices.Clone(observed[0].BindMounts)
+		c.BindMountKinds = cloneMountKinds(observed[0].BindMountKinds)
+		c.EnvNames = slices.Clone(observed[0].EnvNames)
+		c.MountsObserved = observed[0].MountsObserved
+		c.EnvObserved = observed[0].EnvObserved
+	}
 	b.admitted[c.Key()] = c
+}
+
+func cloneMountKinds(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for destination, kind := range in {
+		out[destination] = kind
+	}
+	return out
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The

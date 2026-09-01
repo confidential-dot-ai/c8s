@@ -18,16 +18,19 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -46,7 +49,8 @@ func handoffTestClusterIdentity(t *testing.T) *tls.Certificate {
 	t.Helper()
 	key := handoffTestKey(t)
 	ext, err := ratls.MarshalMatchedWorkloadExtension(&ratls.MatchedWorkload{
-		Name: "c8s-cds", AllowlistVersion: "1", AllowlistDigest: bytes.Repeat([]byte{0x44}, 32),
+		Name: "c8s-cds-2026-09-01", Identity: "c8s-cds",
+		AllowlistVersion: "1", AllowlistDigest: bytes.Repeat([]byte{0x44}, 32),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +83,14 @@ func handoffTestServer(t *testing.T, hh *HandoffHandler) (*httptest.Server, *tls
 		}
 		if r.URL.Path == "/handoff/activate" {
 			hh.HandleActivate(w, r)
+			return
+		}
+		if r.URL.Path == "/handoff/confirm" {
+			hh.HandleConfirm(w, r)
+			return
+		}
+		if r.URL.Path == "/handoff/abort" {
+			hh.HandleAbort(w, r)
 			return
 		}
 		hh.HandleHandoff(w, r)
@@ -318,12 +330,33 @@ func TestHandoffRetryIsIdempotentAndActivationIsOneWay(t *testing.T) {
 		t.Fatal("identical retry did not return the same encrypted application-secret snapshot")
 	}
 
+	// The same selected mesh identity can restart its transfer with a new
+	// X25519 key. The new transfer fences the old request.
 	other, err := prepareHandoffRequest(deps, srv.URL, requesterEAR, requesterKey, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.execute(context.Background()); err == nil {
-		t.Fatal("a second successor request received state")
+	current, err := other.execute(context.Background())
+	if err != nil {
+		t.Fatalf("selected successor could not resume transfer: %v", err)
+	}
+	if current.TransferID == first.TransferID {
+		t.Fatal("resumed transfer did not fence the old request")
+	}
+	if err := first.Activate(context.Background()); err == nil {
+		t.Fatal("fenced transfer activated")
+	}
+
+	// A different mesh leaf cannot replace the selected successor.
+	otherServer, otherIdentity := handoffTestServer(t, hh)
+	otherDeps := deps
+	otherDeps.ClusterIdentity = otherIdentity
+	otherSuccessor, err := prepareHandoffRequest(otherDeps, otherServer.URL, requesterEAR, requesterKey, otherServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := otherSuccessor.execute(context.Background()); err == nil {
+		t.Fatal("a different successor received state")
 	} else {
 		var statusErr *HandoffStatusError
 		if !errors.As(err, &statusErr) || statusErr.Status != http.StatusConflict {
@@ -343,7 +376,7 @@ func TestHandoffRetryIsIdempotentAndActivationIsOneWay(t *testing.T) {
 	}
 	activateCtx, cancelActivate := context.WithCancel(context.Background())
 	firstAttempt := make(chan error, 1)
-	go func() { firstAttempt <- first.Activate(activateCtx) }()
+	go func() { firstAttempt <- current.Activate(activateCtx) }()
 	deadline := time.Now().Add(time.Second)
 	for hh.ReadyForTraffic() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -359,7 +392,7 @@ func TestHandoffRetryIsIdempotentAndActivationIsOneWay(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("draining mutation = %d, want 503", recorder.Code)
 	}
-	// Disconnect the first activation client. Retirement must continue on the
+	// Disconnect the first activation client. The endpoint drain must continue on the
 	// CDS-owned timer. A same-successor retry during drain waits for it.
 	cancelActivate()
 	select {
@@ -371,7 +404,7 @@ func TestHandoffRetryIsIdempotentAndActivationIsOneWay(t *testing.T) {
 		t.Fatal("canceled activation request did not return")
 	}
 	activated := make(chan error, 1)
-	go func() { activated <- first.Activate(context.Background()) }()
+	go func() { activated <- current.Activate(context.Background()) }()
 	select {
 	case err := <-activated:
 		if err != nil {
@@ -380,11 +413,17 @@ func TestHandoffRetryIsIdempotentAndActivationIsOneWay(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("activation did not finish after endpoint drain delay")
 	}
-	if hh.Active() || hh.Serving() {
-		t.Fatal("predecessor stayed serving after activation")
+	if hh.Active() || !hh.Serving() {
+		t.Fatal("predecessor must stay frozen and readable before confirmation")
 	}
-	if err := first.Activate(context.Background()); err != nil {
+	if err := current.Activate(context.Background()); err != nil {
 		t.Fatalf("identical activation retry failed: %v", err)
+	}
+	if err := current.Confirm(context.Background()); err != nil {
+		t.Fatalf("confirm takeover: %v", err)
+	}
+	if hh.Active() || hh.Serving() {
+		t.Fatal("predecessor stayed serving after confirmed takeover")
 	}
 }
 
@@ -409,6 +448,7 @@ func TestActivationClientRetriesTransientAndLostSuccessResponses(t *testing.T) {
 	prepared := &preparedHandoffRequest{
 		deps:    HandoffClientDeps{ClusterIdentity: identity},
 		peerURL: srv.URL, transferID: "transfer", client: srv.Client(),
+		pinnedClient: srv.Client(), peerAddress: srv.Listener.Addr().String(),
 		activationRetryInterval: time.Millisecond,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -418,6 +458,286 @@ func TestActivationClientRetriesTransientAndLostSuccessResponses(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("activation attempts = %d, want 3", attempts)
+	}
+}
+
+func TestConfirmationClientRetriesTransientAndLostSuccessResponses(t *testing.T) {
+	identity := handoffTestClusterIdentity(t)
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		switch attempts {
+		case 1:
+			http.Error(w, "predecessor is still draining", http.StatusServiceUnavailable)
+		case 2:
+			w.WriteHeader(http.StatusOK)
+		default:
+			_ = json.NewEncoder(w).Encode(HandoffConfirmResponse{Confirmed: true})
+		}
+	}))
+	defer srv.Close()
+	prepared := &preparedHandoffRequest{
+		deps: HandoffClientDeps{ClusterIdentity: identity}, peerURL: srv.URL,
+		transferID: "transfer", client: srv.Client(), pinnedClient: srv.Client(),
+		peerAddress: srv.Listener.Addr().String(), activationRetryInterval: time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := prepared.confirm(ctx); err != nil {
+		t.Fatalf("confirmation retry failed: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("confirmation attempts = %d, want 3", attempts)
+	}
+}
+
+func TestHandoffPinnedPathSurvivesServiceEndpointWithdrawal(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	activeKey := handoffTestKey(t)
+	requesterKey := handoffTestKey(t)
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hh, err := NewHandoffHandler(HandoffDeps{
+		KeyProvider:         testKeyProvider{pub: &tokenKey.PublicKey},
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash, EndpointDrainDelay: time.Millisecond,
+		Signer: activeKey, EARSource: staticHandoffEARSource{ear: handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeKey)},
+		Snapshot: snapshotFromCA(ca),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, identity := handoffTestServer(t, hh)
+	var serviceUp atomic.Bool
+	serviceUp.Store(true)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if strings.HasPrefix(address, "handoff.service.invalid:") {
+			if !serviceUp.Load() {
+				return nil, fmt.Errorf("Service has no ready endpoint")
+			}
+			address = predecessor.Listener.Addr().String()
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
+	client := &http.Client{Transport: transport}
+	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterKey)
+	prepared, err := prepareHandoffRequest(HandoffClientDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, ClusterIdentity: identity,
+	}, "http://handoff.service.invalid", requesterEAR, requesterKey, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := prepared.execute(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceUp.Store(false)
+	if err := material.Activate(context.Background()); err != nil {
+		t.Fatalf("pinned activation after endpoint withdrawal: %v", err)
+	}
+	if err := material.Confirm(context.Background()); err != nil {
+		t.Fatalf("pinned confirmation after endpoint withdrawal: %v", err)
+	}
+}
+
+func TestPreActivationLeaseSafelyThawsPredecessor(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	activeKey := handoffTestKey(t)
+	requesterKey := handoffTestKey(t)
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resumed atomic.Bool
+	hh, err := NewHandoffHandler(HandoffDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, EndpointDrainDelay: time.Millisecond, TransferLease: 20 * time.Millisecond,
+		Signer: activeKey, EARSource: staticHandoffEARSource{ear: handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeKey)},
+		Snapshot: snapshotFromCA(ca), Resume: func() { resumed.Store(true) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, identity := handoffTestServer(t, hh)
+	_, err = RequestHandoff(context.Background(), HandoffClientDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, ClusterIdentity: identity,
+	}, srv.URL, handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterKey), requesterKey, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !hh.Active() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !hh.Active() || !resumed.Load() {
+		t.Fatal("pre-activation lease did not restore the predecessor")
+	}
+}
+
+func TestOperatorAbortRecoversFrozenTransferIdempotently(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	activeKey := handoffTestKey(t)
+	requesterKey := handoffTestKey(t)
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resumed atomic.Bool
+	hh, err := NewHandoffHandler(HandoffDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, EndpointDrainDelay: time.Millisecond,
+		Signer: activeKey, EARSource: staticHandoffEARSource{ear: handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeKey)},
+		Snapshot: snapshotFromCA(ca), Resume: func() { resumed.Store(true) },
+		AuthorizeWrite: func(*http.Request, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, identity := handoffTestServer(t, hh)
+	material, err := RequestHandoff(context.Background(), HandoffClientDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, ClusterIdentity: identity,
+	}, srv.URL, handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterKey), requesterKey, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(HandoffAbortRequest{TransferID: material.TransferID})
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := srv.Client().Post(srv.URL+"/handoff/abort", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("abort attempt %d = %d", attempt+1, resp.StatusCode)
+		}
+	}
+	otherBody, _ := json.Marshal(HandoffAbortRequest{TransferID: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, sha256.Size))})
+	resp, err := srv.Client().Post(srv.URL+"/handoff/abort", "application/json", bytes.NewReader(otherBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("different abort after idempotent abort = %d, want 409", resp.StatusCode)
+	}
+	if !hh.Active() || !resumed.Load() {
+		t.Fatal("operator abort did not restore the predecessor")
+	}
+}
+
+func TestOperatorAbortPhasePolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase leadershipPhase
+		want  int
+	}{
+		{name: "active", phase: leadershipActive, want: http.StatusConflict},
+		{name: "frozen", phase: leadershipFrozen, want: http.StatusOK},
+		{name: "draining", phase: leadershipDraining, want: http.StatusOK},
+		{name: "takeover ready", phase: leadershipTakeoverReady, want: http.StatusOK},
+		{name: "retired", phase: leadershipRetired, want: http.StatusConflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tokenKey := handoffTestKey(t)
+			activeKey := handoffTestKey(t)
+			requesterKey := handoffTestKey(t)
+			ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+			if err != nil {
+				t.Fatal(err)
+			}
+			hh, err := NewHandoffHandler(HandoffDeps{
+				KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+				OperatorKeysHash: handoffTestOperatorKeysHash, EndpointDrainDelay: time.Second,
+				Signer: activeKey, EARSource: staticHandoffEARSource{ear: handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeKey)},
+				Snapshot: snapshotFromCA(ca), AuthorizeWrite: func(*http.Request, []byte) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv, identity := handoffTestServer(t, hh)
+			material, err := RequestHandoff(context.Background(), HandoffClientDeps{
+				KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+				OperatorKeysHash: handoffTestOperatorKeysHash, ClusterIdentity: identity,
+			}, srv.URL, handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterKey), requesterKey, srv.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			hh.leader.mu.Lock()
+			hh.leader.phase = tc.phase
+			if tc.phase == leadershipDraining {
+				hh.leader.drainDone = make(chan struct{})
+			}
+			hh.leader.mu.Unlock()
+
+			body, _ := json.Marshal(HandoffAbortRequest{TransferID: material.TransferID})
+			resp, err := srv.Client().Post(srv.URL+"/handoff/abort", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("abort in %s phase = %d, want %d", tc.name, resp.StatusCode, tc.want)
+			}
+			if tc.want == http.StatusOK && !hh.Active() {
+				t.Fatal("successful abort did not restore active leadership")
+			}
+			if tc.phase == leadershipRetired && hh.Serving() {
+				t.Fatal("abort reactivated a retired predecessor")
+			}
+		})
+	}
+}
+
+func TestOperatorAbortAfterConfirmedTakeoverIsRejected(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	activeKey := handoffTestKey(t)
+	requesterKey := handoffTestKey(t)
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hh, err := NewHandoffHandler(HandoffDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, EndpointDrainDelay: time.Millisecond,
+		Signer: activeKey, EARSource: staticHandoffEARSource{ear: handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeKey)},
+		Snapshot: snapshotFromCA(ca), AuthorizeWrite: func(*http.Request, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, identity := handoffTestServer(t, hh)
+	material, err := RequestHandoff(context.Background(), HandoffClientDeps{
+		KeyProvider: testKeyProvider{pub: &tokenKey.PublicKey}, AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash: handoffTestOperatorKeysHash, ClusterIdentity: identity,
+	}, srv.URL, handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterKey), requesterKey, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := material.Activate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := material.Confirm(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(HandoffAbortRequest{TransferID: material.TransferID})
+	resp, err := srv.Client().Post(srv.URL+"/handoff/abort", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("abort after confirmed takeover = %d, want 409", resp.StatusCode)
+	}
+	if hh.Active() || hh.Serving() {
+		t.Fatal("abort after confirmation reactivated the predecessor")
 	}
 }
 
@@ -1410,6 +1730,59 @@ func TestHandoffInvalidRecipientKeyDoesNotFreezePredecessor(t *testing.T) {
 	}
 	if !hh.Active() || !hh.Serving() {
 		t.Fatal("invalid recipient key left the predecessor frozen")
+	}
+}
+
+func TestMaximumBoundedHandoffPayloadRoundTrip(t *testing.T) {
+	ca, err := NewCAWithCurve("large handoff", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := certutil.MarshalECKeyPEM(ca.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretSnapshot := &secrets.Snapshot{
+		Version: secrets.SnapshotVersion, MaxPaths: 2048, MaxPerHolder: 64, MaxValue: 11200,
+		Entries: make([]secrets.SnapshotEntry, 1024),
+	}
+	for i := range secretSnapshot.Entries {
+		secretSnapshot.Entries[i] = secrets.SnapshotEntry{
+			Path: fmt.Sprintf("/large/%04d", i), Value: bytes.Repeat([]byte{byte(i)}, 11200), Origin: secrets.OriginOperator,
+		}
+	}
+	ledger := &sandboxledger.Snapshot{Entries: make([]sandboxledger.SnapshotEntry, sandboxledger.MaxSnapshotEntries)}
+	for i := range ledger.Entries {
+		ledger.Entries[i] = sandboxledger.SnapshotEntry{
+			SandboxID: fmt.Sprintf("%0128d", i), InventoryHost: strings.Repeat("h", 255), Expires: time.Now().Add(time.Hour),
+		}
+	}
+	digests := make(map[types.Digest]string, 8000)
+	for i := 0; i < 8000; i++ {
+		digest, err := types.ParseDigest(fmt.Sprintf("sha256:%064x", i+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digests[digest] = "registry.example/system@" + digest.String()
+	}
+	payload := handoffPayload{
+		CAKey: string(keyPEM), CACertificate: string(certutil.EncodeCertPEM(ca.Cert.Raw)),
+		CABundle: string(certutil.EncodeCertPEM(ca.Cert.Raw)), AllowlistVersion: "1",
+		Allowlist: digests, Secrets: secretSnapshot, SandboxLedger: ledger,
+	}
+	plain, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) <= 20<<20 || len(plain) > maxHandoffPlaintextBytes {
+		t.Fatalf("large payload size = %d, bounds (%d, %d]", len(plain), 20<<20, maxHandoffPlaintextBytes)
+	}
+	material, err := ParseHandoffPayload(plain)
+	if err != nil {
+		t.Fatalf("round-trip maximum bounded handoff: %v", err)
+	}
+	if len(material.Secrets.Entries) != 1024 || len(material.SandboxLedger.Entries) != sandboxledger.MaxSnapshotEntries {
+		t.Fatal("large handoff lost bounded state")
 	}
 }
 

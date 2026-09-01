@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -65,29 +64,22 @@ func TestExplainResolvesTheGrant(t *testing.T) {
 	}
 }
 
-// The injected sidecar is reported but marked, and does not reach the candidate
-// set — the operator has to be able to see why it is excluded.
-func TestExplainMarksInjectedContainers(t *testing.T) {
+// The diagnostic keeps c8s helpers in the candidate set. Exact workload policy
+// must account for them, so an attacker-configured helper cannot be hidden.
+func TestExplainDoesNotHideInjectedContainers(t *testing.T) {
 	eh := newExplainHarness(t)
 	_, resp := eh.serve(testSandbox)
 
-	if len(resp.Reported) != 3 || len(resp.Candidates) != 2 {
-		t.Fatalf("reported=%d candidates=%d, want 3 and 2", len(resp.Reported), len(resp.Candidates))
+	if len(resp.Reported) != 3 || len(resp.Candidates) != 3 {
+		t.Fatalf("reported=%d candidates=%d, want 3 and 3", len(resp.Reported), len(resp.Candidates))
 	}
-	var injected int
 	for _, c := range resp.Reported {
 		if c.Injected {
-			injected++
-			if c.Digest != testInjected {
-				t.Fatalf("the wrong container was dropped: %s", c.Digest)
-			}
+			t.Fatalf("container %s was hidden as injected", c.Digest)
 		}
 	}
-	if injected != 1 {
-		t.Fatalf("injected = %d, want 1", injected)
-	}
-	if resp.Candidates[0].Digest != testAppImg || resp.Candidates[1].Digest != testAppImg2 {
-		t.Fatalf("candidates = %+v, want the two app images", resp.Candidates)
+	if resp.Candidates[2].Digest != testInjected {
+		t.Fatalf("candidates = %+v, want the c8s helper included", resp.Candidates)
 	}
 }
 
@@ -200,13 +192,13 @@ func TestExplainReportsEarlyRefusals(t *testing.T) {
 			t.Fatalf("refusal = %q", resp.Refusal)
 		}
 	})
-	t.Run("only injected containers", func(t *testing.T) {
+	t.Run("only a c8s helper", func(t *testing.T) {
 		eh := newExplainHarness(t)
 		eh.inv.containers = []workloadclaims.SandboxContainer{
-			{Digest: testInjected, Argv: []string{"get-cert"}},
+			{Digest: testInjected, Argv: []string{"get-cert", "--san=x"}},
 		}
 		_, resp := eh.serve(testSandbox)
-		if !strings.Contains(resp.Refusal, "platform-injected") {
+		if !strings.Contains(resp.Refusal, "no entry describes") {
 			t.Fatalf("refusal = %q", resp.Refusal)
 		}
 	})
@@ -313,12 +305,7 @@ func TestExplainAgreesWithTheMatcher(t *testing.T) {
 			_, resp := eh.serve(testSandbox)
 
 			al, _ := eh.h.Policy.Allowlist()
-			var candidates []pkgallowlist.RunningContainer
-			for _, c := range tc.running {
-				if !isInjected(al, c) {
-					candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
-				}
-			}
+			candidates := WorkloadContainers(tc.running)
 			name, _, err := al.MatchWorkload(candidates)
 			if err != nil {
 				name = ""

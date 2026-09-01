@@ -39,7 +39,7 @@ func discoveryDocWithPublicTLS(t *testing.T, mode, certPEM string, challenge []b
 }
 
 // The discovery gather must classify public_tls.mode: cds (and its
-// pre-mode-field empty spelling) and webpki parse; anything else fails closed
+// pre-mode-field empty spelling), webpki, and tee-webpki; anything else fails closed
 // as a security verdict — auto mode must not fall through past a document it
 // cannot classify. A parsed mode gates classification only — the verdict keys
 // on the live handshake observation, which a parsed-but-unprobed document
@@ -49,7 +49,7 @@ func TestDiscoveryPublicTLSModeParsing(t *testing.T) {
 	challenge := []byte("issuance-challenge")
 	evidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
 
-	for _, mode := range []string{"", "cds", "webpki"} {
+	for _, mode := range []string{"", "cds", "webpki", "tee-webpki"} {
 		ev, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, mode, certPEM, challenge, evidence), "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatalf("mode %q: %v", mode, err)

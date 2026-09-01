@@ -16,9 +16,30 @@
 package sandboxledger
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
+
+const (
+	// MaxSnapshotEntries bounds handoff memory independently of a deployment's
+	// configured live-entry limit.
+	MaxSnapshotEntries    = 10000
+	maxSandboxIDBytes     = 128
+	maxInventoryHostBytes = 255
+)
+
+// Snapshot is the bounded sandbox-to-inventory state for CDS handoff.
+type Snapshot struct {
+	Entries []SnapshotEntry `json:"entries,omitempty"`
+}
+
+// SnapshotEntry is one live first-write-wins sandbox binding.
+type SnapshotEntry struct {
+	SandboxID     string    `json:"sandbox_id"`
+	InventoryHost string    `json:"inventory_host"`
+	Expires       time.Time `json:"expires"`
+}
 
 // binding is what the ledger holds for one sandbox: the node address whose
 // inventory vouched for it, and when that stops being believed.
@@ -40,6 +61,7 @@ type Ledger struct {
 	ttl      time.Duration
 	max      int
 	now      func() time.Time
+	frozen   bool
 }
 
 // New builds a ledger. ttl should be the maximum leaf lifetime: a binding is
@@ -71,6 +93,9 @@ func (l *Ledger) Record(sandboxID, inventoryHost string) bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.frozen {
+		return false
+	}
 
 	now := l.now()
 	if b, ok := l.bindings[sandboxID]; ok && now.Before(b.expires) {
@@ -108,6 +133,77 @@ func (l *Ledger) Len() int {
 	defer l.mu.Unlock()
 	l.evictExpiredLocked(l.now())
 	return len(l.bindings)
+}
+
+// Snapshot returns every live binding without extending its expiry.
+func (l *Ledger) Snapshot() Snapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.evictExpiredLocked(now)
+	out := Snapshot{Entries: make([]SnapshotEntry, 0, len(l.bindings))}
+	for sandboxID, item := range l.bindings {
+		out.Entries = append(out.Entries, SnapshotEntry{SandboxID: sandboxID, InventoryHost: item.host, Expires: item.expires})
+	}
+	return out
+}
+
+// Freeze stops new bindings and returns one atomic snapshot.
+func (l *Ledger) Freeze() Snapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.frozen = true
+	now := l.now()
+	l.evictExpiredLocked(now)
+	out := Snapshot{Entries: make([]SnapshotEntry, 0, len(l.bindings))}
+	for sandboxID, item := range l.bindings {
+		out.Entries = append(out.Entries, SnapshotEntry{SandboxID: sandboxID, InventoryHost: item.host, Expires: item.expires})
+	}
+	return out
+}
+
+// Resume allows new bindings after an aborted pre-activation handoff.
+func (l *Ledger) Resume() {
+	l.mu.Lock()
+	l.frozen = false
+	l.mu.Unlock()
+}
+
+// RestoreSnapshot atomically restores live bindings with the same expiry and
+// first-write-wins meaning. It rejects malformed or oversized input.
+func (l *Ledger) RestoreSnapshot(snapshot Snapshot) error {
+	if err := ValidateSnapshot(snapshot, l.max); err != nil {
+		return err
+	}
+	now := l.now()
+	next := make(map[string]binding, len(snapshot.Entries))
+	for _, item := range snapshot.Entries {
+		if now.Before(item.Expires) {
+			next[item.SandboxID] = binding{host: item.InventoryHost, expires: item.Expires}
+		}
+	}
+	l.mu.Lock()
+	l.bindings = next
+	l.mu.Unlock()
+	return nil
+}
+
+// ValidateSnapshot checks structural and size limits without exposing values.
+func ValidateSnapshot(snapshot Snapshot, max int) error {
+	if max <= 0 || max > MaxSnapshotEntries || len(snapshot.Entries) > max {
+		return fmt.Errorf("sandbox ledger snapshot has %d entries, limit is %d", len(snapshot.Entries), max)
+	}
+	seen := make(map[string]struct{}, len(snapshot.Entries))
+	for _, item := range snapshot.Entries {
+		if item.SandboxID == "" || len(item.SandboxID) > maxSandboxIDBytes || item.InventoryHost == "" || len(item.InventoryHost) > maxInventoryHostBytes || item.Expires.IsZero() {
+			return fmt.Errorf("sandbox ledger snapshot contains an invalid entry")
+		}
+		if _, exists := seen[item.SandboxID]; exists {
+			return fmt.Errorf("sandbox ledger snapshot contains a duplicate sandbox")
+		}
+		seen[item.SandboxID] = struct{}{}
+	}
+	return nil
 }
 
 func (l *Ledger) evictExpiredLocked(now time.Time) {

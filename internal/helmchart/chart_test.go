@@ -1,9 +1,11 @@
 package helmchart
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/controller"
+	"github.com/confidential-dot-ai/c8s/internal/systempolicy"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -2679,7 +2682,9 @@ func TestChartTLSLBActiveOperatorPolicy(t *testing.T) {
 	if err == nil {
 		t.Fatalf("string active operator policy value must fail\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.attest.activeOperatorPolicy must be a boolean; do not set it via --set-string, got: true")
+	if !strings.Contains(out, "Invalid type. Expected: boolean, given: string") {
+		t.Fatalf("quoted boolean error = %q", out)
+	}
 }
 
 func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
@@ -2778,7 +2783,7 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 
 // TestCDSKataReadinessTracksLeadership prevents a TCP-only readiness probe.
 // TCP stays open after a CDS handoff. The HTTPS /readyz probe becomes false
-// before the predecessor stops its read and certificate service.
+// before the predecessor stops its read-only service.
 func TestCDSKataReadinessTracksLeadership(t *testing.T) {
 	out, err := helmTemplateKata(t)
 	if err != nil {
@@ -4921,14 +4926,10 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		// manual-upstream paths clear it via noUpstreamArgs.
 		"--set-string", "tlsLb.upstream.address=c8s-infer.c8s-system.svc.cluster.local:8000",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
-		// The fail-closed default (this PR) activates the
-		// uncovered_component_digest guard: every digest-pinned component must be
-		// covered in the allowlist floor or the plugin would deny it on its own
-		// node. The nri installer also self-allows by digest, so the image must
-		// stay digest-pinned. Cover the base nri digest in the floor so the
-		// default render is a valid fail-closed config. Tests that exercise the
-		// guard pin a different, deliberately-uncovered digest.
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		// Keep chart-derived system bytes in the node-local cold-boot floor. They
+		// must not enter the CDS active digest floor. Tests for the coverage guard
+		// turn derivation off and pin a different uncovered digest.
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 	}
 	cmd := exec.Command("helm", append(base, args...)...)
@@ -4944,7 +4945,10 @@ func teeWebPKIChartArgs(hostPort bool) []string {
 		"--set", "tlsLb.enabled=true",
 		"--set", fmt.Sprintf("tlsLb.hostPort.enabled=%t", hostPort),
 		"--set", "tlsLb.publicTLS.mode=tee-webpki",
+		"--set", "tlsLb.nginx.configMode=image",
+		"--set-string", "tlsLb.upstream.address=",
 		"--set", "tlsLb.attest.enabled=true",
+		"--set", "tlsLb.attest.activeOperatorPolicy=true",
 		"--set", "tlsLb.attest.expectedWorkload=c8s-tls-lb",
 		"--set", "cds.teeWebPKI.enabled=true",
 		"--set", "cds.handoff.enabled=true",
@@ -4959,21 +4963,9 @@ func TestChartTEEWebPKIWaitsForPublicCertificate(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
-	var init *corev1.Container
 	for i := range deployment.Spec.Template.Spec.InitContainers {
 		if deployment.Spec.Template.Spec.InitContainers[i].Name == "tee-webpki-init" {
-			init = &deployment.Spec.Template.Spec.InitContainers[i]
-			break
-		}
-	}
-	if init == nil {
-		t.Fatal("tee-webpki init container is missing")
-	}
-	assertContainerHasArg(t, init.Name, init.Args, "--once")
-	assertContainerHasArg(t, init.Name, init.Args, "--wait-timeout=15m")
-	for _, arg := range init.Args {
-		if arg == "--reload-nginx" {
-			t.Fatal("tee-webpki init must not reload nginx before nginx starts")
+			t.Fatal("tee-webpki key fetch is an init container; exact workload identity cannot exist before main containers start")
 		}
 	}
 	var sidecar *corev1.Container
@@ -4987,6 +4979,11 @@ func TestChartTEEWebPKIWaitsForPublicCertificate(t *testing.T) {
 		t.Fatal("tee-webpki renewal sidecar is missing")
 	}
 	assertContainerHasArg(t, sidecar.Name, sidecar.Args, "--reload-nginx")
+	for _, arg := range sidecar.Args {
+		if arg == "--once" {
+			t.Fatal("tee-webpki main sidecar must keep polling and renewing")
+		}
+	}
 	for _, volume := range deployment.Spec.Template.Spec.Volumes {
 		if volume.Name == "public-tls" {
 			if volume.EmptyDir == nil || volume.Secret != nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory {
@@ -4996,6 +4993,152 @@ func TestChartTEEWebPKIWaitsForPublicCertificate(t *testing.T) {
 		}
 	}
 	t.Fatal("public-tls memory volume is missing")
+}
+
+func TestChartTEEWebPKIUsesOneExactTLSLBIdentity(t *testing.T) {
+	out, err := helmTemplate(t, teeWebPKIChartArgs(false)...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	seedConfig := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(seedConfig.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload, ok := seed.Workloads["c8s-tls-lb"]
+	if !ok || len(workload.Containers) != 1 {
+		t.Fatalf("derived tls-lb workload = %#v", workload)
+	}
+	policy := workload.Containers[0]
+	if !slices.Equal(policy.Command.Argv, nginx.Command) || !slices.Equal(policy.Args.Argv, nginx.Args) {
+		t.Fatalf("pod argv (%v, %v) differs from policy (%v, %v)", nginx.Command, nginx.Args, policy.Command.Argv, policy.Args.Argv)
+	}
+	if policy.Command.Policy != pkgallowlist.PolicyExact || policy.Args.Policy != pkgallowlist.PolicyExact {
+		t.Fatal("tls-lb argv policy is not exact")
+	}
+	if policy.Mounts.Policy != pkgallowlist.PolicyExact || policy.Env.Policy != pkgallowlist.PolicyExact {
+		t.Fatal("tls-lb runtime policy does not exactly constrain mounts and environment names")
+	}
+	if _, ok := containerVolumeMount(nginx, "nginx-config"); ok {
+		t.Fatal("tee-webpki nginx still reads its routing configuration from a control-plane ConfigMap")
+	}
+	if _, ok := podVolume(renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec, "nginx-config"); ok {
+		t.Fatal("tee-webpki pod still mounts the nginx ConfigMap")
+	}
+	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-tls-lb-nginx") {
+		t.Fatal("tee-webpki still renders a control-plane nginx ConfigMap")
+	}
+	if _, ok := seed.Digests[policy.Digest.String()]; ok {
+		t.Fatal("nginx leaked from the local cold-boot floor into active CDS policy")
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if _, ok := worker.Allowlist.AlwaysAllow[policy.Digest.String()]; !ok {
+		t.Fatal("nginx is missing from the node-local cold-boot floor")
+	}
+	if name, _, err := seed.MatchWorkload([]pkgallowlist.RunningContainer{
+		{
+			Digest: policy.Digest.String(), Argv: append(append([]string{}, nginx.Command...), nginx.Args...),
+			BindMounts: policy.Mounts.Destinations, BindMountKinds: policy.Mounts.Kinds,
+			MountsObserved: true, EnvObserved: true,
+		},
+	}); err != nil || name != "c8s-tls-lb" {
+		t.Fatalf("exact nginx identity did not match: name=%q err=%v", name, err)
+	}
+	wrongKinds := maps.Clone(policy.Mounts.Kinds)
+	wrongKinds["/tls"] = "host-path"
+	if _, _, err := seed.MatchWorkload([]pkgallowlist.RunningContainer{{
+		Digest: policy.Digest.String(), Argv: append(append([]string{}, nginx.Command...), nginx.Args...),
+		BindMounts: policy.Mounts.Destinations, BindMountKinds: wrongKinds,
+		MountsObserved: true, EnvObserved: true,
+	}}); !errors.Is(err, pkgallowlist.ErrNoMatch) {
+		t.Fatalf("host-path substitution received the tls-lb workload identity: %v", err)
+	}
+	if _, _, err := seed.MatchWorkload([]pkgallowlist.RunningContainer{
+		{Digest: policy.Digest.String(), Argv: []string{"/bin/sh"}},
+	}); !errors.Is(err, pkgallowlist.ErrNoMatch) {
+		t.Fatalf("arbitrary nginx argv received a workload identity: %v", err)
+	}
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	for _, arg := range attest.Args {
+		if arg == "--nvidia-gpu-evidence" {
+			t.Fatal("tls-lb must not aggregate worker GPU evidence")
+		}
+	}
+
+	maliciousArgs := teeWebPKIChartArgs(false)
+	maliciousDigest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	maliciousArgs = append(maliciousArgs, "--set-string", "tlsLb.nginx.image.digest="+maliciousDigest)
+	customOut, err := helmTemplate(t, maliciousArgs...)
+	if err != nil {
+		t.Fatalf("changed routing render: %v\n%s", err, customOut)
+	}
+	customNginx := renderedDeploymentContainer(t, customOut, "c8s-tls-lb", "nginx")
+	customConfig := renderedConfigMap(t, customOut, "c8s-cds-allowlist-seed")
+	customSeed, err := pkgallowlist.ParseJSON([]byte(customConfig.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	customPolicy := customSeed.Workloads["c8s-tls-lb"].Containers[0]
+	if !slices.Equal(customPolicy.Command.Argv, customNginx.Command) || !slices.Equal(customPolicy.Args.Argv, customNginx.Args) {
+		t.Fatal("changed routing configuration did not change the derived workload policy")
+	}
+	if customPolicy.Digest.String() != maliciousDigest {
+		t.Fatal("changed image did not change the derived workload policy")
+	}
+	if _, _, err := seed.MatchWorkload([]pkgallowlist.RunningContainer{{
+		Digest: maliciousDigest, Argv: append(append([]string{}, customNginx.Command...), customNginx.Args...), EnvObserved: true,
+	}}); !errors.Is(err, pkgallowlist.ErrNoMatch) {
+		t.Fatalf("old policy admitted an image with different baked routing: %v", err)
+	}
+}
+
+func TestChartTEEWebPKIRejectsConfigMapRouting(t *testing.T) {
+	args := teeWebPKIChartArgs(false)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--set" && args[i+1] == "tlsLb.nginx.configMode=image" {
+			args[i+1] = "tlsLb.nginx.configMode=configmap"
+		}
+	}
+	out, err := helmTemplate(t, args...)
+	if err == nil || !strings.Contains(out, "tee-webpki requires tlsLb.nginx.configMode=image") {
+		t.Fatalf("tee-webpki accepted control-plane routing configuration: err=%v\n%s", err, out)
+	}
+}
+
+func TestChartTEEWebPKIRejectsRuntimeRoutingValues(t *testing.T) {
+	args := append(teeWebPKIChartArgs(false), "--set-string", "tlsLb.upstream.address=c8s-evil.c8s-system.svc.cluster.local:8000")
+	out, err := helmTemplate(t, args...)
+	if err == nil || !strings.Contains(out, "routing comes only from the digest-pinned image") {
+		t.Fatalf("tee-webpki accepted runtime routing values: err=%v\n%s", err, out)
+	}
+}
+
+func TestChartHandoffSelfUsesNotReadyHeadlessService(t *testing.T) {
+	args := teeWebPKIChartArgs(false)
+	args = append(args, "--set", "cds.handoff.peerUrl=self")
+	out, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	assertContainerHasArg(t, "cds", cds.Args, "--handoff-peer-url=https://c8s-cds-handoff.c8s-system.svc:8443")
+	var service corev1.Service
+	if !findDoc(t, out, "Service", "c8s-cds-handoff", &service) {
+		t.Fatal("handoff Service is missing")
+	}
+	if service.Spec.ClusterIP != corev1.ClusterIPNone || !service.Spec.PublishNotReadyAddresses {
+		t.Fatalf("handoff Service = clusterIP %q publishNotReady %t", service.Spec.ClusterIP, service.Spec.PublishNotReadyAddresses)
+	}
+}
+
+func TestChartHandoffBooleansRejectQuotedValues(t *testing.T) {
+	for _, field := range []string{"cds.handoff.enabled", "cds.teeWebPKI.enabled"} {
+		out, err := helmTemplate(t, "--set-string", field+"=false")
+		if err == nil || !strings.Contains(out, "Invalid type. Expected: boolean, given: string") {
+			t.Fatalf("quoted %s error = %v\n%s", field, err, out)
+		}
+	}
 }
 
 func TestChartTEEWebPKIRejectsHostPort(t *testing.T) {
@@ -5669,7 +5812,7 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
 		"--set-string", "tlsLb.upstream.address=vllm:8000",
 		// Secured (https + verify) upstream baseline for the tls-lb subchart
 		// tests, on a bare vllm address. A manual address must be app-TLS now
@@ -5833,11 +5976,9 @@ func podVolume(spec corev1.PodSpec, name string) (corev1.Volume, bool) {
 	return corev1.Volume{}, false
 }
 
-// TestChartSeedsCDSAllowlistFromFloor proves the single authoritative floor
-// (nriImagePolicy.bootstrapAllowlist.digests) plus the CDS image self-entry are
-// rendered into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
-// non-empty on the first worker pull. Decoded with the same typed Allowlist
-// shape CDS parses, not substring-matched.
+// TestChartSeedsCDSAllowlistFromFloor proves that operator-authored active
+// digests reach CDS, while the chart-derived CDS self-entry stays only in each
+// node's local cold-boot floor.
 func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 	const floorDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
 	out, err := helmTemplate(t,
@@ -5862,12 +6003,15 @@ func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 	if got := seed.Digests[floorDigest]; got != "ghcr.io/x/coredns:v1" {
 		t.Errorf("seed floor digest = %q, want ghcr.io/x/coredns:v1\nseed: %v", got, seed.Digests)
 	}
-	// The CDS self-entry, derived from cds.image (set by the test harness to
-	// digest ...0001); the reference is repository@digest.
+	// The CDS self-entry is not active digest-only policy.
 	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
-	if got := seed.Digests[cdsDigest]; got != cdsRef {
-		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Digests)
+	if got := seed.Digests[cdsDigest]; got != "" {
+		t.Errorf("active seed contains local CDS cold-boot entry %q", got)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if got := worker.Allowlist.AlwaysAllow[cdsDigest]; got != cdsRef {
+		t.Errorf("local CDS cold-boot entry = %q, want %q", got, cdsRef)
 	}
 }
 
@@ -5901,8 +6045,8 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
 
-	// Each derived entry's reference must be repo@digest for the image the chart
-	// actually deploys.
+	// Each local cold-boot entry's reference must be repo@digest for the image
+	// the chart actually deploys.
 	want := map[string]string{
 		opD:  "ghcr.io/confidential-dot-ai/c8s-operator@" + opD,
 		asD:  "ghcr.io/confidential-dot-ai/attestation-api@" + asD,
@@ -5910,9 +6054,9 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		rmD:  "ghcr.io/confidential-dot-ai/ratls-mesh@" + rmD,
 		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
 	}
-	for digest, ref := range want {
-		if got := seed.Digests[digest]; got != ref {
-			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Digests)
+	for digest := range want {
+		if got := seed.Digests[digest]; got != "" {
+			t.Errorf("derived cold-boot entry %s leaked into active CDS floor as %q", digest, got)
 		}
 	}
 
@@ -5923,6 +6067,118 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		if got := worker.Allowlist.AlwaysAllow[digest]; got != ref {
 			t.Errorf("worker always_allow[%s] = %q, want %q\nalways_allow: %v", digest, got, ref, worker.Allowlist.AlwaysAllow)
 		}
+	}
+}
+
+func TestChartDerivesExactNamedPolicyForEverySteadySystemPod(t *testing.T) {
+	const (
+		c8sDigest  = "sha256:1000000000000000000000000000000000000000000000000000000000000001"
+		apiDigest  = "sha256:2000000000000000000000000000000000000000000000000000000000000002"
+		meshDigest = "sha256:3000000000000000000000000000000000000000000000000000000000000003"
+	)
+	args := append(teeWebPKIChartArgs(false),
+		"--set-string", "image.digest="+c8sDigest,
+		"--set-string", "attestationApi.image.digest="+apiDigest,
+		"--set-string", "ratlsMesh.image.digest="+meshDigest,
+	)
+	first, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("first helm render: %v\n%s", err, first)
+	}
+
+	derived, err := systempolicy.Derive(context.Background(), []byte(first), func(_ context.Context, _ string) (systempolicy.ImageConfig, error) {
+		return systempolicy.ImageConfig{
+			Entrypoint: []string{"/image-entrypoint"},
+			Cmd:        []string{"serve"},
+			Env:        []string{"PATH=/usr/bin"},
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("derive exact system policy: %v", err)
+	}
+	if len(derived) < 6 {
+		t.Fatalf("derived only %d steady workloads: %v", len(derived), maps.Keys(derived))
+	}
+	for name, workload := range derived {
+		if len(workload.Containers) == 0 {
+			t.Errorf("%s has no declared main container", name)
+		}
+		for _, container := range append(slices.Clone(workload.InitContainers), workload.Containers...) {
+			if container.Command.Policy != pkgallowlist.PolicyExact || container.Args.Policy != pkgallowlist.PolicyDeny {
+				t.Errorf("%s has non-exact effective argv policy: command=%+v args=%+v", name, container.Command, container.Args)
+			}
+			if container.Mounts.Policy != pkgallowlist.PolicyExact || container.Env.Policy != pkgallowlist.PolicyExact {
+				t.Errorf("%s does not constrain observed mounts and environment names", name)
+			}
+		}
+	}
+	if got := derived["c8s-tls-lb"]; len(got.InitContainers)+len(got.Containers) < 3 {
+		t.Fatalf("c8s-tls-lb policy does not include its c8s helpers and nginx: %+v", got)
+	}
+	tlsPolicy := derived["c8s-tls-lb"]
+	hasTEEWebPKIMain := false
+	for _, container := range tlsPolicy.Containers {
+		if slices.Contains(container.Command.Argv, "tee-webpki") {
+			hasTEEWebPKIMain = true
+		}
+	}
+	if !hasTEEWebPKIMain {
+		t.Fatalf("c8s-tls-lb exact policy does not include tee-webpki as a main sidecar: %+v", tlsPolicy)
+	}
+	for _, container := range tlsPolicy.InitContainers {
+		if slices.Contains(container.Command.Argv, "tee-webpki") {
+			t.Fatalf("tee-webpki remained an init container and cannot wait for named workload identity: %+v", container)
+		}
+	}
+
+	// Apply the generated overlay to the same chart. This models c8s install's
+	// two-pass render and proves the chart does not replace the full TLS-LB Pod
+	// entry with its nginx-only raw-Helm fallback.
+	tree := map[string]any{"nriImagePolicy": map[string]any{"bootstrapAllowlist": map[string]any{"workloads": derived}}}
+	overlay, err := sigsyaml.Marshal(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valuesFile := filepath.Join(t.TempDir(), "system-policy.yaml")
+	if err := os.WriteFile(valuesFile, overlay, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := helmTemplate(t, append(args, "-f", valuesFile)...)
+	if err != nil {
+		t.Fatalf("second helm render: %v\n%s", err, second)
+	}
+	seedConfig := renderedConfigMap(t, second, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(seedConfig.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seed.Workloads) != len(derived) {
+		t.Fatalf("active policy has %d workloads, want %d", len(seed.Workloads), len(derived))
+	}
+	for name, workload := range seed.Workloads {
+		for _, container := range append(slices.Clone(workload.InitContainers), workload.Containers...) {
+			if _, floor := seed.Digests[container.Digest.String()]; floor {
+				t.Errorf("system image %s from %s leaked into active digest-only policy", container.Digest, name)
+			}
+		}
+	}
+	if got := seed.Workloads["c8s-tls-lb"]; len(got.InitContainers)+len(got.Containers) < 3 {
+		t.Fatalf("second render replaced the full TLS-LB entry: %+v", got)
+	}
+
+	changedArgs := append(slices.Clone(args), "--set-json", `tlsLb.nginx.command=["/changed-nginx"]`)
+	changedManifest, err := helmTemplate(t, changedArgs...)
+	if err != nil {
+		t.Fatalf("changed argv render: %v\n%s", err, changedManifest)
+	}
+	changed, err := systempolicy.Derive(context.Background(), []byte(changedManifest), func(_ context.Context, _ string) (systempolicy.ImageConfig, error) {
+		return systempolicy.ImageConfig{Entrypoint: []string{"/image-entrypoint"}, Cmd: []string{"serve"}, Env: []string{"PATH=/usr/bin"}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(derived["c8s-tls-lb"], changed["c8s-tls-lb"]) {
+		t.Fatal("changing rendered TLS-LB argv did not change its generated active policy")
 	}
 }
 
@@ -5945,13 +6201,9 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if got, want := seed.Digests[nxDigest], nxRepo+"@"+nxDigest; got != want {
-			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Digests)
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if got, want := worker.Allowlist.AlwaysAllow[nxDigest], nxRepo+"@"+nxDigest; got != want {
+			t.Errorf("tls-lb nginx cold-boot entry = %q, want %q", got, want)
 		}
 	})
 
@@ -5964,13 +6216,9 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if _, ok := seed.Digests[nxDigest]; ok {
-			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Digests)
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if _, ok := worker.Allowlist.AlwaysAllow[nxDigest]; ok {
+			t.Errorf("tls-lb nginx cold-boot entry present with tls-lb disabled: %v", worker.Allowlist.AlwaysAllow)
 		}
 	})
 }
@@ -5992,13 +6240,9 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if _, ok := seed.Digests[volD]; !ok {
-			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if _, ok := worker.Allowlist.AlwaysAllow[volD]; !ok {
+			t.Errorf("volumed digest not derived into the cold-boot floor: %v", worker.Allowlist.AlwaysAllow)
 		}
 	})
 
@@ -6010,13 +6254,9 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if _, ok := seed.Digests[volD]; ok {
-			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if _, ok := worker.Allowlist.AlwaysAllow[volD]; ok {
+			t.Errorf("volumed digest derived into the cold-boot floor while disabled: %v", worker.Allowlist.AlwaysAllow)
 		}
 	})
 }
@@ -6061,10 +6301,9 @@ func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live
-// allowlist from CDS. If the seed is not served, CDS starts empty and every
-// un-baked component (operator, ratls-mesh, tls-lb's nginx) is denied until an
-// operator hand-runs `c8s allowlist add`. Regression for that deadlock: the seed
-// ConfigMap must render, be mounted, and carry the deployed digests.
+// allowlist from CDS. The seed must contain the exact TLS-LB identity and must
+// not copy the node-local cold-boot floor into active digest-only policy. The
+// install command supplies exact entries for the other rendered system Pods.
 func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	const (
 		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
@@ -6087,17 +6326,17 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
-	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
-	// and tls-lb's nginx (default digest from values.yaml).
-	if got := seed.Digests[opD]; got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
-		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Digests)
+	// Chart-derived component digests are a local cold-boot floor. They must not
+	// become the active CDS digest floor.
+	if _, ok := seed.Digests[opD]; ok {
+		t.Errorf("node-mode active seed contains operator cold-boot digest: %v", seed.Digests)
 	}
-	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
-		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
+	if _, ok := seed.Digests[rmD]; ok {
+		t.Errorf("node-mode active seed contains ratls-mesh cold-boot digest: %v", seed.Digests)
 	}
 	const nginxD = "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
-	if _, ok := seed.Digests[nginxD]; !ok {
-		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
+	if _, ok := seed.Digests[nginxD]; ok {
+		t.Errorf("node-mode active seed contains nginx cold-boot digest: %v", seed.Digests)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
@@ -6128,15 +6367,6 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		}
 		wantRef := prepRepo + "@" + prepDigest
 
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if got := seed.Digests[prepDigest]; got != wantRef {
-			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Digests)
-		}
-
 		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
 		if got := worker.Allowlist.AlwaysAllow[prepDigest]; got != wantRef {
 			t.Errorf("worker always_allow[%s] = %q, want %q\nalways_allow: %v", prepDigest, got, wantRef, worker.Allowlist.AlwaysAllow)
@@ -6152,13 +6382,9 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-		if err != nil {
-			t.Fatalf("seed JSON does not parse: %v", err)
-		}
-		if _, ok := seed.Digests[prepDigest]; ok {
-			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Digests)
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if _, ok := worker.Allowlist.AlwaysAllow[prepDigest]; ok {
+			t.Errorf("containerd-prep cold-boot entry present on k8s (init container not rendered): %v", worker.Allowlist.AlwaysAllow)
 		}
 	})
 }
@@ -6331,9 +6557,13 @@ func TestChartDeriveComponentsDefaultsOff(t *testing.T) {
 			if _, ok := seed.Digests[opD]; ok {
 				t.Errorf("operator digest derived without deriveComponents: %v", seed.Digests)
 			}
-			// The CDS floor self-entry is always present, independent of derivation.
-			if _, ok := seed.Digests[cdsDigest]; !ok {
-				t.Errorf("CDS floor self-entry missing: %v", seed.Digests)
+			// The CDS self-entry stays in the node-local cold-boot floor.
+			if _, ok := seed.Digests[cdsDigest]; ok {
+				t.Errorf("CDS cold-boot entry leaked into active seed: %v", seed.Digests)
+			}
+			worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+			if _, ok := worker.Allowlist.AlwaysAllow[cdsDigest]; !ok {
+				t.Errorf("CDS cold-boot entry missing: %v", worker.Allowlist.AlwaysAllow)
 			}
 		})
 	}
@@ -6426,6 +6656,7 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 	// deriveComponents off, fail-closed -> guard fires.
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.policy.mode=fail-closed",
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=false",
 		"--set-string", "nriImagePolicy.image.digest="+nriD,
 	)
 	if err == nil {
@@ -6440,9 +6671,9 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"audit mode is non-blocking", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=audit"}},
+		{"audit mode is non-blocking", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=audit", "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=false"}},
 		{"deriveComponents covers it", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true"}},
-		{"digest listed in floor", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + nriD + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD}},
+		{"digest listed in floor", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=false", "--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + nriD + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if out, err := helmTemplate(t, tc.args...); err != nil {

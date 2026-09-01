@@ -120,3 +120,68 @@ func TestEvictionLoopStops(t *testing.T) {
 		t.Fatal("EvictionLoop did not return when done closed")
 	}
 }
+
+func TestFreezeBlocksWritesAndResumeRestoresWrites(t *testing.T) {
+	l, _ := testLedger(t, time.Hour, 10)
+	if !l.Record("before", "10.0.0.1") {
+		t.Fatal("initial binding refused")
+	}
+	snapshot := l.Freeze()
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("snapshot entries = %d, want 1", len(snapshot.Entries))
+	}
+	if l.Record("after", "10.0.0.2") {
+		t.Fatal("ledger accepted a write after freeze")
+	}
+	if _, ok := l.Lookup("before"); !ok {
+		t.Fatal("freeze blocked an existing read")
+	}
+	l.Resume()
+	if !l.Record("after", "10.0.0.2") {
+		t.Fatal("ledger did not resume writes")
+	}
+}
+
+func TestRestoreSnapshotPreservesExpiryAndFirstWriteWins(t *testing.T) {
+	source, clock := testLedger(t, time.Hour, 10)
+	if !source.Record("sandbox-1", "10.0.0.1") {
+		t.Fatal("source binding refused")
+	}
+	snapshot := source.Freeze()
+
+	restored, restoredClock := testLedger(t, time.Hour, 10)
+	*restoredClock = *clock
+	if err := restored.RestoreSnapshot(snapshot); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	if restored.Record("sandbox-1", "10.0.0.2") {
+		t.Fatal("restored binding lost first-write-wins ownership")
+	}
+	host, ok := restored.Lookup("sandbox-1")
+	if !ok || host != "10.0.0.1" {
+		t.Fatalf("restored lookup = %q, %v", host, ok)
+	}
+	*restoredClock = restoredClock.Add(time.Hour + time.Second)
+	if _, ok := restored.Lookup("sandbox-1"); ok {
+		t.Fatal("restored binding did not keep its original expiry")
+	}
+}
+
+func TestRestoreSnapshotRejectsMalformedState(t *testing.T) {
+	l, clock := testLedger(t, time.Hour, 10)
+	expires := clock.Add(time.Hour)
+	cases := []Snapshot{
+		{Entries: []SnapshotEntry{{SandboxID: "", InventoryHost: "10.0.0.1", Expires: expires}}},
+		{Entries: []SnapshotEntry{{SandboxID: "a", InventoryHost: "", Expires: expires}}},
+		{Entries: []SnapshotEntry{{SandboxID: "a", InventoryHost: "10.0.0.1"}}},
+		{Entries: []SnapshotEntry{
+			{SandboxID: "a", InventoryHost: "10.0.0.1", Expires: expires},
+			{SandboxID: "a", InventoryHost: "10.0.0.2", Expires: expires},
+		}},
+	}
+	for i, snapshot := range cases {
+		if err := l.RestoreSnapshot(snapshot); err == nil {
+			t.Fatalf("case %d: malformed snapshot was accepted", i)
+		}
+	}
+}

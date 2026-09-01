@@ -7,7 +7,9 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
+	"github.com/containerd/nri/pkg/api"
 )
 
 // sandboxDigestsFor walks the production path CDS drives: bind the caller by
@@ -320,6 +322,159 @@ func TestInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
 		}) {
 			t.Fatalf("argv %q was erased from the high-water mark: %+v", want, containers)
 		}
+	}
+}
+
+func TestInventoryPreservesObservedMountAndEnvPolicyWithoutValues(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+	obs := containerObservation{bindMounts: []string{"/config"}, envNames: []string{"PATH", "TOKEN"}}
+	b.record(cidApp1, "sandbox-1", "app", digestApp, []string{"/app"}, obs)
+
+	_, containers, known, err := b.DigestsForSandbox("sandbox-1")
+	if err != nil || !known || len(containers) != 1 {
+		t.Fatalf("inventory: known=%v containers=%v err=%v", known, containers, err)
+	}
+	got := containers[0]
+	if !got.MountsObserved || !got.EnvObserved {
+		t.Fatal("inventory dropped observation state")
+	}
+	if !slices.Equal(got.BindMounts, []string{"/config"}) || !slices.Equal(got.EnvNames, []string{"PATH", "TOKEN"}) {
+		t.Fatalf("inventory runtime policy = mounts %v env %v", got.BindMounts, got.EnvNames)
+	}
+}
+
+func TestRuntimeInventoryIsLiveOnlyAndBindsPolicyAndPodIdentity(t *testing.T) {
+	policy := newPolicyStore(floorAllowlist(map[string]string{digestApp: "bootstrap"}))
+	steady := floorAllowlist(map[string]string{digestApp2: "steady"})
+	if !policy.apply(steady, 9) {
+		t.Fatal("apply steady policy")
+	}
+	b := newAdmissionInventory(t.TempDir(), policy)
+	b.recordPod(&api.PodSandbox{Id: "sandbox-1", Name: "worker-0", Namespace: "inference", Uid: "pod-uid"})
+	b.record(cidApp1, "sandbox-1", "worker", digestApp2, []string{"/worker", "--serve"}, containerObservation{
+		bindMounts: []string{"/models"}, envNames: []string{"PATH"},
+	})
+
+	got, err := b.RuntimeInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Schema != workloadclaims.RuntimeInventorySchema || got.PolicyVersion != 9 || got.PolicySHA256 != allowlistDigest(steady) {
+		t.Fatalf("policy identity = schema %q version %d digest %q", got.Schema, got.PolicyVersion, got.PolicySHA256)
+	}
+	if len(got.Containers) != 1 {
+		t.Fatalf("containers = %+v", got.Containers)
+	}
+	c := got.Containers[0]
+	if c.Namespace != "inference" || c.PodName != "worker-0" || c.PodUID != "pod-uid" || c.ContainerName != "worker" || c.ContainerID != cidApp1 {
+		t.Fatalf("runtime identity = %+v", c)
+	}
+	if !c.MountsObserved || !c.EnvObserved || !slices.Equal(c.BindMounts, []string{"/models"}) || !slices.Equal(c.EnvNames, []string{"PATH"}) {
+		t.Fatalf("runtime observations = %+v", c)
+	}
+	beforeRemove := got.Generation
+	b.remove(cidApp1)
+	got, err = b.RuntimeInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Containers) != 0 || got.Generation <= beforeRemove {
+		t.Fatalf("stopped container remained in live inventory: %+v", got)
+	}
+	if _, highWater, known, err := b.DigestsForSandbox("sandbox-1"); err != nil || !known || len(highWater) != 1 {
+		t.Fatalf("secret-release high-water mark was lost: known=%v err=%v containers=%+v", known, err, highWater)
+	}
+}
+
+func TestEveryNodeInventoryReportsExactCDSCanonicalPolicyDigestAfterTransition(t *testing.T) {
+	active, err := allowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"c8s-system":{"containers":[{"digest":"` + digestApp2 + `","command":{"policy":"exact","argv":["/system"]},"args":{"policy":"deny"}}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalDigest := allowlistDigest(active)
+	if canonicalDigest == "" {
+		t.Fatal("empty canonical digest")
+	}
+
+	for _, node := range []string{"node-a", "node-b", "node-c"} {
+		t.Run(node, func(t *testing.T) {
+			store := newPolicyStore(floorAllowlist(map[string]string{digestApp: "local-cold-boot-only"}))
+			inventory := newAdmissionInventory(t.TempDir(), store)
+			store.setTransitionGuard(inventory.admitsLiveRuntime)
+			inventory.recordPod(&api.PodSandbox{Id: "system-sandbox", Name: "c8s-system", Namespace: "c8s-system", Uid: node + "-uid"})
+			inventory.record("system-container", "system-sandbox", "c8s", digestApp2, []string{"/system"})
+			if applied, err := store.applyChecked(active, 17); err != nil || !applied {
+				t.Fatalf("apply active policy: applied=%v err=%v", applied, err)
+			}
+			got, err := inventory.RuntimeInventory()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.PolicyVersion != 17 || got.PolicySHA256 != canonicalDigest {
+				t.Fatalf("node policy identity = version %d digest %q, want 17 / %q", got.PolicyVersion, got.PolicySHA256, canonicalDigest)
+			}
+			if store.current().index.AdmitsDigest(digestApp) {
+				t.Fatal("local cold-boot floor survived the authenticated transition")
+			}
+		})
+	}
+}
+
+func TestRuntimeInventoryFailsClosedOnUnresolvedLiveDigest(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+	b.record(cidApp1, "sandbox-1", "worker", "", []string{"/worker"})
+	if _, err := b.RuntimeInventory(); err == nil {
+		t.Fatal("runtime inventory served a subset while a live digest was unresolved")
+	}
+}
+
+func TestPolicyTransitionRequiresCoverageOfLiveRuntime(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "bootstrap"}))
+	inventory := newAdmissionInventory("/proc", store)
+	store.setTransitionGuard(inventory.admitsLiveRuntime)
+	inventory.record("ctr", "sandbox", "system", pushDigestA, []string{"/c8s", "serve"}, containerObservation{
+		bindMounts:     []string{"/run/state"},
+		bindMountKinds: map[string]string{"/run/state": "empty-dir"},
+		envNames:       []string{"PATH"},
+	})
+
+	before := store.current()
+	uncovered := floorAllowlist(map[string]string{pushDigestB: "application"})
+	if applied, err := store.applyChecked(uncovered, 1); err == nil || applied {
+		t.Fatalf("uncovered live runtime applied=%v err=%v", applied, err)
+	}
+	if store.current() != before {
+		t.Fatal("a rejected policy changed the active snapshot")
+	}
+
+	digestOnly := floorAllowlist(map[string]string{pushDigestA: "system-bytes-only"})
+	if applied, err := store.applyChecked(digestOnly, 1); err == nil || applied {
+		t.Fatalf("digest-only policy crossed the bootstrap barrier: applied=%v err=%v", applied, err)
+	}
+	if store.current() != before {
+		t.Fatal("a digest-only policy changed the active snapshot")
+	}
+
+	covered := &allowlist.Allowlist{
+		Schema: allowlist.Schema,
+		Workloads: map[string]allowlist.Workload{
+			"c8s-system": {
+				Containers: []allowlist.Container{{
+					Digest:  mustDigest(t, pushDigestA),
+					Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/c8s"}},
+					Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"serve"}},
+					Mounts: allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: []string{"/run/state"},
+						Kinds: map[string]string{"/run/state": "empty-dir"}},
+					Env: allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH"}},
+				}},
+			},
+		},
+	}
+	if applied, err := store.applyChecked(covered, 1); err != nil || !applied {
+		t.Fatalf("covered live runtime applied=%v err=%v", applied, err)
+	}
+	if store.current() == before {
+		t.Fatal("covered policy did not replace the bootstrap snapshot")
 	}
 }
 

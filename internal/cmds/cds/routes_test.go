@@ -428,6 +428,7 @@ func TestValidateConfigRequiresActivationRetryMargin(t *testing.T) {
 		handoffPeerURL:             "https://c8s-cds:8443",
 		handoffPeerTimeout:         7 * time.Second,
 		handoffEndpointDrainDelay:  5 * time.Second,
+		handoffTransferLease:       time.Minute,
 		handoffClientCert:          "cert.pem",
 		handoffClientKey:           "key.pem",
 		ratlsPlatform:              "tdx",
@@ -604,6 +605,14 @@ func (s *stubHandoffController) HandleActivate(w http.ResponseWriter, _ *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *stubHandoffController) HandleConfirm(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *stubHandoffController) HandleAbort(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *stubHandoffController) Serving() bool { return s.serving }
 
 func (s *stubHandoffController) GuardMutation(next http.Handler) http.Handler {
@@ -616,7 +625,7 @@ func (s *stubHandoffController) GuardMutation(next http.Handler) http.Handler {
 	})
 }
 
-func TestRouterFrozenPredecessorKeepsReadsAndCertificateService(t *testing.T) {
+func TestRouterFrozenPredecessorKeepsOnlyReadOnlyService(t *testing.T) {
 	keyPEM, err := earsigner.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -657,8 +666,8 @@ func TestRouterFrozenPredecessorKeepsReadsAndCertificateService(t *testing.T) {
 			t.Errorf("frozen predecessor GET %s = %d, want 200", path, got)
 		}
 	}
-	if got := request(http.MethodPost, "/sign-csr", `{}`); got == http.StatusServiceUnavailable {
-		t.Fatalf("frozen predecessor certificate route returned 503")
+	if got := request(http.MethodPost, "/sign-csr", `{}`); got != http.StatusServiceUnavailable {
+		t.Fatalf("frozen predecessor certificate route = %d, want 503", got)
 	}
 	if got := request(http.MethodPut, "/allowlist", `{}`); got != http.StatusServiceUnavailable {
 		t.Fatalf("frozen predecessor mutation = %d, want 503", got)

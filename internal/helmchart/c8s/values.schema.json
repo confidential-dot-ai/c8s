@@ -36,10 +36,11 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "enabled": {},
+            "enabled": {"type": "boolean"},
             "endpointDrainDelay": {},
             "peerUrl": {},
-            "successorWorkload": {}
+            "successorWorkload": {},
+            "transferLease": {}
           }
         },
         "image": {
@@ -147,7 +148,7 @@
           "type": ["object", "null"],
           "additionalProperties": false,
           "properties": {
-            "enabled": {},
+            "enabled": {"type": "boolean"},
             "workload": {}
           }
         }
@@ -364,7 +365,7 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "activeOperatorPolicy": {},
+            "activeOperatorPolicy": {"type": "boolean"},
             "attestationApiURL": {},
             "enabled": {},
             "expectedWorkload": {},
@@ -448,6 +449,10 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "args": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "configMode": {"type": "string", "enum": ["configmap", "image"]},
+            "effectiveEnvNames": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
             "httpsPort": {},
             "image": {
               "type": [
@@ -481,7 +486,6 @@
             "keyKey": {},
             "mode": {},
             "mountPath": {},
-            "issueTimeout": {},
             "pollInterval": {},
             "readyPort": {},
             "secretName": {}

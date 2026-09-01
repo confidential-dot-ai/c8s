@@ -109,6 +109,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: kata-deploy
     spec:
+      enableServiceLinks: false
       serviceAccountName: {{ include "c8s.kataName" . }}
       # hostPID: kata-deploy nsenters into PID 1 to restart the runtime.
       hostPID: true

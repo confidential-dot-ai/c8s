@@ -2,6 +2,7 @@ package cds
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -27,6 +29,74 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
+
+func TestCompleteAdoptionKeepsSuccessorNotReadyUntilConfirm(t *testing.T) {
+	confirmStarted := make(chan struct{})
+	releaseConfirm := make(chan struct{})
+	done := make(chan error, 1)
+	var successorActive atomic.Bool
+	var promoted atomic.Bool
+
+	go func() {
+		done <- completeAdoption(context.Background(), func() {
+			promoted.Store(true)
+		}, func(context.Context) error {
+			close(confirmStarted)
+			<-releaseConfirm
+			return nil
+		}, &successorActive)
+	}()
+
+	<-confirmStarted
+	if !promoted.Load() {
+		t.Fatal("successor was not promoted before confirmation")
+	}
+	if successorActive.Load() {
+		t.Fatal("successor became Ready before confirmation succeeded")
+	}
+	close(releaseConfirm)
+	if err := <-done; err != nil {
+		t.Fatalf("completeAdoption: %v", err)
+	}
+	if !successorActive.Load() {
+		t.Fatal("successor stayed NotReady after confirmation succeeded")
+	}
+}
+
+func TestCompleteAdoptionConfirmFailureKeepsPromotedSuccessorActive(t *testing.T) {
+	var successorActive atomic.Bool
+	var promoted atomic.Bool
+	want := fmt.Errorf("confirm failed")
+	err := completeAdoption(context.Background(), func() { promoted.Store(true) }, func(context.Context) error {
+		return want
+	}, &successorActive)
+	if err != want {
+		t.Fatalf("completeAdoption error = %v, want %v", err, want)
+	}
+	if !promoted.Load() || !successorActive.Load() {
+		t.Fatal("promoted successor became unavailable after an ambiguous confirmation failure")
+	}
+}
+
+func TestCompleteAdoptionLostConfirmResponseKeepsSuccessorActive(t *testing.T) {
+	for _, name := range []string{"response lost after retire", "request not delivered"} {
+		t.Run(name, func(t *testing.T) {
+			var successorActive atomic.Bool
+			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+			defer cancel()
+			err := completeAdoption(ctx, func() {}, func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			}, &successorActive)
+			if err == nil {
+				t.Fatal("ambiguous confirmation returned no diagnostic error")
+			}
+			if !successorActive.Load() {
+				t.Fatal("successor became unavailable after ambiguous confirmation")
+			}
+		})
+	}
+}
 
 func TestCompilePattern(t *testing.T) {
 	t.Run("empty returns nil", func(t *testing.T) {

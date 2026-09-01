@@ -76,7 +76,7 @@ func TestProvisionCAAdoptsFromPeer(t *testing.T) {
 			return nil
 		},
 		RestoreSecrets: secretStore.RestoreSnapshot,
-		OnAdopt:        func(fn func(context.Context) error) { activate = fn },
+		OnAdopt:        func(fn, _ func(context.Context) error) { activate = fn },
 	}, slog.Default(), pull)
 	if err != nil {
 		t.Fatalf("provisionCA: %v", err)
@@ -253,7 +253,7 @@ func TestProvisionCAAdoptsSingleCertBundle(t *testing.T) {
 		Measurements:     []string{"m"},
 		OperatorKeysHash: handoffTestOperatorKeysHash,
 		RestoreAllowlist: func(string, *allowlist.Allowlist) error { return nil },
-		OnAdopt:          func(func(context.Context) error) {},
+		OnAdopt:          func(func(context.Context) error, func(context.Context) error) {},
 	}, slog.Default(), pull)
 	if err != nil {
 		t.Fatalf("provisionCA refused a single-cert bundle: %v", err)

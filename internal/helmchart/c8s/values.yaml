@@ -326,21 +326,25 @@ cds:
     # NotReady. This gives Kubernetes time to remove its Service endpoint.
     # This delay does not prove an atomic endpoint switch.
     endpointDrainDelay: 5s
+    # -- Maximum pre-activation freeze. If a selected successor receives state
+    # but never starts activation, the predecessor safely resumes mutations.
+    transferLease: 5m
     ## peerUrl: where a starting cds adopts its mesh CA from over /handoff
     ## instead of generating a fresh one. The old CDS freezes mutations but
-    ## keeps reads and certificate service. The new CDS restores state and
-    ## listens while NotReady and frozen. Activation makes the old CDS NotReady
-    ## and keeps its read and certificate service during endpointDrainDelay.
-    ## The old CDS then retires. The new CDS becomes mutable and Ready. This
-    ## prevents two mutable CDS instances. It does not prove an atomic endpoint
-    ## switch. CDS fails closed if the peer is unavailable or rejects handoff.
+    ## keeps read-only service. The new CDS restores state and listens while
+    ## NotReady and frozen. Activation makes the old CDS NotReady and keeps its
+    ## read-only service during endpointDrainDelay. The new CDS becomes mutable
+    ## but stays NotReady. It confirms retirement through a direct path pinned
+    ## to the predecessor. The old CDS retires, and the new CDS then becomes
+    ## Ready. This prevents two mutable CDS instances. CDS fails closed if the
+    ## peer is unavailable or rejects handoff.
     ##
     ## Two-phase install: install with handoff.enabled=true (+ pinned
     ## cds.measurements) but peerUrl empty (cold start, self generate); once a
     ## cds pod is serving, `helm upgrade --set cds.handoff.peerUrl=self` to
     ## enable adoption on every subsequent roll. The sentinel "self" expands to
-    ## the cds Service URL (adopt from your own predecessor); any other value
-    ## is an explicit distinct-peer https URL.
+    ## a headless handoff Service that includes the NotReady predecessor; any
+    ## other value is an explicit distinct-peer https URL.
     ## Requires handoff.enabled=true (the serving pod must offer /handoff for
     ## the next roll) and cds.measurements; cannot combine with
     ## persistence.enabled (the surge pod cannot share the RWO data PVC).
@@ -990,39 +994,28 @@ nriImagePolicy:
     # container start.
     interval: 5s
 
-  # --- Bootstrap allowlist (the authoritative floor) ---
-  # The single source of truth for the image-digest floor. Used two ways:
-  #   1. Rendered into every plugin's always_allow (both installer DaemonSets,
-  #      via nri-image-policy.bootConfig), so the cluster can bring itself up
-  #      before CDS is reachable.
-  #   2. Rendered into CDS's --allowlist-seed (templates/cds.yaml), so CDS's
-  #      served /allowlist is non-empty on the first worker pull.
-  # `digests` is the floor: everything needed to reach a Ready CDS on the CDS
-  # node and a working kubelet on every node — the c8s component images plus
-  # kube-proxy, coredns, pause/sandbox, CNI — supplied via values or `-f`
-  # (resolve digests with crane/skopeo). In production you pin the full set
-  # here; deriveComponents below is a demo convenience for the c8s images only.
+  # --- Initial active policy and local cold-boot policy ---
+  # Chart-derived c8s component digests go only to each node's local NRI
+  # cold-boot floor. They let CDS and the policy pull path start. The first
+  # authenticated CDS policy replaces that floor.
+  #
+  # Operator values in `digests` are different. They are copied to the local
+  # floor and to the CDS active digest floor for compatibility. A digest-floor
+  # entry permits all argv. Production workloads must use exact entries in
+  # `workloads` instead.
   #
   # Format: map of "sha256:<hex>" -> "<image reference>"
   bootstrapAllowlist:
-    # deriveComponents: a demo convenience (off by default, like
-    # `c8s install --resolve-digests`, which turns it on). When true, the c8s
-    # component images this chart installs (operator, cds, attestation-api,
-    # ratls-mesh, nri-image-policy) are auto-added to the floor
-    # whenever their image.digest is set, so a digest-pinned install self-allows
-    # the c8s images without listing them in `digests`. It never covers the
-    # non-c8s system images, so production installs pin the full floor in
-    # `digests` instead. Entries in `digests` override a derived entry for the
-    # same sha256.
+    # `c8s install --resolve-digests` enables this. The chart puts each enabled,
+    # digest-pinned c8s component in the node-local cold-boot floor. It does not
+    # put these derived entries in CDS. The install command separately derives
+    # exact named system workloads from the rendered chart and OCI configs.
     deriveComponents: false
     digests: {}
     # sha256:abc123...: "ghcr.io/confidential-dot-ai/cds:v0.1.0"
-    # workloads: named workload entries folded into the served seed alongside
-    # the floor. Each entry pins an init/main container set with per-container
-    # argv (command/args) and paths policy; policy is matched by container
-    # digest. Standalone/injected component images stay digest-only in `digests`
-    # above. Keys are the pkg/allowlist Workload JSON fields (initContainers,
-    # containers, digest, command, args, paths). Default empty.
+    # Named workload entries in the CDS seed. Each entry pins the complete
+    # init/main container set. Include all injected c8s helpers. Use exact argv,
+    # mount, and environment-name policy for production.
     workloads: {}
     #   infer:
     #     containers:
@@ -1328,7 +1321,6 @@ tlsLb:
     keyKey: tls.key
     mountPath: "/public-tls"
     pollInterval: "30s"
-    issueTimeout: "15m"
     readyPort: 8801
 
   # -- Discovery/preflight metadata (the issued cert + attestation evidence
@@ -1405,6 +1397,10 @@ tlsLb:
     # no stamp could ever arrive and the gate would hold the front door at 503
     # forever. The named entry must match the tls-lb pod's own non-injected
     # container set (nginx).
+    # The chart adds this exact nginx digest and argv to the CDS seed. nginx
+    # also stays in the digest floor so the cluster can admit the front door
+    # before a named mesh identity exists. The tee key is released only after
+    # the exact named-workload match.
     #
     # Requires attest.enabled and hostPort.enabled: false — readiness only
     # withdraws Service endpoints, while a hostPort is published by the CNI
@@ -1416,6 +1412,11 @@ tlsLb:
     resources: {}
 
   nginx:
+    # -- Routing configuration source. configmap is compatible with ordinary
+    # TLS modes. tee-webpki requires image: nginx.conf and all routing data must
+    # be inside the digest-pinned image, not supplied by Kubernetes. In image
+    # mode, tlsLb.upstream.address and tlsLb.routes must be empty.
+    configMode: configmap
     image:
       repository: nginxinc/nginx-unprivileged
       # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
@@ -1425,6 +1426,14 @@ tlsLb:
       digest: "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
       tag: ""
       pullPolicy: IfNotPresent
+    # -- Explicit OCI argv. The same values render the pod and the exact named
+    # workload policy used before CDS releases tee-webpki state.
+    command: ["/docker-entrypoint.sh"]
+    args: ["nginx", "-g", "daemon off;"]
+    # -- Effective OCI environment names in the digest-pinned image. The exact
+    # tee-webpki workload policy enforces this list. Use an image with no
+    # environment for the smallest trust surface.
+    effectiveEnvNames: []
     # -- Number of nginx replicas.
     replicas: 1
     # -- HTTPS port nginx listens on. Unprivileged (>=1024) because nginx runs

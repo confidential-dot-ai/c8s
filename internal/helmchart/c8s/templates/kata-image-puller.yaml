@@ -71,6 +71,7 @@ spec:
         # the ConfigMap and rolls the DaemonSet.
         checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository (include "c8s.kataGuestImageTag" .) | sha256sum }}
     spec:
+      enableServiceLinks: false
       serviceAccountName: {{ include "c8s.kataName" . }}-image-puller
       # Same node selector / tolerations as kata-deploy (templates/kata.yaml).
       # The puller must land on every node kata-deploy lands on so the
