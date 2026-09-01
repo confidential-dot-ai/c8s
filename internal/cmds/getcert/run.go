@@ -128,7 +128,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
-	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys); must be on a memory-backed filesystem")
+	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM (reused on restart if already present); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")

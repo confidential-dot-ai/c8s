@@ -18,8 +18,12 @@ func TestPrepareOutDir(t *testing.T) {
 	if fileutil.RequireRAMBacked(dir) == nil {
 		t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
 	}
-	if err := prepareOutDir(filepath.Join(dir, "secrets")); err == nil {
+	out := filepath.Join(dir, "secrets")
+	if err := prepareOutDir(out); err == nil {
 		t.Fatal("expected an out-dir on persistent storage to be refused")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("refusal must not create the out-dir on the storage it rejects")
 	}
 }
 

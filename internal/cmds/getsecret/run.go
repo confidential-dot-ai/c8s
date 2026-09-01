@@ -170,10 +170,28 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 // secret bytes are readable by the host. Checked before fetching so a
 // misconfigured dir fails fast, without touching the secret store.
 func prepareOutDir(dir string) error {
+	// Vet the nearest existing ancestor before creating anything: MkdirAll
+	// cannot cross a mountpoint, so the new dirs land on the same filesystem,
+	// and a refusal leaves no directories behind on the persistent storage
+	// it refuses to use.
+	probe := dir
+	for {
+		if _, err := os.Stat(probe); err == nil {
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break
+		}
+		probe = parent
+	}
+	if err := cmdsutil.RequireRAMBackedDir("--out-dir", probe); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	return cmdsutil.RequireRAMBackedDir("--out-dir", dir)
+	return nil
 }
 
 // writeAll writes every value atomically (temp file then rename) so a consumer
