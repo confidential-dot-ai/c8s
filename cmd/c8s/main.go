@@ -51,6 +51,7 @@ func normalizeArgvAlias() {
 		"get-cert",
 		"nri-image-policy",
 		"ratls-mesh",
+		"workload-proxy",
 	} {
 		if base == alias || strings.HasSuffix(base, "-"+alias) {
 			if len(os.Args) < 2 || os.Args[1] != alias {

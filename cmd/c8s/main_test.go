@@ -33,6 +33,11 @@ func TestNormalizeArgvAlias(t *testing.T) {
 			want: []string{"nri-image-policy", "nri-image-policy"},
 		},
 		{
+			name: "workload proxy alias inserts",
+			argv: []string{"/workload-proxy", "--mode=client"},
+			want: []string{"/workload-proxy", "workload-proxy", "--mode=client"},
+		},
+		{
 			name: "already normalized argv stays untouched",
 			argv: []string{"get-cert", "get-cert"},
 			want: []string{"get-cert", "get-cert"},
