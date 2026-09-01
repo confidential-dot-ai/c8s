@@ -77,7 +77,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ inputs.confos_ref || 'fd4427c0a401238f3430d05d9ba775ec0691d523' }} # pin: main — snapshot-pinned host build deps (confos#111, confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
+  CONFOS_REF: ${{ inputs.confos_ref || 'cffb512383ca0cfdc966e4a981319411e7840ba9' }} # pin: main — mkosi v27 + MinimumVersion=27 (confos#116, needs the v27 setup-mkosi ref below), dropin-tree symlink-check exemption (confos#117); rolls measurements once (mkosi v26 -> v27)
   ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
@@ -185,7 +185,7 @@ jobs:
         # the upstream action's codeload fetch or foreign-distro installs.
         uses: ./c8s/.github/actions/setup-mkosi
         with:
-          ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+          ref: 4736cd836108a97772142c461c49f1ddb4172348 # v27
 
       - name: Compute runner-image cache term
         # ImageOS/ImageVersion are runner-process env vars, not workflow env
