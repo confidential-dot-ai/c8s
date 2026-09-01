@@ -125,16 +125,35 @@ func deriveContainer(ctx context.Context, container corev1.Container, volumes ma
 		cache[container.Image] = config
 	}
 	command := config.Entrypoint
+	commandFromPod := false
 	if len(container.Command) > 0 {
 		command = container.Command
+		commandFromPod = true
 	}
 	args := config.Cmd
+	argsFromPod := false
 	if len(container.Args) > 0 {
 		args = container.Args
+		argsFromPod = true
 	}
 	argv := append(slices.Clone(command), args...)
 	if len(argv) == 0 {
 		return allowlist.Container{}, fmt.Errorf("effective OCI argv is empty")
+	}
+	var argvBindings []allowlist.ArgvEnvBinding
+	if commandFromPod {
+		bindings, err := kubeletArgBindings(command, 0, container.Env)
+		if err != nil {
+			return allowlist.Container{}, fmt.Errorf("command: %w", err)
+		}
+		argvBindings = append(argvBindings, bindings...)
+	}
+	if argsFromPod {
+		bindings, err := kubeletArgBindings(args, len(command), container.Env)
+		if err != nil {
+			return allowlist.Container{}, fmt.Errorf("args: %w", err)
+		}
+		argvBindings = append(argvBindings, bindings...)
 	}
 
 	envNames := make([]string, 0, len(config.Env)+len(container.Env))
@@ -162,27 +181,128 @@ func deriveContainer(ctx context.Context, container corev1.Container, volumes ma
 		if !ok {
 			return allowlist.Container{}, fmt.Errorf("mount %s refers to unknown volume %s", mount.MountPath, mount.Name)
 		}
+		// A subPath loses both its original plugin path in CRI and the direct
+		// TEE-local mount shape that the guest enforcer requires for private
+		// evidence. Classify every subPath as node instead of making a source claim
+		// that both enforcers cannot prove.
+		if mount.SubPath != "" || mount.SubPathExpr != "" {
+			kind = "node"
+		}
 		kinds[mount.MountPath] = kind
 	}
 	// Kubelet adds this mount when the ServiceAccount token is enabled.
 	if serviceAccountMount && containerNeedsImplicitServiceAccountMount(container) {
 		destinations = append(destinations, "/var/run/secrets/kubernetes.io/serviceaccount")
-		kinds["/var/run/secrets/kubernetes.io/serviceaccount"] = "projected"
+		kinds["/var/run/secrets/kubernetes.io/serviceaccount"] = "node"
 	}
 	sort.Strings(destinations)
 	destinations = slices.Compact(destinations)
 
 	return allowlist.Container{
+		Name:   container.Name,
 		Digest: digest,
 		Image:  container.Image,
 		Command: allowlist.ArgvPolicy{
-			Policy: allowlist.PolicyExact,
-			Argv:   argv,
+			Policy:      allowlist.PolicyExact,
+			Argv:        argv,
+			EnvBindings: argvBindings,
 		},
 		Args:   allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny},
 		Mounts: allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: destinations, Kinds: kinds},
-		Env:    allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: envNames},
+		Env: allowlist.EnvPolicy{
+			Policy: allowlist.PolicyExact, Names: envNames,
+			// enableServiceLinks=false suppresses workload Service variables, but
+			// kubelet still supplies its Kubernetes API family. Admit that family
+			// without predicting each version-specific name.
+			Prefixes: []string{"KUBERNETES_"},
+		},
 	}, nil
+}
+
+// kubeletArgBindings records the dynamic values that kubelet inserts before
+// CRI admission. Only the public node address is supported. The declared env
+// item must use the downward API, so the rendered system policy cannot silently
+// bind an operator-supplied service address.
+func kubeletArgBindings(argv []string, offset int, env []corev1.EnvVar) ([]allowlist.ArgvEnvBinding, error) {
+	var out []allowlist.ArgvEnvBinding
+	for i, arg := range argv {
+		var names []string
+		for cursor := 0; cursor < len(arg); {
+			start := strings.Index(arg[cursor:], "$(")
+			if start < 0 {
+				break
+			}
+			start += cursor
+			end := strings.IndexByte(arg[start+2:], ')')
+			if end < 0 {
+				break
+			}
+			end += start + 2
+			name := arg[start+2 : end]
+			if !validKubeEnvName(name) {
+				cursor = end + 1
+				continue
+			}
+			if start > 0 && arg[start-1] == '$' {
+				return nil, fmt.Errorf("argv[%d] uses escaped, unexpanded $(%s)", i, name)
+			}
+			if name != "HOST_IP" && name != "NODE_IP" {
+				if hasEnvName(env, name) {
+					return nil, fmt.Errorf("argv[%d] uses unsupported dynamic environment value $(%s)", i, name)
+				}
+				// An undeclared name stays byte-for-byte in CRI. System shell
+				// scripts use this shape for command substitution.
+				cursor = end + 1
+				continue
+			}
+			if !hasHostIPDownwardEnv(env, name) {
+				return nil, fmt.Errorf("argv[%d] uses $(%s) without a unique status.hostIP downward-API env", i, name)
+			}
+			names = append(names, name)
+			cursor = end + 1
+		}
+		if len(names) != 0 {
+			sort.Strings(names)
+			out = append(out, allowlist.ArgvEnvBinding{Index: offset + i, Names: slices.Compact(names)})
+		}
+	}
+	return out, nil
+}
+
+func validKubeEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hasHostIPDownwardEnv(env []corev1.EnvVar, name string) bool {
+	matches := 0
+	for _, item := range env {
+		if item.Name != name {
+			continue
+		}
+		matches++
+		if item.Value != "" || item.ValueFrom == nil || item.ValueFrom.FieldRef == nil || item.ValueFrom.FieldRef.FieldPath != "status.hostIP" {
+			return false
+		}
+	}
+	return matches == 1
+}
+
+func hasEnvName(env []corev1.EnvVar, name string) bool {
+	for _, item := range env {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // The implicit ServiceAccount mount does not appear in Container.VolumeMounts
@@ -203,22 +323,23 @@ func volumeKinds(volumes []corev1.Volume) (map[string]string, error) {
 		var kind string
 		switch {
 		case volume.EmptyDir != nil:
-			kind = "empty-dir"
+			if volume.EmptyDir.Medium == corev1.StorageMediumMemory {
+				kind = "private"
+			} else {
+				kind = "node"
+			}
 		case volume.ConfigMap != nil:
-			kind = "configmap"
+			kind = "node"
 		case volume.Secret != nil:
-			kind = "secret"
+			kind = "node"
 		case volume.Projected != nil:
-			kind = "projected"
+			kind = "node"
 		case volume.DownwardAPI != nil:
-			kind = "downward-api"
+			kind = "node"
 		case volume.HostPath != nil:
 			kind = "node"
 		case volume.PersistentVolumeClaim != nil:
-			// CRI exposes the resolved kubelet bind source, not the Kubernetes
-			// volume object. The enforcer can prove that this is a pod-scoped
-			// host bind, but it cannot prove the PVC name.
-			kind = "host-path"
+			kind = "node"
 		default:
 			return nil, fmt.Errorf("volume %s has an unsupported source for exact policy", volume.Name)
 		}

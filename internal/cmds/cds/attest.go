@@ -517,8 +517,9 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 			return unnamed(slog.LevelError, "inventory reported a malformed container digest", "error", err)
 		}
 		canonical = append(canonical, workloadclaims.SandboxContainer{
-			Digest: digest.String(), Argv: c.Argv,
+			Name: c.Name, Role: c.Role, Stopped: c.Stopped, Digest: digest.String(), Argv: c.Argv,
 			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			EnvValues:      c.EnvValues,
 			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
 		})
 		containerSet[digest.String()] = struct{}{}

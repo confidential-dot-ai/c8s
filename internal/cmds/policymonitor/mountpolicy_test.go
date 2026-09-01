@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/mountidentity"
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"golang.org/x/sys/unix"
 )
 
 // writeSpec writes a bundle config.json carrying the fields workload policy is
@@ -120,9 +122,12 @@ func TestWorkloadMountPolicy(t *testing.T) {
 }
 
 func TestEnvNamesDropValues(t *testing.T) {
-	got := envNames([]string{"PATH=/bin", "TOKEN=s3cret", "NOEQUALS"})
-	if strings.Join(got, ",") != "PATH,TOKEN" {
+	got, values := envObservation([]string{"PATH=/bin", "TOKEN=s3cret", "NOEQUALS", "HOST_IP=10.0.0.7"})
+	if strings.Join(got, ",") != "HOST_IP,PATH,TOKEN" {
 		t.Errorf("envNames = %v, want the names of the two NAME=value entries", got)
+	}
+	if len(values) != 1 || values["HOST_IP"] != "10.0.0.7" {
+		t.Fatalf("public env values = %v", values)
 	}
 	for _, n := range got {
 		if strings.Contains(n, "s3cret") {
@@ -132,12 +137,54 @@ func TestEnvNamesDropValues(t *testing.T) {
 }
 
 func TestBindMountDestinationsIgnoresPseudoFilesystems(t *testing.T) {
-	got := bindMountDestinations([]ociMount{
+	got, kinds := bindMountObservationWithEvidence([]ociMount{
 		{Destination: "/proc", Source: "proc"},
 		{Destination: "/data", Source: "/run/kata-containers/sandbox/storage/x"},
 		{Destination: "/dev/shm", Source: "/run/kata-containers/sandbox/shm"},
-	})
+	}, func(string) (mountidentity.Evidence, error) { return mountidentity.Evidence{}, os.ErrNotExist })
 	if strings.Join(got, ",") != "/data,/dev/shm" {
-		t.Errorf("bindMountDestinations = %v, want only the bind destinations", got)
+		t.Errorf("bindMountObservation = %v, want only the bind destinations", got)
+	}
+	if kinds["/data"] != "node" || kinds["/dev/shm"] != "node" {
+		t.Errorf("bind provenance = %v, want conservative node provenance", kinds)
+	}
+}
+
+func TestGuestMountProvenanceDoesNotTrustSourceNames(t *testing.T) {
+	mounts := []ociMount{
+		{Destination: "/public-tls", Source: "/run/kata-containers/sandbox/ephemeral/public-tls"},
+		{Destination: "/config", Source: "/run/kata-containers/shared/configmap/config"},
+	}
+	_, kinds := bindMountObservationWithEvidence(mounts, func(path string) (mountidentity.Evidence, error) {
+		if strings.Contains(path, "public-tls") {
+			return mountidentity.Evidence{Filesystem: int64(unix.TMPFS_MAGIC), Mountpoint: true, Canonical: true}, nil
+		}
+		return mountidentity.Evidence{Mountpoint: true, Canonical: true}, nil
+	})
+	if kinds["/public-tls"] != "private" {
+		t.Fatalf("guest tmpfs = %q, want private", kinds["/public-tls"])
+	}
+	if kinds["/config"] != "node" {
+		t.Fatalf("host-selected configmap-like path = %q, want node", kinds["/config"])
+	}
+	spoofs := []ociMount{
+		{Destination: "/public-tls", Source: "/dev/shm"},
+		{Destination: "/public-tls", Source: "/run/kata-containers/sandbox/ephemeral"},
+		{Destination: "/public-tls", Source: "/run/kata-containers/sandbox/ephemeral/public-tls/subdir"},
+		{Destination: "/public-tls", Source: "/run/kata-containers/shared/ephemeral/public-tls"},
+	}
+	for _, spoof := range spoofs {
+		_, kinds = bindMountObservationWithEvidence([]ociMount{spoof}, func(string) (mountidentity.Evidence, error) {
+			return mountidentity.Evidence{Filesystem: int64(unix.TMPFS_MAGIC), Mountpoint: true, Canonical: true}, nil
+		})
+		if kinds["/public-tls"] != "node" {
+			t.Errorf("unexpected guest tmpfs source %q = %q, want node", spoof.Source, kinds["/public-tls"])
+		}
+	}
+	_, kinds = bindMountObservationWithEvidence(mounts[:1], func(string) (mountidentity.Evidence, error) {
+		return mountidentity.Evidence{Filesystem: int64(unix.TMPFS_MAGIC), Canonical: true}, nil
+	})
+	if kinds["/public-tls"] != "node" {
+		t.Fatalf("tmpfs path without a kernel mount point = %q, want node", kinds["/public-tls"])
 	}
 }

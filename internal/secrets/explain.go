@@ -24,11 +24,15 @@ const ExplainRoute = "/secrets-explain/{sandboxID}"
 // the response for wire compatibility. It is always false because exact policy
 // now matches all c8s helpers instead of dropping them.
 type ReportedContainer struct {
+	Name           string            `json:"name,omitempty"`
+	Role           string            `json:"role,omitempty"`
+	Stopped        bool              `json:"stopped,omitempty"`
 	Digest         string            `json:"digest"`
 	Argv           []string          `json:"argv"`
 	BindMounts     []string          `json:"bindMounts,omitempty"`
 	BindMountKinds map[string]string `json:"bindMountKinds,omitempty"`
 	EnvNames       []string          `json:"envNames,omitempty"`
+	EnvValues      map[string]string `json:"envValues,omitempty"`
 	MountsObserved bool              `json:"mountsObserved"`
 	EnvObserved    bool              `json:"envObserved"`
 	Injected       bool              `json:"injected"`
@@ -42,13 +46,17 @@ type EntryVerdict struct {
 	// MissingMains is the main containers this entry declares that nothing
 	// running satisfies.
 	MissingMains []MissingContainer `json:"missingMains,omitempty"`
-	Matches      bool               `json:"matches"`
+	// CardinalityMismatch means all items match alone, but no one-to-one
+	// assignment covers both the observed set and each required main.
+	CardinalityMismatch bool `json:"cardinalityMismatch,omitempty"`
+	Matches             bool `json:"matches"`
 	// HasGrant reports whether a matching entry would release anything.
 	HasGrant bool `json:"hasGrant"`
 }
 
 // MissingContainer names a declared main the sandbox is not running.
 type MissingContainer struct {
+	Name   string `json:"name,omitempty"`
 	Digest string `json:"digest"`
 	Image  string `json:"image,omitempty"`
 }
@@ -163,16 +171,18 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 	var candidates []pkgallowlist.RunningContainer
 	for _, c := range reported {
 		entry := ReportedContainer{
-			Digest: c.Digest, Argv: c.Argv,
+			Name: c.Name, Role: c.Role, Stopped: c.Stopped, Digest: c.Digest, Argv: c.Argv,
 			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			EnvValues:      c.EnvValues,
 			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
 			Injected: false,
 		}
 		resp.Reported = append(resp.Reported, entry)
 		resp.Candidates = append(resp.Candidates, entry)
 		candidates = append(candidates, pkgallowlist.RunningContainer{
-			Digest: c.Digest, Argv: c.Argv,
+			Name: c.Name, Role: c.Role, Stopped: c.Stopped, Digest: c.Digest, Argv: c.Argv,
 			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			EnvValues:      c.EnvValues,
 			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
 		})
 	}
@@ -185,19 +195,19 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 	for _, name := range sortedNames(al.Workloads) {
 		d := al.Workloads[name].Diff(candidates)
 		v := EntryVerdict{
-			Name:     name,
-			Matches:  d.Describes(),
-			HasGrant: al.Workloads[name].Secrets != nil,
+			Name: name, CardinalityMismatch: d.CardinalityMismatch,
+			Matches: d.Describes(), HasGrant: al.Workloads[name].Secrets != nil,
 		}
 		for _, f := range d.Foreign {
 			v.Foreign = append(v.Foreign, ReportedContainer{
-				Digest: f.Digest, Argv: f.Argv,
+				Name: f.Name, Role: f.Role, Stopped: f.Stopped, Digest: f.Digest, Argv: f.Argv,
 				BindMounts: f.BindMounts, BindMountKinds: f.BindMountKinds, EnvNames: f.EnvNames,
+				EnvValues:      f.EnvValues,
 				MountsObserved: f.MountsObserved, EnvObserved: f.EnvObserved,
 			})
 		}
 		for _, m := range d.MissingMains {
-			v.MissingMains = append(v.MissingMains, MissingContainer{Digest: m.Digest.String(), Image: m.Image})
+			v.MissingMains = append(v.MissingMains, MissingContainer{Name: m.Name, Digest: m.Digest.String(), Image: m.Image})
 		}
 		resp.Entries = append(resp.Entries, v)
 		if v.Matches {

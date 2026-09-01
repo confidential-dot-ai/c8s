@@ -15,9 +15,11 @@ import (
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
+	"github.com/confidential-dot-ai/c8s/internal/mountidentity"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -44,9 +46,10 @@ const (
 // contains the static cold-boot policy. After that pull, it contains only the
 // CDS policy. Swapped as a unit.
 type policySnapshot struct {
-	index   *allowlist.Index
-	version uint64
-	digest  string
+	index         *allowlist.Index
+	version       uint64
+	digest        string
+	authenticated bool
 }
 
 // policyStore holds the current admission snapshot. A single writer (the pull
@@ -56,6 +59,10 @@ type policySnapshot struct {
 type policyStore struct {
 	transitionGuard func(*allowlist.Allowlist, *allowlist.Index) error
 	snap            atomic.Pointer[policySnapshot]
+	// admission makes the live-runtime check and policy activation atomic with
+	// each CreateContainer decision and its inventory record. Lock order is
+	// admission then inventory.
+	admission sync.RWMutex
 }
 
 // newPolicyStore seeds the store with the floor alone (version 0) so admission
@@ -79,10 +86,9 @@ func (s *policyStore) setTransitionGuard(guard func(*allowlist.Allowlist, *allow
 }
 
 // apply replaces the cold-boot policy with the authenticated CDS policy at
-// version, unless version is below the applied one. The bootstrap digests do
-// not survive this transition unless CDS also names them. Reports whether it
-// applied. Single-writer: only the pull loop calls it, so the
-// read-compare-store needs no lock against other writers.
+// version. After that first pull, only a greater version can apply. The
+// bootstrap digests do not survive this transition unless CDS also names them.
+// Reports whether it applied.
 //
 // The applied version is process-local (newPolicyStore starts at 0), so
 // rollback is only rejected within a process lifetime: after a restart the first
@@ -100,7 +106,9 @@ func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 // a partial steady policy cannot strand a running c8s component at its next
 // restart. The caller logs the error and keeps the last authenticated policy.
 func (s *policyStore) applyChecked(pulled *allowlist.Allowlist, version uint64) (bool, error) {
-	if cur := s.snap.Load(); cur != nil && version < cur.version {
+	s.admission.Lock()
+	defer s.admission.Unlock()
+	if cur := s.snap.Load(); cur != nil && cur.authenticated && version <= cur.version {
 		return false, nil
 	}
 	if pulled == nil {
@@ -113,8 +121,9 @@ func (s *policyStore) applyChecked(pulled *allowlist.Allowlist, version uint64) 
 		}
 	}
 	s.snap.Store(&policySnapshot{
-		index:   index,
-		version: version,
+		index:         index,
+		version:       version,
+		authenticated: true,
 		// Hash the exact normalized document that CDS served. Rebuilding it
 		// through a merge changes JSON null maps to empty maps and produces a
 		// different canonical digest for the same pull.
@@ -302,7 +311,7 @@ func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) erro
 // fail-closed, and logged at error because it costs the pod its claim.
 //
 // INVARIANT: callers record what runs, not what passed the checks.
-func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) {
+func (p *plugin) recordForInventory(ctx context.Context, pod *api.PodSandbox, ctr *api.Container, imageRef string) {
 	if p.inventory == nil {
 		return
 	}
@@ -314,49 +323,82 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 			p.logger.Error("cannot resolve the image digest of a running container; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
 		}
 	}
-	p.recordDigest(ctr, digest)
+	p.recordDigest(pod, ctr, digest)
 }
 
 // recordUncheckedForInventory records the digest inlined in the reference
 // without resolving; the pre-Ready hook must answer inside NRI's
 // plugin_request_timeout, so recording adds no containerd round-trip.
-func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) {
-	p.recordDigest(ctr, extractDigest(imageRef))
+func (p *plugin) recordUncheckedForInventory(pod *api.PodSandbox, ctr *api.Container, imageRef string) {
+	p.recordDigest(pod, ctr, extractDigest(imageRef))
 }
 
 // recordDigest is the only inventory.record call site. ctr.Args is the
 // effective OCI process.args, the same value the checks read.
-func (p *plugin) recordDigest(ctr *api.Container, digest string) {
+func (p *plugin) recordDigest(pod *api.PodSandbox, ctr *api.Container, digest string) {
 	if p.inventory == nil {
 		return
 	}
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), observeCRIContainer(ctr))
+	observed := observeCRIContainer(pod, ctr)
+	running := observed.running(ctr.GetName(), digest, ctr.GetArgs())
+	role := ""
+	if snap := p.policy.current(); snap != nil && snap.index != nil {
+		role = snap.index.MatchingRole(running)
+	}
+	observed.role = role
+	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), observed)
 }
 
 // containerObservation carries the fields NRI reports from the effective OCI
-// container. Environment values are not retained. A bind mount is a mount with
-// type "bind", or an absolute source for runtimes that omit the type.
+// container. It retains only public HOST_IP and NODE_IP values for argv
+// binding. A bind mount has type "bind", or an absolute source when a runtime
+// omits the type.
 type containerObservation struct {
+	role           string
 	bindMounts     []string
 	bindMountKinds map[string]string
 	envNames       []string
+	envValues      map[string]string
 }
 
-func observeCRIContainer(ctr *api.Container) containerObservation {
-	out := containerObservation{bindMountKinds: map[string]string{}}
+func (o containerObservation) running(name, digest string, argv []string) allowlist.RunningContainer {
+	return allowlist.RunningContainer{
+		Name: name, Digest: digest, Argv: argv,
+		BindMounts: o.bindMounts, BindMountKinds: o.bindMountKinds, EnvNames: o.envNames,
+		EnvValues:      o.envValues,
+		MountsObserved: true, EnvObserved: true,
+	}
+}
+
+func observeCRIContainer(pod *api.PodSandbox, ctr *api.Container) containerObservation {
+	out := containerObservation{bindMountKinds: map[string]string{}, envValues: map[string]string{}}
+	podUID := ""
+	if pod != nil {
+		podUID = pod.GetUid()
+	}
 	for _, m := range ctr.GetMounts() {
 		if m == nil || (m.GetType() != "bind" && !filepath.IsAbs(m.GetSource())) {
 			continue
 		}
 		if destination := m.GetDestination(); filepath.IsAbs(destination) {
 			out.bindMounts = append(out.bindMounts, destination)
-			out.bindMountKinds[destination] = classifyMountSource(m.GetSource())
+			out.bindMountKinds[destination] = classifyMountSource(podUID, ctr.GetName(), m.GetSource())
 		}
 	}
+	duplicatePublic := map[string]bool{}
 	for _, entry := range ctr.GetEnv() {
-		name, _, _ := strings.Cut(entry, "=")
+		name, value, _ := strings.Cut(entry, "=")
 		if name != "" {
 			out.envNames = append(out.envNames, name)
+		}
+		if name != "HOST_IP" && name != "NODE_IP" {
+			continue
+		}
+		if _, exists := out.envValues[name]; exists {
+			delete(out.envValues, name)
+			duplicatePublic[name] = true
+		} else if !duplicatePublic[name] {
+			out.envValues[name] = value
 		}
 	}
 	sort.Strings(out.bindMounts)
@@ -366,24 +408,52 @@ func observeCRIContainer(ctr *api.Container) containerObservation {
 	return out
 }
 
-func classifyMountSource(source string) string {
-	switch {
-	case strings.Contains(source, "/volumes/kubernetes.io~empty-dir/"):
-		return "empty-dir"
-	case strings.Contains(source, "/volumes/kubernetes.io~configmap/"):
-		return "configmap"
-	case strings.Contains(source, "/volumes/kubernetes.io~secret/"):
-		return "secret"
-	case strings.Contains(source, "/volumes/kubernetes.io~projected/"):
-		return "projected"
-	case strings.Contains(source, "/volumes/kubernetes.io~downward-api/"):
-		return "downward-api"
-	case strings.Contains(source, "/var/lib/kubelet/pods/"):
-		return "host-path"
-	case filepath.IsAbs(source):
+func classifyMountSource(podUID, containerName, source string) string {
+	return classifyMountSourceWithEvidence(podUID, containerName, source, mountidentity.Observe)
+}
+
+const kubeletPodsRoot = "/var/lib/kubelet/pods"
+
+func classifyMountSourceWithEvidence(podUID, containerName, source string, observe func(string) (mountidentity.Evidence, error)) string {
+	if !filepath.IsAbs(source) {
+		return "unknown"
+	}
+	clean := filepath.Clean(source)
+	rel, err := filepath.Rel(kubeletPodsRoot, clean)
+	if err != nil || rel == "." || rel == "" || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "node"
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || podUID == "" || parts[0] != podUID {
+		return "node"
+	}
+	if parts[1] == "volume-subpaths" {
+		if len(parts) < 5 || parts[3] != containerName {
+			return "node"
+		}
+		if evidence, err := observe(clean); err == nil && evidence.Canonical && evidence.Mountpoint && evidence.Filesystem == int64(unix.TMPFS_MAGIC) {
+			return "private"
+		}
+		// CRI does not carry the original plugin for a subPath. Non-tmpfs
+		// subPaths are node provenance, which is safe and deployable without a
+		// false ConfigMap/PVC claim.
+		return "node"
+	}
+	if len(parts) < 4 || parts[1] != "volumes" {
+		return "node"
+	}
+	switch parts[2] {
+	case "kubernetes.io~empty-dir":
+		if evidence, err := observe(clean); err != nil {
+			return "unknown"
+		} else if evidence.Canonical && evidence.Mountpoint && evidence.Filesystem == int64(unix.TMPFS_MAGIC) {
+			return "private"
+		}
 		return "node"
 	default:
-		return "unknown"
+		// CRI does not prove Kubernetes source ownership. Do not call a source
+		// Pod-private from the kubelet path alone.
+		return "node"
 	}
 }
 
@@ -514,13 +584,14 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 
 	// Floor digests admit regardless of process policy. Workload digests require
 	// the effective argv, bind destinations, and environment names to satisfy one
-	// entry. NRI supplies all three from the effective OCI container. Values of
-	// environment variables are not copied or logged.
-	running := allowlist.RunningContainer{Digest: digest, Argv: argv}
+	// entry. NRI supplies all three from the effective OCI container. Only the
+	// public HOST_IP and NODE_IP values are copied, and no values are logged.
+	running := allowlist.RunningContainer{Name: containerName, Digest: digest, Argv: argv}
 	if len(observed) == 1 {
 		running.BindMounts = observed[0].bindMounts
 		running.BindMountKinds = observed[0].bindMountKinds
 		running.EnvNames = observed[0].envNames
+		running.EnvValues = observed[0].envValues
 		running.MountsObserved = true
 		running.EnvObserved = true
 	}
@@ -571,7 +642,7 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), observeCRIContainer(ctr))
+		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), observeCRIContainer(pod, ctr))
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
@@ -715,8 +786,24 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 
 	// If not ready yet, defer the check until after CDS init completes.
 	if !p.Ready() {
+		unlockAdmission := p.lockAdmissionRead()
+		defer unlockAdmission()
 		p.logger.Info("plugin not ready, deferring startup check",
 			"pods", len(pods), "containers", len(ctrs))
+		// The first authenticated pull can run before the deferred check. Seed
+		// the transition inventory now, without a containerd round-trip, so that
+		// pull cannot remove the cold floor while a synchronized container is
+		// absent from the live-runtime guard. The deferred check resolves tags
+		// later and overwrites these records.
+		if p.inventory != nil {
+			podByID := make(map[string]*api.PodSandbox, len(pods))
+			for _, pod := range pods {
+				podByID[pod.GetId()] = pod
+			}
+			for _, ctr := range ctrs {
+				p.recordUncheckedForInventory(podByID[ctr.GetPodSandboxId()], ctr, ctr.GetAnnotations()[annotationImageName])
+			}
+		}
 		p.deferredMu.Lock()
 		p.deferredPods = pods
 		p.deferredCtrs = ctrs
@@ -742,15 +829,19 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 
 	var killed, failed int
 	for _, ctr := range ctrs {
+		unlockAdmission := p.lockAdmissionRead()
 		// Recorded ahead of the lookup that can skip it; the record needs no pod.
 		imageRef := ctr.GetAnnotations()[annotationImageName]
-		p.recordForInventory(ctx, ctr, imageRef)
 
 		pod := podByID[ctr.GetPodSandboxId()]
+		p.recordForInventory(ctx, pod, ctr, imageRef)
 		if pod == nil {
+			unlockAdmission()
 			continue
 		}
-		if verdict, _ := p.checkContainer(ctx, cfg, pod, ctr, imageRef); verdict != verdictDeny {
+		verdict, _ := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
+		unlockAdmission()
+		if verdict != verdictDeny {
 			continue
 		}
 		// A running container in an exempt namespace is never killed: stopping a
@@ -830,6 +921,8 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 // CreateContainer is called when a container is being created.
 // Returning an error will reject the container creation.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	unlockAdmission := p.lockAdmissionRead()
+	defer unlockAdmission()
 	cfg := p.cfg
 	imageRef := ctr.GetAnnotations()[annotationImageName]
 
@@ -837,7 +930,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
 			return nil, nil, err
 		}
-		p.recordUncheckedForInventory(ctr, imageRef)
+		p.recordUncheckedForInventory(pod, ctr, imageRef)
 		return nil, nil, nil
 	}
 
@@ -846,8 +939,16 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, fmt.Errorf("%s", reason)
 	}
 
-	p.recordForInventory(ctx, ctr, imageRef)
+	p.recordForInventory(ctx, pod, ctr, imageRef)
 	return nil, nil, nil
+}
+
+func (p *plugin) lockAdmissionRead() func() {
+	if p.policy == nil {
+		return func() {}
+	}
+	p.policy.admission.RLock()
+	return p.policy.admission.RUnlock
 }
 
 // extractDigest returns the canonical "sha256:<64hex>" digest from an image

@@ -11,11 +11,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
+	"github.com/confidential-dot-ai/c8s/internal/mountidentity"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/containerd/nri/pkg/api"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -933,8 +936,12 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.inventory.containers) != 0 {
-		t.Fatal("nothing should be recorded before the plugin is ready")
+	seeded, ok := p.inventory.containers[ctr.Id]
+	if !ok {
+		t.Fatal("synchronized container was absent from the pre-ready transition inventory")
+	}
+	if seeded.digest != pushDigestA {
+		t.Fatalf("seeded digest = %q, want %q", seeded.digest, pushDigestA)
 	}
 
 	p.SetReady()
@@ -1457,22 +1464,135 @@ func TestObserveCRIContainerReportsBindDestinationsAndEnvNames(t *testing.T) {
 			{Type: "tmpfs", Source: "tmpfs", Destination: "/tmp"},
 			{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~empty-dir/a", Destination: "/app/a"},
 		},
-		Env: []string{"PATH=/bin", "TOKEN=secret", "PATH=/usr/bin", "EMPTY="},
+		Env: []string{"PATH=/bin", "TOKEN=secret", "PATH=/usr/bin", "EMPTY=", "HOST_IP=10.0.0.7", "HOST_IP=10.0.0.8"},
 	}
-	got := observeCRIContainer(ctr)
+	got := observeCRIContainer(&api.PodSandbox{Uid: "p1"}, ctr)
 	if !slices.Equal(got.bindMounts, []string{"/app/a", "/app/b"}) {
 		t.Fatalf("bind mounts = %v", got.bindMounts)
 	}
-	if got.bindMountKinds["/app/a"] != "empty-dir" || got.bindMountKinds["/app/b"] != "configmap" {
+	if got.bindMountKinds["/app/a"] != "unknown" || got.bindMountKinds["/app/b"] != "node" {
 		t.Fatalf("bind mount kinds = %v", got.bindMountKinds)
 	}
-	if !slices.Equal(got.envNames, []string{"EMPTY", "PATH", "TOKEN"}) {
+	if !slices.Equal(got.envNames, []string{"EMPTY", "HOST_IP", "PATH", "TOKEN"}) {
 		t.Fatalf("env names = %v", got.envNames)
 	}
 	for _, item := range got.envNames {
 		if strings.Contains(item, "secret") {
 			t.Fatal("environment value entered the observation")
 		}
+	}
+	if _, ok := got.envValues["HOST_IP"]; ok {
+		t.Fatal("duplicate HOST_IP produced an argv-binding value")
+	}
+}
+
+func TestMountSourceClassificationRejectsPathAndPodSpoofing(t *testing.T) {
+	tmpfs := func(string) (mountidentity.Evidence, error) {
+		return mountidentity.Evidence{Filesystem: int64(unix.TMPFS_MAGIC), Mountpoint: true, Canonical: true}, nil
+	}
+	disk := func(string) (mountidentity.Evidence, error) {
+		return mountidentity.Evidence{Mountpoint: true, Canonical: true}, nil
+	}
+	current := "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~empty-dir/public-tls"
+	if got := classifyMountSourceWithEvidence("p1", "app", current, tmpfs); got != "private" {
+		t.Fatalf("current Pod tmpfs = %q, want private", got)
+	}
+	if got := classifyMountSourceWithEvidence("p1", "app", current, disk); got != "node" {
+		t.Fatalf("current Pod disk emptyDir = %q, want node", got)
+	}
+	notMountpoint := func(string) (mountidentity.Evidence, error) {
+		return mountidentity.Evidence{Filesystem: int64(unix.TMPFS_MAGIC), Canonical: true}, nil
+	}
+	if got := classifyMountSourceWithEvidence("p1", "app", current, notMountpoint); got != "node" {
+		t.Fatalf("tmpfs directory without mount identity = %q, want node", got)
+	}
+	for name, source := range map[string]string{
+		"victim UID":          "/var/lib/kubelet/pods/victim/volumes/kubernetes.io~empty-dir/public-tls",
+		"UID prefix":          "/var/lib/kubelet/pods/p1-evil/volumes/kubernetes.io~empty-dir/public-tls",
+		"embedded substring":  "/host/var/lib/kubelet/pods/p1/volumes/kubernetes.io~empty-dir/public-tls",
+		"hostPath plugin":     "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~host-path/public-tls",
+		"wrong subPath owner": "/var/lib/kubelet/pods/p1/volume-subpaths/public-tls/other/0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := classifyMountSourceWithEvidence("p1", "app", source, tmpfs); got != "node" {
+				t.Fatalf("spoof source %q classified %q, want node", source, got)
+			}
+		})
+	}
+}
+
+func TestPolicyActivationIsAtomicWithContainerAdmissionAndRecord(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold floor"}))
+	inventory := newAdmissionInventory(t.TempDir(), store)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store.setTransitionGuard(func(policy *allowlist.Allowlist, index *allowlist.Index) error {
+		close(entered)
+		<-release
+		return inventory.admitsLiveRuntime(policy, index)
+	})
+	p := newTestPlugin(&config{
+		Policy:    policyConfig{Mode: ModeFailClosed},
+		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "cold floor"}},
+	})
+	p.policy = store
+	p.inventory = inventory
+	p.SetReady()
+
+	active := floorAllowlist(map[string]string{pushDigestB: "active"})
+	applyDone := make(chan error, 1)
+	go func() {
+		applied, err := store.applyChecked(active, 1)
+		if err == nil && !applied {
+			err = errors.New("policy was not applied")
+		}
+		applyDone <- err
+	}()
+	<-entered
+
+	pod := &api.PodSandbox{Id: "sandbox", Name: "pod", Namespace: "default", Uid: "p1"}
+	ctr := makeCtrWithImage(pod.Id, "old-floor", "repo@"+pushDigestA)
+	createDone := make(chan error, 1)
+	go func() {
+		_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+		createDone <- err
+	}()
+	select {
+	case err := <-createDone:
+		t.Fatalf("container admission crossed an in-progress transition: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-applyDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-createDone; err == nil {
+		t.Fatal("old-floor container entered after active policy transition")
+	}
+	if _, ok := inventory.containers[ctr.Id]; ok {
+		t.Fatal("denied old-floor container was recorded as running")
+	}
+}
+
+func TestPreReadySynchronizeSeedsPolicyTransitionGuard(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold floor"}))
+	p := newTestPlugin(&config{
+		Policy:    policyConfig{Mode: ModeFailClosed},
+		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "cold floor"}},
+	})
+	p.policy = store
+	p.inventory = newAdmissionInventory(t.TempDir(), store)
+	store.setTransitionGuard(p.inventory.admitsLiveRuntime)
+	pod := &api.PodSandbox{Id: "sandbox", Name: "system", Namespace: "c8s-system", Uid: "p1"}
+	ctr := makeCtrWithImage(pod.Id, "system", "repo@"+pushDigestA)
+	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.inventory.containers[ctr.Id]; !ok {
+		t.Fatal("pre-ready synchronization omitted a live container from the transition inventory")
+	}
+	if applied, err := store.applyChecked(floorAllowlist(map[string]string{pushDigestB: "active"}), 1); err == nil || applied {
+		t.Fatalf("policy uncovered a synchronized live container: applied=%v err=%v", applied, err)
 	}
 }
 
@@ -1482,12 +1602,12 @@ func TestCheckContainerEnforcesObservedMountAndEnvPolicy(t *testing.T) {
 	c.Mounts = allowlist.MountPolicy{
 		Policy:       allowlist.PolicyExact,
 		Destinations: []string{"/config"},
-		Kinds:        map[string]string{"/config": "configmap"},
+		Kinds:        map[string]string{"/config": "node"},
 	}
 	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH"}}
 	al.Workloads["w"] = allowlist.Workload{Containers: []allowlist.Container{c}}
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "bootstrap"}}}, al)
-	pod := &api.PodSandbox{Namespace: "default", Name: "app"}
+	pod := &api.PodSandbox{Namespace: "default", Name: "app", Uid: "p1"}
 	base := &api.Container{
 		Name: "app", Args: []string{"/bin/app", "--serve"},
 		Mounts: []*api.Mount{{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~configmap/config", Destination: "/config"}},
@@ -1510,9 +1630,32 @@ func TestCheckContainerEnforcesObservedMountAndEnvPolicy(t *testing.T) {
 		t.Fatal("undeclared bind destination was admitted")
 	}
 
-	withSubstitutedMount := proto.Clone(base).(*api.Container)
-	withSubstitutedMount.Mounts = []*api.Mount{{Type: "bind", Source: "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~host-path/config", Destination: "/config"}}
-	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, withSubstitutedMount, "repo@"+pushDigestB); verdict != verdictDeny {
-		t.Fatal("host-path substitution at a declared destination was admitted")
+}
+
+func TestCheckContainerBindsFinalArgvToUniqueCRIEnvValue(t *testing.T) {
+	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app", "--url=http://$(HOST_IP):8400"})
+	c := al.Workloads["w"].Containers[0]
+	c.Command.EnvBindings = []allowlist.ArgvEnvBinding{{Index: 1, Names: []string{"HOST_IP"}}}
+	c.Args = allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny}
+	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"HOST_IP"}}
+	al.Workloads["w"] = allowlist.Workload{Containers: []allowlist.Container{c}}
+	p, _ := newCachedPlugin(&config{
+		Policy:    policyConfig{Mode: ModeFailClosed},
+		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "bootstrap"}},
+	}, al)
+	pod := &api.PodSandbox{Namespace: "default", Name: "app", Uid: "p1"}
+	base := &api.Container{Name: "app", Args: []string{"/bin/app", "--url=http://10.0.0.7:8400"}, Env: []string{"HOST_IP=10.0.0.7"}}
+	if verdict, reason := p.checkContainer(context.Background(), p.cfg, pod, base, "repo@"+pushDigestB); verdict != verdictAllow {
+		t.Fatalf("bound final argv: verdict=%d reason=%q", verdict, reason)
+	}
+	changed := proto.Clone(base).(*api.Container)
+	changed.Env = []string{"HOST_IP=10.0.0.8"}
+	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, changed, "repo@"+pushDigestB); verdict != verdictDeny {
+		t.Fatal("changed downward-API value admitted the prior argv")
+	}
+	duplicate := proto.Clone(base).(*api.Container)
+	duplicate.Env = []string{"HOST_IP=10.0.0.7", "HOST_IP=10.0.0.8"}
+	if verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, duplicate, "repo@"+pushDigestB); verdict != verdictDeny {
+		t.Fatal("duplicate downward-API values admitted a bound argv")
 	}
 }

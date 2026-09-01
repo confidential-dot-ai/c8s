@@ -133,7 +133,7 @@ func TestMutatePodCertSidecarCarriesHostIPEnv(t *testing.T) {
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:      "image",
 		CDSURL:            "http://cds",
-		AttestationApiURL: "http://$(HOST_IP):8400",
+		AttestationApiURL: "http://__C8S_HOST_IP__:8400",
 		CertDir:           "/etc/c8s/certs",
 	})
 
@@ -1545,6 +1545,9 @@ func TestSidecarAttestationApiURLRebase(t *testing.T) {
 		{"http endpoint passes through", hostDir,
 			"http://attestation-api.c8s-system.svc:8400",
 			"http://attestation-api.c8s-system.svc:8400"},
+		{"operator host token becomes a tenant downward value", hostDir,
+			"http://__C8S_HOST_IP__:8400",
+			"http://$(HOST_IP):8400"},
 		{"socket outside the inventory dir passes through", hostDir,
 			"unix:///elsewhere/attest.sock",
 			"unix:///elsewhere/attest.sock"},

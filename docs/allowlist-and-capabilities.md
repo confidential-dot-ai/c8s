@@ -59,6 +59,7 @@ it does not, NRI keeps the cold-boot policy and retries.
       "initContainers": [],
       "containers": [
         {
+          "name": "vllm",
           "digest": "sha256:<vllm>",
           "image":  "docker.io/vllm/vllm-openai:v0.6.3",
           "command": { "policy": "exact", "argv": ["python3"] },
@@ -132,6 +133,16 @@ an allowlisted digest.
 
 The two policy fields mirror the Kubernetes container fields an operator already
 sets: `command` overrides the image `ENTRYPOINT`, `args` overrides `CMD`.
+
+Generated entries also pin the Kubernetes container `name`. The inventory
+records that name and the resolved `init` or `main` role. Complete-set matching
+uses a one-to-one assignment. One observed container cannot satisfy two
+declarations. A stopped main cannot satisfy a required live main. A stopped init
+can remain in the high-water record.
+
+An old entry with no names remains usable when each process tuple identifies
+only one role. An unnamed init and main with the same tuple are ambiguous. The
+parser rejects that entry and tells the operator to re-derive it with names.
 
 ### What the enforcers see
 
@@ -223,6 +234,33 @@ container always carries a mount table and an environment it never declared, so
 a `deny` default would refuse every real pod and adopting the field would mean
 adopting an outage. That makes these opt-in: a digest with no policy is
 constrained exactly as much as it was before.
+
+`mounts.kinds` records a small storage trust class. `private` is TEE-local
+memory. `node` means the source can be persistent or host-selected. New policy
+requires an exact class match. The node-CVM NRI reports `private` only for a
+canonical source under the current Pod UID, in the memory-emptyDir plugin
+location, that the kernel reports as an exact tmpfs mount point. A victim Pod
+path, a hostPath plugin, a symlink, an ordinary tmpfs directory, and a path that
+only contains a familiar substring all report as `node` or `unknown`.
+
+This check proves TEE-local memory and current-Pod placement together. It does
+not prove every Kubernetes volume type. The generator therefore classifies
+disk emptyDir, ConfigMap, Secret, Projected, PVC, service-account, and hostPath
+mounts as `node`. The older `pod` and Kubernetes kind values remain parseable
+for document compatibility, but they do not accept the new conservative `node`
+evidence. Re-derive those entries before this enforcer version becomes active.
+New generated policy does not claim that evidence.
+
+The pod-CVM OCI spec does not retain the original Kubernetes volume class.
+Policy-monitor reports `private` only for a canonical, exact tmpfs mount that is
+one direct child of kata-agent's fixed TEE-local ephemeral root,
+`/run/kata-containers/sandbox/ephemeral`. It reports every other bind source as
+`node`. This includes another guest tmpfs and a subdirectory below an ephemeral
+volume. It does not infer ConfigMap, Secret, or emptyDir from a host-selected
+path. This keeps exact policy deployable without a false source claim. A
+secret-bearing memory volume such as `public-tls` requires `private`, so a
+hostPath replacement fails. A `subPath` policy is `node` because both enforcers
+cannot prove the direct private-volume identity after that conversion.
 
 Two limits apply. They bind only digests a `workloads` entry names.
 floor digests are admitted on the digest alone, so `c8s allowlist add` does not
@@ -366,6 +404,18 @@ failure modes:
   guarantee needs an attested freshness / monotonic-counter mechanism the host
   cannot reset — a tracked follow-on.
 
+On node-CVM, the live-runtime guard and the policy pointer swap hold the same
+write lock that container admission reads. Admission holds its read lock until
+it records an allowed container. Thus, a container is fully checked and
+recorded before a transition, or it is checked against the new policy after the
+transition. It cannot enter through the old floor after the guard has passed.
+Node inventory reads use the same read lock. They cannot report roles from the
+new policy with the old policy digest or version.
+
+On pod-CVM, policy-monitor holds one overlay read lock across the final
+admission decision, role resolution, and inventory record. An overlay update
+cannot split those operations across two policy versions.
+
 ## Bootstrap
 
 The chart renders resolved c8s component digests into each node-CVM NRI
@@ -378,7 +428,19 @@ second time with those entries in the CDS seed.
 Use `c8s allowlist derive-system <rendered.yaml> --base <application.json>` for
 a manual Helm flow. `enableServiceLinks: false` is required. The command rejects
 floating images, `envFrom`, unsupported volume sources, and empty effective
-argv. It includes init containers and native sidecars.
+argv. It includes container names, init containers, and native sidecars. It
+also models the effective CRI inputs. `enableServiceLinks: false` removes
+workload Service variables. The exact environment admits only declared names
+and the kubelet `KUBERNETES_` API family.
+
+Kubernetes expands `$(NAME)` before NRI sees argv. The generated policy records
+an environment binding for `HOST_IP` or `NODE_IP` only when the rendered Pod has
+one `status.hostIP` downward-API env item with that name. NRI and policy-monitor
+observe the final argv and the effective CRI environment together. They admit
+the argv only when its expanded bytes match the one observed value. A missing,
+changed, or duplicate binding value fails closed. The operator carries a stable
+non-Kubernetes token and the webhook converts it to `$(HOST_IP)` only in the
+tenant Pod that kubelet will expand.
 
 The guest-baked seed remains a flat `sha256_digests` list — it is the floor,
 measured into the SNP launch digest, and keeping it digest-only means a policy
@@ -441,13 +503,13 @@ digest alone, so the process policy is not enforced — tag-form labels
 (which can move under the operator), and a summary of how many `any` policies a document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
-Two entries declaring the same containers with the same argv policy are an
+Two entries declaring the same containers with the same effective policy are an
 **error**, not a warning: release requires exactly one entry to describe a
 sandbox, so entries of the same shape either both match or neither does, and
 every pod resolving to them is refused whichever grant was meant. Nothing a
-workload can do resolves it. The shape compared is digests and argv policies per
-container list — the image label and the secret grant are excluded, since two
-entries alike but for their grants are exactly the case worth catching.
+workload can do resolves it. The shape includes container names, roles, digests,
+argv, mounts, and environment policy. The image label and the secret grant are
+excluded. Two entries alike only in those fields are the case worth catching.
 
 `workload apply` runs that check against the served allowlist as well as the
 file, because the entry a new one collides with is usually one already there.

@@ -1645,6 +1645,9 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 // the inventory's host directory onto the sidecar's mount of that directory
 // (workloadClaimsMounts); every other shape passes through verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
+	if strings.Contains(cfg.AttestationApiURL, "__C8S_HOST_IP__") {
+		return strings.ReplaceAll(cfg.AttestationApiURL, "__C8S_HOST_IP__", "$(HOST_IP)")
+	}
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL

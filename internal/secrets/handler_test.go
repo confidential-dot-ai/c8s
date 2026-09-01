@@ -135,6 +135,13 @@ func exactTestContainer(t *testing.T, digest string, argv ...string) pkgallowlis
 	}
 }
 
+func namedExactTestContainer(t *testing.T, name, digest string, argv ...string) pkgallowlist.Container {
+	t.Helper()
+	c := exactTestContainer(t, digest, argv...)
+	c.Name = name
+	return c
+}
+
 // leafFor mints a client certificate carrying sandboxID, as CDS stamps it.
 func leafFor(t *testing.T, sandboxID string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
@@ -195,16 +202,18 @@ func newHarness(t *testing.T) *harness {
 		// gate is only exercisable with more than one.
 		"api": {
 			InitContainers: []pkgallowlist.Container{
-				exactTestContainer(t, testInjected, "get-cert", "--san=x"),
-				exactTestContainer(t, testInjectedOld, "get-cert", "--san=x"),
+				namedExactTestContainer(t, "c8s-cert", testInjected, "get-cert", "--san=x"),
+				namedExactTestContainer(t, "c8s-cert-old", testInjectedOld, "get-cert", "--san=x"),
 			},
 			Containers: []pkgallowlist.Container{
 				{
+					Name:    "app",
 					Digest:  mustDigest(t, testAppImg),
 					Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/serve"}},
 					Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
 				},
 				{
+					Name:    "metrics",
 					Digest:  mustDigest(t, testAppImg2),
 					Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/metrics"}},
 					Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
@@ -220,9 +229,9 @@ func newHarness(t *testing.T) *harness {
 	inv := &fakeInventory{
 		keys: map[string]*ecdsa.PublicKey{testHost: signer.PublicKey()},
 		containers: []workloadclaims.SandboxContainer{
-			{Digest: testAppImg, Argv: []string{"/serve"}},
-			{Digest: testAppImg2, Argv: []string{"/metrics"}},
-			{Digest: testInjected, Argv: []string{"get-cert", "--san=x"}},
+			{Name: "app", Role: pkgallowlist.ContainerRoleMain, Digest: testAppImg, Argv: []string{"/serve"}},
+			{Name: "metrics", Role: pkgallowlist.ContainerRoleMain, Digest: testAppImg2, Argv: []string{"/metrics"}},
+			{Name: "c8s-cert", Role: pkgallowlist.ContainerRoleInit, Digest: testInjected, Argv: []string{"get-cert", "--san=x"}},
 		},
 	}
 	challenges := &fakeChallenges{used: map[string]bool{}}
@@ -256,9 +265,10 @@ func (hn *harness) declareBulkEntry(t *testing.T) *x509.Certificate {
 	}
 	al.Workloads["bulk"] = pkgallowlist.Workload{
 		InitContainers: []pkgallowlist.Container{
-			exactTestContainer(t, testInjected, "get-secret"),
+			namedExactTestContainer(t, "c8s-secret", testInjected, "get-secret"),
 		},
 		Containers: []pkgallowlist.Container{{
+			Name:    "bulk",
 			Digest:  mustDigest(t, testBulkImg),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/bulk"}},
 			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
@@ -273,8 +283,8 @@ func (hn *harness) declareBulkEntry(t *testing.T) *x509.Certificate {
 		hn.inv.bySandbox = map[string][]workloadclaims.SandboxContainer{}
 	}
 	hn.inv.bySandbox[testBulkSandbox] = []workloadclaims.SandboxContainer{
-		{Digest: testBulkImg, Argv: []string{"/bulk"}},
-		{Digest: testInjected, Argv: []string{"get-secret"}},
+		{Name: "bulk", Role: pkgallowlist.ContainerRoleMain, Digest: testBulkImg, Argv: []string{"/bulk"}},
+		{Name: "c8s-secret", Role: pkgallowlist.ContainerRoleInit, Digest: testInjected, Argv: []string{"get-secret"}},
 	}
 	leaf, _ := leafFor(t, testBulkSandbox)
 	return leaf
@@ -730,9 +740,9 @@ func TestMethodNotAllowed(t *testing.T) {
 func TestExactInjectedImageFromPreviousReleaseCanOverlap(t *testing.T) {
 	hn := newHarness(t)
 	hn.inv.containers = []workloadclaims.SandboxContainer{
-		{Digest: testAppImg, Argv: []string{"/serve"}},
-		{Digest: testAppImg2, Argv: []string{"/metrics"}},
-		{Digest: testInjectedOld, Argv: []string{"get-cert", "--san=x"}},
+		{Name: "app", Role: pkgallowlist.ContainerRoleMain, Digest: testAppImg, Argv: []string{"/serve"}},
+		{Name: "metrics", Role: pkgallowlist.ContainerRoleMain, Digest: testAppImg2, Argv: []string{"/metrics"}},
+		{Name: "c8s-cert-old", Role: pkgallowlist.ContainerRoleInit, Digest: testInjectedOld, Argv: []string{"get-cert", "--san=x"}},
 	}
 	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
 		t.Fatalf("pod running the previous injected image = %d, want 201", w.Code)

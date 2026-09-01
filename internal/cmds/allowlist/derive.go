@@ -20,10 +20,21 @@ type podTemplate struct {
 }
 
 type templateContainer struct {
-	Name    string   `json:"name"`
-	Image   string   `json:"image"`
-	Command []string `json:"command"`
-	Args    []string `json:"args"`
+	Name    string        `json:"name"`
+	Image   string        `json:"image"`
+	Command []string      `json:"command"`
+	Args    []string      `json:"args"`
+	Env     []templateEnv `json:"env"`
+}
+
+type templateEnv struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	ValueFrom *struct {
+		FieldRef *struct {
+			FieldPath string `json:"fieldPath"`
+		} `json:"fieldRef"`
+	} `json:"valueFrom"`
 }
 
 // podSpecOf finds the pod spec in a Pod or in any workload that carries a pod
@@ -60,11 +71,40 @@ func podSpecOf(data []byte) (podTemplate, error) {
 // An empty argv is Deny, never Exact: Exact requires equality against a
 // non-empty argv and the apply is rejected outright, and Any would be looser
 // than what the container actually runs.
-func argvPolicy(argv []string) allowlist.ArgvPolicy {
+func argvPolicy(argv []string, env []templateEnv) (allowlist.ArgvPolicy, error) {
 	if len(argv) == 0 {
-		return allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny}
+		return allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny}, nil
 	}
-	return allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: argv}
+	policy := allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: argv}
+	for i, arg := range argv {
+		var names []string
+		for _, name := range []string{"HOST_IP", "NODE_IP"} {
+			if strings.Contains(arg, "$$("+name+")") {
+				return allowlist.ArgvPolicy{}, fmt.Errorf("argv[%d] uses escaped $$(%s), which kubelet leaves literal", i, name)
+			}
+			if !strings.Contains(arg, "$("+name+")") {
+				continue
+			}
+			matches := 0
+			for _, item := range env {
+				if item.Name != name {
+					continue
+				}
+				matches++
+				if item.Value != "" || item.ValueFrom == nil || item.ValueFrom.FieldRef == nil || item.ValueFrom.FieldRef.FieldPath != "status.hostIP" {
+					return allowlist.ArgvPolicy{}, fmt.Errorf("argv[%d] uses $(%s) without a status.hostIP downward-API env", i, name)
+				}
+			}
+			if matches != 1 {
+				return allowlist.ArgvPolicy{}, fmt.Errorf("argv[%d] uses $(%s) without one unique status.hostIP downward-API env", i, name)
+			}
+			names = append(names, name)
+		}
+		if len(names) != 0 {
+			policy.EnvBindings = append(policy.EnvBindings, allowlist.ArgvEnvBinding{Index: i, Names: names})
+		}
+	}
+	return policy, nil
 }
 
 func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
@@ -78,11 +118,20 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 		if err != nil {
 			return nil, fmt.Errorf("container %q: %w", c.Name, err)
 		}
+		command, err := argvPolicy(c.Command, c.Env)
+		if err != nil {
+			return nil, fmt.Errorf("container %q command: %w", c.Name, err)
+		}
+		args, err := argvPolicy(c.Args, c.Env)
+		if err != nil {
+			return nil, fmt.Errorf("container %q args: %w", c.Name, err)
+		}
 		out = append(out, allowlist.Container{
+			Name:    c.Name,
 			Digest:  digest,
 			Image:   c.Image,
-			Command: argvPolicy(c.Command),
-			Args:    argvPolicy(c.Args),
+			Command: command,
+			Args:    args,
 		})
 	}
 	return out, nil
@@ -108,8 +157,8 @@ a container with a command and no args needs an args policy of "deny", because
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
 
-c8s injects its own sidecars and drops them before matching, so they are
-deliberately absent from the derived entry.`,
+Run this command against the admitted object. The entry must include every c8s
+helper because complete-set matching does not remove injected containers.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := readFileOrStdin(cmd, args[1])

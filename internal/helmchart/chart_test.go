@@ -233,6 +233,7 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		t.Fatalf("iptables-sync init container missing; have %v", containerNames(ds.Spec.Template.Spec.InitContainers))
 	}
 	for _, pair := range [][2]string{
+		// Kubelet expands this to the final value before NRI admission.
 		{"--node-ip", "$(NODE_IP)"},
 		{"--resync-period", "30s"},
 		{"--watchdog-period", "2s"},
@@ -2062,6 +2063,7 @@ func hasHostIPEnv(c corev1.Container) bool {
 // together.
 func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
+	const operatorURL = "--attestation-api-url=http://__C8S_HOST_IP__:8400"
 	// The exact shape `c8s install --cvm-mode=node` produces: the node image
 	// bakes attestation-api and nri-image-policy, so both chart components
 	// are off and consumers dial the baked host service via $(HOST_IP).
@@ -2110,7 +2112,7 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
 	}
 
-	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.
+	// ratls-mesh: hostNetwork, so HOST_IP is its own node IP.
 	mesh := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh")
 	if !slices.Contains(mesh.Args, "http://$(HOST_IP):8400") {
 		t.Errorf("ratls-mesh missing http://$(HOST_IP):8400 arg; have %v", mesh.Args)
@@ -2121,8 +2123,8 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 
 	// operator: forwards the string verbatim; the placeholder must NOT be
 	// expanded here, so the container must NOT define HOST_IP.
-	if !slices.Contains(renderedOperatorArgs(t, out), hostIPURL) {
-		t.Errorf("operator missing verbatim %q\n%v", hostIPURL, renderedOperatorArgs(t, out))
+	if !slices.Contains(renderedOperatorArgs(t, out), operatorURL) {
+		t.Errorf("operator missing stable forwarding token %q\n%v", operatorURL, renderedOperatorArgs(t, out))
 	}
 	op := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
 	if hasHostIPEnv(op) {

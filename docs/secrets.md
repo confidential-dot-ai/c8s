@@ -313,9 +313,10 @@ container would share the certificate volume, but the old drop rule would hide
 it from matching. With complete-set matching, that Pod gets no named
 certificate and no application secret.
 
-During an image update, an entry can name the old and new exact helper forms as
-init containers. A declared init container can be absent after it exits. Remove
-the old form after all old Pods are gone.
+Each declaration includes the Kubernetes container name. The inventory also
+reports that name, its resolved init or main role, and whether it stopped.
+Matching assigns observations to declarations one-to-one. A completed init can
+be absent or stopped. Every declared main must have a live observation.
 
 ## The grant
 
@@ -365,10 +366,10 @@ kept for operator-authored input, where an unknown field is a typo.
 | field | shape | used by |
 |---|---|---|
 | `digests` | deduplicated digest set | cert issuance (membership) |
-| `containers` | `[{digest, argv}]`, **not** deduplicated | secret release |
+| `containers` | distinct `[{name, role, stopped, digest, argv, mounts, env}]` observations | secret release |
 
 `argv` is the effective OCI `process.args` a container runs, so release can hold
-a sandbox to the `(digest, argv)` pairs that ran in it rather than to a digest
+a sandbox to the named policy tuples that ran in it rather than to a digest
 set that says nothing about what those images were told to run.
 Without it, two entries differing only in argv are indistinguishable, and the
 argv admission enforces is a **union across every entry listing the digest** — so
@@ -391,7 +392,10 @@ secret during a backoff window, and read it when the extra container restarts.
 
 Admission is monotone, so membership here is too. A container that stops leaves
 caller resolution — a stopped container must not bind a caller — but stays in the
-sandbox's record until the sandbox itself is torn down.
+sandbox's record until the sandbox itself is torn down. Its record changes to
+`stopped: true`. This state prevents an exited main from satisfying the live-main
+part of a complete-set match. A restart of the same named tuple changes it back
+to live instead of creating a false duplicate.
 
 The cost is that a pod which ever ran an image outside its entry never receives a
 secret, even after that image is gone. That is the correct direction for a

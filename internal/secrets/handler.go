@@ -437,8 +437,9 @@ func WorkloadContainers(reported []workloadclaims.SandboxContainer) []pkgallowli
 	out := make([]pkgallowlist.RunningContainer, 0, len(reported))
 	for _, c := range reported {
 		out = append(out, pkgallowlist.RunningContainer{
-			Digest: c.Digest, Argv: c.Argv,
+			Name: c.Name, Role: c.Role, Stopped: c.Stopped, Digest: c.Digest, Argv: c.Argv,
 			BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+			EnvValues:      c.EnvValues,
 			MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
 		})
 	}

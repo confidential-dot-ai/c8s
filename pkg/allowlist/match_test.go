@@ -40,10 +40,16 @@ func run(digest string, argv ...string) RunningContainer {
 }
 
 func TestMatchWorkload(t *testing.T) {
+	init := exactly(t, dInit, "/migrate")
+	init.Name = "migrate"
+	app := exactly(t, dApp, "/serve")
+	app.Name = "app"
+	sidecar := exactly(t, dSidecar, "/proxy")
+	sidecar.Name = "proxy"
 	al := &Allowlist{Schema: Schema, Workloads: map[string]Workload{
 		"api": {
-			InitContainers: []Container{exactly(t, dInit, "/migrate")},
-			Containers:     []Container{exactly(t, dApp, "/serve"), exactly(t, dSidecar, "/proxy")},
+			InitContainers: []Container{init},
+			Containers:     []Container{app, sidecar},
 		},
 	}}
 
@@ -55,30 +61,30 @@ func TestMatchWorkload(t *testing.T) {
 	}{
 		{
 			name:    "every main present",
-			running: []RunningContainer{run(dApp, "/serve"), run(dSidecar, "/proxy")},
+			running: []RunningContainer{{Name: "app", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/serve"}}, {Name: "proxy", Role: ContainerRoleMain, Digest: dSidecar, Argv: []string{"/proxy"}}},
 			want:    "api",
 		},
 		{
 			// A declared init container that has not been reaped is not foreign.
 			name:    "lingering init is admitted",
-			running: []RunningContainer{run(dApp, "/serve"), run(dSidecar, "/proxy"), run(dInit, "/migrate")},
+			running: []RunningContainer{{Name: "app", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/serve"}}, {Name: "proxy", Role: ContainerRoleMain, Digest: dSidecar, Argv: []string{"/proxy"}}, {Name: "migrate", Role: ContainerRoleInit, Stopped: true, Digest: dInit, Argv: []string{"/migrate"}}},
 			want:    "api",
 		},
 		{
 			name:    "missing main is refused",
-			running: []RunningContainer{run(dApp, "/serve")},
+			running: []RunningContainer{{Name: "app", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/serve"}}},
 			wantErr: ErrNoMatch,
 		},
 		{
 			// The whole point: an extra image, even one that has since stopped,
 			// means this pod is not the entry.
 			name:    "foreign container is refused",
-			running: []RunningContainer{run(dApp, "/serve"), run(dSidecar, "/proxy"), run(dOther, "/sh")},
+			running: []RunningContainer{{Name: "app", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/serve"}}, {Name: "proxy", Role: ContainerRoleMain, Digest: dSidecar, Argv: []string{"/proxy"}}, run(dOther, "/sh")},
 			wantErr: ErrNoMatch,
 		},
 		{
 			name:    "wrong argv on a declared digest is refused",
-			running: []RunningContainer{run(dApp, "/bin/sh", "-c", "cat /run/secrets/*"), run(dSidecar, "/proxy")},
+			running: []RunningContainer{{Name: "app", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/bin/sh", "-c", "cat /run/secrets/*"}}, {Name: "proxy", Role: ContainerRoleMain, Digest: dSidecar, Argv: []string{"/proxy"}}},
 			wantErr: ErrNoMatch,
 		},
 		{
@@ -154,6 +160,48 @@ func TestMatchWorkloadEmptyAllowlist(t *testing.T) {
 	al := &Allowlist{Schema: Schema}
 	if _, _, err := al.MatchWorkload([]RunningContainer{run(dApp, "/serve")}); !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("err = %v, want ErrNoMatch", err)
+	}
+}
+
+func TestNamedCompleteSetPreservesRoleAndCardinality(t *testing.T) {
+	mainA := exactly(t, dApp, "/same")
+	mainA.Name = "main-a"
+	mainB := exactly(t, dApp, "/same")
+	mainB.Name = "main-b"
+	init := exactly(t, dApp, "/same")
+	init.Name = "prepare"
+	w := Workload{InitContainers: []Container{init}, Containers: []Container{mainA, mainB}}
+
+	if d := w.Diff([]RunningContainer{{Name: "main-a", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/same"}}}); d.Describes() {
+		t.Fatal("one observation satisfied two equal main policies")
+	}
+	if d := w.Diff([]RunningContainer{
+		{Name: "main-a", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/same"}},
+		{Name: "main-b", Role: ContainerRoleInit, Digest: dApp, Argv: []string{"/same"}},
+	}); d.Describes() {
+		t.Fatal("an init-role observation satisfied a required main")
+	}
+	if d := w.Diff([]RunningContainer{
+		{Name: "main-a", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/same"}},
+		{Name: "main-b", Role: ContainerRoleMain, Stopped: true, Digest: dApp, Argv: []string{"/same"}},
+	}); d.Describes() {
+		t.Fatal("a stopped main satisfied the live-main requirement")
+	}
+	if d := w.Diff([]RunningContainer{
+		{Name: "main-a", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/same"}},
+		{Name: "main-b", Role: ContainerRoleMain, Digest: dApp, Argv: []string{"/same"}},
+		{Name: "prepare", Role: ContainerRoleInit, Stopped: true, Digest: dApp, Argv: []string{"/same"}},
+	}); !d.Describes() {
+		t.Fatalf("one-to-one named set was refused: %+v", d)
+	}
+}
+
+func TestUnnamedDuplicateMainsNeedTwoObservations(t *testing.T) {
+	c := exactly(t, dApp, "/serve")
+	w := Workload{Containers: []Container{c, c}}
+	d := w.Diff([]RunningContainer{run(dApp, "/serve")})
+	if d.Describes() || !d.CardinalityMismatch {
+		t.Fatalf("one observation covered duplicate mains: %+v", d)
 	}
 }
 

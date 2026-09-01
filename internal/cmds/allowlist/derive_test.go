@@ -117,6 +117,30 @@ func TestDeriveAcceptsABarePod(t *testing.T) {
 	}
 }
 
+func TestDeriveBindsInjectedHelperFinalHostIPArgv(t *testing.T) {
+	pod := `{"kind":"Pod","spec":{"containers":[{"name":"c8s-cert","image":"` + testImage + `",
+		"command":["/c8s","get-cert"],"args":["--attestation-api-url=http://$(HOST_IP):8400"],
+		"env":[{"name":"HOST_IP","valueFrom":{"fieldRef":{"fieldPath":"status.hostIP"}}}]}]}}`
+	got, err := runDerive(t, pod, "p", "-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := got["p"].Containers[0].Args.EnvBindings
+	if len(bindings) != 1 || bindings[0].Index != 0 || len(bindings[0].Names) != 1 || bindings[0].Names[0] != "HOST_IP" {
+		t.Fatalf("helper argv bindings = %+v", bindings)
+	}
+	bad := strings.Replace(pod, `"valueFrom":{"fieldRef":{"fieldPath":"status.hostIP"}}`, `"value":"attacker"`, 1)
+	if _, err := runDerive(t, bad, "p", "-"); err == nil {
+		t.Fatal("helper dynamic argv accepted an operator-controlled env value")
+	}
+	escaped := strings.Replace(pod, "$(HOST_IP)", "$$(HOST_IP)", 1)
+	if _, err := runDerive(t, escaped, "p", "-"); err == nil {
+		t.Fatal("helper dynamic argv accepted an escaped kubelet placeholder")
+	} else if !strings.Contains(err.Error(), "leaves literal") {
+		t.Fatalf("escaped placeholder error = %v", err)
+	}
+}
+
 func TestDeriveRejectsUnpinnedImage(t *testing.T) {
 	bad := `{"kind":"Pod","spec":{"containers":[{"name":"c","image":"busybox:latest","command":["sh"]}]}}`
 	if _, err := runDerive(t, bad, "p", "-"); err == nil {

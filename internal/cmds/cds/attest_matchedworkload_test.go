@@ -149,15 +149,17 @@ func TestAttest_MatchedWorkload_SharedIdentityDoesNotResolveAmbiguousPolicy(t *t
 func TestAttest_MatchedWorkload_MatchesExactInjectedContainer(t *testing.T) {
 	store := completeAPIStore(t)
 	entry := store.workloads["api"]
+	entry.Containers[0].Name = "app"
 	entry.InitContainers = []pkgallowlist.Container{{
+		Name:    "c8s-cert",
 		Digest:  wlDigest(t, wlDigestC),
 		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"get-cert", "--renew-interval=6h"}},
 		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
 	}}
 	store.workloads["api"] = entry
 	containers := []workloadclaims.SandboxContainer{
-		{Digest: wlDigestA},
-		{Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
+		{Name: "app", Role: pkgallowlist.ContainerRoleMain, Digest: wlDigestA},
+		{Name: "c8s-cert", Role: pkgallowlist.ContainerRoleInit, Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
 	}
 	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
 	if matched == nil || matched.Name != "api" {
@@ -170,15 +172,17 @@ func TestAttest_MatchedWorkload_MatchesExactInjectedContainer(t *testing.T) {
 func TestAttest_MatchedWorkload_RejectsExtraC8SHelperArguments(t *testing.T) {
 	store := completeAPIStore(t)
 	entry := store.workloads["api"]
+	entry.Containers[0].Name = "app"
 	entry.InitContainers = []pkgallowlist.Container{{
+		Name:    "c8s-cert",
 		Digest:  wlDigest(t, wlDigestC),
 		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"get-cert", "--renew-interval=6h"}},
 		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
 	}}
 	store.workloads["api"] = entry
 	containers := []workloadclaims.SandboxContainer{
-		{Digest: wlDigestA},
-		{Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
+		{Name: "app", Role: pkgallowlist.ContainerRoleMain, Digest: wlDigestA},
+		{Name: "c8s-cert", Role: pkgallowlist.ContainerRoleInit, Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
 		{Digest: wlDigestC, Argv: []string{"/c8s", "workload-proxy", "--upstream=http://attacker.invalid"}},
 	}
 	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)

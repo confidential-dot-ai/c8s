@@ -34,12 +34,14 @@ type admissionInventory struct {
 
 type ctrRec struct {
 	sandboxID      string
-	name           string // unread
+	name           string
+	role           string
 	digest         string // canonical sha256:<hex>; "" when unresolved
 	argv           []string
 	bindMounts     []string
 	bindMountKinds map[string]string
 	envNames       []string
+	envValues      map[string]string
 	mountsObserved bool
 	envObserved    bool
 }
@@ -50,9 +52,9 @@ type podRec struct {
 	uid       string
 }
 
-// sbxRec is a sandbox's admission high-water mark: every distinct (digest,
-// argv) admitted in it, keyed for dedup, never pruned while the sandbox lives.
-// See docs/secrets.md — "The report is a high-water mark".
+// sbxRec is a sandbox's admission high-water mark: every distinct named policy
+// tuple admitted in it, keyed for dedup and never pruned while the sandbox
+// lives. See docs/secrets.md — "The report is a high-water mark".
 type sbxRec struct {
 	byKey      map[string]workloadclaims.SandboxContainer
 	unresolved map[string]struct{} // container IDs with no digest; cleared only by a later resolved record for the same ID
@@ -84,9 +86,11 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	defer b.mu.Unlock()
 	record := ctrRec{sandboxID: sandboxID, name: name, digest: digest, argv: slices.Clone(argv)}
 	if len(observed) == 1 {
+		record.role = observed[0].role
 		record.bindMounts = slices.Clone(observed[0].bindMounts)
 		record.bindMountKinds = cloneStringMap(observed[0].bindMountKinds)
 		record.envNames = slices.Clone(observed[0].envNames)
+		record.envValues = cloneStringMap(observed[0].envValues)
 		record.mountsObserved = true
 		record.envObserved = true
 	}
@@ -104,11 +108,12 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 		rec.unresolved[containerID] = struct{}{}
 	} else {
 		delete(rec.unresolved, containerID)
-		c := workloadclaims.SandboxContainer{Name: name, Digest: digest, Argv: slices.Clone(argv)}
+		c := workloadclaims.SandboxContainer{Name: name, Role: record.role, Digest: digest, Argv: slices.Clone(argv)}
 		if len(observed) == 1 {
 			c.BindMounts = slices.Clone(observed[0].bindMounts)
 			c.BindMountKinds = cloneStringMap(observed[0].bindMountKinds)
 			c.EnvNames = slices.Clone(observed[0].envNames)
+			c.EnvValues = cloneStringMap(observed[0].envValues)
 			c.MountsObserved = true
 			c.EnvObserved = true
 		}
@@ -129,9 +134,39 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 func (b *admissionInventory) remove(containerID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.containers[containerID]; ok {
-		delete(b.containers, containerID)
-		b.generation++
+	record, ok := b.containers[containerID]
+	if !ok {
+		return
+	}
+	delete(b.containers, containerID)
+	if record.digest != "" {
+		candidate := sandboxContainer(record)
+		key := candidate.Key()
+		stillLive := false
+		for _, live := range b.containers {
+			if live.sandboxID == record.sandboxID && live.digest != "" && sandboxContainer(live).Key() == key {
+				stillLive = true
+				break
+			}
+		}
+		if !stillLive {
+			rec := b.admitted[record.sandboxID]
+			if historical, exists := rec.byKey[key]; exists {
+				historical.Stopped = true
+				rec.byKey[key] = historical
+				b.admitted[record.sandboxID] = rec
+			}
+		}
+	}
+	b.generation++
+}
+
+func sandboxContainer(rec ctrRec) workloadclaims.SandboxContainer {
+	return workloadclaims.SandboxContainer{
+		Name: rec.name, Role: rec.role, Digest: rec.digest, Argv: slices.Clone(rec.argv),
+		BindMounts: slices.Clone(rec.bindMounts), BindMountKinds: cloneStringMap(rec.bindMountKinds),
+		EnvNames: slices.Clone(rec.envNames), EnvValues: cloneStringMap(rec.envValues),
+		MountsObserved: rec.mountsObserved, EnvObserved: rec.envObserved,
 	}
 }
 
@@ -183,6 +218,8 @@ func (b *admissionInventory) removeSandbox(sandboxID string) {
 // containers, not the per-sandbox high-water marks used for secret release.
 // One unresolved live digest fails the whole snapshot.
 func (b *admissionInventory) RuntimeInventory() (workloadclaims.RuntimeInventory, error) {
+	unlockPolicy := b.lockPolicyRead()
+	defer unlockPolicy()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -204,12 +241,14 @@ func (b *admissionInventory) RuntimeInventory() (workloadclaims.RuntimeInventory
 			PodUID:         pod.uid,
 			SandboxID:      rec.sandboxID,
 			ContainerName:  rec.name,
+			ContainerRole:  rec.role,
 			ContainerID:    id,
 			Digest:         rec.digest,
 			Argv:           slices.Clone(rec.argv),
 			BindMounts:     slices.Clone(rec.bindMounts),
 			BindMountKinds: cloneStringMap(rec.bindMountKinds),
 			EnvNames:       slices.Clone(rec.envNames),
+			EnvValues:      cloneStringMap(rec.envValues),
 			MountsObserved: rec.mountsObserved,
 			EnvObserved:    rec.envObserved,
 		})
@@ -224,24 +263,32 @@ func (b *admissionInventory) RuntimeInventory() (workloadclaims.RuntimeInventory
 // cold-boot state. This prevents the active policy from retaining the same
 // arbitrary-command property as the local bootstrap floor.
 func (b *admissionInventory) admitsLiveRuntime(policy *allowlist.Allowlist, index *allowlist.Index) error {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	bySandbox := make(map[string][]allowlist.RunningContainer)
+	resolvedRoles := make(map[string]string, len(b.containers))
 	for id, rec := range b.containers {
 		if rec.digest == "" {
 			return fmt.Errorf("live container %s has no resolved image digest", id)
 		}
 		running := allowlist.RunningContainer{
+			Name:           rec.name,
+			Role:           rec.role,
 			Digest:         rec.digest,
 			Argv:           slices.Clone(rec.argv),
 			BindMounts:     slices.Clone(rec.bindMounts),
 			BindMountKinds: cloneStringMap(rec.bindMountKinds),
 			EnvNames:       slices.Clone(rec.envNames),
+			EnvValues:      cloneStringMap(rec.envValues),
 			MountsObserved: rec.mountsObserved,
 			EnvObserved:    rec.envObserved,
 		}
 		if !index.AdmitsContainer(running) {
 			return fmt.Errorf("live container %s (%s) is not admitted", id, rec.digest)
+		}
+		if role := index.MatchingRole(running); role != "" {
+			running.Role = role
+			resolvedRoles[id] = role
 		}
 		bySandbox[rec.sandboxID] = append(bySandbox[rec.sandboxID], running)
 	}
@@ -250,6 +297,41 @@ func (b *admissionInventory) admitsLiveRuntime(policy *allowlist.Allowlist, inde
 			pod := b.pods[sandboxID]
 			return fmt.Errorf("live pod %s/%s (%s) has no unique exact workload identity: %w", pod.namespace, pod.name, sandboxID, err)
 		}
+	}
+	changed := false
+	for id, role := range resolvedRoles {
+		rec := b.containers[id]
+		if rec.role != role {
+			rec.role = role
+			b.containers[id] = rec
+			changed = true
+		}
+	}
+	// Containers admitted by the cold floor already exist in each sandbox's
+	// high-water map. Re-key them with the unique exact role while policy
+	// activation and container admission are mutually excluded.
+	for sandboxID, rec := range b.admitted {
+		next := make(map[string]workloadclaims.SandboxContainer, len(rec.byKey))
+		for _, c := range rec.byKey {
+			running := allowlist.RunningContainer{
+				Name: c.Name, Role: c.Role, Digest: c.Digest, Argv: c.Argv,
+				BindMounts: c.BindMounts, BindMountKinds: c.BindMountKinds, EnvNames: c.EnvNames,
+				EnvValues:      c.EnvValues,
+				MountsObserved: c.MountsObserved, EnvObserved: c.EnvObserved,
+			}
+			if role := index.MatchingRole(running); role != "" {
+				if c.Role != role {
+					changed = true
+				}
+				c.Role = role
+			}
+			next[c.Key()] = c
+		}
+		rec.byKey = next
+		b.admitted[sandboxID] = rec
+	}
+	if changed {
+		b.generation++
 	}
 	return nil
 }
@@ -322,6 +404,8 @@ func (b *admissionInventory) SandboxForPeer(peer workloadclaims.Peer) (string, e
 // An unresolved digest fails the whole answer rather than commit a subset as if
 // it were the whole inventory.
 func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
+	unlockPolicy := b.lockPolicyRead()
+	defer unlockPolicy()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -341,4 +425,12 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 	slices.Sort(digests)
 	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
 	return slices.Compact(digests), containers, true, nil
+}
+
+func (b *admissionInventory) lockPolicyRead() func() {
+	if b.policy == nil {
+		return func() {}
+	}
+	b.policy.admission.RLock()
+	return b.policy.admission.RUnlock
 }

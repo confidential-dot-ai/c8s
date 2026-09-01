@@ -177,6 +177,15 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 		t.Fatal("version-5 digest dropped by rollback attempt")
 	}
 
+	// The epoch identifies one immutable policy. A second body with the same
+	// version is a replay, not a forward update.
+	if store.apply(floorAllowlist(map[string]string{pushDigestC: "other-v5"}), 5) {
+		t.Fatal("different policy at the same version was applied")
+	}
+	if !admitsDigest(store, pushDigestB) || admitsDigest(store, pushDigestC) {
+		t.Fatal("same-version replay changed the active policy")
+	}
+
 	// A forward version applies.
 	if !store.apply(floorAllowlist(map[string]string{pushDigestC: "v6"}), 6) {
 		t.Fatal("forward version 6 rejected")
@@ -247,6 +256,19 @@ func TestPolicyStoreTrustsFirstVersionAfterRestart(t *testing.T) {
 	}
 	if fresh.current().version != 3 {
 		t.Fatalf("version = %d, want 3", fresh.current().version)
+	}
+}
+
+func TestPolicyStoreTrustsFirstAuthenticatedVersionZeroOnce(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "cold-boot"}))
+	if !store.apply(floorAllowlist(map[string]string{pushDigestB: "first"}), 0) {
+		t.Fatal("first authenticated version zero was rejected as the cold snapshot")
+	}
+	if store.apply(floorAllowlist(map[string]string{pushDigestC: "replay"}), 0) {
+		t.Fatal("second authenticated version zero was applied")
+	}
+	if !admitsDigest(store, pushDigestB) || admitsDigest(store, pushDigestA) || admitsDigest(store, pushDigestC) {
+		t.Fatal("same-version zero replay changed the active policy")
 	}
 }
 

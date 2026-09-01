@@ -194,6 +194,70 @@ func TestHandleNewContainer_WorkloadArgvMatchAdmits(t *testing.T) {
 	}
 }
 
+func TestOverlaySnapshotCoversDecisionRoleAndInventoryRecord(t *testing.T) {
+	floor := strings.Repeat("a", 64)
+	wl := strings.Repeat("b", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + floor})
+	m.overlay.apply(exactEntrypointOverlay(t, "sha256:"+wl, []string{"/bin/app"}), 1)
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
+	cid := testCID("snapshot-record")
+	writeConfigJSONArgs(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type": "container",
+		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + wl,
+	}, []string{"/bin/app"})
+
+	m.inventory.mu.Lock()
+	handleDone := make(chan struct{})
+	go func() {
+		m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+		close(handleDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if !m.overlay.mu.TryLock() {
+			time.Sleep(5 * time.Millisecond)
+			if !m.overlay.mu.TryLock() {
+				break
+			}
+			m.overlay.mu.Unlock()
+		} else {
+			m.overlay.mu.Unlock()
+		}
+		if time.Now().After(deadline) {
+			m.inventory.mu.Unlock()
+			t.Fatal("container handler did not hold the overlay snapshot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	next := exactEntrypointOverlay(t, "sha256:"+wl, []string{"/bin/new"})
+	applyDone := make(chan bool, 1)
+	go func() {
+		applyDone <- m.overlay.apply(next, 2)
+	}()
+	select {
+	case <-applyDone:
+		m.inventory.mu.Unlock()
+		t.Fatal("overlay changed while the admission record was incomplete")
+	case <-time.After(50 * time.Millisecond):
+	}
+	m.inventory.mu.Unlock()
+	<-handleDone
+	if !<-applyDone {
+		t.Fatal("new overlay was not applied")
+	}
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("old-snapshot admitted container was killed: %+v", calls)
+	}
+	m.inventory.mu.RLock()
+	recorded := m.inventory.containers[cid]
+	m.inventory.mu.RUnlock()
+	if recorded.Role != allowlistpkg.ContainerRoleMain {
+		t.Fatalf("recorded role = %q, want main", recorded.Role)
+	}
+}
+
 // A workload digest whose effective argv violates the overlay policy is killed.
 func TestHandleNewContainer_WorkloadArgvMismatchKills(t *testing.T) {
 	floor := strings.Repeat("a", 64)

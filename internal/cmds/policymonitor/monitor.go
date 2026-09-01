@@ -46,13 +46,17 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
+	"github.com/confidential-dot-ai/c8s/internal/mountidentity"
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -555,14 +559,15 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	// What the container actually runs, as the allowlist describes it. Floor
 	// digests ignore all of it; workload digests are gated on the whole set.
 	rc := allowlistpkg.RunningContainer{
+		Name:           spec.Annotations[kataspec.ContainerNameKey],
 		Digest:         digest,
-		BindMounts:     bindMountDestinations(spec.Mounts),
 		MountsObserved: true,
 		EnvObserved:    true,
 	}
+	rc.BindMounts, rc.BindMountKinds = bindMountObservation(spec.Mounts)
 	if spec.Process != nil {
 		rc.Argv = spec.Process.Args
-		rc.EnvNames = envNames(spec.Process.Env)
+		rc.EnvNames, rc.EnvValues = envObservation(spec.Process.Env)
 	}
 	// A container is created seconds after its guest boots, while the first
 	// CDS pull is still failing for want of a pod network, so the allowlist a
@@ -574,10 +579,20 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	if !m.admits(rc) {
 		m.refresh.awaitSettled(ctx, refreshSettleBudget)
 	}
+	// Keep one overlay snapshot across the final decision, role resolution, and
+	// inventory record. An apply cannot otherwise swap the policy between these
+	// three operations and expose a role that the admission decision did not use.
+	m.overlay.mu.RLock()
+	idx := m.overlay.idx
+	if idx != nil {
+		rc.Role = idx.MatchingRole(rc)
+	}
+	admitted := m.allowlist.Contains(rc.Digest) || (idx != nil && idx.AdmitsContainer(rc))
 	if m.inventory != nil {
 		m.inventory.record(cid, digest, rc.Argv, rc)
 	}
-	if m.admits(rc) {
+	m.overlay.mu.RUnlock()
+	if admitted {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
 		m.recordVerdict(dir, verdictAllow)
 		return
@@ -786,31 +801,67 @@ type ociMount struct {
 	Source      string `json:"source"`
 }
 
-// bindMountDestinations returns the destinations of the mounts that carry guest
-// content in. A source that is not an absolute path names a filesystem type
-// (proc, sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing, so gating it
-// would only make an operator restate the OCI base set.
-func bindMountDestinations(mounts []ociMount) []string {
-	var out []string
-	for _, m := range mounts {
-		if strings.HasPrefix(m.Source, "/") {
-			out = append(out, m.Destination)
-		}
-	}
-	return out
+// bindMountObservation returns each bind destination and the strongest storage
+// provenance that the guest can prove. With shared_fs=none, kata-agent creates
+// each memory emptyDir as one tmpfs mount directly below its fixed guest
+// ephemeral root. The OCI spec does not retain the Kubernetes source class for
+// other storage, so those mounts are reported as node provenance. This is
+// intentionally weaker than guessing from a host-selected path.
+func bindMountObservation(mounts []ociMount) ([]string, map[string]string) {
+	return bindMountObservationWithEvidence(mounts, mountidentity.Observe)
 }
 
-// envNames returns the NAME halves of the spec's "NAME=value" environment.
-// Values never leave this function: policy matches names, because an allowlist
-// is served to every enforcer and values carry secrets.
-func envNames(env []string) []string {
-	var out []string
-	for _, e := range env {
-		if name, _, ok := strings.Cut(e, "="); ok {
-			out = append(out, name)
+func bindMountObservationWithEvidence(mounts []ociMount, observe func(string) (mountidentity.Evidence, error)) ([]string, map[string]string) {
+	var destinations []string
+	kinds := map[string]string{}
+	for _, m := range mounts {
+		if !filepath.IsAbs(m.Source) || !filepath.IsAbs(m.Destination) {
+			continue
+		}
+		destinations = append(destinations, m.Destination)
+		kinds[m.Destination] = "node"
+		if expectedGuestPrivateSource(m.Source) {
+			evidence, err := observe(m.Source)
+			if err != nil || !evidence.Canonical || !evidence.Mountpoint || evidence.Filesystem != int64(unix.TMPFS_MAGIC) {
+				continue
+			}
+			kinds[m.Destination] = "private"
 		}
 	}
-	return out
+	sort.Strings(destinations)
+	return slices.Compact(destinations), kinds
+}
+
+func expectedGuestPrivateSource(source string) bool {
+	rel, err := filepath.Rel(volumed.DefaultGuestEphemeralRoot, filepath.Clean(source))
+	return err == nil && rel != "." && rel != "" && filepath.Dir(rel) == "."
+}
+
+// envObservation returns all names and only the public downward-API values
+// that exact argv policy can bind. Duplicate public names are ambiguous and
+// are omitted, so a binding fails closed.
+func envObservation(env []string) ([]string, map[string]string) {
+	var names []string
+	values := map[string]string{}
+	duplicatePublic := map[string]bool{}
+	for _, e := range env {
+		name, value, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		names = append(names, name)
+		if name != "HOST_IP" && name != "NODE_IP" {
+			continue
+		}
+		if _, exists := values[name]; exists {
+			delete(values, name)
+			duplicatePublic[name] = true
+		} else if !duplicatePublic[name] {
+			values[name] = value
+		}
+	}
+	sort.Strings(names)
+	return slices.Compact(names), values
 }
 
 func readOCISpec(path string) (*ociSpec, error) {

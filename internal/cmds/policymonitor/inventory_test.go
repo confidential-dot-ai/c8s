@@ -106,6 +106,28 @@ func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	}
 }
 
+func TestKataInventoryMarksStoppedMainWithoutLosingHistory(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	running := allowlistpkg.RunningContainer{Name: "app", Role: allowlistpkg.ContainerRoleMain, Digest: pmDigestApp}
+	b.record(testCID("app"), pmDigestApp, nil, running)
+	b.remove(testCID("app"))
+
+	_, containers, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known || len(containers) != 1 || !containers[0].Stopped {
+		t.Fatalf("stopped high-water record = known %v err %v containers %+v", known, err, containers)
+	}
+	policy := allowlistpkg.Workload{Containers: []allowlistpkg.Container{{
+		Name: "app", Digest: mustParseDigest(t, pmDigestApp),
+		Command: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny}, Args: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
+	}}}
+	if policy.Diff([]allowlistpkg.RunningContainer{{
+		Name: containers[0].Name, Role: containers[0].Role, Stopped: containers[0].Stopped, Digest: containers[0].Digest,
+	}}).Describes() {
+		t.Fatal("stopped guest main satisfied a complete-set match")
+	}
+}
+
 // An unresolved digest fails the whole answer: serving the siblings that did
 // resolve would pass a subset off as the sandbox's whole image set.
 func TestKataInventoryRefusesUnresolvedDigest(t *testing.T) {

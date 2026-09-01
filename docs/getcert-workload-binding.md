@@ -273,12 +273,13 @@ skips it (it is measured via the rootfs, not allowlisted). Unknown sandbox ⇒
   are floor entries, so they pass by digest, not by name. CDS does not require
   the set to match a whole workload entry — see Corner 4.
 
-**Matching is set-based over init and main together.** The inventory tracks
-admission, not pod-spec roles, so two workload entries differing only in which
-role holds an image are indistinguishable here. What actually constrains how an
-image runs — the per-container argv policy — is enforced at admission by
-nri-image-policy / policy-monitor, where the role distinction is not needed
-(`docs/allowlist-and-capabilities.md`).
+**Matching preserves container names and roles.** The inventory records the
+Kubernetes container name. Exact policy resolves that observation to `init` or
+`main`. It also records whether the container stopped. Matching is one-to-one:
+one observation cannot cover two declarations, and a stopped main cannot prove
+that a required main is live. An old unnamed entry remains usable only when
+each process tuple identifies one role. An identical unnamed init/main tuple is
+rejected and must be re-derived.
 
 ---
 
@@ -305,14 +306,13 @@ set is a strict subset of the declared one in most of those states:
 - at first issuance, only the injected sidecar is up;
 - while a user init container runs, the main containers do not exist yet;
 - main containers come up over a short window, not atomically;
-- a restarting container is evicted from the inventory until it is recreated;
-- once completed init containers are garbage-collected, `RemoveContainer` fires
-  and they leave the set **permanently** — a pod with init containers never
-  again runs its whole declared set.
+- a restarting container remains in the high-water inventory as stopped until
+  it is recreated;
+- once completed init containers are garbage-collected, `RemoveContainer` marks
+  them stopped in the high-water record.
 
 Requiring the running set to equal a workload entry would therefore deny
-certificates for ordinary lifecycle states, and in the last case would fail
-every renewal for the rest of the pod's life. Membership is subset-safe — any
+certificates for ordinary lifecycle states. Membership is subset-safe — any
 subset of an allowlisted set is still allowlisted — so it holds throughout.
 
 What this gives up: CDS no longer refuses a pod that mixes containers from two
@@ -323,7 +323,7 @@ key belongs to pod X*, not *pod X runs exactly workload Y*.
 
 The **matched-workload stamp** (OID `…1.5`, docs/ratls.md "Matched workload")
 is layered on top of this without changing it: when the sandbox's high-water
-`(digest, argv)` inventory uniquely matches one allowlist entry, CDS
+named policy inventory uniquely matches one allowlist entry, CDS
 additionally stamps that entry's name and the policy snapshot's version and
 canonical digest onto the leaf. The membership-only issuance contract is
 untouched — every state above still gets its (unnamed) certificate, and the

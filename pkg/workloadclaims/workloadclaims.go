@@ -195,18 +195,27 @@ type AllowlistRefreshReporter interface {
 // SandboxContainer is one admitted container: the bytes, and what they were
 // told to run.
 type SandboxContainer struct {
-	Name   string `json:"name,omitempty"`
-	Digest string `json:"digest"`
+	Name string `json:"name,omitempty"`
+	// Role is the unique init/main role resolved by the active exact policy at
+	// admission. Empty means the floor or policy union could not prove one.
+	Role string `json:"role,omitempty"`
+	// Stopped distinguishes an optional, completed init container from a main
+	// container that must still be live. The admission high-water mark keeps
+	// both, but only a live observation can satisfy a declared main.
+	Stopped bool   `json:"stopped,omitempty"`
+	Digest  string `json:"digest"`
 	// Argv is the effective OCI process.args — the merged image-config and
 	// pod-spec command, which is what the argv policy is written against.
 	Argv []string `json:"argv,omitempty"`
 	// BindMounts contains observed bind-mount destinations. EnvNames contains
-	// environment variable names only. Values are never stored or returned.
+	// environment variable names. EnvValues contains only public downward-API
+	// values that exact argv policy binds. Other values are never retained.
 	// The booleans make an observed empty set different from old or incomplete
 	// inventory data. Exact policy requires the applicable boolean.
 	BindMounts     []string          `json:"bind_mounts,omitempty"`
 	BindMountKinds map[string]string `json:"bind_mount_kinds,omitempty"`
 	EnvNames       []string          `json:"env_names,omitempty"`
+	EnvValues      map[string]string `json:"env_values,omitempty"`
 	MountsObserved bool              `json:"mounts_observed,omitempty"`
 	EnvObserved    bool              `json:"env_observed,omitempty"`
 }
@@ -220,19 +229,21 @@ type RuntimeContainer struct {
 	PodUID         string            `json:"pod_uid"`
 	SandboxID      string            `json:"sandbox_id"`
 	ContainerName  string            `json:"container_name"`
+	ContainerRole  string            `json:"container_role,omitempty"`
 	ContainerID    string            `json:"container_id"`
 	Digest         string            `json:"digest"`
 	Argv           []string          `json:"argv"`
 	BindMounts     []string          `json:"bind_mounts"`
 	BindMountKinds map[string]string `json:"bind_mount_kinds"`
 	EnvNames       []string          `json:"env_names"`
+	EnvValues      map[string]string `json:"env_values,omitempty"`
 	MountsObserved bool              `json:"mounts_observed"`
 	EnvObserved    bool              `json:"env_observed"`
 }
 
 // Key is the deterministic order key for a node-wide inventory.
 func (c RuntimeContainer) Key() string {
-	parts := []string{c.Namespace, c.PodName, c.PodUID, c.SandboxID, c.ContainerName, c.ContainerID, c.Digest}
+	parts := []string{c.Namespace, c.PodName, c.PodUID, c.SandboxID, c.ContainerName, c.ContainerRole, c.ContainerID, c.Digest}
 	parts = append(parts, strconv.Itoa(len(c.Argv)))
 	parts = append(parts, c.Argv...)
 	parts = append(parts, strconv.FormatBool(c.MountsObserved))
@@ -243,6 +254,9 @@ func (c RuntimeContainer) Key() string {
 	parts = append(parts, strconv.FormatBool(c.EnvObserved))
 	parts = append(parts, strconv.Itoa(len(c.EnvNames)))
 	parts = append(parts, c.EnvNames...)
+	for _, name := range []string{"HOST_IP", "NODE_IP"} {
+		parts = append(parts, name, c.EnvValues[name])
+	}
 	return strings.Join(parts, "\x00")
 }
 

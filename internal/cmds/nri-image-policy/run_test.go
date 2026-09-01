@@ -142,7 +142,7 @@ func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	ctr := &api.Container{Id: "ctr-id", PodSandboxId: "sandbox-1", Name: "app"}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	p.recordForInventory(ctx, ctr, "registry/repo:latest")
+	p.recordForInventory(ctx, nil, ctr, "registry/repo:latest")
 
 	rec, ok := p.inventory.containers["ctr-id"]
 	if !ok {

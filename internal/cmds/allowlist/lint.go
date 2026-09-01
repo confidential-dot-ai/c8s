@@ -265,20 +265,15 @@ func ambiguousGroupFinding(names []string) finding {
 		strings.Join(names, ", "))
 }
 
-// entryShape is the part of an entry a release decision reads: the digests and
-// argv policies of each container list. Image labels and the secret grant are
-// excluded — two entries differing only in those are exactly the dangerous
-// case, since the grant an operator intended is the thing that never resolves.
+// entryShape is the part of an entry a release decision reads. Image labels and
+// the secret grant are excluded. Names, digest, argv, mount, and environment
+// policy all remain because each can distinguish two complete-set matches.
 func entryShape(w pkgallowlist.Workload) (string, error) {
-	type containerShape struct {
-		Digest  string                  `json:"digest"`
-		Command pkgallowlist.ArgvPolicy `json:"command"`
-		Args    pkgallowlist.ArgvPolicy `json:"args"`
-	}
 	shape := func(cs []pkgallowlist.Container) ([]string, error) {
 		out := make([]string, 0, len(cs))
 		for _, c := range cs {
-			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args})
+			c.Image = ""
+			b, err := json.Marshal(c)
 			if err != nil {
 				return nil, err
 			}

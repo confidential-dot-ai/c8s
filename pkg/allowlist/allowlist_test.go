@@ -30,6 +30,38 @@ func TestParseJSON_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestJSONParsersRequireEOF(t *testing.T) {
+	allowlistBody := `{"schema":"` + Schema + `","workloads":{}}`
+	workloadBody := `{"containers":[{"digest":"` + digestA + `"}]}`
+	for _, tc := range []struct {
+		name  string
+		parse func([]byte) error
+		body  string
+	}{
+		{"operator allowlist", func(b []byte) error { _, err := ParseJSON(b); return err }, allowlistBody},
+		{"served allowlist", func(b []byte) error { _, err := ParseServedJSON(b); return err }, allowlistBody},
+		{"workload", func(b []byte) error { _, err := ParseWorkloadJSON(b); return err }, workloadBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.parse([]byte(tc.body + " \n\t")); err != nil {
+				t.Fatalf("trailing whitespace was rejected: %v", err)
+			}
+			for _, suffix := range []string{` {}`, ` true`, ` trailing`} {
+				if err := tc.parse([]byte(tc.body + suffix)); err == nil {
+					t.Fatalf("accepted trailing data %q", suffix)
+				}
+			}
+		})
+	}
+}
+
+func TestParseRejectsDuplicateContainerNameAcrossRoles(t *testing.T) {
+	body := `{"schema":"` + Schema + `","workloads":{"w":{"initContainers":[{"name":"same","digest":"` + digestA + `"}],"containers":[{"name":"same","digest":"` + digestB + `"}]}}}`
+	if _, err := ParseJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "declared more than once") {
+		t.Fatalf("duplicate init/main name error = %v", err)
+	}
+}
+
 func TestParseJSON_RejectsBadFloorDigest(t *testing.T) {
 	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","digests":{"sha256:zz":"x"}}`)); err == nil {
 		t.Fatal("expected invalid digest error")
@@ -270,6 +302,18 @@ func TestWorkloadDigests(t *testing.T) {
 		if got[i].String() != want[i] {
 			t.Fatalf("Digests()[%d] = %s, want %s", i, got[i], want[i])
 		}
+	}
+}
+
+func TestLegacyUnnamedIdenticalInitMainNeedsNamedMigration(t *testing.T) {
+	body := `{"schema":"c8s.allowlist/v1","workloads":{"legacy":{
+		"initContainers":[{"digest":"` + digestA + `"}],
+		"containers":[{"digest":"` + digestA + `"}]}}}`
+	if _, err := ParseJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "re-derive it with container names") {
+		t.Fatalf("ambiguous legacy role migration error = %v", err)
+	}
+	if _, err := ParseServedJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "re-derive it with container names") {
+		t.Fatalf("served ambiguous legacy role migration error = %v", err)
 	}
 }
 

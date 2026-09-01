@@ -2,7 +2,6 @@ package allowlist
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -293,9 +292,7 @@ func parseWorkloadEntries(data []byte) (entries map[string]pkgallowlist.Workload
 	}
 
 	var raw map[string]json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if derr := dec.Decode(&raw); derr != nil {
+	if derr := json.Unmarshal(data, &raw); derr != nil {
 		return nil, 0, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
 	}
 	out := make(map[string]pkgallowlist.Workload, len(raw))

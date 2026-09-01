@@ -335,6 +335,16 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 {{- end -}}
 
+{{- /* The operator must carry a stable value because it has no HOST_IP env.
+The webhook converts this token to $(HOST_IP) in each injected tenant Pod. */ -}}
+{{- define "c8s.operatorAttestationApiURL" -}}
+{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) -}}
+http://__C8S_HOST_IP__:{{ .Values.attestationApi.port }}
+{{- else -}}
+{{ include "c8s.attestationApiURL" . }}
+{{- end -}}
+{{- end -}}
+
 {{- /*
 c8s.attestationApiSocket — the node-local socket the attest-proxy sidecar
 serves the attestation-api on. It lives in the admission inventory's socket

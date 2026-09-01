@@ -17,6 +17,11 @@ import "regexp"
 // bytes the guest fetches. See c8s/docs/kata-image-policy.md.
 const PullReferenceKey = "io.kubernetes.cri.image-name"
 
+// ContainerNameKey is the CRI annotation that names the Kubernetes container.
+// policy-monitor preserves it so an exact workload cannot exchange an init
+// container for a required main container with the same image and command.
+const ContainerNameKey = "io.kubernetes.cri.container-name"
+
 // pinnedReference matches a digest-pinned image reference. It is the Go side of
 // the same anchor the baked policy applies to the guest-pull source; the two
 // must accept the same set.

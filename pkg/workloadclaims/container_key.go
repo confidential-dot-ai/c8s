@@ -7,8 +7,10 @@ import (
 	"strings"
 )
 
-// Key identifies one complete observed container policy tuple in an inventory's admission
-// high-water mark, where it is the deduplication key.
+// Key identifies one observed container policy tuple in an inventory's
+// admission high-water mark, where it is the deduplication key. It excludes
+// Stopped. A restart of the same Kubernetes container replaces the stopped
+// value with a live value instead of creating a false duplicate admission.
 //
 // The encoding MUST be injective, so it is /proc/cmdline's: NUL after every
 // element, digest included. NUL is the one byte neither field can carry — an
@@ -23,8 +25,10 @@ import (
 // sandbox can then be named for a workload it did not actually run.
 func (c SandboxContainer) Key() string {
 	var b strings.Builder
-	b.Grow(len(c.Name) + len(c.Digest) + 2 + len(c.Argv))
+	b.Grow(len(c.Name) + len(c.Role) + len(c.Digest) + 3 + len(c.Argv))
 	b.WriteString(c.Name)
+	b.WriteByte(0)
+	b.WriteString(c.Role)
 	b.WriteByte(0)
 	b.WriteString(c.Digest)
 	b.WriteByte(0)
@@ -46,6 +50,12 @@ func (c SandboxContainer) Key() string {
 		b.WriteString(n)
 		b.WriteByte(0)
 	}
+	for _, name := range []string{"HOST_IP", "NODE_IP"} {
+		b.WriteString(name)
+		b.WriteByte(0)
+		b.WriteString(c.EnvValues[name])
+		b.WriteByte(0)
+	}
 	return b.String()
 }
 
@@ -55,6 +65,8 @@ func (c SandboxContainer) Key() string {
 func (c SandboxContainer) Compare(o SandboxContainer) int {
 	return cmp.Or(
 		strings.Compare(c.Name, o.Name),
+		strings.Compare(c.Role, o.Role),
+		compareBool(c.Stopped, o.Stopped),
 		strings.Compare(c.Digest, o.Digest),
 		slices.Compare(c.Argv, o.Argv),
 		compareBool(c.MountsObserved, o.MountsObserved),
@@ -62,7 +74,17 @@ func (c SandboxContainer) Compare(o SandboxContainer) int {
 		compareMountKinds(c.BindMounts, c.BindMountKinds, o.BindMounts, o.BindMountKinds),
 		compareBool(c.EnvObserved, o.EnvObserved),
 		slices.Compare(c.EnvNames, o.EnvNames),
+		comparePublicEnv(c.EnvValues, o.EnvValues),
 	)
+}
+
+func comparePublicEnv(a, b map[string]string) int {
+	for _, name := range []string{"HOST_IP", "NODE_IP"} {
+		if c := strings.Compare(a[name], b[name]); c != 0 {
+			return c
+		}
+	}
+	return 0
 }
 
 func compareMountKinds(aNames []string, a map[string]string, bNames []string, b map[string]string) int {

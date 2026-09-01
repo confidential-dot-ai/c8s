@@ -34,7 +34,7 @@ var sandboxIDAnnotations = []string{
 // the guest boundary is the isolation, so no peer-credential check is needed.
 type admissionInventory struct {
 	mu         sync.RWMutex
-	containers map[string]string                          // live container id -> image digest
+	containers map[string]workloadclaims.SandboxContainer // live container id -> observation
 	admitted   map[string]workloadclaims.SandboxContainer // key -> everything ever admitted
 	unresolved map[string]struct{}                        // container ids with no digest; cleared only by a later resolved record
 	sandboxID  string                                     // the guest's single pod sandbox
@@ -45,7 +45,7 @@ type admissionInventory struct {
 
 func newAdmissionInventory() *admissionInventory {
 	return &admissionInventory{
-		containers: map[string]string{},
+		containers: map[string]workloadclaims.SandboxContainer{},
 		admitted:   map[string]workloadclaims.SandboxContainer{},
 		unresolved: map[string]struct{}{},
 	}
@@ -67,15 +67,18 @@ func (b *admissionInventory) record(cid, digest string, argv []string, observed 
 		return
 	}
 	delete(b.unresolved, cid)
-	b.containers[cid] = digest
 	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv)}
 	if len(observed) == 1 {
+		c.Name = observed[0].Name
+		c.Role = observed[0].Role
 		c.BindMounts = slices.Clone(observed[0].BindMounts)
 		c.BindMountKinds = cloneMountKinds(observed[0].BindMountKinds)
 		c.EnvNames = slices.Clone(observed[0].EnvNames)
+		c.EnvValues = cloneMountKinds(observed[0].EnvValues)
 		c.MountsObserved = observed[0].MountsObserved
 		c.EnvObserved = observed[0].EnvObserved
 	}
+	b.containers[cid] = c
 	b.admitted[c.Key()] = c
 }
 
@@ -98,7 +101,21 @@ func cloneMountKinds(in map[string]string) map[string]string {
 func (b *admissionInventory) remove(cid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	c, ok := b.containers[cid]
 	delete(b.containers, cid)
+	if !ok {
+		return
+	}
+	key := c.Key()
+	for _, live := range b.containers {
+		if live.Key() == key {
+			return
+		}
+	}
+	if historical, exists := b.admitted[key]; exists {
+		historical.Stopped = true
+		b.admitted[key] = historical
+	}
 }
 
 // recordSandboxID notes the guest's pod sandbox ID (from the CRI annotations

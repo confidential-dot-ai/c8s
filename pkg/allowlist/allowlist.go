@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"path"
 	"slices"
@@ -45,6 +46,14 @@ const (
 	PolicyAny   = "any"
 	PolicyExact = "exact"
 	PolicyAllow = "allow"
+)
+
+// Container roles are part of the complete-set release decision. They are not
+// used for per-container admission, where a container starts before the whole
+// Pod can exist.
+const (
+	ContainerRoleInit = "init"
+	ContainerRoleMain = "main"
 )
 
 // Allowlist is the complete image allowlist.
@@ -70,6 +79,10 @@ type Workload struct {
 
 // Container binds a digest to the process policy permitted for it.
 type Container struct {
+	// Name is the Kubernetes container name. Old entries can omit it, but a
+	// generated exact entry always sets it. The complete-set matcher uses it to
+	// keep two equal process policies and the init/main lists distinct.
+	Name    string       `json:"name,omitempty"`
 	Digest  types.Digest `json:"digest"`
 	Image   string       `json:"image,omitempty"`
 	Command ArgvPolicy   `json:"command"`
@@ -84,8 +97,16 @@ type Container struct {
 // it. Exact requires equality, Any leaves it unconstrained, Deny requires it to
 // be empty. An absent policy defaults to Deny.
 type ArgvPolicy struct {
-	Policy string   `json:"policy"`
-	Argv   []string `json:"argv,omitempty"`
+	Policy      string           `json:"policy"`
+	Argv        []string         `json:"argv,omitempty"`
+	EnvBindings []ArgvEnvBinding `json:"env_bindings,omitempty"`
+}
+
+// ArgvEnvBinding binds one exact argv item to public downward-API values that
+// kubelet expands before CRI admission. Index is relative to this policy.
+type ArgvEnvBinding struct {
+	Index int      `json:"index"`
+	Names []string `json:"names"`
 }
 
 // MountPolicy governs where the host may bind content into the container.
@@ -105,10 +126,10 @@ type ArgvPolicy struct {
 type MountPolicy struct {
 	Policy       string   `json:"policy"`
 	Destinations []string `json:"destinations,omitempty"`
-	// Kinds optionally pins the Kubernetes volume source class at a
-	// confidentiality-critical destination. It never contains the host source
-	// path. Supported values are empty-dir, configmap, secret, projected,
-	// downward-api, host-path, node, and unknown.
+	// Kinds pins storage provenance at a confidentiality-critical destination.
+	// New generated entries use private or node. private is TEE-private memory.
+	// node is persistent or host-selected. pod and legacy Kubernetes kind values
+	// remain accepted for migration and map to the same matching classes.
 	Kinds map[string]string `json:"kinds,omitempty"`
 }
 
@@ -119,6 +140,11 @@ type MountPolicy struct {
 type EnvPolicy struct {
 	Policy string   `json:"policy"`
 	Names  []string `json:"names,omitempty"`
+	// Prefixes admits runtime-created name families without guessing the full
+	// set. Generated Kubernetes system policy uses KUBERNETES_ while
+	// enableServiceLinks=false. It still rejects LD_PRELOAD and every unrelated
+	// injected name.
+	Prefixes []string `json:"prefixes,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -158,6 +184,9 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
 	}
+	if err := requireJSONEOF(dec); err != nil {
+		return nil, fmt.Errorf("decode allowlist: %w", err)
+	}
 	if err := a.normalize(strict); err != nil {
 		return nil, err
 	}
@@ -174,6 +203,9 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("decode workload: %w", err)
 	}
+	if err := requireJSONEOF(dec); err != nil {
+		return nil, fmt.Errorf("decode workload: %w", err)
+	}
 	if w.Identity != "" && !ValidWorkloadName(w.Identity) {
 		return nil, fmt.Errorf("entry identity %q must be at most %d bytes and match [A-Za-z0-9][A-Za-z0-9._-]*", w.Identity, MaxWorkloadNameLen)
 	}
@@ -181,6 +213,9 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 		return nil, err
 	}
 	if err := normalizeContainers("entry", "containers", w.Containers); err != nil {
+		return nil, err
+	}
+	if err := validateContainerNames("entry", w); err != nil {
 		return nil, err
 	}
 	if err := normalizeSecrets(&w.Secrets); err != nil {
@@ -274,6 +309,9 @@ func (a *Allowlist) normalize(strict bool) error {
 		if err := normalizeContainers(name, "containers", w.Containers); err != nil {
 			return err
 		}
+		if err := validateContainerNames(name, w); err != nil {
+			return err
+		}
 		if err := normalizeSecrets(&w.Secrets); err != nil {
 			return fmt.Errorf("workload %q secrets: %w", name, err)
 		}
@@ -296,6 +334,9 @@ func WorkloadIdentity(entryName string, workload Workload) string {
 func normalizeContainers(workload, field string, cs []Container) error {
 	for i := range cs {
 		c := &cs[i]
+		if c.Name != "" && !validContainerName(c.Name) {
+			return fmt.Errorf("workload %q %s[%d]: container name %q must be a lowercase DNS label", workload, field, i, c.Name)
+		}
 		if c.Digest.String() == "" {
 			return fmt.Errorf("workload %q %s[%d]: digest is required", workload, field, i)
 		}
@@ -310,6 +351,35 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		}
 		if err := normalizeEnv(&c.Env); err != nil {
 			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
+		}
+	}
+	return nil
+}
+
+func validateContainerNames(workload string, w Workload) error {
+	seen := map[string]string{}
+	for _, part := range []struct {
+		role string
+		cs   []Container
+	}{{ContainerRoleInit, w.InitContainers}, {ContainerRoleMain, w.Containers}} {
+		for _, c := range part.cs {
+			if c.Name == "" {
+				continue
+			}
+			if prior, ok := seen[c.Name]; ok {
+				return fmt.Errorf("workload %q container name %q is declared more than once (%s and %s)", workload, c.Name, prior, part.role)
+			}
+			seen[c.Name] = part.role
+		}
+	}
+	for _, init := range w.InitContainers {
+		if init.Name != "" {
+			continue
+		}
+		for _, main := range w.Containers {
+			if main.Name == "" && init.Digest == main.Digest && policyKey(init) == policyKey(main) {
+				return fmt.Errorf("workload %q has the same unnamed container policy in init and main roles; re-derive it with container names before migration", workload)
+			}
 		}
 	}
 	return nil
@@ -337,7 +407,13 @@ func normalizeMounts(p *MountPolicy) error {
 			}
 		}
 		p.Destinations = sortedUnique(p.Destinations)
-		allowedKinds := map[string]struct{}{"empty-dir": {}, "configmap": {}, "secret": {}, "projected": {}, "downward-api": {}, "host-path": {}, "node": {}, "unknown": {}}
+		allowedKinds := map[string]struct{}{
+			"private": {}, "pod": {}, "node": {}, "unknown": {},
+			// Accepted for existing v1 documents. The matcher converts them to
+			// private/pod/node requirements.
+			"empty-dir": {}, "configmap": {}, "secret": {}, "projected": {},
+			"downward-api": {}, "host-path": {},
+		}
 		for destination, kind := range p.Kinds {
 			if !path.IsAbs(destination) {
 				return fmt.Errorf("kind destination %q is not an absolute path", destination)
@@ -360,11 +436,12 @@ func normalizeMounts(p *MountPolicy) error {
 func normalizeEnv(p *EnvPolicy) error {
 	switch p.Policy {
 	case PolicyAny, "":
-		if len(p.Names) != 0 {
-			return fmt.Errorf("any policy takes no names")
+		if len(p.Names) != 0 || len(p.Prefixes) != 0 {
+			return fmt.Errorf("any policy takes no names or prefixes")
 		}
 		p.Policy = PolicyAny
 		p.Names = nil
+		p.Prefixes = nil
 	case PolicyExact:
 		for _, n := range p.Names {
 			if n == "" || strings.ContainsRune(n, '=') {
@@ -372,6 +449,12 @@ func normalizeEnv(p *EnvPolicy) error {
 			}
 		}
 		p.Names = sortedUnique(p.Names)
+		for _, prefix := range p.Prefixes {
+			if prefix == "" || strings.ContainsRune(prefix, '=') {
+				return fmt.Errorf("environment prefix %q is empty or contains '='", prefix)
+			}
+		}
+		p.Prefixes = sortedUnique(p.Prefixes)
 	default:
 		return fmt.Errorf("unknown env policy %q (want any or exact)", p.Policy)
 	}
@@ -399,17 +482,43 @@ func sortedUnique(in []string) []string {
 func normalizeArgv(p *ArgvPolicy) error {
 	switch p.Policy {
 	case PolicyDeny, PolicyAny:
-		if len(p.Argv) != 0 {
-			return fmt.Errorf("%s policy takes no argv", p.Policy)
+		if len(p.Argv) != 0 || len(p.EnvBindings) != 0 {
+			return fmt.Errorf("%s policy takes no argv or environment bindings", p.Policy)
 		}
 		p.Argv = nil
+		p.EnvBindings = nil
 	case PolicyExact:
 		if len(p.Argv) == 0 {
 			return fmt.Errorf("exact policy requires a non-empty argv")
 		}
+		seenIndex := map[int]struct{}{}
+		for i := range p.EnvBindings {
+			binding := &p.EnvBindings[i]
+			if binding.Index < 0 || binding.Index >= len(p.Argv) {
+				return fmt.Errorf("environment binding index %d is outside argv", binding.Index)
+			}
+			if _, exists := seenIndex[binding.Index]; exists {
+				return fmt.Errorf("environment binding index %d is declared more than once", binding.Index)
+			}
+			seenIndex[binding.Index] = struct{}{}
+			binding.Names = sortedUnique(binding.Names)
+			if len(binding.Names) == 0 {
+				return fmt.Errorf("environment binding index %d has no names", binding.Index)
+			}
+			for _, name := range binding.Names {
+				if name != "HOST_IP" && name != "NODE_IP" {
+					return fmt.Errorf("environment binding name %q is not a supported public downward-API value", name)
+				}
+				if !strings.Contains(p.Argv[binding.Index], "$("+name+")") {
+					return fmt.Errorf("environment binding index %d does not contain $(%s)", binding.Index, name)
+				}
+			}
+		}
+		sort.Slice(p.EnvBindings, func(i, j int) bool { return p.EnvBindings[i].Index < p.EnvBindings[j].Index })
 	case "":
 		p.Policy = PolicyDeny
 		p.Argv = nil
+		p.EnvBindings = nil
 	default:
 		return fmt.Errorf("unknown argv policy %q (want deny, any, or exact)", p.Policy)
 	}
@@ -493,6 +602,9 @@ func normalizeGlobs(globs []string) ([]string, error) {
 // (e.g. a shared base image invoked differently by different workloads).
 func sortContainers(cs []Container) {
 	sort.SliceStable(cs, func(i, j int) bool {
+		if cs[i].Name != cs[j].Name {
+			return cs[i].Name < cs[j].Name
+		}
 		di, dj := cs[i].Digest.String(), cs[j].Digest.String()
 		if di != dj {
 			return di < dj
@@ -502,8 +614,33 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env})
+	b, _ := json.Marshal([]any{c.Name, c.Command, c.Args, c.Mounts, c.Env})
 	return string(b)
+}
+
+func requireJSONEOF(dec *json.Decoder) error {
+	var trailing any
+	err := dec.Decode(&trailing)
+	if err == io.EOF {
+		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("more than one JSON value")
+	}
+	return fmt.Errorf("trailing data: %w", err)
+}
+
+func validContainerName(name string) bool {
+	if name == "" || len(name) > 63 || name[0] == '-' || name[len(name)-1] == '-' {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // MaxWorkloadNameLen bounds an entry name to the Kubernetes label-value length,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -420,11 +421,78 @@ func TestEveryNodeInventoryReportsExactCDSCanonicalPolicyDigestAfterTransition(t
 	}
 }
 
+func TestRuntimeInventoryCannotExposeNewRoleWithOldPolicyIdentity(t *testing.T) {
+	store := newPolicyStore(floorAllowlist(map[string]string{digestApp: "floor"}))
+	inventory := newAdmissionInventory(t.TempDir(), store)
+	inventory.recordPod(&api.PodSandbox{Id: "sandbox", Name: "system", Namespace: "c8s-system", Uid: "uid"})
+	inventory.record("container", "sandbox", "system", digestApp, []string{"/system"}, containerObservation{})
+	active, err := allowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"system":{"containers":[
+		{"name":"system","digest":"` + digestApp + `","command":{"policy":"exact","argv":["/system"]},"args":{"policy":"deny"}}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolesChanged := make(chan struct{})
+	release := make(chan struct{})
+	store.setTransitionGuard(func(policy *allowlist.Allowlist, index *allowlist.Index) error {
+		if err := inventory.admitsLiveRuntime(policy, index); err != nil {
+			return err
+		}
+		close(rolesChanged)
+		<-release
+		return nil
+	})
+	applyDone := make(chan error, 1)
+	go func() {
+		_, err := store.applyChecked(active, 5)
+		applyDone <- err
+	}()
+	<-rolesChanged
+	readDone := make(chan workloadclaims.RuntimeInventory, 1)
+	go func() {
+		got, _ := inventory.RuntimeInventory()
+		readDone <- got
+	}()
+	select {
+	case got := <-readDone:
+		t.Fatalf("inventory crossed an in-progress policy activation: %+v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-applyDone; err != nil {
+		t.Fatal(err)
+	}
+	got := <-readDone
+	if got.PolicyVersion != 5 || got.PolicySHA256 != allowlistDigest(active) || len(got.Containers) != 1 || got.Containers[0].ContainerRole != allowlist.ContainerRoleMain {
+		t.Fatalf("inventory policy/role snapshot = %+v", got)
+	}
+}
+
 func TestRuntimeInventoryFailsClosedOnUnresolvedLiveDigest(t *testing.T) {
 	b := newAdmissionInventory(t.TempDir())
 	b.record(cidApp1, "sandbox-1", "worker", "", []string{"/worker"})
 	if _, err := b.RuntimeInventory(); err == nil {
 		t.Fatal("runtime inventory served a subset while a live digest was unresolved")
+	}
+}
+
+func TestNodeInventoryMarksStoppedMainWithoutLosingHistory(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+	b.record("ctr", "sandbox", "app", digestApp, []string{"/app"}, containerObservation{role: allowlist.ContainerRoleMain})
+	b.remove("ctr")
+	_, containers, known, err := b.DigestsForSandbox("sandbox")
+	if err != nil || !known || len(containers) != 1 || !containers[0].Stopped {
+		t.Fatalf("stopped high-water record = known %v err %v containers %+v", known, err, containers)
+	}
+	w := allowlist.Workload{Containers: []allowlist.Container{{
+		Name: "app", Digest: mustDigest(t, digestApp),
+		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/app"}},
+		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny},
+	}}}
+	if w.Diff([]allowlist.RunningContainer{{
+		Name: containers[0].Name, Role: containers[0].Role, Stopped: containers[0].Stopped,
+		Digest: containers[0].Digest, Argv: containers[0].Argv,
+	}}).Describes() {
+		t.Fatal("stopped node main satisfied a complete-set match")
 	}
 }
 

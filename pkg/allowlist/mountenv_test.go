@@ -79,6 +79,12 @@ func TestMountPolicyRefusesWrongSourceKindAtDeclaredDestination(t *testing.T) {
 	if c.admits(malicious) {
 		t.Error("a host-path substitution at the same destination was admitted")
 	}
+	nodePolicy := containerWith(t,
+		MountPolicy{Policy: PolicyExact, Destinations: []string{"/run/tls"}, Kinds: map[string]string{"/run/tls": "node"}},
+		EnvPolicy{Policy: PolicyAny})
+	if nodePolicy.admits(allowed) {
+		t.Error("exact node provenance accepted a private or Pod source")
+	}
 }
 
 // An absent policy has to mean "unconstrained": every container carries a mount
@@ -110,6 +116,18 @@ func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 	}
 }
 
+func TestEnvPolicyAllowsOnlyDeclaredRuntimePrefix(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	c := containerWith(t, MountPolicy{Policy: PolicyAny},
+		EnvPolicy{Policy: PolicyExact, Names: []string{"PATH"}, Prefixes: []string{"KUBERNETES_"}})
+	if !c.admits(running(digest, nil, []string{"PATH", "KUBERNETES_SERVICE_HOST", "KUBERNETES_PORT"})) {
+		t.Fatal("declared Kubernetes runtime environment family was refused")
+	}
+	if c.admits(running(digest, nil, []string{"PATH", "KUBERNETESX_PRELOAD"})) {
+		t.Fatal("near-prefix environment injection was admitted")
+	}
+}
+
 // An exact rule is a security promise. A runtime that cannot observe its input
 // must refuse it instead of treating missing evidence as an empty set.
 func TestExactPolicyRefusesUnobservedFields(t *testing.T) {
@@ -137,6 +155,9 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 		{"any env carrying names", Container{Env: EnvPolicy{Policy: PolicyAny, Names: []string{"PATH"}}}},
 		{"name containing =", Container{Env: EnvPolicy{Policy: PolicyExact, Names: []string{"PATH=/bin"}}}},
 		{"unknown env policy", Container{Env: EnvPolicy{Policy: "sometimes"}}},
+		{"binding on deny argv", Container{Command: ArgvPolicy{Policy: PolicyDeny, EnvBindings: []ArgvEnvBinding{{Index: 0, Names: []string{"HOST_IP"}}}}}},
+		{"unsupported binding name", Container{Command: ArgvPolicy{Policy: PolicyExact, Argv: []string{"$(TOKEN)"}, EnvBindings: []ArgvEnvBinding{{Index: 0, Names: []string{"TOKEN"}}}}}},
+		{"binding outside argv", Container{Command: ArgvPolicy{Policy: PolicyExact, Argv: []string{"/app"}, EnvBindings: []ArgvEnvBinding{{Index: 1, Names: []string{"HOST_IP"}}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.c
