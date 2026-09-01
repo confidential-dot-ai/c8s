@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -172,10 +173,7 @@ func prepareOutDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	if err := fileutil.RequireRAMBacked(dir); err != nil {
-		return fmt.Errorf("--out-dir: %w", err)
-	}
-	return nil
+	return cmdsutil.RequireRAMBackedDir("--out-dir", dir)
 }
 
 // writeAll writes every value atomically (temp file then rename) so a consumer
@@ -185,6 +183,8 @@ func writeAll(cfg config, values map[string][]byte) error {
 	if err != nil {
 		return err
 	}
+	// In run() the out-dir already exists: prepareOutDir created and vetted
+	// it. Kept so writeAll stands alone for its direct (test) callers.
 	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", cfg.OutDir, err)
 	}

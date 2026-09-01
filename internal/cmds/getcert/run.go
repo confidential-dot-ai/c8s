@@ -750,10 +750,7 @@ func requireKeyOutRAMBacked(keyOutPath string) error {
 	if keyOutPath == "" {
 		return nil
 	}
-	if err := fileutil.RequireRAMBacked(filepath.Dir(keyOutPath)); err != nil {
-		return fmt.Errorf("--key-out: %w", err)
-	}
-	return nil
+	return cmdsutil.RequireRAMBackedDir("--key-out", filepath.Dir(keyOutPath))
 }
 
 // validateOutputPaths checks that output file locations are writable before

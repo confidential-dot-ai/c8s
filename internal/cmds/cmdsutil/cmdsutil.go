@@ -13,6 +13,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 // RunMain is the body of the per-binary thin shim under cmd/<name>/main.go.
@@ -48,6 +50,17 @@ func ValidateAttestationAPIURL(flagName, u string) error {
 		return nil
 	}
 	return ValidateHTTPURL(flagName, u)
+}
+
+// RequireRAMBackedDir returns an error unless dir sits on tmpfs/ramfs
+// (fileutil.RequireRAMBacked). The flagName is interpolated into the error so
+// callers needn't wrap. Shared by get-secret (--out-dir) and get-cert
+// (--key-out): each secret-writing sidecar gets the same refusal shape.
+func RequireRAMBackedDir(flagName, dir string) error {
+	if err := fileutil.RequireRAMBacked(dir); err != nil {
+		return fmt.Errorf("%s: %w", flagName, err)
+	}
+	return nil
 }
 
 // ParseFlags is the standard fs.Parse(args) call used by every Run-style
