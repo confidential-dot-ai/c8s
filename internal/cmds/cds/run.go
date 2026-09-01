@@ -9,10 +9,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +27,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -31,6 +36,7 @@ import (
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"golang.org/x/time/rate"
 )
@@ -101,14 +107,57 @@ func run(cfg config) error {
 		return fmt.Errorf("open allowlist database: %w", err)
 	}
 	defer allowlistStore.Close()
+	// Create one store before CA adoption. A successor must restore application
+	// secrets before it starts any handler that can read them.
+	secretsStore := newSecretsStore(cfg)
 
-	// CDS generates its mesh CA in process at startup; the private key never
-	// touches a Kubernetes Secret.
-	mesh, err := issuer.NewCAWithCurve(cfg.caCommonName, cfg.caCertValidity, elliptic.P384())
-	if err != nil {
-		return fmt.Errorf("generate mesh CA: %w", err)
+	var (
+		teeWebPKIStore    *teewebpki.Store
+		teeWebPKIRestored bool
+	)
+	if cfg.teeWebPKIEnabled && cfg.handoffPeerURL == "" {
+		teeWebPKIStore, err = teewebpki.NewStore(nil)
+		if err != nil {
+			return fmt.Errorf("create tee-webpki state: %w", err)
+		}
 	}
-	slog.Info("generated in-memory mesh CA",
+	restoreTEEWebPKI := func(snapshot teewebpki.Snapshot) error {
+		restored, err := teewebpki.NewStoreFromSnapshot(snapshot)
+		if err != nil {
+			return err
+		}
+		teeWebPKIStore = restored
+		teeWebPKIRestored = true
+		return nil
+	}
+
+	// A cold start creates a mesh CA. A planned successor receives the live CA
+	// and protected state from the active CDS. It never falls back to a new CA.
+	var activatePredecessor func(context.Context) error
+	mesh, adopted, err := issuer.ProvisionCA(ctx, issuer.CAProvisionConfig{
+		CommonName: cfg.caCommonName, Validity: cfg.caCertValidity, Curve: elliptic.P384(),
+		PeerURL:           strings.TrimRight(cfg.handoffPeerURL, "/"),
+		AttestationApiURL: cfg.attestationApiURL,
+		Measurements:      cfg.handoffMeasurements, RTMRs: cfg.handoffRTMRs,
+		ExpectedIssuer: cfg.earIssuerName, Timeout: cfg.handoffPeerTimeout,
+		OperatorKeysHash:        operatorKeysHash,
+		ClusterIdentityCertFile: cfg.handoffClientCert,
+		ClusterIdentityKeyFile:  cfg.handoffClientKey,
+		RestoreAllowlist:        allowlistStore.RestoreSnapshot,
+		RestoreTEEWebPKI:        restoreTEEWebPKI,
+		RestoreSecrets:          secretsStore.RestoreSnapshot,
+		OnAdopt: func(activate func(context.Context) error) {
+			activatePredecessor = activate
+		},
+	}, slog.Default())
+	if err != nil {
+		return fmt.Errorf("provision mesh CA: %w", err)
+	}
+	if cfg.teeWebPKIEnabled && adopted && !teeWebPKIRestored {
+		return fmt.Errorf("adopted CDS did not receive tee-webpki state")
+	}
+	slog.Info("loaded in-memory mesh CA",
+		"source", map[bool]string{false: "generated", true: "handoff"}[adopted],
 		"fingerprint", certutil.CertFingerprint(mesh.Cert.Raw),
 		"not_after", mesh.Cert.NotAfter.Format(time.RFC3339),
 	)
@@ -204,6 +253,7 @@ func run(cfg config) error {
 		Challenges:        &challengeStore,
 		AttestationClient: asClient,
 		EarIssuer:         earIssuer,
+		OperatorKeysHash:  handoffOperatorPolicy(cfg, operatorKeysHash),
 		RTMRs:             rtmrPins,
 	}
 
@@ -262,10 +312,9 @@ func run(cfg config) error {
 	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
 		// One store behind both handlers: an operator write and a workload read
 		// are two doors onto the same paths.
-		store := newSecretsStore(cfg)
 		policy := secrets.NewCachedPolicy(&allowlistStore)
 		secretsHandler = &secrets.Handler{
-			Store:          store,
+			Store:          secretsStore,
 			Challenges:     &secretsChallenges,
 			Inventory:      sandboxDigests,
 			Bindings:       sandboxBindings,
@@ -274,7 +323,7 @@ func run(cfg config) error {
 			Logger:         slog.Default(),
 		}
 		secretsOperator = &secrets.OperatorHandler{
-			Store:        store,
+			Store:        secretsStore,
 			Authorize:    writeAuthorizer,
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Logger:       slog.Default(),
@@ -292,6 +341,19 @@ func run(cfg config) error {
 		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
 	} else {
 		slog.Warn("NOT serving /secrets: any workload depending on a secret will fail to start", "reason", why)
+	}
+
+	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, secretsStore, teeWebPKIStore, operatorKeysHash, rotator, earIssuer, asClient)
+	if err != nil {
+		return err
+	}
+	var successorActive atomic.Bool
+	successorActive.Store(!adopted)
+	if adopted {
+		if handoffHandler == nil || activatePredecessor == nil {
+			return fmt.Errorf("adopted CDS has no handoff leadership controller")
+		}
+		handoffHandler.StartFrozen()
 	}
 
 	deps := dependencies{
@@ -345,6 +407,23 @@ func run(cfg config) error {
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
 	}
+	if handoffHandler != nil {
+		deps.HandoffHandler = handoffHandler
+		baseReady := deps.ReadyFn
+		deps.ReadyFn = func() bool {
+			return handoffHandler.ReadyForTraffic() && successorActive.Load() && baseReady()
+		}
+	}
+	if teeWebPKIStore != nil {
+		deps.TEEWebPKIHandler = &teewebpki.Handler{
+			Store:            teeWebPKIStore,
+			ExpectedWorkload: cfg.teeWebPKIWorkload,
+		}
+		deps.TEEWebPKIOperator = &teewebpki.OperatorHandler{
+			Store:     teeWebPKIStore,
+			Authorize: writeAuthorizer,
+		}
+	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)
 	}
@@ -387,6 +466,45 @@ func run(cfg config) error {
 		}
 
 		go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
+		if adopted {
+			listener, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("listen before CDS activation: %w", err)
+			}
+			serveErrors := make(chan error, 1)
+			serveStarted := make(chan struct{})
+			go func() {
+				close(serveStarted)
+				serveErrors <- srv.Serve(tls.NewListener(listener, tlsCfg))
+			}()
+			<-serveStarted
+			select {
+			case serveErr := <-serveErrors:
+				if serveErr != nil && serveErr != http.ErrServerClosed {
+					return fmt.Errorf("serve adopted CDS before activation: %w", serveErr)
+				}
+				return fmt.Errorf("adopted CDS stopped before activation")
+			default:
+			}
+			// The successor now accepts direct RA-TLS connections, but /readyz is
+			// false and mutations are frozen. Retire the old CDS, then promote.
+			activateCtx, cancel := context.WithTimeout(ctx, cfg.handoffPeerTimeout)
+			activateErr := activatePredecessor(activateCtx)
+			cancel()
+			if activateErr != nil {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = srv.Shutdown(shutdownCtx)
+				shutdownCancel()
+				return fmt.Errorf("activate adopted CDS state: %w", activateErr)
+			}
+			handoffHandler.Promote()
+			successorActive.Store(true)
+			slog.Info("CDS successor activated", "addr", addr)
+			if err := <-serveErrors; err != nil && err != http.ErrServerClosed {
+				return err
+			}
+			return nil
+		}
 
 		slog.Info("cds listening (RA-TLS)", "addr", addr, "platform", cfg.ratlsPlatform)
 		if err := srv.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
@@ -403,6 +521,82 @@ func run(cfg config) error {
 		return err
 	}
 	return nil
+}
+
+func handoffOperatorPolicy(cfg config, operatorKeysHash string) string {
+	if len(cfg.handoffMeasurements) == 0 {
+		return ""
+	}
+	return operatorKeysHash
+}
+
+func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, secretsStore *secrets.MemoryStore, teeStore *teewebpki.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
+	allowed := parseReferenceDigests(cfg.handoffMeasurements)
+	if len(allowed) == 0 {
+		return nil, nil
+	}
+	boot, err := issuer.NewLocalHandoffBootstrap(asClient, earIssuer, operatorKeysHash)
+	if err != nil {
+		return nil, fmt.Errorf("prepare handoff bootstrap: %w", err)
+	}
+	handler, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
+		Logger: slog.Default(), KeyProvider: keyProvider,
+		ExpectedIssuer: cfg.earIssuerName, AllowedMeasurements: allowed,
+		OperatorKeysHash:          operatorKeysHash,
+		ExpectedSuccessorWorkload: cfg.handoffSuccessorWorkload,
+		RequestEARMaxAge:          cfg.handoffEARMaxAge,
+		EndpointDrainDelay:        cfg.handoffEndpointDrainDelay,
+		Signer:                    boot.Signer(), EARSource: boot.EARSource(),
+		Snapshot: func() (issuer.CASnapshot, bool) {
+			snapshot, ok := snapshotHandoffState(allowlistStore, mesh)
+			if ok {
+				secretSnapshot, err := secretsStore.Snapshot()
+				if err != nil {
+					slog.Error("snapshot application-secret state for handoff", "error", err)
+					return issuer.CASnapshot{}, false
+				}
+				snapshot.Secrets = &secretSnapshot
+			}
+			if ok && teeStore != nil {
+				// HandleHandoff holds the global mutation write lock while this
+				// snapshot is taken, then keeps the CDS in the frozen leadership
+				// phase. All tee-webpki write routes use that same gate. Do not
+				// freeze the sub-store separately: if validation or encryption
+				// fails before a response is committed, leadership can return to
+				// active without leaving this state permanently frozen.
+				state := teeStore.Snapshot()
+				snapshot.TEEWebPKI = &state
+			}
+			return snapshot, ok
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	go boot.RunRefresh(ctx, slog.Default())
+	go issuer.RunHandoffEARExpiryUpdater(ctx, handler.IssuerEARSource(), time.Minute, slog.Default())
+	return handler, nil
+}
+
+func snapshotHandoffState(store *allowlist.Store, mesh *issuer.CA) (issuer.CASnapshot, bool) {
+	doc, version, err := store.LoadAll()
+	if err != nil {
+		slog.Error("snapshot allowlist for handoff", "error", err)
+		return issuer.CASnapshot{}, false
+	}
+	floor := make(map[types.Digest]string, len(doc.Digests))
+	for digest, image := range doc.Digests {
+		parsed, err := types.ParseDigest(digest)
+		if err != nil {
+			slog.Error("snapshot allowlist for handoff", "digest", digest, "error", err)
+			return issuer.CASnapshot{}, false
+		}
+		floor[parsed] = image
+	}
+	return issuer.CASnapshot{
+		Cert: mesh.Cert, Key: mesh.Key,
+		AllowlistVersion: version, Allowlist: floor, Workloads: doc.Workloads,
+	}, true
 }
 
 func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {
@@ -479,6 +673,48 @@ func secretsEnabled(cfg config, sandboxDigests *workloadclaims.DigestsClient, in
 }
 
 func validateConfig(cfg config) error {
+	if cfg.teeWebPKIEnabled && !pkgallowlist.ValidWorkloadName(cfg.teeWebPKIWorkload) {
+		return fmt.Errorf("--tee-webpki-workload must be a valid workload name")
+	}
+	if (cfg.teeWebPKIEnabled || cfg.handoffPeerURL != "") && len(cfg.handoffMeasurements) == 0 {
+		return fmt.Errorf("tee-webpki and CDS adoption require --handoff-measurements")
+	}
+	if len(cfg.handoffMeasurements) > 0 {
+		if cfg.operatorKeys == "" {
+			return fmt.Errorf("CDS handoff requires --operator-keys")
+		}
+		if !pkgallowlist.ValidWorkloadName(cfg.handoffSuccessorWorkload) {
+			return fmt.Errorf("--handoff-successor-workload must be a valid workload name")
+		}
+		if cfg.handoffEARMaxAge <= 0 {
+			return fmt.Errorf("--handoff-ear-max-age must be positive")
+		}
+		if cfg.handoffEndpointDrainDelay <= 0 {
+			return fmt.Errorf("--handoff-endpoint-drain-delay must be positive")
+		}
+		writeTimeout := cfg.writeTimeout
+		if writeTimeout == 0 {
+			writeTimeout = defaultHTTPWriteTimeout
+		}
+		if cfg.handoffEndpointDrainDelay >= writeTimeout {
+			return fmt.Errorf("--handoff-endpoint-drain-delay must be below --write-timeout")
+		}
+	}
+	if cfg.handoffPeerURL != "" {
+		if ratls.NormalizePlatform(cfg.ratlsPlatform) == "" {
+			return fmt.Errorf("CDS adoption requires --ratls-platform")
+		}
+		if cfg.handoffPeerTimeout <= 0 {
+			return fmt.Errorf("--handoff-peer-timeout must be positive")
+		}
+		minimumPeerTimeout := cfg.handoffEndpointDrainDelay + issuer.DefaultPullRetryInterval
+		if cfg.handoffPeerTimeout <= minimumPeerTimeout {
+			return fmt.Errorf("--handoff-peer-timeout must exceed --handoff-endpoint-drain-delay by more than %s for an activation retry", issuer.DefaultPullRetryInterval)
+		}
+		if cfg.handoffClientCert == "" || cfg.handoffClientKey == "" {
+			return fmt.Errorf("CDS adoption requires --handoff-client-cert and --handoff-client-key")
+		}
+	}
 	for _, timeout := range []struct {
 		name  string
 		value time.Duration

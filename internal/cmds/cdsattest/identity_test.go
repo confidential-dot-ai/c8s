@@ -127,8 +127,10 @@ func writeTestPEM(t *testing.T, path, blockType string, der []byte) {
 func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	provider := &capturingProvider{}
+	operatorKeySetHash := strings.Repeat("b", 64)
 	srv := NewServer(Config{
 		Evidence:             provider,
+		OperatorPolicy:       staticOperatorPolicy{policy: OperatorPolicy{KeysPEM: "operator keys", SHA256: operatorKeySetHash}},
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -173,8 +175,15 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantReportData, err = overenc.BindOperatorKeySetHash(wantReportData, operatorKeySetHash)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(provider.lastReportData, wantReportData) {
 		t.Fatalf("report_data = %x, want identity transcript %x", provider.lastReportData, wantReportData)
+	}
+	if bundle.OperatorKeysSHA256 != operatorKeySetHash || bundle.OperatorKeysPEM != "operator keys" {
+		t.Fatalf("operator policy was not returned: %+v", bundle)
 	}
 
 	leafHash := sha256.Sum256(identity.leaf.Raw)

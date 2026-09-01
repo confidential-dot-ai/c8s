@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -518,6 +519,32 @@ func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 		return err
 	}
 	if err := bumpVersionTx(tx); err != nil {
+		return err
+	}
+	return s.commitTx(tx)
+}
+
+// RestoreSnapshot atomically restores the peer's complete allowlist and ETag.
+// This is a state transfer. It is not an operator mutation.
+func (s *Store) RestoreSnapshot(version string, al *pkgallowlist.Allowlist) error {
+	parsedVersion, err := strconv.ParseUint(version, 10, 64)
+	if err != nil || parsedVersion == 0 {
+		return fmt.Errorf("invalid allowlist snapshot version %q", version)
+	}
+	if al == nil {
+		return fmt.Errorf("allowlist snapshot is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := replaceContentsTx(tx, al); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE allowlist_version SET version = ?", version); err != nil {
 		return err
 	}
 	return s.commitTx(tx)

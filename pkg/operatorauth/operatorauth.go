@@ -83,6 +83,18 @@ func KeySetHash(keys []*ecdsa.PublicKey) (string, error) {
 	return hex.EncodeToString(digest), nil
 }
 
+// ValidateKeySetHash accepts only the canonical lowercase SHA-256 form.
+func ValidateKeySetHash(value string) error {
+	if value == "" {
+		return fmt.Errorf("operator key-set hash is empty")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size || strings.ToLower(value) != value {
+		return fmt.Errorf("operator key-set hash must be %d lowercase hex characters", sha256.Size*2)
+	}
+	return nil
+}
+
 // Signer mints operator authorization tokens from an EC private key. Construct
 // with NewSignerFromKeyPEM; the zero value is unusable.
 type Signer struct {

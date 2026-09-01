@@ -14,6 +14,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -23,6 +24,8 @@ type Handler struct {
 	Challenges        *ChallengeStore
 	AttestationClient attestationclient.Client
 	EarIssuer         ear.Issuer
+	// OperatorKeysHash makes /attest-key reject another operator policy.
+	OperatorKeysHash string
 	// RTMRs pins TDX runtime measurement registers on /attest-key: the launch
 	// digest recorded in the issued EAR covers TDVF firmware alone on TDX, so
 	// without these the EAR vouches for a guest image the host chose. Enforced
@@ -52,6 +55,16 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusUnprocessableEntity, "invalid_request", err.Error())
 		return
 	}
+	if req.OperatorKeysHash != "" {
+		if err := operatorauth.ValidateKeySetHash(req.OperatorKeysHash); err != nil {
+			WriteError(w, http.StatusBadRequest, "invalid_operator_keys_hash", err.Error())
+			return
+		}
+	}
+	if h.OperatorKeysHash != "" && req.OperatorKeysHash != h.OperatorKeysHash {
+		WriteError(w, http.StatusForbidden, "operator_policy_mismatch", "attested operator-key policy does not match this CDS")
+		return
+	}
 
 	challengeBytes, err := base64.StdEncoding.DecodeString(req.Challenge)
 	if err != nil {
@@ -79,7 +92,7 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expectedReportData, err := ratls.ReportDataForKey(pub, challengeBytes)
+	expectedReportData, err := ratls.ReportDataForKeyWithContext(pub, challengeBytes, []byte(req.OperatorKeysHash))
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_public_key", err.Error())
 		return
@@ -115,7 +128,7 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	earToken, err := h.EarIssuer.IssueWithLaunchDigestAndPubKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, pub)
+	earToken, err := h.EarIssuer.IssueAttestedKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, pub, req.OperatorKeysHash)
 	if err != nil {
 		slog.Error("attest-key: failed to issue EAR token", "error", err)
 		WriteError(w, http.StatusInternalServerError, "ear_issuance_failed",

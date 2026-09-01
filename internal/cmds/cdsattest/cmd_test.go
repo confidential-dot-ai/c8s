@@ -87,6 +87,23 @@ func TestRunErrors(t *testing.T) {
 			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
+		{
+			name: "active operator policy requires direct CDS URL",
+			cfg: config{
+				frontDoorMode: FrontDoorModeTEEWebPKI, platform: "snp",
+				evidenceFixture: fixture, activeOperatorPolicy: true,
+			},
+			wantSub: "--cds-url must be a direct https RA-TLS endpoint",
+		},
+		{
+			name: "active operator policy requires pinned CDS measurement",
+			cfg: config{
+				frontDoorMode: FrontDoorModeTEEWebPKI, platform: "snp",
+				evidenceFixture: fixture, activeOperatorPolicy: true,
+				cdsURL: "https://c8s-cds.c8s-system.svc:8443",
+			},
+			wantSub: "--cds-measurements must pin the CDS build",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -104,8 +104,10 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 
 - **Confidential GPUs.** NVIDIA GPU passthrough into confidential pods on
   SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
-  NVIDIA GPU and NVSwitch evidence; it is not wired into the c8s certificate
-  flow end to end, see [Known gaps](#known-gaps-and-open-items).
+  NVIDIA GPU and NVSwitch evidence. On a node-as-CVM GPU worker,
+  `cds-attest --nvidia-gpu-evidence` returns local GPU evidence in the same
+  nonce-bound receipt as the CPU TEE evidence. Cluster-wide receipt checks are
+  not part of c8s, see [Known gaps](#known-gaps-and-open-items).
 
 - **Verifiable from a browser.** A challenge-response protocol and a
   post-quantum over-encrypted channel let end users verify the cluster with
@@ -537,14 +539,15 @@ than let you discover them:
   `ratlsMesh.measurements` are set, the mesh accepts any attested peer. Fine
   for demos, mandatory homework for production.
 
-- **CDS is a singleton.** The mesh CA key lives only in CDS process
-  memory; a restart mints a new CA and workloads re-bootstrap.
+- **CDS has one active writer.** A planned, attested handoff preserves the mesh
+  CA and protected state. An unplanned loss of the only live CDS still mints a
+  new CA and makes workloads re-bootstrap.
 
-- **Secrets and volume keys live only in CDS memory.** There is no persistent
-  or external key store: a CDS restart destroys every secret and volume key,
-  every workload holding one must be rolled, and volume keys come back only
-  from the operator's escrow file. Rotation, versioning and delete are absent
-  — a replaced value is gone, and pods keep what they read at startup.
+- **Secrets and volume keys live only in CDS memory.** A planned CDS handoff
+  transfers them in recipient-bound ciphertext. An unplanned loss of the only
+  CDS still destroys every secret and volume key. Every workload holding one
+  must then be rolled. Volume keys come back only from the operator's escrow
+  file. Rotation, versioning, and delete are absent.
 
 - **Mesh peers are verified by CA chain, not per-peer measurement.** Leaves
   carry the evidence CDS verified at issuance, and `VerifyPolicy` has a
@@ -620,13 +623,17 @@ than let you discover them:
   mixed SNP+TDX clusters are not. Pod-as-CVM is also unavailable on Azure,
   which does not expose nested virtualization.
 
-- **GPU attestation is not wired end to end.** GPU passthrough into
+- **GPU attestation needs application-level worker coverage.** GPU passthrough into
   confidential pods works, and a locked guest fails closed on a non-CC GPU.
   [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
   verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
-  CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
-  require it at certificate issuance, so no positive GPU attestation reaches
-  the relying party.
+  CPU TEE evidence). A node-as-CVM worker can now collect and return this
+  evidence through its local `cds-attest` receipt sidecar. `c8s verify` checks
+  one such bundle with the pinned NRAS verifier, including nonce and expected
+  GPU architecture. c8s does not know the required worker set. The application
+  must collect one receipt from each required GPU worker and reject a missing
+  or invalid GPU bundle. The pod-as-CVM GPU path does not yet have the same
+  collection wiring.
 
 - **The browser over-encryption channel does not stream.** Requests and
   responses are buffered per envelope; responses over 32 MiB fail rather than
@@ -639,9 +646,9 @@ than let you discover them:
 
 The direction of travel:
 
-- **GPU attestation end to end.** Collect GPU evidence in the guest and
-  require it at certificate issuance, so a positive GPU attestation reaches
-  the relying party rather than stopping at the attestation service.
+- **GPU attestation end to end.** Add the same local collection path to
+  pod-as-CVM. Require the application verifier to check one nonce-bound CPU
+  and GPU receipt for each required worker.
 
 - **In-TEE volume encryption.** Stream plaintext into a CVM that generates the
   key, writes the encrypted volume, and commits the key straight to the secret

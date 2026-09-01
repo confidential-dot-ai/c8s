@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -246,6 +247,29 @@ func ReportDataForKey(pub crypto.PublicKey, nonce []byte) ([64]byte, error) {
 	h.Write(keyBytes)
 	if len(nonce) > 0 {
 		h.Write(nonce)
+	}
+	copy(reportData[:], h.Sum(nil))
+	return reportData, nil
+}
+
+// ReportDataForKeyWithContext binds protocol context to a key and nonce. It
+// keeps the old wire format when context is empty.
+func ReportDataForKeyWithContext(pub crypto.PublicKey, nonce, context []byte) ([64]byte, error) {
+	if len(context) == 0 {
+		return ReportDataForKey(pub, nonce)
+	}
+	var reportData [64]byte
+	keyBytes, err := marshalPublicKey(pub)
+	if err != nil {
+		return reportData, fmt.Errorf("ratls: marshal public key: %w", err)
+	}
+	h := sha512.New384()
+	h.Write([]byte("c8s-report-data-context-v1\x00"))
+	for _, field := range [][]byte{keyBytes, nonce, context} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		h.Write(size[:])
+		h.Write(field)
 	}
 	copy(reportData[:], h.Sum(nil))
 	return reportData, nil

@@ -30,7 +30,7 @@ type countingEvidence struct {
 	calls atomic.Int64
 }
 
-func (c *countingEvidence) Evidence(ctx context.Context, reportData []byte) (json.RawMessage, string, string, error) {
+func (c *countingEvidence) Evidence(ctx context.Context, reportData []byte) (CollectedEvidence, error) {
 	c.calls.Add(1)
 	return c.inner.Evidence(ctx, reportData)
 }

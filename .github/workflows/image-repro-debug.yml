@@ -26,14 +26,15 @@ jobs:
         with:
           path: c8s
 
-      - name: Read pins from c8s-image.yml
-        # Single source of truth for the confos/attestation-rs/mkosi pins.
+      - name: Read image build pins
+        # c8s-image.yml owns confos/mkosi. The node-image ref file owns
+        # attestation-rs for both the producer and verifier.
         id: pins
         run: |
           set -euo pipefail
           w=c8s/.github/workflows/c8s-image.yml
           confos=$(grep -oE "inputs.confos_ref \|\| '[0-9a-f]{40}'" "$w" | grep -oE "[0-9a-f]{40}")
-          attest=$(grep -oE 'ATTESTATION_RS_REF: "[0-9a-f]{40}"' "$w" | grep -oE "[0-9a-f]{40}")
+          attest=$(tr -d '[:space:]' < c8s/node-guest-image/attestation-rs.ref)
           mkosi=$(grep -A2 "actions/setup-mkosi" "$w" | grep -oE "ref: [0-9a-f]{40}" | grep -oE "[0-9a-f]{40}")
           for v in confos attest mkosi; do test -n "${!v}"; echo "$v=${!v}" >> "$GITHUB_OUTPUT"; done
 

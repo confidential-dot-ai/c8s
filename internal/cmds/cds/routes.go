@@ -12,6 +12,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/server"
+	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
 )
 
 // dependencies bundles everything the cds router needs.
@@ -20,6 +21,9 @@ type dependencies struct {
 	AttestKeyHandler  attestation.Handler
 	SignCSRHandler    SignCSRHandler
 	AllowlistHandler  allowlist.Handler
+	HandoffHandler    handoffController
+	TEEWebPKIHandler  *teewebpki.Handler
+	TEEWebPKIOperator *teewebpki.OperatorHandler
 	ReadyFn           attestation.ReadinessFunc
 	EarIssuer         ear.Issuer
 	JWKSFunc          func() []byte
@@ -33,6 +37,15 @@ type dependencies struct {
 	SecretsChallenges *attestation.ChallengeStore
 	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
 	SecretsExplain    *secrets.ExplainHandler  // release diagnostic; routed with SecretsHandler
+}
+
+// handoffController keeps the router testable without weakening the handoff
+// contract. The production implementation is issuer.HandoffHandler.
+type handoffController interface {
+	HandleHandoff(http.ResponseWriter, *http.Request)
+	HandleActivate(http.ResponseWriter, *http.Request)
+	Serving() bool
+	GuardMutation(http.Handler) http.Handler
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -50,6 +63,7 @@ func newRouter(deps dependencies) http.Handler {
 	}
 	r := chi.NewRouter()
 	r.Use(server.RequestLogger)
+	r.Use(deps.activeMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -62,6 +76,18 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodPost, "/attest", deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest)))
 	r.Method(http.MethodPost, "/attest-key", deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey)))
 	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
+	if deps.HandoffHandler != nil {
+		r.Method(http.MethodPost, "/handoff", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleHandoff)))
+		r.Method(http.MethodPost, "/handoff/activate", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleActivate)))
+	}
+	if deps.TEEWebPKIHandler != nil {
+		r.Method(http.MethodGet, teewebpki.CSRRoute, deps.protected(http.HandlerFunc(deps.TEEWebPKIHandler.ServeCSR)))
+		r.Method(http.MethodGet, teewebpki.Route, deps.protected(deps.TEEWebPKIHandler))
+		r.Method(http.MethodPut, teewebpki.Route, deps.mutation(deps.protected(deps.TEEWebPKIHandler)))
+	}
+	if deps.TEEWebPKIOperator != nil {
+		r.Method(http.MethodPut, teewebpki.CertificateRoute, deps.mutation(deps.protected(deps.TEEWebPKIOperator)))
+	}
 
 	// GET is unauthenticated (RA-TLS integrity only); every mutation goes
 	// through allowlistWrite (operator-JWT auth in the handler + rate limit +
@@ -82,7 +108,7 @@ func newRouter(deps dependencies) http.Handler {
 		}
 		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.perSandbox(attestation.HandleAuthenticate(deps.SecretsChallenges)))
 		r.Method(http.MethodGet, secrets.Route, deps.perSandbox(deps.SecretsHandler))
-		r.Method(http.MethodPost, secrets.Route, deps.perSandbox(deps.SecretsHandler))
+		r.Method(http.MethodPost, secrets.Route, deps.mutation(deps.perSandbox(deps.SecretsHandler)))
 		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
 		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
 	}
@@ -92,6 +118,27 @@ func newRouter(deps dependencies) http.Handler {
 	r.Get("/measurements", handleMeasurements(deps.MeasurementsDoc))
 
 	return r
+}
+
+// activeMiddleware keeps health, readiness, metrics, and the handoff protocol
+// reachable after leadership moves. It rejects every other old-CDS operation.
+func (deps dependencies) activeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if deps.HandoffHandler == nil || deps.HandoffHandler.Serving() || r.URL.Path == "/healthz" ||
+			r.URL.Path == "/readyz" || r.URL.Path == "/metrics" ||
+			r.URL.Path == "/handoff" || r.URL.Path == "/handoff/activate" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "CDS leadership moved to its successor", http.StatusServiceUnavailable)
+	})
+}
+
+func (deps dependencies) mutation(next http.Handler) http.Handler {
+	if deps.HandoffHandler == nil {
+		return next
+	}
+	return deps.HandoffHandler.GuardMutation(next)
 }
 
 // allowlistWriteBodyCap bounds an allowlist mutation body. A workload document
@@ -120,7 +167,7 @@ func (deps dependencies) challengeProtected(next http.Handler) http.Handler {
 // allowlistWrite is protected with the larger allowlist body cap. Its callers
 // are operators reaching CDS directly, so the source address is the caller.
 func (deps dependencies) allowlistWrite(next http.Handler) http.Handler {
-	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(allowlistWriteBodyCap, next))
+	return deps.mutation(issuer.RateLimitMiddleware(deps.RateLimiter, capBody(allowlistWriteBodyCap, next)))
 }
 
 // perSandbox rate-limits by the caller's attested sandbox instead of its

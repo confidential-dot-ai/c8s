@@ -43,6 +43,8 @@ type AttestKeyRequestBody struct {
 	// SHA-384(this key) — the server verifies this binding before issuing
 	// the EAR.
 	PublicKey string `json:"public_key"`
+	// OperatorKeysHash is bound to the key and challenge in REPORTDATA.
+	OperatorKeysHash string `json:"operator_keys_hash,omitempty"`
 }
 
 // AttestKeyResponseBody is the response body for POST /attest-key.
@@ -110,6 +112,9 @@ const (
 type AttestRequest struct {
 	ReportData Base64Bytes `json:"report_data"`
 	Platform   Platform    `json:"platform"`
+	// NvidiaGPU asks the attestation-api to collect GPU evidence with a nonce
+	// derived from ReportData.
+	NvidiaGPU bool `json:"nvidia_gpu,omitempty"`
 }
 
 // AttestResponse is the response from the attestation-api POST /attest.
@@ -119,8 +124,11 @@ type AttestRequest struct {
 // need to forward evidence to /verify must wrap it in an AttestationEvidence
 // envelope keyed by Platform.
 type AttestResponse struct {
-	Platform string          `json:"platform"`
-	Evidence json.RawMessage `json:"evidence"`
+	Platform    string          `json:"platform"`
+	Evidence    json.RawMessage `json:"evidence"`
+	GPUAttested string          `json:"gpu_attested"`
+	// NvidiaGPU preserves the attestation-rs bundle without a schema change.
+	NvidiaGPU json.RawMessage `json:"nvidia_gpu,omitempty"`
 }
 
 // VerifyRequest is sent to the attestation-api POST /verify. The attestation-api

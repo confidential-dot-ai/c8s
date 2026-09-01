@@ -78,7 +78,6 @@ env:
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
   CONFOS_REF: ${{ inputs.confos_ref || 'fd4427c0a401238f3430d05d9ba775ec0691d523' }} # pin: main — snapshot-pinned host build deps (confos#111, confos#36); rolls the SNP measurement once (OVMF 2ubuntu0.9 -> snapshot 2ubuntu0.8)
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
   build-and-push:
@@ -118,6 +117,16 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
+
+      - name: Load attestation-rs source lock
+        shell: bash
+        run: |
+          ref="$(tr -d '[:space:]' < c8s/node-guest-image/attestation-rs.ref)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::node-guest-image/attestation-rs.ref must contain one full Git commit"
+            exit 1
+          fi
+          echo "ATTESTATION_RS_REF=$ref" >> "$GITHUB_ENV"
 
       - name: Download gate-only module-signing key
         if: inputs.gate_signing_artifact != ''

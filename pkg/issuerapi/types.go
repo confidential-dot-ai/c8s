@@ -193,3 +193,33 @@ type SignCSRResponse struct {
 	// CACertificate is the PEM-encoded CA bundle for chain building.
 	CACertificate PEMData `json:"ca_certificate"`
 }
+
+// HandoffRequest asks the active CDS to wrap its in-memory state to one
+// recipient-bound X25519 public key.
+type HandoffRequest struct {
+	EAR              string `json:"ear"`
+	PublicKey        string `json:"public_key"`
+	Signature        string `json:"signature"`
+	ClusterSignature string `json:"cluster_signature"`
+}
+
+// HandoffResponse carries state encrypted to the successor public key.
+type HandoffResponse struct {
+	IssuerEAR  string `json:"issuer_ear"`
+	PublicKey  string `json:"public_key"`
+	Signature  string `json:"signature"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+// HandoffActivateRequest transfers CDS leadership to the exact successor that
+// received the protected state.
+type HandoffActivateRequest struct {
+	TransferID string `json:"transfer_id"`
+	Signature  string `json:"signature"`
+}
+
+// HandoffActivateResponse confirms that the predecessor is inactive.
+type HandoffActivateResponse struct {
+	Activated bool `json:"activated"`
+}

@@ -116,8 +116,9 @@ var (
 // TEE-held, so it is served only in cds mode; a WebPKI Secret's key is
 // host-visible and that deployment shape is attest-pq-only.
 const (
-	FrontDoorModeCDS    = "cds"
-	FrontDoorModeWebPKI = "webpki"
+	FrontDoorModeCDS       = "cds"
+	FrontDoorModeWebPKI    = "webpki"
+	FrontDoorModeTEEWebPKI = "tee-webpki"
 )
 
 // Backend handles a decrypted application request and returns the response. The
@@ -131,6 +132,10 @@ type Backend interface {
 type Config struct {
 	Logger   *slog.Logger
 	Evidence EvidenceProvider
+	// OperatorPolicy reads the current write-authority key set from the live
+	// CDS. The endpoint binds its canonical key-set hash into report_data. Nil
+	// preserves the response without operator policy data.
+	OperatorPolicy OperatorPolicyProvider
 	// FrontDoorMode says which credential terminates public TLS in front of
 	// this sidecar (FrontDoorModeCDS or FrontDoorModeWebPKI). Anything but
 	// cds — including an unset mode — refuses attest-lb, so a
@@ -140,8 +145,8 @@ type Config struct {
 	// ServingCertFile is the path to the LB serving-leaf PEM (the cert nginx
 	// presents on the wire). In cds front-door mode, GET .../attest-lb binds
 	// report_data to this exact leaf DER plus the mesh identity. Re-read per
-	// request so a get-cert renewal (which SIGHUPs nginx to a new leaf) is
-	// picked up without restarting the sidecar.
+	// request so a certificate renewal is picked up without restarting the
+	// sidecar.
 	ServingCertFile string
 	// MeshIdentity* are the TEE-held mesh leaf, matching private key, and CA
 	// bundle whose possession both attestation endpoints prove. They are
@@ -161,6 +166,13 @@ type Config struct {
 	// the attestation fetch and the handshake POST. Defaults to
 	// defaultNonceTTL.
 	NonceTTL time.Duration
+}
+
+func (s *Server) activeOperatorPolicy(ctx context.Context) (OperatorPolicy, error) {
+	if s.cfg.OperatorPolicy == nil {
+		return OperatorPolicy{}, nil
+	}
+	return s.cfg.OperatorPolicy.Active(ctx)
 }
 
 type pendingSession struct {
@@ -421,6 +433,12 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "identity-bound PQ credentials are temporarily unavailable")
 		return
 	}
+	operatorPolicy, err := s.activeOperatorPolicy(r.Context())
+	if err != nil {
+		s.log.Error("active operator policy unavailable", "error", err)
+		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain the active operator policy")
+		return
+	}
 
 	key, err := overenc.GenerateServerKey()
 	if err != nil {
@@ -430,14 +448,14 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	}
 	pub := key.Public()
 
-	reportData, proof, err := identity.bind(pub, nonce)
+	reportData, proof, err := identity.bind(pub, nonce, operatorPolicy.SHA256)
 	if err != nil {
 		s.log.Error("bind mesh identity", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "mesh identity binding failed")
 		return
 	}
 
-	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
+	collected, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
 		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
@@ -454,12 +472,16 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:    types.BindingAttestPQ,
-		Platform:   platform,
-		Generation: generation,
-		Nonce:      nonceB64,
-		Evidence:   evidence,
-		CDSCertPEM: string(identity.bundlePEM),
+		Version:            types.BindingAttestPQ,
+		Platform:           collected.Platform,
+		Generation:         collected.Generation,
+		Nonce:              nonceB64,
+		Evidence:           collected.Evidence,
+		GPUAttested:        collected.GPUAttested,
+		NvidiaGPU:          collected.NvidiaGPU,
+		OperatorKeysPEM:    operatorPolicy.KeysPEM,
+		OperatorKeysSHA256: operatorPolicy.SHA256,
+		CDSCertPEM:         string(identity.bundlePEM),
 		SessionPubKey: &types.SessionPublicKey{
 			X25519:   base64.RawURLEncoding.EncodeToString(pub.X25519),
 			MLKEM768: base64.RawURLEncoding.EncodeToString(pub.MLKEM768),
@@ -483,9 +505,9 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	// WebPKI Secret's serving key is host-visible, so the host could terminate
 	// the client's TLS with the same leaf and proxy this request. Only a
 	// TEE-held (cds-mode) serving key supports transport binding.
-	if s.cfg.FrontDoorMode != FrontDoorModeCDS {
+	if s.cfg.FrontDoorMode != FrontDoorModeCDS && s.cfg.FrontDoorMode != FrontDoorModeTEEWebPKI {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeUnsupportedFrontDoor,
-			"attest-lb requires a TEE-held serving key (public_tls.mode=cds); this front door is attest-pq-only")
+			"attest-lb requires a TEE-held serving key (public_tls.mode=cds or tee-webpki); this front door is attest-pq-only")
 		return
 	}
 	servingLeafDER, err := s.servingLeafDER()
@@ -501,15 +523,21 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "mesh identity credentials are temporarily unavailable")
 		return
 	}
+	operatorPolicy, err := s.activeOperatorPolicy(r.Context())
+	if err != nil {
+		s.log.Error("active operator policy unavailable", "error", err)
+		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain the active operator policy")
+		return
+	}
 
-	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce)
+	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce, operatorPolicy.SHA256)
 	if err != nil {
 		s.log.Error("bind serving leaf", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "serving-leaf binding failed")
 		return
 	}
 
-	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
+	collected, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
 		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
@@ -518,20 +546,24 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 
 	servingLeafHash := sha256.Sum256(servingLeafDER)
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:           types.BindingAttestLB,
-		Platform:          platform,
-		Generation:        generation,
-		Nonce:             nonceB64,
-		Evidence:          evidence,
-		CDSCertPEM:        string(identity.bundlePEM),
-		IdentityProof:     proof,
-		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
+		Version:            types.BindingAttestLB,
+		Platform:           collected.Platform,
+		Generation:         collected.Generation,
+		Nonce:              nonceB64,
+		Evidence:           collected.Evidence,
+		GPUAttested:        collected.GPUAttested,
+		NvidiaGPU:          collected.NvidiaGPU,
+		OperatorKeysPEM:    operatorPolicy.KeysPEM,
+		OperatorKeysSHA256: operatorPolicy.SHA256,
+		CDSCertPEM:         string(identity.bundlePEM),
+		IdentityProof:      proof,
+		ServingLeafSHA256:  base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
 	})
 }
 
 // servingLeafDER reads the LB serving-leaf PEM and returns the whole leaf DER.
-// It is read per request so a get-cert renewal (which SIGHUPs nginx to a new
-// leaf) is picked up without restarting the sidecar. Exactly one certificate
+// It is read per request so a certificate renewal is picked up without
+// restarting the sidecar. Exactly one certificate
 // is committed; per-SNI or multi-certificate serving is unsupported and fails
 // the client's exact-DER comparison closed.
 func (s *Server) servingLeafDER() ([]byte, error) {

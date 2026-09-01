@@ -60,6 +60,10 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce
 	if err != nil {
 		t.Fatal(err)
 	}
+	transcript, err = overenc.BindOperatorKeySetHash(transcript, bundle.OperatorKeysSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
 	channel, hs, err := overenc.ClientAgree(pub, transcript)
 	if err != nil {
 		t.Fatal(err)
@@ -437,8 +441,8 @@ func TestHTTPBackendRejectsOversizedUpstreamResponse(t *testing.T) {
 // failingProvider always fails, to exercise the evidence-unavailable paths.
 type failingProvider struct{}
 
-func (failingProvider) Evidence(context.Context, []byte) (json.RawMessage, string, string, error) {
-	return nil, "", "", errors.New("no TEE here")
+func (failingProvider) Evidence(context.Context, []byte) (CollectedEvidence, error) {
+	return CollectedEvidence{}, errors.New("no TEE here")
 }
 
 func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {

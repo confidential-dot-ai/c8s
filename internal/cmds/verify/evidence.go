@@ -23,6 +23,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -47,6 +48,11 @@ type evidence struct {
 	platform string
 	// rawEvidence is the platform-specific evidence object, forwarded verbatim.
 	rawEvidence json.RawMessage
+	// nvidiaGPU is the raw attestation-rs bundle. gpuAttested records only
+	// collection state. Cryptographic verification happens through the pinned
+	// attestation-rs verifier when the caller enables the GPU policy.
+	nvidiaGPU   json.RawMessage
+	gpuAttested string
 	// erd is the expected freshness anchor — the exact bytes the producer bound,
 	// unpadded (48-byte SHA-384 for c8s bindings). Hardware-report verifiers
 	// zero-pad it to the 64-byte REPORTDATA field; the Azure vTPM verifiers
@@ -60,6 +66,10 @@ type evidence struct {
 	source string
 	// certSHA256 is the hex SHA-256 of the serving certificate (cert modes only).
 	certSHA256 string
+	// servingLeafSHA256 and tlsBindingVerified record the attest-lb check
+	// against a leaf observed by the caller on the same HTTPS connection.
+	servingLeafSHA256  string
+	tlsBindingVerified bool
 	// bindingNote explains what the REPORTDATA is bound to.
 	bindingNote string
 	// leaf is the CDS-issued leaf the evidence speaks for: the serving cert in
@@ -127,16 +137,21 @@ func platformOrDefault(p string) string {
 // nonce, session keys, served mesh chain, and identity proof (which together
 // derive and authenticate the REPORTDATA binding) are parsed here.
 type attestationResponse struct {
-	Version       string          `json:"version"`
-	Platform      string          `json:"platform"`
-	Nonce         string          `json:"nonce"`
-	Evidence      json.RawMessage `json:"evidence"`
-	CDSCertPEM    string          `json:"cds_cert_pem"`
-	SessionPubkey struct {
+	Version            string          `json:"version"`
+	Platform           string          `json:"platform"`
+	Nonce              string          `json:"nonce"`
+	Evidence           json.RawMessage `json:"evidence"`
+	GPUAttested        string          `json:"gpu_attested"`
+	NvidiaGPU          json.RawMessage `json:"nvidia_gpu"`
+	OperatorKeysPEM    string          `json:"operator_keys_pem"`
+	OperatorKeysSHA256 string          `json:"operator_keys_sha256"`
+	CDSCertPEM         string          `json:"cds_cert_pem"`
+	SessionPubkey      struct {
 		X25519   string `json:"x25519"`
 		Mlkem768 string `json:"mlkem768"`
 	} `json:"session_pubkey"`
-	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
+	IdentityProof     *types.MeshIdentityProof `json:"identity_proof"`
+	ServingLeafSHA256 string                   `json:"serving_leaf_sha256"`
 }
 
 // leafTrust is what a caller can offer to authenticate a leaf body that is
@@ -336,6 +351,9 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	if len(r.Evidence) == 0 {
 		return nil, fmt.Errorf("attestation response carries no evidence")
 	}
+	if err := validateBoundOperatorPolicy(r.OperatorKeysPEM, r.OperatorKeysSHA256); err != nil {
+		return nil, err
+	}
 
 	nonce, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.Nonce, "="))
 	if err != nil {
@@ -373,6 +391,10 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	if err != nil {
 		return nil, fmt.Errorf("compute identity transcript: %w", err)
 	}
+	erd, err = overenc.BindOperatorKeySetHash(erd, r.OperatorKeysSHA256)
+	if err != nil {
+		return nil, fmt.Errorf("bind active operator key set: %w", err)
+	}
 	// §5 step 4 (proof of possession) and step 5 (chain to the committed CA)
 	// come before anything from the leaf is surfaced. The hardware evidence
 	// itself is verified downstream against erd; a failure here means the
@@ -394,10 +416,12 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	return &evidence{
 		platform:         platformOrDefault(r.Platform),
 		rawEvidence:      r.Evidence,
+		nvidiaGPU:        r.NvidiaGPU,
+		gpuAttested:      r.GPUAttested,
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
-		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf, its issuing CA, and the active operator key-set commitment (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
 		frontDoor:        frontDoorNone,
@@ -406,6 +430,119 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		workload:         workload,
 		workloadErr:      workloadErr,
 	}, nil
+}
+
+// evidenceFromAttestLBJSON verifies the attest-lb transcript against inputs
+// observed by the caller on one live HTTPS connection. The saved bundle is not
+// sufficient by itself: it can be replayed with its own nonce and claimed leaf
+// digest. Thus, this function requires both the original challenge and the
+// exact observed leaf DER.
+func evidenceFromAttestLBJSON(data, expectNonce, observedLeafDER []byte, source string) (*evidence, error) {
+	var r attestationResponse
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parse attestation response: %w", err)
+	}
+	if r.Version != types.BindingAttestLB {
+		return nil, fmt.Errorf("attestation response version %q is not the attest-lb binding %q", r.Version, types.BindingAttestLB)
+	}
+	if len(r.Evidence) == 0 {
+		return nil, fmt.Errorf("attestation response carries no evidence")
+	}
+	if len(observedLeafDER) == 0 {
+		return nil, fmt.Errorf("attest-lb verification requires the observed serving leaf DER")
+	}
+	if len(expectNonce) != nonceSize {
+		return nil, fmt.Errorf("attest-lb verification requires a %d-byte expected nonce", nonceSize)
+	}
+	if r.SessionPubkey.X25519 != "" || r.SessionPubkey.Mlkem768 != "" {
+		return nil, fmt.Errorf("attest-lb response must not carry a session_pubkey")
+	}
+	if err := validateBoundOperatorPolicy(r.OperatorKeysPEM, r.OperatorKeysSHA256); err != nil {
+		return nil, err
+	}
+
+	nonce, err := base64.RawURLEncoding.DecodeString(r.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode nonce: %w", err)
+	}
+	if !bytes.Equal(nonce, expectNonce) {
+		return nil, &securityError{err: fmt.Errorf("response nonce does not echo the challenge (possible replay or MITM)")}
+	}
+	observedHash := sha256.Sum256(observedLeafDER)
+	claimedHash, err := base64.RawURLEncoding.DecodeString(r.ServingLeafSHA256)
+	if err != nil {
+		return nil, fmt.Errorf("decode serving_leaf_sha256: %w", err)
+	}
+	if !bytes.Equal(claimedHash, observedHash[:]) {
+		return nil, &securityError{err: fmt.Errorf("serving_leaf_sha256 does not match the leaf observed on the HTTPS connection")}
+	}
+
+	leaf, ca, err := committedMeshChain(r.CDSCertPEM, r.IdentityProof)
+	if err != nil {
+		return nil, err
+	}
+	erd, err := overenc.LBTranscriptHash(nonce, observedLeafDER, leaf.Raw, ca.Raw)
+	if err != nil {
+		return nil, fmt.Errorf("compute attest-lb transcript: %w", err)
+	}
+	erd, err = overenc.BindOperatorKeySetHash(erd, r.OperatorKeysSHA256)
+	if err != nil {
+		return nil, fmt.Errorf("bind active operator key set: %w", err)
+	}
+	if err := verifyIdentityProof(r.IdentityProof, leaf, erd); err != nil {
+		return nil, &securityError{err: err}
+	}
+	if err := verifyCommittedChain(leaf, ca); err != nil {
+		return nil, &securityError{err: err}
+	}
+	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
+	hexHash := hex.EncodeToString(observedHash[:])
+	return &evidence{
+		platform:            platformOrDefault(r.Platform),
+		rawEvidence:         r.Evidence,
+		nvidiaGPU:           r.NvidiaGPU,
+		gpuAttested:         r.GPUAttested,
+		erd:                 erd,
+		fresh:               true,
+		source:              source,
+		certSHA256:          hexHash,
+		servingLeafSHA256:   hexHash,
+		tlsBindingVerified:  true,
+		bindingNote:         "REPORTDATA binds the caller's nonce, the exact leaf observed on the same HTTPS connection, the exact mesh leaf and CA, and the active operator key-set commitment",
+		leaf:                leaf,
+		leafChainDerived:    true,
+		frontDoor:           frontDoorAttested,
+		frontDoorCertSHA256: hexHash,
+		sandboxID:           sandboxID,
+		sandboxErr:          sandboxErr,
+		workload:            workload,
+		workloadErr:         workloadErr,
+	}, nil
+}
+
+// validateBoundOperatorPolicy proves that the public PEM set is the exact set
+// whose canonical commitment is part of report_data. The hash is a framed
+// key-set commitment. It is not an individual SPKI fingerprint.
+func validateBoundOperatorPolicy(keysPEM, keySetHash string) error {
+	if keysPEM == "" && keySetHash == "" {
+		return nil
+	}
+	if keysPEM == "" || keySetHash == "" {
+		return fmt.Errorf("attestation response has an incomplete active operator policy")
+	}
+	keys, err := operatorauth.ParsePublicKeysPEM([]byte(keysPEM))
+	if err != nil {
+		return fmt.Errorf("parse active operator keys: %w", err)
+	}
+	want, err := operatorauth.KeySetHash(keys)
+	if err != nil {
+		return fmt.Errorf("hash active operator keys: %w", err)
+	}
+	if keySetHash != want {
+		return &securityError{err: fmt.Errorf("active operator key-set hash does not match operator_keys_pem")}
+	}
+	return nil
 }
 
 // committedMeshChain parses the served mesh chain and returns the leaf plus
@@ -535,6 +672,37 @@ func gatherFromFile(data []byte, overrideERD []byte, source string, trust leafTr
 		// fall through to full-response parsing if it wasn't bare evidence
 	}
 	return evidenceFromEndpointJSON(data, nil, source)
+}
+
+func parseObservedServingCertificate(data []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(data)
+	if block, rest := pem.Decode(trimmed); block != nil {
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("observed serving certificate PEM block is %q, want CERTIFICATE", block.Type)
+		}
+		if len(bytes.TrimSpace(rest)) != 0 {
+			return nil, fmt.Errorf("observed serving certificate file must contain exactly one certificate")
+		}
+		trimmed = block.Bytes
+	}
+	if _, err := x509.ParseCertificate(trimmed); err != nil {
+		return nil, fmt.Errorf("parse observed serving certificate: %w", err)
+	}
+	return append([]byte(nil), trimmed...), nil
+}
+
+func parseAttestationNonce(value string) ([]byte, error) {
+	nonce, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("--attestation-nonce must be unpadded base64url: %w", err)
+	}
+	if len(nonce) != nonceSize {
+		return nil, fmt.Errorf("--attestation-nonce must decode to %d bytes, got %d", nonceSize, len(nonce))
+	}
+	if base64.RawURLEncoding.EncodeToString(nonce) != value {
+		return nil, fmt.Errorf("--attestation-nonce must use canonical unpadded base64url")
+	}
+	return nonce, nil
 }
 
 // evidenceFromBareJSON parses a bare {platform, evidence:{attestation_report,

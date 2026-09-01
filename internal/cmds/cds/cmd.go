@@ -74,6 +74,17 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
+	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 launch measurements allowed to receive protected CDS state")
+	flags.StringVar(&cfg.handoffPeerURL, "handoff-peer-url", "", "surviving CDS RA-TLS URL to adopt protected state from")
+	flags.DurationVar(&cfg.handoffPeerTimeout, "handoff-peer-timeout", 2*time.Minute, "deadline for state adoption and activation")
+	flags.StringSliceVar(&cfg.handoffRTMRs, "handoff-rtmrs", nil, "TDX RTMR pins for the predecessor CDS")
+	flags.StringVar(&cfg.handoffSuccessorWorkload, "handoff-successor-workload", "c8s-cds", "matched-workload name required on the successor mesh certificate")
+	flags.StringVar(&cfg.handoffClientCert, "handoff-client-cert", "", "successor mesh certificate used for handoff mTLS")
+	flags.StringVar(&cfg.handoffClientKey, "handoff-client-key", "", "private key for --handoff-client-cert")
+	flags.DurationVar(&cfg.handoffEARMaxAge, "handoff-ear-max-age", issuer.DefaultHandoffEARMaxAge, "maximum age of successor handoff evidence")
+	flags.DurationVar(&cfg.handoffEndpointDrainDelay, "handoff-endpoint-drain-delay", issuer.DefaultEndpointDrainDelay, "time a frozen predecessor stays readable but NotReady before retirement")
+	flags.BoolVar(&cfg.teeWebPKIEnabled, "tee-webpki", false, "hold one cluster TLS key and public certificate state in CDS memory")
+	flags.StringVar(&cfg.teeWebPKIWorkload, "tee-webpki-workload", "c8s-tls-lb", "matched-workload name allowed to read protected cluster TLS state")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
 	flags.IntVar(&cfg.rateBurst, "rate-burst", 20, "max burst size per source IP")
@@ -116,44 +127,55 @@ func NewCmd() *cobra.Command {
 }
 
 type config struct {
-	host                string
-	port                int
-	logLevel            string
-	attestationApiURL   string
-	caCommonName        string
-	caCertValidity      time.Duration
-	measurements        []string
-	measurementsConfig  string
-	rtmrs               []string
-	earIssuerName       string
-	expectedIssuer      string
-	jwtClockSkew        int64
-	maxTTL              time.Duration
-	certTTL             time.Duration
-	namedCertTTL        time.Duration
-	challengeTTL        time.Duration
-	requestTimeout      time.Duration
-	maxRequestSize      int64
-	readTimeout         time.Duration
-	readHeaderTimeout   time.Duration
-	writeTimeout        time.Duration
-	idleTimeout         time.Duration
-	maxHeaderBytes      int
-	sanValidation       bool
-	dnsSANPatterns      []string
-	allowedCNPattern    string
-	readinessInterval   time.Duration
-	minCAValidity       time.Duration
-	allowlistDB         string
-	allowlistPersistent bool
-	allowlistSeed       string
-	inventoryCIDRs      []string
-	operatorKeys        string
-	rotationInterval    time.Duration
-	rotationOverlap     time.Duration
-	rotationJitter      float64
-	ratlsPlatform       string
-	ratlsCertTTL        time.Duration
+	host                      string
+	port                      int
+	logLevel                  string
+	attestationApiURL         string
+	caCommonName              string
+	caCertValidity            time.Duration
+	measurements              []string
+	measurementsConfig        string
+	rtmrs                     []string
+	earIssuerName             string
+	expectedIssuer            string
+	jwtClockSkew              int64
+	maxTTL                    time.Duration
+	certTTL                   time.Duration
+	namedCertTTL              time.Duration
+	challengeTTL              time.Duration
+	requestTimeout            time.Duration
+	maxRequestSize            int64
+	readTimeout               time.Duration
+	readHeaderTimeout         time.Duration
+	writeTimeout              time.Duration
+	idleTimeout               time.Duration
+	maxHeaderBytes            int
+	sanValidation             bool
+	dnsSANPatterns            []string
+	allowedCNPattern          string
+	readinessInterval         time.Duration
+	minCAValidity             time.Duration
+	allowlistDB               string
+	allowlistPersistent       bool
+	allowlistSeed             string
+	inventoryCIDRs            []string
+	operatorKeys              string
+	handoffMeasurements       []string
+	handoffRTMRs              []string
+	handoffPeerURL            string
+	handoffPeerTimeout        time.Duration
+	handoffSuccessorWorkload  string
+	handoffClientCert         string
+	handoffClientKey          string
+	handoffEARMaxAge          time.Duration
+	handoffEndpointDrainDelay time.Duration
+	teeWebPKIEnabled          bool
+	teeWebPKIWorkload         string
+	rotationInterval          time.Duration
+	rotationOverlap           time.Duration
+	rotationJitter            float64
+	ratlsPlatform             string
+	ratlsCertTTL              time.Duration
 
 	rateLimit                float64
 	rateBurst                int

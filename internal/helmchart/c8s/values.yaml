@@ -151,7 +151,7 @@ webhook:
 
 ## Certificate Distribution Service (cds): the c8s trust root. One binary, one Service,
 ## one ServiceAccount, and one measurement allowlist serve EAR issuance,
-## allowlist, JWKS, and mesh-CA leaf signing.
+## allowlist, JWKS, mesh-CA leaf signing, and handoff.
 ##
 ## The mesh CA key is generated inside the cds process and stays in memory
 ## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
@@ -261,8 +261,8 @@ cds:
   ## server_name only and need no pattern here.
   dnsSanPatterns: []
   cnPattern: ""
-  ## The single flat allowlist of SHA-384 hex launch digests, used two ways:
-  ##   1. CDS admits these to call /attest and /sign-csr.
+  ## The single flat allowlist of SHA-384 launch digests. Handoff also requires
+  ## a current mesh certificate with the exact configured successor workload.
   ##   2. The ratls-mesh daemonset and nri-image-policy plugin pin CDS's RA-TLS
   ##      serving cert against it when they dial CDS.
   ## Empty = no pinning (UNSAFE outside dev).
@@ -307,6 +307,46 @@ cds:
     commonName: c8s Mesh CA
     certValidity: 8760h
     minValidity: 1h
+  # -- Cluster-wide public TLS key state. CDS creates both private seeds in
+  # TEE memory. Only the admitted tls-lb workload can read them over mesh mTLS.
+  teeWebPKI:
+    enabled: false
+    workload: c8s-tls-lb
+  ## Attested CA handoff to a joining cds replica. When enabled, cds
+  ## self-provisions its handoff signer EAR in process (no external dial) and
+  ## registers /handoff, authorising peers whose launch digest is in
+  ## cds.measurements. Handoff also requires cds.operatorKeys: a canonical hash
+  ## of that public-key set is bound into both replicas' REPORTDATA and must
+  ## match before state is released. CDS is never active/active.
+  handoff:
+    enabled: false
+    # -- Allowlist workload name required on the successor CDS mesh leaf.
+    successorWorkload: c8s-cds
+    # -- Minimum time the old CDS stays frozen and readable after it becomes
+    # NotReady. This gives Kubernetes time to remove its Service endpoint.
+    # This delay does not prove an atomic endpoint switch.
+    endpointDrainDelay: 5s
+    ## peerUrl: where a starting cds adopts its mesh CA from over /handoff
+    ## instead of generating a fresh one. The old CDS freezes mutations but
+    ## keeps reads and certificate service. The new CDS restores state and
+    ## listens while NotReady and frozen. Activation makes the old CDS NotReady
+    ## and keeps its read and certificate service during endpointDrainDelay.
+    ## The old CDS then retires. The new CDS becomes mutable and Ready. This
+    ## prevents two mutable CDS instances. It does not prove an atomic endpoint
+    ## switch. CDS fails closed if the peer is unavailable or rejects handoff.
+    ##
+    ## Two-phase install: install with handoff.enabled=true (+ pinned
+    ## cds.measurements) but peerUrl empty (cold start, self generate); once a
+    ## cds pod is serving, `helm upgrade --set cds.handoff.peerUrl=self` to
+    ## enable adoption on every subsequent roll. The sentinel "self" expands to
+    ## the cds Service URL (adopt from your own predecessor); any other value
+    ## is an explicit distinct-peer https URL.
+    ## Requires handoff.enabled=true (the serving pod must offer /handoff for
+    ## the next roll) and cds.measurements; cannot combine with
+    ## persistence.enabled (the surge pod cannot share the RWO data PVC).
+    ## The encrypted handoff snapshot carries the complete served allowlist, so
+    ## planned adoption rolls preserve operator-added entries despite emptyDir.
+    peerUrl: ""
   persistence:
     enabled: false
     size: 1Gi
@@ -1278,10 +1318,18 @@ tlsLb:
   # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
   # compatibility.
   publicTLS:
+    # -- Public TLS key mode. Empty preserves the old behavior: webpki when
+    # secretName is set, cds otherwise. tee-webpki loads one cluster key from
+    # CDS inside each attested tls-lb replica. It never reads a private key
+    # from a Kubernetes Secret.
+    mode: ""
     secretName: ""
     certKey: tls.crt
     keyKey: tls.key
     mountPath: "/public-tls"
+    pollInterval: "30s"
+    issueTimeout: "15m"
+    readyPort: 8801
 
   # -- Discovery/preflight metadata (the issued cert + attestation evidence
   # with the VCEK chain) served by nginx at `path`. The chart-rendered get-cert
@@ -1332,6 +1380,9 @@ tlsLb:
   # AMD-only generation), so both TEEs advertise correctly out of the box.
   attest:
     enabled: true
+    # -- Fetch the current operator public-key set from the live CDS over
+    # pinned RA-TLS and include it in the public attestation response.
+    activeOperatorPolicy: false
     # -- Loopback port the sidecar listens on; nginx proxies `/.well-known/c8s/`
     # to 127.0.0.1 on this port.
     port: 8800

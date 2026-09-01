@@ -10,6 +10,14 @@ set -euo pipefail
 : "${CONFOS_REF:?CONFOS_REF must be set}"
 ngi=node-guest-image
 
+# One source lock builds the guest evidence producer and the offline NVIDIA
+# verifier. The workflow and operator instructions read this same file.
+attestation_rs_ref=$(tr -d '[:space:]' < "$ngi/attestation-rs.ref")
+if ! [[ "$attestation_rs_ref" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "::error::$ngi/attestation-rs.ref must contain one full Git commit"
+  exit 1
+fi
+
 # kernel/c8s.config must be a superset of confos kernel/gpu.config:
 # only one --kernel-config-fragment is accepted per build, so the
 # c8s fragment duplicates the gpu lines verbatim. Catch drift when
@@ -76,6 +84,15 @@ fi
 # tests/cloud-init-disabled.sh owns the marker invariant itself.
 if grep -q -- '--cloud-init' "$ngi/build"; then
   echo "::error::$ngi/build bakes a cloud-init seed; the node image disables cloud-init instead"
+  exit 1
+fi
+
+# GPU evidence is opt-in at two levels. cds-attest sets nvidia_gpu=true only
+# when the chart enables it. The measured node configuration must also permit
+# collection. Otherwise the public endpoint fails closed on every request.
+gpu_attest_config="$ngi/c8s/mkosi.extra/etc/attestation-api/config.toml"
+if [ "$(grep -Ec '^gpu_attestation_evidence_enabled = true$' "$gpu_attest_config")" != 1 ]; then
+  echo "::error::$gpu_attest_config must enable GPU evidence collection exactly once"
   exit 1
 fi
 # tdx-metal-e2e.yml is vendored from confidential-ci; the bait +

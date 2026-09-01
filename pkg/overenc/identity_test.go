@@ -188,3 +188,52 @@ func TestIdentityTranscriptHashValidatesShape(t *testing.T) {
 		})
 	}
 }
+
+func TestBindOperatorKeySetHashBindsCanonicalSet(t *testing.T) {
+	base := bytes.Repeat([]byte{0x42}, sha512.Size384)
+	hashA := strings.Repeat("a1", 32)
+	hashB := strings.Repeat("b2", 32)
+
+	boundA, err := BindOperatorKeySetHash(base, hashA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundB, err := BindOperatorKeySetHash(base, hashB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(boundA, base) || bytes.Equal(boundA, boundB) {
+		t.Fatal("operator key-set change did not change the transcript")
+	}
+	legacy, err := BindOperatorKeySetHash(base, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(legacy, base) {
+		t.Fatal("empty operator policy changed the legacy transcript")
+	}
+	legacy[0] ^= 0xff
+	if bytes.Equal(legacy, base) {
+		t.Fatal("empty operator policy returned an alias")
+	}
+}
+
+func TestBindOperatorKeySetHashRejectsInvalidInput(t *testing.T) {
+	base := make([]byte, sha512.Size384)
+	for _, tc := range []struct {
+		name       string
+		transcript []byte
+		hash       string
+	}{
+		{name: "short transcript", transcript: base[:len(base)-1], hash: strings.Repeat("a1", 32)},
+		{name: "short hash", transcript: base, hash: strings.Repeat("a1", 31)},
+		{name: "uppercase hash", transcript: base, hash: strings.Repeat("A1", 32)},
+		{name: "non hex", transcript: base, hash: strings.Repeat("zz", 32)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := BindOperatorKeySetHash(tc.transcript, tc.hash); err == nil {
+				t.Fatal("invalid operator binding succeeded")
+			}
+		})
+	}
+}

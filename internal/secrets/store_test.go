@@ -449,6 +449,89 @@ func TestMemoryStoreQuotaUnderConcurrentWrites(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreSnapshotRestorePreservesValuesHoldersAndCAS(t *testing.T) {
+	ctx := context.Background()
+	source := NewMemoryStore(8, 2, 64)
+	if _, _, err := source.PutIfAbsent(ctx, "/api/pepper", []byte("workload-secret"), WorkloadHolder("api")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := source.PutIfAbsent(ctx, "/api/key", []byte("second-secret"), WorkloadHolder("api")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Put(ctx, "/operator/tls", []byte("operator-secret")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := source.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := NewMemoryStore(8, 2, 64)
+	if err := target.RestoreSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/api/pepper": "workload-secret", "/api/key": "second-secret", "/operator/tls": "operator-secret",
+	} {
+		got, err := target.Get(ctx, path)
+		if err != nil || string(got) != want {
+			t.Fatalf("Get(%q) = %q, %v", path, got, err)
+		}
+	}
+	current, held, err := target.PutIfAbsent(ctx, "/api/pepper", []byte("replacement"), WorkloadHolder("other"))
+	if err != nil || !held.Exists || held.Origin != OriginWorkload || string(current) != "workload-secret" {
+		t.Fatalf("restored CAS = value %q, held %+v, err %v", current, held, err)
+	}
+	if _, _, err := target.PutIfAbsent(ctx, "/api/third", []byte("x"), WorkloadHolder("api")); !errors.Is(err, ErrHolderQuota) {
+		t.Fatalf("restored holder quota was not preserved: %v", err)
+	}
+}
+
+func TestMemoryStoreRestoreRejectsMalformedSnapshotAtomically(t *testing.T) {
+	ctx := context.Background()
+	target := NewMemoryStore(4, 2, 32)
+	if _, err := target.Put(ctx, "/keep", []byte("existing")); err != nil {
+		t.Fatal(err)
+	}
+	secretMarker := "do-not-leak-this-value"
+	base := Snapshot{
+		Version: SnapshotVersion, MaxPaths: 4, MaxPerHolder: 2, MaxValue: 32,
+		Entries: []SnapshotEntry{{Path: "/a", Value: []byte(secretMarker), Origin: OriginWorkload, HolderName: "api"}},
+	}
+	malformed := []Snapshot{
+		{Version: 99, MaxPaths: 4, MaxPerHolder: 2, MaxValue: 32},
+		{Version: SnapshotVersion, MaxPaths: 4, MaxPerHolder: 2, MaxValue: 32, Entries: []SnapshotEntry{
+			{Path: "/same", Value: []byte("a"), Origin: OriginOperator},
+			{Path: "/same", Value: []byte("b"), Origin: OriginOperator},
+		}},
+		{Version: SnapshotVersion, MaxPaths: 4, MaxPerHolder: 1, MaxValue: 32, Entries: []SnapshotEntry{
+			{Path: "/a", Value: []byte("a"), Origin: OriginWorkload, HolderName: "api"},
+			{Path: "/b", Value: []byte("b"), Origin: OriginWorkload, HolderName: "api"},
+		}},
+		{Version: SnapshotVersion, MaxPaths: 4, MaxPerHolder: 2, MaxValue: 4, Entries: []SnapshotEntry{
+			{Path: "/a", Value: []byte(secretMarker), Origin: OriginWorkload, HolderName: "api"},
+		}},
+		{Version: SnapshotVersion, MaxPaths: 4, MaxPerHolder: 2, MaxValue: 32, Entries: []SnapshotEntry{
+			{Path: "relative", Value: []byte(secretMarker), Origin: OriginWorkload, HolderName: "api"},
+		}},
+	}
+	for i, snapshot := range malformed {
+		err := target.RestoreSnapshot(snapshot)
+		if err == nil {
+			t.Fatalf("malformed snapshot %d restored", i)
+		}
+		if strings.Contains(err.Error(), secretMarker) {
+			t.Fatalf("snapshot error leaked a value: %v", err)
+		}
+		got, getErr := target.Get(ctx, "/keep")
+		if getErr != nil || string(got) != "existing" {
+			t.Fatalf("failed restore changed live store: %q, %v", got, getErr)
+		}
+	}
+	if err := target.RestoreSnapshot(base); err != nil {
+		t.Fatalf("valid snapshot did not restore after refusals: %v", err)
+	}
+}
+
 // The census names the holders and their counts, largest first. Four holders
 // tied at one path pin the tie-break: without it the order is the map's.
 func TestTopHolders(t *testing.T) {

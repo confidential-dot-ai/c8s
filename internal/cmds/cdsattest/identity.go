@@ -102,8 +102,12 @@ func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
 	return nil
 }
 
-func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte, operatorKeySetHash string) ([]byte, *types.MeshIdentityProof, error) {
 	transcriptHash, err := overenc.IdentityTranscriptHash(pub, nonce, m.leaf.Raw, m.ca.Raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	transcriptHash, err = overenc.BindOperatorKeySetHash(transcriptHash, operatorKeySetHash)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -118,8 +122,12 @@ func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types
 // serving leaf alongside the mesh identity and signs that transcript. No
 // session key exists on this path — the TLS handshake itself proves possession
 // of the serving-leaf key.
-func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte, operatorKeySetHash string) ([]byte, *types.MeshIdentityProof, error) {
 	transcriptHash, err := overenc.LBTranscriptHash(nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	transcriptHash, err = overenc.BindOperatorKeySetHash(transcriptHash, operatorKeySetHash)
 	if err != nil {
 		return nil, nil, err
 	}

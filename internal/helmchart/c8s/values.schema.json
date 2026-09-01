@@ -29,6 +29,19 @@
         "dnsSanPatterns": {},
         "earIssuer": {},
         "expectedIssuer": {},
+        "handoff": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "endpointDrainDelay": {},
+            "peerUrl": {},
+            "successorWorkload": {}
+          }
+        },
         "image": {
           "type": [
             "object",
@@ -129,7 +142,15 @@
         },
         "tokenSignerOverlap": {},
         "tokenSignerRotationInterval": {},
-        "tokenSignerRotationJitter": {}
+        "tokenSignerRotationJitter": {},
+        "teeWebPKI": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "workload": {}
+          }
+        }
       }
     },
     "nriImagePolicy": {
@@ -343,6 +364,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "activeOperatorPolicy": {},
             "attestationApiURL": {},
             "enabled": {},
             "expectedWorkload": {},
@@ -457,7 +479,11 @@
           "properties": {
             "certKey": {},
             "keyKey": {},
+            "mode": {},
             "mountPath": {},
+            "issueTimeout": {},
+            "pollInterval": {},
+            "readyPort": {},
             "secretName": {}
           }
         },

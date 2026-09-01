@@ -34,6 +34,12 @@ const (
 
 	// MeshIdentityProofECDSASHA384 is the proof-of-possession algorithm.
 	MeshIdentityProofECDSASHA384 = "ecdsa-sha384"
+
+	// GPUAttestedUnknown means that the service did not collect GPU evidence.
+	GPUAttestedUnknown = "unknown"
+	// GPUAttestedEvidenceCollected means that raw GPU evidence exists. A
+	// verifier must still validate it.
+	GPUAttestedEvidenceCollected = "evidence_collected"
 )
 
 // MeshIdentityProof authenticates the PQ session transcript with the private
@@ -58,12 +64,22 @@ type MeshIdentityProof struct {
 // binding identifier (BindingAttestPQ / BindingAttestLB); a client requires
 // the one its endpoint mode selects.
 type AttestationBundle struct {
-	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
-	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
-	Generation string          `json:"generation"`   // AMD gen for "snp": milan|genoa|turin; empty otherwise
-	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
-	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
-	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
+	Version    string          `json:"version"`    // BindingAttestPQ | BindingAttestLB
+	Platform   string          `json:"platform"`   // "snp" | "az-snp" | "az-tdx" | "tdx"
+	Generation string          `json:"generation"` // AMD gen for "snp": milan|genoa|turin; empty otherwise
+	Nonce      string          `json:"nonce"`      // echoed client nonce (b64url)
+	Evidence   json.RawMessage `json:"evidence"`   // platform-shaped attestation-rs evidence
+	// GPUAttested reports collection state. It does not report verification.
+	GPUAttested string `json:"gpu_attested"`
+	// NvidiaGPU preserves the opaque attestation-rs NVIDIA evidence bundle.
+	NvidiaGPU json.RawMessage `json:"nvidia_gpu,omitempty"`
+	// OperatorKeysPEM is the public key set fetched from the active CDS during
+	// this request. OperatorKeysSHA256 is the canonical framed c8s key-set
+	// commitment from operatorauth.KeySetHash. It is not an individual SPKI
+	// fingerprint. Both endpoint transcripts bind this value into report_data.
+	OperatorKeysPEM    string `json:"operator_keys_pem,omitempty"`
+	OperatorKeysSHA256 string `json:"operator_keys_sha256,omitempty"`
+	CDSCertPEM         string `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
 	// SessionPubKey is the per-session over-encryption key, present only for
 	// the attest-pq response; attest-lb creates no session.
 	SessionPubKey *SessionPublicKey `json:"session_pubkey,omitempty"`

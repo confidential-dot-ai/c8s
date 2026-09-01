@@ -1,8 +1,40 @@
 {{- if .Values.tlsLb.enabled }}
+{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
+{{- if not (has $publicTLSMode (list "cds" "webpki" "tee-webpki")) -}}
+{{- fail (printf "tlsLb.publicTLS.mode must be cds, webpki, or tee-webpki; got %q" $publicTLSMode) -}}
+{{- end -}}
+{{- if and (eq $publicTLSMode "webpki") (not .Values.tlsLb.publicTLS.secretName) -}}
+{{- fail "tlsLb.publicTLS.mode=webpki requires publicTLS.secretName" -}}
+{{- end -}}
+{{- if and (eq $publicTLSMode "tee-webpki") .Values.tlsLb.publicTLS.secretName -}}
+{{- fail "tlsLb.publicTLS.mode=tee-webpki forbids publicTLS.secretName; the private key must come from CDS" -}}
+{{- end -}}
+{{- if eq $publicTLSMode "tee-webpki" -}}
+{{- if not .Values.cds.teeWebPKI.enabled -}}
+{{- fail "tlsLb.publicTLS.mode=tee-webpki requires cds.teeWebPKI.enabled=true" -}}
+{{- end -}}
+{{- if ne .Values.tlsLb.attest.expectedWorkload .Values.cds.teeWebPKI.workload -}}
+{{- fail "tee-webpki requires tlsLb.attest.expectedWorkload to equal cds.teeWebPKI.workload" -}}
+{{- end -}}
+{{- if not .Values.cds.measurements -}}
+{{- fail "tee-webpki requires cds.measurements so tls-lb pins the CDS RA-TLS endpoint" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (kindIs "bool" .Values.tlsLb.hostPort.enabled) -}}
 {{- /* A string "false" is truthy and would both bind the node port and force
 Recreate, silently defeating the operator's opt-out. */ -}}
 {{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.tlsLb.attest.activeOperatorPolicy) -}}
+{{- fail (printf "tlsLb.attest.activeOperatorPolicy must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.attest.activeOperatorPolicy) -}}
+{{- end -}}
+{{- if .Values.tlsLb.attest.activeOperatorPolicy -}}
+{{- if not .Values.cds.operatorKeys -}}
+{{- fail "tlsLb.attest.activeOperatorPolicy requires cds.operatorKeys" -}}
+{{- end -}}
+{{- if not .Values.cds.measurements -}}
+{{- fail "tlsLb.attest.activeOperatorPolicy requires cds.measurements so tls-lb pins the live CDS" -}}
+{{- end -}}
 {{- end -}}
 {{- if and .Values.kata.enabled (ne (int .Values.tlsLb.nginx.httpsPort) 8443) -}}
 {{- /* The guest bakes C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 (a guest-wide
@@ -89,6 +121,42 @@ spec:
       shareProcessNamespace: true
       initContainers:
         {{- include "tls-lb.getCertContainers" . | nindent 8 }}
+        {{- if eq $publicTLSMode "tee-webpki" }}
+        - name: tee-webpki-init
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          args:
+            - tee-webpki
+            - --once
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            - --cds-measurements={{ join "," .Values.cds.measurements }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ join "," . }}
+            {{- end }}
+            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            - --mesh-cert={{ .Values.tlsLb.tlsMountPath }}/cert.pem
+            - --mesh-key={{ .Values.tlsLb.tlsMountPath }}/key.pem
+            {{- range (include "tls-lb.sanList" . | fromJsonArray) }}
+            - --dns-name={{ . }}
+            {{- end }}
+            - --out-cert={{ include "tls-lb.publicCertPath" . }}
+            - --out-key={{ include "tls-lb.publicKeyPath" . }}
+            - --out-csr={{ .Values.tlsLb.publicTLS.mountPath }}/tls.csr
+            - --wait-timeout={{ .Values.tlsLb.publicTLS.issueTimeout }}
+          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tlsLb.tlsMountPath }}
+              readOnly: true
+            - name: public-tls
+              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+          securityContext:
+            {{- include "c8s.getCertSecurityContext" (dict "runAsUser" .Values.tlsLb.nginx.runAsUser "runAsGroup" .Values.tlsLb.nginx.runAsGroup "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot) | nindent 12 }}
+        {{- end }}
       containers:
         - name: nginx
           image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}
@@ -148,7 +216,7 @@ spec:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
-            {{- if .Values.tlsLb.publicTLS.secretName }}
+            {{- if ne $publicTLSMode "cds" }}
             - name: public-tls
               mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
               readOnly: true
@@ -170,6 +238,49 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if eq $publicTLSMode "tee-webpki" }}
+        - name: tee-webpki
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          args:
+            - tee-webpki
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            - --cds-measurements={{ join "," .Values.cds.measurements }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ join "," . }}
+            {{- end }}
+            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            - --mesh-cert={{ .Values.tlsLb.tlsMountPath }}/cert.pem
+            - --mesh-key={{ .Values.tlsLb.tlsMountPath }}/key.pem
+            {{- range (include "tls-lb.sanList" . | fromJsonArray) }}
+            - --dns-name={{ . }}
+            {{- end }}
+            - --out-cert={{ include "tls-lb.publicCertPath" . }}
+            - --out-key={{ include "tls-lb.publicKeyPath" . }}
+            - --out-csr={{ .Values.tlsLb.publicTLS.mountPath }}/tls.csr
+            - --ready-address=127.0.0.1:{{ .Values.tlsLb.publicTLS.readyPort }}
+            - --poll-interval={{ .Values.tlsLb.publicTLS.pollInterval }}
+            - --reload-nginx
+          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.tlsLb.publicTLS.readyPort }}
+              scheme: HTTP
+            periodSeconds: 5
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tlsLb.tlsMountPath }}
+              readOnly: true
+            - name: public-tls
+              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+          securityContext:
+            {{- include "c8s.getCertSecurityContext" (dict "runAsUser" .Values.tlsLb.nginx.runAsUser "runAsGroup" .Values.tlsLb.nginx.runAsGroup "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot) | nindent 12 }}
+        {{- end }}
         {{- if .Values.tlsLb.attest.enabled }}
         - name: cds-attest
           image: {{ include "c8s.image" . }}
@@ -185,16 +296,20 @@ spec:
             - --port={{ .Values.tlsLb.attest.port }}
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
+            {{- if .Values.tlsLb.attest.activeOperatorPolicy }}
+            - --active-operator-policy
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            - --cds-measurements={{ join "," .Values.cds.measurements }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ join "," . }}
+            {{- end }}
+            {{- end }}
             - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
             # attest-lb transport trust rests on the serving key being TEE-held:
             # a publicTLS Secret's key is host-visible, so that front door is
             # attest-pq-only and the sidecar refuses attest-lb with
             # unsupported_front_door.
-            {{- if .Values.tlsLb.publicTLS.secretName }}
-            - --front-door-mode=webpki
-            {{- else }}
-            - --front-door-mode=cds
-            {{- end }}
+            - --front-door-mode={{ $publicTLSMode }}
             # Bind the *exact* leaf nginx presents on the wire (ssl_certificate =
             # publicCertPath), so the attest-lb binding (GET
             # /.well-known/c8s/attest-lb) commits report_data to the leaf DER a
@@ -267,7 +382,7 @@ spec:
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-            {{- if .Values.tlsLb.publicTLS.secretName }}
+            {{- if ne $publicTLSMode "cds" }}
             # cds-attest reads the same public leaf nginx serves
             # (--serving-cert-file).
             - name: public-tls
@@ -348,7 +463,7 @@ spec:
           configMap:
             name: {{ include "c8s.fullname" . }}-measurements
         {{- end }}
-        {{- if .Values.tlsLb.publicTLS.secretName }}
+        {{- if eq $publicTLSMode "webpki" }}
         - name: public-tls
           secret:
             secretName: {{ .Values.tlsLb.publicTLS.secretName }}
@@ -357,6 +472,11 @@ spec:
                 path: {{ .Values.tlsLb.publicTLS.certKey }}
               - key: {{ .Values.tlsLb.publicTLS.keyKey }}
                 path: {{ .Values.tlsLb.publicTLS.keyKey }}
+        {{- else if eq $publicTLSMode "tee-webpki" }}
+        - name: public-tls
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Mi
         {{- end }}
         {{- if .Values.tlsLb.discovery.enabled }}
         - name: discovery

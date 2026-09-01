@@ -33,9 +33,24 @@ type capturingProvider struct {
 	lastReportData []byte
 }
 
-func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (json.RawMessage, string, string, error) {
+type staticOperatorPolicy struct {
+	policy OperatorPolicy
+	err    error
+}
+
+func (p staticOperatorPolicy) Active(context.Context) (OperatorPolicy, error) {
+	return p.policy, p.err
+}
+
+func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (CollectedEvidence, error) {
 	p.lastReportData = append([]byte(nil), reportData...)
-	return json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), "snp", "genoa", nil
+	return CollectedEvidence{
+		Evidence:    json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
+		Platform:    "snp",
+		Generation:  "genoa",
+		GPUAttested: types.GPUAttestedEvidenceCollected,
+		NvidiaGPU:   json.RawMessage(`{"devices":[],"binding":{"kind":"concat","algo":"sha256"}}`),
+	}, nil
 }
 
 // writeTestServingLeaf writes a self-signed leaf PEM to a temp file and
@@ -63,7 +78,10 @@ func newAttestLBServer(t *testing.T, identity testMeshIdentity, servingCertFile 
 	t.Helper()
 	prov := &capturingProvider{}
 	srv := NewServer(Config{
-		Evidence:             prov,
+		Evidence: prov,
+		OperatorPolicy: staticOperatorPolicy{policy: OperatorPolicy{
+			KeysPEM: "operator keys", SHA256: strings.Repeat("a", 64),
+		}},
 		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      servingCertFile,
 		MeshIdentityCertFile: identity.certFile,
@@ -107,6 +125,15 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	if b.Nonce != b64url(nonce) {
 		t.Errorf("nonce not echoed: got %q", b.Nonce)
 	}
+	if b.GPUAttested != types.GPUAttestedEvidenceCollected {
+		t.Errorf("gpu_attested = %q", b.GPUAttested)
+	}
+	if string(b.NvidiaGPU) != `{"devices":[],"binding":{"kind":"concat","algo":"sha256"}}` {
+		t.Errorf("nvidia_gpu changed: %s", b.NvidiaGPU)
+	}
+	if b.OperatorKeysPEM != "operator keys" || b.OperatorKeysSHA256 != strings.Repeat("a", 64) {
+		t.Errorf("operator policy changed: pem=%q hash=%q", b.OperatorKeysPEM, b.OperatorKeysSHA256)
+	}
 	servingHash := sha256.Sum256(servingDER)
 	if b.ServingLeafSHA256 != b64url(servingHash[:]) {
 		t.Errorf("serving_leaf_sha256 = %q, want hash of the served leaf", b.ServingLeafSHA256)
@@ -116,6 +143,10 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	// on the connection plus the served mesh chain — and require the hardware
 	// report_data and the ECDSA proof to verify against it.
 	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err = overenc.BindOperatorKeySetHash(want, b.OperatorKeysSHA256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +171,35 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	}
 	if !strings.Contains(b.CDSCertPEM, "CERTIFICATE") {
 		t.Fatalf("bundle carries no mesh chain: %q", b.CDSCertPEM)
+	}
+}
+
+func TestAttestLBOperatorPolicyFailureStopsBeforeEvidence(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	certPath, _ := writeTestServingLeaf(t)
+	provider := &capturingProvider{}
+	srv := NewServer(Config{
+		Evidence:             provider,
+		OperatorPolicy:       staticOperatorPolicy{err: context.DeadlineExceeded},
+		FrontDoorMode:        FrontDoorModeTEEWebPKI,
+		ServingCertFile:      certPath,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if provider.lastReportData != nil {
+		t.Fatal("evidence was collected after the active operator policy failed")
 	}
 }
 

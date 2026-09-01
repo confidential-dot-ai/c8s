@@ -2,9 +2,11 @@ package cdsattest
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -31,6 +34,11 @@ type config struct {
 	attestationAPIURL    string
 	platform             string
 	generation           string
+	nvidiaGPUEvidence    bool
+	activeOperatorPolicy bool
+	cdsURL               string
+	cdsMeasurements      string
+	cdsRTMRs             string
 	sessionTTL           time.Duration
 	readHeaderTimeout    time.Duration
 
@@ -59,7 +67,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.host, "host", "127.0.0.1", "listen host (loopback: nginx proxies to it)")
 	f.IntVarP(&cfg.port, "port", "p", 8800, "listen port")
 	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
-	f.StringVar(&cfg.frontDoorMode, "front-door-mode", "", "REQUIRED: which credential terminates public TLS in front of this sidecar: cds (TEE-held mesh-issued serving key; attest-lb served) or webpki (host-visible Secret; attest-lb refused with unsupported_front_door)")
+	f.StringVar(&cfg.frontDoorMode, "front-door-mode", "", "REQUIRED: public TLS credential mode: cds, tee-webpki, or webpki")
 	f.StringVar(&cfg.servingCertFile, "serving-cert-file", "", "path to the LB serving-leaf PEM (the cert nginx presents). In cds front-door mode, GET /.well-known/c8s/attest-lb binds report_data to this exact leaf DER. Re-read per request to follow get-cert rotation.")
 	f.StringVar(&cfg.meshIdentityCertFile, "mesh-identity-cert-file", "", "TEE-held mesh leaf PEM whose possession both attestation endpoints prove (re-read per request)")
 	f.StringVar(&cfg.meshIdentityKeyFile, "mesh-identity-key-file", "", "TEE-held mesh leaf private key matching --mesh-identity-cert-file (re-read per request)")
@@ -69,6 +77,11 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
 	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|az-snp|az-tdx|tdx")
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
+	f.BoolVar(&cfg.nvidiaGPUEvidence, "nvidia-gpu-evidence", false, "request nonce-bound NVIDIA evidence from the local node attestation API; use on GPU-worker receipt sidecars")
+	f.BoolVar(&cfg.activeOperatorPolicy, "active-operator-policy", false, "include the operator key set fetched from the active CDS")
+	f.StringVar(&cfg.cdsURL, "cds-url", "", "direct RA-TLS CDS base URL for active operator policy")
+	f.StringVar(&cfg.cdsMeasurements, "cds-measurements", "", "comma-separated pinned CDS launch measurements")
+	f.StringVar(&cfg.cdsRTMRs, "cds-rtmrs", "", "comma-separated pinned CDS TDX RTMR values")
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "pending-handshake TTL and established-session idle TTL")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
 	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Empty uses an echo backend (demo).")
@@ -84,8 +97,8 @@ func run(cfg config) error {
 
 	// No default: serving attest-lb is a trust decision about where the
 	// serving key lives, so the deployer must state it.
-	if cfg.frontDoorMode != FrontDoorModeCDS && cfg.frontDoorMode != FrontDoorModeWebPKI {
-		return fmt.Errorf("--front-door-mode must be %q or %q, got %q", FrontDoorModeCDS, FrontDoorModeWebPKI, cfg.frontDoorMode)
+	if cfg.frontDoorMode != FrontDoorModeCDS && cfg.frontDoorMode != FrontDoorModeTEEWebPKI && cfg.frontDoorMode != FrontDoorModeWebPKI {
+		return fmt.Errorf("--front-door-mode must be %q, %q, or %q, got %q", FrontDoorModeCDS, FrontDoorModeTEEWebPKI, FrontDoorModeWebPKI, cfg.frontDoorMode)
 	}
 	// Same rule as front-door-mode: the advertised TEE is a trust statement,
 	// so the deployer must state it.
@@ -105,9 +118,10 @@ func run(cfg config) error {
 			"file", cfg.evidenceFixture)
 	case cfg.attestationAPIURL != "":
 		provider = LiveEvidenceProvider{
-			Client:     attestationclient.NewClient(cfg.attestationAPIURL),
-			Platform:   types.Platform(cfg.platform),
-			Generation: cfg.generation,
+			Client:            attestationclient.NewClient(cfg.attestationAPIURL),
+			Platform:          types.Platform(cfg.platform),
+			Generation:        cfg.generation,
+			NvidiaGPUEvidence: cfg.nvidiaGPUEvidence,
 		}
 	default:
 		return fmt.Errorf("one of --attestation-api-url or --evidence-fixture is required")
@@ -131,9 +145,22 @@ func run(cfg config) error {
 		logger.Warn("no --upstream set: using echo backend (demo only)")
 	}
 
+	var operatorPolicy OperatorPolicyProvider
+	if cfg.activeOperatorPolicy {
+		client, err := newOperatorPolicyClient(cfg)
+		if err != nil {
+			return err
+		}
+		operatorPolicy, err = newLiveOperatorPolicyProvider(cfg.cdsURL, client)
+		if err != nil {
+			return err
+		}
+	}
+
 	srv := NewServer(Config{
 		Logger:               logger,
 		Evidence:             provider,
+		OperatorPolicy:       operatorPolicy,
 		FrontDoorMode:        cfg.frontDoorMode,
 		ServingCertFile:      cfg.servingCertFile,
 		MeshIdentityCertFile: cfg.meshIdentityCertFile,
@@ -156,6 +183,44 @@ func run(cfg config) error {
 
 	logger.Info("LB browser-facing endpoints listening", "addr", addr)
 	return srv.Serve(ctx, httpSrv)
+}
+
+func newOperatorPolicyClient(cfg config) (*http.Client, error) {
+	u, err := url.Parse(cfg.cdsURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("--cds-url must be a direct https RA-TLS endpoint")
+	}
+	measurements, err := ratls.ParseHexMeasurements(cfg.cdsMeasurements)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-measurements: %w", err)
+	}
+	if len(measurements) == 0 {
+		return nil, fmt.Errorf("--cds-measurements must pin the CDS build")
+	}
+	rtmrs, err := ratls.ParseRTMRPinsString(cfg.cdsRTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.attestationAPIURL)
+	if err != nil {
+		return nil, fmt.Errorf("active operator policy RA-TLS client: %w", err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig == nil {
+		return nil, fmt.Errorf("active operator policy RA-TLS client has no TLS transport")
+	}
+	transport = transport.Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		cert, err := tls.LoadX509KeyPair(cfg.meshIdentityCertFile, cfg.meshIdentityKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load tls-lb mesh identity: %w", err)
+		}
+		return &cert, nil
+	}
+	client.Transport = transport
+	client.Timeout = 15 * time.Second
+	return client, nil
 }
 
 func newLogger(level string) *slog.Logger {

@@ -2648,6 +2648,40 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	}
 }
 
+func TestChartTLSLBActiveOperatorPolicy(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "tlsLb.attest.activeOperatorPolicy=true")
+	if err == nil {
+		t.Fatalf("active policy without operator keys must fail\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.attest.activeOperatorPolicy requires cds.operatorKeys")
+
+	pemText := "-----BEGIN PUBLIC KEY-----\nMFkwfakefakefake\n-----END PUBLIC KEY-----\n"
+	path := filepath.Join(t.TempDir(), "operator.pub")
+	if err := os.WriteFile(path, []byte(pemText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = helmTemplate(t,
+		"--set", "tlsLb.attest.activeOperatorPolicy=true",
+		"--set-file", "cds.operatorKeys="+path,
+		"--set", "cds.measurements[0]="+teeWebPKITestMeasurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template active operator policy: %v\n%s", err, out)
+	}
+	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, sidecar,
+		"--active-operator-policy",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--cds-measurements="+teeWebPKITestMeasurement,
+	)
+
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.activeOperatorPolicy=true")
+	if err == nil {
+		t.Fatalf("string active operator policy value must fail\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.attest.activeOperatorPolicy must be a boolean; do not set it via --set-string, got: true")
+}
+
 func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",
@@ -2739,6 +2773,33 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 		if p.probe.HTTPGet != nil {
 			t.Errorf("kata shape: tls-lb %s probe must not be httpGet under kata", p.name)
 		}
+	}
+}
+
+// TestCDSKataReadinessTracksLeadership prevents a TCP-only readiness probe.
+// TCP stays open after a CDS handoff. The HTTPS /readyz probe becomes false
+// before the predecessor stops its read and certificate service.
+func TestCDSKataReadinessTracksLeadership(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template --cvm-mode=pod: %v\n%s", err, out)
+	}
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	probe := cds.ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("kata CDS readiness probe = %+v, want HTTPS /readyz", probe)
+	}
+	if probe.TCPSocket != nil {
+		t.Fatal("kata CDS readiness must not use a TCP-only probe")
+	}
+	if got := probe.HTTPGet.Path; got != "/readyz" {
+		t.Fatalf("kata CDS readiness path = %q, want /readyz", got)
+	}
+	if got := probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+		t.Fatalf("kata CDS readiness scheme = %q, want HTTPS", got)
+	}
+	if probe.PeriodSeconds != 1 || probe.FailureThreshold != 1 {
+		t.Fatalf("kata CDS readiness cadence = period %ds threshold %d, want 1s and 1", probe.PeriodSeconds, probe.FailureThreshold)
 	}
 }
 
@@ -4874,6 +4935,77 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+const teeWebPKITestMeasurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+
+func teeWebPKIChartArgs(hostPort bool) []string {
+	return []string{
+		"--set", "tlsLb.enabled=true",
+		"--set", fmt.Sprintf("tlsLb.hostPort.enabled=%t", hostPort),
+		"--set", "tlsLb.publicTLS.mode=tee-webpki",
+		"--set", "tlsLb.attest.enabled=true",
+		"--set", "tlsLb.attest.expectedWorkload=c8s-tls-lb",
+		"--set", "cds.teeWebPKI.enabled=true",
+		"--set", "cds.handoff.enabled=true",
+		"--set", "cds.measurements[0]=" + teeWebPKITestMeasurement,
+		"--set-string", "cds.operatorKeys=-----BEGIN PUBLIC KEY-----fake",
+	}
+}
+
+func TestChartTEEWebPKIWaitsForPublicCertificate(t *testing.T) {
+	out, err := helmTemplate(t, teeWebPKIChartArgs(false)...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	var init *corev1.Container
+	for i := range deployment.Spec.Template.Spec.InitContainers {
+		if deployment.Spec.Template.Spec.InitContainers[i].Name == "tee-webpki-init" {
+			init = &deployment.Spec.Template.Spec.InitContainers[i]
+			break
+		}
+	}
+	if init == nil {
+		t.Fatal("tee-webpki init container is missing")
+	}
+	assertContainerHasArg(t, init.Name, init.Args, "--once")
+	assertContainerHasArg(t, init.Name, init.Args, "--wait-timeout=15m")
+	for _, arg := range init.Args {
+		if arg == "--reload-nginx" {
+			t.Fatal("tee-webpki init must not reload nginx before nginx starts")
+		}
+	}
+	var sidecar *corev1.Container
+	for i := range deployment.Spec.Template.Spec.Containers {
+		if deployment.Spec.Template.Spec.Containers[i].Name == "tee-webpki" {
+			sidecar = &deployment.Spec.Template.Spec.Containers[i]
+			break
+		}
+	}
+	if sidecar == nil {
+		t.Fatal("tee-webpki renewal sidecar is missing")
+	}
+	assertContainerHasArg(t, sidecar.Name, sidecar.Args, "--reload-nginx")
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == "public-tls" {
+			if volume.EmptyDir == nil || volume.Secret != nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory {
+				t.Fatalf("public-tls volume is not TEE memory only: %#v", volume.VolumeSource)
+			}
+			return
+		}
+	}
+	t.Fatal("public-tls memory volume is missing")
+}
+
+func TestChartTEEWebPKIRejectsHostPort(t *testing.T) {
+	out, err := helmTemplate(t, teeWebPKIChartArgs(true)...)
+	if err == nil {
+		t.Fatalf("tee-webpki rendered with hostPort; output=%s", out)
+	}
+	if !strings.Contains(out, "hostPort.enabled=true") {
+		t.Fatalf("unexpected hostPort failure: %s", out)
+	}
 }
 
 // noUpstreamArgs clears the mesh-wrapped upstream that helmTemplate pins by

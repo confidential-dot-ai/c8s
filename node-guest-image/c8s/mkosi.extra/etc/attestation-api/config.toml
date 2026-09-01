@@ -1,0 +1,26 @@
+# c8s owns this measured override for the composed attest-gpu profile.
+# A request must also set nvidia_gpu=true. The service collects evidence only;
+# the client must verify the CPU and GPU evidence.
+
+[server]
+bind = "0.0.0.0:8400"
+
+[server.tls]
+enabled = false
+
+[auth]
+api_keys = []
+
+[certs]
+cache_max_entries = 1024
+tdx_collateral_ttl_hours = 24
+prefetch_nras_jwks = true
+
+[token]
+enabled = false
+
+[attestation]
+enabled = true
+gpu_attestation_evidence_enabled = true
+tdx_quote_method = "vsock"
+platforms = ["snp", "tdx"]

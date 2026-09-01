@@ -450,8 +450,18 @@ Path to the public-TLS certificate nginx serves. Resolves to the
 operator-provided publicTLS secret when set, otherwise the CDS-issued
 cert under tlsMountPath.
 */}}
+{{- define "tls-lb.publicTLSMode" -}}
+{{- if .Values.tlsLb.publicTLS.mode -}}
+{{- .Values.tlsLb.publicTLS.mode -}}
+{{- else if .Values.tlsLb.publicTLS.secretName -}}
+webpki
+{{- else -}}
+cds
+{{- end -}}
+{{- end -}}
+
 {{- define "tls-lb.publicCertPath" -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- if ne (include "tls-lb.publicTLSMode" .) "cds" -}}
 {{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.certKey -}}
 {{- else -}}
 {{- printf "%s/cert.pem" .Values.tlsLb.tlsMountPath -}}
@@ -459,7 +469,7 @@ cert under tlsMountPath.
 {{- end -}}
 
 {{- define "tls-lb.publicKeyPath" -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- if ne (include "tls-lb.publicTLSMode" .) "cds" -}}
 {{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.keyKey -}}
 {{- else -}}
 {{- printf "%s/key.pem" .Values.tlsLb.tlsMountPath -}}
@@ -479,7 +489,7 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 {{- if .Values.tlsLb.discovery.enabled }}
 - --discovery-out={{ include "tls-lb.discoveryFilePath" . }}
 - --discovery-cds-cert-url={{ .Values.tlsLb.discovery.cdsCertPath }}
-- --discovery-public-tls-mode={{ ternary "webpki" "cds" (ne .Values.tlsLb.publicTLS.secretName "") }}
+- --discovery-public-tls-mode={{ include "tls-lb.publicTLSMode" . }}
 {{- if .Values.tlsLb.meshCA.expose }}
 - --discovery-mesh-ca-url={{ .Values.tlsLb.discovery.meshCAPath }}
 {{- end }}
@@ -542,7 +552,7 @@ list.
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- if ne (include "tls-lb.publicTLSMode" .) "cds" -}}
 {{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath) -}}
 {{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) -}}
 {{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicKeyPath" .)) -}}

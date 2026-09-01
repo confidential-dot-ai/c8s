@@ -352,9 +352,11 @@ after install.
 It verifies **in-process** with `attestation-go` — the Go port of the same
 attestation-rs engine the cluster runs. That engine auto-detects the platform and
 AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
-classify. The only requirement on the machine running `c8s verify` is outbound
-HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
-report; no container runtime is needed.
+classify. CPU-only verification needs outbound HTTPS to AMD KDS
+(`kdsintf.amd.com`) so it can fetch the VCEK for a bare report. It needs no
+container runtime. NVIDIA GPU verification also needs the exact
+`attestation-cli` v0.5.0 NRAS helper described in
+[`docs/tee-webpki.md`](tee-webpki.md).
 
 ```bash
 # CDS's RA-TLS endpoint answers unattested clients. Under kata the baked guest

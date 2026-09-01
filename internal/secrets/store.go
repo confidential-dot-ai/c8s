@@ -6,10 +6,14 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"sync"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // ErrNotFound reports a path the store does not hold.
@@ -109,8 +113,36 @@ func Generate() ([]byte, error) {
 // DefaultMaxPathsPerHolder is the shipped per-holder path quota.
 const DefaultMaxPathsPerHolder = 64
 
-// MemoryStore keeps secrets in the CDS process and nowhere else. They do not
-// survive a restart — see docs/secrets.md, "Restarts".
+const (
+	// SnapshotVersion identifies the encrypted CDS handoff representation.
+	SnapshotVersion = 1
+	// MaxSnapshotBytes bounds the cleartext secret state before it enters the
+	// recipient-bound handoff ciphertext. A larger live store refuses handoff.
+	MaxSnapshotBytes = 16 << 20
+)
+
+// Snapshot is a complete secret-store state for one encrypted CDS handoff.
+// Values must never be logged or returned outside the encrypted payload.
+type Snapshot struct {
+	Version      int             `json:"version"`
+	MaxPaths     int             `json:"max_paths"`
+	MaxPerHolder int             `json:"max_per_holder"`
+	MaxValue     int             `json:"max_value"`
+	Entries      []SnapshotEntry `json:"entries"`
+}
+
+// SnapshotEntry preserves the value and the holder charged for its path.
+// HolderName is empty for an operator-held value.
+type SnapshotEntry struct {
+	Path       string `json:"path"`
+	Value      []byte `json:"value"`
+	Origin     Origin `json:"origin"`
+	HolderName string `json:"holder_name,omitempty"`
+}
+
+// MemoryStore keeps secrets in CDS memory. A planned, attested CDS handoff can
+// transfer one encrypted snapshot. An unplanned restart still destroys them.
+// See docs/secrets.md, "Restarts".
 //
 // A bound refuses the write: an entry is the only copy of its value.
 type MemoryStore struct {
@@ -231,6 +263,113 @@ func (s *MemoryStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.values)
+}
+
+// Snapshot copies all state while writes are blocked by the store lock. It
+// returns entries in path order so tests and encrypted payloads are stable.
+func (s *MemoryStore) Snapshot() (Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot := Snapshot{
+		Version: SnapshotVersion, MaxPaths: s.maxPaths,
+		MaxPerHolder: s.maxPerHolder, MaxValue: s.maxValue,
+		Entries: make([]SnapshotEntry, 0, len(s.values)),
+	}
+	for path, stored := range s.values {
+		snapshot.Entries = append(snapshot.Entries, SnapshotEntry{
+			Path: path, Value: append([]byte(nil), stored.value...),
+			Origin: stored.holder.origin, HolderName: stored.holder.name,
+		})
+	}
+	sort.Slice(snapshot.Entries, func(i, j int) bool { return snapshot.Entries[i].Path < snapshot.Entries[j].Path })
+	if err := ValidateSnapshot(snapshot); err != nil {
+		return Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// ValidateSnapshot checks bounds and holder accounting without exposing any
+// value in an error. It is used before encryption and after decryption.
+func ValidateSnapshot(snapshot Snapshot) error {
+	if snapshot.Version != SnapshotVersion {
+		return fmt.Errorf("secrets: snapshot version %d is not supported", snapshot.Version)
+	}
+	if snapshot.MaxPaths <= 0 || snapshot.MaxPerHolder <= 0 || snapshot.MaxPerHolder >= snapshot.MaxPaths || snapshot.MaxValue <= 0 {
+		return fmt.Errorf("secrets: snapshot store limits are invalid")
+	}
+	if len(snapshot.Entries) > snapshot.MaxPaths {
+		return fmt.Errorf("secrets: snapshot holds %d paths, limit is %d", len(snapshot.Entries), snapshot.MaxPaths)
+	}
+	seen := make(map[string]struct{}, len(snapshot.Entries))
+	holders := make(map[Holder]int)
+	totalBytes := 0
+	for i, item := range snapshot.Entries {
+		canonical, err := pkgallowlist.CanonicalSecretPath(item.Path)
+		if err != nil || canonical != item.Path {
+			return fmt.Errorf("secrets: snapshot entry %d has an invalid path", i)
+		}
+		if _, exists := seen[item.Path]; exists {
+			return fmt.Errorf("secrets: snapshot repeats path %q", item.Path)
+		}
+		seen[item.Path] = struct{}{}
+		if len(item.Value) > snapshot.MaxValue {
+			return fmt.Errorf("secrets: snapshot value at %q exceeds the configured limit", item.Path)
+		}
+		// JSON can escape each path or holder byte as six bytes. []byte values
+		// use standard base64. This is a conservative bound on the encoded
+		// snapshot, not an estimate.
+		totalBytes += 6*len(item.Path) + base64.StdEncoding.EncodedLen(len(item.Value)) + 6*len(item.HolderName) + 128
+		if totalBytes > MaxSnapshotBytes {
+			return fmt.Errorf("secrets: snapshot exceeds the %d-byte handoff limit", MaxSnapshotBytes)
+		}
+		var holder Holder
+		switch item.Origin {
+		case OriginOperator:
+			if item.HolderName != "" {
+				return fmt.Errorf("secrets: operator-held snapshot path %q has a holder name", item.Path)
+			}
+			holder = OperatorHolder()
+		case OriginWorkload:
+			if !pkgallowlist.ValidWorkloadName(item.HolderName) {
+				return fmt.Errorf("secrets: workload-held snapshot path %q has an invalid holder name", item.Path)
+			}
+			holder = WorkloadHolder(item.HolderName)
+		default:
+			return fmt.Errorf("secrets: snapshot path %q has invalid origin %q", item.Path, item.Origin)
+		}
+		holders[holder]++
+		if holder.origin != OriginOperator && holders[holder] > snapshot.MaxPerHolder {
+			return fmt.Errorf("secrets: snapshot holder %s exceeds the %d-path quota", holder, snapshot.MaxPerHolder)
+		}
+	}
+	return nil
+}
+
+// RestoreSnapshot validates and atomically replaces this store. The limits
+// must match, so a rolling update cannot silently change holder or value
+// semantics while it adopts live state.
+func (s *MemoryStore) RestoreSnapshot(snapshot Snapshot) error {
+	if err := ValidateSnapshot(snapshot); err != nil {
+		return err
+	}
+	if snapshot.MaxPaths != s.maxPaths || snapshot.MaxPerHolder != s.maxPerHolder || snapshot.MaxValue != s.maxValue {
+		return fmt.Errorf("secrets: snapshot limits do not match the configured store")
+	}
+	values := make(map[string]entry, len(snapshot.Entries))
+	holders := make(map[Holder]int)
+	for _, item := range snapshot.Entries {
+		holder := OperatorHolder()
+		if item.Origin == OriginWorkload {
+			holder = WorkloadHolder(item.HolderName)
+		}
+		values[item.Path] = entry{value: append([]byte(nil), item.Value...), holder: holder}
+		holders[holder]++
+	}
+	s.mu.Lock()
+	s.values = values
+	s.holders = holders
+	s.mu.Unlock()
+	return nil
 }
 
 // HolderPaths is one holder's share of the store.

@@ -306,7 +306,7 @@ reach.
   the modules signed against a confos GPU kernel flavor is the remaining
   hardening step. Everything grafted is inside the measured verity root, so it
   is attested — just not c8s-compiled.
-- **GPU attestation is not wired.** The NVIDIA GPU's own attestation (SPDM /
+- **Pod-as-CVM GPU attestation is not wired.** The NVIDIA GPU's own attestation (SPDM /
   `nvidia-smi conf-compute`) is out of scope for this iteration — CC mode is
   assumed correct on the host. A malicious host could present a non-CC GPU
   (the driver loads fine on one); the locked guest fails closed at boot
@@ -314,7 +314,7 @@ reach.
   off before the kata-agent starts, so the sandbox fails at creation. Only
   the `-debug` guest — already rejected by locked-reference attestation —
   tolerates a non-CC GPU, with a warning. There is still no *positive* GPU
-  attestation surfaced to the relying party. (The graft carries upstream's
+  attestation surfaced from this pod-as-CVM path. (The graft carries upstream's
   `libnvat` NVIDIA-attestation library, so the in-guest plumbing for this is
   staged.)
 - **Host-namespace GPU pods bypass the confidential path.** A pod with
@@ -331,7 +331,9 @@ reach.
 
 - **Node-as-CVM GPU is separate.** For the node-as-CVM shape, GPU drivers are
   baked into the node guest OS image and measured into the node's launch
-  digest — a different mechanism that does not use this puller/runtime.
+  digest. A local GPU-worker `cds-attest` sidecar can collect nonce-bound
+  NVIDIA evidence. `c8s verify` checks that evidence with NRAS. This is a
+  different mechanism that does not use this puller/runtime.
 
 ## Uninstall
 

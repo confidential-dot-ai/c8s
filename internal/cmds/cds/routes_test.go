@@ -418,6 +418,37 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRequiresActivationRetryMargin(t *testing.T) {
+	cfg := config{
+		teeWebPKIWorkload:          "c8s-tls-lb",
+		handoffMeasurements:        []string{"aa"},
+		operatorKeys:               "keys.pem",
+		handoffSuccessorWorkload:   "c8s-cds",
+		handoffEARMaxAge:           time.Minute,
+		handoffPeerURL:             "https://c8s-cds:8443",
+		handoffPeerTimeout:         7 * time.Second,
+		handoffEndpointDrainDelay:  5 * time.Second,
+		handoffClientCert:          "cert.pem",
+		handoffClientKey:           "key.pem",
+		ratlsPlatform:              "tdx",
+		maxTTL:                     time.Hour,
+		namedCertTTL:               issuer.MaxNamedLeafTTL,
+		maxRequestSize:             1,
+		secretsMaxPaths:            1024,
+		secretsMaxPathsPerWorkload: 64,
+		secretsMaxValueBytes:       4096,
+		sandboxLedgerMax:           10000,
+		readinessInterval:          time.Second,
+	}
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "activation retry") {
+		t.Fatalf("unsafe timeout error = %v, want activation retry margin", err)
+	}
+	cfg.handoffPeerTimeout = 8 * time.Second
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("safe timeout rejected: %v", err)
+	}
+}
+
 func TestReadinessFn(t *testing.T) {
 	healthyService := func() bool { return true }
 	unhealthyService := func() bool { return false }
@@ -557,5 +588,87 @@ func TestHandleMeasurements(t *testing.T) {
 	}
 	if len(servedEmpty.Entries) != 0 {
 		t.Errorf("empty set served %d entries", len(servedEmpty.Entries))
+	}
+}
+
+type stubHandoffController struct {
+	serving bool
+	mutable bool
+}
+
+func (s *stubHandoffController) HandleHandoff(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *stubHandoffController) HandleActivate(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *stubHandoffController) Serving() bool { return s.serving }
+
+func (s *stubHandoffController) GuardMutation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.mutable {
+			http.Error(w, "CDS state is frozen for handoff", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func TestRouterFrozenPredecessorKeepsReadsAndCertificateService(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &stubHandoffController{serving: true, mutable: false}
+	router := newRouter(dependencies{
+		SignCSRHandler:   SignCSRHandler{CA: ca},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		HandoffHandler:   controller,
+		ReadyFn:          func() bool { return true },
+		EarIssuer:        earIss,
+		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      newTestRateLimiter(t),
+		ChallengeLimiter: newTestRateLimiter(t),
+		MaxRequestSize:   65536,
+	})
+
+	request := func(method, path, body string) int {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return recorder.Code
+	}
+	for _, path := range []string{"/ca", "/allowlist", "/readyz"} {
+		if got := request(http.MethodGet, path, ""); got != http.StatusOK {
+			t.Errorf("frozen predecessor GET %s = %d, want 200", path, got)
+		}
+	}
+	if got := request(http.MethodPost, "/sign-csr", `{}`); got == http.StatusServiceUnavailable {
+		t.Fatalf("frozen predecessor certificate route returned 503")
+	}
+	if got := request(http.MethodPut, "/allowlist", `{}`); got != http.StatusServiceUnavailable {
+		t.Fatalf("frozen predecessor mutation = %d, want 503", got)
+	}
+
+	controller.serving = false
+	if got := request(http.MethodGet, "/ca", ""); got != http.StatusServiceUnavailable {
+		t.Fatalf("retired predecessor read = %d, want 503", got)
+	}
+	if got := request(http.MethodGet, "/healthz", ""); got != http.StatusOK {
+		t.Fatalf("retired predecessor health = %d, want 200", got)
 	}
 }

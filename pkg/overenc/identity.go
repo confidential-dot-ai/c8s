@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -15,7 +16,12 @@ const (
 	// one: the two endpoints sign different statements, so a response can
 	// never be replayed across them.
 	lbTranscriptDomain = types.BindingAttestLB
-	identityNonceBytes = 32
+	// operatorKeySetTranscriptDomain separates the active operator-policy
+	// commitment from both endpoint transcript formats. The value committed is
+	// operatorauth.KeySetHash: a canonical, framed commitment to the complete
+	// active key set. It is not an individual operator-key fingerprint.
+	operatorKeySetTranscriptDomain = "c8s/operator-key-set/v1"
+	identityNonceBytes             = 32
 )
 
 // IdentityTranscriptHash commits the hybrid server key, client nonce, exact
@@ -95,6 +101,46 @@ func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte,
 	}
 	sum := sha512.Sum384(encoded)
 	return sum[:], nil
+}
+
+// BindOperatorKeySetHash adds the active operator key-set commitment to an
+// endpoint transcript. Empty keySetHash preserves the old transcript for
+// deployments that do not expose active operator policy. A non-empty value
+// must be the canonical lowercase SHA-256 value returned by
+// operatorauth.KeySetHash.
+func BindOperatorKeySetHash(transcriptHash []byte, keySetHash string) ([]byte, error) {
+	if len(transcriptHash) != sha512.Size384 {
+		return nil, fmt.Errorf("overenc: transcript hash must be %d bytes, got %d", sha512.Size384, len(transcriptHash))
+	}
+	if keySetHash == "" {
+		return append([]byte(nil), transcriptHash...), nil
+	}
+	keySetDigest, err := hex.DecodeString(keySetHash)
+	if err != nil || len(keySetDigest) != sha256.Size || keySetHash != lowerASCII(keySetHash) {
+		return nil, fmt.Errorf("overenc: operator key-set hash must be %d lowercase hex characters", sha256.Size*2)
+	}
+	var encoded []byte
+	for _, field := range [][]byte{
+		[]byte(operatorKeySetTranscriptDomain),
+		transcriptHash,
+		keySetDigest,
+	} {
+		if encoded, err = appendLengthPrefixed(encoded, field); err != nil {
+			return nil, err
+		}
+	}
+	sum := sha512.Sum384(encoded)
+	return sum[:], nil
+}
+
+func lowerASCII(value string) string {
+	b := []byte(value)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'F' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // appendLengthPrefixed is the single owner of the transcript's LP(field) wire

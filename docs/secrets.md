@@ -404,16 +404,19 @@ release decision.
 
 ## Restarts
 
-**A CDS restart destroys every secret, and requires rolling every workload that
-holds one.**
+A planned CDS rolling handoff preserves every secret. The current CDS freezes
+all secret writes. It puts values, paths, holder ownership, and store limits in
+the recipient-bound encrypted snapshot. The successor validates and restores
+the complete snapshot before it can become Ready. A missing or malformed
+secret snapshot stops adoption.
 
-The store is process memory and there is no persistence. Worse than losing it:
-a pod recreated after the restart calls `POST`, finds the path empty, and is
-given a **new** value — while its siblings still hold the old one. Nothing
-reports this. A partially-rolled Deployment ends up with two different values
-for one path.
+**An unplanned CDS restart still destroys every secret and requires rolling
+every workload that holds one.** The store has no durable persistence. A pod
+recreated after such a restart calls `POST`, finds the path empty, and gets a
+**new** value while its siblings still hold the old one. Nothing reports this.
+A partially rolled Deployment then has two values for one path.
 
-So after a CDS restart, restart every secret-consuming workload rather than
+After an unplanned CDS restart, restart every secret-consuming workload rather than
 letting them recover piecemeal — a rolling restart of each Deployment. Treat a released value as ephemeral for the
 lifetime of the CDS process; nothing durable may be keyed on one.
 
