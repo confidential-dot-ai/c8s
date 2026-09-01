@@ -1371,7 +1371,7 @@ tlsLb:
       # core modules tls-lb uses; the full/perl variants ship image-filter,
       # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
       # Accepted CVEs against this pin live in .grype.yaml.
-      digest: "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
+      digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
       tag: ""
       pullPolicy: IfNotPresent
     # -- Number of nginx replicas.
