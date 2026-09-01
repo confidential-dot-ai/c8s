@@ -1,0 +1,29 @@
+# Fail the boot when a passed-through NVIDIA GPU is not in CC mode. The kata
+# GPU guest has the same gate (nvidia-gpu-ready); confos's nvidia-cc-ready
+# deliberately tolerates non-CC launches, which the c8s node must not.
+[Unit]
+Description=Refuse to start the node unless every NVIDIA GPU is in confidential-compute mode
+# nvidia-cc-ready is where the driver is proven up and the ready state set;
+# order after it so nvidia-smi answers, but do not Require it: on a GPU-less
+# boot it is a no-op and this unit is too.
+After=nvidia-cc-ready.service
+Before=rke2-server.service rke2-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/gpu-cc-enforce.sh
+# nvidia-cc-ready already waited up to 180s for the driver; this is one query.
+TimeoutStartSec=60
+# Fail closed: a non-CC GPU powers the VM off rather than leaving a node that
+# schedules unprotected GPU memory.
+FailureAction=poweroff-force
+
+# vsock fence: only attestation-api may use AF_VSOCK (see kernel/gpu.config).
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
+# Preset creates the .requires links, so rke2 cannot start while this unit
+# is failing or has not run.
+RequiredBy=rke2-server.service rke2-agent.service

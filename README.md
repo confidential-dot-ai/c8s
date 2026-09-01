@@ -621,7 +621,8 @@ than let you discover them:
   which does not expose nested virtualization.
 
 - **GPU attestation is not wired end to end.** GPU passthrough into
-  confidential pods works, and a locked guest fails closed on a non-CC GPU.
+  confidential pods works, and both the kata GPU guest and the node CVM fail
+  closed on a non-CC GPU.
   [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
   verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
   CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
