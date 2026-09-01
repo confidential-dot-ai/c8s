@@ -716,8 +716,14 @@ EOF
 kubectl apply -f "$WORKDIR/curl-lb.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/it-curl-lb --timeout=120s \
     || fail "front-door request to the adopted workload failed"
-kubectl logs it-curl-lb | grep -q "Welcome to nginx" \
-    || fail "front door did not proxy the adopted workload: $(kubectl logs it-curl-lb)"
+# Read the body once: piping a live `kubectl logs` into `grep -q` is a race
+# under pipefail (grep exits on the match and the producer can die to SIGPIPE)
+# and re-reading in the failure message can show a body grep never saw.
+BODY="$(kubectl logs it-curl-lb)" || fail "could not read the it-curl-lb logs"
+case "$BODY" in
+    *"Welcome to nginx"*) ;;
+    *) fail "front door did not proxy the adopted workload: $BODY" ;;
+esac
 pass "tls-lb routes the front door to the adopted workload over the mesh"
 
 log "Uninstall"
