@@ -191,6 +191,22 @@ func TestAttest_MatchedWorkload_RejectsExtraC8SHelperArguments(t *testing.T) {
 	}
 }
 
+// A control-plane author cannot hide a second proxy under the broad `/c8s`
+// entrypoint. It remains in the inventory, makes the pod differ from its exact
+// named policy, and therefore cannot receive a named workload certificate.
+func TestAttest_MatchedWorkload_HiddenC8sProxyGetsNoNamedIdentity(t *testing.T) {
+	store := completeAPIStore(t)
+	containers := []workloadclaims.SandboxContainer{
+		{Digest: wlDigestA},
+		{Digest: wlDigestC, Argv: []string{"/c8s", "get-cert", "--renew-interval=6h"}},
+		{Digest: wlDigestC, Argv: []string{"/c8s", "workload-proxy", "--mode=client", "--peer-workload=sglang-router"}},
+	}
+	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
+	if matched != nil {
+		t.Fatalf("hidden /c8s workload-proxy received named identity %+v", matched)
+	}
+}
+
 // Every failure to establish a name issues the membership-only leaf unnamed —
 // never a refusal, never a wrong name.
 func TestAttest_MatchedWorkload_UnnamedCases(t *testing.T) {

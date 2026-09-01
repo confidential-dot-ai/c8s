@@ -287,6 +287,27 @@ func startEcho(t *testing.T) (string, *atomic.Int64) {
 	return ln.Addr().String(), &accepted
 }
 
+func startEOFReply(t *testing.T) string {
+	t.Helper()
+	ln := startListener(t, "127.0.0.1:0")
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		request, err := io.ReadAll(conn)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(append([]byte("reply:"), request...))
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+	}()
+	return ln.Addr().String()
+}
+
 func startTestProxy(t *testing.T, cfg config) string {
 	t.Helper()
 	ln := startListener(t, "127.0.0.1:0")
@@ -352,6 +373,46 @@ func TestClientAndServerProxyStreamDuplex(t *testing.T) {
 	}
 	if accepted.Load() != 1 {
 		t.Fatalf("plaintext target accepts = %d, want 1", accepted.Load())
+	}
+}
+
+func TestClientAndServerProxyPreserveTLSHalfClose(t *testing.T) {
+	dir := t.TempDir()
+	ca := makeCA(t, "mesh")
+	caFile := writeCA(t, dir, "mesh", ca)
+	gateway := makeIdentity(t, dir, ca, "gateway", "valid")
+	router := makeIdentity(t, dir, ca, "sglang-router", "valid")
+
+	serverCfg := baseConfig(modeServer, router, caFile)
+	serverCfg.upstream = startEOFReply(t)
+	serverCfg.peerWorkload = "gateway"
+	serverCfg.idleTimeout = 5 * time.Second
+	serverAddr := startTestProxy(t, serverCfg)
+
+	clientCfg := baseConfig(modeClient, gateway, caFile)
+	clientCfg.upstream = serverAddr
+	clientCfg.peerWorkload = "sglang-router"
+	clientCfg.idleTimeout = 5 * time.Second
+	clientAddr := startTestProxy(t, clientCfg)
+
+	conn, err := net.Dial("tcp", clientAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(response), "reply:request"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
 	}
 }
 
@@ -439,6 +500,27 @@ func TestCommandDoesNotAcceptArguments(t *testing.T) {
 	cmd.SetArgs([]string{"unexpected"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("workload-proxy accepted a positional argument")
+	}
+}
+
+func TestRunRejectsHiddenC8sEntrypointBeforeUsingIdentity(t *testing.T) {
+	previous := os.Args
+	defer func() { os.Args = previous }()
+	os.Args = []string{"/c8s", "workload-proxy"}
+	err := run(config{})
+	if err == nil || !strings.Contains(err.Error(), "argv[0] exactly /workload-proxy") {
+		t.Fatalf("run error = %v, want fail-closed entrypoint error", err)
+	}
+}
+
+func TestValidateEntrypointAcceptsOnlyImageAlias(t *testing.T) {
+	if err := validateEntrypoint("/workload-proxy"); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv0 := range []string{"/c8s", "workload-proxy", "/usr/local/bin/workload-proxy", ""} {
+		if err := validateEntrypoint(argv0); err == nil {
+			t.Fatalf("argv[0] %q was accepted", argv0)
+		}
 	}
 }
 

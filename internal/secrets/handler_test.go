@@ -53,18 +53,17 @@ const (
 	testBulkImg = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 )
 
-func TestWorkloadProxyAliasRemainsInNamedWorkloadInventory(t *testing.T) {
-	al := &pkgallowlist.Allowlist{Digests: map[string]string{testInjected: "c8s"}}
+func TestWorkloadProxyAndHelpersRemainInNamedWorkloadInventory(t *testing.T) {
 	reported := []workloadclaims.SandboxContainer{
 		{Digest: testInjected, Argv: []string{"/c8s", "probe-file", "--wait", "/certs/tls.crt"}},
 		{Digest: testInjected, Argv: []string{"/workload-proxy", "--mode=client", "--peer-workload=sglang-router"}},
 	}
-	got := WorkloadContainers(al, reported)
-	if len(got) != 1 {
-		t.Fatalf("workload candidates = %d, want only the proxy", len(got))
+	got := WorkloadContainers(reported)
+	if len(got) != len(reported) {
+		t.Fatalf("workload candidates = %d, want every container", len(got))
 	}
-	if got[0].Argv[0] != "/workload-proxy" {
-		t.Fatalf("workload candidate argv = %v, want the proxy alias", got[0].Argv)
+	if got[1].Argv[0] != "/workload-proxy" {
+		t.Fatalf("workload candidate argv = %v, want the proxy alias", got[1].Argv)
 	}
 }
 
