@@ -68,7 +68,7 @@ spec:
             - --socket-dir
             - {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
             - --kubelet-root
-            - {{ .Values.volumed.hostPaths.kubeletRoot | quote }}
+            - {{ include "c8s.volumedKubeletRoot" . | quote }}
             - --cgroup-root
             - {{ .Values.volumed.hostPaths.cgroupRoot | quote }}
             - --reap-interval
@@ -79,7 +79,7 @@ spec:
             # Bidirectional: the mount is made here and has to reach the
             # workload's pod directory on the node.
             - name: kubelet-root
-              mountPath: {{ .Values.volumed.hostPaths.kubeletRoot }}
+              mountPath: {{ include "c8s.volumedKubeletRoot" . }}
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
@@ -101,7 +101,7 @@ spec:
       volumes:
         - name: kubelet-root
           hostPath:
-            path: {{ .Values.volumed.hostPaths.kubeletRoot }}
+            path: {{ include "c8s.volumedKubeletRoot" . }}
             type: Directory
         - name: dev
           hostPath:
