@@ -128,7 +128,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
-	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys)")
+	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
@@ -219,6 +219,9 @@ func run(cfg config) error {
 	}
 
 	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
+		return err
+	}
+	if err := requireKeyOutRAMBacked(cfg.KeyOutPath); err != nil {
 		return err
 	}
 	slog.Debug("output paths validated")
@@ -738,6 +741,19 @@ func validateHostname(s string) error {
 // isIPSAN returns true if the SAN is an IP address.
 func isIPSAN(san string) bool {
 	return net.ParseIP(san) != nil
+}
+
+// requireKeyOutRAMBacked enforces that --key-out sits on tmpfs/ramfs: the
+// private key must never reach persistent storage, which the host reads at
+// will. The cert and CA outputs are public and stay unconstrained.
+func requireKeyOutRAMBacked(keyOutPath string) error {
+	if keyOutPath == "" {
+		return nil
+	}
+	if err := fileutil.RequireRAMBacked(filepath.Dir(keyOutPath)); err != nil {
+		return fmt.Errorf("--key-out: %w", err)
+	}
+	return nil
 }
 
 // validateOutputPaths checks that output file locations are writable before

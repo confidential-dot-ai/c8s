@@ -77,6 +77,10 @@ func run(cfg config) error {
 		return err
 	}
 
+	if err := prepareOutDir(cfg.OutDir); err != nil {
+		return err
+	}
+
 	var values map[string][]byte
 	err = sidecar.Retry(ctx, cfg.Config, "secret", func(ctx context.Context) error {
 		var err error
@@ -158,6 +162,20 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 		return nil, fmt.Errorf("created by another replica but not readable: %w", err)
 	}
 	return value, nil
+}
+
+// prepareOutDir creates the out-dir and enforces that it is RAM-backed: the
+// flag documents "must be memory-backed", and on any other filesystem the
+// secret bytes are readable by the host. Checked before fetching so a
+// misconfigured dir fails fast, without touching the secret store.
+func prepareOutDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	if err := fileutil.RequireRAMBacked(dir); err != nil {
+		return fmt.Errorf("--out-dir: %w", err)
+	}
+	return nil
 }
 
 // writeAll writes every value atomically (temp file then rename) so a consumer

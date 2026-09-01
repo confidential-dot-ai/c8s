@@ -8,7 +8,20 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
+
+// TestPrepareOutDir: the "must be memory-backed" invariant on --out-dir is
+// enforced, not merely documented.
+func TestPrepareOutDir(t *testing.T) {
+	dir := t.TempDir()
+	if fileutil.RequireRAMBacked(dir) == nil {
+		t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
+	}
+	if err := prepareOutDir(filepath.Join(dir, "secrets")); err == nil {
+		t.Fatal("expected an out-dir on persistent storage to be refused")
+	}
+}
 
 func TestParseSecretSpec(t *testing.T) {
 	for _, tc := range []struct {
