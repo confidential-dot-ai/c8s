@@ -70,6 +70,7 @@ func NewCmd() *cobra.Command {
 	f.DurationVar(&cfg.WaitTimeout, "wait-timeout", 15*time.Minute, "maximum time --once waits for a valid public certificate")
 	f.BoolVar(&cfg.Once, "once", false, "publish the CSR, wait for a valid public certificate, then exit")
 	f.BoolVar(&cfg.ReloadNginx, "reload-nginx", false, "SIGHUP nginx after the sidecar installs a new public certificate")
+	cmd.AddCommand(newCSRCmd(), newInstallCertificateCmd())
 	return cmd
 }
 

@@ -78,8 +78,10 @@ CDS is the source of truth for this state:
 
 TLS-LB replicas receive the state only over a mesh-authenticated connection.
 Each replica derives the same private key inside its TEE. The public
-certificate can enter through a ConfigMap. The sidecar verifies that it
-matches the protected key before it stores or serves it.
+certificate enters through a body-bound, operator-signed CDS request. It does
+not enter through a Kubernetes Secret or ConfigMap. CDS accepts a certificate
+only when its leaf matches the protected key. Each sidecar also verifies the
+public chain, hostnames, and key before it serves the certificate.
 
 The CDS rolling handoff carries this state, the application-secret store, the
 mesh CA, the active and overlapping EAR signing keys, and the sandbox ledger.
@@ -96,16 +98,46 @@ CDS restores the snapshot before it becomes Ready.
 1. TLS-LB gets its named mesh identity from CDS.
 2. TLS-LB gets the cluster TLS state from CDS.
 3. TLS-LB derives the private key and writes a CSR to TEE memory.
-4. An issuer signs the CSR. Kubernetes may carry the public certificate only.
-5. TLS-LB verifies the chain, hostnames, and key match.
-6. TLS-LB stores the public certificate state in CDS and reloads nginx.
-7. `attest-lb` binds fresh evidence to the exact public leaf that nginx serves.
+4. An operator fetches the public CSR from the direct, attested CDS endpoint.
+5. A public certificate authority signs the CSR.
+6. The operator verifies and installs the public chain with a signed request.
+7. TLS-LB verifies the chain, hostnames, and key match, then reloads nginx.
+8. `attest-lb` binds fresh evidence to the exact public leaf that nginx serves.
 
 The tee-WebPKI helper runs as a regular sidecar. This lets the complete TLS-LB
 Pod earn its exact workload identity before CDS releases the protected key. It
 writes the public chain and signals nginx. Until a valid public chain exists,
 nginx has no certificate and cannot bind successfully. The Pod stays NotReady.
 No temporary certificate is created.
+
+Use a direct CDS RA-TLS endpoint for certificate operations. Do not send the
+operator key to an unverified public endpoint. First fetch the CSR:
+
+```bash
+c8s tee-webpki csr \
+  --url "${DIRECT_CDS_URL}" \
+  --measurements-file cds.measurements \
+  --out cluster.csr
+```
+
+Give `cluster.csr` to the public certificate authority. Save the returned leaf
+and intermediate certificates in `fullchain.pem`. Then install the chain:
+
+```bash
+c8s tee-webpki install-certificate \
+  --url "${DIRECT_CDS_URL}" \
+  --measurements-file cds.measurements \
+  --operator-key operator-key.pem \
+  --certificate fullchain.pem
+```
+
+The install command fetches the current CSR and state version again. It rejects
+a chain for another key, an untrusted issuer, an invalid lifetime, or a DNS SAN
+set that differs from the CSR. Use `--public-roots` for a private test CA. The
+default uses system public roots. Both commands reject plaintext, `--insecure`,
+and an unpinned CDS build. The operator token is bound to the exact method,
+route, and certificate body. A concurrent state change returns a conflict.
+Fetch the current CSR and repeat certificate issuance after such a conflict.
 
 ## Receipt evidence
 

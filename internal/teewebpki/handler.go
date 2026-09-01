@@ -15,6 +15,7 @@ const (
 	Route            = "/tee-webpki/state"
 	CSRRoute         = "/tee-webpki/csr"
 	CertificateRoute = "/tee-webpki/certificate"
+	VersionHeader    = "X-C8s-TEE-WebPKI-Version"
 )
 
 // ServeCSR publishes only the CSR. It never returns either private seed.
@@ -29,6 +30,8 @@ func (h Handler) ServeCSR(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/pkcs10")
+	w.Header().Set(VersionHeader, fmt.Sprint(state.Version))
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write(state.CSRPEM)
 }
 
@@ -63,7 +66,7 @@ func (h OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var update PublicUpdate
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&update); err != nil || len(update.CertificatePEM) == 0 || len(update.CSRPEM) != 0 {
+	if err := decoder.Decode(&update); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(update.CertificatePEM) == 0 || len(update.CSRPEM) != 0 {
 		http.Error(w, "bad request: version and certificate_pem are required", http.StatusBadRequest)
 		return
 	}
@@ -101,7 +104,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var update PublicUpdate
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&update); err != nil {
+		if err := decoder.Decode(&update); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 			http.Error(w, "bad request: invalid public TLS state", http.StatusBadRequest)
 			return
 		}

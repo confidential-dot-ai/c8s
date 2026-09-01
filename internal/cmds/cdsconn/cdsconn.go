@@ -162,6 +162,14 @@ func (o *Options) Signer() (*operatorauth.Signer, error) {
 	return signer, nil
 }
 
+// RequirePinnedEndpoint refuses an operator workflow that can create or
+// release a credential for an endpoint whose measured build is not pinned.
+// A CSR is public, but a public CA certificate issued for an attacker-supplied
+// CSR is a credential. Call this before a CSR leaves the c8s trust workflow.
+func (o *Options) RequirePinnedEndpoint() error {
+	return o.requirePinnedEndpoint()
+}
+
 // requirePinnedEndpoint refuses to mint an operator token for an endpoint whose
 // build is not pinned. RA-TLS proves the peer is *a* TEE, not that it is the CDS
 // this operator meant; with no --measurements, `c8s secrets put` hands a secret,

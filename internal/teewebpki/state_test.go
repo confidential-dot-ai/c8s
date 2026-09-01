@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -141,6 +142,96 @@ func TestHandlerReleasesStateOnlyToExpectedMatchedWorkload(t *testing.T) {
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("wrong admitted workload = %d, want 403", response.Code)
+	}
+}
+
+func TestServeCSRPublishesVersionAndDisablesCaching(t *testing.T) {
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := store.Snapshot()
+	key, err := PrivateKey(state.TLSKeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		DNSNames: []string{"api.example"},
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.UpdatePublicState(PublicUpdate{
+		Version: state.Version,
+		CSRPEM:  pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	Handler{Store: store}.ServeCSR(response, httptest.NewRequest(http.MethodGet, CSRRoute, nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ServeCSR = HTTP %d: %s", response.Code, response.Body.String())
+	}
+	if got, want := response.Header().Get(VersionHeader), fmt.Sprint(state.Version); got != want {
+		t.Fatalf("%s = %q, want %q", VersionHeader, got, want)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestOperatorCertificateUpdateUsesAuthorizerAndRejectsTrailingJSON(t *testing.T) {
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := store.Snapshot()
+	key, err := PrivateKey(state.TLSKeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(PublicUpdate{
+		Version:        state.Version,
+		CertificatePEM: selfSignedServerCertificate(t, key, "api.example"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := 0
+	handler := OperatorHandler{
+		Store: store,
+		Authorize: func(_ *http.Request, got []byte) error {
+			authorized++
+			if !bytes.Equal(got, body) {
+				t.Fatalf("authorized body differs from request")
+			}
+			return nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodPut, CertificateRoute, bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || authorized != 1 {
+		t.Fatalf("authorized update = HTTP %d, authorize calls %d", response.Code, authorized)
+	}
+
+	updated := store.Snapshot()
+	trailingBody, err := json.Marshal(PublicUpdate{
+		Version:        updated.Version,
+		CertificatePEM: updated.CertificatePEM,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trailingBody = append(trailingBody, []byte("{}")...)
+	handler.Authorize = func(_ *http.Request, _ []byte) error { return nil }
+	request = httptest.NewRequest(http.MethodPut, CertificateRoute, bytes.NewReader(trailingBody))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON update = HTTP %d, want 400", response.Code)
 	}
 }
 
