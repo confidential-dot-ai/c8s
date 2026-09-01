@@ -87,5 +87,11 @@ for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert'; do
     exit 1
   fi
 done
+# The e2e VM must keep the serial the initrd matches its write-storage disk
+# on; scratch-enforce would power the VM off without it.
+if ! grep -qF 'serial: confai-scratch' .github/workflows/tdx-metal-e2e.yml; then
+  echo "::error::tdx-metal-e2e.yml lost 'serial: confai-scratch': re-vendoring dropped the scratch disk serial — re-apply the c8s-local patch"
+  exit 1
+fi
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"
