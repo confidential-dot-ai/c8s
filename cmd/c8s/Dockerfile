@@ -8,4 +8,10 @@ FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987
 # that command too.
 COPY build/c8s /c8s
 
+# Run the named-workload proxy through this alias. Do not run it as
+# `/c8s workload-proxy`: CDS excludes injected `/c8s` helpers from workload
+# matching. The distinct argv[0] keeps the proxy mode, peer name, addresses,
+# and limits inside the exact named-workload policy.
+COPY build/c8s /workload-proxy
+
 ENTRYPOINT ["/c8s"]
