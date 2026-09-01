@@ -40,6 +40,22 @@ Layout:
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
 
+## Launch requirements
+
+Every node VM needs a write-storage disk with virtio-blk serial
+`confai-scratch`, at least 64G. The initrd encrypts it and uses it as the
+rootfs upper. Without it, the guest boots anyway on a 2G RAM tmpfs, comes
+up Ready, and wedges once RKE2 fills it — that's a flapping node, not a
+boot error. The serial is what matters: labels don't work, and the disk
+must be one of `/dev/vdb`–`vdd`. In KubeVirt that's `disk: {bus: virtio}`
+plus `serial: confai-scratch` (see the vendored `tdx-metal-e2e.yml`); with
+confidential-metal, pass `--datadisk-gi` — its default is 0, meaning no
+disk.
+
+A second disk with serial `confai-containerd` is recommended so the image
+cache stays off guest RAM. `confai-models`, `opkeydata`, and `joindata`
+are optional; missing ones are a clean no-op.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
