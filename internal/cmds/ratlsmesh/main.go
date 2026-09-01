@@ -93,7 +93,6 @@ type proxyConfig struct {
 	attestationApiURL         string
 	outboundPort              int
 	inboundPort               int
-	nodeIP                    string
 	certDNSSAN                string
 	logLevel                  string
 	dialTimeout               time.Duration
@@ -140,7 +139,6 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.attestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
 	fs.IntVar(&c.outboundPort, "outbound-port", 15001, "outbound listener port (intercepted app traffic)")
 	fs.IntVar(&c.inboundPort, "inbound-port", 15006, "inbound listener port (RA-TLS from peer nodes)")
-	fs.StringVar(&c.nodeIP, "node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
 	fs.StringVar(&c.certDNSSAN, "cert-dns-san", "", "DNS SAN placed on the CDS-issued mesh cert (must match CDS --dns-san-pattern; empty omits SANs). Not used for peer verification, which is attestation-based.")
 	fs.StringVar(&c.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	fs.DurationVar(&c.dialTimeout, "dial-timeout", 5*time.Second, "plain TCP dial timeout")
@@ -188,17 +186,14 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	}
 	slog.SetDefault(logger)
 
-	if c.nodeIP == "" {
-		c.nodeIP = os.Getenv("NODE_IP")
+	nodeIPs, err := discoverTrustedNodeIPs()
+	if err != nil {
+		return fmt.Errorf("derive node address from kernel: %w", err)
 	}
-	if c.nodeIP == "" {
-		return fmt.Errorf("node IP required: set --node-ip or NODE_IP env var")
+	nodeIP, err := primaryTrustedNodeIP(nodeIPs)
+	if err != nil {
+		return fmt.Errorf("derive primary node address from kernel: %w", err)
 	}
-	canonicalNodeIP := normalizeIP(c.nodeIP)
-	if canonicalNodeIP == "" {
-		return fmt.Errorf("--node-ip %q must be a valid IP address", c.nodeIP)
-	}
-	c.nodeIP = canonicalNodeIP
 
 	if err := validateConfig(c.attestationApiURL, c.outboundPort, c.inboundPort, c.healthPort, c.certTTL); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
@@ -208,7 +203,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	resolver, err := newK8sResolver(ctx, clientset, c.nodeIP, c.localCIDRBootTimeout, logger)
+	resolver, err := newK8sResolver(ctx, clientset, nodeIP, c.localCIDRBootTimeout, logger)
 	if err != nil {
 		return fmt.Errorf("k8s resolver: %w", err)
 	}
@@ -361,7 +356,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		inboundLn:         c.listeners.inbound,
 		serverTLS:         serverTLS,
 		clientTLS:         clientTLS,
-		nodeIP:            c.nodeIP,
+		nodeIP:            nodeIP,
 		inboundPort:       c.inboundPort,
 		resolver:          resolver,
 		origDstFunc:       defaultOrigDstFunc,
@@ -455,7 +450,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			AttestationApiURL: c.attestationApiURL,
 			CDSCAURL:          c.cdsURL,
 			CACertURL:         effectiveCAURL,
-			NodeIP:            c.nodeIP,
+			NodeIP:            nodeIP,
 			DNSSAN:            c.certDNSSAN,
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
@@ -543,7 +538,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	logger.Info("starting ratls-mesh",
 		"outbound", proxy.outboundAddr,
 		"inbound", proxy.inboundAddr,
-		"node", c.nodeIP,
+		"node", nodeIP,
 		"platform", c.platform,
 		"cert_mode", c.certMode,
 		"resolver", "k8s",
@@ -566,7 +561,6 @@ type iptablesSyncConfig struct {
 	uid                     int
 	excludeUIDs             string
 	excludeSourceNamespaces string
-	nodeIPs                 []string
 	resyncPeriod            time.Duration
 	watchdogPeriod          time.Duration
 	ipsetMaxElem            int
@@ -592,7 +586,6 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.IntVar(&cfg.uid, "uid", defaultProxyUID, "UID to exclude from redirect")
 	fs.StringVar(&cfg.excludeUIDs, "exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
 	fs.StringVar(&cfg.excludeSourceNamespaces, "exclude-source-namespaces", defaultMeshExcludedSourceNamespacesCSV(), "comma-separated local source namespaces excluded from transparent mesh interception")
-	fs.StringSliceVar(&cfg.nodeIPs, "node-ip", nil, "local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to NODE_IP env. Each address must be a non-loopback, non-unspecified IP bound to a local interface.")
 	fs.DurationVar(&cfg.resyncPeriod, "resync-period", 30*time.Second, "periodic full ipset reconciliation interval")
 	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at the head of their chain (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")

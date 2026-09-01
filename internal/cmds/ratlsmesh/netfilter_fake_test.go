@@ -906,7 +906,7 @@ func TestParseIPSetMaxElemHeaderMalformed(t *testing.T) {
 }
 
 func TestRunIptablesSyncRejectsZeroWatchdogPeriod(t *testing.T) {
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{"10.0.0.7"}, nil)
 	cfg := defaultTestSyncConfig()
 	cfg.watchdogPeriod = 0
 	err := runIptablesSync(context.Background(), cfg)
@@ -917,8 +917,8 @@ func TestRunIptablesSyncRejectsZeroWatchdogPeriod(t *testing.T) {
 
 func TestRunIptablesSyncHappyPath(t *testing.T) {
 	nf := installFakeNetfilter(t)
-	t.Setenv("NODE_IP", "")
 	own := localIPv4(t)
+	stubTrustedNodeIPs(t, []string{own}, nil)
 	cs := k8sfake.NewSimpleClientset(testPod("w1", "default", "10.244.0.5", own, nil))
 	stubKubeClientset(t, cs, nil)
 
@@ -929,7 +929,6 @@ func TestRunIptablesSyncHappyPath(t *testing.T) {
 	readyFile := filepath.Join(dir, "ready")
 	metricsFile := filepath.Join(dir, "metrics.json")
 	cfg := defaultTestSyncConfig()
-	cfg.nodeIPs = []string{own}
 	// Long periods keep the ticker and watchdog dormant: the loop advances
 	// only on informer events, which the test drives explicitly.
 	cfg.resyncPeriod = time.Hour

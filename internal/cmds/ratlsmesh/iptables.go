@@ -114,8 +114,8 @@ const (
 // operator only configured one family.
 //
 // INVARIANT: each value in nodeIPsByFamily is a canonical, validated IP
-// literal of the matching family. Callers must verify (parseNodeIPs in
-// pod_ipsets_linux.go).
+// literal of the matching family. The measured host-network process obtains
+// them from the kernel route and interface snapshot.
 func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32, nodeIPsByFamily map[iptablesFamily]string) []iptablesRule {
 	portStr := strconv.Itoa(outboundPort)
 	uidStr := strconv.Itoa(uid)
@@ -145,11 +145,9 @@ func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32, nodeIPsByFa
 		if !hasFamily {
 			continue
 		}
-		// Defense in depth: parseNodeIPs rejects empty strings, but an empty
-		// value here would produce `--to-destination :15001` which iptables
-		// accepts syntactically and rejects with a generic error not
-		// traceable to this caller. makeDNATRule's panic only catches a
-		// fully empty toDestination, not the `:port` form.
+		// Defense in depth: trustedNodeIPsByFamily rejects empty strings, but
+		// an empty value here would produce `--to-destination :15001`, which
+		// iptables accepts syntactically and rejects with a generic error.
 		if nodeIP == "" {
 			panic(fmt.Sprintf("ratlsmesh: buildPodIPSetRules got empty nodeIP for family %s", spec.family))
 		}

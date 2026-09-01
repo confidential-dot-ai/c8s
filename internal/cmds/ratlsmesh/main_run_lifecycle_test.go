@@ -127,13 +127,12 @@ func scrapedValueEventually(t *testing.T, port int, name string, labels map[stri
 // The invalid-measurement-length message must state the required hex length,
 // which operators paste measurements against.
 func TestRunProxyMeasurementLengthMessage(t *testing.T) {
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{"127.0.0.1"}, nil)
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(), nil)
 	cfg := defaultTestProxyConfig(t)
 	bindProxyPorts(t, cfg)
 	cfg.logLevel = "error"
 	cfg.localCIDRBootTimeout = time.Millisecond
-	cfg.nodeIP = "127.0.0.1"
 	cfg.attestationApiURL = "http://127.0.0.1:1"
 	cfg.measurements = "abcd"
 	err := runProxy(context.Background(), cfg)
@@ -148,13 +147,12 @@ func TestRunProxyMeasurementLengthMessage(t *testing.T) {
 func TestRunProxySelfSignedReadiness(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(testPod("web", "default", "10.244.0.7", nodeIP, nil)), nil)
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{nodeIP}, nil)
 	attest := testattest.New(t)
 
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
 	cfg.platform = "sev-snp"
-	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = attest.URL
 	bindProxyPorts(t, cfg)
 	cfg.rotationTimeout = 5 * time.Second
@@ -267,7 +265,7 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 func TestRunProxyCDSModeDegraded(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(), nil)
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{nodeIP}, nil)
 
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusNotFound)
@@ -289,7 +287,6 @@ func TestRunProxyCDSModeDegraded(t *testing.T) {
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "info"
 	cfg.platform = "sev-snp"
-	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = "http://127.0.0.1:1" // refused: warm-up failure is non-fatal
 	bindProxyPorts(t, cfg)
 	cfg.certMode = "cds"

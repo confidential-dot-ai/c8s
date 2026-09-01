@@ -182,8 +182,6 @@ spec:
             - {{ .Values.ratlsMesh.excludeUids | quote }}
             - --exclude-source-namespaces
             - {{ $excludeSourceNamespaces | quote }}
-            - --node-ip
-            - $(NODE_IP)
             - --resync-period
             - {{ .Values.ratlsMesh.iptablesSync.resyncPeriod | quote }}
             - --watchdog-period
@@ -206,11 +204,6 @@ spec:
             - /tmp/ratls-iptables-metrics.json
             - --log-level
             - {{ .Values.ratlsMesh.logLevel | quote }}
-          env:
-            - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
           startupProbe:
             exec:
               command:
@@ -320,11 +313,6 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
-          env:
-            - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
           ports:
             - name: outbound
               containerPort: {{ .Values.ratlsMesh.ports.outbound }}

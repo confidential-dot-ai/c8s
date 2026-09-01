@@ -121,7 +121,7 @@ func testPod(name, ns, podIP, hostIP string, labels map[string]string) *corev1.P
 }
 
 func TestRunProxyConfigErrors(t *testing.T) {
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{"10.0.0.9"}, nil)
 	fakeCS := k8sfake.NewSimpleClientset()
 	stubKubeClientset(t, fakeCS, nil)
 
@@ -132,57 +132,45 @@ func TestRunProxyConfigErrors(t *testing.T) {
 		wantErr string
 	}{
 		{"bad log level", func(c *proxyConfig) { c.logLevel = "bogus" }, "--log-level"},
-		{"missing node IP", func(c *proxyConfig) {}, "node IP required"},
-		{"invalid node IP", func(c *proxyConfig) { c.nodeIP = "not-an-ip" }, "must be a valid IP address"},
-		{"invalid configuration", func(c *proxyConfig) { c.nodeIP = "127.0.0.1" }, "invalid configuration"},
+		{"invalid configuration", func(c *proxyConfig) {}, "invalid configuration"},
 		{"invalid measurement hex", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = "zz"
 		}, "invalid measurement hex"},
 		{"invalid measurement length", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = "abcd"
 		}, "invalid measurement length"},
 		{"blank measurement entry", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = valid48 + ","
 		}, "invalid measurement length"},
 		{"missing CA cert file", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.caCertPath = "/nonexistent/ca.pem"
 		}, "load CA certificate"},
 		{"invalid cert mode", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.certMode = "bogus"
 		}, "invalid --cert-mode"},
 		{"cds mode requires urls", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.certMode = "cds"
 		}, "--cds-url and --attestation-api-url are required"},
 		{"unsupported platform", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.platform = "frobnitz"
 		}, "unsupported --platform"},
 		{"empty platform", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.platform = ""
 		}, "--platform is required"},
 		{"invalid cds measurements", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.platform = "sev-snp"
 			c.cdsMeasurements = "zz"
 		}, "--cds-measurements"},
 		{"valid cds measurements but bad mesh policy", func(c *proxyConfig) {
-			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = valid48 + ",zz"
 		}, "invalid measurement hex"},
@@ -206,7 +194,7 @@ func TestRunProxyConfigErrors(t *testing.T) {
 }
 
 func TestRunProxyClientsetError(t *testing.T) {
-	t.Setenv("NODE_IP", "10.0.0.9")
+	stubTrustedNodeIPs(t, []string{"10.0.0.9"}, nil)
 	stubKubeClientset(t, nil, fmt.Errorf("k8s in-cluster config: nope"))
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
@@ -265,7 +253,7 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	pod := testPod("web", "default", "10.244.0.7", nodeIP, nil)
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(pod), nil)
-	t.Setenv("NODE_IP", "")
+	stubTrustedNodeIPs(t, []string{nodeIP}, nil)
 
 	// Fake CDS: everything 404s; the upgrade goroutine retries with backoff.
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -296,7 +284,6 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
 	cfg.platform = "sev-snp"
-	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = "http://127.0.0.1:1" // refused instantly; warm-up failure is non-fatal
 	bindProxyPorts(t, cfg)
 	cfg.certDNSSAN = "mesh.example"

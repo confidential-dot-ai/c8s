@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-	"net/netip"
 	"os"
 	"os/exec"
 	"sort"
@@ -89,33 +88,14 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if cfg.ipsetMaxElem <= 0 {
 		return fmt.Errorf("ipset-maxelem must be positive")
 	}
-	if len(cfg.nodeIPs) == 0 {
-		if env := os.Getenv("NODE_IP"); env != "" {
-			cfg.nodeIPs = []string{env}
-		}
-	}
-	if len(cfg.nodeIPs) == 0 {
-		return fmt.Errorf("node IP required: set --node-ip or NODE_IP env var")
-	}
-	nodeIPsByFamily, err := parseNodeIPs(cfg.nodeIPs)
+	nodeIPs, err := discoverTrustedNodeIPs()
 	if err != nil {
-		return err
+		return fmt.Errorf("derive node address from kernel: %w", err)
 	}
-	// Dual-stack: the chart only passes status.hostIP (IPv4 on most nodes),
-	// so pod-originated IPv6 TCP was never redirected. Auto-discover the
-	// missing family's address from local interfaces; verifyNodeIPsLocal
-	// already confirmed the explicitly-provided ones are local.
-	discovered, err := discoverMissingFamilyNodeIPs(nodeIPsByFamily)
+	nodeIPsByFamily, err := trustedNodeIPsByFamily(nodeIPs)
 	if err != nil {
-		return err
+		return fmt.Errorf("derive node address from kernel: %w", err)
 	}
-	for family, ip := range discovered {
-		nodeIPsByFamily[family] = ip
-	}
-	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
-		return err
-	}
-	cfg.nodeIPs = canonicalNodeIPs(nodeIPsByFamily)
 	excludeUIDs, err := parseExcludeUIDs(cfg.excludeUIDs)
 	if err != nil {
 		return err
@@ -175,7 +155,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err := reconcileLiveSetMaxElem(logger, cfg.ipsetMaxElem); err != nil {
 		return err
 	}
-	cwIPs, err := reconcilePodIPSets(podInformer.GetStore(), cfg.nodeIPs, excludedSourceNamespaces, cfg.ipsetMaxElem, logger)
+	cwIPs, err := reconcilePodIPSets(podInformer.GetStore(), nodeIPs, excludedSourceNamespaces, cfg.ipsetMaxElem, logger)
 	if err != nil {
 		return err
 	}
@@ -228,7 +208,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 			resync = true
 		case <-syncCh:
 		}
-		cwIPs, err := reconcilePodIPSets(podInformer.GetStore(), cfg.nodeIPs, excludedSourceNamespaces, cfg.ipsetMaxElem, logger)
+		cwIPs, err := reconcilePodIPSets(podInformer.GetStore(), nodeIPs, excludedSourceNamespaces, cfg.ipsetMaxElem, logger)
 		if err != nil {
 			logger.Warn("pod ipset sync failed", "error", err)
 			continue
@@ -441,61 +421,6 @@ func podIsLocal(pod *corev1.Pod, ourNodeIPs map[string]struct{}) bool {
 	return false
 }
 
-// parseNodeIPs validates raw --node-ip values and groups them by family.
-// Rejects: empty input, invalid literals, unspecified (0.0.0.0 / ::),
-// loopback (DNAT to loopback needs route_localnet=1 which we don't set),
-// zone-scoped IPv6 (`fe80::1%eth0` — DNAT has no defined target for a
-// zone-scoped address), IPv4-in-IPv6 literals in any RFC 4291 form
-// (IPv4-mapped `::ffff:10.0.0.1` and its hex/expanded/mixed-case variants
-// caught by netip.Addr.Is4In6, plus the deprecated IPv4-compatible
-// `::1.2.3.4` caught by the dot-in-IPv6 heuristic — both ambiguous family;
-// operator should pass the IPv4 form directly), and more than one address
-// per family (the DNAT rule takes a single --to-destination per family).
-func parseNodeIPs(raw []string) (map[iptablesFamily]string, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("at least one --node-ip required")
-	}
-	out := make(map[iptablesFamily]string, 2)
-	for i, s := range raw {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return nil, fmt.Errorf("--node-ip[%d]: empty value", i)
-		}
-		addr, err := netip.ParseAddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("--node-ip[%d] %q: not a valid IP address", i, s)
-		}
-		if addr.Zone() != "" {
-			return nil, fmt.Errorf("--node-ip[%d] %q: zone-scoped IPv6 is not supported; pass a global-scope address", i, s)
-		}
-		// Is4In6 covers RFC 4291 §2.5.5.2 IPv4-mapped in every notation
-		// (dotted, hex-only, expanded, mixed-case). The dot-in-IPv6 check
-		// catches the deprecated §2.5.5.1 IPv4-compatible form (`::1.2.3.4`),
-		// which has no 0xff/0xff prefix so Is4In6 returns false.
-		if addr.Is4In6() || (addr.Is6() && strings.ContainsRune(s, '.')) {
-			return nil, fmt.Errorf("--node-ip[%d] %q: IPv4-in-IPv6 literal is ambiguous; pass the IPv4 form", i, s)
-		}
-		if addr.IsUnspecified() {
-			return nil, fmt.Errorf("--node-ip[%d] %q: unspecified address (not a routable target for DNAT)", i, s)
-		}
-		if addr.IsLoopback() {
-			return nil, fmt.Errorf("--node-ip[%d] %q: loopback address (DNAT to loopback requires route_localnet=1 on the input interface, which is not enabled)", i, s)
-		}
-		var family iptablesFamily
-		if addr.Is4() {
-			family = iptablesFamilyIPv4
-		} else {
-			family = iptablesFamilyIPv6
-		}
-		canonical := addr.String()
-		if existing, dup := out[family]; dup {
-			return nil, fmt.Errorf("--node-ip: multiple %s addresses (%s and %s); pass at most one per family", family, existing, canonical)
-		}
-		out[family] = canonical
-	}
-	return out, nil
-}
-
 // composeIptablesSyncRules assembles the NAT interception rules and the
 // always-on fail-closed guard rules plus their FORWARD jumps for one sync
 // cycle. It is a pure function over already-validated inputs so the rule/jump
@@ -563,171 +488,8 @@ func collectInterfaceAddresses() ([]ifaceAddrSet, error) {
 	return out, nil
 }
 
-// discoverMissingFamilyNodeIPs returns one address for any family absent
-// from byFamily, so a dual-stack node whose chart only passed the IPv4
-// status.hostIP still gets the IPv6 PREROUTING DNAT. It prefers a host-usable
-// unicast address on the interface carrying the provided node IP (the egress
-// interface); if one exists only on a non-primary interface it returns an
-// error rather than install a misrouted DNAT, and a genuinely single-stack
-// node yields no entry.
-func discoverMissingFamilyNodeIPs(byFamily map[iptablesFamily]string) (map[iptablesFamily]string, error) {
-	needed := make(map[iptablesFamily]bool)
-	if _, ok := byFamily[iptablesFamilyIPv4]; !ok {
-		needed[iptablesFamilyIPv4] = true
-	}
-	if _, ok := byFamily[iptablesFamilyIPv6]; !ok {
-		needed[iptablesFamilyIPv6] = true
-	}
-	if len(needed) == 0 {
-		return nil, nil
-	}
-	sets, err := collectInterfaceAddresses()
-	if err != nil {
-		return nil, err
-	}
-	return selectMissingFamilyNodeIPs(byFamily, needed, sets)
-}
-
-// selectMissingFamilyNodeIPs is the pure selection half of
-// discoverMissingFamilyNodeIPs. For each missing family it picks a usable
-// non-loopback address bound to the interface that also carries a provided
-// node IP (the node's primary/egress interface); among those it prefers a
-// host-style (larger) prefix. If the missing family's address exists only on
-// non-primary interfaces it returns an error so the DNAT is never silently
-// installed on an overlay/management listener; a genuinely single-stack node
-// yields no entry and no error.
-func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[iptablesFamily]bool, sets []ifaceAddrSet) (map[iptablesFamily]string, error) {
-	out := make(map[iptablesFamily]string, 2)
-	for fam, present := range needed {
-		if !present {
-			continue
-		}
-		type candidate struct {
-			ip     net.IP
-			ones   int
-			iface  string
-			onSame bool
-		}
-		var cands []candidate
-		for si := range sets {
-			set := sets[si]
-			// The interface carries a provided node IP literal. That IP names
-			// the egress interface (kubelet's primary NIC), not an overlay.
-			carriesProvided := false
-			for _, a := range set.addrs {
-				for _, p := range byFamily {
-					if p == a.ip.String() {
-						carriesProvided = true
-					}
-				}
-			}
-			for _, a := range set.addrs {
-				ip := a.ip
-				if (fam == iptablesFamilyIPv4) != (ip.To4() != nil) {
-					continue
-				}
-				if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
-					continue
-				}
-				ones, _ := a.mask.Size()
-				if fam == iptablesFamilyIPv6 && !isHostUsableIPv6(ip, ones) {
-					continue // a network aggregate (e.g. a /56 prefix), not a host address.
-				}
-				cands = append(cands, candidate{ip: ip, ones: ones, iface: set.name, onSame: carriesProvided})
-			}
-		}
-		if len(cands) == 0 {
-			continue // genuinely no address of this family: single-stack node.
-		}
-		best := cands[0]
-		bestSame := best.onSame
-		for _, c := range cands[1:] {
-			// Same-carrier outranks prefix and interface name; within the
-			// same precedence prefer a larger prefix, then a stable name tie.
-			if c.onSame != bestSame {
-				if c.onSame {
-					best, bestSame = c, true
-				}
-				continue
-			}
-			if c.ones > best.ones || (c.ones == best.ones && c.iface < best.iface) {
-				best = c
-			}
-		}
-		if !bestSame {
-			return nil, fmt.Errorf("cannot confidently choose a %s node IP: only non-primary-interface addresses exist; pass --node-ip explicitly", fam)
-		}
-		out[fam] = best.ip.String()
-	}
-	return out, nil
-}
-
-// isHostUsableIPv6 reports whether ip (prefix length ones) is a host-style
-// address suitable as a DNAT target, ruling out a pure network aggregate: a
-// prefix shorter than /64 whose interface (low 64) bits are all zero is the
-// network/aggregate address, not a host address.
-func isHostUsableIPv6(ip net.IP, ones int) bool {
-	if ones >= 64 {
-		return true // host or host-style SLAAC /64, static /128, etc.
-	}
-	v6 := ip.To16()
-	if v6 == nil {
-		return false
-	}
-	for i := 8; i < 16; i++ {
-		if v6[i] != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// verifyNodeIPsLocal confirms each parsed nodeIP is bound to a local
-// interface. DNAT to a non-local IP silently misroutes traffic off-node;
-// REDIRECT's prior self-healing property (always retargeted the receive
-// interface) is gone with DNAT, so we must catch a misconfigured --node-ip
-// at startup rather than at first packet.
-func verifyNodeIPsLocal(byFamily map[iptablesFamily]string) error {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return fmt.Errorf("enumerate local interface addresses: %w", err)
-	}
-	return nodeIPsAreLocal(byFamily, addrs)
-}
-
-// nodeIPsAreLocal is the pure half of verifyNodeIPsLocal: given the parsed
-// node IPs and a pre-fetched list of local interface addresses, return an
-// error if any node IP is not bound locally. Extracted so the comparison
-// can be unit-tested without manipulating real interfaces.
-//
-// byFamily values are assumed canonical (parseNodeIPs invariant) and
-// net.IP.String() returns canonical form, so the two sides match directly
-// without an extra normalize pass.
-func nodeIPsAreLocal(byFamily map[iptablesFamily]string, localAddrs []net.Addr) error {
-	local := make(map[string]struct{}, len(localAddrs))
-	for _, a := range localAddrs {
-		var ip net.IP
-		switch v := a.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		}
-		if len(ip) > 0 {
-			local[ip.String()] = struct{}{}
-		}
-	}
-	for family, ip := range byFamily {
-		if _, ok := local[ip]; !ok {
-			return fmt.Errorf("--node-ip %s (%s) is not bound to any local interface; DNAT would misroute traffic off-node", ip, family)
-		}
-	}
-	return nil
-}
-
-// canonicalNodeIPs returns the validated, family-grouped node IPs as a flat
-// slice in deterministic order (IPv4 first, then IPv6). Used to repopulate
-// cfg.nodeIPs with canonical forms after validation.
+// canonicalNodeIPs returns the kernel-validated, family-grouped node IPs as a
+// flat slice in deterministic order (IPv4 first, then IPv6).
 func canonicalNodeIPs(byFamily map[iptablesFamily]string) []string {
 	out := make([]string, 0, len(byFamily))
 	for _, f := range []iptablesFamily{iptablesFamilyIPv4, iptablesFamilyIPv6} {

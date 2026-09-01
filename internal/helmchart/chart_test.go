@@ -233,8 +233,6 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		t.Fatalf("iptables-sync init container missing; have %v", containerNames(ds.Spec.Template.Spec.InitContainers))
 	}
 	for _, pair := range [][2]string{
-		// Kubelet expands this to the final value before NRI admission.
-		{"--node-ip", "$(NODE_IP)"},
 		{"--resync-period", "30s"},
 		{"--watchdog-period", "2s"},
 		{"--ipset-maxelem", "262144"},
@@ -248,6 +246,16 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 			t.Errorf("iptables-sync command missing %s %s; command=%q", pair[0], pair[1], sync.Command)
 		}
 	}
+	if slices.Contains(sync.Command, "--node-ip") || hasNodeIPEnv(sync) {
+		t.Errorf("iptables-sync must derive its node address from kernel state; command=%q env=%v", sync.Command, sync.Env)
+	}
+	mesh, ok := findContainer(ds.Spec.Template.Spec.Containers, "ratls-mesh")
+	if !ok {
+		t.Fatalf("ratls-mesh container missing; have %v", containerNames(ds.Spec.Template.Spec.Containers))
+	}
+	if slices.Contains(mesh.Command, "--node-ip") || hasNodeIPEnv(mesh) {
+		t.Errorf("ratls-mesh must derive its node address from kernel state; command=%q env=%v", mesh.Command, mesh.Env)
+	}
 	if slices.Contains(sync.Command, "--pod-cidrs") {
 		t.Errorf("iptables-sync must not require static --pod-cidrs; command=%q", sync.Command)
 	}
@@ -257,7 +265,7 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		t.Errorf("iptables-sync command missing --cw-inbound-passthrough=udp:53,tcp:53; command=%q", sync.Command)
 	}
 
-	mesh, ok := findContainer(ds.Spec.Template.Spec.Containers, "ratls-mesh")
+	mesh, ok = findContainer(ds.Spec.Template.Spec.Containers, "ratls-mesh")
 	if !ok {
 		t.Fatalf("ratls-mesh container missing; have %v", containerNames(ds.Spec.Template.Spec.Containers))
 	}

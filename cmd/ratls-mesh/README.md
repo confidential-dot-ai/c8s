@@ -23,7 +23,11 @@ ratls-mesh \
   --health-port 15021
 ```
 
-Node IP is auto-detected from the `NODE_IP` environment variable (Kubernetes downward API) or set via `--node-ip`.
+The measured host-network process derives the node IP from kernel route and
+interface state. It does not trust a Kubernetes field, CRI environment
+variable, installer file, or Kubernetes API for this decision. It accepts one
+address per IP family and fails closed if no usable route source exists or the
+kernel result is ambiguous.
 
 ### Subcommands
 
@@ -111,7 +115,8 @@ node. When the host exposes local pod-network CIDRs, `ValidateLocalDest`
 cross-checks the destination Pod IP against those CIDRs and the kernel route.
 On CNIs that do not expose a local pod CIDR on the host, such as AKS with
 Azure CNI, the resolver falls back to the Kubernetes pod cache and only accepts
-destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
+destinations whose `Pod.Status.HostIP` matches this node's kernel-derived
+address.
 
 ## Common Flags
 
@@ -121,7 +126,6 @@ destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 | `--attestation-api-url` | (required) | URL of the local attestation-api (e.g. `http://localhost:8400`) |
 | `--outbound-port` | `15001` | Outbound listener port (iptables redirect target) |
 | `--inbound-port` | `15006` | Inbound listener port (RA-TLS from peer nodes) |
-| `--node-ip` | `$NODE_IP` | This node's IP address |
 | `--health-port` | `15021` | Health/metrics HTTP port |
 | `--iptables-metrics-file` | `/tmp/ratls-iptables-metrics.json` | Shared file read from the `iptables-sync` sidecar for iptables/ipset counters |
 | `--max-conns` | `0` | Max concurrent connections (0 = unlimited) |
@@ -154,7 +158,6 @@ it intercepts. The flags below tune that loop.
 | `--outbound-port` | `15001` | Outbound listener port used as the REDIRECT target |
 | `--uid` | `1337` | Mesh proxy UID to exclude from redirect |
 | `--exclude-uids` | `0` | Comma-separated extra UIDs to skip, e.g. host root daemons |
-| `--node-ip` | `$NODE_IP` | Local node IP used to maintain local pod source ipsets |
 | `--resync-period` | `30s` | Periodic full ipset reconciliation interval |
 | `--watchdog-period` | `2s` | Interval for re-asserting base-chain jumps at position 1 |
 | `--ipset-maxelem` | `262144` | Maximum members per managed ipset |
