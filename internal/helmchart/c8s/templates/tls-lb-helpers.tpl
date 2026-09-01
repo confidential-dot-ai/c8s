@@ -484,6 +484,9 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 - --discovery-mesh-ca-url={{ .Values.tlsLb.discovery.meshCAPath }}
 {{- end }}
 {{- end }}
+{{- with .Values.tlsLb.certProvisioning.caWatchInterval }}
+- --ca-watch-interval={{ . }}
+{{- end }}
 {{- if .Values.tlsLb.certProvisioning.verbose }}
 - --verbose
 {{- end }}

@@ -5,7 +5,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -660,6 +663,132 @@ func waitForFile(t *testing.T, path string, done <-chan error) {
 			t.Fatalf("no certificate at %s: get-cert waited out --renew-interval instead of retrying", path)
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// startFakeCAServer serves /ca with whatever bundle serve() returns, so a test
+// can swap the "current" CDS mesh CA mid-flight.
+func startFakeCAServer(t *testing.T, serve func() string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ca" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, serve())
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestServedCAStale(t *testing.T) {
+	caA := testCertificatePEM(t)
+	caB := testCertificatePEM(t)
+
+	writeServed := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "ca.pem")
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	tests := []struct {
+		name    string
+		cds     string
+		served  string
+		want    bool
+		wantErr bool
+	}{
+		{name: "same CA", cds: caA, served: caA, want: false},
+		{name: "regenerated CA", cds: caB, served: caA, want: true},
+		{name: "served bundle still carries the current CA", cds: caA, served: caB + caA, want: false},
+		{name: "unparseable cds bundle", cds: "not pem", served: caA, wantErr: true},
+		{name: "unparseable served bundle", cds: caA, served: "not pem", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := startFakeCAServer(t, func() string { return tt.cds })
+			stale, err := servedCAStale(context.Background(), plaintextCDSClient(url), writeServed(t, tt.served))
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("servedCAStale err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if stale != tt.want {
+				t.Fatalf("servedCAStale = %v, want %v", stale, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing served bundle", func(t *testing.T) {
+		url := startFakeCAServer(t, func() string { return caA })
+		if _, err := servedCAStale(context.Background(), plaintextCDSClient(url), filepath.Join(t.TempDir(), "missing.pem")); err == nil {
+			t.Fatal("servedCAStale succeeded, want read error")
+		}
+	})
+
+	t.Run("cds unreachable", func(t *testing.T) {
+		if _, err := servedCAStale(context.Background(), plaintextCDSClient("http://127.0.0.1:1"), writeServed(t, caA)); err == nil {
+			t.Fatal("servedCAStale succeeded, want transport error")
+		}
+	})
+}
+
+// A CDS whose /ca stops matching the served bundle triggers an immediate
+// renewal instead of waiting out --renew-interval (an hour here, so any
+// renewal inside the deadline can only have come from the CA watch); while the
+// bundles match the watch must stay quiet.
+func TestRenewLoopRenewsWhenCDSMeshCAChanges(t *testing.T) {
+	caA := testCertificatePEM(t)
+	caB := testCertificatePEM(t)
+
+	var mu sync.Mutex
+	current := caA
+	url := startFakeCAServer(t, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	})
+
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, []byte(caA), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := stubObtainCert(t, func(int) (*x509.Certificate, error) {
+		return &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}, nil
+	})
+
+	cfg := unreachableRenewalConfig()
+	cfg.CAOutPath = caPath
+	cfg.CAWatchInterval = 10 * time.Millisecond
+	cfg.ReloadNginx = false
+
+	leaf := &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- renewLoop(ctx, cfg, plaintextCDSClient(url), leaf, true) }()
+
+	// Matching bundles: many watch ticks must pass without a renewal.
+	time.Sleep(100 * time.Millisecond)
+	if got := attempts(); len(got) != 0 {
+		t.Fatalf("%d renewals while the CA matched, want 0", len(got))
+	}
+
+	mu.Lock()
+	current = caB
+	mu.Unlock()
+	waitForAttempts(t, attempts, 1)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("renewLoop returned %v, want nil on shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("renewLoop did not shut down when the context was cancelled")
 	}
 }
 

@@ -434,6 +434,17 @@ func TestValidateConfigAccepts(t *testing.T) {
 				DiscoveryPublicTLSMode: "webpki",
 			},
 		},
+		{
+			name: "ca watch with ca-out and renew",
+			cfg: config{
+				CDSURL:            "http://cds:8443",
+				AttestationApiURL: "http://attestation-api:8400",
+				SAN:               "host.example.com",
+				CAOutPath:         "/tls/ca.pem",
+				RenewInterval:     time.Hour,
+				CAWatchInterval:   time.Minute,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -459,6 +470,19 @@ func TestValidateConfigRejects(t *testing.T) {
 		{"empty attestation url", func(c *config) { c.AttestationApiURL = "" }},
 		{"empty san", func(c *config) { c.SAN = "" }},
 		{"url san", func(c *config) { c.SAN = "https://host.example.com" }},
+		{"negative ca watch interval", func(c *config) {
+			c.CAOutPath = "/tls/ca.pem"
+			c.RenewInterval = time.Hour
+			c.CAWatchInterval = -time.Minute
+		}},
+		{"ca watch without ca-out", func(c *config) {
+			c.RenewInterval = time.Hour
+			c.CAWatchInterval = time.Minute
+		}},
+		{"ca watch without renew interval", func(c *config) {
+			c.CAOutPath = "/tls/ca.pem"
+			c.CAWatchInterval = time.Minute
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

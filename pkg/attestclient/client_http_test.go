@@ -140,6 +140,42 @@ func TestAttestTransportError(t *testing.T) {
 	}
 }
 
+func TestMeshCA(t *testing.T) {
+	t.Run("returns the served bundle", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/ca" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte("CA-PEM"))
+		}))
+		defer srv.Close()
+
+		c := NewClientWithHTTP(srv.URL, srv.Client())
+		got, err := c.MeshCA(context.Background())
+		if err != nil {
+			t.Fatalf("MeshCA: %v", err)
+		}
+		if string(got) != "CA-PEM" {
+			t.Fatalf("MeshCA = %q, want CA-PEM", got)
+		}
+	})
+
+	t.Run("non-2xx is a StatusError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "gone", http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+
+		c := NewClientWithHTTP(srv.URL, srv.Client())
+		_, err := c.MeshCA(context.Background())
+		var statusErr *StatusError
+		if !errors.As(err, &statusErr) || statusErr.Status != http.StatusServiceUnavailable {
+			t.Fatalf("error = %v, want StatusError 503", err)
+		}
+	})
+}
+
 func TestHealthzNotReady(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
