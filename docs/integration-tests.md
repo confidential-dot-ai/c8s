@@ -24,11 +24,12 @@ plugin) works unchanged against it. The all-zero digest is pinned via
 `--measurements`, so every RA-TLS hop is verified exactly as in production.
 
 The NRI image-policy plugin runs for real: the harness renders the chart's
-installer DaemonSet and applies it out-of-band (node mode does not render it —
-production node images bake the plugin). The installer patches the node's
-containerd config and restarts it, which kind survives. The install-time
-allowlist floor is generated from the node containerd's image store, because
-`policy.enforceExisting` checks already-running containers against it.
+full installer DaemonSet and applies it out-of-band (node mode renders only
+the baked pins patcher, and the kind node bakes no plugin for it to pin). The
+installer patches the node's containerd config and restarts it, which kind
+survives. The install-time allowlist floor is generated from the node
+containerd's image store, because `policy.enforceExisting` checks
+already-running containers against it.
 
 Two operator-facing commands verify evidence **in-process** with real hardware
 cryptography, which synthetic evidence cannot pass: `c8s verify` and the `c8s

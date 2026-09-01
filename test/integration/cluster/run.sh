@@ -184,7 +184,13 @@ for line in open(sys.argv[1]):
 floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
-        "nriImagePolicy": {"bootstrapAllowlist": {"digests": floor}},
+        "nriImagePolicy": {
+            # The kind node bakes no plugin or boot config, so the chart's
+            # installer stays off: its baked form would find no config to
+            # patch. The full installer is applied out-of-band below.
+            "enabled": False,
+            "bootstrapAllowlist": {"digests": floor},
+        },
     }, f)
 print(f"floor: {len(floor)} digests")
 PYEOF
@@ -240,10 +246,11 @@ cds_write() {
 # --- NRI image-policy plugin ---
 
 log "Installing the NRI image-policy plugin"
-# Under --cvm-mode=node the chart does not render this DaemonSet (production
-# node images bake the plugin), so the harness renders it from the chart
-# source and applies it out-of-band — same installer, same containerd patch,
-# same plugin.
+# Under --cvm-mode=node the chart renders the installer only in its baked
+# pins-patching form, and the install above leaves even that off (values.yaml):
+# the kind node bakes no plugin for it to pin. The harness renders the full
+# installer from the chart source and applies it out-of-band — same installer,
+# same containerd patch, same plugin.
 NRI_STORE_DIGEST="$(awk -F'\t' '$2 ~ /nri-image-policy:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 [ -n "$NRI_STORE_DIGEST" ] && [ -n "$CDS_STORE_DIGEST" ] || fail "loaded-image digests missing from the floor scan"

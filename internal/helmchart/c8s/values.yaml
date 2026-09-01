@@ -823,16 +823,25 @@ ratlsMesh:
     monitoringNamespace: monitoring
 
 nriImagePolicy:
-  ## Host-side NRI image admission. Its enabled state is bound to the cvmMode
-  ## shape, not free: it MUST be false where another path already admits — under
-  ## kata (the in-guest policy-monitor; enforce_host_components) and under
-  ## cvmMode=node (the node image bakes a fail-closed plugin) — and MUST be true
-  ## otherwise (pod/gke/aks, where host NRI is the only allowlist gate;
-  ## require_host_image_policy). `c8s install` sets it from --cvm-mode. The
-  ## bootstrapAllowlist below still feeds CDS's served seed whenever a consumer
-  ## exists — host NRI, kata's in-guest monitor, or the node-baked plugin (see
-  ## c8s.serveAllowlistSeed).
+  ## Host-side NRI image admission: the installer DaemonSet. Its enabled state is
+  ## bound to the cvmMode shape, not free: it MUST be false under kata, where the
+  ## in-guest policy-monitor admits instead (enforce_host_components), and MUST
+  ## be true on gke/aks, where host NRI is the only allowlist gate
+  ## (require_host_image_policy). On cvmMode=node it runs in its baked form
+  ## (below) — the plugin comes from the node image, but only this installer
+  ## carries the release's CDS pins to it. `c8s install` sets both from
+  ## --cvm-mode. The bootstrapAllowlist below still feeds CDS's served seed
+  ## whenever a consumer exists — host NRI, kata's in-guest monitor, or the
+  ## node-baked plugin (see c8s.serveAllowlistSeed).
   enabled: true
+  ## Node-as-CVM (`c8s install --cvm-mode=node`, which sets this): the node image
+  ## bakes the plugin binary, its containerd registration and the boot config —
+  ## floor included, whose RKE2 system-image digests only the image build
+  ## resolves. The installer then writes this release's cds.measurements /
+  ## cds.rtmrs into that config and restarts containerd when they change,
+  ## touching nothing else. Requires attestationApi.cvmMode=node
+  ## (nri_baked_requires_node).
+  baked: false
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
   ## Selects the containerd config layout it targets — see the subchart's
   ## values.yaml. `c8s install` sets this to the distro detected from the

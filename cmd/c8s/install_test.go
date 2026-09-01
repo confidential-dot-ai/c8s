@@ -1141,11 +1141,13 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 			)
 		}
 		// node: the node image bakes attestation-api + nri-image-policy, so the
-		// chart copies are skipped (ratlsMesh is not baked, stays on).
+		// attestation-api copy is skipped and the NRI installer switches to its
+		// baked form — the only path that reaches the baked plugin's CDS pins.
+		// ratlsMesh is not baked, stays on.
 		if mode == "node" {
 			out = append(out,
 				"--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false",
+				"--set", "nriImagePolicy.baked=true",
 			)
 		}
 		return out
@@ -1360,8 +1362,6 @@ func TestBuildDigestArgsSkipsDisabledComponent(t *testing.T) {
 		resolved[ref] = true
 		return "sha256:3333333333333333333333333333333333333333333333333333333333333333", nil
 	}
-	// Node-mode shape: attestation-api and nri-image-policy are baked into the
-	// node image and disabled in the chart.
 	disabled := map[string]bool{"attestationApi.enabled": true, "nriImagePolicy.enabled": true}
 	enabled := func(path string) (bool, error) { return !disabled[path], nil }
 

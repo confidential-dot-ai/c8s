@@ -537,6 +537,14 @@ func preflightImagePolicy(ctx context.Context, w io.Writer, values map[string]an
 	if !boolAtPath(values, "nriImagePolicy.enabled") {
 		return "", nil
 	}
+	// Under .baked the node's floor is the one the image build rendered — the
+	// RKE2 system digests included — and the chart cannot see it, so every
+	// baked-floor pod here reads as denied. The plugin has also been enforcing
+	// since boot, so what runs is already admitted and the pins the installer
+	// writes change who may serve the allowlist, not what it admits.
+	if boolAtPath(values, "nriImagePolicy.baked") {
+		return "", nil
+	}
 	// A mode the chart cannot read is the render guard's to reject, not this
 	// preflight's; either way nothing is denied here.
 	if mode, err := stringAtPath(values, "nriImagePolicy.policy.mode"); err != nil || mode != policyModeFailClosed {
@@ -1674,11 +1682,14 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// node: the node image bakes host attestation-api and nri-image-policy;
 	// re-rendering them duplicates the baked pair and the baked fail-closed NRI
 	// floor denies the chart copies' own images. ratlsMesh stays: it is not
-	// baked (unlike kata-guest-base).
+	// baked (unlike kata-guest-base). The NRI installer does stay on, in its
+	// baked form — the pins below are the one thing an image built before this
+	// release cannot carry, and the installer is the only path that reaches the
+	// baked plugin's config.
 	if cvmMode == "node" {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
-			"--set", "nriImagePolicy.enabled=false",
+			"--set", "nriImagePolicy.baked=true",
 		)
 	}
 	// --measurements pins the expected launch measurement(s) of this cluster's

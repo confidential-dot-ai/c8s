@@ -62,7 +62,15 @@
   exactly the remaining shapes — non-kata and non-node.
 */ -}}
 {{- if and (not .Values.kata.enabled) (not .Values.nriImagePolicy.enabled) (ne .Values.attestationApi.cvmMode "node") -}}
-{{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires kata.enabled=true or attestationApi.cvmMode=node. On a non-kata, non-node cluster host nri-image-policy is the only image-admission enforcement; disabling it leaves confidential workloads with no attested allowlist gate. Under kata the in-guest policy-monitor replaces it and under cvmMode=node the node image bakes the plugin (`c8s install --cvm-mode=pod` and `--cvm-mode=node` set nriImagePolicy.enabled=false for you)." -}}
+{{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires kata.enabled=true or attestationApi.cvmMode=node. On a non-kata, non-node cluster host nri-image-policy is the only image-admission enforcement; disabling it leaves confidential workloads with no attested allowlist gate. Under kata the in-guest policy-monitor replaces it (`c8s install --cvm-mode=pod` sets nriImagePolicy.enabled=false for you), and under cvmMode=node the node image bakes the plugin — but leaving the installer off there also leaves the baked plugin without this release's CDS pins, so prefer nriImagePolicy.enabled=true with nriImagePolicy.baked=true (`c8s install --cvm-mode=node` sets both)." -}}
+{{- end -}}
+{{- /*
+  nriImagePolicy.baked says the plugin, its containerd registration and its boot
+  config come from the node image. Only a node-as-CVM ships those, so anywhere
+  else it would skip the install and leave the node with no plugin at all.
+*/ -}}
+{{- if and .Values.nriImagePolicy.baked (ne .Values.attestationApi.cvmMode "node") -}}
+{{- fail (printf "VALIDATION_ERROR kind=nri_baked_requires_node: nriImagePolicy.baked=true requires attestationApi.cvmMode=node (got %q). Only the node-as-CVM image bakes the plugin and its containerd registration; anywhere else the installer must install them, so baked would leave the node with no image admission at all." .Values.attestationApi.cvmMode) -}}
 {{- end -}}
 {{- /*
   Under kata the webhook injects c8s-cert/c8s-secret/c8s-volume into every

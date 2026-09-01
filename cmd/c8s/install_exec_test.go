@@ -833,12 +833,14 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 	}
 
 	// An unstamped build resolves digests at the fallback tag, and only for
-	// components the node shape actually renders.
+	// components the node shape actually renders. nri-image-policy is among
+	// them: the baked installer runs from that image, and its digest is what
+	// derives it into the seed the node's plugin admits it from.
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/c8s-operator:main")
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/cds:main")
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/ratls-mesh:main")
+	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/nri-image-policy:main")
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/attestation-api")
-	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/nri-image-policy")
 	// volumed stays off without --volumes.
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/volumed")
 
@@ -854,6 +856,12 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 	}
 	if got := treeAt(t, tree, "attestationApi", "enabled"); got != false {
 		t.Errorf("attestationApi.enabled = %#v, want false (baked into the node image)", got)
+	}
+	// The plugin is baked, but its installer stays on (chart default enabled) —
+	// it is the only path that writes this release's CDS pins into the baked
+	// config, so node mode flips the installer's shape, not its presence.
+	if got := treeAt(t, tree, "nriImagePolicy", "baked"); got != true {
+		t.Errorf("nriImagePolicy.baked = %#v, want true", got)
 	}
 	if got := treeAt(t, tree, "attestationApi", "teeDevices", "sevGuest"); got != true {
 		t.Errorf("teeDevices.sevGuest = %#v, want true", got)

@@ -141,13 +141,23 @@ const defaultPullTimeout = 30 * time.Second
 // node's address to. Read only when advertise_host is unset.
 const NodeIPFile = "node-ip"
 
+// defaultConfigPath is the plugin config containerd's plugin_config_path
+// resolves for this plugin, and the file set-cds-pins patches.
+const defaultConfigPath = "/etc/nri/conf.d/image-policy.yaml"
+
 // loadConfig loads configuration from a YAML file.
 func loadConfig(path string) (*config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
+	return parseConfig(data)
+}
 
+// parseConfig decodes and validates a config document. set-cds-pins reads the
+// file it is about to patch through here, so the patched bytes are accepted by
+// exactly the loader the plugin boots with.
+func parseConfig(data []byte) (*config, error) {
 	cfg := &config{
 		Allowlist: allowlistConfig{
 			Pull: pullConfig{
