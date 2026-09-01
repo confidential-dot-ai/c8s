@@ -10,15 +10,22 @@
 set -eu
 
 fail() {
-    echo "scratch-enforce: $1 — refusing to start the node (the rootfs upper is a 2G RAM tmpfs and rke2 wedges when it fills). Attach a virtio-blk disk with serial=confai-scratch, >=64G." >&2
+    echo "scratch-enforce: $1 — refusing to start the node. Attach a virtio-blk disk with serial=confai-scratch, >=64G." >&2
     exit 1
 }
 
+# The 64G floor in 512-byte sectors, decimal so a 64GB or 64GiB disk both
+# pass; the hazard is a toy disk that re-creates the wedge with more rope.
+MIN_SECTORS=125000000
+
 for name in /sys/block/dm-*/dm/name; do
     [ -e "$name" ] || continue
-    if [ "$(cat "$name")" = "scratch" ]; then
-        echo "scratch-enforce: rootfs upper is on the encrypted scratch disk"
-        exit 0
+    [ "$(cat "$name")" = "scratch" ] || continue
+    sectors=$(cat "$(dirname "$(dirname "$name")")/size" 2>/dev/null || echo 0)
+    if [ "$sectors" -lt "$MIN_SECTORS" ]; then
+        fail "scratch disk too small ($((sectors / 2048)) MiB, need >=64G)"
     fi
+    echo "scratch-enforce: rootfs upper is on the encrypted scratch disk"
+    exit 0
 done
 fail "initrd fell back to the tmpfs overlay (no dm device named scratch)"
