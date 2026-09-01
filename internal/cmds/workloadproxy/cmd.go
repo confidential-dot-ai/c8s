@@ -43,7 +43,8 @@ type config struct {
 	mode             string
 	listen           string
 	upstream         string
-	peerWorkload     string
+	peerPolicy       string
+	peerIdentity     string
 	certFile         string
 	keyFile          string
 	caFile           string
@@ -70,7 +71,8 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.mode, "mode", "", "proxy mode: client or server")
 	f.StringVar(&cfg.listen, "listen", "", "TCP listen address")
 	f.StringVar(&cfg.upstream, "upstream", "", "client: TLS peer; server: fixed loopback plaintext target")
-	f.StringVar(&cfg.peerWorkload, "peer-workload", "", "exact matched-workload name required in the peer certificate")
+	f.StringVar(&cfg.peerPolicy, "peer-policy", "", "exact allowlist policy entry required in the peer certificate")
+	f.StringVar(&cfg.peerIdentity, "peer-identity", "", "stable allowlist identity required in the peer certificate")
 	f.StringVar(&cfg.certFile, "cert-file", "", "get-cert leaf and certificate chain PEM")
 	f.StringVar(&cfg.keyFile, "key-file", "", "get-cert private key PEM")
 	f.StringVar(&cfg.caFile, "ca-file", "", "CDS mesh CA bundle PEM")
@@ -131,8 +133,14 @@ func validateConfig(cfg config) error {
 	} else if _, _, err := net.SplitHostPort(cfg.upstream); err != nil {
 		return fmt.Errorf("client --upstream must be host:port: %w", err)
 	}
-	if !allowlist.ValidWorkloadName(cfg.peerWorkload) {
-		return fmt.Errorf("--peer-workload %q is not a valid c8s workload name", cfg.peerWorkload)
+	if (cfg.peerPolicy == "") == (cfg.peerIdentity == "") {
+		return fmt.Errorf("set exactly one of --peer-policy or --peer-identity")
+	}
+	if cfg.peerPolicy != "" && !allowlist.ValidWorkloadName(cfg.peerPolicy) {
+		return fmt.Errorf("--peer-policy %q is not a valid c8s workload name", cfg.peerPolicy)
+	}
+	if cfg.peerIdentity != "" && !allowlist.ValidWorkloadName(cfg.peerIdentity) {
+		return fmt.Errorf("--peer-identity %q is not a valid c8s workload name", cfg.peerIdentity)
 	}
 	for flag, path := range map[string]string{
 		"--cert-file": cfg.certFile,
@@ -274,12 +282,12 @@ func dialVerifiedPeer(ctx context.Context, cfg config) (net.Conn, error) {
 		Certificates:       []tls.Certificate{identity},
 		InsecureSkipVerify: true, // The callback verifies the mesh CA and workload stamp.
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			return verifyPeer(cs.PeerCertificates, roots, cfg.peerWorkload, x509.ExtKeyUsageServerAuth)
+			return verifyPeer(cs.PeerCertificates, roots, cfg.peerPolicy, cfg.peerIdentity, x509.ExtKeyUsageServerAuth)
 		},
 	})
 	if err := handshake(ctx, tlsConn, cfg.handshakeTimeout); err != nil {
 		_ = raw.Close()
-		return nil, fmt.Errorf("verify TLS peer %q: %w", cfg.peerWorkload, err)
+		return nil, fmt.Errorf("verify TLS peer: %w", err)
 	}
 	return tlsConn, nil
 }
@@ -302,11 +310,11 @@ func acceptVerifiedPeer(ctx context.Context, raw net.Conn, cfg config) (net.Conn
 			if len(cs.VerifiedChains) == 0 || len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("peer certificate did not verify against the mesh CA")
 			}
-			return ratls.CheckWorkloadPin(cs.PeerCertificates[0], cfg.peerWorkload)
+			return verifyPeerPins(cs.PeerCertificates[0], cfg.peerPolicy, cfg.peerIdentity)
 		},
 	})
 	if err := handshake(ctx, tlsConn, cfg.handshakeTimeout); err != nil {
-		return nil, fmt.Errorf("verify TLS client %q: %w", cfg.peerWorkload, err)
+		return nil, fmt.Errorf("verify TLS client: %w", err)
 	}
 	return tlsConn, nil
 }
@@ -320,7 +328,7 @@ func handshake(ctx context.Context, conn *tls.Conn, timeout time.Duration) error
 	return conn.SetDeadline(time.Time{})
 }
 
-func verifyPeer(certs []*x509.Certificate, roots *x509.CertPool, expected string, usage x509.ExtKeyUsage) error {
+func verifyPeer(certs []*x509.Certificate, roots *x509.CertPool, expectedPolicy, expectedIdentity string, usage x509.ExtKeyUsage) error {
 	if len(certs) == 0 {
 		return fmt.Errorf("peer sent no certificate")
 	}
@@ -340,7 +348,18 @@ func verifyPeer(certs []*x509.Certificate, roots *x509.CertPool, expected string
 	if err := certutil.CheckValidity(certs[0], now); err != nil {
 		return fmt.Errorf("peer certificate validity: %w", err)
 	}
-	return ratls.CheckWorkloadPin(certs[0], expected)
+	return verifyPeerPins(certs[0], expectedPolicy, expectedIdentity)
+}
+
+// verifyPeerPins keeps exact policy selection distinct from stable identity
+// selection. validateConfig requires exactly one pin, but calling both helpers
+// here makes the security boundary explicit and keeps each check independently
+// testable.
+func verifyPeerPins(cert *x509.Certificate, expectedPolicy, expectedIdentity string) error {
+	if err := ratls.CheckWorkloadPin(cert, expectedPolicy); err != nil {
+		return err
+	}
+	return ratls.CheckWorkloadIdentityPin(cert, expectedIdentity)
 }
 
 func loadIdentity(certFile, keyFile string) (tls.Certificate, error) {
