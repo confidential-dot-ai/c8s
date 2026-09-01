@@ -92,7 +92,11 @@ func TestClientRejectsUnknownScheme(t *testing.T) {
 // --- signer error paths ---
 
 func TestSignerMissingKeyFile(t *testing.T) {
-	o := &options{Options: cdsconn.Options{OperatorKey: filepath.Join(t.TempDir(), "nope.key")}}
+	o := &options{Options: cdsconn.Options{
+		URL:          "https://cds.example:8443",
+		Measurements: []string{strings.Repeat("ab", 48)},
+		OperatorKey:  filepath.Join(t.TempDir(), "nope.key"),
+	}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "read operator key") {
 		t.Fatalf("expected a read error, got %v", err)
 	}

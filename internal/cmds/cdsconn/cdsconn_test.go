@@ -193,7 +193,11 @@ func writeTestKey(t *testing.T) string {
 }
 
 func TestSignerMissingKeyFile(t *testing.T) {
-	o := Options{OperatorKey: filepath.Join(t.TempDir(), "nope.key")}
+	o := Options{
+		URL:          "https://cds.example:8443",
+		Measurements: []string{strings.Repeat("ab", 48)},
+		OperatorKey:  filepath.Join(t.TempDir(), "nope.key"),
+	}
 	if _, err := o.Signer(); err == nil || !strings.Contains(err.Error(), "read operator key") {
 		t.Fatalf("expected a read error, got %v", err)
 	}
@@ -262,6 +266,17 @@ func TestSignerRefusesAnUnpinnedEndpoint(t *testing.T) {
 	o.URL = "http://cds.example:8080"
 	if _, err := o.Signer(); err != nil {
 		t.Fatalf("plaintext must fall through to the HTTPClient refusal, got %v", err)
+	}
+}
+
+func TestSignerChecksEndpointPinBeforeReadingKey(t *testing.T) {
+	o := Options{
+		URL:         "https://cds.example:8443",
+		OperatorKey: filepath.Join(t.TempDir(), "missing.key"),
+	}
+	_, err := o.Signer()
+	if err == nil || !strings.Contains(err.Error(), "unpinned CDS") {
+		t.Fatalf("err = %v, want the endpoint pin refusal before key access", err)
 	}
 }
 

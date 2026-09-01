@@ -148,6 +148,9 @@ func (o *Options) Signer() (*operatorauth.Signer, error) {
 	if keyPath == "" {
 		return nil, fmt.Errorf("operator key required: set --operator-key or %s", EnvOperatorKey)
 	}
+	if err := o.requirePinnedEndpoint(); err != nil {
+		return nil, err
+	}
 	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read operator key: %w", err)
@@ -155,9 +158,6 @@ func (o *Options) Signer() (*operatorauth.Signer, error) {
 	signer, err := operatorauth.NewSignerFromKeyPEM(keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("load operator key: %w", err)
-	}
-	if err := o.requirePinnedEndpoint(); err != nil {
-		return nil, err
 	}
 	return signer, nil
 }
