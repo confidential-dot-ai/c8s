@@ -871,9 +871,13 @@ redirects do not change its target.
 
 Run the image through its `/workload-proxy` alias. Do not use
 `/c8s workload-proxy`. CDS excludes injected `/c8s` helpers from workload
-matching. The alias makes the full command visible to exact allowlist matching.
-The allowlist must name each proxy workload and pin the complete command. For
-example:
+matching only for the exact `get-cert`, `get-secret`, `get-volume`, and
+`probe-file` helper commands. It does not exclude `/c8s workload-proxy`. The
+binary also refuses to run unless its original `argv[0]` is exactly
+`/workload-proxy`. These two checks stop a hidden proxy from receiving or using
+a named workload certificate. The alias makes the full command visible to
+exact allowlist matching. The allowlist must name each proxy workload and pin
+the complete command. For example:
 
 ```text
 /workload-proxy --mode=client --listen=127.0.0.1:8000 \
@@ -886,6 +890,13 @@ The proxy does not get keys. Use the existing `get-cert` flow to write its
 leaf, key, and CA files inside the pod TEE. The CDS mesh CA vouches for the
 matched workload stamp. The proxy does not independently verify the hardware
 evidence in the leaf.
+
+The shared certificate volume must remain mounted in the injected helpers.
+`get-cert` writes it. `probe-file` waits for it. `get-secret` and `get-volume`
+use it to authenticate to CDS. These are the only excluded helper commands.
+Other containers receive a read-only mount, but they remain in the named
+workload inventory. An extra container therefore prevents named issuance
+unless the exact allowlist entry includes it.
 
 ## Reading order for the curious
 

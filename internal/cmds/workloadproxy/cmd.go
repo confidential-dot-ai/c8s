@@ -83,6 +83,9 @@ func NewCmd() *cobra.Command {
 }
 
 func run(cfg config) error {
+	if err := validateEntrypoint(os.Args[0]); err != nil {
+		return err
+	}
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
@@ -94,6 +97,13 @@ func run(cfg config) error {
 	}
 	defer ln.Close()
 	return serve(ctx, cfg, ln, slog.Default())
+}
+
+func validateEntrypoint(argv0 string) error {
+	if argv0 != "/workload-proxy" {
+		return fmt.Errorf("workload-proxy must run with argv[0] exactly /workload-proxy")
+	}
+	return nil
 }
 
 func validateConfig(cfg config) error {
@@ -428,18 +438,25 @@ func (c *idleConn) CloseWrite() error {
 	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
-	return nil
+	return fmt.Errorf("connection type %T does not support a write half-close", c.Conn)
 }
 
 func proxyDuplex(a, b net.Conn) error {
 	type result struct{ err error }
 	results := make(chan result, 2)
 	copyOne := func(dst, src net.Conn) {
-		_, err := io.CopyBuffer(dst, src, make([]byte, 32*1024))
+		_, copyErr := io.CopyBuffer(dst, src, make([]byte, 32*1024))
+		var closeErr error
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
+			closeErr = cw.CloseWrite()
+		} else {
+			closeErr = fmt.Errorf("connection type %T does not support a write half-close", dst)
 		}
-		results <- result{err: err}
+		if closeErr != nil {
+			// Do not leave the opposite copy blocked after a failed half-close.
+			_ = dst.Close()
+		}
+		results <- result{err: errors.Join(copyErr, closeErr)}
 	}
 	go copyOne(a, b)
 	go copyOne(b, a)
