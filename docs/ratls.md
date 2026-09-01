@@ -896,18 +896,20 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
 
 ## Exact named-workload proxy
 
-`workload-proxy` binds one TCP hop to two exact c8s workload names. The client
-mode accepts plaintext only on pod loopback. It uses a `get-cert` leaf and the
-mesh CA to connect to the server mode. The server requires the exact client
-workload name and can forward plaintext only to one fixed loopback target.
+`workload-proxy` binds one TCP hop to one selected c8s peer property. The
+client mode accepts plaintext only on pod loopback. It uses a `get-cert` leaf
+and the mesh CA to connect to the server mode. The server can forward
+plaintext only to one fixed loopback target. Select exactly one peer mode:
+`--peer-policy` requires one exact allowlist entry name, and
+`--peer-identity` requires one stable allowlist identity. The flags are not
+aliases. Each uses its own matched-workload certificate check.
 Both modes use TLS 1.3. They reject a self-signed peer, a peer from another CA,
 and a leaf without the CDS matched-workload stamp. This is an L4 proxy. HTTP
 redirects do not change its target.
 
 Run the image through its `/workload-proxy` alias. Do not use
-`/c8s workload-proxy`. CDS excludes injected `/c8s` helpers from workload
-matching only for the exact `get-cert`, `get-secret`, `get-volume`, and
-`probe-file` helper commands. It does not exclude `/c8s workload-proxy`. The
+`/c8s workload-proxy`. CDS does not exclude injected `/c8s` helpers from
+workload matching. The allowlist entry must name every helper exactly. The
 binary also refuses to run unless its original `argv[0]` is exactly
 `/workload-proxy`. These two checks stop a hidden proxy from receiving or using
 a named workload certificate. The alias makes the full command visible to
@@ -916,10 +918,17 @@ the complete command. For example:
 
 ```text
 /workload-proxy --mode=client --listen=127.0.0.1:8000 \
-  --upstream=router-proxy:9443 --peer-workload=sglang-router \
+  --upstream=router-proxy:9443 --peer-policy=sglang-router-v2 \
   --cert-file=/certs/tls.crt --key-file=/certs/tls.key \
   --ca-file=/certs/ca.crt
 ```
+
+Use `--peer-policy` during an exact-entry migration. It accepts v1 leaves and
+v2 leaves only when their policy name is the configured value. Use
+`--peer-identity` when a v2 entry can change policy names while it retains the
+same stable identity. A v1 leaf has no separate identity, so its identity is
+its exact policy name. Do not configure both flags. The proxy rejects both and
+also rejects neither.
 
 The proxy does not get keys. Use the existing `get-cert` flow to write its
 leaf, key, and CA files inside the pod TEE. The CDS mesh CA vouches for the
@@ -928,10 +937,9 @@ evidence in the leaf.
 
 The shared certificate volume must remain mounted in the injected helpers.
 `get-cert` writes it. `probe-file` waits for it. `get-secret` and `get-volume`
-use it to authenticate to CDS. These are the only excluded helper commands.
-Other containers receive a read-only mount, but they remain in the named
-workload inventory. An extra container therefore prevents named issuance
-unless the exact allowlist entry includes it.
+use it to authenticate to CDS. Each helper remains in the named workload
+inventory. An extra container therefore prevents named issuance unless the
+exact allowlist entry includes it.
 
 ## Reading order for the curious
 

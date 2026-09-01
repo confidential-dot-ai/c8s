@@ -56,7 +56,7 @@ const (
 func TestWorkloadProxyAndHelpersRemainInNamedWorkloadInventory(t *testing.T) {
 	reported := []workloadclaims.SandboxContainer{
 		{Digest: testInjected, Argv: []string{"/c8s", "probe-file", "--wait", "/certs/tls.crt"}},
-		{Digest: testInjected, Argv: []string{"/workload-proxy", "--mode=client", "--peer-workload=sglang-router"}},
+		{Digest: testInjected, Argv: []string{"/workload-proxy", "--mode=client", "--peer-policy=sglang-router"}},
 	}
 	got := WorkloadContainers(reported)
 	if len(got) != len(reported) {
