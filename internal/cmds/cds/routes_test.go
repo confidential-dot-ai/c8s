@@ -5,7 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,8 +16,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/teewebpki"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"golang.org/x/time/rate"
 )
@@ -53,6 +55,51 @@ func newStubRouter(t *testing.T) http.Handler {
 		MaxRequestSize:   65536,
 	}
 	return newRouter(deps)
+}
+
+func TestRouter_TEEWebPKICertificateUsesOperatorAuthorizer(t *testing.T) {
+	store, err := teewebpki.NewStore(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"version":1}`)
+	var authorized bool
+	var gotBody []byte
+	deps := dependencies{
+		TEEWebPKIOperator: &teewebpki.OperatorHandler{
+			Store: store,
+			Authorize: func(_ *http.Request, got []byte) error {
+				gotBody = append([]byte(nil), got...)
+				if !authorized {
+					return errors.New("denied")
+				}
+				return nil
+			},
+		},
+		ReadyFn:          func() bool { return true },
+		RateLimiter:      newTestRateLimiter(t),
+		ChallengeLimiter: newTestRateLimiter(t),
+		MaxRequestSize:   65536,
+	}
+	r := newRouter(deps)
+
+	request := httptest.NewRequest(http.MethodPut, teewebpki.CertificateRoute, bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized certificate update = HTTP %d, want 401", response.Code)
+	}
+	if !bytes.Equal(gotBody, body) {
+		t.Fatalf("authorizer body = %q, want exact request body %q", gotBody, body)
+	}
+
+	authorized = true
+	request = httptest.NewRequest(http.MethodPut, teewebpki.CertificateRoute, bytes.NewReader(body))
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("authorized invalid certificate update = HTTP %d, want 400", response.Code)
+	}
 }
 
 func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
