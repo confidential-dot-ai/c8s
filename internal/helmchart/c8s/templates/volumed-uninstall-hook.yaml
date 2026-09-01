@@ -76,7 +76,7 @@ spec:
             # Bidirectional: the mounts live in the host namespace, so the
             # unmount has to propagate back out of this pod.
             - name: kubelet-root
-              mountPath: {{ .Values.volumed.hostPaths.kubeletRoot }}
+              mountPath: {{ include "c8s.volumedKubeletRoot" . }}
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
@@ -97,7 +97,7 @@ spec:
       volumes:
         - name: kubelet-root
           hostPath:
-            path: {{ .Values.volumed.hostPaths.kubeletRoot }}
+            path: {{ include "c8s.volumedKubeletRoot" . }}
             type: Directory
         - name: dev
           hostPath:

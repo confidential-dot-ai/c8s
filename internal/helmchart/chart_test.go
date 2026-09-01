@@ -7133,6 +7133,57 @@ func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
 	}
 }
 
+// The kubelet root dir differs by distro: RKE2 runs its kubelet with
+// --root-dir under the agent dir, everything else takes the upstream default.
+// volumed resolves pod volume directories beneath it, so the wrong value
+// mounts volumes where no pod looks for them.
+func TestChartVolumedKubeletRootTracksDistro(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "/var/lib/kubelet"},
+		{"k8s distro", []string{"--set-string", "nriImagePolicy.distro=k8s"}, "/var/lib/kubelet"},
+		{"rke2 via nri distro", []string{"--set-string", "nriImagePolicy.distro=rke2"}, "/var/lib/rancher/rke2/agent/kubelet"},
+		{"rke2 via kata distro", []string{"--set-string", "kata.distro=rke2"}, "/var/lib/rancher/rke2/agent/kubelet"},
+		{"explicit wins", []string{
+			"--set-string", "nriImagePolicy.distro=rke2",
+			"--set-string", "volumed.hostPaths.kubeletRoot=/custom/kubelet",
+		}, "/custom/kubelet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--set", "volumed.enabled=true"}, tc.args...)
+			out, err := helmTemplate(t, args...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			spec := renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec
+			c, ok := findContainer(spec.Containers, "volumed")
+			if !ok {
+				t.Fatal("volumed container missing")
+			}
+			if got := argAfter(c.Args, "--kubelet-root"); got != tc.want {
+				t.Errorf("--kubelet-root = %q, want %q", got, tc.want)
+			}
+			mount, ok := containerVolumeMount(c, "kubelet-root")
+			if !ok {
+				t.Fatal("no kubelet-root mount")
+			}
+			if mount.MountPath != tc.want {
+				t.Errorf("kubelet-root mountPath = %q, want %q", mount.MountPath, tc.want)
+			}
+			v, ok := podVolume(spec, "kubelet-root")
+			if !ok || v.HostPath == nil {
+				t.Fatal("no kubelet-root hostPath volume")
+			}
+			if v.HostPath.Path != tc.want {
+				t.Errorf("kubelet-root hostPath = %q, want %q", v.HostPath.Path, tc.want)
+			}
+		})
+	}
+}
+
 // argAfter returns the value following flag in an argv, or "" if absent.
 func argAfter(args []string, flag string) string {
 	for i, a := range args {
