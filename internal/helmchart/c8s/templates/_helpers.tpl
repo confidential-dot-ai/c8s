@@ -355,8 +355,8 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- /*
 c8s.attestationApiSocket — the node-local socket the attest-proxy sidecar
 serves the attestation-api on. It lives in the admission inventory's socket
-directory: the one hostPath the deny-host-namespaces policy admits into a cw
-pod (read-only) and the one the webhook mounts into get-cert sidecars.
+directory, which nri-image-policy NRI-mounts read-only into injected get-cert
+sidecars.
 */ -}}
 {{- define "c8s.attestationApiSocket" -}}
 {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}/attestation-api.sock

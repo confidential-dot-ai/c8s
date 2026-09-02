@@ -15,6 +15,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"github.com/containerd/nri/pkg/api"
 )
 
@@ -307,6 +308,128 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	expected := "container has no image annotation"
 	if err.Error() != expected {
 		t.Fatalf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+// The claims socket directory reaches injected sidecars as an NRI mount — a
+// pod-spec hostPath would fail PodSecurity restricted — so CreateContainer
+// must adjust exactly the webhook-injected sidecars of an injected pod, on the
+// ready and initializing paths alike.
+//
+// The pods here carry only the annotation, never a real injection, so this
+// also pins the forged-trigger posture: any pod that fakes the annotation and
+// a sidecar name gets the RO mount, by design — the sockets behind it bind
+// callers by kernel peer credentials, not by who holds the mount.
+func TestCreateContainer_MountsSocketDirIntoInjectedSidecars(t *testing.T) {
+	const socketDir = "/var/run/nri-image-policy"
+	for name, ready := range map[string]bool{"ready": true, "initializing": false} {
+		t.Run(name, func(t *testing.T) {
+			p := newTestPlugin(&config{
+				Policy:         policyConfig{Mode: ModeAudit},
+				WorkloadClaims: workloadClaimsConfig{SocketDir: socketDir},
+			})
+			p.inventory = newAdmissionInventory(t.TempDir())
+			if ready {
+				p.SetReady()
+				p.policy = newPolicyStore(floorAllowlist(map[string]string{}))
+			}
+			pod := makePod("default", "pod1")
+			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+
+			for _, ctrName := range []string{
+				workloadclaims.CertContainerName,
+				workloadclaims.SecretContainerName,
+				workloadclaims.VolumeContainerName,
+			} {
+				adjust, _, err := p.CreateContainer(context.Background(), pod, makeCtr(pod.Id, ctrName))
+				if err != nil {
+					t.Fatalf("%s: %v", ctrName, err)
+				}
+				if adjust == nil || len(adjust.Mounts) != 1 {
+					t.Fatalf("%s: adjustment = %+v, want exactly the socket-dir mount", ctrName, adjust)
+				}
+				m := adjust.Mounts[0]
+				if m.Source != socketDir || m.Destination != workloadclaims.SidecarSocketDir {
+					t.Fatalf("%s: mount %s -> %s, want %s -> %s", ctrName, m.Source, m.Destination, socketDir, workloadclaims.SidecarSocketDir)
+				}
+				if !slices.Contains(m.Options, "ro") {
+					t.Fatalf("%s: socket-dir mount not read-only: %v", ctrName, m.Options)
+				}
+			}
+		})
+	}
+}
+
+// Everything else gets no mount: a workload container in an injected pod, a
+// sidecar-named container in a pod the webhook never touched, and any
+// container when the inventory is disabled.
+func TestCreateContainer_NoSocketDirMountOutsideInjectedSidecars(t *testing.T) {
+	injected := makePod("default", "pod1")
+	injected.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+	plain := makePod("default", "pod2")
+	halfway := makePod("default", "pod3")
+	halfway.Annotations = map[string]string{workloadclaims.AnnotationInjected: "false"}
+
+	for name, tc := range map[string]struct {
+		inventory bool
+		pod       *api.PodSandbox
+		ctr       string
+	}{
+		"workload container":     {true, injected, "app"},
+		"cert-wait is no dialer": {true, injected, "c8s-cert-wait"},
+		"uninjected pod":         {true, plain, workloadclaims.CertContainerName},
+		"annotation not true":    {true, halfway, workloadclaims.CertContainerName},
+		"inventory disabled":     {false, injected, workloadclaims.CertContainerName},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config{Policy: policyConfig{Mode: ModeAudit}}
+			if tc.inventory {
+				cfg.WorkloadClaims = workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"}
+			}
+			p := newTestPlugin(cfg)
+			if tc.inventory {
+				p.inventory = newAdmissionInventory(t.TempDir())
+			}
+			p.SetReady()
+			p.policy = newPolicyStore(floorAllowlist(map[string]string{}))
+
+			adjust, _, err := p.CreateContainer(context.Background(), tc.pod, makeCtr(tc.pod.Id, tc.ctr))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adjust != nil {
+				t.Fatalf("adjustment = %+v, want none", adjust)
+			}
+		})
+	}
+}
+
+// A denied container gets no adjustment alongside its error, on the ready and
+// initializing paths alike.
+func TestCreateContainer_DeniedContainerGetsNoAdjustment(t *testing.T) {
+	for name, ready := range map[string]bool{"ready": true, "initializing": false} {
+		t.Run(name, func(t *testing.T) {
+			p := newTestPlugin(&config{
+				Allowlist:      allowlistConfig{Pull: pullConfig{URL: "http://wl.local:8080", Timeout: 30}},
+				Policy:         policyConfig{Mode: ModeFailClosed, DenyMissingAnnotation: true},
+				WorkloadClaims: workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"},
+			})
+			p.inventory = newAdmissionInventory(t.TempDir())
+			if ready {
+				p.SetReady()
+				p.policy = newPolicyStore(floorAllowlist(map[string]string{}))
+			}
+			pod := makePod("default", "pod1")
+			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+
+			adjust, _, err := p.CreateContainer(context.Background(), pod, makeCtr(pod.Id, workloadclaims.CertContainerName))
+			if err == nil {
+				t.Fatal("denied container admitted")
+			}
+			if adjust != nil {
+				t.Fatalf("denied container got adjustment %+v", adjust)
+			}
+		})
 	}
 }
 

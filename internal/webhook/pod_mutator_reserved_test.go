@@ -126,13 +126,13 @@ func TestReservedVolumeNamesCoversSidecarMounts(t *testing.T) {
 	pod := podWithApp()
 	pod.Spec.InitContainers = []corev1.Container{
 		{Name: reservedCertContainerName, VolumeMounts: []corev1.VolumeMount{
-			{Name: "my-certs"}, {Name: workloadClaimsVolumeName},
+			{Name: "my-certs"}, {Name: "sidecar-extra"},
 		}},
 		{Name: "user-init", VolumeMounts: []corev1.VolumeMount{{Name: "user-scratch"}}},
 	}
 
 	reserved := reservedVolumeNames(pod)
-	for _, want := range []string{secretsVolumeName, defaultCertVolumeName, "my-certs", workloadClaimsVolumeName} {
+	for _, want := range []string{secretsVolumeName, defaultCertVolumeName, "my-certs", "sidecar-extra"} {
 		if !reserved[want] {
 			t.Errorf("%q not reserved", want)
 		}

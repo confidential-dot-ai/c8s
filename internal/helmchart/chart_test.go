@@ -637,8 +637,8 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 // inventory's and mint tokens naming any sandbox. hostNetwork is not the only
 // way to get there — a hostPort publishes a pod on the node's address with no
 // host namespace at all — so the VAP must deny both. PodSecurity baseline also
-// denies hostPort, but a namespace hosting CW pods cannot run at baseline (the
-// injected hostPath forces privileged), so this policy is the only control.
+// denies hostPort, but nothing forces a workload namespace to enforce
+// baseline, so this policy is the guaranteed control.
 func TestChartHostNamespacePolicyDeniesHostPort(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
@@ -785,12 +785,10 @@ func TestChartTCPEgressPolicyDefaultOnRendersNoNamespaces(t *testing.T) {
 	}
 }
 
-// The webhook injects a read-only hostPath mount of the inventory socket dir
-// (nriImagePolicy.hostPaths.runtimeDir) into every CW pod, so the
-// deny-host-namespaces VAP must carve out exactly that dir — a blanket
-// hostPath deny rejects every confidential workload the platform itself
-// mutates.
-func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
+// The claims socket directory reaches CW pods as an NRI mount, not a pod-spec
+// volume, so the deny-host-namespaces VAP denies hostPath outright: any
+// carve-out would let a tenant reach the node filesystem.
+func TestChartHostNamespacePolicyDeniesAllHostPath(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -808,13 +806,13 @@ func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
 	if hostPathExpr == "" {
 		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
 	}
-	for _, want := range []string{
-		`"/var/run/nri-image-policy"`, // the claims dir, and nothing wider
-		`'Directory'`,                 // the exact type the webhook injects
-		"m.readOnly",                  // every referencing mount must be read-only
-	} {
-		if !strings.Contains(hostPathExpr, want) {
-			t.Errorf("hostPath validation missing %s; expression=%q", want, hostPathExpr)
+	// Absence, not presence: a leftover carve-out would pass a "some hostPath
+	// deny renders" check.
+	for _, v := range vap.Spec.Validations {
+		for _, stale := range []string{"/var/run/nri-image-policy", "readOnly", "hostPath.type"} {
+			if strings.Contains(v.Expression, stale) {
+				t.Errorf("validation still carves out the claims dir (%q); expression=%q", stale, v.Expression)
+			}
 		}
 	}
 }
@@ -7096,11 +7094,13 @@ func TestChartVolumedDaemonSetShape(t *testing.T) {
 	}
 }
 
-// The daemon's socket has to land in the inventory's socket directory: the
-// deny-host-namespaces VAP carves out that exact path by string equality, and
-// it is the directory the webhook mounts into cw pods. A daemon serving
-// anywhere else is a daemon no confidential pod can reach.
-func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
+// The daemon's socket has to land in the inventory's socket directory — the
+// one nri-image-policy NRI-mounts into cw-pod sidecars, which the operator
+// names via --workload-claims-host-dir. A daemon serving anywhere else is a
+// daemon no confidential pod can reach. And a moved directory must not
+// resurface in the VAP: the pod spec carries no hostPath anymore, so a
+// carve-out would only reopen tenant access to the node filesystem.
+func TestChartVolumedSocketDirTracksTheInventoryDir(t *testing.T) {
 	const runtimeDir = "/var/run/c8s-inventory-elsewhere"
 	out, err := helmTemplate(t,
 		"--set", "volumed.enabled=true",
@@ -7117,19 +7117,19 @@ func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
 	if got := argAfter(c.Args, "--socket-dir"); got != runtimeDir {
 		t.Errorf("--socket-dir = %q, want the inventory socket dir %q", got, runtimeDir)
 	}
+	operator := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
+	if !slices.Contains(operator.Args, "--workload-claims-host-dir="+runtimeDir) {
+		t.Errorf("operator args %v missing --workload-claims-host-dir=%s", operator.Args, runtimeDir)
+	}
 
 	var vap admissionregv1.ValidatingAdmissionPolicy
 	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var carved bool
 	for _, v := range vap.Spec.Validations {
 		if strings.Contains(v.Expression, strconv.Quote(runtimeDir)) {
-			carved = true
+			t.Errorf("the VAP names the socket dir %s; hostPath must be denied without carve-outs, expression=%q", runtimeDir, v.Expression)
 		}
-	}
-	if !carved {
-		t.Errorf("the VAP does not carve out %s, so the socket dir the daemon serves in is denied to cw pods", runtimeDir)
 	}
 }
 
