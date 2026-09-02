@@ -101,8 +101,11 @@ func run(cfg config) error {
 			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
 		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
-	} else {
-		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served)")
+	} else if !cfg.staticAllowlist {
+		// A sealed run is key-less by design and logs its own line, so this
+		// warning fires only on the ambiguous shape: writes disabled with
+		// nothing telling a relying party the policy is frozen.
+		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served). If a frozen policy is the intent, --static-allowlist also seals its digest into the mesh CA so relying parties can verify what is enforced (docs/static-allowlist.md)")
 	}
 
 	allowlistStore, err := allowlist.OpenStore(cfg.allowlistDB)
