@@ -48,10 +48,6 @@ const (
 //	1.3.6.1.4.1.66378.1.3 - static allowlist extension (staticallowlist.go)
 //	1.3.6.1.4.1.66378.1.4 - pod sandbox ID extension (sandbox.go)
 //	1.3.6.1.4.1.66378.1.5 - matched workload extension (matchedworkload.go)
-//
-// .1.3 originally carried the RA-TLS config-claims extension, removed before
-// v0 with no deployments minting it; the arc was reused for the static
-// allowlist.
 var (
 	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1}
 	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 1}
