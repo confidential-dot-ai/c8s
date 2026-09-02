@@ -49,8 +49,16 @@ initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
 `tdx-metal-e2e.yml`); confidential-metal attaches one by default
 (`--datadisk-gi`, 0 opts out).
 
-The initrd encrypts the disk and mounts it as the rootfs upper, via a dm
-mapping named `scratch`. Without the disk it falls back to a 2G RAM tmpfs:
+The initrd encrypts the disk and uses it, via a dm mapping named `scratch`,
+to back the guest's writable state overlays. The root itself is immutable:
+`/usr` and `/etc` are the read-only verity mount, and only the directories
+the image declares in `/usr/lib/confai/state.d/` are writable — confos's
+base declares `/var`, `/home`, `/root`, `/tmp`; this profile adds
+`/etc/rancher` (`c8s/mkosi.extra/usr/lib/confai/state.d/60-c8s.conf`) for
+rke2's kubeconfig, node password and config.yaml.d fragments. A service
+that needs to write anywhere else must get a line there, and the directory
+must already exist in the image. Without the disk the initrd falls back to
+a 2G RAM tmpfs:
 the guest comes up Ready, then wedges once RKE2 fills it — a flapping
 node, not a boot error. `scratch-enforce.service` closes that hole by
 checking for the dm mapping and powering the VM off before rke2 starts.
