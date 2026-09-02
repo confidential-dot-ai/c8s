@@ -15,6 +15,10 @@ Every file must yield its expected number of recognized pin sites, counted
 whether or not they change (the sync-c8s-pins sub_once principle): a
 hand-reformatted pin line fails this script loudly instead of shipping a
 PR that silently half-bumped. Update EXPECTED alongside any pin-site move.
+
+Mkosi pins are file-specific and action-scoped: direct systemd/mkosi uses are
+matched separately from the local setup-mkosi action's ref input. An unrelated
+version-commented ref never satisfies the mkosi pin count.
 """
 
 import argparse
@@ -29,6 +33,25 @@ EXPECTED = {
     "c8s-image.yml": 3,        # CONFOS_REF (dispatch form), ATTESTATION_RS_REF, setup-mkosi ref
     "kata-guest-base.yml": 3,  # CONFOS_REF (quoted), ATTESTATION_RS_REF, systemd/mkosi uses
     "kernel-snapshot.yml": 3,  # confos_ref default x2 (dispatch + call), systemd/mkosi uses
+}
+
+# Keep mkosi rewrites tied to the action that consumes the pin. In particular,
+# a generic `ref: <sha> # vN` may belong to any action and must never count as
+# the c8s-image mkosi pin merely because it has the same textual shape.
+LOCAL_MKOSI_PATTERN = (
+    rf"(?P<pre>^[ \t]*uses:[ \t]+\./c8s/\.github/actions/setup-mkosi[ \t]*(?:#[^\n]*)?\n"
+    rf"(?:^[ \t]*(?:#[^\n]*)?\n){{0,5}}"
+    rf"^[ \t]*with:[ \t]*(?:#[^\n]*)?\n"
+    rf"(?:^[ \t]*(?:#[^\n]*)?\n){{0,5}}"
+    rf"^[ \t]*ref:[ \t]*)(?P<sha>{HEX})( # v[0-9.]+)$"
+)
+UPSTREAM_MKOSI_PATTERN = (
+    rf"^(?P<pre>[ \t]*uses:[ \t]+systemd/mkosi@)(?P<sha>{HEX})( # v[0-9.]+)$"
+)
+MKOSI_PATTERNS = {
+    "c8s-image.yml": LOCAL_MKOSI_PATTERN,
+    "kata-guest-base.yml": UPSTREAM_MKOSI_PATTERN,
+    "kernel-snapshot.yml": UPSTREAM_MKOSI_PATTERN,
 }
 
 
@@ -63,7 +86,7 @@ def main():
     note = f"# pin: main {a.date} (pin-watch) — review the upstream log for what rolls"
     # (pattern, target sha, replacement tail appended after the sha)
     dol = "$"  # keep the literal Actions expression out of grep'able source
-    rules = [
+    common_rules = [
         (rf"^(?P<pre>\s*CONFOS_REF: \{dol}\{{\{{ inputs\.confos_ref \|\| ')(?P<sha>{HEX})(' \}}\}}) *(#.*)?$",
          a.confos, "' }} " + note),
         (rf'^(?P<pre>\s*CONFOS_REF: ")(?P<sha>{HEX})(") *(#.*)?$', a.confos, '" ' + note),
@@ -72,19 +95,21 @@ def main():
         # future unrelated hex default can never be rewritten to confos's sha
         (rf'(?P<pre>confos_ref:(?:\n[^\n]*){{0,5}}?\n\s*default: ")(?P<sha>{HEX})("[^\n]*)',
          a.confos, '" ' + note),
-        (rf"^(?P<pre>.*(?:systemd/mkosi@|ref: ))(?P<sha>{HEX})( # v[0-9.]+)$",
-         a.mkosi_sha, f" # {a.mkosi_ver}"),
     ]
 
     total_replaced = 0
     for path in a.files:
         text = open(path).read()
+        base = path.rsplit("/", 1)[-1]
+        rules = list(common_rules)
+        mkosi_pattern = MKOSI_PATTERNS.get(base)
+        if mkosi_pattern is not None:
+            rules.append((mkosi_pattern, a.mkosi_sha, f" # {a.mkosi_ver}"))
         found_total = replaced_total = 0
         for pattern, sha, tail in rules:
             text, found, replaced = rewrite(text, pattern, sha, tail)
             found_total += found
             replaced_total += replaced
-        base = path.rsplit("/", 1)[-1]
         want = EXPECTED.get(base)
         if want is not None and found_total != want:
             sys.exit(f"error: {path}: recognized {found_total} pin sites, expected {want} — "

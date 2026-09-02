@@ -11,11 +11,11 @@
 #   node-image:  c8s-image.yml            (node rootfs / RTMR + SNP digests)
 #   kata-guest:  kata-guest-base.yml + kernel-snapshot.yml (kata launch digest)
 #
-# PRs opened with the default Actions token trigger no CI (GitHub suppresses
-# runs for GITHUB_TOKEN-created events) — so the repro gate the PR needs
-# will not run until PIN_WATCH_TOKEN (fine-grained PAT, contents+PR write)
-# is configured, or the PR is closed/reopened by hand. Creating PRs also
-# needs "Allow GitHub Actions to create and approve pull requests" enabled.
+# With PIN_WATCH_TOKEN (a fine-grained PAT with Contents and Pull requests
+# read/write access), checkout, push, and PR creation all use the PAT and PR
+# checks start automatically. Without it, they consistently use GITHUB_TOKEN:
+# the repository must allow Actions to create pull requests, and the resulting
+# PR workflow runs wait for approval before starting.
 name: confos pin watch
 
 on:
@@ -26,6 +26,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+
+concurrency:
+  group: confos-pin-watch
+  cancel-in-progress: false
 
 env:
   GH_TOKEN: ${{ secrets.PIN_WATCH_TOKEN || github.token }}
@@ -43,18 +47,31 @@ jobs:
             files: .github/workflows/kata-guest-base.yml .github/workflows/kernel-snapshot.yml
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Persist the same token used by gh so PAT-created PR updates also
+          # trigger CI automatically; github.token remains the fallback.
+          token: ${{ secrets.PIN_WATCH_TOKEN || github.token }}
       - name: Bump stale pins and open the PR
         run: |
           set -euo pipefail
-          confos=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main --jq .sha)
-          attest=$(gh api repos/confidential-dot-ai/attestation-rs/commits/main --jq .sha)
+          confos_record=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main \
+            --jq '[.sha, .commit.committer.date[0:10]] | @tsv')
+          IFS=$'\t' read -r confos confos_date <<<"$confos_record"
+          attest_record=$(gh api repos/confidential-dot-ai/attestation-rs/commits/main \
+            --jq '[.sha, .commit.committer.date[0:10]] | @tsv')
+          IFS=$'\t' read -r attest attest_date <<<"$attest_record"
+          # A source-derived date keeps the proposed tree stable across reruns.
+          pin_date=$confos_date
+          if [[ $attest_date > $pin_date ]]; then
+            pin_date=$attest_date
+          fi
           mkosi_line=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/confidential-dot-ai/confidential-os-builder/${confos}/.github/workflows/base.yml" |
             grep -oE 'systemd/mkosi@[0-9a-f]{40} # v[0-9.]+')
           out=$(.github/scripts/bump-pins.py \
             --confos "$confos" --attest "$attest" \
             --mkosi-sha "$(grep -oE '[0-9a-f]{40}' <<<"$mkosi_line")" \
             --mkosi-ver "$(grep -oE 'v[0-9.]+$' <<<"$mkosi_line")" \
-            --date "$(date -u +%Y-%m-%d)" \
+            --date "$pin_date" \
             ${{ matrix.files }})
           echo "$out"
           grep -q '^no-drift$' <<<"$out" && exit 0
@@ -64,9 +81,25 @@ jobs:
           git config user.email "actions@github.com"
           git checkout -b "$branch"
           git commit -am "$title"
-          # Force-push keeps an open PR current when upstream moves again and
-          # recovers an orphaned branch from a failed pr create.
-          git push -f origin "$branch"
-          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
-            gh pr create --title "$title" --body "Automated pin-watch bump to confos main \`${confos:0:9}\` / attestation-rs main \`${attest:0:9}\`, mkosi \`${mkosi_line#systemd/mkosi@}\` scraped from that confos commit's base.yml so the MinimumVersion= lockstep holds by construction. Rolls the affected measurements — review the upstream logs before merging, and run the repro gate (see the workflow header about tokens and CI)."
+          open_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
+          local_tree=$(git rev-parse 'HEAD^{tree}')
+          remote_oid=
+          remote_tree=
+          if git fetch --no-tags origin \
+            "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+            remote_oid=$(git rev-parse "refs/remotes/origin/$branch")
+            remote_tree=$(git rev-parse "${remote_oid}^{tree}")
+            if [ "$local_tree" = "$remote_tree" ] && [ -n "$open_pr" ]; then
+              echo "pin-watch PR #$open_pr already has the proposed tree"
+              exit 0
+            fi
+          fi
+          if [ -z "$remote_oid" ]; then
+            git push origin "HEAD:refs/heads/$branch"
+          elif [ "$local_tree" != "$remote_tree" ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_oid" \
+              origin "HEAD:refs/heads/$branch"
+          fi
+          if [ -z "$open_pr" ]; then
+            gh pr create --title "$title" --body "Automated pin-watch bump to confos main \`${confos:0:9}\` / attestation-rs main \`${attest:0:9}\`, mkosi \`${mkosi_line#systemd/mkosi@}\` scraped from that confos commit's base.yml so the MinimumVersion= lockstep holds by construction. Rolls the affected measurements — review the upstream logs before merging, and run the repro gate. With the default GITHUB_TOKEN, approve the PR's workflow run; PIN_WATCH_TOKEN lets CI start automatically."
           fi
