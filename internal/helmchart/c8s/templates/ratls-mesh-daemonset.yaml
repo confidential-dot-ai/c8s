@@ -283,6 +283,14 @@ spec:
             - {{ join "," . | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.ratlsMesh.pcrs }}
+            - --pcrs
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.ratlsMesh.initDataHash }}
+            - --init-data-hash
+            - {{ . | quote }}
+            {{- end }}
             {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
             - --max-conns
             - {{ .Values.ratlsMesh.maxConns | quote }}
@@ -316,6 +324,14 @@ spec:
             {{- with .Values.cds.rtmrs }}
             - --cds-rtmrs
             - {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.cds.pcrs }}
+            - --cds-pcrs
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.cds.initDataHash }}
+            - --cds-init-data-hash
+            - {{ . | quote }}
             {{- end }}
             {{- end }}
             {{- end }}

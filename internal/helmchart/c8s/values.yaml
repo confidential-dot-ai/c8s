@@ -276,6 +276,18 @@ cds:
   ## RTMR pinning (on TDX the measurement pin then confers no guest-code
   ## identity, UNSAFE).
   rtmrs: []
+  ## Azure vTPM PCR pins, each "<index>=<sha256-hex>", completing
+  ## `measurements` on az-snp/az-tdx: there the launch measurement covers the
+  ## Microsoft paravisor/IGVM alone, while the guest OS measures into the
+  ## vTPM PCRs. Same dual use as `measurements`. Ignored for non-vTPM
+  ## evidence. Empty = no PCR pinning (on Azure the measurement pin then
+  ## confers no guest-OS identity).
+  pcrs: []
+  ## Hex SHA-256 init-data digest callers' evidence must bind (vTPM PCR[8] on
+  ## az, HOST_DATA on snp, MRCONFIGID on tdx), and that components dialing
+  ## CDS require of CDS in turn. Empty = no init-data pinning.
+  initDataHash: ""
+
   ## PEM bundle of operator EC public keys (public material, not a secret).
   ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a
   ## short-lived token signed by one of the matching operator private keys (see
@@ -714,6 +726,15 @@ ratlsMesh:
   # Measurements config for mesh peers and the CDS the proxy dials: the JSON
   # document's content, not a path (see cds.measurementsConfig).
   measurementsConfig: ""
+
+  # Azure vTPM PCR pins for mesh peers, each "<index>=<sha256-hex>" (see
+  # cds.pcrs). Ignored for peers without a vTPM; empty = no PCR pinning.
+  pcrs: []
+
+  # Hex SHA-256 init-data digest mesh peers' evidence must bind (see
+  # cds.initDataHash). Empty = no init-data pinning.
+  initDataHash: ""
+
 
   # Pod shutdown budget. The iptables-cleanup preStop hook fires last in the
   # native-sidecar reverse-init order, so its sleep upper bound must leave room

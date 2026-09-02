@@ -64,6 +64,20 @@ type AttestHandler struct {
 	// so a digest from one image cannot be paired with another's registers.
 	Entries []measurements.Entry
 
+	// PCRs pins Azure vTPM registers on issuance: on az-snp/az-tdx the
+	// launch measurement covers the Microsoft paravisor alone, so without
+	// these (or InitDataHash) an Azure host can boot the pinned paravisor
+	// with a substituted guest OS and still be issued a leaf. Enforced only
+	// against az-shaped evidence. Empty = no PCR pinning.
+	PCRs map[int][]byte
+
+	// InitDataHash, when set, is the SHA-256 init-data digest the caller's
+	// evidence must bind: the verify request carries it as
+	// expected_init_data_hash and the init_data_match verdict must be
+	// affirmatively true (vTPM PCR[8] on az, HOST_DATA on snp, MRCONFIGID on
+	// tdx). Nil sends no pin.
+	InitDataHash []byte
+
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
 	// subject — see THREAT MODEL on issuer.CA.SignCSR.
@@ -194,6 +208,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
 	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	if h.InitDataHash != nil {
+		pinned := types.NewBase64Bytes(h.InitDataHash)
+		verifyReq.Params.ExpectedInitDataHash = &pinned
+	}
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
@@ -227,6 +245,11 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if err := attestationclient.EnforcePCRs(req.Evidence.Platform, verifyResp, h.PCRs); err != nil {
+		slog.Warn("vTPM PCR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
+		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "vTPM platform configuration registers not allowed")
+		return
 	}
 
 	policy := h.Policy
@@ -587,6 +610,8 @@ func classifyVerifyError(err error) (int, string, string) {
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
+	case errors.Is(err, attestationclient.ErrInitDataMismatch):
+		return http.StatusForbidden, types.ErrorCodeMeasurementDenied, "init-data mismatch in attestation evidence"
 	}
 	var apiErr *attestationclient.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {

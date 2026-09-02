@@ -65,6 +65,8 @@ by this command.`,
 			AttestationApiURL:       attestationApiURL,
 			CDSMeasurements:         cdsMeasurements,
 			CDSRTMRs:                cdsRTMRs,
+			CDSPCRs:                 cdsPCRs,
+			CDSInitDataHash:         cdsInitDataHash,
 			ExcludeNamespaces:       excludeNamespaces,
 			WebhookConfigName:       webhookConfigName,
 			WebhookServiceName:      webhookServiceName,
@@ -96,6 +98,8 @@ var (
 	cdsMeasurements         []string
 	cdsMeasurementsConfig   string
 	cdsRTMRs                []string
+	cdsPCRs                 []string
+	cdsInitDataHash         string
 	webhookConfigName       string
 	webhookServiceName      string
 	webhookServiceNamespace string
@@ -126,6 +130,8 @@ func init() {
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
 	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs. Any listed image may serve as CDS; the injected sidecars carry the digests flat. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	operatorCmd.Flags().StringSliceVar(&cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for SNP evidence, empty pins no registers)")
+	operatorCmd.Flags().StringSliceVar(&cdsPCRs, "cds-pcrs", nil, "Azure vTPM PCR pin(s) <index>=<sha256-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for non-vTPM evidence, empty pins no registers)")
+	operatorCmd.Flags().StringVar(&cdsInitDataHash, "cds-init-data-hash", "", "hex SHA-256 init-data digest the injected sidecars require CDS's evidence to bind (empty pins nothing)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")
 	operatorCmd.Flags().StringVar(&webhookServiceName, "webhook-service-name", "", "webhook Service name (defaults to c8s)")

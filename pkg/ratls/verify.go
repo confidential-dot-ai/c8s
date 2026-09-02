@@ -41,6 +41,21 @@ type VerifyPolicy struct {
 	// so cannot speak to guest identity.
 	RTMRs map[int][]byte
 
+	// PCRs pins Azure vTPM platform configuration registers by index. On
+	// az-snp/az-tdx the launch measurement covers the Microsoft
+	// paravisor/IGVM alone — the guest kernel and initrd measure into the
+	// vTPM PCRs — so it is these that make the guest OS itself attested.
+	// Values are SHA-256 (32 bytes). Ignored on platforms without a vTPM
+	// (snp, gcp-snp, tdx). Empty pins nothing.
+	PCRs map[int][]byte
+
+	// InitDataHash, when set, is the SHA-256 init-data digest the evidence
+	// must bind: on az-snp/az-tdx via vTPM PCR[8], on snp via HOST_DATA, on
+	// tdx via the zero-padded MRCONFIGID. The attestation-api computes the
+	// binding and the init_data_match verdict is required to be
+	// affirmatively true. Nil pins nothing.
+	InitDataHash []byte
+
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component
 	// (bootloader, TEE, reserved, snp, microcode, etc.) — each component
@@ -330,12 +345,14 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		minTcb = &m
 	}
 	resp, err := attestationclient.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, *evidence, attestationclient.EvidencePolicy{
-		ExpectedReportData: expectedReportData,
-		AllowDebug:         policy.AllowDebug,
-		MinTcb:             minTcb,
-		Entries:            policy.Entries,
-		Measurements:       policy.Measurements,
-		RTMRs:              policy.RTMRs,
+		ExpectedReportData:   expectedReportData,
+		AllowDebug:           policy.AllowDebug,
+		MinTcb:               minTcb,
+		Entries:              policy.Entries,
+		Measurements:         policy.Measurements,
+		RTMRs:                policy.RTMRs,
+		PCRs:                 policy.PCRs,
+		ExpectedInitDataHash: policy.InitDataHash,
 	})
 	if err != nil {
 		return nil, mapVerifyError(evidence.Platform, err)
@@ -367,7 +384,10 @@ func mapVerifyError(platform string, err error) error {
 		return ErrSignatureInvalid
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed):
+	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
+		errors.Is(err, attestationclient.ErrRTMRNotAllowed),
+		errors.Is(err, attestationclient.ErrPCRNotAllowed),
+		errors.Is(err, attestationclient.ErrInitDataMismatch):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, attestationclient.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

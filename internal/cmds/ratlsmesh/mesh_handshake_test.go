@@ -28,7 +28,7 @@ func attestedMeshTLSConfigs(t *testing.T, stub *testattest.Stub, measurements st
 	t.Helper()
 	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
 
-	policy, err := meshVerifyPolicy(stub.URL, measurements, "")
+	policy, err := meshVerifyPolicy(stub.URL, measurements, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,14 +164,70 @@ func TestMeshHandshakeRejectsUnpinnedMeasurement(t *testing.T) {
 // enforces, and refuse a malformed pin outright.
 func TestMeshVerifyPolicyParsesRTMRPins(t *testing.T) {
 	hex48 := strings.Repeat("ab", 48)
-	policy, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "1="+hex48+",2="+hex48)
+	policy, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "1="+hex48+",2="+hex48, "", "")
 	if err != nil {
 		t.Fatalf("meshVerifyPolicy: %v", err)
 	}
 	if len(policy.RTMRs) != 2 {
 		t.Fatalf("policy.RTMRs = %v, want RTMR[1] and RTMR[2]", policy.RTMRs)
 	}
-	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "0="+hex48); err == nil {
+	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "0="+hex48, "", ""); err == nil {
 		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")
+	}
+}
+
+// The az pins parse into the mesh policy the same way; each malformed value
+// errors naming its flag.
+func TestMeshVerifyPolicyParsesAzurePins(t *testing.T) {
+	pcr := "8=" + strings.Repeat("ab", 32)
+	initData := strings.Repeat("cd", 32)
+	policy, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "", pcr, initData)
+	if err != nil {
+		t.Fatalf("meshVerifyPolicy: %v", err)
+	}
+	if len(policy.PCRs) != 1 || len(policy.InitDataHash) != 32 {
+		t.Fatalf("policy = %d PCRs, %d init-data bytes; want 1 and 32", len(policy.PCRs), len(policy.InitDataHash))
+	}
+	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "", "24="+strings.Repeat("ab", 32), ""); err == nil || !strings.Contains(err.Error(), "--pcrs") {
+		t.Fatalf("err = %v, want a PCR parse failure naming the flag", err)
+	}
+	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "", "", "zz"); err == nil || !strings.Contains(err.Error(), "--init-data-hash") {
+		t.Fatalf("err = %v, want an init-data parse failure naming the flag", err)
+	}
+}
+
+// cdsDialPins parses every CDS-dial pin flag; each malformed value errors
+// naming its flag.
+func TestCDSDialPins(t *testing.T) {
+	c := &proxyConfig{
+		cdsMeasurements: strings.Repeat("ab", 48),
+		cdsRTMRs:        "1=" + strings.Repeat("cd", 48),
+		cdsPCRs:         "8=" + strings.Repeat("ef", 32),
+		cdsInitDataHash: strings.Repeat("12", 32),
+	}
+	pins, err := cdsDialPins(c)
+	if err != nil {
+		t.Fatalf("cdsDialPins: %v", err)
+	}
+	if len(pins.Measurements) != 1 || len(pins.RTMRs) != 1 || len(pins.PCRs) != 1 || len(pins.InitDataHash) != 32 {
+		t.Fatalf("pins = %+v, want one of each", pins)
+	}
+
+	for name, tc := range map[string]struct {
+		mutate   func(*proxyConfig)
+		wantFlag string
+	}{
+		"bad measurements": {func(c *proxyConfig) { c.cdsMeasurements = "zz" }, "--cds-measurements"},
+		"bad rtmrs":        {func(c *proxyConfig) { c.cdsRTMRs = "0=" + strings.Repeat("cd", 48) }, "--cds-rtmrs"},
+		"bad pcrs":         {func(c *proxyConfig) { c.cdsPCRs = "8=zz" }, "--cds-pcrs"},
+		"bad init-data":    {func(c *proxyConfig) { c.cdsInitDataHash = "zz" }, "--cds-init-data-hash"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := *c
+			tc.mutate(&bad)
+			if _, err := cdsDialPins(&bad); err == nil || !strings.Contains(err.Error(), tc.wantFlag) {
+				t.Fatalf("err = %v, want a parse failure naming %s", err, tc.wantFlag)
+			}
+		})
 	}
 }

@@ -602,3 +602,30 @@ func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
+
+func TestValidateRejectsBadAzurePins(t *testing.T) {
+	cfg := validConfig()
+	cfg.Allowlist.Pull.CDSPCRs = []string{"8=zz"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cds_pcrs") {
+		t.Fatalf("err = %v, want a cds_pcrs parse failure", err)
+	}
+	cfg = validConfig()
+	cfg.Allowlist.Pull.CDSInitDataHash = "zz"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cds_init_data_hash") {
+		t.Fatalf("err = %v, want a cds_init_data_hash parse failure", err)
+	}
+}
+
+// The az pins fail the pull-client build when malformed.
+func TestAllowlistPullHTTPClientRejectsBadAzurePins(t *testing.T) {
+	cfg := validConfig().Allowlist.Pull
+	cfg.CDSPCRs = []string{"8=zz"}
+	if _, err := allowlistPullHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "PCR") {
+		t.Fatalf("err = %v, want a PCR parse failure", err)
+	}
+	cfg = validConfig().Allowlist.Pull
+	cfg.CDSInitDataHash = "zz"
+	if _, err := allowlistPullHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "init-data") {
+		t.Fatalf("err = %v, want an init-data parse failure", err)
+	}
+}

@@ -64,6 +64,15 @@ type Options struct {
 	// sidecars additionally hold CDS to. Ignored for SNP evidence.
 	CDSRTMRs []string
 
+	// CDSPCRs are the Azure vTPM PCR pins (<index>=<sha256-hex>) the
+	// injected sidecars additionally hold CDS to. Ignored for non-vTPM
+	// evidence.
+	CDSPCRs []string
+
+	// CDSInitDataHash is the hex SHA-256 init-data digest the injected
+	// sidecars require CDS's evidence to bind. Empty pins nothing.
+	CDSInitDataHash string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -269,6 +278,8 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			AttestationApiURL:     opts.AttestationApiURL,
 			CDSMeasurements:       opts.CDSMeasurements,
 			CDSRTMRs:              opts.CDSRTMRs,
+			CDSPCRs:               opts.CDSPCRs,
+			CDSInitDataHash:       opts.CDSInitDataHash,
 			CertFSGroup:           ptr.To(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,

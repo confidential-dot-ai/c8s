@@ -2250,3 +2250,82 @@ func TestTDXRTMRPinWarning(t *testing.T) {
 		t.Fatal("an unreadable values file was silently treated as unpinned")
 	}
 }
+
+// --pcrs and --init-data-hash fan into cds.* and ratlsMesh.*.
+func TestAppendCvmModeInstallArgsAzurePins(t *testing.T) {
+	prevPCRs, prevInitData := installPCRs, installInitDataHash
+	defer func() { installPCRs, installInitDataHash = prevPCRs, prevInitData }()
+	p4, p8 := strings.Repeat("44", 32), strings.Repeat("88", 32)
+	installPCRs = []string{"8=" + p8, "4=" + p4} // out of order on purpose
+	installInitDataHash = strings.Repeat("cd", 32)
+
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"cds.pcrs[0]=4=" + p4, "ratlsMesh.pcrs[0]=4=" + p4,
+		"cds.pcrs[1]=8=" + p8, "ratlsMesh.pcrs[1]=8=" + p8,
+		"cds.initDataHash=" + installInitDataHash,
+		"ratlsMesh.initDataHash=" + installInitDataHash,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+
+	installPCRs = []string{"24=" + p4}
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "sev-snp"); err == nil {
+		t.Fatal("PCR index 24 accepted; the vTPM has registers 0-23")
+	}
+}
+
+// An AKS install without vTPM pins warns that the measurement pin covers the
+// paravisor only; pinned or non-AKS installs stay quiet.
+func TestAKSVTPMPinWarning(t *testing.T) {
+	p8 := "8=" + strings.Repeat("88", 32)
+	initData := strings.Repeat("cd", 32)
+
+	if warn, err := aksVTPMPinWarning("node", nil, "", nil); err != nil || warn != "" {
+		t.Fatalf("node: warn=%q err=%v, want quiet", warn, err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", []string{p8}, "", nil); err != nil || warn != "" {
+		t.Fatalf("pcr-pinned aks: warn=%q err=%v, want quiet", warn, err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", nil, initData, nil); err != nil || warn != "" {
+		t.Fatalf("init-data-pinned aks: warn=%q err=%v, want quiet", warn, err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", nil, "", nil); err != nil || warn == "" {
+		t.Fatalf("unpinned aks: warn=%q err=%v, want a warning", warn, err)
+	}
+
+	pinned := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(pinned, []byte("cds:\n  pcrs:\n    - \""+p8+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", nil, "", []string{pinned}); err != nil || warn != "" {
+		t.Fatalf("values-file pinned aks: warn=%q err=%v, want quiet", warn, err)
+	}
+
+	initDataPinned := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(initDataPinned, []byte("cds:\n  initDataHash: \""+initData+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := aksVTPMPinWarning("aks", nil, "", []string{initDataPinned}); err != nil || warn != "" {
+		t.Fatalf("init-data values file: warn=%q err=%v, want quiet", warn, err)
+	}
+	if _, err := aksVTPMPinWarning("aks", nil, "", []string{filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
+		t.Fatal("an unreadable values file was silently treated as unpinned")
+	}
+}
+
+// A malformed --init-data-hash aborts the fan-out rather than emitting a
+// half-pinned install.
+func TestAppendCvmModeInstallArgsRejectsBadInitDataHash(t *testing.T) {
+	prev := installInitDataHash
+	defer func() { installInitDataHash = prev }()
+	installInitDataHash = "zz"
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "sev-snp"); err == nil || !strings.Contains(err.Error(), "--init-data-hash") {
+		t.Fatalf("err = %v, want an init-data parse failure naming the flag", err)
+	}
+}

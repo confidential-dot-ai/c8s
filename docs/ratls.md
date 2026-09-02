@@ -340,6 +340,18 @@ What it does **not** guarantee:
   not silently drop `--min-tcb-*` on TDX the way the mesh policy does: an
   SNP-shaped floor against TDX evidence is a policy failure naming the
   platform, and on SNP the floor is re-checked against the verified claims.
+- **Guest-OS identity on Azure, unless vTPM registers are pinned.** On
+  az-snp/az-tdx the launch measurement covers the Microsoft paravisor/IGVM;
+  the guest OS kernel and initrd measure into the **vTPM PCRs**. The same
+  pinning machinery applies: `cds.pcrs` / `ratlsMesh.pcrs`
+  (`c8s install --pcrs <i>=<sha256-hex>`) pins registers in-cluster,
+  `cds.initDataHash` / `--init-data-hash` binds the init-data digest through
+  vTPM PCR[8], and operator-side `c8s verify --pcr <i>=<hex>` pins registers
+  on a hand-held verdict (`--init-data` already binds PCR[8] there). Left
+  empty — the default, warned on an AKS install — the in-cluster pins prove
+  the paravisor booted, not the c8s guest OS. Which PCR indices carry
+  guest-OS identity depends on the deployed node image's measured-boot
+  layout; read the values off a boot you trust.
 - **Workload-granular identity beyond the TEE boundary.** The unit of
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS

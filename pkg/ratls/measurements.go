@@ -20,6 +20,13 @@ type Pins struct {
 	// (VerifyPolicy.RTMRs). Ignored on SNP evidence, where kernel-hashes
 	// folds the guest image into the launch digest.
 	RTMRs map[int][]byte
+	// PCRs pins Azure vTPM registers by index (VerifyPolicy.PCRs). Ignored
+	// on platforms without a vTPM.
+	PCRs map[int][]byte
+	// InitDataHash pins the SHA-256 init-data digest
+	// (VerifyPolicy.InitDataHash): bound via vTPM PCR[8] on az-snp/az-tdx,
+	// HOST_DATA on snp, MRCONFIGID on tdx. Nil pins nothing.
+	InitDataHash []byte
 
 	// Entries pins whole images (VerifyPolicy.Entries). When set it replaces
 	// Measurements and RTMRs, so a digest from one image cannot be paired
@@ -35,6 +42,8 @@ func (p Pins) VerifyPolicy(attestationApiURL string) *VerifyPolicy {
 		Entries:           p.Entries,
 		Measurements:      p.Measurements,
 		RTMRs:             p.RTMRs,
+		PCRs:              p.PCRs,
+		InitDataHash:      p.InitDataHash,
 		AttestationApiURL: attestationApiURL,
 	}
 }
@@ -124,4 +133,71 @@ func ParseRTMRPinsString(raw string) (map[int][]byte, error) {
 		return nil, nil
 	}
 	return ParseRTMRPins(strings.Split(raw, ","))
+}
+
+// ParsePCRPins parses Azure vTPM PCR pins of the form <index>=<sha256-hex>
+// into the map VerifyPolicy.PCRs expects. Blank entries are skipped; an
+// all-blank or empty slice returns nil (no pin). Indices 0-23 are accepted —
+// which registers carry guest identity depends on the measured-boot layout of
+// the deployed node image.
+func ParsePCRPins(raw []string) (map[int][]byte, error) {
+	out := make(map[int][]byte, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		idxStr, hexStr, ok := strings.Cut(p, "=")
+		if !ok {
+			return nil, fmt.Errorf("pcr pin %q: want <index>=<sha256-hex>", p)
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(idxStr))
+		if err != nil {
+			return nil, fmt.Errorf("pcr pin %q: index is not a number: %w", p, err)
+		}
+		if idx < 0 || idx > 23 {
+			return nil, fmt.Errorf("pcr pin %q: index must be 0-23", p)
+		}
+		if _, dup := out[idx]; dup {
+			return nil, fmt.Errorf("PCR[%d] pinned more than once", idx)
+		}
+		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
+		if err != nil {
+			return nil, fmt.Errorf("pcr pin %d: value is not hex: %w", idx, err)
+		}
+		if len(v) != PCRDigestSize {
+			return nil, fmt.Errorf("pcr pin %d: value is %d bytes, want %d (%d hex characters)", idx, len(v), PCRDigestSize, PCRDigestSize*2)
+		}
+		out[idx] = v
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// ParsePCRPinsString parses a comma-separated list of <index>=<sha256-hex>
+// PCR pins (see ParsePCRPins). Empty input returns nil.
+func ParsePCRPinsString(raw string) (map[int][]byte, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	return ParsePCRPins(strings.Split(raw, ","))
+}
+
+// ParseInitDataHash parses the hex SHA-256 init-data digest a pin carries.
+// Empty input returns nil (no pin).
+func ParseInitDataHash(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	v, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("init-data hash is not hex: %w", err)
+	}
+	if len(v) != PCRDigestSize {
+		return nil, fmt.Errorf("init-data hash is %d bytes, want %d (SHA-256 of the init-data document)", len(v), PCRDigestSize)
+	}
+	return v, nil
 }
