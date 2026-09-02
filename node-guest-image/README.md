@@ -55,9 +55,24 @@ the guest comes up Ready, then wedges once RKE2 fills it — a flapping
 node, not a boot error. `scratch-enforce.service` closes that hole by
 checking for the dm mapping and powering the VM off before rke2 starts.
 
-A second disk with serial `confai-containerd` is recommended so the image
-cache stays off guest RAM. `confai-models`, `opkeydata`, and `joindata`
-are optional; missing ones are a clean no-op.
+The other disks are optional; a missing one is a clean no-op. Each is
+owned by one unit under `c8s/mkosi.extra`, whose header comment carries
+the full contract (threat model, fallback, file format):
+
+- serial `confai-containerd` (or filesystem label `containerd`) —
+  recommended. Backs containerd's image cache with a per-boot encrypted
+  ext4 instead of a 32G RAM tmpfs (`containerd-data-disk.service`).
+- serial `confai-models` — a pre-populated, read-only ext4 of model
+  weights, mounted at `/var/lib/models` so hundreds of GiB survive a
+  relaunch. Unencrypted: weights are public, integrity is the workload's
+  digest check (`models-disk.service`).
+- label `joindata` — an ISO of single-line files (`role`, `server`,
+  tokens, node IPs) that picks server vs agent and joins the cluster.
+  Absent means single-node server (`rke2-role.service`, contract v0 in
+  `rke2-role.sh`).
+- label `opkeydata` — an ISO carrying the operator public key the initrd
+  hashes into RTMR[3]; its presence turns on attested credential release
+  (`cred-release.service`, see [operator.md]).
 
 Migration state (see [#264] for the full plan):
 
@@ -79,3 +94,4 @@ Migration state (see [#264] for the full plan):
 
 [confidential-os-builder]: https://github.com/confidential-dot-ai/confidential-os-builder
 [#264]: https://github.com/confidential-dot-ai/c8s/issues/264
+[operator.md]: ../docs/operator.md
