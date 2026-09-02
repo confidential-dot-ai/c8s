@@ -37,6 +37,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/internal/snpvcek"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -210,6 +211,11 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 
 // obtainCertFn is a var so renewal-loop tests can observe attempts.
 var obtainCertFn = obtainCert
+
+// vcekEmbedder inlines the AMD VCEK into bare-SNP discovery evidence; one
+// instance so its cache survives renewals. A var so tests can stub the KDS
+// fetch.
+var vcekEmbedder = snpvcek.New()
 
 func run(cfg config) error {
 	slog.Info("starting get-cert", "san", cfg.SAN)
@@ -562,6 +568,14 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) (*x
 		return nil, fmt.Errorf("attestation failed: %w", err)
 	}
 	slog.Info("certificate obtained")
+
+	if cfg.DiscoveryOutPath != "" {
+		if enriched, err := vcekEmbedder.Embed(ctx, result.Platform, result.Evidence); err != nil {
+			slog.Warn("discovery evidence carries no inline VCEK; offline verifiers (c8s-verify-js) will reject it until a renewal embeds one", "error", err)
+		} else {
+			result.Evidence = enriched
+		}
+	}
 
 	if err := writeOutputs(cfg, keyPEM, result); err != nil {
 		return nil, err

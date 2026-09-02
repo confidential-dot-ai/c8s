@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 
+	"github.com/confidential-dot-ai/c8s/internal/snpvcek"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -32,6 +34,11 @@ type LiveEvidenceProvider struct {
 	// platforms auto-detect (az-snp) or have no generation concept (TDX),
 	// and the bundle field is left empty for them.
 	Generation string
+	// VCEK inlines the AMD VCEK into bare-SNP evidence the attestation-api
+	// returns chainless, so offline verifiers (c8s-verify-js) can check the
+	// chain without network. Nil disables embedding.
+	VCEK *snpvcek.Embedder
+	Log  *slog.Logger // defaults to slog.Default()
 }
 
 // Evidence implements EvidenceProvider against the attestation-api.
@@ -51,7 +58,23 @@ func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (
 	if platform != string(types.PlatformSnp) {
 		generation = ""
 	}
-	return resp.Evidence, platform, generation, nil
+	evidence := resp.Evidence
+	if p.VCEK != nil {
+		enriched, err := p.VCEK.Embed(ctx, platform, evidence)
+		if err != nil {
+			p.log().Warn("evidence carries no inline VCEK; offline verifiers (c8s-verify-js) will reject it", "error", err)
+		} else {
+			evidence = enriched
+		}
+	}
+	return evidence, platform, generation, nil
+}
+
+func (p LiveEvidenceProvider) log() *slog.Logger {
+	if p.Log != nil {
+		return p.Log
+	}
+	return slog.Default()
 }
 
 // FixtureEvidenceProvider serves a recorded evidence file. DEV/DEMO ONLY: the
