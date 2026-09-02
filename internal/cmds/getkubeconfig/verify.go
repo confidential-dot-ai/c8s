@@ -211,14 +211,12 @@ func checkMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy)
 		{2, "guest rootfs", exp.pins.RTMR2},
 		{3, "operator-key + workload chain", exp.rtmr3},
 	} {
-		key := fmt.Sprintf("rtmr_%d", reg.idx)
-		got, _ := res.Claims.PlatformData[key].(string)
-		got = strings.ToLower(strings.TrimSpace(got))
-		if got == "" {
-			return fmt.Errorf("quote carries no %s", key)
+		got, err := res.Claims.RTMR(reg.idx)
+		if err != nil {
+			return fmt.Errorf("RTMR[%d] mismatch (%s): %w", reg.idx, reg.meaning, err)
 		}
-		if want := hex.EncodeToString(reg.want[:]); got != want {
-			return fmt.Errorf("RTMR[%d] mismatch (%s): node reports %s, expected %s", reg.idx, reg.meaning, got, want)
+		if !bytes.Equal(got, reg.want[:]) {
+			return fmt.Errorf("RTMR[%d] mismatch (%s): node reports %x, expected %x", reg.idx, reg.meaning, got, reg.want)
 		}
 	}
 	return nil

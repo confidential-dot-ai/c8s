@@ -135,7 +135,7 @@ func (c Client) VerifyEvidence(ctx context.Context, evidence types.AttestationEv
 	switch evidence.Platform {
 	case string(types.PlatformSnp), string(types.PlatformAzSnp), string(types.PlatformGcpSnp):
 		return c.verifySNPEvidence(ctx, evidence, policy)
-	case string(types.PlatformTdx), string(types.PlatformAzTdx):
+	case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
 		return c.verifyTDXEvidence(ctx, evidence, policy)
 	default:
 		return types.VerifyResponse{}, fmt.Errorf("%w: %q", ErrUnsupportedPlatform, evidence.Platform)

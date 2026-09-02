@@ -382,7 +382,7 @@ func unsupportedPlatformAttester(t *testing.T) string {
 	t.Helper()
 	stub := testattest.New(t)
 	stub.SetVerdict(hostDataVerdict(testHostData()))
-	stub.SetPlatform(types.Platform("gcp-tdx"))
+	stub.SetPlatform(types.Platform("dstack"))
 	return stub.URL
 }
 

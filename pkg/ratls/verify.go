@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
@@ -286,7 +287,7 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 			return nil, fmt.Errorf("%w: TDX RA-TLS extension missing evidence envelope", ErrInvalidReport)
 		}
 		switch evidence.Platform {
-		case string(types.PlatformTdx), string(types.PlatformAzTdx):
+		case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
 		default:
 			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 		}
@@ -341,7 +342,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 	}
 
 	teeType := TEETypeSEVSNP
-	if evidence.Platform == string(types.PlatformTdx) || evidence.Platform == string(types.PlatformAzTdx) {
+	if teetypes.NormalizePlatform(evidence.Platform).IsTDX() {
 		teeType = TEETypeTDX
 	}
 	result := &VerifyResult{TEEType: teeType}

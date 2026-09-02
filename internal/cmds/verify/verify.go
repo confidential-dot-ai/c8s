@@ -1272,7 +1272,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	oc.Measurement = result.Claims.LaunchDigest
 	oc.CurrentTCB = formatTCB(result.Claims.TCB)
 	oc.ReportData = hex.EncodeToString(result.Claims.ReportData)
-	oc.Debug, oc.SMT = reportFlags(oc.Platform, result.Claims.PlatformData)
+	oc.Debug, oc.SMT = reportFlags(result.Claims)
 
 	// The TDX-only gate runs before any register is compared: on non-TDX
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
@@ -1406,20 +1406,13 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	}
 
 	check := func(idx int, meaning string, want []byte) bool {
-		key := fmt.Sprintf("rtmr_%d", idx)
-		got, _ := result.Claims.PlatformData[key].(string)
-		got = strings.ToLower(strings.TrimSpace(got))
-		if got == "" {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: the verified claims carry no %s", idx, key)
+		got, err := result.Claims.RTMR(idx)
+		if err != nil {
+			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: register claim absent or malformed: %v", idx, err)
 			return false
 		}
-		gb, err := hex.DecodeString(got)
-		if err != nil || len(gb) != runtimemeasure.Size {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: %s claim is malformed (%q)", idx, key, got)
-			return false
-		}
-		if !bytes.Equal(gb, want) {
-			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %s, expected %s", idx, meaning, got, hex.EncodeToString(want))
+		if !bytes.Equal(got, want) {
+			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %x, expected %x", idx, meaning, got, want)
 			return false
 		}
 		oc.RTMRsPinned = append(oc.RTMRsPinned, fmt.Sprintf("%d:%s", idx, hex.EncodeToString(want)))
@@ -1495,21 +1488,12 @@ func minTCBFromCfg(cfg config) *teetypes.SnpTcb {
 }
 
 // reportFlags reads the debug and SMT state the verifier extracted into the
-// platform-specific claims: SNP carries them under policy/platform_info, TDX
-// attests debug under td_attributes_parsed and carries no SMT state (smt:false
-// means unattested, not off). attestation-go routes all six supported platforms
-// through one of these two claim layouts, so the non-TDX branch is SNP-shaped
-// by exhaustion.
-func reportFlags(platform string, pd map[string]any) (debug, smt bool) {
-	nested := func(section, key string) bool {
-		m, _ := pd[section].(map[string]any)
-		v, _ := m[key].(bool)
-		return v
-	}
-	if isTDX(platform) {
-		return nested("td_attributes_parsed", "debug"), false
-	}
-	return nested("policy", "debug_allowed"), nested("platform_info", "smt_enabled")
+// claims, for display. A flag the platform does not carry (SMT on TDX) renders
+// as false; the verdict never depends on either.
+func reportFlags(claims teetypes.Claims) (debug, smt bool) {
+	debug, _ = claims.DebugEnabled()
+	smt, _ = claims.SMTEnabled()
+	return debug, smt
 }
 
 // formatTCB renders the verified TCB for display: SNP shows its components, TDX
