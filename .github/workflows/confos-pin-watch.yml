@@ -1,0 +1,84 @@
+# Watches the confos / attestation-rs source pins the measured builds ride
+# and opens bump PRs when upstream main moves — never merges: each bump
+# rolls a measurement, so a human owns the merge. The mkosi ref is not
+# watched independently: it is scraped from the target confos commit's own
+# base.yml, which is what keeps MinimumVersion= and the installed mkosi in
+# lockstep by construction (the v27 bump had to move both by hand).
+#
+# Two PRs, matching the two measurement domains:
+#   node-image:   c8s-image.yml            (node rootfs / RTMR + SNP digests)
+#   kata-guest:   kata-guest-base.yml + kernel-snapshot.yml (kata launch digest)
+#
+# Requires "Allow GitHub Actions to create and approve pull requests" in the
+# repo's Actions settings.
+name: confos pin watch
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # weekly; a no-op while the pins match upstream main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Open bump PRs for stale source pins
+        run: |
+          set -euo pipefail
+          confos=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main --jq .sha)
+          attest=$(gh api repos/confidential-dot-ai/attestation-rs/commits/main --jq .sha)
+          # The mkosi pin that confos commit builds with, comment included.
+          mkosi_line=$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/confidential-dot-ai/confidential-os-builder/${confos}/.github/workflows/base.yml" |
+            grep -oE 'systemd/mkosi@[0-9a-f]{40} # v[0-9.]+')
+          mkosi_sha=$(grep -oE '[0-9a-f]{40}' <<<"$mkosi_line")
+          mkosi_ver=$(grep -oE 'v[0-9.]+$' <<<"$mkosi_line")
+          today=$(date -u +%Y-%m-%d)
+          git config user.name "confos-pin-watch"
+          git config user.email "actions@github.com"
+
+          bump() { # <file> — rewrite every watched pin in one workflow file
+            python3 - "$1" <<EOF
+          import re, sys
+          p = sys.argv[1]
+          t = open(p).read()
+          note = "# pin: main ${today} (pin-watch) — review upstream log for what rolls"
+          t = re.sub(r"CONFOS_REF: \\\$\{\{ inputs\.confos_ref \|\| '[0-9a-f]{40}' \}\} #.*",
+                     "CONFOS_REF: $" + "{{ inputs.confos_ref || '${confos}' }} " + note, t)
+          t = re.sub(r'CONFOS_REF: "[0-9a-f]{40}" #.*', 'CONFOS_REF: "${confos}" ' + note, t)
+          t = re.sub(r'ATTESTATION_RS_REF: "[0-9a-f]{40}" #.*', 'ATTESTATION_RS_REF: "${attest}" ' + note, t)
+          t = re.sub(r'default: "[0-9a-f]{40}" #.*', 'default: "${confos}" ' + note, t)  # kernel-snapshot confos_ref defaults
+          t = re.sub(r'systemd/mkosi@[0-9a-f]{40} # v[0-9.]+', 'systemd/mkosi@${mkosi_sha} # ${mkosi_ver}', t)
+          t = re.sub(r'ref: [0-9a-f]{40} # v[0-9.]+', 'ref: ${mkosi_sha} # ${mkosi_ver}', t)  # local setup-mkosi action
+          open(p, "w").write(t)
+          EOF
+          }
+
+          open_pr() { # <branch> <title> <files...>
+            local branch="$1" title="$2"; shift 2
+            git diff --quiet -- "$@" && return 0
+            git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null && { git checkout -- "$@"; return 0; }
+            git checkout -b "$branch"
+            git add "$@" && git commit -m "$title"
+            git push origin "$branch"
+            gh pr create --title "$title" --body "Automated confos-pin-watch bump to confos main \`${confos:0:9}\` / attestation-rs main \`${attest:0:9}\`, mkosi ${mkosi_ver} (\`${mkosi_sha:0:9}\`, scraped from that confos commit's base.yml so the MinimumVersion= lockstep holds by construction). Rolls the affected measurements — the repro gate builds both legs on this PR; review the upstream logs before merging."
+            git checkout "${GITHUB_REF_NAME}"
+          }
+
+          bump .github/workflows/c8s-image.yml
+          open_pr pin-watch/node-image-refs \
+            "build(c8s-image): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}" \
+            .github/workflows/c8s-image.yml
+
+          bump .github/workflows/kata-guest-base.yml
+          bump .github/workflows/kernel-snapshot.yml
+          open_pr pin-watch/kata-guest-refs \
+            "build(kata-guest): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}" \
+            .github/workflows/kata-guest-base.yml .github/workflows/kernel-snapshot.yml
