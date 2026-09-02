@@ -3,7 +3,6 @@ package credrelease
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,8 +108,8 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 }
 
 // snpAttester returns the URL of a stub attestation-api whose verified claims
-// report initData (hex-encoded verbatim) as this guest's HOSTDATA.
-func snpAttester(t *testing.T, initData string) string {
+// report initData verbatim as this guest's HOSTDATA.
+func snpAttester(t *testing.T, initData []byte) string {
 	t.Helper()
 	stub := testattest.New(t)
 	v := testattest.PassingVerdict("")
@@ -126,7 +125,7 @@ func TestLoadMeasuredOperatorKeySNP(t *testing.T) {
 	pub := []byte("operator public key bytes")
 	writeFileT(t, pubPath, pub)
 	want := runtimemeasure.HostDataForOperatorKey(pub)
-	url := snpAttester(t, hex.EncodeToString(want[:]))
+	url := snpAttester(t, want[:])
 
 	got, err := LoadMeasuredOperatorKey(context.Background(), "sev-snp", url)
 	if err != nil {
@@ -152,30 +151,32 @@ func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
 			name:     "keyless launch: zero HOSTDATA",
 			platform: "sev-snp",
 			url: func(t *testing.T) string {
-				return snpAttester(t, hex.EncodeToString(bytes.Repeat([]byte{0}, runtimemeasure.HostDataSize)))
+				return snpAttester(t, bytes.Repeat([]byte{0}, runtimemeasure.HostDataSize))
 			},
 		},
 		{
 			name:     "launched for a different key",
 			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, hex.EncodeToString(otherKey[:])) },
+			url:      func(t *testing.T) string { return snpAttester(t, otherKey[:]) },
 		},
 		{
 			name:     "TDX-sized InitData (48-byte MRCONFIGID)",
 			platform: "sev-snp",
 			url: func(t *testing.T) string {
-				return snpAttester(t, hex.EncodeToString(bytes.Repeat([]byte{0xa5}, 48)))
+				return snpAttester(t, bytes.Repeat([]byte{0xa5}, 48))
 			},
 		},
 		{
-			name:     "InitData not hex",
+			// The wire's not-hex shape is refused by the HexBytes decoder in
+			// the client; through the typed stub only widths are expressible.
+			name:     "InitData wrong width",
 			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, "zz") },
+			url:      func(t *testing.T) string { return snpAttester(t, []byte("zz")) },
 		},
 		{
 			name:     "InitData claim empty",
 			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, "") },
+			url:      func(t *testing.T) string { return snpAttester(t, nil) },
 		},
 		// The two verdict cases carry a MATCHING InitData: refusal must come
 		// from verdict enforcement, not the claims compare, so a refactor
@@ -188,7 +189,7 @@ func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
 				stub := testattest.New(t)
 				v := testattest.PassingVerdict("")
 				v.SignatureValid = false
-				v.Claims.InitData = hex.EncodeToString(want[:])
+				v.Claims.InitData = want[:]
 				stub.SetVerdict(v)
 				return stub.URL
 			},
@@ -201,7 +202,7 @@ func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
 				stub := testattest.New(t)
 				v := testattest.PassingVerdict("")
 				v.ReportDataMatch = nil
-				v.Claims.InitData = hex.EncodeToString(want[:])
+				v.Claims.InitData = want[:]
 				stub.SetVerdict(v)
 				return stub.URL
 			},

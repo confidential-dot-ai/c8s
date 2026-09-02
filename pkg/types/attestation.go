@@ -168,13 +168,9 @@ type VerifyParams struct {
 	MinTcb               *MinTcb      `json:"min_tcb,omitempty"`
 }
 
-// MinTcb specifies minimum TCB version requirements.
-type MinTcb struct {
-	Bootloader uint8 `json:"bootloader"`
-	Tee        uint8 `json:"tee"`
-	Snp        uint8 `json:"snp"`
-	Microcode  uint8 `json:"microcode"`
-}
+// MinTcb aliases teetypes.SnpTcb; its JSON field names match the
+// attestation-api's min_tcb object.
+type MinTcb = teetypes.SnpTcb
 
 // VerifyResponse is the response from the attestation-api POST /verify.
 type VerifyResponse struct {
@@ -182,25 +178,15 @@ type VerifyResponse struct {
 	Token  *string            `json:"token"`
 }
 
-// VerificationResult contains the verification outcome.
-type VerificationResult struct {
-	Platform        string          `json:"platform"`
-	SignatureValid  bool            `json:"signature_valid"`
-	Claims          Claims          `json:"claims"`
-	ReportDataMatch *bool           `json:"report_data_match"`
-	InitDataMatch   *bool           `json:"init_data_match"`
-	TcbStatus       json.RawMessage `json:"tcb_status,omitempty"`
-}
+// VerificationResult aliases teetypes.VerificationResult: the attestation-api
+// (attestation-rs) serializes the same JSON shape, so the delegated and
+// in-process verification paths share one result type.
+type VerificationResult = teetypes.VerificationResult
 
-// Claims are normalised claims extracted from attestation evidence.
-type Claims struct {
-	LaunchDigest string          `json:"launch_digest"`
-	ReportData   string          `json:"report_data"`
-	SignedData   string          `json:"signed_data"`
-	InitData     string          `json:"init_data"`
-	Tcb          json.RawMessage `json:"tcb"`
-	PlatformData json.RawMessage `json:"platform_data"`
-}
+// Claims aliases teetypes.Claims. Hex-encoded wire fields decode into
+// teetypes.HexBytes, and platform_data into a map served by typed accessors
+// (Claims.RTMR, Claims.DebugEnabled, Claims.SMTEnabled).
+type Claims = teetypes.Claims
 
 // HealthResponse is the response from the attestation-api GET /health.
 type HealthResponse struct {

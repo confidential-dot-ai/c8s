@@ -589,7 +589,7 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
-	verdict.Claims.PlatformData = json.RawMessage(`{"source":"test"}`)
+	verdict.Claims.PlatformData = map[string]any{"source": "test"}
 	stub.SetVerdict(verdict)
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
@@ -822,7 +822,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("AttestationVerifyTimeout bounds the call", func(t *testing.T) {
 		match := true
 		slow := types.VerifyResponse{Result: types.VerificationResult{
-			Platform:        string(types.PlatformAzSnp),
+			Platform:        types.PlatformAzSnp,
 			SignatureValid:  true,
 			ReportDataMatch: &match,
 			Claims:          types.Claims{LaunchDigest: hex.EncodeToString(measurement)},
@@ -1159,7 +1159,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 	newPolicy := func(url string) *VerifyPolicy {
 		return &VerifyPolicy{AttestationApiURL: url, Measurements: [][]byte{measurement}}
 	}
-	stubWithPlatformData := func(t *testing.T, platformData json.RawMessage) *testattest.Stub {
+	stubWithPlatformData := func(t *testing.T, platformData map[string]any) *testattest.Stub {
 		t.Helper()
 		stub := testattest.New(t)
 		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
@@ -1170,7 +1170,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("SNP platform data is surfaced", func(t *testing.T) {
 		cert, _ := embeddedAzureCert(t)
-		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
+		srv := stubWithPlatformData(t, map[string]any{"source": "unit"})
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -1200,7 +1200,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("TDX platform data is not surfaced", func(t *testing.T) {
 		cert, _ := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
-		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
+		srv := stubWithPlatformData(t, map[string]any{"source": "unit"})
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)

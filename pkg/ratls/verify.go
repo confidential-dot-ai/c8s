@@ -1,7 +1,6 @@
 package ratls
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/x509"
@@ -346,8 +345,10 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		teeType = TEETypeTDX
 	}
 	result := &VerifyResult{TEEType: teeType}
-	if teeType == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 && !bytes.Equal(resp.Result.Claims.PlatformData, []byte("null")) {
-		result.PlatformInfo = resp.Result.Claims.PlatformData
+	if teeType == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 {
+		// The claims map came out of json.Unmarshal, so re-marshaling it
+		// cannot fail.
+		result.PlatformInfo, _ = json.Marshal(resp.Result.Claims.PlatformData)
 	}
 	copy(result.ReportData[:], expectedReportData[:])
 	if resp.Result.Claims.LaunchDigest != "" {

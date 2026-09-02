@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -222,28 +221,19 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	if len(pinned) == 0 {
 		return nil
 	}
-	reported, err := reportedRTMRs(resp)
-	if err != nil {
-		return err
-	}
-	return enforceRTMRsAgainst(reported, pinned)
+	return enforceRTMRsAgainst(reportedRTMRs(resp), pinned)
 }
 
 // reportedRTMRs reads the registers the verifier reported. Shared with the
-// entry matcher so the two cannot disagree about what evidence carries.
-func reportedRTMRs(resp types.VerifyResponse) ([4]string, error) {
-	var platform struct {
-		RTMR0 string `json:"rtmr_0"`
-		RTMR1 string `json:"rtmr_1"`
-		RTMR2 string `json:"rtmr_2"`
-		RTMR3 string `json:"rtmr_3"`
+// entry matcher so the two cannot disagree about what evidence carries. An
+// absent or non-string claim reads as "", which enforceRTMRsAgainst refuses
+// for any pinned register.
+func reportedRTMRs(resp types.VerifyResponse) [4]string {
+	var out [4]string
+	for i := range out {
+		out[i], _ = resp.Result.Claims.PlatformData[fmt.Sprintf("rtmr_%d", i)].(string)
 	}
-	if len(resp.Result.Claims.PlatformData) > 0 {
-		if err := json.Unmarshal(resp.Result.Claims.PlatformData, &platform); err != nil {
-			return [4]string{}, fmt.Errorf("%w: platform data unreadable: %w", ErrRTMRNotAllowed, err)
-		}
-	}
-	return [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}, nil
+	return out
 }
 
 func enforceRTMRsAgainst(reported [4]string, pinned map[int][]byte) error {
