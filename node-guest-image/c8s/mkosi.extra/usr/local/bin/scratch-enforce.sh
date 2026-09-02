@@ -14,14 +14,13 @@ fail() {
     exit 1
 }
 
-# The 64G floor in 512-byte sectors, decimal so a 64GB or 64GiB disk both
-# pass; the hazard is a toy disk that re-creates the wedge with more rope.
+# 64G in 512-byte sectors — decimal, so a 64GB or 64GiB disk both pass.
 MIN_SECTORS=125000000
 
-for name in /sys/block/dm-*/dm/name; do
-    [ -e "$name" ] || continue
-    [ "$(cat "$name")" = "scratch" ] || continue
-    sectors=$(cat "$(dirname "$(dirname "$name")")/size" 2>/dev/null || echo 0)
+for d in /sys/block/dm-*; do
+    [ -e "$d/dm/name" ] || continue
+    [ "$(cat "$d/dm/name")" = "scratch" ] || continue
+    sectors=$(cat "$d/size" 2>/dev/null || echo 0)
     if [ "$sectors" -lt "$MIN_SECTORS" ]; then
         fail "scratch disk too small ($((sectors / 2048)) MiB, need >=64G)"
     fi

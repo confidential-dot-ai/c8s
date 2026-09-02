@@ -43,8 +43,8 @@ Layout:
 ## Launch requirements
 
 Every node VM needs a write-storage disk with virtio-blk serial
-`confai-scratch`, at least 64G. The serial is what matters: labels don't
-work, and the disk must be one of `/dev/vdb`–`vdd`. In KubeVirt that's
+`confai-scratch`, at least 64G. The serial is what matters: the confos
+initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
 `disk: {bus: virtio}` plus `serial: confai-scratch` (see the vendored
 `tdx-metal-e2e.yml`); confidential-metal attaches one by default
 (`--datadisk-gi`, 0 opts out).
@@ -55,24 +55,20 @@ the guest comes up Ready, then wedges once RKE2 fills it — a flapping
 node, not a boot error. `scratch-enforce.service` closes that hole by
 checking for the dm mapping and powering the VM off before rke2 starts.
 
-The other disks are optional; a missing one is a clean no-op. Each is
-owned by one unit under `c8s/mkosi.extra`, whose header comment carries
-the full contract (threat model, fallback, file format):
+The other disks are optional; each is owned by one unit under
+`c8s/mkosi.extra`, whose header carries the full contract:
 
-- serial `confai-containerd` (or filesystem label `containerd`) —
-  recommended. Backs containerd's image cache with a per-boot encrypted
-  ext4 instead of a 32G RAM tmpfs (`containerd-data-disk.service`).
-- serial `confai-models` — a pre-populated, read-only ext4 of model
-  weights, mounted at `/var/lib/models` so hundreds of GiB survive a
-  relaunch. Unencrypted: weights are public, integrity is the workload's
-  digest check (`models-disk.service`).
-- label `joindata` — an ISO of single-line files (`role`, `server`,
-  tokens, node IPs) that picks server vs agent and joins the cluster.
-  Absent means single-node server (`rke2-role.service`, contract v0 in
-  `rke2-role.sh`).
-- label `opkeydata` — an ISO carrying the operator public key the initrd
-  hashes into RTMR[3]; its presence turns on attested credential release
-  (`cred-release.service`, see [operator.md]).
+- serial `confai-containerd` (or label `containerd`) — recommended:
+  backs containerd's image cache, which otherwise lives in a RAM tmpfs
+  (`containerd-data-disk.service`).
+- serial `confai-models` — a pre-populated, read-only weights disk
+  mounted at `/var/lib/models` so a large cache survives relaunch
+  (`models-disk.service`).
+- label `joindata` — an ISO that picks server vs agent and joins the
+  cluster; absent means single-node server (`rke2-role.service`).
+- label `opkeydata` — an ISO carrying the operator public key; its
+  presence turns on attested credential release (`cred-release.service`,
+  see [operator.md]).
 
 Migration state (see [#264] for the full plan):
 
