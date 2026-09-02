@@ -62,6 +62,37 @@ needs those inputs as `c8s-image.yml` sets them. Add
 The header of `build` documents every knob; the first build compiles the guest
 kernel (30 to 60 minutes), later builds hit the cache.
 
+## Launch requirements
+
+Every node VM needs a write-storage disk with virtio-blk serial
+`confai-scratch`, at least 64G. The serial is what matters: the confos
+initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
+`disk: {bus: virtio}` plus `serial: confai-scratch` (see the vendored
+`tdx-metal-e2e.yml`); confidential-metal attaches one by default
+(`--datadisk-gi`, 0 opts out).
+
+The initrd encrypts the disk and mounts it as the rootfs upper, via a dm
+mapping named `scratch`. Without the disk it falls back to a 2G RAM tmpfs:
+the guest comes up Ready, then wedges once RKE2 fills it — a flapping
+node, not a boot error. `scratch-enforce.service` closes that hole by
+checking for the dm mapping and powering the VM off before rke2 starts.
+
+The other disks are optional; each is owned by one unit under
+`c8s/mkosi.extra`, whose header carries the full contract:
+
+- serial `confai-containerd` (or label `containerd`) — recommended:
+  backs containerd's image cache, which otherwise lives in a RAM tmpfs
+  (`containerd-data-disk.service`).
+- serial `confai-models` — a pre-populated, read-only weights disk
+  mounted at `/var/lib/models` so a large cache survives relaunch. It is
+  unencrypted and host-writable: attach it only for public weights whose
+  digests the workload verifies itself (`models-disk.service`).
+- label `joindata` — an ISO that picks server vs agent and joins the
+  cluster; absent means single-node server (`rke2-role.service`).
+- label `opkeydata` — an ISO carrying the operator public key; its
+  presence turns on attested credential release (`cred-release.service`,
+  see [operator.md]).
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
@@ -82,3 +113,4 @@ Migration state (see [#264] for the full plan):
 
 [confidential-os-builder]: https://github.com/confidential-dot-ai/confidential-os-builder
 [#264]: https://github.com/confidential-dot-ai/c8s/issues/264
+[operator.md]: ../docs/operator.md

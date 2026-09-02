@@ -81,11 +81,27 @@ fi
 # tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
 # tripwire are a c8s-local patch until the source takes the same
 # edit — a re-vendor would silently delete them.
-for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert'; do
+# 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
+for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch'; do
   if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
-    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped the cidata bait/tripwire — re-apply the c8s-local patch"
+    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
     exit 1
   fi
 done
+
+# scratch-enforce keys on the initrd's dm mapping name; a confos rename
+# would power off every healthy node. Pin the contract at the pinned ref.
+if ! grep -qF '"$SCRATCH_DEV" scratch' confos/mkosi/initrd/mkosi.extra/init; then
+  echo "::error::confos initrd no longer opens the scratch disk as dm 'scratch'; scratch-enforce.sh gates on that name — update both together"
+  exit 1
+fi
+
+# The scratch floor is prose in the README and a sector count in the gate;
+# a bump must touch both.
+if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh" \
+   || ! grep -qF 'at least 64G' "$ngi/README.md"; then
+  echo "::error::scratch floor drifted: scratch-enforce.sh MIN_SECTORS (64G = 125000000 sectors) and the README's 'at least 64G' must move together"
+  exit 1
+fi
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"
