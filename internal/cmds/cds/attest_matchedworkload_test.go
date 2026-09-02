@@ -151,7 +151,7 @@ func TestAttest_MatchedWorkload_HiddenC8sProxyGetsNoNamedIdentity(t *testing.T) 
 	containers := []workloadclaims.SandboxContainer{
 		{Digest: wlDigestA},
 		{Digest: wlDigestC, Argv: []string{"/c8s", "get-cert", "--renew-interval=6h"}},
-		{Digest: wlDigestC, Argv: []string{"/c8s", "workload-proxy", "--mode=client", "--peer-policy=sglang-router"}},
+		{Digest: wlDigestC, Argv: []string{"/c8s", "workload-proxy", "--mode=client", "--peer-workload=sglang-router"}},
 	}
 	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
 	if matched != nil {

@@ -9,10 +9,10 @@ FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987
 COPY build/c8s /c8s
 
 # Run the named-workload proxy through this alias. Do not run it as
-# `/c8s workload-proxy`: CDS keeps every helper in workload matching, and the
+# `/c8s workload-proxy`: CDS excludes only the exact helper commands that the
+# webhook injects. It keeps `/c8s workload-proxy` in workload matching, and the
 # proxy also rejects that entrypoint. The distinct argv[0] keeps the proxy mode,
-# peer policy or identity, addresses, and limits inside the exact named-workload
-# policy.
+# peer name, addresses, and limits inside the exact named-workload policy.
 COPY build/c8s /workload-proxy
 
 ENTRYPOINT ["/c8s"]

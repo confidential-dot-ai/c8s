@@ -64,10 +64,6 @@ func makeCA(t *testing.T, name string) testCA {
 }
 
 func makeIdentity(t *testing.T, dir string, ca testCA, name string, extensionMode string) testIdentity {
-	return makeIdentityWithIdentity(t, dir, ca, name, "", extensionMode)
-}
-
-func makeIdentityWithIdentity(t *testing.T, dir string, ca testCA, name, stableIdentity, extensionMode string) testIdentity {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -84,7 +80,6 @@ func makeIdentityWithIdentity(t *testing.T, dir string, ca testCA, name, stableI
 	}
 	validExt, err := ratls.MarshalMatchedWorkloadExtension(&ratls.MatchedWorkload{
 		Name:             name,
-		Identity:         stableIdentity,
 		AllowlistVersion: "1",
 		AllowlistDigest:  bytes.Repeat([]byte{0x42}, 32),
 	})
@@ -164,7 +159,7 @@ func baseConfig(mode string, id testIdentity, caFile string) config {
 		mode:             mode,
 		listen:           "127.0.0.1:9443",
 		upstream:         "127.0.0.1:9444",
-		peerPolicy:       "peer",
+		peerWorkload:     "peer",
 		certFile:         id.certFile,
 		keyFile:          id.keyFile,
 		caFile:           caFile,
@@ -192,15 +187,7 @@ func TestValidateConfigRestrictsPlaintextAndBounds(t *testing.T) {
 		{"client plaintext not loopback", func() config { c := baseConfig(modeClient, id, caFile); c.listen = "0.0.0.0:9443"; return c }(), "loopback"},
 		{"server plaintext target not loopback", func() config { c := baseConfig(modeServer, id, caFile); c.upstream = "10.0.0.8:30000"; return c }(), "loopback"},
 		{"server target hostname refused", func() config { c := baseConfig(modeServer, id, caFile); c.upstream = "localhost:30000"; return c }(), "numeric IP"},
-		{"missing peer selector", func() config { c := baseConfig(modeClient, id, caFile); c.peerPolicy = ""; return c }(), "exactly one"},
-		{"both peer selectors", func() config { c := baseConfig(modeClient, id, caFile); c.peerIdentity = "peer"; return c }(), "exactly one"},
-		{"bad peer policy", func() config { c := baseConfig(modeClient, id, caFile); c.peerPolicy = "bad/name"; return c }(), "valid c8s workload"},
-		{"bad peer identity", func() config {
-			c := baseConfig(modeClient, id, caFile)
-			c.peerPolicy = ""
-			c.peerIdentity = "bad/name"
-			return c
-		}(), "valid c8s workload"},
+		{"bad workload", func() config { c := baseConfig(modeClient, id, caFile); c.peerWorkload = "bad/name"; return c }(), "valid c8s workload"},
 		{"zero timeout", func() config { c := baseConfig(modeClient, id, caFile); c.handshakeTimeout = 0; return c }(), "positive"},
 		{"zero connection bound", func() config { c := baseConfig(modeClient, id, caFile); c.maxConnections = 0; return c }(), "between 1 and 65536"},
 		{"excessive connection bound", func() config { c := baseConfig(modeClient, id, caFile); c.maxConnections = 65537; return c }(), "between 1 and 65536"},
@@ -218,7 +205,7 @@ func TestValidateConfigRestrictsPlaintextAndBounds(t *testing.T) {
 	}
 }
 
-func TestVerifyPeerRequiresCAAndSelectedMatchedWorkloadPin(t *testing.T) {
+func TestVerifyPeerRequiresCAAndExactMatchedWorkload(t *testing.T) {
 	dir := t.TempDir()
 	ca := makeCA(t, "mesh")
 	otherCA := makeCA(t, "other")
@@ -228,22 +215,16 @@ func TestVerifyPeerRequiresCAAndSelectedMatchedWorkloadPin(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		identity         testIdentity
-		expectedPolicy   string
-		expectedIdentity string
-		wantError        string
+		name      string
+		identity  testIdentity
+		expected  string
+		wantError string
 	}{
-		{"v1 policy", makeIdentity(t, dir, ca, "sglang-router-v1", "valid"), "sglang-router-v1", "", ""},
-		{"v1 identity", makeIdentity(t, dir, ca, "sglang-router-v1", "valid"), "", "sglang-router-v1", ""},
-		{"v2 policy", makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid"), "sglang-router-v2", "", ""},
-		{"v2 identity", makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid"), "", "sglang-router", ""},
-		{"changed policy", makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid"), "sglang-router-v1", "", "does not match"},
-		{"changed identity", makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid"), "", "gateway", "does not match"},
-		{"policy substituted for identity", makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid"), "", "sglang-router-v2", "does not match"},
-		{"missing stamp", makeIdentity(t, dir, ca, "sglang-router-missing", "missing"), "sglang-router-missing", "", "no matched-workload"},
-		{"malformed stamp", makeIdentity(t, dir, ca, "sglang-router-malformed", "malformed"), "sglang-router-malformed", "", "unmarshal"},
-		{"wrong CA", makeIdentity(t, dir, otherCA, "sglang-router-v1", "valid"), "sglang-router-v1", "", "does not chain"},
+		{"exact", makeIdentity(t, dir, ca, "sglang-router", "valid"), "sglang-router", ""},
+		{"wrong name", makeIdentity(t, dir, ca, "other-workload", "valid"), "sglang-router", "does not match"},
+		{"missing name", makeIdentity(t, dir, ca, "sglang-router-missing", "missing"), "sglang-router", "no matched-workload"},
+		{"malformed name", makeIdentity(t, dir, ca, "sglang-router-malformed", "malformed"), "sglang-router", "unmarshal"},
+		{"wrong CA", makeIdentity(t, dir, otherCA, "sglang-router", "valid"), "sglang-router", "does not chain"},
 	}
 	duplicate := makeIdentity(t, dir, ca, "sglang-router", "valid")
 	duplicateLeaf := *duplicate.leaf
@@ -253,12 +234,12 @@ func TestVerifyPeerRequiresCAAndSelectedMatchedWorkloadPin(t *testing.T) {
 			break
 		}
 	}
-	if err := verifyPeer([]*x509.Certificate{&duplicateLeaf}, roots, "sglang-router", "", x509.ExtKeyUsageServerAuth); err == nil || !strings.Contains(err.Error(), "more than one") {
+	if err := verifyPeer([]*x509.Certificate{&duplicateLeaf}, roots, "sglang-router", x509.ExtKeyUsageServerAuth); err == nil || !strings.Contains(err.Error(), "more than one") {
 		t.Fatalf("duplicate workload extension error = %v", err)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyPeer([]*x509.Certificate{tc.identity.leaf}, roots, tc.expectedPolicy, tc.expectedIdentity, x509.ExtKeyUsageServerAuth)
+			err := verifyPeer([]*x509.Certificate{tc.identity.leaf}, roots, tc.expected, x509.ExtKeyUsageServerAuth)
 			if tc.wantError == "" && err != nil {
 				t.Fatal(err)
 			}
@@ -269,7 +250,7 @@ func TestVerifyPeerRequiresCAAndSelectedMatchedWorkloadPin(t *testing.T) {
 	}
 
 	self := makeSelfSignedIdentity(t, dir, "sglang-router")
-	if err := verifyPeer([]*x509.Certificate{self.leaf}, roots, "sglang-router", "", x509.ExtKeyUsageServerAuth); err == nil || !strings.Contains(err.Error(), "does not chain") {
+	if err := verifyPeer([]*x509.Certificate{self.leaf}, roots, "sglang-router", x509.ExtKeyUsageServerAuth); err == nil || !strings.Contains(err.Error(), "does not chain") {
 		t.Fatalf("self-signed peer error = %v", err)
 	}
 }
@@ -356,13 +337,13 @@ func TestClientAndServerProxyStreamDuplex(t *testing.T) {
 
 	serverCfg := baseConfig(modeServer, router, caFile)
 	serverCfg.upstream = target
-	serverCfg.peerPolicy = "gateway"
+	serverCfg.peerWorkload = "gateway"
 	serverCfg.idleTimeout = 5 * time.Second
 	serverAddr := startTestProxy(t, serverCfg)
 
 	clientCfg := baseConfig(modeClient, gateway, caFile)
 	clientCfg.upstream = serverAddr
-	clientCfg.peerPolicy = "sglang-router"
+	clientCfg.peerWorkload = "sglang-router"
 	clientCfg.idleTimeout = 5 * time.Second
 	clientAddr := startTestProxy(t, clientCfg)
 
@@ -395,26 +376,22 @@ func TestClientAndServerProxyStreamDuplex(t *testing.T) {
 	}
 }
 
-// The policy side remains on a v1 certificate while the identity side moves to
-// v2. This is the safe mixed-version migration: each proxy selects the stamp
-// field it means to authorize, and half-close still reaches the plaintext peer.
-func TestClientAndServerProxyPreserveTLSHalfCloseAcrossV1V2(t *testing.T) {
+func TestClientAndServerProxyPreserveTLSHalfClose(t *testing.T) {
 	dir := t.TempDir()
 	ca := makeCA(t, "mesh")
 	caFile := writeCA(t, dir, "mesh", ca)
 	gateway := makeIdentity(t, dir, ca, "gateway", "valid")
-	router := makeIdentityWithIdentity(t, dir, ca, "sglang-router-v2", "sglang-router", "valid")
+	router := makeIdentity(t, dir, ca, "sglang-router", "valid")
 
 	serverCfg := baseConfig(modeServer, router, caFile)
 	serverCfg.upstream = startEOFReply(t)
-	serverCfg.peerPolicy = "gateway"
+	serverCfg.peerWorkload = "gateway"
 	serverCfg.idleTimeout = 5 * time.Second
 	serverAddr := startTestProxy(t, serverCfg)
 
 	clientCfg := baseConfig(modeClient, gateway, caFile)
 	clientCfg.upstream = serverAddr
-	clientCfg.peerPolicy = ""
-	clientCfg.peerIdentity = "sglang-router"
+	clientCfg.peerWorkload = "sglang-router"
 	clientCfg.idleTimeout = 5 * time.Second
 	clientAddr := startTestProxy(t, clientCfg)
 
@@ -449,11 +426,11 @@ func TestServerRejectsWrongClientWorkloadBeforePlaintextDial(t *testing.T) {
 
 	serverCfg := baseConfig(modeServer, router, caFile)
 	serverCfg.upstream = target
-	serverCfg.peerPolicy = "gateway"
+	serverCfg.peerWorkload = "gateway"
 	serverAddr := startTestProxy(t, serverCfg)
 	clientCfg := baseConfig(modeClient, intruder, caFile)
 	clientCfg.upstream = serverAddr
-	clientCfg.peerPolicy = "sglang-router"
+	clientCfg.peerWorkload = "sglang-router"
 	clientAddr := startTestProxy(t, clientCfg)
 
 	conn, err := net.DialTimeout("tcp", clientAddr, time.Second)
@@ -487,7 +464,7 @@ func TestClientHandshakeTimeoutClosesPlaintextConnection(t *testing.T) {
 
 	cfg := baseConfig(modeClient, gateway, caFile)
 	cfg.upstream = stall.Addr().String()
-	cfg.peerPolicy = "sglang-router"
+	cfg.peerWorkload = "sglang-router"
 	cfg.handshakeTimeout = 100 * time.Millisecond
 	clientAddr := startTestProxy(t, cfg)
 	conn, err := net.Dial("tcp", clientAddr)
