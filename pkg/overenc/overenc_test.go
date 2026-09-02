@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 var update = flag.Bool("update", false, "regenerate testdata/attest_pq_channel_vectors.json")
@@ -391,27 +393,28 @@ func TestKeyAgreementRejectsWrongSizes(t *testing.T) {
 // the identity transcript, the HKDF key schedule, and one sealed record per
 // direction. c8s-verify-js/test/vectors.test.ts consumes the identical file.
 type channelVectors struct {
-	Description       string `json:"description"`
-	XWingSeed         string `json:"xwing_seed_hex"`
-	XWingEK           string `json:"xwing_ek_hex"`
-	XWingCT           string `json:"xwing_ct_hex"`
-	SharedSecret      string `json:"shared_secret_hex"`
-	LeafDER           string `json:"leaf_der_hex"`
-	CADER             string `json:"ca_der_hex"`
-	Nonce             string `json:"nonce_hex"`
-	SessionID         string `json:"session_id_hex"`
-	TranscriptHash    string `json:"transcript_hash_hex"`
-	C2SKey            string `json:"c2s_key_hex"`
-	S2CKey            string `json:"s2c_key_hex"`
-	C2SIV             string `json:"c2s_iv_hex"`
-	S2CIV             string `json:"s2c_iv_hex"`
-	Exporter          string `json:"exporter_hex"`
-	RequestSeq        uint64 `json:"request_seq"`
-	RequestPlaintext  string `json:"request_plaintext_hex"`
-	RequestCT         string `json:"request_ct_hex"`
-	ResponseSeq       uint64 `json:"response_seq"`
-	ResponsePlaintext string `json:"response_plaintext_hex"`
-	ResponseCT        string `json:"response_ct_hex"`
+	Description       string              `json:"description"`
+	FrontDoorMode     types.FrontDoorMode `json:"front_door_mode"`
+	XWingSeed         string              `json:"xwing_seed_hex"`
+	XWingEK           string              `json:"xwing_ek_hex"`
+	XWingCT           string              `json:"xwing_ct_hex"`
+	SharedSecret      string              `json:"shared_secret_hex"`
+	LeafDER           string              `json:"leaf_der_hex"`
+	CADER             string              `json:"ca_der_hex"`
+	Nonce             string              `json:"nonce_hex"`
+	SessionID         string              `json:"session_id_hex"`
+	TranscriptHash    string              `json:"transcript_hash_hex"`
+	C2SKey            string              `json:"c2s_key_hex"`
+	S2CKey            string              `json:"s2c_key_hex"`
+	C2SIV             string              `json:"c2s_iv_hex"`
+	S2CIV             string              `json:"s2c_iv_hex"`
+	Exporter          string              `json:"exporter_hex"`
+	RequestSeq        uint64              `json:"request_seq"`
+	RequestPlaintext  string              `json:"request_plaintext_hex"`
+	RequestCT         string              `json:"request_ct_hex"`
+	ResponseSeq       uint64              `json:"response_seq"`
+	ResponsePlaintext string              `json:"response_plaintext_hex"`
+	ResponseCT        string              `json:"response_ct_hex"`
 }
 
 const channelVectorsPath = "testdata/attest_pq_channel_vectors.json"
@@ -449,7 +452,7 @@ func TestChannelGoldenVectors(t *testing.T) {
 		t.Fatalf("shared secret = %s, want %s", got, v.SharedSecret)
 	}
 
-	th, err := IdentityTranscriptHash(ck.EncapsulationKey(), mustHex(t, v.XWingCT),
+	th, err := IdentityTranscriptHash(v.FrontDoorMode, ck.EncapsulationKey(), mustHex(t, v.XWingCT),
 		mustHex(t, v.SessionID), mustHex(t, v.Nonce), mustHex(t, v.LeafDER), mustHex(t, v.CADER))
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +532,7 @@ func writeChannelVectors(t *testing.T) {
 	leafDER, caDER := []byte("leaf-der"), []byte("ca-der")
 	nonce := bytes.Repeat([]byte{0x33}, 32)
 	sessionID := bytes.Repeat([]byte{0x44}, SessionIDBytes)
-	th, err := IdentityTranscriptHash(ck.EncapsulationKey(), ct, sessionID, nonce, leafDER, caDER)
+	th, err := IdentityTranscriptHash("cds", ck.EncapsulationKey(), ct, sessionID, nonce, leafDER, caDER)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,6 +559,7 @@ func writeChannelVectors(t *testing.T) {
 	}
 	v := channelVectors{
 		Description:       "c8s attest-pq v1 channel golden vector: X-Wing decapsulation from seed, identity transcript, HKDF schedule, one record per direction. Shared verbatim with c8s-verify-js.",
+		FrontDoorMode:     "cds",
 		XWingSeed:         hex.EncodeToString(seed),
 		XWingEK:           hex.EncodeToString(ck.EncapsulationKey()),
 		XWingCT:           hex.EncodeToString(ct),

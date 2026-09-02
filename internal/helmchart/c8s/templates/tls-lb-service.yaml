@@ -29,6 +29,13 @@ spec:
       targetPort: https
       protocol: TCP
       name: https
+    {{- if eq (include "tls-lb.publicTLSMode" .) "acme" }}
+    {{- /* HTTP-01 validators dial :80. */}}
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- end }}
   selector:
     {{- include "tls-lb.selectorLabels" . | nindent 4 }}
 {{- end }}

@@ -21,7 +21,7 @@ type config struct {
 	host                 string
 	port                 int
 	logLevel             string
-	frontDoorMode        string
+	frontDoorMode        types.FrontDoorMode
 	servingCertFile      string
 	meshIdentityCertFile string
 	meshIdentityKeyFile  string
@@ -60,7 +60,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.host, "host", "127.0.0.1", "listen host (loopback: nginx proxies to it)")
 	f.IntVarP(&cfg.port, "port", "p", 8800, "listen port")
 	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
-	f.StringVar(&cfg.frontDoorMode, "front-door-mode", "", "REQUIRED: which credential terminates public TLS in front of this sidecar: cds (TEE-held mesh-issued serving key; attest-lb served) or webpki (host-visible Secret; attest-lb refused with unsupported_front_door)")
+	f.StringVar((*string)(&cfg.frontDoorMode), "front-door-mode", "", "REQUIRED: which credential terminates public TLS in front of this sidecar: cds (TEE-held mesh-issued serving key; attest-lb served), acme (TEE-held in-guest ACME serving key; attest-lb served), or webpki (host-visible Secret; attest-lb refused with external_tls)")
 	f.StringVar(&cfg.servingCertFile, "serving-cert-file", "", "path to the LB serving-leaf PEM (the cert nginx presents). In cds front-door mode, GET /.well-known/c8s/attest-lb binds report_data to this exact leaf DER. Re-read per request to follow get-cert rotation.")
 	f.StringVar(&cfg.meshIdentityCertFile, "mesh-identity-cert-file", "", "TEE-held mesh leaf PEM whose possession both attestation endpoints prove (re-read per request)")
 	f.StringVar(&cfg.meshIdentityKeyFile, "mesh-identity-key-file", "", "TEE-held mesh leaf private key matching --mesh-identity-cert-file (re-read per request)")
@@ -86,8 +86,10 @@ func run(cfg config) error {
 
 	// No default: serving attest-lb is a trust decision about where the
 	// serving key lives, so the deployer must state it.
-	if cfg.frontDoorMode != FrontDoorModeCDS && cfg.frontDoorMode != FrontDoorModeWebPKI {
-		return fmt.Errorf("--front-door-mode must be %q or %q, got %q", FrontDoorModeCDS, FrontDoorModeWebPKI, cfg.frontDoorMode)
+	switch cfg.frontDoorMode {
+	case types.FrontDoorModeCDS, types.FrontDoorModeWebPKI, types.FrontDoorModeACME:
+	default:
+		return fmt.Errorf("--front-door-mode must be %q, %q, or %q, got %q", types.FrontDoorModeCDS, types.FrontDoorModeWebPKI, types.FrontDoorModeACME, cfg.frontDoorMode)
 	}
 	// Same rule as front-door-mode: the advertised TEE is a trust statement,
 	// so the deployer must state it.

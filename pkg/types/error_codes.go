@@ -21,10 +21,10 @@ const (
 	// ErrorCodeTooManyRequests: the caller holds as many sessions as one
 	// client may. Retrying once the sessions it holds expire succeeds.
 	ErrorCodeTooManyRequests = "too_many_requests"
-	// ErrorCodeUnsupportedFrontDoor: attest-lb was requested on a WebPKI-secret
-	// front door, whose host-visible serving key cannot support transport
-	// binding; that deployment shape is attest-pq-only.
-	ErrorCodeUnsupportedFrontDoor = "unsupported_front_door"
+	// ErrorCodeExternalTLS: attest-lb was requested on a front door whose TLS
+	// terminates outside the TEE (a WebPKI-secret deployment), so no TEE-held
+	// serving key exists to bind; that deployment shape is attest-pq-only.
+	ErrorCodeExternalTLS = "external_tls"
 	// ErrorCodeSecretHolderQuota: the caller is at --secrets-max-paths-per-workload.
 	ErrorCodeSecretHolderQuota = "secret_holder_quota"
 	// ErrorCodeSecretStoreFull: the store is at --secrets-max-paths.

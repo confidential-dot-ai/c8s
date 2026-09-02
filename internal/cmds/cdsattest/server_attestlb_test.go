@@ -64,7 +64,7 @@ func newAttestLBServer(t *testing.T, identity testMeshIdentity, servingCertFile 
 	prov := &capturingProvider{}
 	srv := NewServer(Config{
 		Evidence:             prov,
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      servingCertFile,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -115,7 +115,10 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	// Recompute the transcript the way a client does — from the leaf observed
 	// on the connection plus the served mesh chain — and require the hardware
 	// report_data and the ECDSA proof to verify against it.
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	if b.FrontDoorMode != types.FrontDoorModeCDS {
+		t.Errorf("front_door_mode = %q, want %q", b.FrontDoorMode, types.FrontDoorModeCDS)
+	}
+	want, err := overenc.LBTranscriptHash(b.FrontDoorMode, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,13 +152,13 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	_, servingDER := writeTestServingLeaf(t)
 	nonce := make([]byte, 32)
-	pq, err := overenc.IdentityTranscriptHash(
+	pq, err := overenc.IdentityTranscriptHash(types.FrontDoorModeCDS,
 		make([]byte, overenc.XWingEKBytes), make([]byte, overenc.XWingCTBytes),
 		make([]byte, overenc.SessionIDBytes), nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	lb, err := overenc.LBTranscriptHash(types.FrontDoorModeCDS, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +172,7 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
-		FrontDoorMode:        FrontDoorModeWebPKI,
+		FrontDoorMode:        types.FrontDoorModeWebPKI,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -186,8 +189,8 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeUnsupportedFrontDoor {
-		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeUnsupportedFrontDoor)
+	if e := decodeErr(t, resp); e.Error != types.ErrorCodeExternalTLS {
+		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeExternalTLS)
 	}
 
 	// attest-pq stays available on the same front door.

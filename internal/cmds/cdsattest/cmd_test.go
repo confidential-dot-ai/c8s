@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // TestNewCmdDurationDefaults pins the shipped duration-flag defaults.
@@ -63,29 +65,30 @@ func TestRunErrors(t *testing.T) {
 		},
 		{
 			name:    "missing platform",
-			cfg:     config{frontDoorMode: FrontDoorModeCDS, evidenceFixture: fixture},
+			cfg:     config{frontDoorMode: types.FrontDoorModeCDS, evidenceFixture: fixture},
 			wantSub: "--platform is required",
 		},
 		{
 			name:    "no evidence source",
-			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp"},
+			cfg:     config{frontDoorMode: types.FrontDoorModeCDS, platform: "snp"},
 			wantSub: "--attestation-api-url or --evidence-fixture",
 		},
 		{
 			name:    "unreadable evidence fixture",
-			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp", evidenceFixture: filepath.Join(t.TempDir(), "missing.json")},
+			cfg:     config{frontDoorMode: types.FrontDoorModeCDS, platform: "snp", evidenceFixture: filepath.Join(t.TempDir(), "missing.json")},
 			wantSub: "read evidence fixture",
 		},
 		{
+			// acme passes the mode gate: the failure is the later upstream check.
 			name:    "invalid upstream URL",
-			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", evidenceFixture: fixture, upstream: "ftp://backend"},
+			cfg:     config{frontDoorMode: types.FrontDoorModeACME, platform: "snp", evidenceFixture: fixture, upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
 		{
 			// The live-evidence branch must be selected on --attestation-api-url
 			// alone; the bad upstream proves run() got past provider selection.
 			name:    "invalid upstream URL with live evidence source",
-			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
+			cfg:     config{frontDoorMode: types.FrontDoorModeWebPKI, platform: "snp", attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
 	}
@@ -150,7 +153,7 @@ func TestRunServesUntilSignalled(t *testing.T) {
 		host:              "127.0.0.1",
 		port:              port,
 		logLevel:          "not-a-level", // exercises the newLogger fallback too
-		frontDoorMode:     FrontDoorModeCDS,
+		frontDoorMode:     types.FrontDoorModeCDS,
 		evidenceFixture:   fixture,
 		platform:          "snp",
 		generation:        "genoa",

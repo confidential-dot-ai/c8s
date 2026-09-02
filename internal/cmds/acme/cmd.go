@@ -1,0 +1,180 @@
+// Package acme implements the tls-lb ACME sidecar (`c8s acme`): the in-guest
+// public-TLS issuer for the acme front-door mode. It obtains one multi-SAN
+// WebPKI certificate for --domains via ACME HTTP-01 (nginx's :80 server
+// proxies /.well-known/acme-challenge/ to the loopback challenge listener),
+// writes key + chain under --cert-dir, renews at 2/3 lifetime, and reloads
+// nginx via SIGHUP after each install. Under a confidential runtime the
+// cert-dir is a Memory-medium emptyDir, so the serving key is TEE-held and
+// re-issued on pod recreation.
+package acme
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+)
+
+const letsEncryptDirectoryURL = "https://acme-v02.api.letsencrypt.org/directory"
+
+type config struct {
+	domains       []string
+	directoryURL  string
+	email         string
+	challengePort int
+	httpPort      int
+	certDir       string
+	reloadNginx   bool
+	logLevel      string
+}
+
+// NewCmd returns the acme subcommand.
+func NewCmd() *cobra.Command {
+	var cfg config
+	cmd := &cobra.Command{
+		Use:   "acme",
+		Short: "Run the tls-lb in-guest ACME sidecar (acme front-door mode)",
+		Long: `acme runs beside nginx in the tls-lb pod and keeps one multi-SAN WebPKI
+certificate for --domains under --cert-dir: cert.pem (full chain) and key.pem.
+Issuance uses ACME HTTP-01; nginx's :80 server proxies
+/.well-known/acme-challenge/ to the loopback challenge listener. The
+certificate is renewed at 2/3 of its lifetime, and nginx is reloaded via
+SIGHUP after each install (shareProcessNamespace: true). On start, a
+self-signed placeholder is written when no certificate exists, so nginx —
+whose config names both files — can start and serve the challenge proxy the
+first issuance needs.
+
+The cert-dir also holds the ACME account key. On a Memory-medium emptyDir the
+state is lost with the pod and re-issued on recreation; point
+--acme-directory-url at a staging directory when testing to stay clear of the
+CA's duplicate-certificate limits.`,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return run(cfg)
+		},
+	}
+	f := cmd.Flags()
+	f.StringSliceVar(&cfg.domains, "domains", nil, "FQDNs the certificate covers (one multi-SAN certificate), repeatable/comma-separated")
+	f.StringVar(&cfg.directoryURL, "acme-directory-url", letsEncryptDirectoryURL, "ACME directory URL (point at a staging directory for testing)")
+	f.StringVar(&cfg.email, "acme-email", "", "contact email registered with the ACME account")
+	f.IntVar(&cfg.challengePort, "challenge-port", 8402, "loopback port answering ACME HTTP-01 challenges (nginx's :80 server proxies /.well-known/acme-challenge/ to it)")
+	f.IntVar(&cfg.httpPort, "http-port", 8080, "loopback port of nginx's :80 server, probed round-trip before each order so no validation is sent at a listener that is still starting")
+	f.StringVar(&cfg.certDir, "cert-dir", "/etc/c8s-acme-tls", "directory for cert.pem, key.pem, and the ACME account key")
+	f.BoolVar(&cfg.reloadNginx, "reload-nginx", true, "SIGHUP nginx after a certificate install")
+	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
+
+	_ = cmd.MarkFlagRequired("domains")
+
+	return cmd
+}
+
+func validateConfig(cfg *config) error {
+	if len(cfg.domains) == 0 {
+		return fmt.Errorf("--domains must name at least one FQDN")
+	}
+	seen := make(map[string]struct{}, len(cfg.domains))
+	for _, d := range cfg.domains {
+		if err := validateDomain(d); err != nil {
+			return fmt.Errorf("--domains: %w", err)
+		}
+		if _, dup := seen[d]; dup {
+			return fmt.Errorf("--domains lists %q twice", d)
+		}
+		seen[d] = struct{}{}
+	}
+	if err := cmdsutil.ValidateHTTPURL("--acme-directory-url", cfg.directoryURL); err != nil {
+		return err
+	}
+	if cfg.challengePort < 1 || cfg.challengePort > 65535 {
+		return fmt.Errorf("--challenge-port must be between 1 and 65535, got %d", cfg.challengePort)
+	}
+	if cfg.httpPort < 1 || cfg.httpPort > 65535 {
+		return fmt.Errorf("--http-port must be between 1 and 65535, got %d", cfg.httpPort)
+	}
+	if cfg.httpPort == cfg.challengePort {
+		return fmt.Errorf("--http-port and --challenge-port must differ, got %d", cfg.httpPort)
+	}
+	return nil
+}
+
+// validateDomain checks an RFC 1123 hostname.
+func validateDomain(domain string) error {
+	if domain == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if len(domain) > 253 {
+		return fmt.Errorf("%q exceeds 253 characters", domain)
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(validation.IsDNS1123Label(label)) > 0 {
+			return fmt.Errorf("%q is not a valid RFC 1123 hostname", domain)
+		}
+	}
+	return nil
+}
+
+func run(cfg config) error {
+	logger, err := newLogger(cfg.logLevel)
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(logger)
+
+	if err := validateConfig(&cfg); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.certDir, 0o700); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	mgr := newManager(cfg.directoryURL, cfg.email, cfg.certDir, cfg.domains, logger, func() {
+		if !cfg.reloadNginx {
+			return
+		}
+		if err := reloadNginx(logger); err != nil {
+			logger.Error("nginx reload failed", "error", err)
+		}
+	})
+	mgr.httpPort = cfg.httpPort
+
+	challengeSrv := &http.Server{
+		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.challengePort)),
+		Handler:           mgr.handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go cmdsutil.ShutdownOnDone(ctx, challengeSrv, 5*time.Second)
+	go func() {
+		if err := challengeSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("acme challenge listener failed", "error", err)
+		}
+	}()
+
+	logger.Info("acme sidecar running", "domains", cfg.domains, "cert_dir", cfg.certDir)
+	mgr.run(ctx)
+	logger.Info("shutting down")
+	return nil
+}
+
+func newLogger(level string) (*slog.Logger, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("--log-level: %w", err)
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})), nil
+}

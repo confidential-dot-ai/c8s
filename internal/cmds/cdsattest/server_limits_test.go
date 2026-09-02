@@ -73,6 +73,7 @@ func newTestServerWith(t *testing.T, tune func(*Server)) (*Server, *httptest.Ser
 	evidence := &countingEvidence{inner: testFixture()}
 	srv := NewServer(Config{
 		Evidence:             evidence,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -185,7 +186,7 @@ func TestAttestLBIsMetered(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             testFixture(),
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      identity.certFile,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -1036,6 +1037,7 @@ func TestReadyzIsCached(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             testFixture(),
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ExpectedWorkload:     "some-workload",
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
