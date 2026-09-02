@@ -2282,3 +2282,14 @@ func TestTDXRTMRPinWarning(t *testing.T) {
 		t.Fatal("an unreadable values file was silently treated as unpinned")
 	}
 }
+
+func TestPrintAttestVerifyHint_MeasurementsConfigCountsAsPinned(t *testing.T) {
+	t.Cleanup(func() { installMeasurementsConfig = ""; installMeasurements = nil })
+	installMeasurementsConfig = "measurements.json"
+	installMeasurements = nil
+	var out strings.Builder
+	printAttestVerifyHint(&out, true)
+	if strings.Contains(out.String(), "UNPINNED") || !strings.Contains(out.String(), "--measurements-config") {
+		t.Fatalf("a --measurements-config install must not be reported unpinned: %q", out.String())
+	}
+}

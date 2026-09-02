@@ -131,11 +131,10 @@ sealed CDS never comes up with an unstamped root.
 
 ```sh
 c8s verify https://workload.example.com --kind lb \
-  --measurements <node-launch-digest> \
+  --image-manifest manifest.json \
   --mesh-ca mesh-ca.pem \
   --static-allowlist \
-  --allowlist allowlist.json \
-  --workload api
+  --allowlist allowlist.json
 ```
 
 `--static-allowlist` (requires `--mesh-ca`) makes the verdict additionally
@@ -147,17 +146,42 @@ require:
    key, and its launch digest passes the same measurement policy as the
    target (`--measurements` / `--measurements-config` / `--image-manifest`).
 3. With `--allowlist`, the sealed digest equals SHA-256 of the held bytes
-   (fetch them with `c8s allowlist export`, or use the published document).
+   (`GET /allowlist`, `c8s allowlist export`, or the published document —
+   `c8s allowlist digest` prints the value from any of them).
 4. Any `…1.5` matched-workload stamp on the target's leaf was decided under
    the sealed digest — a leaf stamped under a different policy document is
-   `static_allowlist_skew`, a hard failure.
+   `static_allowlist_skew`, a hard failure. The front door's own leaf is
+   unnamed unless tls-lb's nginx has a named entry, so under
+   `--static-allowlist` an unnamed leaf passes `--allowlist`; pin
+   `--workload` to require a name.
 
-The sealed CA also verifies offline, because it is an ordinary self-signed
-RA-TLS certificate:
+The verdict prints the sealed digest and what stands behind it:
+
+```text
+  sealed policy: c6c966767974402e6b5875304dce41f60f100966308730925c2da1b1f43075a1
+                 static_allowlist_verified: the mesh CA embeds TEE evidence binding
+                 its own key (launch 9309…8ba1, inside the pinned measurement
+                 policy) and seals this policy digest; the policy cannot change
+                 without minting a new CA
+```
+
+`--mode attest-pq` runs the same pins over the nonce-fresh browser protocol,
+and the sealed CA also verifies offline, because it is an ordinary
+self-signed RA-TLS certificate:
 
 ```sh
-c8s verify --from-file mesh-ca.pem --measurements <node-launch-digest> \
+c8s verify --from-file mesh-ca.pem --image-manifest manifest.json \
   --mesh-ca mesh-ca.pem --static-allowlist --allowlist allowlist.json
+```
+
+A workload's own leaf verifies the same way, naming the entry it matched
+under the sealed policy (the injected certificate is at
+`/etc/c8s/certs/tls.crt` in the pod):
+
+```sh
+c8s verify --from-file demo-leaf.pem --image-manifest manifest.json \
+  --mesh-ca mesh-ca.pem --static-allowlist --allowlist allowlist.json \
+  --workload demo-nginx
 ```
 
 ### What this buys, concretely

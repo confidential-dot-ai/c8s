@@ -214,7 +214,7 @@ responder chose).`,
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
-	f.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "require the --mesh-ca bundle to hold a sealed mesh CA: one certificate carrying the static-allowlist stamp AND embedded TEE evidence binding the CA key, verified against the same measurement policy as the target. With --allowlist the sealed digest must equal SHA-256 of the held bytes, and any matched-workload stamp on the target's leaf must have been decided under the sealed policy (docs/static-allowlist.md). Requires --mesh-ca")
+	f.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "require the --mesh-ca bundle to hold a sealed mesh CA: one certificate carrying the static-allowlist stamp AND embedded TEE evidence binding the CA key, verified against the same measurement policy as the target. With --allowlist the sealed digest must equal SHA-256 of the held bytes (an unnamed leaf then passes unless --workload is also pinned), and any matched-workload stamp on the target's leaf must have been decided under the sealed policy (docs/static-allowlist.md). Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
@@ -1280,6 +1280,13 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 		return
 	}
 	if ev.workload == nil {
+		// Under --static-allowlist the held bytes are checked against the
+		// sealed digest on the mesh CA (applyStaticAllowlistPolicy), so an
+		// unnamed leaf — a front door whose pod matched no entry — is not a
+		// failure unless a name was pinned too.
+		if cfg.staticAllowlist && cfg.workload == "" {
+			return
+		}
 		fail("workload_absent: a workload policy is pinned but the leaf carries no matched-workload extension")
 		return
 	}

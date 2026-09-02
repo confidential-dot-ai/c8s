@@ -331,3 +331,29 @@ func TestRenderText_SealedPolicy(t *testing.T) {
 		t.Fatalf("renderText output missing sealed-policy lines:\n%s", out.String())
 	}
 }
+
+// With --static-allowlist the held bytes are judged against the sealed CA, so
+// an unnamed leaf (a front door whose pod matched no entry) passes --allowlist
+// unless a name is pinned too.
+func TestApplyWorkloadPolicy_StaticAllowlistToleratesUnnamedLeaf(t *testing.T) {
+	held := &heldAllowlist{raw: []byte(`{"schema":"c8s.allowlist/v1"}`)}
+	ev := &evidence{leaf: &x509.Certificate{}}
+
+	oc := staticOutcome()
+	applyWorkloadPolicy(oc, config{staticAllowlist: true}, ev, held)
+	if !oc.Verified || oc.Error != "" {
+		t.Fatalf("sealed + unnamed leaf: verdict = %+v, want verified", oc)
+	}
+
+	oc = staticOutcome()
+	applyWorkloadPolicy(oc, config{staticAllowlist: true, workload: "api"}, ev, held)
+	if oc.Verified || !strings.Contains(oc.Error, "workload_absent") {
+		t.Fatalf("sealed + --workload on an unnamed leaf must fail: %+v", oc)
+	}
+
+	oc = staticOutcome()
+	applyWorkloadPolicy(oc, config{}, ev, held)
+	if oc.Verified || !strings.Contains(oc.Error, "workload_absent") {
+		t.Fatalf("dynamic --allowlist on an unnamed leaf must fail: %+v", oc)
+	}
+}

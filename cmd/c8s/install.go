@@ -1377,6 +1377,11 @@ func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 	if !attestEnabled {
 		return
 	}
+	if installMeasurementsConfig != "" {
+		fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled; mesh pinned to --measurements-config.")
+		fmt.Fprintln(w, "  Clients verify with the same file: c8s verify https://<tls-lb> --measurements-config <file>")
+		return
+	}
 	if len(installMeasurements) > 0 {
 		fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled; mesh pinned to --measurements.")
 		fmt.Fprintln(w, "  Clients verify with the same M: c8s verify https://<tls-lb> --measurements <M>")
