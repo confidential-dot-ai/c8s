@@ -95,27 +95,23 @@ The operator's path, end to end:
    [confidential-os-builder](https://github.com/confidential-dot-ai/confidential-os-builder)
    checkout at the `CONFOS_REF` pinned in `.github/workflows/c8s-image.yml`
    (its `bin/setup` installs mkosi and the host tools; the build runs mkosi
-   under sudo) and the module-signing key whose certificate is committed at
-   `node-guest-image/module-signing.crt` — or your own keypair with its
-   certificate installed over that file, which rolls the measurement
-   (`node-guest-image/MODULE-SIGNING.md`):
+   under sudo) and a module-signing keypair whose certificate you install
+   over `node-guest-image/module-signing.crt`
+   (`node-guest-image/MODULE-SIGNING.md`; c8s's own key is a CI secret):
 
    ```sh
-   CONFOS_DIR=../confidential-os-builder MODULE_SIG_KEY=module-sig.key \
-     C8S_PLATFORM=tdx C8S_REF=<short sha> C8S_STATIC_ALLOWLIST=static-allowlist.json \
-     node-guest-image/build
+   CONFOS_DIR=../confidential-os-builder MODULE_SIG_KEY=module-signing.key \
+     C8S_GPU_ATTEST=0 C8S_PLATFORM=tdx C8S_REF=<short sha> \
+     C8S_STATIC_ALLOWLIST=static-allowlist.json node-guest-image/build
    # → ../confidential-os-builder/output/c8s/{disk.raw,manifest.json,static-allowlist.json,...}
    ```
 
-   The GPU attestation stage also needs NVIDIA's `libnvat` (public,
-   digest-pinned as `LIBNVAT_REF` in `.github/workflows/c8s-image.yml`)
-   installed on the host and the GPU-capable `attestation-api` built from
-   attestation-rs at `ATTESTATION_RS_REF` with `--features
-   nvidia-gpu-attest`, at `../attestation-rs/target/release/attestation-api`
-   relative to the builder checkout (or `ATTEST_GPU_BIN`/`LIBNVAT`). The
-   host must resolve libnvat's deps (Ubuntu 24.04's ICU 74 and
-   `libxml2.so.2`), since the build bundles what `ldd` finds; elsewhere,
-   set `LD_LIBRARY_PATH` to copies of those sonames.
+   `C8S_GPU_ATTEST=0` keeps the NVIDIA driver, GPU CC enforcement and signed
+   modules but composes the plain `attest` profile, so the bake needs no
+   `libnvat`, no attestation-rs build and no `ATTEST_GPU_BIN`/`LIBNVAT`; c8s
+   consumes no GPU evidence today. Leave it unset to match CI's profile set,
+   which additionally needs those inputs (set as `c8s-image.yml` sets them,
+   on a host that resolves libnvat's ICU 74 and `libxml2.so.2` deps).
    `C8S_REF` selects the c8s component images the image bakes and pins, so
    they must be published at that commit (`docker.yml` on main, or a
    `workflow_dispatch` for a branch).
