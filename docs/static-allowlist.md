@@ -1,6 +1,6 @@
 # Static allowlist: sealing the policy into the mesh CA
 
-`cds --static-allowlist` (synonym: `--allowlist-static`) turns the allowlist
+`cds --static-allowlist` turns the allowlist
 into a launch-time constant. The seed document becomes the one policy the CDS
 instance enforces for its whole lifetime, every write endpoint is disabled,
 and the mesh CA certificate is minted carrying two extra extensions:

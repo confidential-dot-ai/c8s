@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
@@ -75,8 +74,7 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
-	flags.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "seal the allowlist: --allowlist-seed becomes the one immutable policy for this CDS's lifetime (the store is replaced with it, not merged), writes stay disabled (--operator-keys is refused), and the mesh CA certificate is minted carrying the document's canonical SHA-256 plus an RA-TLS attestation extension binding the CA key, so relying parties can pin the enforced policy (docs/static-allowlist.md). --allowlist-static is an accepted synonym")
-	flags.SetNormalizeFunc(normalizeFlagAliases)
+	flags.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "seal the allowlist: --allowlist-seed becomes the one immutable policy for this CDS's lifetime (the store is replaced with it, not merged), writes stay disabled (--operator-keys is refused), and the mesh CA certificate is minted carrying the document's canonical SHA-256 plus an RA-TLS attestation extension binding the CA key, so relying parties can pin the enforced policy (docs/static-allowlist.md)")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
 	flags.IntVar(&cfg.rateBurst, "rate-burst", 20, "max burst size per source IP")
@@ -169,16 +167,6 @@ type config struct {
 	secretsMaxPathsPerWorkload int
 	secretsMaxValueBytes       int
 	sandboxLedgerMax           int
-}
-
-// normalizeFlagAliases maps accepted alternate flag spellings onto their
-// canonical flag, so --allowlist-static and --static-allowlist name the same
-// switch. Help output shows only the canonical name.
-func normalizeFlagAliases(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-	if name == "allowlist-static" {
-		name = "static-allowlist"
-	}
-	return pflag.NormalizedName(name)
 }
 
 // validateRATLSPlatformFlag rejects the CLI paths to a TLS-less CDS: the

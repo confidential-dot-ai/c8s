@@ -90,23 +90,3 @@ func TestValidateRATLSPlatformFlag(t *testing.T) {
 		}
 	}
 }
-
-// --allowlist-static is the accepted synonym for --static-allowlist; both
-// spellings must set the same flag.
-func TestStaticAllowlistFlagSynonym(t *testing.T) {
-	for _, spelling := range []string{"--static-allowlist", "--allowlist-static"} {
-		t.Run(spelling, func(t *testing.T) {
-			cmd := NewCmd()
-			if err := cmd.Flags().Parse([]string{spelling}); err != nil {
-				t.Fatalf("parse %s: %v", spelling, err)
-			}
-			f := cmd.Flags().Lookup("static-allowlist")
-			if f == nil {
-				t.Fatal("static-allowlist flag not registered")
-			}
-			if f.Value.String() != "true" {
-				t.Fatalf("%s did not set static-allowlist (value %q)", spelling, f.Value.String())
-			}
-		})
-	}
-}
