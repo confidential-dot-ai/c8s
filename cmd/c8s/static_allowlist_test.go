@@ -91,3 +91,65 @@ func TestPrintStaticAllowlistHint(t *testing.T) {
 		t.Fatalf("hint missing the pin instructions: %q", out.String())
 	}
 }
+
+const renderedSeedManifests = `---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-cds
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-cds-allowlist-seed
+data:
+  allowlist-seed.json: '{"schema":"c8s.allowlist/v1","digests":{"sha256:1111111111111111111111111111111111111111111111111111111111111111":"ghcr.io/x/cds"},"workloads":{}}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-cds
+`
+
+func TestSeedFromRenderedManifests(t *testing.T) {
+	seed, err := seedFromRenderedManifests([]byte(renderedSeedManifests))
+	if err != nil {
+		t.Fatalf("seedFromRenderedManifests: %v", err)
+	}
+	if !strings.Contains(string(seed), `"schema":"c8s.allowlist/v1"`) {
+		t.Fatalf("seed = %s", seed)
+	}
+	if _, err := seedFromRenderedManifests([]byte("kind: Deployment\n")); err == nil {
+		t.Fatal("a stream with no seed ConfigMap must be refused")
+	}
+}
+
+func TestAppendNodeSealArgs(t *testing.T) {
+	if _, err := appendNodeSealArgs(nil, "", nodeStaticSeedPath); err == nil {
+		t.Fatal("node seal without --bootstrap-allowlist must be refused")
+	}
+	path := filepath.Join(t.TempDir(), "static-allowlist.json")
+	if err := os.WriteFile(path, []byte(bootstrapDoc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, err := bootstrapDocument(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := appendNodeSealArgs(nil, path, nodeStaticSeedPath)
+	if err != nil {
+		t.Fatalf("appendNodeSealArgs: %v", err)
+	}
+	tree, err := valueArgsToTree(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := stringAtPath(tree, "cds.allowlistSeedHostPath"); v != nodeStaticSeedPath {
+		t.Fatalf("cds.allowlistSeedHostPath = %q", v)
+	}
+	if v, _ := stringAtPath(tree, "cds.staticAllowlistDigest"); v != digest || len(v) != 64 {
+		t.Fatalf("cds.staticAllowlistDigest = %q, want %q", v, digest)
+	}
+}

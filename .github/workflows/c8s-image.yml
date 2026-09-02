@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      static_allowlist:
+        description: "Seal the image: base64 of a c8s.allowlist/v1 document baked at /etc/c8s/static-allowlist.json and enforced with no pull (docs/static-allowlist.md). Tags gain -sa<sha256 prefix of the document>."
+        required: false
+        type: string
+        default: ""
       gate:
         required: false
         type: boolean
@@ -381,6 +386,7 @@ jobs:
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+          STATIC_ALLOWLIST_B64: ${{ inputs.static_allowlist }}
           # Private half of the module signing certificate (org secret) — the
           # fetch script signs the NVIDIA modules with it and fails closed
           # without it. Signatures are deterministic (sign-file uses no
@@ -397,6 +403,14 @@ jobs:
           # it to rebuild a published release. Definition lives in this repo:
           # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
+          # A sealed build bakes the operator's policy document; the file is
+          # per deployment and never committed, so it arrives as an input.
+          if [ -n "$STATIC_ALLOWLIST_B64" ]; then
+            printf '%s' "$STATIC_ALLOWLIST_B64" | base64 -d > "$RUNNER_TEMP/static-allowlist.json"
+            jq -e '.schema == "c8s.allowlist/v1"' "$RUNNER_TEMP/static-allowlist.json" >/dev/null
+            export C8S_STATIC_ALLOWLIST="$RUNNER_TEMP/static-allowlist.json"
+            echo "sealed build: static allowlist sha256 $(sha256sum "$C8S_STATIC_ALLOWLIST" | cut -c1-16)…"
+          fi
           # The build script requires an explicit platform (no default). The
           # matrix publishes both measured platform variants.
           C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
@@ -508,9 +522,16 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+          STATIC_ALLOWLIST_B64: ${{ inputs.static_allowlist }}
         run: |
           set -eux
           SHORT_SHA="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
+          # A sealed image is one deployment's; it never moves a floating tag
+          # and is named by its policy as well as its commit.
+          if [ -n "$STATIC_ALLOWLIST_B64" ]; then
+            SHORT_SHA="${SHORT_SHA}-sa$(printf '%s' "$STATIC_ALLOWLIST_B64" | base64 -d | sha256sum | cut -c1-12)"
+            C8S_REF_INPUT="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
+          fi
           # A c8s_ref rebuild repoints only that release's suffixed tags; the
           # floating tags keep tracking main builds.
           CDI_TAGS="${VARIANT}-cdi,${VARIANT}-cdi-${SHORT_SHA}"

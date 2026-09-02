@@ -54,149 +54,120 @@ then refuses every mutation. Changing the policy therefore means launching a
 new CDS, which mints a new mesh CA — and every pinning client notices,
 because the CA hash in the fresh evidence changes.
 
-## Node-as-CVM: the primary deployment
+## What the seal rests on, per shape
 
-Node-as-CVM is where the seal composes end to end, because every enforcement
-component sits inside one measured boundary:
+The `…1.3` stamp is authenticated by the CA's self-signature, and the CA's
+evidence binds only the CA *key* to a launch measurement. So the stamp is as
+trustworthy as the answer to: could anything other than the real CDS, running
+`--static-allowlist` on exactly this document, have held that key? On
+node-as-CVM every pod on every node booted from the same image gets the same
+evidence, so the answer has to come from admission control — and a dynamic
+allowlist on a second node of the same image would admit a forger. The seal
+therefore requires the policy to be inside what the measurement implies:
 
-- The **nri-image-policy plugin**, its containerd registration
-  (`required_plugins` — a plugin that fails to register blocks all container
-  creation), and its baked floor live on the dm-verity root, inside the node
-  launch digest (`node-guest-image/c8s/image-policy.yaml.in`).
-- With the seed baked into the node image, the **policy content** is inside
-  the node launch digest too, not just its hash inside the CA.
-- CDS runs from an image whose digest is in the measured floor, and its
-  evidence is the node's evidence.
+| Shape | What binds the policy to hardware | What CDS checks at startup |
+| --- | --- | --- |
+| node-as-CVM | the document is baked on the dm-verity root and the baked NRI plugin enforces exactly it, with no pull (`allowlist.static_path`) — so image `M` admits only the sealed set, anywhere | the seed it read from the baked path hashes to `--static-allowlist-digest`, the digest the operator installed with |
+| pod-as-CVM (kata) | the kata shim commits the CDS pod's init-data document into HOST_DATA / MRCONFIGID at launch; that document carries `c8s.cds.allowlist-seed-sha256` | its own verified report's init-data claim matches the document it was launched with, and that document names the sealed digest (`--static-allowlist-init-data`) |
 
-### Build: bake the seed into the node image
+Either way a CDS started any other way refuses to come up, and the
+`--static-allowlist` verifier has a hardware-rooted reason to believe the
+stamp: on node-as-CVM the launch measurement itself implies the policy; on
+pod-as-CVM the CA's evidence carries the init-data claim, which `c8s verify
+--init-data` pins.
 
-To bake the sealed policy into the measured image, drop the allowlist
-document at `node-guest-image/c8s/static-allowlist.json` (gitignored — it is
-per deployment) before building. The build validates it and stages it at
-`/etc/c8s/static-allowlist.json` on the verity root
-(`node-guest-image/c8s/mkosi.sync`, `stage_static_allowlist`). Baking it
-changes the node launch measurement — that is the point: the reference values
-the end user pins now imply the policy.
+## Node-as-CVM
 
-Record the value to publish:
+The operator's path, end to end:
 
-```sh
-c8s allowlist digest node-guest-image/c8s/static-allowlist.json
-```
+1. **Compose the policy.** The sealed document must carry the platform's own
+   component images (at the exact tag being deployed) plus every workload.
+   `c8s render-allowlist` renders the same seed `c8s install` would, resolved
+   to digests, and folds in the workload entries:
 
-The document must carry every image the node runs beyond the baked floor —
-the chart components (`c8s.allowlistSeedJSON` is what a non-static install
-would have rendered; `helm template` shows it) and the workload entries,
-including a named entry for the workload behind tls-lb so its leaves earn the
-`…1.5` stamp.
+   ```sh
+   c8s render-allowlist --cvm-mode=node --hardware-platform=tdx \
+     --image-tag v0.10.0 --bootstrap-allowlist workloads.json > static-allowlist.json
+   c8s allowlist digest static-allowlist.json   # the value relying parties pin
+   ```
 
-### Install
+2. **Bake it into the node image.** Locally:
 
-```sh
-c8s install --cvm-mode=node --hardware-platform=tdx --single-node \
-  --measurements-config measurements.json \
-  --static-allowlist \
-  --bootstrap-allowlist workloads.json \
-  --set cds.allowlistSeedHostPath=/etc/c8s/static-allowlist.json
-```
+   ```sh
+   C8S_PLATFORM=tdx C8S_REF=<short sha> C8S_STATIC_ALLOWLIST=static-allowlist.json node-guest-image/build
+   ```
 
-- `--static-allowlist` renders `cds.staticAllowlist=true` and is refused next
-  to `--operator-keys` (a sealed allowlist has no write path). It also
-  satisfies the operator-keys preflight: key-less is the design here, not an
-  oversight.
-- `--bootstrap-allowlist` folds a `c8s.allowlist/v1` document into the install
-  seed — its floor digests and its named workload entries. Under a seal this
-  is the only way a workload entry gets in, since nothing can be written after
-  CDS starts; the entry for the workload behind tls-lb is what earns its
-  leaves the `…1.5` stamp.
-- `cds.allowlistSeedHostPath` mounts the baked file into CDS instead of the
-  chart's ConfigMap seed. On node-as-CVM the "host" path is the measured
-  guest root, so the mount is verity-backed. (Without it the ConfigMap seed
-  still works and still seals — the digest is still committed and immutable —
-  but the content then rides an operator-rendered ConfigMap rather than the
-  measured image, so only the CA stamp, not the node measurement, speaks for
-  it.)
+   or in CI, which publishes the sealed image under its own tags and never
+   moves a floating one:
 
-The install prints the publish-and-pin recipe on success: export the served
-document, print its canonical digest, and hand both to relying parties.
+   ```sh
+   gh workflow run c8s-image-publish.yml -f c8s_ref=<short sha> \
+     -f static_allowlist="$(base64 -w0 static-allowlist.json)"
+   # → node-guest-base:rke2-tdx-<sha>-sa<digest12> (+ -cdi)
+   ```
 
-At startup CDS **replaces** the store with the seed (`seedStoreStatic` — a
-persistent DB from an earlier, wider policy cannot leak entries into the
-sealed set), computes the snapshot digest, fetches evidence for the fresh CA
-key from the node's attestation-api, and self-signs the sealed CA. Any
-failure — unreadable seed, unreachable attestation-api — aborts startup: a
-sealed CDS never comes up with an unstamped root.
+   The build stages the document at `/etc/c8s/static-allowlist.json` on the
+   verity root, renders the NRI plugin's config with `static_path` set and
+   the pull URL blanked (`node-guest-image/c8s/mkosi.sync`), and ships the
+   document beside `manifest.json` in the artifact. The launch measurement
+   changes — that is the point.
 
-### Verify (operator or end user)
+3. **Boot and install.** Boot the sealed image as usual, fetch the attested
+   kubeconfig, then:
 
-```sh
-c8s verify https://workload.example.com --kind lb \
-  --image-manifest manifest.json \
-  --mesh-ca mesh-ca.pem \
-  --static-allowlist \
-  --allowlist allowlist.json
-```
+   ```sh
+   c8s install --cvm-mode=node --hardware-platform=tdx --single-node \
+     --measurements-config measurements.json \
+     --static-allowlist --bootstrap-allowlist static-allowlist.json
+   ```
 
-`--static-allowlist` (requires `--mesh-ca`) makes the verdict additionally
-require:
+   Under `--cvm-mode=node`, `--static-allowlist` requires
+   `--bootstrap-allowlist` and treats it as the baked document: the install
+   points CDS at the baked path (`cds.allowlistSeedHostPath`) and pins the
+   document's canonical digest (`cds.staticAllowlistDigest`). CDS refuses to
+   start if the file the node carries hashes to anything else, so installing
+   the wrong policy against an image — or the right policy against an
+   unsealed image — fails loudly instead of sealing something the node does
+   not enforce.
 
-1. Exactly one certificate in the `--mesh-ca` bundle carries the `…1.3`
-   stamp.
-2. That CA's embedded `…1.1` evidence verifies, binds the CA's own public
-   key, and its launch digest passes the same measurement policy as the
-   target (`--measurements` / `--measurements-config` / `--image-manifest`).
-3. With `--allowlist`, the sealed digest equals SHA-256 of the held bytes
-   (`GET /allowlist`, `c8s allowlist export`, or the published document —
-   `c8s allowlist digest` prints the value from any of them).
-4. Any `…1.5` matched-workload stamp on the target's leaf was decided under
-   the sealed digest — a leaf stamped under a different policy document is
-   `static_allowlist_skew`, a hard failure. The front door's own leaf is
-   unnamed unless tls-lb's nginx has a named entry, so under
-   `--static-allowlist` an unnamed leaf passes `--allowlist`; pin
-   `--workload` to require a name.
+4. **Publish and prove.** As before: export the served document (`GET
+   /allowlist` returns exactly the baked one), capture the mesh CA, hand out
+   the image manifest, and verify with `c8s verify --static-allowlist
+   --allowlist`. A relying party can now also pull the image artifact and
+   recompute the digest from the `static-allowlist.json` it contains.
 
-The verdict prints the sealed digest and what stands behind it:
+## Pod-as-CVM (kata)
 
-```text
-  sealed policy: c6c966767974402e6b5875304dce41f60f100966308730925c2da1b1f43075a1
-                 static_allowlist_verified: the mesh CA embeds TEE evidence binding
-                 its own key (launch 9309…8ba1, inside the pinned measurement
-                 policy) and seals this policy digest; the policy cannot change
-                 without minting a new CA
-```
-
-`--mode attest-pq` runs the same pins over the nonce-fresh browser protocol,
-and the sealed CA also verifies offline, because it is an ordinary
-self-signed RA-TLS certificate:
+The CDS guest image is shared with every other pod, so the policy cannot be
+baked per deployment. The binding is launch-time instead:
 
 ```sh
-c8s verify --from-file mesh-ca.pem --image-manifest manifest.json \
-  --mesh-ca mesh-ca.pem --static-allowlist --allowlist allowlist.json
+c8s install --cvm-mode=pod --hardware-platform=tdx --single-node \
+  --measurements <kata guest digest> \
+  --static-allowlist --bootstrap-allowlist workloads.json
 ```
 
-A workload's own leaf verifies the same way, naming the entry it matched
-under the sealed policy (the injected certificate is at
-`/etc/c8s/certs/tls.crt` in the pod):
+The install renders the chart's seed (components plus `workloads.json`)
+exactly as helm will install it, pins its canonical digest
+(`cds.staticAllowlistDigest`), and renders a kata init-data document for the
+CDS pod — role `cds`, `c8s.cds.allowlist-seed-sha256` = that digest — as the
+`cds.initDataAnnotation` (`io.katacontainers.config.hypervisor.cc_init_data`).
+The shim hashes the document into the guest's HOST_DATA / MRCONFIGID at
+launch. CDS then asks its in-guest attestation-api for a report, verifies it,
+and refuses to start unless the init-data claim is the digest of the document
+it finds at `/run/confidential-containers/initdata/initdata.toml` and that
+document names the sealed digest (`--static-allowlist-init-data`,
+`internal/cmds/cds/static.go`).
+
+Relying parties pin the init-data digest on top of the seal:
 
 ```sh
-c8s verify --from-file demo-leaf.pem --image-manifest manifest.json \
-  --mesh-ca mesh-ca.pem --static-allowlist --allowlist allowlist.json \
-  --workload demo-nginx
+c8s verify <lb> --kind lb --image-manifest manifest.json --mesh-ca mesh-ca.pem \
+  --static-allowlist --allowlist allowlist.json --init-data <sha256 of the CDS init-data document>
 ```
 
-### What this buys, concretely
-
-Between two HTTPS requests verified against the same pinned
-`(allowlist digest, reference values, workload name)`:
-
-- The operator cannot widen or swap the policy: there is no write path, and a
-  replacement CDS (any seed, any code) mints a different CA — the fresh
-  `report_data` commitment breaks immediately.
-- A malicious pod not in the sealed allowlist is never admitted (measured NRI
-  plugin, deny-by-default) and never issued a mesh leaf (issuance-time
-  membership gate against the sealed snapshot).
-- Routing the client to a different allowlisted workload trips the `…1.5`
-  name pin.
+`--init-data` is applied to the sealed CA's evidence, so the CA is accepted
+only if a launch committed to this policy minted it.
 
 ## What it does not buy (unchanged residuals)
 

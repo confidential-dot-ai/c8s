@@ -669,6 +669,7 @@ func TestValidateConfig_StaticAllowlist(t *testing.T) {
 		{"missing seed", func(cfg *config) { cfg.allowlistSeed = "" }, "--allowlist-seed"},
 		{"operator keys set", func(cfg *config) { cfg.operatorKeys = "keys.pem" }, "mutually exclusive"},
 		{"no ratls platform", func(cfg *config) { cfg.ratlsPlatform = "" }, "--ratls-platform"},
+		{"bad expected digest", func(cfg *config) { cfg.staticAllowlistDigest = "nothex" }, "--static-allowlist-digest"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base(t)
@@ -678,5 +679,10 @@ func TestValidateConfig_StaticAllowlist(t *testing.T) {
 				t.Fatalf("validateConfig() = %v, want error containing %q", err, tc.wantSub)
 			}
 		})
+	}
+	unsealed := validRunConfig(t, "http://127.0.0.1:1")
+	unsealed.staticAllowlistDigest = strings.Repeat("ab", 32)
+	if err := validateConfig(unsealed); err == nil || !strings.Contains(err.Error(), "require --static-allowlist") {
+		t.Fatalf("expected digest without --static-allowlist must be refused: %v", err)
 	}
 }

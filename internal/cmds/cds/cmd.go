@@ -74,6 +74,8 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
+	flags.StringVar(&cfg.staticAllowlistDigest, "static-allowlist-digest", "", "hex canonical SHA-256 the sealed allowlist must have (requires --static-allowlist). CDS refuses to start when the seed it loaded hashes to anything else, which is how an installer proves the node baked the document the operator installed with")
+	flags.BoolVar(&cfg.staticAllowlistInitData, "static-allowlist-init-data", false, "require CDS's own launch-committed init-data document (kata pod-as-CVM) to carry c8s.cds.allowlist-seed-sha256 equal to the sealed digest, verified against CDS's own attestation report; refuse to start otherwise (requires --static-allowlist)")
 	flags.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "seal the allowlist: --allowlist-seed becomes the one immutable policy for this CDS's lifetime (the store is replaced with it, not merged), writes stay disabled (--operator-keys is refused), and the mesh CA certificate is minted carrying the document's canonical SHA-256 plus an RA-TLS attestation extension binding the CA key, so relying parties can pin the enforced policy (docs/static-allowlist.md)")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
@@ -117,45 +119,47 @@ func NewCmd() *cobra.Command {
 }
 
 type config struct {
-	host                string
-	port                int
-	logLevel            string
-	attestationApiURL   string
-	caCommonName        string
-	caCertValidity      time.Duration
-	measurements        []string
-	measurementsConfig  string
-	rtmrs               []string
-	earIssuerName       string
-	expectedIssuer      string
-	jwtClockSkew        int64
-	maxTTL              time.Duration
-	certTTL             time.Duration
-	namedCertTTL        time.Duration
-	challengeTTL        time.Duration
-	requestTimeout      time.Duration
-	maxRequestSize      int64
-	readTimeout         time.Duration
-	readHeaderTimeout   time.Duration
-	writeTimeout        time.Duration
-	idleTimeout         time.Duration
-	maxHeaderBytes      int
-	sanValidation       bool
-	dnsSANPatterns      []string
-	allowedCNPattern    string
-	readinessInterval   time.Duration
-	minCAValidity       time.Duration
-	allowlistDB         string
-	allowlistPersistent bool
-	allowlistSeed       string
-	staticAllowlist     bool
-	inventoryCIDRs      []string
-	operatorKeys        string
-	rotationInterval    time.Duration
-	rotationOverlap     time.Duration
-	rotationJitter      float64
-	ratlsPlatform       string
-	ratlsCertTTL        time.Duration
+	host                    string
+	port                    int
+	logLevel                string
+	attestationApiURL       string
+	caCommonName            string
+	caCertValidity          time.Duration
+	measurements            []string
+	measurementsConfig      string
+	rtmrs                   []string
+	earIssuerName           string
+	expectedIssuer          string
+	jwtClockSkew            int64
+	maxTTL                  time.Duration
+	certTTL                 time.Duration
+	namedCertTTL            time.Duration
+	challengeTTL            time.Duration
+	requestTimeout          time.Duration
+	maxRequestSize          int64
+	readTimeout             time.Duration
+	readHeaderTimeout       time.Duration
+	writeTimeout            time.Duration
+	idleTimeout             time.Duration
+	maxHeaderBytes          int
+	sanValidation           bool
+	dnsSANPatterns          []string
+	allowedCNPattern        string
+	readinessInterval       time.Duration
+	minCAValidity           time.Duration
+	allowlistDB             string
+	allowlistPersistent     bool
+	allowlistSeed           string
+	staticAllowlist         bool
+	staticAllowlistDigest   string
+	staticAllowlistInitData bool
+	inventoryCIDRs          []string
+	operatorKeys            string
+	rotationInterval        time.Duration
+	rotationOverlap         time.Duration
+	rotationJitter          float64
+	ratlsPlatform           string
+	ratlsCertTTL            time.Duration
 
 	rateLimit                float64
 	rateBurst                int

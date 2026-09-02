@@ -23,7 +23,7 @@ import (
 // embedded evidence verified. Gathered only when --static-allowlist asks for
 // the check (the CA evidence verification can fetch AMD KDS collateral).
 type staticCAReport struct {
-	// digest is the .1.6 stamp of the one sealed CA in the --mesh-ca bundle
+	// digest is the .1.3 stamp of the one sealed CA in the --mesh-ca bundle
 	// (nil when no bundle certificate carries a stamp).
 	digest []byte
 	// launchDigest is the sealed CA evidence's verified launch measurement.
@@ -85,7 +85,9 @@ func gatherStaticCA(ctx context.Context, cfg config, plan *verifyPlan) staticCAR
 		report.verifyErr = err
 		return report
 	}
-	result, err := verifyInProcess(ctx, caEv, plan.policy, nil, nil)
+	// --init-data, when given, pins the CA's launch-committed document as
+	// well: on pod-as-CVM that is where the sealed digest is hardware-bound.
+	result, err := verifyInProcess(ctx, caEv, plan.policy, plan.initDataHash, nil)
 	if err != nil {
 		report.verifyErr = err
 		return report

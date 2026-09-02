@@ -1144,6 +1144,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err := staticAllowlistPreflight(installStaticAllowlist, installOperatorKeys, installValues); err != nil {
 			return err
 		}
+		if installStaticAllowlist && !cvmModeIsPod(installCvmMode) && installBootstrapAllowlist == "" {
+			return fmt.Errorf("--static-allowlist under --cvm-mode=%s requires --bootstrap-allowlist: the document the node image baked (composed with `c8s render-allowlist`) is the whole policy, and the install pins its digest", installCvmMode)
+		}
 		if warn, err := operatorKeysPreflight(installOperatorKeys, installStaticAllowlist, installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
@@ -1248,7 +1251,26 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return err
 		}
-		defer os.Remove(computedValues)
+		defer func() { os.Remove(computedValues) }()
+		if installStaticAllowlist {
+			// The seal pins what CDS must load. Node-as-CVM: the document the
+			// image baked (its digest, checked at CDS startup). Pod-as-CVM: the
+			// chart's rendered seed, launch-committed through init-data. Both
+			// need the computed values already on disk, so they extend and
+			// rewrite them.
+			if cvmModeIsPod(installCvmMode) {
+				setArgs, err = appendPodSealArgs(cmd.Context(), setArgs, chartPath, installValues, computedValues)
+			} else {
+				setArgs, err = appendNodeSealArgs(setArgs, installBootstrapAllowlist, nodeStaticSeedPath)
+			}
+			if err != nil {
+				return err
+			}
+			os.Remove(computedValues)
+			if computedValues, err = writeComputedValues(setArgs); err != nil {
+				return err
+			}
+		}
 		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
 
 		// Fail fast on the default path if the CDS node is unlabelled, before

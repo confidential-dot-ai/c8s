@@ -41,6 +41,14 @@
 #   C8S_NAME=...       output name (default c8s → output/c8s/)
 #   C8S_MEMORY=...     default-memory recorded in the manifest / used by
 #                      `confos run` (default 16G — etcd OOMs at the 4G default)
+#   C8S_STATIC_ALLOWLIST=<file>
+#                      seal the image: bake this c8s.allowlist/v1 document at
+#                      /etc/c8s/static-allowlist.json on the verity root and
+#                      render the NRI plugin to enforce exactly it (no pull).
+#                      Changes the measurement — that is the point. The file is
+#                      also copied beside manifest.json in the output, so it
+#                      ships in the published artifact. Compose it with
+#                      `c8s allowlist compose` (docs/static-allowlist.md).
 #   C8S_REF=...        bake the c8s components (nri plugin + the CDS digest in
 #                      the NRI floor) from a specific c8s COMMIT (short SHA)
 #                      instead of the pin in the c8s profile's mkosi.sync,
@@ -78,6 +86,18 @@ if [ "${C8S_DEV:-0}" = 1 ]; then
     : "${C8S_NAME:=c8s-dev}"
 fi
 KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
+
+# The sealed policy travels to mkosi.sync as a file in the profile dir (a
+# sync-input is a short value, not a document). Staged for this build only.
+STATIC_ALLOWLIST_STAGED="$NGI_DIR/c8s/static-allowlist.json"
+rm -f "$STATIC_ALLOWLIST_STAGED"
+if [ -n "${C8S_STATIC_ALLOWLIST:-}" ]; then
+    [ -f "$C8S_STATIC_ALLOWLIST" ] || { echo "node-guest-image/build: C8S_STATIC_ALLOWLIST=$C8S_STATIC_ALLOWLIST is not a file" >&2; exit 1; }
+    jq -e '.schema == "c8s.allowlist/v1"' "$C8S_STATIC_ALLOWLIST" >/dev/null \
+        || { echo "node-guest-image/build: C8S_STATIC_ALLOWLIST is not a c8s.allowlist/v1 document" >&2; exit 1; }
+    cp "$C8S_STATIC_ALLOWLIST" "$STATIC_ALLOWLIST_STAGED"
+    trap 'rm -f "$STATIC_ALLOWLIST_STAGED"' EXIT
+fi
 bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
     --module-signing-cert "$NGI_DIR/module-signing.crt" \
@@ -106,7 +126,7 @@ else
     echo "$GPU_FPR" > "$GPU_STAMP"
 fi
 bin/confos-fetch-attest-gpu
-exec bin/confos build "${C8S_NAME:-c8s}" \
+bin/confos build "${C8S_NAME:-c8s}" \
     "${PROFILES[@]}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
     --profile-dir "$NGI_DIR/c8s" \
@@ -119,3 +139,11 @@ exec bin/confos build "${C8S_NAME:-c8s}" \
     --platform "$C8S_PLATFORM" \
     --memory "${C8S_MEMORY:-16G}" \
     "$@"
+
+# Ship the sealed policy beside manifest.json so `confos push` includes it in
+# the artifact: a relying party pulls the image and recomputes the digest the
+# mesh CA seals from the same bytes the node enforces.
+if [ -n "${C8S_STATIC_ALLOWLIST:-}" ]; then
+    cp "$C8S_STATIC_ALLOWLIST" "output/${C8S_NAME:-c8s}/static-allowlist.json"
+    echo "node-guest-image/build: sealed policy shipped in output/${C8S_NAME:-c8s}/static-allowlist.json"
+fi

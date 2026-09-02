@@ -223,6 +223,17 @@ cds:
   # binding the CA key, so relying parties can pin the enforced policy.
   # See docs/static-allowlist.md.
   staticAllowlist: false
+  # -- Hex canonical SHA-256 the sealed seed must have. CDS refuses to start
+  # when the document it loaded hashes to anything else, which is how a
+  # node-as-CVM install proves the node image baked the policy it was
+  # installed with. `c8s install --static-allowlist` sets it from
+  # --bootstrap-allowlist.
+  staticAllowlistDigest: ""
+  # -- Pod-as-CVM only: the kata init-data annotation value (base64 of the
+  # gzipped document) launch-committing the sealed seed digest into the CDS
+  # guest's HOST_DATA / MRCONFIGID. Rendered by `c8s install --static-allowlist`;
+  # required under kata.enabled with staticAllowlist.
+  initDataAnnotation: ""
   # -- Absolute host path of the allowlist seed file to mount into CDS instead
   # of the chart-rendered ConfigMap seed. On node-as-CVM this is how the seed
   # comes from the measured dm-verity node image (bake the document at

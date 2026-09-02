@@ -3,6 +3,7 @@ package cds
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
@@ -226,5 +227,25 @@ func TestSeedStoreStatic_FailsClosedOnBadSeed(t *testing.T) {
 	}
 	if err := seedStoreStatic(&store, "/does/not/exist.json"); err == nil {
 		t.Fatal("seedStoreStatic accepted a missing seed file")
+	}
+}
+
+func TestCheckExpectedSealedDigest(t *testing.T) {
+	got := make([]byte, 32)
+	got[0] = 0xab
+	if err := checkExpectedSealedDigest("", got); err != nil {
+		t.Fatalf("no expectation must pass: %v", err)
+	}
+	if err := checkExpectedSealedDigest("ab"+strings.Repeat("00", 31), got); err != nil {
+		t.Fatalf("matching expectation: %v", err)
+	}
+	if err := checkExpectedSealedDigest("cd"+strings.Repeat("00", 31), got); err == nil {
+		t.Fatal("a different expected digest must refuse startup")
+	}
+	if err := checkExpectedSealedDigest("zz", got); err == nil {
+		t.Fatal("a malformed expected digest must refuse startup")
+	}
+	if _, err := parseSealedDigest(strings.Repeat("ab", 31)); err == nil {
+		t.Fatal("a 31-byte digest must be refused")
 	}
 }

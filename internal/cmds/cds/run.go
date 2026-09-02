@@ -140,10 +140,20 @@ func run(cfg config) error {
 		if err != nil {
 			return fmt.Errorf("static allowlist: %w", err)
 		}
+		if err := checkExpectedSealedDigest(cfg.staticAllowlistDigest, snapshot.Digest); err != nil {
+			return err
+		}
+		if cfg.staticAllowlistInitData {
+			if err := checkInitDataSeal(ctx, cfg.attestationApiURL, snapshot.Digest); err != nil {
+				return err
+			}
+		}
 		slog.Info("allowlist sealed: operator writes are disabled and the policy digest is stamped into the mesh CA",
 			"allowlist_digest", hex.EncodeToString(snapshot.Digest),
 			"floor", len(snapshot.Allowlist.Digests),
 			"workloads", len(snapshot.Allowlist.Workloads),
+			"expected_digest_checked", cfg.staticAllowlistDigest != "",
+			"init_data_checked", cfg.staticAllowlistInitData,
 		)
 		caExtensions = staticCAExtensions(ctx, cfg.attestationApiURL, snapshot.Digest)
 	}
@@ -571,6 +581,14 @@ func validateConfig(cfg config) error {
 		}
 		if cfg.ratlsPlatform == "" {
 			return fmt.Errorf("--static-allowlist requires --ratls-platform: the sealed mesh CA embeds its own TEE evidence")
+		}
+	}
+	if (cfg.staticAllowlistDigest != "" || cfg.staticAllowlistInitData) && !cfg.staticAllowlist {
+		return fmt.Errorf("--static-allowlist-digest and --static-allowlist-init-data require --static-allowlist")
+	}
+	if cfg.staticAllowlistDigest != "" {
+		if _, err := parseSealedDigest(cfg.staticAllowlistDigest); err != nil {
+			return fmt.Errorf("--static-allowlist-digest: %w", err)
 		}
 	}
 	if cfg.readinessInterval <= 0 {

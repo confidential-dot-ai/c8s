@@ -43,6 +43,11 @@ on:
         required: false
         type: boolean
         default: false
+      static_allowlist:
+        description: "Seal the image with this base64-encoded c8s.allowlist/v1 document (compose it with `c8s render-allowlist`). Publishes only the :<variant>[-cdi]-<ref>-sa<digest> tags."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -117,6 +122,7 @@ jobs:
       c8s_ref: ${{ inputs.c8s_ref || '' }}
       confos_ref: ${{ inputs.confos_ref || '' }}
       gate: ${{ inputs.gate || false }}
+      static_allowlist: ${{ inputs.static_allowlist || '' }}
       release_tag: ${{ needs.release-context.outputs.tag }}
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
