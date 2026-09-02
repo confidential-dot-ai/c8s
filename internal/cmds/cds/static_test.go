@@ -2,6 +2,9 @@ package cds
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -74,5 +77,76 @@ func TestCheckInitDataSeal(t *testing.T) {
 	initDataDocumentPath = filepath.Join(t.TempDir(), "missing.toml")
 	if err := checkInitDataSeal(context.Background(), fakeAttestationAPI(t, committed).URL, sealed); err == nil {
 		t.Fatal("no launch-committed document must refuse the seal")
+	}
+}
+
+func TestCheckInitDataSeal_RefusesBadClaimsAndDocuments(t *testing.T) {
+	sealed := make([]byte, 32)
+	sealed[0] = 0x42
+	writeDoc := func(t *testing.T, data map[string]string) string {
+		t.Helper()
+		built, err := initdata.New(data).Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc := filepath.Join(t.TempDir(), "initdata.toml")
+		if err := os.WriteFile(doc, built.Raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		initDataDocumentPath = doc
+		return hex.EncodeToString(built.Digest[:])
+	}
+	t.Cleanup(func() { initDataDocumentPath = initdata.GuestDocumentPath })
+
+	good := map[string]string{
+		initdata.KeyRole:                   initdata.RoleCDS,
+		initdata.KeyCDSAllowlistSeedSHA256: hex.EncodeToString(sealed),
+	}
+	committed := writeDoc(t, good)
+	claims := map[string]string{
+		"claim is not hex":               "zz",
+		"claim is neither 32 nor 48":     committed + "00",
+		"MRCONFIGID padding is not zero": committed + strings.Repeat("00", 15) + "01",
+	}
+	for name, claim := range claims {
+		t.Run(name, func(t *testing.T) {
+			if err := checkInitDataSeal(context.Background(), fakeAttestationAPI(t, claim).URL, sealed); err == nil {
+				t.Fatal("bad claim was accepted")
+			}
+		})
+	}
+	t.Run("attestation-api unreachable", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		t.Cleanup(srv.Close)
+		if err := checkInitDataSeal(context.Background(), srv.URL, sealed); err == nil {
+			t.Fatal("an unreachable attestation-api was accepted")
+		}
+	})
+	t.Run("document names another role", func(t *testing.T) {
+		claim := writeDoc(t, map[string]string{
+			initdata.KeyRole:                   "workload",
+			initdata.KeyCDSAllowlistSeedSHA256: hex.EncodeToString(sealed),
+		})
+		if err := checkInitDataSeal(context.Background(), fakeAttestationAPI(t, claim).URL, sealed); err == nil {
+			t.Fatal("a non-cds role was accepted")
+		}
+	})
+	t.Run("document omits the seed digest", func(t *testing.T) {
+		claim := writeDoc(t, map[string]string{initdata.KeyRole: initdata.RoleCDS})
+		if err := checkInitDataSeal(context.Background(), fakeAttestationAPI(t, claim).URL, sealed); err == nil {
+			t.Fatal("a document without the seed digest was accepted")
+		}
+	})
+}
+
+func TestStaticCAExtensions_AttestFailureAborts(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := staticCAExtensions(context.Background(), srv.URL, make([]byte, 32))(&key.PublicKey); err == nil {
+		t.Fatal("an unattested CA key was stamped")
 	}
 }

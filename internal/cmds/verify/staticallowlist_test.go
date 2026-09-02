@@ -357,3 +357,32 @@ func TestApplyWorkloadPolicy_StaticAllowlistToleratesUnnamedLeaf(t *testing.T) {
 		t.Fatalf("dynamic --allowlist on an unnamed leaf must fail: %+v", oc)
 	}
 }
+
+func TestGatherStaticCA_MalformedStampIsBundleDamage(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "malformed stamp"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		ExtraExtensions:       []pkix.Extension{{Id: ratls.OIDStaticAllowlist, Value: []byte{0x30, 0x00}}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mesh-ca.pem")
+	if err := os.WriteFile(path, certutil.EncodeCertPEM(der), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{staticAllowlist: true, meshCA: path}
+	report := gatherStaticCA(context.Background(), cfg, &verifyPlan{policy: &ratls.VerifyPolicy{}})
+	if report.err == nil {
+		t.Fatal("a malformed static-allowlist stamp must fail the bundle")
+	}
+}

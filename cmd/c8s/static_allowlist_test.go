@@ -196,3 +196,59 @@ func TestAppendPodSealArgs(t *testing.T) {
 	}
 	mustContainLine(t, f.calls(t), "helm template c8s /chart --show-only templates/cds.yaml -f "+computed)
 }
+
+func TestBootstrapDocument_Errors(t *testing.T) {
+	if _, _, err := bootstrapDocument(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("missing document was accepted")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := bootstrapDocument(bad); err == nil {
+		t.Fatal("malformed document was accepted")
+	}
+	if _, err := appendNodeSealArgs(nil, bad, nodeStaticSeedPath); err == nil {
+		t.Fatal("node seal over a malformed document was accepted")
+	}
+}
+
+func TestAppendPodSealArgs_Errors(t *testing.T) {
+	computed := filepath.Join(t.TempDir(), "computed.yaml")
+	if err := os.WriteFile(computed, []byte("cds: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		helm string
+		want string
+	}{
+		"helm fails": {
+			helm: "echo 'Error: chart not found' >&2; exit 1",
+			want: "chart not found",
+		},
+		"seed is not an allowlist": {
+			helm: "printf 'kind: ConfigMap\\ndata:\\n  allowlist-seed.json: \"{not json\"\\n'",
+			want: "rendered allowlist seed",
+		},
+		"no seed rendered": {
+			helm: "echo 'kind: Deployment'",
+			want: "no allowlist seed ConfigMap",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeBin(t)
+			f.tool(t, "helm", tc.helm)
+			_, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("appendPodSealArgs = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	t.Run("helm missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed); err == nil {
+			t.Fatal("a missing helm binary was accepted")
+		}
+	})
+}
