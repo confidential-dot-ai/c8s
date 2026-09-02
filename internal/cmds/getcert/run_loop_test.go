@@ -809,3 +809,81 @@ func TestCDSHTTPClientParsesRTMRPins(t *testing.T) {
 		t.Fatalf("cdsHTTPClient with valid pins: %v", err)
 	}
 }
+
+// Once the installed leaf has expired and renewals keep failing, the loop must
+// exit rather than retry forever: as a native sidecar the container restarts
+// with fresh client state, which is the only self-heal available on a locked
+// guest (exec liveness probes are policy-denied there).
+func TestRunRenewalLoopExitsOnExpiredLeaf(t *testing.T) {
+	holdSIGTERM(t)
+
+	oldBase := renewalRetryBase
+	renewalRetryBase = 10 * time.Millisecond
+	t.Cleanup(func() { renewalRetryBase = oldBase })
+
+	// The initial request installs a leaf that expires almost immediately;
+	// every renewal fails.
+	leaf := &x509.Certificate{NotAfter: time.Now().Add(30 * time.Millisecond)}
+	attempts := stubObtainCert(t, func(n int) (*x509.Certificate, error) {
+		if n == 1 {
+			return leaf, nil
+		}
+		return nil, errors.New("stubbed certificate request failure")
+	})
+
+	cfg := unreachableRenewalConfig()
+	cfg.RenewInterval = 20 * time.Millisecond
+	cfg.ReloadNginx = false
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run() = nil, want an error once the expired leaf cannot be renewed")
+		}
+		if !strings.Contains(err.Error(), "expired") {
+			t.Errorf("run() = %v, want an error naming the expired certificate", err)
+		}
+		// The initial request plus at least expiredExitFailures failed renewals.
+		if got := len(attempts()); got < 1+expiredExitFailures {
+			t.Errorf("exited after %d attempts, want at least %d", got, 1+expiredExitFailures)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not exit with an expired, unrenewable leaf")
+	}
+}
+
+// A leaf that is still valid never triggers the expired-leaf exit, however many
+// renewals fail.
+func TestRunRenewalLoopKeepsRetryingWhileLeafValid(t *testing.T) {
+	holdSIGTERM(t)
+
+	oldBase := renewalRetryBase
+	renewalRetryBase = 10 * time.Millisecond
+	t.Cleanup(func() { renewalRetryBase = oldBase })
+
+	leaf := &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}
+	attempts := stubObtainCert(t, func(n int) (*x509.Certificate, error) {
+		if n == 1 {
+			return leaf, nil
+		}
+		return nil, errors.New("stubbed certificate request failure")
+	})
+
+	cfg := unreachableRenewalConfig()
+	cfg.RenewInterval = 20 * time.Millisecond
+	cfg.ReloadNginx = false
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+
+	waitForAttempts(t, attempts, 2+expiredExitFailures)
+	select {
+	case err := <-done:
+		t.Fatalf("run exited with %v while the leaf was still valid", err)
+	default:
+	}
+	terminateRun(t, done)
+}
