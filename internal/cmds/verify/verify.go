@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -713,9 +712,9 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := parseRTMRPins(cfg.rtmrs)
+	manual, err := ratls.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
-		return rtmrPins{}, err
+		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
 	// RTMR[3] has three spellings — --rtmr 3=, --expected-rtmr3, and
 	// --operator-pkey (which derives the value) — and they write one slot, so
@@ -832,55 +831,6 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 		return fmt.Errorf("PEM block is not a parseable PKIX public key: %w", err)
 	}
 	return nil
-}
-
-// parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
-//
-// Index 0 is refused rather than accepted-and-ignored: RTMR[0] carries the TD
-// HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin would
-// deny half the fleet.
-//
-// 1, 2 and 3 are all accepted here, but they are not interchangeable and
-// resolveRTMRPins applies opposite rules to them. RTMR[1] and [2] ARE the
-// image, so pinning them by hand conflicts with --image-manifest. RTMR[3]
-// records events extended inside whatever image the untrusted host chose, so
-// pinning it REQUIRES --image-manifest — alone it would read as proof of
-// identity while proving none, since the host can boot any image and
-// reproduce the chain.
-func parseRTMRPins(pins []string) (map[int][]byte, error) {
-	if len(pins) == 0 {
-		return nil, nil
-	}
-	out := make(map[int][]byte, len(pins))
-	for _, p := range pins {
-		idxStr, hexStr, ok := strings.Cut(strings.TrimSpace(p), "=")
-		if !ok {
-			return nil, fmt.Errorf("--rtmr %q: want <index>=<sha384-hex>", p)
-		}
-		idx, err := strconv.Atoi(idxStr)
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
-		}
-		switch idx {
-		case 1, 2, 3:
-		case 0:
-			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
-		default:
-			return nil, fmt.Errorf("--rtmr %q: index must be 1, 2 or 3", p)
-		}
-		if _, dup := out[idx]; dup {
-			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
-		}
-		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %d: value is not hex: %w", idx, err)
-		}
-		if len(v) != sha512.Size384 {
-			return nil, fmt.Errorf("--rtmr %d: value is %d bytes, want %d", idx, len(v), sha512.Size384)
-		}
-		out[idx] = v
-	}
-	return out, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
@@ -1493,8 +1443,8 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
-// rtmrMeaning labels a register in operator-facing output. parseRTMRPins
-// admits only 1 and 2; the default keeps this total rather than printing an
+// rtmrMeaning labels a register in operator-facing output. ratls.ParseRTMRPins
+// admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {
 	switch idx {

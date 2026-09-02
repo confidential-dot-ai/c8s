@@ -56,13 +56,19 @@ func fakeSNPReport(reportData [64]byte) []byte {
 	return report
 }
 
-// fakeHCLEnvelope builds the AKS Hyper-V HCL envelope around a raw SNP report.
+// fakeHCLEnvelope builds the AKS Hyper-V HCL envelope around a raw SNP report:
+// header(32) + report + var_data header(20) + var_data content, with trailing
+// null padding bytes after the content.
 func fakeHCLEnvelope(report []byte, trailing int) []byte {
-	env := make([]byte, 32+len(report)+trailing)
+	varData := []byte(`{"keys":[]}`)
+	env := make([]byte, 32+len(report)+20+len(varData)+trailing)
 	copy(env[:4], "HCLA")
 	binary.LittleEndian.PutUint32(env[4:8], 1)
-	binary.LittleEndian.PutUint32(env[8:12], uint32(len(report)+trailing))
 	copy(env[32:], report)
+	hdr := env[32+len(report):]
+	binary.LittleEndian.PutUint32(hdr[8:12], 2) // report_type: SNP
+	binary.LittleEndian.PutUint32(hdr[16:20], uint32(len(varData)+trailing))
+	copy(hdr[20:], varData)
 	return env
 }
 
@@ -1010,13 +1016,22 @@ func TestNormalizeSEVSNPReportSizeEdges(t *testing.T) {
 		// Exactly one HCL header, no payload: must be recognized as an HCL
 		// envelope and rejected as truncated, not misreported as a bare report.
 		raw := make([]byte, 32)
-		copy(raw[:4], hclReportMagic)
+		copy(raw[:4], "HCLA")
 		_, err := NormalizeSEVSNPReport(raw)
 		if err == nil {
 			t.Fatal("expected error for truncated HCL envelope")
 		}
 		if !strings.Contains(err.Error(), "HCL report") {
 			t.Fatalf("error = %v, want HCL truncation error", err)
+		}
+	})
+
+	t.Run("HCL envelope with a TDX report type is rejected", func(t *testing.T) {
+		env := fakeHCLEnvelope(fakeSNPReport([64]byte{1, 2, 3}), 0)
+		binary.LittleEndian.PutUint32(env[32+SNPReportSize+8:], 4) // report_type: TDX
+		_, err := NormalizeSEVSNPReport(env)
+		if err == nil || !strings.Contains(err.Error(), "report type 4") {
+			t.Fatalf("error = %v, want a report-type rejection", err)
 		}
 	})
 
