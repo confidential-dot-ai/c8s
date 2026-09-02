@@ -51,4 +51,9 @@ printf '16777216' > "$WORK/sys/block/dm-0/size" # 8Gi
 ok "fails" not run_enforce
 ok "names the cause" stderr_has "too small"
 
+CASE="scratch size unreadable"
+set_dm scratch
+: > "$WORK/sys/block/dm-0/size"
+ok "fails closed" not run_enforce
+
 summarize "scratch-enforce"
