@@ -422,9 +422,9 @@ pod's images part of a hardware measurement, enforced at `/attest`, is the
 stronger close and is unimplemented.
 
 The one surface still on an untrusted path is the **node-CVM** socket mount:
-the inventory socket sits on a host directory the webhook hostPath-mounts, so a
-malicious *allowlisted* pod able to mount that directory read-write could swap
-the socket file before get-cert connects. That is a PodSecurity /
+the inventory socket sits on a host directory its NRI plugin bind-mounts into
+the sidecar, so a malicious *allowlisted* pod able to mount that directory
+read-write could swap the socket file before get-cert connects. That is a PodSecurity /
 filesystem-permission concern (the socket dir must be unwritable by untrusted
 pods), not a redirectable arg — see
 the residual note under "Why a unix socket". Under kata there is no mount: the
@@ -474,6 +474,12 @@ node path, so a malicious *allowlisted* pod that can `hostPath`-mount that
 directory read-write could swap the socket before get-cert connects. That is a
 PodSecurity / filesystem-permission hardening (the socket dir must be
 unwritable by untrusted pods), not more crypto.
+
+The read-only mount itself is plumbing, not an access boundary: any pod can
+acquire it by forging the injected annotation and a sidecar container name, so
+every socket in the directory must stay safe with every on-node pod assumed
+able to dial it — the binding rests on kernel peer credentials and the RO
+mount, never on who holds the mount.
 
 Note this is *not* the same as the socket's own permissions. The non-root
 get-cert reaches the socket because the inventory group-owns it
@@ -571,11 +577,11 @@ splits cleanly:
   control plane cannot redirect, and the chart's `deny-host-namespaces` policy
   denies `hostPath` volumes to tenant namespaces outright. It opens only if that
   policy is disabled and PodSecurity lets untrusted pods RW-mount host paths.
-  (One nuance: the mount *source*
-  `WorkloadClaimsHostDir` is operator-supplied, so a malicious operator could
-  point it at a rogue dir — but the operator/webhook runs inside the node-CVM
-  and is measured, so this reduces to "is the node's TCB intact", which the node
-  launch digest attests. The plugin binary's on-disk integrity rests on the same
+  (One nuance: the mount *source* — the
+  inventory's configured socket dir — is operator-supplied, so a malicious
+  operator could point it at a rogue dir — but the plugin runs inside the
+  node-CVM and is measured, so this reduces to "is the node's TCB intact",
+  which the node launch digest attests. The plugin binary's on-disk integrity rests on the same
   node measurement + allowlist + guest lockdown, not on the socket.)
 
 **And a subverted socket is bounded anyway.** A swapped socket can hand get-cert
@@ -650,8 +656,9 @@ and the baked floor stands alone there.
 
 ## Enablement
 
-Always on in both shapes. On node-CVM the chart wires the NRI inventory socket,
-the webhook mount, and the operator flag; under kata the operator injects
+Always on in both shapes. On node-CVM the chart wires the NRI inventory socket
+and the operator flag, and the plugin NRI-mounts the socket directory into the
+injected sidecars; under kata the operator injects
 `--workload-claims --workload-claims-guest` and no volume, and `policy-monitor`
 binds its loopback token port unconditionally — gating it on configuration would
 let the untrusted host switch it off. get-cert is fail-closed on an inventory
@@ -687,11 +694,13 @@ node-CVM the same typo fails the plugin's config validation at startup.
 **Upgrade ordering.** Because get-cert fails closed on an inventory error, roll
 `nri-image-policy` (which creates the socket and serves both surfaces) **before
 or with** the operator/webhook that injects `--workload-claims`. If the
-webhook starts injecting the flag while an old plugin (no inventory socket) is
-still running — or before the socket's host directory exists for the hostPath
-mount — every newly admitted `cw` pod fails cert issuance until the plugin is
-current. A chart upgrade that rolls both together is safe; a partial rollout is
-not. Under kata the equivalent ordering is the guest image: a guest whose
+webhook starts injecting the flag while an old plugin (no inventory socket, no
+NRI-injected socket-directory mount) is still running, every newly admitted
+`cw` pod fails cert issuance until the plugin is current: get-cert exits while
+the socket directory is absent, so the sidecar crashloops and its next
+creation picks up the mount once the node's plugin is. A chart upgrade rolls
+the webhook Deployment and the per-node plugin independently, so expect that
+crashloop window on not-yet-rolled nodes. Under kata the equivalent ordering is the guest image: a guest whose
 `policy-monitor` predates the loopback token route answers nothing on
 `127.0.0.1:8401`, so roll the guest image before the operator starts injecting
 `--workload-claims-guest`.

@@ -93,8 +93,8 @@ spec:
               mountPath: {{ .Values.volumed.hostPaths.cgroupRoot }}
               readOnly: true
             # The daemon's socket must live in the inventory's socket directory:
-            # the deny-host-namespaces VAP carves out that exact path by string
-            # equality, and it is what the webhook mounts into cw pods.
+            # that is the one directory nri-image-policy NRI-mounts into cw-pod
+            # sidecars.
             - name: inventory-socket-dir
               mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
           resources:

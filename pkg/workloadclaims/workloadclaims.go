@@ -59,13 +59,36 @@ type InventoryIdentity struct {
 // control plane cannot redirect the fetch to a rogue inventory
 // (docs/getcert-workload-binding.md Corner 5). The inventory (nri-image-policy on
 // node-CVM, policy-monitor in the kata guest) creates its socket as SocketName
-// under its configured directory, and the webhook hostPath-mounts that
-// directory at SidecarSocketDir in the pod. node-CVM only: a kata guest serves
-// the token route on loopback instead (GuestTokenPort), with nothing to mount.
+// under its configured directory, and its NRI plugin bind-mounts that directory
+// at SidecarSocketDir into the SidecarContainers of an injected pod — an OCI
+// mount below the pod spec, so no hostPath volume ever appears to PodSecurity.
+// node-CVM only: a kata guest serves the token route on loopback instead
+// (GuestTokenPort), with nothing to mount.
 const (
 	SocketName       = "workload-claims.sock"
 	SidecarSocketDir = "/run/c8s/workload-claims"
 )
+
+// AnnotationInjected is stamped on a pod by the mutating webhook after
+// injection; the inventory's NRI plugin mounts its socket directory only under
+// it.
+const AnnotationInjected = "confidential.ai/c8s-injected"
+
+// CertContainerName, SecretContainerName and VolumeContainerName are the
+// webhook-injected sidecars that dial sockets in the inventory's directory
+// (workload-claims.sock, attestation-api.sock, volumed.sock); on node-CVM the
+// NRI plugin bind-mounts the directory into exactly these containers.
+const (
+	CertContainerName   = "c8s-cert"
+	SecretContainerName = "c8s-secret"
+	VolumeContainerName = "c8s-volume"
+)
+
+// IsSidecarContainer reports whether name is one of the injected sidecars that
+// receive the inventory socket-directory mount.
+func IsSidecarContainer(name string) bool {
+	return name == CertContainerName || name == SecretContainerName || name == VolumeContainerName
+}
 
 // GuestTokenPort is the in-guest loopback port policy-monitor serves the token
 // route on under kata, alongside the attestation-service on 8400. A kata guest
@@ -80,6 +103,18 @@ const GuestTokenPort = 8401
 // pod.
 func InventoryEndpoint() string {
 	return "unix://" + SidecarSocketDir + "/" + SocketName
+}
+
+// RequireSidecarSocketDir fails when SidecarSocketDir is absent: the directory
+// arrives as a mount at container creation, so absence cannot heal within this
+// container's lifetime — the caller must exit and let the kubelet's restart
+// replay the mount injection. A present-but-empty directory is not an error;
+// sockets appear late and the dial path retries in place.
+func RequireSidecarSocketDir() error {
+	if _, err := os.Stat(SidecarSocketDir); err != nil {
+		return fmt.Errorf("inventory socket directory: %w (not mounted; is nri-image-policy current on this node?)", err)
+	}
+	return nil
 }
 
 // GuestInventoryEndpoint is get-cert's compiled inventory endpoint inside a kata

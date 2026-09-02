@@ -16,7 +16,8 @@ the node-local socket in `nriImagePolicy.hostPaths.runtimeDir`.
 `c8s.attestationApiHostSocket` selects this mode, and the socket volume/mount
 helpers expose the directory at its host path with a read-only mount and
 `DirectoryOrCreate` hostPath. The webhook rebases the socket path for injected
-get-cert sidecars.
+get-cert sidecars, and nri-image-policy NRI-mounts the directory read-only into
+those sidecars.
 
 In node CVM mode with the chart API disabled, `c8s.attestationApiHostIPEnv`
 renders the downward-API `HOST_IP` variable. Kubelet expands the placeholder
