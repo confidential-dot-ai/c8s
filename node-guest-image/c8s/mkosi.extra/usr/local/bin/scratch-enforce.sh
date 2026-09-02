@@ -1,8 +1,8 @@
 #!/bin/sh
 # scratch-enforce: refuse to bring up a node CVM that booted without its
 # confai-scratch write-storage disk — the initrd's silent fallback is a 2G
-# tmpfs behind the state overlays the node later wedges on (see ../README.md "Launch
-# requirements"). The unit running this fails the boot instead.
+# tmpfs backing the state overlays, which the node later wedges on (see
+# ../README.md "Launch requirements"). The unit running this fails the boot.
 #
 # The gate is what the initrd actually did, not disk presence: on success
 # the state overlays sit on a plain-mode dm mapping named "scratch". Sysfs,

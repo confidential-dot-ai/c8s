@@ -1,7 +1,7 @@
 # Mount /var/lib/rancher/rke2/agent/containerd on a real (non-overlay) filesystem
 # before rke2 starts. Containerd's overlay snapshotter cannot stack on overlayfs,
-# and the initrd mounts the whole rootfs as an overlay (verity lower +
-# tmpfs/scratch-disk upper), so /var/lib/rancher/* is overlayfs by default —
+# and the initrd mounts /var as an overlay (a confos state.d dir: verity
+# lower + tmpfs/scratch-disk upper), so /var/lib/rancher/* is overlayfs by default —
 # containerd's "multiple-lowerdir-check" probe fails when its snapshotter tries
 # to use that as an upperdir. The mount must therefore escape the overlay onto
 # its own FS.

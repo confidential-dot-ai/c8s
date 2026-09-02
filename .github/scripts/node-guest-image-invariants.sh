@@ -96,6 +96,35 @@ if ! grep -qF '"$SCRATCH_DEV" scratch' confos/mkosi/initrd/mkosi.extra/init; the
   exit 1
 fi
 
+# confos's root is immutable; the profile declares the directories it
+# writes at runtime in usr/lib/confai/state.d (one path per line). Each
+# must exist in the image or the initrd fails the boot, and every runtime
+# write path in the scripts must sit under a declared directory or it
+# surfaces as EROFS mid-boot.
+state_dirs=$(grep -hvE '^\s*(#|$)' "$ngi"/c8s/mkosi.extra/usr/lib/confai/state.d/*.conf | tr -d '\r')
+for d in $state_dirs; do
+  if [ ! -d "$ngi/c8s/mkosi.extra/$d" ]; then
+    echo "::error::state.d declares $d but $ngi/c8s/mkosi.extra/$d is not a baked directory; the confos initrd refuses to boot an image whose state.d names a missing dir"
+    exit 1
+  fi
+done
+for f in "$ngi/c8s/mkosi.extra/usr/local/bin/rke2-role.sh" \
+         "$ngi/c8s/mkosi.extra/usr/local/bin/gpu-node-label.sh" \
+         "$ngi/tests/lib.sh"; do
+  # The scripts name their /etc write target in one FRAG*= assignment each.
+  path=$(grep -oE '^FRAG(MENT|DIR)?=/etc/[^ ]+' "$f" | head -1 | cut -d= -f2)
+  [ -n "$path" ] || { echo "::error::$f: expected a FRAG*=/etc/... assignment to check against state.d"; exit 1; }
+  covered=no
+  for d in $state_dirs; do case "$path" in "/$d"/*) covered=yes ;; esac; done
+  if [ "$covered" = no ]; then
+    echo "::error::$f writes $path, which no state.d entry ($state_dirs) makes writable under the immutable root"
+    exit 1
+  fi
+done
+if ! grep -qF '/usr/lib/confai/state.d' confos/mkosi/initrd/mkosi.extra/init; then
+  echo "::warning::confos at CONFOS_REF $CONFOS_REF predates the immutable root (no state.d in its initrd); the state.d declaration is inert until the ref is bumped"
+fi
+
 # The scratch floor is prose in the README and a sector count in the gate;
 # a bump must touch both.
 if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh" \
