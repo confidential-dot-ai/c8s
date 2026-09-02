@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 

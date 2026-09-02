@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
@@ -17,8 +18,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 func sealedDigest() []byte { return bytes.Repeat([]byte{0x33}, 32) }
@@ -193,5 +198,136 @@ func TestBuildPolicy_StaticAllowlistRequiresMeshCA(t *testing.T) {
 	_, err := buildPolicy(config{staticAllowlist: true})
 	if err == nil || !strings.Contains(err.Error(), "--mesh-ca") {
 		t.Fatalf("buildPolicy = %v, want --mesh-ca requirement", err)
+	}
+}
+
+// tdxClaims builds a verified-claims result with the given launch digest and
+// rtmr_<i> platform claims.
+func tdxClaims(launch string, rtmrs map[int]string) *teetypes.VerificationResult {
+	pd := map[string]any{}
+	for idx, v := range rtmrs {
+		pd[fmt.Sprintf("rtmr_%d", idx)] = v
+	}
+	return &teetypes.VerificationResult{Claims: teetypes.Claims{LaunchDigest: launch, PlatformData: pd}}
+}
+
+func TestStaticCALaunchAllowed(t *testing.T) {
+	launchHex := strings.Repeat("ab", 48)
+	launch, _ := hex.DecodeString(launchHex)
+	rtmrHex := strings.Repeat("cd", 48)
+	rtmr, _ := hex.DecodeString(rtmrHex)
+	var img runtimemeasure.ImagePins
+	copy(img.MRTD[:], launch)
+	copy(img.RTMR1[:], rtmr)
+	copy(img.RTMR2[:], rtmr)
+
+	measured := func(m ...[]byte) *verifyPlan {
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: m}}
+	}
+	entryPlan := func(e ...measurements.Entry) *verifyPlan {
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Entries: e}}
+	}
+
+	for name, tc := range map[string]struct {
+		result *teetypes.VerificationResult
+		plan   *verifyPlan
+		wantOK bool
+	}{
+		"unpinned accepts": {
+			result: tdxClaims(launchHex, nil),
+			plan:   &verifyPlan{policy: &ratls.VerifyPolicy{}},
+			wantOK: true,
+		},
+		"measurements member": {
+			result: tdxClaims(launchHex, nil),
+			plan:   measured(launch),
+			wantOK: true,
+		},
+		"measurements non-member": {
+			result: tdxClaims(strings.Repeat("ef", 48), nil),
+			plan:   measured(launch),
+			wantOK: false,
+		},
+		"malformed launch digest": {
+			result: tdxClaims("not-hex", nil),
+			plan:   measured(launch),
+			wantOK: false,
+		},
+		"entry digest match without RTMRs": {
+			result: tdxClaims(launchHex, nil),
+			plan:   entryPlan(measurements.Entry{Name: "node", Digest: launch}),
+			wantOK: true,
+		},
+		"entry matched whole with RTMRs": {
+			result: tdxClaims(launchHex, map[int]string{1: rtmrHex, 2: rtmrHex}),
+			plan:   entryPlan(measurements.Entry{Name: "node", Digest: launch, RTMRs: map[int][]byte{1: rtmr, 2: rtmr}}),
+			wantOK: true,
+		},
+		"entry RTMR mismatch": {
+			result: tdxClaims(launchHex, map[int]string{1: strings.Repeat("00", 48)}),
+			plan:   entryPlan(measurements.Entry{Name: "node", Digest: launch, RTMRs: map[int][]byte{1: rtmr}}),
+			wantOK: false,
+		},
+		"no entry matches digest": {
+			result: tdxClaims(strings.Repeat("ef", 48), nil),
+			plan:   entryPlan(measurements.Entry{Name: "node", Digest: launch}),
+			wantOK: false,
+		},
+		"image manifest tuple matches": {
+			result: tdxClaims(launchHex, map[int]string{1: rtmrHex, 2: rtmrHex}),
+			plan:   &verifyPlan{policy: &ratls.VerifyPolicy{}, pins: rtmrPins{image: &img}},
+			wantOK: true,
+		},
+		"image manifest MRTD mismatch": {
+			result: tdxClaims(strings.Repeat("ef", 48), map[int]string{1: rtmrHex, 2: rtmrHex}),
+			plan:   &verifyPlan{policy: &ratls.VerifyPolicy{}, pins: rtmrPins{image: &img}},
+			wantOK: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := staticCALaunchAllowed(tc.result, tc.plan)
+			if tc.wantOK && err != nil {
+				t.Fatalf("staticCALaunchAllowed() = %v, want nil", err)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatal("staticCALaunchAllowed() = nil, want error")
+			}
+		})
+	}
+}
+
+func TestStaticCARTMRs(t *testing.T) {
+	rtmrHex := strings.Repeat("cd", 48)
+	rtmr, _ := hex.DecodeString(rtmrHex)
+
+	if err := staticCARTMRs(tdxClaims("", nil), nil); err != nil {
+		t.Fatalf("no pins must pass: %v", err)
+	}
+	if err := staticCARTMRs(tdxClaims("", map[int]string{1: rtmrHex}), map[int][]byte{1: rtmr}); err != nil {
+		t.Fatalf("matching register: %v", err)
+	}
+	if err := staticCARTMRs(tdxClaims("", nil), map[int][]byte{1: rtmr}); err == nil {
+		t.Fatal("missing register claim must fail closed")
+	}
+	if err := staticCARTMRs(tdxClaims("", map[int]string{1: "zz"}), map[int][]byte{1: rtmr}); err == nil {
+		t.Fatal("malformed register claim must fail closed")
+	}
+	if err := staticCARTMRs(tdxClaims("", map[int]string{1: strings.Repeat("00", 48)}), map[int][]byte{1: rtmr}); err == nil {
+		t.Fatal("mismatched register must fail closed")
+	}
+}
+
+// The sealed-policy verdict lines render only when the check ran.
+func TestRenderText_SealedPolicy(t *testing.T) {
+	var out bytes.Buffer
+	oc := Outcome{
+		Verified:              true,
+		StaticAllowlistDigest: hex.EncodeToString(sealedDigest()),
+		StaticAllowlistNote:   "static_allowlist_verified: test",
+	}
+	renderText(config{}, oc, &out)
+	if !strings.Contains(out.String(), "sealed policy: "+hex.EncodeToString(sealedDigest())) ||
+		!strings.Contains(out.String(), "static_allowlist_verified") {
+		t.Fatalf("renderText output missing sealed-policy lines:\n%s", out.String())
 	}
 }
