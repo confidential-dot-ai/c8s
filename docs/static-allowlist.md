@@ -91,13 +91,8 @@ The operator's path, end to end:
    c8s allowlist digest static-allowlist.json   # the value relying parties pin
    ```
 
-2. **Bake it into the node image.** Locally, with a
-   [confidential-os-builder](https://github.com/confidential-dot-ai/confidential-os-builder)
-   checkout at the `CONFOS_REF` pinned in `.github/workflows/c8s-image.yml`
-   (its `bin/setup` installs mkosi and the host tools; the build runs mkosi
-   under sudo) and a module-signing keypair whose certificate you install
-   over `node-guest-image/module-signing.crt`
-   (`node-guest-image/MODULE-SIGNING.md`; c8s's own key is a CI secret):
+2. **Bake it into the node image.** Locally, with the toolchain
+   `node-guest-image/README.md` ("Build it") describes:
 
    ```sh
    CONFOS_DIR=../confidential-os-builder MODULE_SIG_KEY=module-signing.key \

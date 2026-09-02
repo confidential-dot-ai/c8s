@@ -40,6 +40,28 @@ Layout:
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
 
+## Build it
+
+With a confos checkout at the `CONFOS_REF` pinned in
+`.github/workflows/c8s-image.yml` (its `bin/setup` installs mkosi and the host
+tools) and a module-signing keypair whose certificate you install over
+`module-signing.crt` (recipe in `MODULE-SIGNING.md`; the committed
+certificate's key is a CI secret):
+
+```sh
+MODULE_SIG_KEY=module-signing.key C8S_GPU_ATTEST=0 C8S_PLATFORM=tdx C8S_REF=<short sha> \
+  node-guest-image/build
+ls ../confidential-os-builder/output/c8s/   # disk.raw, uki.efi, manifest.json, roothash, ...
+```
+
+`C8S_GPU_ATTEST=0` composes the plain `attest` profile: same driver, CC
+enforcement and signed modules, but no libnvat, attestation-rs build or
+`ATTEST_GPU_BIN`/`LIBNVAT`. Leave it unset to match CI's profile set, which
+needs those inputs as `c8s-image.yml` sets them. Add
+`C8S_STATIC_ALLOWLIST=<file>` to seal an allowlist (`docs/static-allowlist.md`).
+The header of `build` documents every knob; the first build compiles the guest
+kernel (30 to 60 minutes), later builds hit the cache.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
