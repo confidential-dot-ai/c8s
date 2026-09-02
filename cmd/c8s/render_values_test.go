@@ -176,7 +176,7 @@ func TestValueArgsToTreeSetFileReadsContent(t *testing.T) {
 }
 
 func TestValueArgsToTreeRejectsUnknownFlag(t *testing.T) {
-	if _, err := valueArgsToTree([]string{"--set-json", `a={"b":1}`}); err == nil {
+	if _, err := valueArgsToTree([]string{"--set-literal", "a=b"}); err == nil {
 		t.Fatal("expected error for a value flag the parser does not implement")
 	}
 }

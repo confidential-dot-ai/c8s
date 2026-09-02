@@ -68,22 +68,54 @@ func TestPodModeMeasurementsPreflight(t *testing.T) {
 
 func TestOperatorKeysPreflight(t *testing.T) {
 	// Keys provided → no gate, no warning.
-	if warn, err := operatorKeysPreflight("operator.pub", nil, false); err != nil || warn != "" {
+	if warn, err := operatorKeysPreflight("operator.pub", false, nil, false); err != nil || warn != "" {
 		t.Fatalf("keys provided: want no error/warn, got warn=%q err=%v", warn, err)
 	}
+	// A sealed install has no write path by design → no gate, no warning.
+	if warn, err := operatorKeysPreflight("", true, nil, false); err != nil || warn != "" {
+		t.Fatalf("static allowlist: want no error/warn, got warn=%q err=%v", warn, err)
+	}
 	// Default path, no keys, no force → hard error (must acknowledge).
-	if _, err := operatorKeysPreflight("", nil, false); err == nil {
+	if _, err := operatorKeysPreflight("", false, nil, false); err == nil {
 		t.Fatal("no keys + no force: expected an error requiring --operator-keys or --force")
 	}
 	// Default path, no keys, --force → allowed, but warns.
-	if warn, err := operatorKeysPreflight("", nil, true); err != nil || warn == "" {
+	if warn, err := operatorKeysPreflight("", false, nil, true); err != nil || warn == "" {
 		t.Fatalf("no keys + force: want warn and no error, got warn=%q err=%v", warn, err)
 	}
-	// -f supplied → operator owns cds.operatorKeys in their values file; no gate.
-	// This is the same hole podModeMeasurementsPreflight just lost; closing it
-	// here is a separate change (five exec tests install through it today).
-	if warn, err := operatorKeysPreflight("", []string{"custom.yaml"}, false); err != nil || warn != "" {
-		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
+	// -f values files are inspected, not waved through: one that pins keys or
+	// seals the allowlist clears the guard; one that merely omits the key does
+	// not, so a GitOps install cannot silently ship with writes disabled.
+	withKeys := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\n")
+	if warn, err := operatorKeysPreflight("", false, []string{withKeys}, false); err != nil || warn != "" {
+		t.Fatalf("-f with cds.operatorKeys: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	sealed := writeValuesFile(t, "cds:\n  staticAllowlist: true\n")
+	if warn, err := operatorKeysPreflight("", false, []string{sealed}, false); err != nil || warn != "" {
+		t.Fatalf("-f with cds.staticAllowlist: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	silent := writeValuesFile(t, "cds:\n  port: 8443\n")
+	if _, err := operatorKeysPreflight("", false, []string{silent}, false); err == nil {
+		t.Fatal("-f without a write policy: expected the guard to require --operator-keys, --static-allowlist or --force")
+	}
+	if warn, err := operatorKeysPreflight("", false, []string{silent}, true); err != nil || warn == "" {
+		t.Fatalf("-f without a write policy + force: want warn and no error, got warn=%q err=%v", warn, err)
+	}
+}
+
+func TestStaticAllowlistPreflight(t *testing.T) {
+	if err := staticAllowlistPreflight(false, "operator.pub", nil); err != nil {
+		t.Fatalf("not sealed: %v", err)
+	}
+	if err := staticAllowlistPreflight(true, "", nil); err != nil {
+		t.Fatalf("sealed, no keys: %v", err)
+	}
+	if err := staticAllowlistPreflight(true, "operator.pub", nil); err == nil {
+		t.Fatal("sealed + --operator-keys must be refused")
+	}
+	withKeys := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\n")
+	if err := staticAllowlistPreflight(true, "", []string{withKeys}); err == nil {
+		t.Fatal("sealed + cds.operatorKeys in -f must be refused")
 	}
 }
 

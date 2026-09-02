@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -228,6 +229,16 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 		}
 		setArgs = append(setArgs, "--set-file", "cds.operatorKeys="+installOperatorKeys)
 	}
+	if installStaticAllowlist {
+		setArgs = append(setArgs, "--set", "cds.staticAllowlist=true")
+	}
+	if installBootstrapAllowlist != "" {
+		var err error
+		setArgs, err = appendBootstrapAllowlistArgs(setArgs, installBootstrapAllowlist)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if installResolveDigests {
 		var err error
 		setArgs, err = resolveDigests(ctx, chartPath, setArgs, imageTag, components)
@@ -300,8 +311,17 @@ func valueArgsToTree(setArgs []string) (map[string]any, error) {
 				return nil, fmt.Errorf("%s %s: %w", flag, path, err)
 			}
 			value = string(content)
+		case "--set-json":
+			// A whole subtree in one arg, for values whose keys can carry
+			// dots (allowlist workload names) and so cannot be spelled as a
+			// dotted path.
+			var decoded any
+			if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+				return nil, fmt.Errorf("%s %s: %w", flag, path, err)
+			}
+			value = decoded
 		default:
-			return nil, fmt.Errorf("unsupported value flag %q (want --set, --set-string, or --set-file)", flag)
+			return nil, fmt.Errorf("unsupported value flag %q (want --set, --set-string, --set-file, or --set-json)", flag)
 		}
 		if err := setNested(root, strings.Split(path, "."), value); err != nil {
 			return nil, err
@@ -427,6 +447,8 @@ func init() {
 	renderValuesCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each component image tag to its registry digest (via crane), pin it, and enable the NRI allowlist derivation")
 	renderValuesCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing dockerconfigjson Secret the chart wires into every component's imagePullSecrets")
 	renderValuesCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main'). Override to pin a specific branch/tag/release")
+	renderValuesCmd.Flags().BoolVar(&installStaticAllowlist, "static-allowlist", false, "emit cds.staticAllowlist=true: seal the allowlist for the CDS instance's lifetime (mutually exclusive with --operator-keys); see docs/static-allowlist.md")
+	renderValuesCmd.Flags().StringVar(&installBootstrapAllowlist, "bootstrap-allowlist", "", "path to a c8s.allowlist/v1 document folded into the seed (floor digests and workload entries under nriImagePolicy.bootstrapAllowlist)")
 	renderValuesCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; the file's content is embedded as cds.operatorKeys in the emitted values (the chart value is PEM content, never a path)")
 	rootCmd.AddCommand(renderValuesCmd)
 }

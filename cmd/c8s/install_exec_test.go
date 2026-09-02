@@ -1159,7 +1159,7 @@ func TestInstallValuesFromStdin(t *testing.T) {
 	resetCLIState(t)
 	t.Cleanup(func() { rootCmd.SetIn(nil) })
 	rootCmd.SetIn(strings.NewReader(payload))
-	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "--wait=false", "-f", "-"})
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "--wait=false", "--force", "-f", "-"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -1327,7 +1327,7 @@ func TestInstallHostedLaneDefaultsExemptNamespaces(t *testing.T) {
 func TestInstallHostedLaneKeepsOperatorExemptNamespaces(t *testing.T) {
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
+	values := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\nnriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
 	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -1369,7 +1369,7 @@ func TestInstallRefusesPolicyDenyingPlatformPods(t *testing.T) {
 	pods := podListFile(t, staticEtcdPod())
 	s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, pods))
 	// exemptNamespaces cleared: the shape a pre-#396 values file installs.
-	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
+	values := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\nnriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
 
 	err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values)
 	if err == nil {
@@ -1408,7 +1408,7 @@ func TestInstallForcePastPlatformPodDenial(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		s = newInstallStubs(t, "", false)
 		s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
-		values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
+		values := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\nnriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
 		err = runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false", "-f", values)
 	})
 	if err != nil {
@@ -1425,7 +1425,7 @@ func TestInstallForcePastPlatformPodDenial(t *testing.T) {
 func TestInstallAuditPolicySkipsPlatformPodCheck(t *testing.T) {
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
-	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    mode: audit\n    exemptNamespaces: []\n")
+	values := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\nnriImagePolicy:\n  policy:\n    mode: audit\n    exemptNamespaces: []\n")
 	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -1482,7 +1482,7 @@ func TestInstallNodeLaneReportsNoExemption(t *testing.T) {
 // `-f -` is such a file: the exempt scan runs after stdin is materialized, so
 // it reads the piped bytes rather than a literal "-".
 func TestInstallHostedLaneKeepsExemptNamespacesFromStdin(t *testing.T) {
-	payload := "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n"
+	payload := "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\nnriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n"
 
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
@@ -1490,7 +1490,7 @@ func TestInstallHostedLaneKeepsExemptNamespacesFromStdin(t *testing.T) {
 	resetCLIState(t)
 	t.Cleanup(func() { rootCmd.SetIn(nil) })
 	rootCmd.SetIn(strings.NewReader(payload))
-	rootCmd.SetArgs([]string{"install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", "-"})
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false", "-f", "-"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("install: %v", err)
 	}

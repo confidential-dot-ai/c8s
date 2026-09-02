@@ -93,13 +93,22 @@ including a named entry for the workload behind tls-lb so its leaves earn the
 ### Install
 
 ```sh
-c8s install ... \
-  --set cds.staticAllowlist=true \
+c8s install --cvm-mode=node --hardware-platform=tdx --single-node \
+  --measurements-config measurements.json \
+  --static-allowlist \
+  --bootstrap-allowlist workloads.json \
   --set cds.allowlistSeedHostPath=/etc/c8s/static-allowlist.json
 ```
 
-- `cds.staticAllowlist` renders `--static-allowlist` and is refused next to
-  `cds.operatorKeys` (a sealed allowlist has no write path).
+- `--static-allowlist` renders `cds.staticAllowlist=true` and is refused next
+  to `--operator-keys` (a sealed allowlist has no write path). It also
+  satisfies the operator-keys preflight: key-less is the design here, not an
+  oversight.
+- `--bootstrap-allowlist` folds a `c8s.allowlist/v1` document into the install
+  seed — its floor digests and its named workload entries. Under a seal this
+  is the only way a workload entry gets in, since nothing can be written after
+  CDS starts; the entry for the workload behind tls-lb is what earns its
+  leaves the `…1.5` stamp.
 - `cds.allowlistSeedHostPath` mounts the baked file into CDS instead of the
   chart's ConfigMap seed. On node-as-CVM the "host" path is the measured
   guest root, so the mount is verity-backed. (Without it the ConfigMap seed
@@ -107,6 +116,9 @@ c8s install ... \
   but the content then rides an operator-rendered ConfigMap rather than the
   measured image, so only the CA stamp, not the node measurement, speaks for
   it.)
+
+The install prints the publish-and-pin recipe on success: export the served
+document, print its canonical digest, and hand both to relying parties.
 
 At startup CDS **replaces** the store with the seed (`seedStoreStatic` — a
 persistent DB from an earlier, wider policy cannot leak entries into the
