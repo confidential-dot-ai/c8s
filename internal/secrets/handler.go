@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 
 	"github.com/confidential-dot-ai/c8s/internal/httputil"
@@ -478,5 +477,15 @@ func isInjected(al *pkgallowlist.Allowlist, c workloadclaims.SandboxContainer) b
 	if _, floor := al.Digests[c.Digest]; !floor {
 		return false
 	}
-	return slices.Contains(InjectedEntrypoints, c.Argv[0])
+	switch c.Argv[0] {
+	case "get-cert", "get-secret", "get-volume":
+		return true
+	case "/c8s":
+		// The webhook injects only the probe-file helper through the shared
+		// /c8s entrypoint. Never hide another c8s subcommand from the exact
+		// workload inventory.
+		return len(c.Argv) > 1 && c.Argv[1] == "probe-file"
+	default:
+		return false
+	}
 }
