@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 )
 
 const bootstrapDoc = `{
@@ -152,4 +157,42 @@ func TestAppendNodeSealArgs(t *testing.T) {
 	if v, _ := stringAtPath(tree, "cds.staticAllowlistDigest"); v != digest || len(v) != 64 {
 		t.Fatalf("cds.staticAllowlistDigest = %q, want %q", v, digest)
 	}
+}
+
+func TestAppendPodSealArgs(t *testing.T) {
+	f := newFakeBin(t)
+	// The stub stands in for `helm template`: it prints the chart's CDS
+	// manifests, seed ConfigMap included.
+	f.tool(t, "helm", "cat <<'MANIFESTS'\n"+renderedSeedManifests+"\nMANIFESTS")
+	computed := filepath.Join(t.TempDir(), "computed.yaml")
+	if err := os.WriteFile(computed, []byte("cds: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed)
+	if err != nil {
+		t.Fatalf("appendPodSealArgs: %v", err)
+	}
+	tree, err := valueArgsToTree(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, _ := seedFromRenderedManifests([]byte(renderedSeedManifests))
+	doc, _ := pkgallowlist.ParseJSON(seed)
+	want, _ := doc.CanonicalDigest()
+	if v, _ := stringAtPath(tree, "cds.staticAllowlistDigest"); v != hex.EncodeToString(want) {
+		t.Fatalf("cds.staticAllowlistDigest = %q, want %x", v, want)
+	}
+	annotation, _ := stringAtPath(tree, "cds.initDataAnnotation")
+	raw, err := initdata.Decode(annotation)
+	if err != nil {
+		t.Fatalf("decode init-data annotation: %v", err)
+	}
+	parsed, err := initdata.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse init-data: %v", err)
+	}
+	if parsed.Data[initdata.KeyRole] != initdata.RoleCDS || parsed.Data[initdata.KeyCDSAllowlistSeedSHA256] != hex.EncodeToString(want) {
+		t.Fatalf("init-data does not launch-commit the sealed digest: %+v", parsed.Data)
+	}
+	mustContainLine(t, f.calls(t), "helm template c8s /chart --show-only templates/cds.yaml -f "+computed)
 }

@@ -37,6 +37,10 @@ import (
 // sealed CA's own evidence at startup.
 const staticCAEvidenceTimeout = 30 * time.Second
 
+// initDataDocumentPath is where kata-agent writes the launch-committed
+// document; a variable so tests can point it at a fixture.
+var initDataDocumentPath = initdata.GuestDocumentPath
+
 // seedStoreStatic reads the JSON allowlist at path and REPLACES the store
 // contents with it, unlike seedStore's additive merge: a sealed CDS must
 // enforce exactly the seed document, so entries left over in a persistent
@@ -119,9 +123,9 @@ func checkExpectedSealedDigest(expectedHex string, got []byte) error {
 // closed — an unsealed launch of the same guest image must not present as
 // sealed.
 func checkInitDataSeal(ctx context.Context, attestationApiURL string, sealed []byte) error {
-	raw, err := os.ReadFile(initdata.GuestDocumentPath)
+	raw, err := os.ReadFile(initDataDocumentPath)
 	if err != nil {
-		return fmt.Errorf("static allowlist: read launch-committed init-data %s: %w", initdata.GuestDocumentPath, err)
+		return fmt.Errorf("static allowlist: read launch-committed init-data %s: %w", initDataDocumentPath, err)
 	}
 	claim, err := verifiedOwnInitData(ctx, attestationApiURL)
 	if err != nil {
