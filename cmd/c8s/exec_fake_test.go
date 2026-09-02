@@ -102,11 +102,13 @@ func resetCLIState(t *testing.T) {
 		installNamespace, installRelease, installCertKeyMode, installCvmMode         string
 		installHardwarePlatform, installImagePullSecret, installImageTag             string
 		installOperatorKeys, installUpstream, renderValuesDistro                     string
+		installBootstrapAllowlist                                                    string
 		uninstallNamespace, uninstallRelease                                         string
 		installValues, installWorkloadRefs, installMeasurements                      []string
 		installInventoryCIDRs                                                        []string
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug       bool
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled bool
+		installStaticAllowlist                                                       bool
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce    bool
 		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes                bool
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup        int64
@@ -115,11 +117,13 @@ func resetCLIState(t *testing.T) {
 		installNamespace, installRelease, installCertKeyMode, installCvmMode,
 		installHardwarePlatform, installImagePullSecret, installImageTag,
 		installOperatorKeys, installUpstream, renderValuesDistro,
+		installBootstrapAllowlist,
 		uninstallNamespace, uninstallRelease,
 		slices.Clone(installValues), slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements),
 		slices.Clone(installInventoryCIDRs),
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug,
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled,
+		installStaticAllowlist,
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce,
 		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes,
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup,
@@ -139,6 +143,7 @@ func resetCLIState(t *testing.T) {
 		installVolumes = saved.installVolumes
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup = saved.installCertFSGroup, saved.installGetCertRunAsUser, saved.installGetCertRunAsGroup
 		installGetCertRenewInterval = saved.installGetCertRenewInterval
+		installStaticAllowlist, installBootstrapAllowlist = saved.installStaticAllowlist, saved.installBootstrapAllowlist
 	})
 
 	installNamespace, installRelease = "c8s-system", "c8s"
@@ -156,6 +161,7 @@ func resetCLIState(t *testing.T) {
 	uninstallWait, uninstallKataSweep, uninstallHostSweepOnly = true, true, false
 	uninstallForce, uninstallDeleteCRDs, uninstallDeleteNamespace = false, false, false
 	renderValuesDistro = ""
+	installStaticAllowlist, installBootstrapAllowlist = false, ""
 }
 
 // runC8s executes the real cobra tree exactly as the binary would, from a
