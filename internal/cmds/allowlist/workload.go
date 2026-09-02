@@ -43,7 +43,7 @@ func newWorkloadListCmd(o *options) *cobra.Command {
 		Short: "List workload entries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			al, _, err := o.fetch(ctx(cmd))
+			al, _, err := o.fetch(cmd)
 			if err != nil {
 				return err
 			}
@@ -62,7 +62,7 @@ func newWorkloadGetCmd(o *options) *cobra.Command {
 		Short: "Print one workload entry as canonical JSON",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			al, _, err := o.fetch(ctx(cmd))
+			al, _, err := o.fetch(cmd)
 			if err != nil {
 				return err
 			}
@@ -106,7 +106,7 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 
 			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
 
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}
@@ -173,7 +173,7 @@ func newWorkloadEditCmd(o *options) *cobra.Command {
 				return err
 			}
 			name := args[0]
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}
@@ -227,7 +227,7 @@ func newWorkloadDeleteCmd(o *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}
