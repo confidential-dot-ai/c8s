@@ -298,7 +298,7 @@ func TestIssueDefaultTTL(t *testing.T) {
 }
 
 func TestNewCAWithExtensions(t *testing.T) {
-	ext := pkix.Extension{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 6}, Value: []byte{0x30, 0x00}}
+	ext := pkix.Extension{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 3}, Value: []byte{0x30, 0x00}}
 	var seenKey crypto.PublicKey
 	ca, err := issuer.NewCAWithExtensions("c", time.Hour, elliptic.P384(), func(pub crypto.PublicKey) ([]pkix.Extension, error) {
 		seenKey = pub

@@ -32,8 +32,8 @@ import (
 // OIDStaticAllowlist identifies the static-allowlist extension (see
 // extension.go for the 1.3.6.1.4.1.66378 arc):
 //
-//	1.3.6.1.4.1.66378.1.6 - static allowlist extension
-var OIDStaticAllowlist = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 6}
+//	1.3.6.1.4.1.66378.1.3 - static allowlist extension
+var OIDStaticAllowlist = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 3}
 
 // staticAllowlistVersion is the only encoding version this package emits or
 // parses. An unknown version fails closed wherever the sealed policy is read.

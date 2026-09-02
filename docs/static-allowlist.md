@@ -8,7 +8,7 @@ and the mesh CA certificate is minted carrying two extra extensions:
 - `1.3.6.1.4.1.66378.1.1` — the standard RA-TLS attestation extension, over
   the **CA public key** (`REPORTDATA = SHA-384(PKIX(pubkey))`, the same
   nonce-free binding every serving certificate uses).
-- `1.3.6.1.4.1.66378.1.6` — the static-allowlist stamp:
+- `1.3.6.1.4.1.66378.1.3` — the static-allowlist stamp:
   `SHA-256(Allowlist.Canonical())` of the sealed document
   (`pkg/ratls/staticallowlist.go`).
 
@@ -37,7 +37,7 @@ The chain, per HTTPS request:
 client nonce ──► fresh TEE report (tls-lb guest, pinned launch digest)
                    report_data ⊇ H(serving leaf) ‖ H(mesh leaf) ‖ H(mesh CA cert)
 mesh CA cert ──► …1.1 evidence binds the CA public key to a pinned CDS launch
-                 …1.6 seals SHA-256 of the one policy that CDS enforces
+                 …1.3 seals SHA-256 of the one policy that CDS enforces
 mesh leaf    ──► …1.5 matched-workload stamp {name, version, allowlistDigest}
                    must name the expected workload under the same digest
 ```
@@ -46,7 +46,7 @@ The end user pins **one value** — the canonical allowlist digest, printed by
 `c8s allowlist digest <file>` and reproducible offline from the published
 document — plus the usual launch-measurement reference values.
 
-The `…1.6` value alone is CA-self-asserted. What upgrades it to "enforced" is
+The `…1.3` value alone is CA-self-asserted. What upgrades it to "enforced" is
 the pairing the verifier requires: the embedded `…1.1` evidence proves the CA
 key was generated inside a measured CDS, and the measured CDS code refuses to
 start unless the digest it stamps is the digest of the document it loaded,
@@ -129,7 +129,7 @@ c8s verify https://workload.example.com --kind lb \
 `--static-allowlist` (requires `--mesh-ca`) makes the verdict additionally
 require:
 
-1. Exactly one certificate in the `--mesh-ca` bundle carries the `…1.6`
+1. Exactly one certificate in the `--mesh-ca` bundle carries the `…1.3`
    stamp.
 2. That CA's embedded `…1.1` evidence verifies, binds the CA's own public
    key, and its launch digest passes the same measurement policy as the
