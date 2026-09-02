@@ -23,6 +23,9 @@ enable gpu-node-label.service
 # Fail closed on a non-CC GPU before rke2 registers the node; RequiredBy the
 # rke2 pair so a failed gate never schedules the GPU.
 enable gpu-cc-enforce.service
+# Fail closed when the initrd fell back to the tmpfs rootfs upper; RequiredBy
+# the rke2 pair so a scratch-less node powers off instead of flapping.
+enable scratch-enforce.service
 # Role dispatch + the role-gated rke2 pair.
 enable rke2-role.service
 enable rke2-server.service

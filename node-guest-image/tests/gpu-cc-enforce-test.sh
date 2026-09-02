@@ -10,8 +10,6 @@ TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT=${GPU_CC_SCRIPT:-"$TESTS_DIR/../c8s/mkosi.extra/usr/local/bin/gpu-cc-enforce.sh"}
 [[ -x "$SCRIPT" ]] || { echo "script not found: $SCRIPT"; exit 2; }
 
-not() { ! "$@"; }
-
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin"
@@ -33,7 +31,6 @@ stub_smi() {
     { echo '#!/bin/sh'; printf 'echo "%s"\n' "$@"; echo "exit $rc"; } > "$WORK/bin/nvidia-smi"
     chmod +x "$WORK/bin/nvidia-smi"
 }
-stderr_has() { grep -q "$1" "$WORK/stderr"; }
 
 CASE="no nvidia device"
 set_vendor 0x8086
