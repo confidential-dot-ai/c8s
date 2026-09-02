@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -43,10 +44,10 @@ func MakeSNPRATLSAttestFunc(client Client, attestationApiURL string) func(contex
 // the TDX variants are TDX. The RA-TLS extension records only the family; the
 // per-variant evidence shape is auto-detected by ratls.UnmarshalExtension.
 func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
-	switch types.Platform(platform) {
-	case types.PlatformSnp, types.PlatformAzSnp, types.PlatformGcpSnp:
+	switch teetypes.NormalizePlatform(platform).Family() {
+	case teetypes.FamilySNP:
 		return ratls.TEETypeSEVSNP, nil
-	case types.PlatformTdx, types.PlatformAzTdx:
+	case teetypes.FamilyTDX:
 		return ratls.TEETypeTDX, nil
 	default:
 		return 0, fmt.Errorf("attestclient: no RA-TLS TEE type for platform %q", platform)

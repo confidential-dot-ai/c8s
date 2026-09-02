@@ -1392,7 +1392,7 @@ func enforceMinTCB(oc *Outcome, cfg config, result *teetypes.VerificationResult)
 // pick "gcp-tdx" to slip past a TDX-only rule, or "tdx" to trip a TDX-only
 // rejection, so every platform decision here normalizes first.
 func isTDX(platform string) bool {
-	return ratls.NormalizePlatform(platform) == ratls.NormalizePlatform(string(teetypes.PlatformTDX))
+	return teetypes.NormalizePlatform(platform).IsTDX()
 }
 
 // applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and the RTMR[3] pin

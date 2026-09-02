@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -203,9 +204,11 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 }
 
 // TDXPlatform reports whether platform names TDX-shaped evidence, i.e. carries
-// runtime measurement registers an RTMR pin can be enforced against.
+// runtime measurement registers an RTMR pin can be enforced against. The
+// family mapping is teetypes.Family, so a new TDX tag there (gcp-tdx today)
+// gets its RTMRs enforced instead of silently skipping the pin.
 func TDXPlatform(platform string) bool {
-	return platform == string(types.PlatformTdx) || platform == string(types.PlatformAzTdx)
+	return teetypes.NormalizePlatform(platform).IsTDX()
 }
 
 // EnforceRTMRs requires each pinned register to byte-equal the value the

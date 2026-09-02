@@ -6,11 +6,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -951,19 +951,21 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 
 // NormalizePlatform maps the platform aliases used across the stack (cloud
 // prefixes like az-/gcp-, and "snp") to the two canonical values the RA-TLS
-// package understands: "sev-snp" and "tdx". Unknown values pass through
+// package understands: "sev-snp" and "tdx". The alias table is
+// teetypes.Family; this wrapper additionally accepts the two family names
+// themselves as input, since configs carry them. Unknown values pass through
 // lowercased/trimmed so ValidatePlatform can reject them with a clear error.
 // Call it to canonicalize a value for display or comparison; the package
 // entry points normalize their own input.
 func NormalizePlatform(platform string) string {
-	switch p := strings.ToLower(strings.TrimSpace(platform)); p {
-	case "snp", "sev-snp", "az-snp", "gcp-snp":
-		return "sev-snp"
-	case "tdx", "az-tdx", "gcp-tdx":
-		return "tdx"
-	default:
-		return p
+	p := teetypes.NormalizePlatform(platform)
+	if string(p) == string(teetypes.FamilySNP) {
+		return string(teetypes.FamilySNP)
 	}
+	if f := p.Family(); f != teetypes.FamilyUnknown {
+		return string(f)
+	}
+	return string(p)
 }
 
 // ValidatePlatform checks that the platform string refers to an implemented
@@ -978,9 +980,9 @@ func ValidatePlatform(platform string) error {
 // pass the platform string their own config carries.
 func parseTEEType(platform string) (TEEType, error) {
 	switch NormalizePlatform(platform) {
-	case "sev-snp":
+	case string(teetypes.FamilySNP):
 		return TEETypeSEVSNP, nil
-	case "tdx":
+	case string(teetypes.FamilyTDX):
 		return TEETypeTDX, nil
 	default:
 		return 0, fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -94,16 +96,20 @@ func (b *Base64Bytes) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Platform represents a TEE platform type.
-type Platform string
+// Platform identifies a TEE platform in attestation-api requests and
+// responses. It aliases teetypes.PlatformType so the tag set is defined once;
+// PlatformAuto is request-only ("pick the local platform" in POST /attest),
+// never a verified tag.
+type Platform = teetypes.PlatformType
 
 const (
 	PlatformAuto   Platform = "auto"
-	PlatformSnp    Platform = "snp"
-	PlatformTdx    Platform = "tdx"
-	PlatformAzSnp  Platform = "az-snp"
-	PlatformAzTdx  Platform = "az-tdx"
-	PlatformGcpSnp Platform = "gcp-snp"
+	PlatformSnp             = teetypes.PlatformSNP
+	PlatformTdx             = teetypes.PlatformTDX
+	PlatformAzSnp           = teetypes.PlatformAzSNP
+	PlatformAzTdx           = teetypes.PlatformAzTDX
+	PlatformGcpSnp          = teetypes.PlatformGcpSNP
+	PlatformGcpTdx          = teetypes.PlatformGcpTDX
 )
 
 // AttestRequest is the request body for the attestation-api POST /attest.
