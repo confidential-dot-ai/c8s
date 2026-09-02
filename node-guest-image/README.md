@@ -62,8 +62,9 @@ The other disks are optional; each is owned by one unit under
   backs containerd's image cache, which otherwise lives in a RAM tmpfs
   (`containerd-data-disk.service`).
 - serial `confai-models` — a pre-populated, read-only weights disk
-  mounted at `/var/lib/models` so a large cache survives relaunch
-  (`models-disk.service`).
+  mounted at `/var/lib/models` so a large cache survives relaunch. It is
+  unencrypted and host-writable: attach it only for public weights whose
+  digests the workload verifies itself (`models-disk.service`).
 - label `joindata` — an ISO that picks server vs agent and joins the
   cluster; absent means single-node server (`rke2-role.service`).
 - label `opkeydata` — an ISO carrying the operator public key; its
