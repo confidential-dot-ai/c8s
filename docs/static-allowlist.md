@@ -95,7 +95,10 @@ The operator's path, end to end:
    [confidential-os-builder](https://github.com/confidential-dot-ai/confidential-os-builder)
    checkout at the `CONFOS_REF` pinned in `.github/workflows/c8s-image.yml`
    (its `bin/setup` installs mkosi and the host tools; the build runs mkosi
-   under sudo) and any RSA key to sign the NVIDIA modules with:
+   under sudo) and the module-signing key whose certificate is committed at
+   `node-guest-image/module-signing.crt` — or your own keypair with its
+   certificate installed over that file, which rolls the measurement
+   (`node-guest-image/MODULE-SIGNING.md`):
 
    ```sh
    CONFOS_DIR=../confidential-os-builder MODULE_SIG_KEY=module-sig.key \
@@ -104,6 +107,8 @@ The operator's path, end to end:
    # → ../confidential-os-builder/output/c8s/{disk.raw,manifest.json,static-allowlist.json,...}
    ```
 
+   The GPU attestation stage also needs `ATTEST_GPU_BIN` and `LIBNVAT`, set
+   as `.github/workflows/c8s-image.yml` sets them.
    `C8S_REF` selects the c8s component images the image bakes and pins, so
    they must be published at that commit (`docker.yml` on main, or a
    `workflow_dispatch` for a branch).
