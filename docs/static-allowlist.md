@@ -107,8 +107,15 @@ The operator's path, end to end:
    # → ../confidential-os-builder/output/c8s/{disk.raw,manifest.json,static-allowlist.json,...}
    ```
 
-   The GPU attestation stage also needs `ATTEST_GPU_BIN` and `LIBNVAT`, set
-   as `.github/workflows/c8s-image.yml` sets them.
+   The GPU attestation stage also needs NVIDIA's `libnvat` (public,
+   digest-pinned as `LIBNVAT_REF` in `.github/workflows/c8s-image.yml`)
+   installed on the host and the GPU-capable `attestation-api` built from
+   attestation-rs at `ATTESTATION_RS_REF` with `--features
+   nvidia-gpu-attest`, at `../attestation-rs/target/release/attestation-api`
+   relative to the builder checkout (or `ATTEST_GPU_BIN`/`LIBNVAT`). The
+   host must resolve libnvat's deps (Ubuntu 24.04's ICU 74 and
+   `libxml2.so.2`), since the build bundles what `ldd` finds; elsewhere,
+   set `LD_LIBRARY_PATH` to copies of those sonames.
    `C8S_REF` selects the c8s component images the image bakes and pins, so
    they must be published at that commit (`docker.yml` on main, or a
    `workflow_dispatch` for a branch).
