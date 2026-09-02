@@ -48,7 +48,7 @@
 #                      Changes the measurement — that is the point. The file is
 #                      also copied beside manifest.json in the output, so it
 #                      ships in the published artifact. Compose it with
-#                      `c8s allowlist compose` (docs/static-allowlist.md).
+#                      `c8s render-allowlist` (docs/static-allowlist.md).
 #   C8S_REF=...        bake the c8s components (nri plugin + the CDS digest in
 #                      the NRI floor) from a specific c8s COMMIT (short SHA)
 #                      instead of the pin in the c8s profile's mkosi.sync,

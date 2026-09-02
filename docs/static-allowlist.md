@@ -91,11 +91,22 @@ The operator's path, end to end:
    c8s allowlist digest static-allowlist.json   # the value relying parties pin
    ```
 
-2. **Bake it into the node image.** Locally:
+2. **Bake it into the node image.** Locally, with a
+   [confidential-os-builder](https://github.com/confidential-dot-ai/confidential-os-builder)
+   checkout at the `CONFOS_REF` pinned in `.github/workflows/c8s-image.yml`
+   (its `bin/setup` installs mkosi and the host tools; the build runs mkosi
+   under sudo) and any RSA key to sign the NVIDIA modules with:
 
    ```sh
-   C8S_PLATFORM=tdx C8S_REF=<short sha> C8S_STATIC_ALLOWLIST=static-allowlist.json node-guest-image/build
+   CONFOS_DIR=../confidential-os-builder MODULE_SIG_KEY=module-sig.key \
+     C8S_PLATFORM=tdx C8S_REF=<short sha> C8S_STATIC_ALLOWLIST=static-allowlist.json \
+     node-guest-image/build
+   # → ../confidential-os-builder/output/c8s/{disk.raw,manifest.json,static-allowlist.json,...}
    ```
+
+   `C8S_REF` selects the c8s component images the image bakes and pins, so
+   they must be published at that commit (`docker.yml` on main, or a
+   `workflow_dispatch` for a branch).
 
    or in CI, which publishes the sealed image under its own tags and never
    moves a floating one:
