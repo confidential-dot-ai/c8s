@@ -184,6 +184,11 @@ tar -xzf "$CACHE_DIR/rke2-${CACHE_VER}.tar.gz" -C "$STAGE_DIR/usr/local"
 chmod 0755 "$STAGE_DIR/usr/local/bin/rke2" \
            "$STAGE_DIR/usr/local/bin/rke2-killall.sh" \
            "$STAGE_DIR/usr/local/bin/rke2-uninstall.sh"
+# rke2 keeps containerd on the default CNI dirs and the bundled Cilium chart
+# hostPath-mounts them. Under confos's immutable root they get a writable
+# overlay (state.d/60-c8s.conf), and the initrd only overlays directories
+# that already exist in the image — so bake them empty here.
+mkdir -p "$STAGE_DIR/opt/cni/bin" "$STAGE_DIR/etc/cni/net.d"
 # Marker for inspecting a built image.
 echo "$RKE2_VERSION" > "$STAGE_DIR/usr/local/share/rke2/.confos-baked-version"
 

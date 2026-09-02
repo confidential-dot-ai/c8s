@@ -53,8 +53,8 @@ The initrd encrypts the disk and, via a dm mapping named `scratch`, backs the
 writable state overlays with it; the root itself is the read-only verity
 image. Which directories get an overlay is declared in
 `/usr/lib/confai/state.d/`: confos's base covers `/var`, `/home`, `/root`,
-`/tmp`, and this profile adds `/etc/rancher` (`60-c8s.conf`) for rke2's
-kubeconfig, node password and `config.yaml.d` fragments. Without the disk
+`/tmp`, and this profile adds `/etc/rancher`, `/etc/cni`, `/opt/cni` and
+`/etc/nri` (`60-c8s.conf` says why each). Without the disk
 the initrd falls back to a 2G RAM tmpfs: the guest comes up Ready, then
 wedges once RKE2 fills it — a flapping node, not a boot error.
 `scratch-enforce.service` closes that hole by checking for the dm mapping
