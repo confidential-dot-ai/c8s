@@ -7133,22 +7133,17 @@ func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
 	}
 }
 
-// The kubelet root dir differs by distro: RKE2 runs its kubelet with
-// --root-dir under the agent dir, everything else takes the upstream default.
-// volumed resolves pod volume directories beneath it, so the wrong value
-// mounts volumes where no pod looks for them.
-func TestChartVolumedKubeletRootTracksDistro(t *testing.T) {
+// volumed resolves pod volume directories beneath the kubelet root, so the
+// rendered arg, mount, and hostPath must agree, and an explicit value must win.
+func TestChartVolumedKubeletRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 		want string
 	}{
 		{"default", nil, "/var/lib/kubelet"},
-		{"k8s distro", []string{"--set-string", "nriImagePolicy.distro=k8s"}, "/var/lib/kubelet"},
-		{"rke2 via nri distro", []string{"--set-string", "nriImagePolicy.distro=rke2"}, "/var/lib/rancher/rke2/agent/kubelet"},
-		{"rke2 via kata distro", []string{"--set-string", "kata.distro=rke2"}, "/var/lib/rancher/rke2/agent/kubelet"},
+		{"rke2 distro keeps the default", []string{"--set-string", "nriImagePolicy.distro=rke2"}, "/var/lib/kubelet"},
 		{"explicit wins", []string{
-			"--set-string", "nriImagePolicy.distro=rke2",
 			"--set-string", "volumed.hostPaths.kubeletRoot=/custom/kubelet",
 		}, "/custom/kubelet"},
 	} {
@@ -7180,7 +7175,42 @@ func TestChartVolumedKubeletRootTracksDistro(t *testing.T) {
 			if v.HostPath.Path != tc.want {
 				t.Errorf("kubelet-root hostPath = %q, want %q", v.HostPath.Path, tc.want)
 			}
+			// The teardown hook unmounts under the same root; a divergent
+			// path would sweep the wrong tree.
+			hook := renderedDaemonSet(t, out, "c8s-volumed-teardown").Spec.Template.Spec
+			hc, ok := findContainer(hook.InitContainers, "teardown")
+			if !ok {
+				t.Fatal("teardown init container missing")
+			}
+			hm, ok := containerVolumeMount(hc, "kubelet-root")
+			if !ok {
+				t.Fatal("no kubelet-root mount in the teardown hook")
+			}
+			if hm.MountPath != tc.want {
+				t.Errorf("hook kubelet-root mountPath = %q, want %q", hm.MountPath, tc.want)
+			}
+			hv, ok := podVolume(hook, "kubelet-root")
+			if !ok || hv.HostPath == nil {
+				t.Fatal("no kubelet-root hostPath volume in the teardown hook")
+			}
+			if hv.HostPath.Path != tc.want {
+				t.Errorf("hook kubelet-root hostPath = %q, want %q", hv.HostPath.Path, tc.want)
+			}
 		})
+	}
+}
+
+// An empty kubeletRoot would render an empty hostPath the apiserver rejects
+// long after helm reports success; the chart refuses to render it instead.
+func TestChartVolumedKubeletRootMustNotBeEmpty(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.hostPaths.kubeletRoot=")
+	if err == nil {
+		t.Fatal("rendered with an empty volumed.hostPaths.kubeletRoot")
+	}
+	if !strings.Contains(out, "volumed.hostPaths.kubeletRoot is required") {
+		t.Errorf("render error does not name the value: %s", out)
 	}
 }
 
