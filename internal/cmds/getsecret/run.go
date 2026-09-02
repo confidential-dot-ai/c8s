@@ -78,9 +78,11 @@ func run(cfg config) error {
 		return err
 	}
 
-	if err := prepareOutDir(cfg.OutDir); err != nil {
+	outRoot, err := prepareOutDir(cfg.OutDir)
+	if err != nil {
 		return err
 	}
+	defer outRoot.Close()
 
 	var values map[string][]byte
 	err = sidecar.Retry(ctx, cfg.Config, "secret", func(ctx context.Context) error {
@@ -91,7 +93,7 @@ func run(cfg config) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAll(cfg, values); err != nil {
+	if err := writeAll(outRoot, cfg, values); err != nil {
 		return err
 	}
 	slog.Info("secrets written", "count", len(values), "dir", cfg.OutDir)
@@ -169,7 +171,7 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 // flag documents "must be memory-backed", and on any other filesystem the
 // secret bytes are readable by the host. Checked before fetching so a
 // misconfigured dir fails fast, without touching the secret store.
-func prepareOutDir(dir string) error {
+func prepareOutDir(dir string) (*os.Root, error) {
 	// Vet the nearest existing ancestor before creating anything: MkdirAll
 	// cannot cross a mountpoint, so the new dirs land on the same filesystem,
 	// and a refusal leaves no directories behind on the persistent storage
@@ -178,6 +180,8 @@ func prepareOutDir(dir string) error {
 	for {
 		if _, err := os.Stat(probe); err == nil {
 			break
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("stat %s: %w", probe, err)
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {
@@ -186,30 +190,24 @@ func prepareOutDir(dir string) error {
 		probe = parent
 	}
 	if err := cmdsutil.RequireRAMBackedDir("--out-dir", probe); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	return nil
+	return cmdsutil.OpenRAMBackedDir("--out-dir", dir)
 }
 
 // writeAll writes every value atomically (temp file then rename) so a consumer
 // polling for a file never reads a torn one.
-func writeAll(cfg config, values map[string][]byte) error {
+func writeAll(root *os.Root, cfg config, values map[string][]byte) error {
 	mode, err := parseFileMode(cfg.FileMode)
 	if err != nil {
 		return err
 	}
-	// In run() the out-dir already exists: prepareOutDir created and vetted
-	// it. Kept so writeAll stands alone for its direct (test) callers.
-	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
-		return fmt.Errorf("create %s: %w", cfg.OutDir, err)
-	}
 	for name, value := range values {
-		dest := filepath.Join(cfg.OutDir, name)
-		if err := fileutil.WriteAtomic(dest, value, mode); err != nil {
-			return fmt.Errorf("write %s: %w", dest, err)
+		if err := fileutil.WriteAtomicRoot(root, name, value, mode); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
 	return nil

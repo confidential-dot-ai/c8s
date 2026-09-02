@@ -333,7 +333,8 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 	if string(values["DB"]) != existing || string(values["NEW"]) != minted {
 		t.Fatalf("values = %q, %q; want both sentinels", values["DB"], values["NEW"])
 	}
-	if err := writeAll(cfg, values); err != nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, values); err != nil {
 		t.Fatal(err)
 	}
 

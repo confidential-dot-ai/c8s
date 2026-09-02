@@ -44,6 +44,21 @@ func TestRequireRAMBackedDir(t *testing.T) {
 	}
 }
 
+func TestOpenRAMBackedDir(t *testing.T) {
+	dir := t.TempDir()
+	root, err := OpenRAMBackedDir("--out-dir", dir)
+	if fileutil.RequireRAMBacked(dir) == nil {
+		if err != nil {
+			t.Fatalf("RAM-backed dir refused: %v", err)
+		}
+		defer root.Close()
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "--out-dir") {
+		t.Fatalf("want a --out-dir-prefixed refusal, got %v", err)
+	}
+}
+
 func TestValidateHTTPURL(t *testing.T) {
 	cases := []struct {
 		url     string

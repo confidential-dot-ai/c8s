@@ -27,7 +27,7 @@ services:
   # before nginx-lb starts.
   tls-holder:
     image: nginx:1.27-alpine
-    entrypoint: ["sleep", "infinity"]
+    entrypoint: ["sleep", "2147483647"]
     volumes:
       - tls-certs:/tls
 

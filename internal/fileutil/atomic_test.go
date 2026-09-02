@@ -107,3 +107,64 @@ func TestWriteAtomicRenameFailureCleansUpTemp(t *testing.T) {
 		t.Errorf("temp file not cleaned up, dir contains: %v", entries)
 	}
 }
+
+func TestWriteAtomicRejectsTrailingSeparator(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "dest")
+	if err := os.Mkdir(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteAtomic(dest+string(os.PathSeparator), []byte("secret"), 0o600); err == nil {
+		t.Fatal("expected trailing path separator to be rejected")
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("trailing separator created nested output: %v", entries)
+	}
+}
+
+func TestWriteAtomicRootStaysInOpenedDirectoryAfterPathReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires unprivileged symbolic links")
+	}
+	base := t.TempDir()
+	out := filepath.Join(base, "out")
+	if err := os.Mkdir(out, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	moved := filepath.Join(base, "moved")
+	if err := os.Rename(out, moved); err != nil {
+		t.Fatalf("move opened directory: %v", err)
+	}
+	trap := filepath.Join(base, "trap")
+	if err := os.Mkdir(trap, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(trap, out); err != nil {
+		t.Fatalf("replace opened directory: %v", err)
+	}
+
+	if err := WriteAtomicRoot(root, "secret", []byte("value"), 0o600); err != nil {
+		t.Fatalf("WriteAtomicRoot: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(moved, "secret"))
+	if err != nil {
+		t.Fatalf("read from original directory: %v", err)
+	}
+	if string(got) != "value" {
+		t.Fatalf("original directory content = %q, want value", got)
+	}
+	if _, err := os.Stat(filepath.Join(trap, "secret")); !os.IsNotExist(err) {
+		t.Fatalf("write followed replacement directory, stat error = %v", err)
+	}
+}
