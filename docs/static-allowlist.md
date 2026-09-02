@@ -54,7 +54,7 @@ then refuses every mutation. Changing the policy therefore means launching a
 new CDS, which mints a new mesh CA — and every pinning client notices,
 because the CA hash in the fresh evidence changes.
 
-## What the seal rests on, per shape
+## What the seal rests on
 
 The `…1.3` stamp is authenticated by the CA's self-signature, and the CA's
 evidence binds only the CA *key* to a launch measurement. So the stamp is as
@@ -63,18 +63,19 @@ trustworthy as the answer to: could anything other than the real CDS, running
 node-as-CVM every pod on every node booted from the same image gets the same
 evidence, so the answer has to come from admission control — and a dynamic
 allowlist on a second node of the same image would admit a forger. The seal
-therefore requires the policy to be inside what the measurement implies:
+therefore requires the policy to be inside what the measurement implies: the
+document is baked on the dm-verity root and the baked NRI plugin enforces
+exactly it, with no pull (`allowlist.static_path`), so image `M` admits only
+the sealed set, anywhere. At startup CDS checks that the seed it read from the
+baked path hashes to `--static-allowlist-digest`, the digest the operator
+installed with, and refuses to come up otherwise.
 
-| Shape | What binds the policy to hardware | What CDS checks at startup |
-| --- | --- | --- |
-| node-as-CVM | the document is baked on the dm-verity root and the baked NRI plugin enforces exactly it, with no pull (`allowlist.static_path`) — so image `M` admits only the sealed set, anywhere | the seed it read from the baked path hashes to `--static-allowlist-digest`, the digest the operator installed with |
-| pod-as-CVM (kata) | the kata shim commits the CDS pod's init-data document into HOST_DATA / MRCONFIGID at launch; that document carries `c8s.cds.allowlist-seed-sha256` | its own verified report's init-data claim matches the document it was launched with, and that document names the sealed digest (`--static-allowlist-init-data`) |
-
-Either way a CDS started any other way refuses to come up, and the
-`--static-allowlist` verifier has a hardware-rooted reason to believe the
-stamp: on node-as-CVM the launch measurement itself implies the policy; on
-pod-as-CVM the CA's evidence carries the init-data claim, which `c8s verify
---init-data` pins.
+Pod-as-CVM (kata) is not supported yet: `c8s install` refuses
+`--static-allowlist` with `--cvm-mode=pod`, and the chart refuses
+`cds.staticAllowlist` with `kata.enabled`. The CDS guest image is shared with
+every other pod, so the policy cannot be baked per deployment; the launch-time
+binding through the CDS pod's init-data document is tracked in
+[#530](https://github.com/confidential-dot-ai/c8s/issues/530).
 
 ## Node-as-CVM
 
@@ -150,39 +151,6 @@ The operator's path, end to end:
    --allowlist`. A relying party can now also pull the image artifact and
    recompute the digest from the `static-allowlist.json` it contains.
 
-## Pod-as-CVM (kata)
-
-The CDS guest image is shared with every other pod, so the policy cannot be
-baked per deployment. The binding is launch-time instead:
-
-```sh
-c8s install --cvm-mode=pod --hardware-platform=tdx --single-node \
-  --measurements <kata guest digest> \
-  --static-allowlist --bootstrap-allowlist workloads.json
-```
-
-The install renders the chart's seed (components plus `workloads.json`)
-exactly as helm will install it, pins its canonical digest
-(`cds.staticAllowlistDigest`), and renders a kata init-data document for the
-CDS pod — role `cds`, `c8s.cds.allowlist-seed-sha256` = that digest — as the
-`cds.initDataAnnotation` (`io.katacontainers.config.hypervisor.cc_init_data`).
-The shim hashes the document into the guest's HOST_DATA / MRCONFIGID at
-launch. CDS then asks its in-guest attestation-api for a report, verifies it,
-and refuses to start unless the init-data claim is the digest of the document
-it finds at `/run/confidential-containers/initdata/initdata.toml` and that
-document names the sealed digest (`--static-allowlist-init-data`,
-`internal/cmds/cds/static.go`).
-
-Relying parties pin the init-data digest on top of the seal:
-
-```sh
-c8s verify <lb> --kind lb --image-manifest manifest.json --mesh-ca mesh-ca.pem \
-  --static-allowlist --allowlist allowlist.json --init-data <sha256 of the CDS init-data document>
-```
-
-`--init-data` is applied to the sealed CA's evidence, so the CA is accepted
-only if a launch committed to this policy minted it.
-
 ## What it does not buy (unchanged residuals)
 
 - **Composition drift inside the sealed set.** Issuance gates on membership;
@@ -198,8 +166,3 @@ only if a launch committed to this policy minted it.
 - **CDS restart still re-bootstraps.** A sealed CDS restarting re-seeds the
   same document and re-seals the same digest, but mints a new CA key, exactly
   as today (docs/operator.md, "CDS singleton").
-- **Pod-as-CVM (kata) commitment into HOST_DATA/MRCONFIGID.** The init-data
-  key for it is reserved (`initdata.KeyCDSAllowlistSeedSHA256`) and not yet
-  wired; under kata the seal currently rests on the CA stamp plus CDS's
-  launch measurement, without the seed content being measured. Tracked as a
-  follow-up.

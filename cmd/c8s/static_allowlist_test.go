@@ -1,15 +1,10 @@
 package main
 
 import (
-	"context"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 )
 
 const bootstrapDoc = `{
@@ -159,44 +154,6 @@ func TestAppendNodeSealArgs(t *testing.T) {
 	}
 }
 
-func TestAppendPodSealArgs(t *testing.T) {
-	f := newFakeBin(t)
-	// The stub stands in for `helm template`: it prints the chart's CDS
-	// manifests, seed ConfigMap included.
-	f.tool(t, "helm", "cat <<'MANIFESTS'\n"+renderedSeedManifests+"\nMANIFESTS")
-	computed := filepath.Join(t.TempDir(), "computed.yaml")
-	if err := os.WriteFile(computed, []byte("cds: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	args, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed)
-	if err != nil {
-		t.Fatalf("appendPodSealArgs: %v", err)
-	}
-	tree, err := valueArgsToTree(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, _ := seedFromRenderedManifests([]byte(renderedSeedManifests))
-	doc, _ := pkgallowlist.ParseJSON(seed)
-	want, _ := doc.CanonicalDigest()
-	if v, _ := stringAtPath(tree, "cds.staticAllowlistDigest"); v != hex.EncodeToString(want) {
-		t.Fatalf("cds.staticAllowlistDigest = %q, want %x", v, want)
-	}
-	annotation, _ := stringAtPath(tree, "cds.initDataAnnotation")
-	raw, err := initdata.Decode(annotation)
-	if err != nil {
-		t.Fatalf("decode init-data annotation: %v", err)
-	}
-	parsed, err := initdata.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse init-data: %v", err)
-	}
-	if parsed.Data[initdata.KeyRole] != initdata.RoleCDS || parsed.Data[initdata.KeyCDSAllowlistSeedSHA256] != hex.EncodeToString(want) {
-		t.Fatalf("init-data does not launch-commit the sealed digest: %+v", parsed.Data)
-	}
-	mustContainLine(t, f.calls(t), "helm template c8s /chart --show-only templates/cds.yaml -f "+computed)
-}
-
 func TestBootstrapDocument_Errors(t *testing.T) {
 	if _, _, err := bootstrapDocument(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("missing document was accepted")
@@ -211,44 +168,4 @@ func TestBootstrapDocument_Errors(t *testing.T) {
 	if _, err := appendNodeSealArgs(nil, bad, nodeStaticSeedPath); err == nil {
 		t.Fatal("node seal over a malformed document was accepted")
 	}
-}
-
-func TestAppendPodSealArgs_Errors(t *testing.T) {
-	computed := filepath.Join(t.TempDir(), "computed.yaml")
-	if err := os.WriteFile(computed, []byte("cds: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cases := map[string]struct {
-		helm string
-		want string
-	}{
-		"helm fails": {
-			helm: "echo 'Error: chart not found' >&2; exit 1",
-			want: "chart not found",
-		},
-		"seed is not an allowlist": {
-			helm: "printf 'kind: ConfigMap\\ndata:\\n  allowlist-seed.json: \"{not json\"\\n'",
-			want: "rendered allowlist seed",
-		},
-		"no seed rendered": {
-			helm: "echo 'kind: Deployment'",
-			want: "no allowlist seed ConfigMap",
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newFakeBin(t)
-			f.tool(t, "helm", tc.helm)
-			_, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("appendPodSealArgs = %v, want %q", err, tc.want)
-			}
-		})
-	}
-	t.Run("helm missing", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		if _, err := appendPodSealArgs(context.Background(), nil, "/chart", nil, computed); err == nil {
-			t.Fatal("a missing helm binary was accepted")
-		}
-	})
 }

@@ -17,7 +17,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 )
 
 // valuesFilesSetWritePolicy reports what the operator's -f values files say
@@ -150,8 +149,8 @@ func appendNodeSealArgs(setArgs []string, bootstrapPath, seedPath string) ([]str
 
 // renderSeedDocument runs `helm template` with the install's exact values
 // ordering and returns the allowlist seed the chart would put in the CDS
-// ConfigMap — the bytes CDS will seal on a pod-as-CVM install, and the
-// document `c8s render-allowlist` emits for a node image to bake.
+// ConfigMap — the document `c8s render-allowlist` emits for a node image to
+// bake.
 func renderSeedDocument(ctx context.Context, chartPath string, valueFiles []string, computedValues string) ([]byte, error) {
 	args := []string{"template", "c8s", chartPath, "--show-only", "templates/cds.yaml"}
 	for _, f := range valueFiles {
@@ -193,36 +192,4 @@ func seedFromRenderedManifests(rendered []byte) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("the rendered chart carries no allowlist seed ConfigMap (is the seed served for this shape, and no cds.allowlistSeedHostPath set?)")
-}
-
-// appendPodSealArgs wires a pod-as-CVM seal: the chart's rendered seed is the
-// policy, so its canonical digest is pinned as the expected sealed digest and
-// launch-committed into the CDS guest through the kata init-data annotation.
-// CDS then refuses to start unless its own report carries that document. The
-// seed is rendered with the same values helm will install with, so the bytes
-// CDS seals are the bytes hashed here.
-func appendPodSealArgs(ctx context.Context, setArgs []string, chartPath string, valueFiles []string, computedValues string) ([]string, error) {
-	seed, err := renderSeedDocument(ctx, chartPath, valueFiles, computedValues)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := pkgallowlist.ParseJSON(seed)
-	if err != nil {
-		return nil, fmt.Errorf("rendered allowlist seed: %w", err)
-	}
-	digest, err := doc.CanonicalDigest()
-	if err != nil {
-		return nil, fmt.Errorf("rendered allowlist seed: %w", err)
-	}
-	built, err := initdata.New(map[string]string{
-		initdata.KeyRole:                   initdata.RoleCDS,
-		initdata.KeyCDSAllowlistSeedSHA256: hex.EncodeToString(digest),
-	}).Build()
-	if err != nil {
-		return nil, fmt.Errorf("build CDS init-data: %w", err)
-	}
-	return append(setArgs,
-		"--set-string", "cds.staticAllowlistDigest="+hex.EncodeToString(digest),
-		"--set-string", "cds.initDataAnnotation="+built.Annotation,
-	), nil
 }

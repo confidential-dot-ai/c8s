@@ -14,7 +14,6 @@
         "allowlistSeedHostPath": {},
         "staticAllowlist": {},
         "staticAllowlistDigest": {},
-        "initDataAnnotation": {},
         "ca": {
           "type": [
             "object",

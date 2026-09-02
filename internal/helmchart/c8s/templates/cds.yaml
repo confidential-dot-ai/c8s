@@ -11,8 +11,11 @@ metadata:
 {{- if and .Values.cds.staticAllowlist .Values.cds.operatorKeys }}
 {{- fail "cds.staticAllowlist and cds.operatorKeys are mutually exclusive: a sealed allowlist has no write path" }}
 {{- end }}
+{{- if and .Values.cds.staticAllowlist .Values.kata.enabled }}
+{{- fail "cds.staticAllowlist is not supported with kata.enabled yet (https://github.com/confidential-dot-ai/c8s/issues/530): seal a node-as-CVM install with a baked policy instead" }}
+{{- end }}
 {{- if and .Values.cds.staticAllowlist (not (or (eq (include "c8s.serveAllowlistSeed" .) "true") .Values.cds.allowlistSeedHostPath)) }}
-{{- fail "cds.staticAllowlist needs an allowlist seed: the chart seed (nriImagePolicy / kata / cvmMode=node installs) or cds.allowlistSeedHostPath" }}
+{{- fail "cds.staticAllowlist needs an allowlist seed: the chart seed (nriImagePolicy / cvmMode=node installs) or cds.allowlistSeedHostPath" }}
 {{- end }}
 {{- if and .Values.cds.allowlistSeedHostPath .Values.kata.enabled }}
 {{- fail "cds.allowlistSeedHostPath needs the CDS filesystem to see the host: it is the node-as-CVM path (the node image is the measured root); under kata the guest cannot mount a host file" }}
@@ -99,15 +102,6 @@ spec:
         app.kubernetes.io/component: cds
       annotations:
         confidential.ai/trust-root-mode: "inMemory"
-        {{- if and .Values.kata.enabled .Values.cds.staticAllowlist }}
-        {{- if not .Values.cds.initDataAnnotation }}
-        {{- fail "cds.staticAllowlist under kata needs cds.initDataAnnotation: the init-data document that launch-commits the sealed seed digest (c8s install --static-allowlist renders it)" }}
-        {{- end }}
-        # Launch-committed: the kata shim hashes this document into
-        # HOST_DATA / MRCONFIGID, binding the sealed policy digest to the
-        # CDS guest's own attestation report (docs/static-allowlist.md).
-        io.katacontainers.config.hypervisor.cc_init_data: {{ .Values.cds.initDataAnnotation | quote }}
-        {{- end }}
         {{- if .Values.cds.measurementsConfig }}
         # Pins live in a ConfigMap, which no longer changes the pod template on
         # its own: without this a tightened pin would not roll the pod.
@@ -170,12 +164,6 @@ spec:
             - --static-allowlist
             {{- with .Values.cds.staticAllowlistDigest }}
             - --static-allowlist-digest={{ . }}
-            {{- end }}
-            {{- if .Values.kata.enabled }}
-            # Pod-as-CVM: the seed digest is launch-committed through the
-            # init-data annotation below; CDS refuses to start unless its own
-            # report carries it.
-            - --static-allowlist-init-data
             {{- end }}
             {{- end }}
             - --ear-issuer={{ .Values.cds.earIssuer }}

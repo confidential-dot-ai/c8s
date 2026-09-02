@@ -1144,8 +1144,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err := staticAllowlistPreflight(installStaticAllowlist, installOperatorKeys, installValues); err != nil {
 			return err
 		}
-		if installStaticAllowlist && !cvmModeIsPod(installCvmMode) && installBootstrapAllowlist == "" {
-			return fmt.Errorf("--static-allowlist under --cvm-mode=%s requires --bootstrap-allowlist: the document the node image baked (composed with `c8s render-allowlist`) is the whole policy, and the install pins its digest", installCvmMode)
+		if installStaticAllowlist && cvmModeIsPod(installCvmMode) {
+			return fmt.Errorf("--static-allowlist is not supported under --cvm-mode=pod yet (https://github.com/confidential-dot-ai/c8s/issues/530); use --cvm-mode=node with a sealed node image")
+		}
+		if installStaticAllowlist && installBootstrapAllowlist == "" {
+			return fmt.Errorf("--static-allowlist requires --bootstrap-allowlist: the document the node image baked (composed with `c8s render-allowlist`) is the whole policy, and the install pins its digest")
 		}
 		if warn, err := operatorKeysPreflight(installOperatorKeys, installStaticAllowlist, installValues, installForce); err != nil {
 			return err
@@ -1253,16 +1256,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		defer func() { os.Remove(computedValues) }()
 		if installStaticAllowlist {
-			// The seal pins what CDS must load. Node-as-CVM: the document the
-			// image baked (its digest, checked at CDS startup). Pod-as-CVM: the
-			// chart's rendered seed, launch-committed through init-data. Both
-			// need the computed values already on disk, so they extend and
-			// rewrite them.
-			if cvmModeIsPod(installCvmMode) {
-				setArgs, err = appendPodSealArgs(cmd.Context(), setArgs, chartPath, installValues, computedValues)
-			} else {
-				setArgs, err = appendNodeSealArgs(setArgs, installBootstrapAllowlist, nodeStaticSeedPath)
-			}
+			// The seal pins what CDS must load: the document the node image
+			// baked, whose digest CDS checks at startup. The computed values
+			// are already on disk, so extend and rewrite them.
+			setArgs, err = appendNodeSealArgs(setArgs, installBootstrapAllowlist, nodeStaticSeedPath)
 			if err != nil {
 				return err
 			}
