@@ -120,6 +120,7 @@ type config struct {
 	sandboxID          string
 	workload           string
 	allowlistFile      string
+	staticAllowlist    bool
 	meshCA             string
 	initDataHex        string
 	allowDebug         bool
@@ -213,6 +214,7 @@ responder chose).`,
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
+	f.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "require the --mesh-ca bundle to hold a sealed mesh CA: one certificate carrying the static-allowlist stamp AND embedded TEE evidence binding the CA key, verified against the same measurement policy as the target. With --allowlist the sealed digest must equal SHA-256 of the held bytes, and any matched-workload stamp on the target's leaf must have been decided under the sealed policy (docs/static-allowlist.md). Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
@@ -297,7 +299,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), gatherMeasurements(ctx, cfg, ev), out, errOut)
+	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), gatherMeasurements(ctx, cfg, ev), gatherStaticCA(ctx, cfg, plan), out, errOut)
 }
 
 // targetDescription names the evidence source for a verdict produced before
@@ -355,7 +357,7 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // both work — then renders the verdict. The verification attempt (including the
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
-func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, servedMeasurements measurementsReport, out, errOut io.Writer) int {
+func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, servedMeasurements measurementsReport, staticCA staticCAReport, out, errOut io.Writer) int {
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -369,7 +371,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc := newOutcome(cfg, ev, result, verr, plan)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applyVerdictPolicies(&oc, cfg, ev, held, opKeys, plan, servedMeasurements)
+	applyVerdictPolicies(&oc, cfg, ev, held, opKeys, plan, servedMeasurements, staticCA)
 	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
@@ -380,9 +382,10 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 // the verdict), then the honesty demotions, which only ever turn a passing
 // verdict partial. Ordering matters: applyChainAnchorPolicy reads the pinned
 // chain check's outcome from oc.Verified.
-func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport) {
+func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport, staticCA staticCAReport) {
 	applySandboxPolicy(oc, cfg, ev, opKeys, plan, servedMeasurements)
 	applyWorkloadPolicy(oc, cfg, ev, held)
+	applyStaticAllowlistPolicy(oc, cfg, ev, held, staticCA)
 	applyFrontDoorPolicy(oc, ev)
 	applyChainAnchorPolicy(oc, cfg, ev)
 }
@@ -615,6 +618,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	// loadHeldAllowlist.
 	if cfg.allowlistFile != "" && cfg.meshCA == "" {
 		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
+	}
+	if cfg.staticAllowlist && cfg.meshCA == "" {
+		return nil, fmt.Errorf("--static-allowlist requires --mesh-ca: the sealed-policy stamp rides the mesh CA certificate")
 	}
 
 	initDataHash, err := parseInitDataPin(cfg.initDataHex)
@@ -1125,6 +1131,15 @@ type Outcome struct {
 	WorkloadAllowlistVersion string `json:"workload_allowlist_version,omitempty"`
 	WorkloadAllowlistDigest  string `json:"workload_allowlist_digest,omitempty"`
 	WorkloadNote             string `json:"workload_note,omitempty"`
+
+	// StaticAllowlistDigest is the sealed policy digest stamped on the mesh
+	// CA, reported when --static-allowlist asked for the check.
+	// StaticAllowlistNote carries the verdict basis; failures land in Error
+	// (static_allowlist_absent, static_allowlist_malformed,
+	// static_allowlist_ca_unverified, static_allowlist_digest_mismatch,
+	// static_allowlist_skew).
+	StaticAllowlistDigest string `json:"static_allowlist_digest,omitempty"`
+	StaticAllowlistNote   string `json:"static_allowlist_note,omitempty"`
 }
 
 // applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
@@ -1650,6 +1665,12 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	if oc.Workload != "" {
 		fmt.Fprintf(out, "  workload:     %s  (allowlist version %s, digest %s)\n", oc.Workload, oc.WorkloadAllowlistVersion, oc.WorkloadAllowlistDigest)
 		fmt.Fprintf(out, "                %s\n", oc.WorkloadNote)
+	}
+	if oc.StaticAllowlistDigest != "" {
+		fmt.Fprintf(out, "  sealed policy: %s\n", oc.StaticAllowlistDigest)
+		if oc.StaticAllowlistNote != "" {
+			fmt.Fprintf(out, "                %s\n", oc.StaticAllowlistNote)
+		}
 	}
 	if len(oc.OperatorKeys) > 0 {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"

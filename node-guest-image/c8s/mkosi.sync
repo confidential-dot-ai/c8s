@@ -134,6 +134,26 @@ render_nri_floor() {
     echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
 }
 
+# Optional sealed allowlist for `cds --static-allowlist` (docs/
+# static-allowlist.md): drop the allowlist document at
+# node-guest-image/c8s/static-allowlist.json (gitignored — it is per
+# deployment) and the build bakes it at /etc/c8s/static-allowlist.json on the
+# dm-verity root, putting the policy content inside the node launch
+# measurement. The chart mounts it into CDS via cds.allowlistSeedHostPath.
+# The digest relying parties pin is the CANONICAL one — print it with
+# `c8s allowlist digest static-allowlist.json` — not the file sha256 below.
+stage_static_allowlist() {
+    local src="$SRCDIR/mkosi.profiles/c8s/static-allowlist.json"
+    local dst="$STAGE_DIR/etc/c8s/static-allowlist.json"
+    [ -f "$src" ] || return 0
+    jq -e '.schema == "c8s.allowlist/v1"' "$src" >/dev/null || {
+        echo "c8s sync: FATAL static-allowlist.json is not a c8s.allowlist/v1 document" >&2
+        exit 1
+    }
+    install -D -m 0644 "$src" "$dst"
+    echo "c8s sync: staged static allowlist (file sha256 $(sha256sum "$src" | awk '{print $1}'))"
+}
+
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
 # already matches (this is what makes the pkgcache a cache).
 fetch() {
@@ -217,6 +237,7 @@ if [ -f "$PLUGIN_CACHE" ]; then
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
     render_nri_floor
+    stage_static_allowlist
     echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
     exit 0
 fi
@@ -284,5 +305,6 @@ install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
 install -D -m 0755 "$BIN" "$C8S_TARGET"
 
 render_nri_floor
+stage_static_allowlist
 
 echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
