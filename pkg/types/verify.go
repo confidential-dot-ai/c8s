@@ -64,6 +64,10 @@ type AttestationBundle struct {
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
 	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
 	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
+	// FrontDoorMode is the credential model terminating public TLS in front
+	// of the responder ("cds" | "webpki" | "acme"), committed by the
+	// endpoint's report_data transcript.
+	FrontDoorMode string `json:"front_door_mode"`
 	// SessionPubKey is the per-session over-encryption key, present only for
 	// the attest-pq response; attest-lb creates no session.
 	SessionPubKey *SessionPublicKey `json:"session_pubkey,omitempty"`

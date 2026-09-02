@@ -1306,14 +1306,33 @@ tlsLb:
     # -- Seconds browsers may cache the preflight response.
     maxAge: 600
 
-  # -- Public TLS certificate presented to internet clients. When secretName is
-  # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
-  # compatibility.
+  # -- Public TLS credential presented to internet clients. mode selects it:
+  # cds (default) serves the CDS-issued mesh leaf at tlsMountPath; webpki
+  # serves the operator Secret named by secretName (host-visible key, so the
+  # front door is attest-pq only); acme has the in-pod `c8s acme` sidecar
+  # issue a multi-SAN leaf for the san list (TEE-held key — requires
+  # attestationApi.cvmMode=node; refused under kata, whose guest exempts only
+  # tcp:8443 from the inbound mesh redirect, leaving :80 unreachable).
+  # secretName/certKey/keyKey/mountPath apply to webpki only.
   publicTLS:
+    mode: cds
     secretName: ""
     certKey: tls.crt
     keyKey: tls.key
     mountPath: "/public-tls"
+
+  # -- ACME issuance (publicTLS.mode=acme). The sidecar answers HTTP-01 behind
+  # nginx's :80 server and SIGHUPs nginx on install. Empty directoryURL is
+  # Let's Encrypt production; point it at the staging URL for tests — key and
+  # state live on a Memory emptyDir, so every pod recreation re-issues and
+  # counts against LE duplicate-certificate limits.
+  # Reachability: the CA must reach :80/:443 at the sanList names, so DNS
+  # points at either service.type=LoadBalancer (any implementation: cloud
+  # controller, MetalLB, kube-vip, ...) or, without one, the node via
+  # hostPort. ClusterIP-only fails render.
+  acme:
+    email: ""
+    directoryURL: ""
 
   # -- Discovery/preflight metadata (the issued cert + attestation evidence
   # with the VCEK chain) served by nginx at `path`. The chart-rendered get-cert

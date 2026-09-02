@@ -76,8 +76,9 @@ func TestRunErrors(t *testing.T) {
 			wantSub: "read evidence fixture",
 		},
 		{
+			// acme passes the mode gate: the failure is the later upstream check.
 			name:    "invalid upstream URL",
-			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", evidenceFixture: fixture, upstream: "ftp://backend"},
+			cfg:     config{frontDoorMode: FrontDoorModeACME, platform: "snp", evidenceFixture: fixture, upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
 		{

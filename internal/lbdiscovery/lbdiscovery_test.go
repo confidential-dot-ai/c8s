@@ -235,8 +235,8 @@ func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 
 // TestNewVerifiedHTTPClient_PublicTLSModes proves the client accepts only the
 // modes whose serving cert the evidence binds: cds (and empty, a pre-mode-field
-// document), rejecting webpki and unknown modes with clear errors instead of
-// returning a client whose handshakes can never match.
+// document), rejecting webpki, acme, and unknown modes with clear errors
+// instead of returning a client whose handshakes can never match.
 func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 	cases := []struct {
@@ -246,7 +246,8 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 		{"cds", ""},
 		{"", ""},
 		{"webpki", "public_tls.mode=webpki is not supported"},
-		{"acme", `unknown public_tls.mode "acme"`},
+		{"acme", "public_tls.mode=acme is not supported"},
+		{"tofu", `unknown public_tls.mode "tofu"`},
 	}
 	for _, tc := range cases {
 		name := tc.mode

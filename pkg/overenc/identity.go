@@ -18,11 +18,15 @@ const (
 	identityNonceBytes = 32
 )
 
-// IdentityTranscriptHash commits the hybrid server key, client nonce, exact
-// mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data. Every variable-length field is length-prefixed to make the
-// transcript unambiguous across the Go and browser implementations.
-func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte, error) {
+// IdentityTranscriptHash commits the front-door mode, hybrid server key,
+// client nonce, exact mesh leaf, and issuing mesh CA to one SHA-384 value
+// suitable for TEE report_data. Every variable-length field is
+// length-prefixed to make the transcript unambiguous across the Go and
+// browser implementations.
+func IdentityTranscriptHash(mode string, pub PublicKey, nonce, leafDER, caDER []byte) ([]byte, error) {
+	if mode == "" {
+		return nil, fmt.Errorf("overenc: identity transcript requires a front-door mode")
+	}
 	if len(pub.X25519) != X25519PubBytes {
 		return nil, fmt.Errorf("overenc: identity transcript X25519 key must be %d bytes, got %d", X25519PubBytes, len(pub.X25519))
 	}
@@ -42,6 +46,7 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 	// Most-stable fields first so a signer can reuse the hash state across sessions.
 	for _, field := range [][]byte{
 		[]byte(identityTranscriptDomain),
+		[]byte(mode),
 		caHash[:],
 		leafHash[:],
 		pub.X25519,
@@ -57,19 +62,22 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 	return sum[:], nil
 }
 
-// LBTranscriptHash commits the client nonce, exact outer serving leaf,
-// exact mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data — the attest-lb binding for clients that ride ordinary nginx
-// TLS:
+// LBTranscriptHash commits the front-door mode, client nonce, exact outer
+// serving leaf, exact mesh leaf, and issuing mesh CA to one SHA-384 value
+// suitable for TEE report_data — the attest-lb binding for clients that ride
+// ordinary nginx TLS:
 //
-//	SHA-384( LP("c8s/attest-lb/v1") || LP(nonce) ||
+//	SHA-384( LP("c8s/attest-lb/v1") || LP(mode) || LP(nonce) ||
 //	         LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
 //	         LP(SHA-256(mesh_CA_DER)) )
 //
 // A client recomputes it from the exact leaf it observed on the connection
 // being authorized, so a response relayed through a different serving leaf
 // fails even when both leaves share an issuer.
-func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+func LBTranscriptHash(mode string, nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+	if mode == "" {
+		return nil, fmt.Errorf("overenc: lb transcript requires a front-door mode")
+	}
 	if len(nonce) != identityNonceBytes {
 		return nil, fmt.Errorf("overenc: lb transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
 	}
@@ -83,6 +91,7 @@ func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte,
 	var encoded []byte
 	for _, field := range [][]byte{
 		[]byte(lbTranscriptDomain),
+		[]byte(mode),
 		nonce,
 		servingHash[:],
 		meshHash[:],

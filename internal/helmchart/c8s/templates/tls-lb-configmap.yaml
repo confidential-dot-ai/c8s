@@ -2,6 +2,7 @@
 {{- $sans := include "tls-lb.sanList" . | fromJsonArray -}}
 {{- range $s := $sans -}}{{- include "tls-lb.validateSan" $s -}}{{- end -}}
 {{- $serverNames := join " " $sans -}}
+{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
@@ -348,5 +349,24 @@ data:
                 add_header Content-Type text/plain;
             }
         }
+        {{- if eq $publicTLSMode "acme" }}
+
+        # Public :80 (hostPort/Service -> acmeHTTPPort): HTTP-01 challenges
+        # reach the acme sidecar on loopback; everything else upgrades.
+        server {
+            listen {{ include "tls-lb.acmeHTTPPort" . }};
+            server_name {{ $serverNames }};
+
+            location /.well-known/acme-challenge/ {
+                access_log off;
+                proxy_pass http://127.0.0.1:{{ include "tls-lb.acmeChallengePort" . }};
+                proxy_set_header Host $host;
+            }
+
+            location / {
+                return 301 https://$host$request_uri;
+            }
+        }
+        {{- end }}
     }
 {{- end }}

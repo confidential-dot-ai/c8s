@@ -357,7 +357,7 @@ func mintEndpointIdentityFrom(t *testing.T, leafPub crypto.PublicKey, notBefore,
 // this identity and session.
 func (id *endpointIdentity) transcript(t *testing.T, nonce, x25519, mlkem []byte) []byte {
 	t.Helper()
-	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw)
+	erd, err := overenc.IdentityTranscriptHash("cds", overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,11 +399,12 @@ func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []b
 	t.Helper()
 	b64u := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	resp := map[string]any{
-		"version":        types.BindingAttestPQ,
-		"platform":       "snp",
-		"nonce":          b64u(nonce),
-		"evidence":       evidence,
-		"session_pubkey": map[string]any{"x25519": b64u(x25519), "mlkem768": b64u(mlkem)},
+		"version":         types.BindingAttestPQ,
+		"platform":        "snp",
+		"nonce":           b64u(nonce),
+		"evidence":        evidence,
+		"front_door_mode": "cds",
+		"session_pubkey":  map[string]any{"x25519": b64u(x25519), "mlkem768": b64u(mlkem)},
 	}
 	if id != nil {
 		resp["cds_cert_pem"] = id.chainPEM
@@ -562,7 +563,7 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		// issuing relationship, which must fail closed.
 		other := mintEndpointIdentity(t)
 		b64u := base64.RawURLEncoding.EncodeToString
-		erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw)
+		erd, err := overenc.IdentityTranscriptHash("cds", overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -647,6 +648,23 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("missing front_door_mode rejected", func(t *testing.T) {
+		// The mode is a transcript field: a response without one cannot be
+		// recomputed, so it fails closed rather than verifying mode-lessly.
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		delete(obj, "front_door_mode")
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "front-door mode") {
+			t.Fatalf("expected a missing-mode transcript error, got %v", err)
+		}
+	})
+
 	t.Run("wrong-size session key rejected", func(t *testing.T) {
 		// The transcript is length-framed; IdentityTranscriptHash refuses a
 		// non-canonical key size outright rather than producing a binding that
@@ -711,6 +729,7 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
     "cert_chain": { "vcek": %q }
   },
   "cds_cert_pem": %q,
+  "front_door_mode": "cds",
   "session_pubkey": { "x25519": %q, "mlkem768": %q },
   "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q }
 }`,

@@ -26,10 +26,10 @@ type meshIdentity struct {
 }
 
 // loadMeshIdentity reads all three files for every attestation request so a
-// get-cert rotation is observed without restarting the sidecar. X509KeyPair
-// verifies that the private key matches the leaf. A transient rotation mismatch
-// or an expired credential fails this request closed; the next request can
-// retry after the three files converge on one valid credential generation.
+// get-cert rotation is observed without restarting the sidecar. A transient
+// rotation mismatch or an expired credential fails this request closed; the
+// next request can retry after the three files converge on one valid
+// credential generation.
 func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	if certFile == "" || keyFile == "" || caFile == "" {
 		return nil, fmt.Errorf("mesh identity cert, key, and CA files are required")
@@ -46,7 +46,12 @@ func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read mesh identity CA: %w", err)
 	}
+	return parseMeshIdentity(certPEM, keyPEM, caPEM)
+}
 
+// parseMeshIdentity validates one credential generation. X509KeyPair verifies
+// that the private key matches the leaf.
+func parseMeshIdentity(certPEM, keyPEM, caPEM []byte) (*meshIdentity, error) {
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("load mesh identity keypair: %w", err)
@@ -102,8 +107,8 @@ func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
 	return nil
 }
 
-func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
-	transcriptHash, err := overenc.IdentityTranscriptHash(pub, nonce, m.leaf.Raw, m.ca.Raw)
+func (m *meshIdentity) bind(mode string, pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.IdentityTranscriptHash(mode, pub, nonce, m.leaf.Raw, m.ca.Raw)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -118,8 +123,8 @@ func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types
 // serving leaf alongside the mesh identity and signs that transcript. No
 // session key exists on this path — the TLS handshake itself proves possession
 // of the serving-leaf key.
-func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
-	transcriptHash, err := overenc.LBTranscriptHash(nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw)
+func (m *meshIdentity) bindServingLeaf(mode string, servingLeafDER, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.LBTranscriptHash(mode, nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -115,7 +115,10 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	// Recompute the transcript the way a client does — from the leaf observed
 	// on the connection plus the served mesh chain — and require the hardware
 	// report_data and the ECDSA proof to verify against it.
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	if b.FrontDoorMode != FrontDoorModeCDS {
+		t.Errorf("front_door_mode = %q, want %q", b.FrontDoorMode, FrontDoorModeCDS)
+	}
+	want, err := overenc.LBTranscriptHash(b.FrontDoorMode, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,11 +156,11 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 		X25519:   make([]byte, overenc.X25519PubBytes),
 		MLKEM768: make([]byte, overenc.MLKEM768EKBytes),
 	}
-	pq, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	pq, err := overenc.IdentityTranscriptHash(FrontDoorModeCDS, pub, nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	lb, err := overenc.LBTranscriptHash(FrontDoorModeCDS, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}

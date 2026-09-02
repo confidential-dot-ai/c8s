@@ -129,6 +129,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	provider := &capturingProvider{}
 	srv := NewServer(Config{
 		Evidence:             provider,
+		FrontDoorMode:        FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -169,7 +170,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}
-	wantReportData, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	wantReportData, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, pub, nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,7 @@ func postHandshake(t *testing.T, base string, nonce []byte, hs overenc.Handshake
 }
 
 func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
-	srv := NewServer(Config{Evidence: &capturingProvider{}})
+	srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
@@ -247,6 +248,7 @@ func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
 func TestIdentityBoundAttestationFailsClosedOnInvalidConfiguredIdentity(t *testing.T) {
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        FrontDoorModeCDS,
 		MeshIdentityCertFile: "/does/not/exist/cert.pem",
 		MeshIdentityKeyFile:  "/does/not/exist/key.pem",
 		MeshIdentityCAFile:   "/does/not/exist/ca.pem",
@@ -525,6 +527,7 @@ func TestIdentityBoundAttestationRejectsWrongSizeNonce(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
