@@ -1,0 +1,22 @@
+[Unit]
+Description=Node-local Unix socket for the attestation API
+Documentation=https://github.com/confidential-dot-ai/c8s
+After=attestation-api.service
+Requires=attestation-api.service
+Before=rke2-server.service rke2-agent.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -m 0711 /run/nri-image-policy
+ExecStart=/usr/local/bin/c8s attest-proxy \
+    --socket=/run/nri-image-policy/attestation-api.sock \
+    --upstream=http://127.0.0.1:8400
+Restart=on-failure
+RestartSec=2
+ProtectSystem=strict
+ReadWritePaths=/run/nri-image-policy
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
