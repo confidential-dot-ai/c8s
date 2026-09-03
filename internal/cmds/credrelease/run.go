@@ -104,6 +104,9 @@ func Run(ctx context.Context, cfg Config) error {
 		Handler:           handler,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
+		// A slow reader or parked keep-alive must not hold a goroutine open.
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  30 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
