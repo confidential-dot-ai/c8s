@@ -429,6 +429,7 @@ container reuse the existing key so the cert chain stays valid.
 
 Caller passes a dict:
   root            - the root context (for c8s.image / c8s.cdsURL / c8s.attestationApiURL)
+  attestationApiURL - optional endpoint override for a chart-owned consumer
   san             - --san for the cert (the workload identity / Service DNS name)
   certOut         - --out path
   keyOut          - --key-out path
@@ -448,6 +449,7 @@ Caller passes a dict:
 */}}
 {{- define "c8s.getCertContainers" -}}
 {{- $root := .root -}}
+{{- $attestationApiURL := default (include "c8s.attestationApiURL" $root) .attestationApiURL -}}
 - name: c8s-cert
   image: {{ include "c8s.image" $root }}
   imagePullPolicy: IfNotPresent
@@ -455,7 +457,7 @@ Caller passes a dict:
   args:
     - get-cert
     - --cds-url={{ include "c8s.cdsURL" $root }}
-    - --attestation-api-url={{ include "c8s.attestationApiURL" $root }}
+    - --attestation-api-url={{ $attestationApiURL }}
     - --san={{ .san }}
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
@@ -472,11 +474,13 @@ Caller passes a dict:
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
+  {{- if not .attestationApiURL }}
   {{- with (include "c8s.attestationApiHostIPEnv" $root) }}
   # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node IP so
   # this pod-netns sidecar reaches the node-baked host attestation-api.
   env:
     {{- . | nindent 4 }}
+  {{- end }}
   {{- end }}
   volumeMounts:
     - name: {{ .volume }}

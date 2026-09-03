@@ -563,6 +563,57 @@ true
 {{- end -}}
 
 {{/*
+tls-lb.attestationApiUsesSocket is true for a non-kata tls-lb pod when the
+attestation endpoint is node-local. This includes both the chart-managed
+attest-proxy and the node-baked proxy. Keep this predicate local to tls-lb:
+the operator and other chart components still use their existing endpoint
+contract in node mode.
+*/}}
+{{- define "tls-lb.attestationApiUsesSocket" -}}
+{{- if and (not .Values.kata.enabled) (or .Values.attestationApi.enabled (eq .Values.attestationApi.cvmMode "node")) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+tls-lb.attestationApiURL is the endpoint used by tls-lb's own attestation
+consumers. Node mode is fixed to the measured node socket; a runtime HOST_IP
+value is not stable and is not valid for this pod-local client.
+*/}}
+{{- define "tls-lb.attestationApiURL" -}}
+{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+unix://{{ include "c8s.attestationApiSocket" . }}
+{{- else -}}
+{{- default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Read-only hostPath access to the node-local attestation socket. */}}
+{{- define "tls-lb.attestationApiSocketMount" -}}
+{{- if eq (include "tls-lb.attestationApiUsesSocket" .) "true" }}
+- name: attestation-api-socket
+  mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{/*
+The node-baked socket directory must already exist on the node. Directory
+avoids creating a host path when the measured node service is absent. The
+chart-managed proxy can create its runtime directory before its sidecar starts.
+*/}}
+{{- define "tls-lb.attestationApiSocketVolume" -}}
+{{- if eq (include "tls-lb.attestationApiUsesSocket" .) "true" }}
+- name: attestation-api-socket
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+    {{- if .Values.attestationApi.enabled }}
+    type: DirectoryOrCreate
+    {{- else }}
+    type: Directory
+    {{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
 and renews it on a ticker, SIGHUP-ing nginx after each renewal. Long-lived so
 its PID namespace can anchor shareProcessNamespace under kata (see
@@ -574,7 +625,7 @@ list.
 {{- if .Values.tlsLb.discovery.enabled -}}
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
-{{- if eq (include "c8s.attestationApiHostSocket" .) "true" -}}
+{{- if eq (include "tls-lb.attestationApiUsesSocket" .) "true" -}}
 {{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
 {{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
@@ -603,6 +654,7 @@ list.
 {{- end -}}
 {{- include "c8s.getCertContainers" (dict
   "root" .
+  "attestationApiURL" (include "tls-lb.attestationApiURL" .)
   "san" (include "tls-lb.san" .)
   "certOut" (printf "%s/cert.pem" .Values.tlsLb.tlsMountPath)
   "keyOut" (printf "%s/key.pem" .Values.tlsLb.tlsMountPath)

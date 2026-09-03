@@ -1647,6 +1647,16 @@ func assertContainerMount(t *testing.T, c corev1.Container, name, mountPath stri
 	t.Fatalf("container %s missing mount of volume %q at %q; mounts %+v", c.Name, name, mountPath, c.VolumeMounts)
 }
 
+func assertReadOnlySocketMount(t *testing.T, c corev1.Container) {
+	t.Helper()
+	for _, m := range c.VolumeMounts {
+		if m.Name == "attestation-api-socket" && m.MountPath == "/var/run/nri-image-policy" && m.ReadOnly {
+			return
+		}
+	}
+	t.Fatalf("container %s missing read-only attestation-api-socket mount; mounts %+v", c.Name, c.VolumeMounts)
+}
+
 // The host NRI plugin is a host process: it reaches the attestation-api over
 // the node-local Unix socket, never the pod network.
 func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
@@ -2063,27 +2073,15 @@ func hasHostIPEnv(c corev1.Container) bool {
 	return false
 }
 
-// TestChartNodeModeAttestationApiURLUsesHostIP proves cvmMode=node points the
-// pod-netns components (cds, tls-lb's cert sidecar, ratls-mesh) at the
-// node-baked host attestation-api via the $(HOST_IP) downward-API env var, since
-// there is no in-cluster Service and pods cannot reach host loopback. The
-// operator is the exception: it forwards its --attestation-api-url verbatim into
-// the tenant get-cert sidecars it injects, so the placeholder must stay
-// UNEXPANDED there — the operator container deliberately omits HOST_IP so each
-// tenant pod expands it against its own node.
-// KNOWN-GAP (ATTEST-ORACLE, node mode): the http://$(HOST_IP):8400 wiring
-// this test pins reaches the node image's baked attestation-api, which still
-// binds 0.0.0.0:8400 with no auth — the oracle shape this branch removes
-// everywhere the chart controls. Closing node mode needs the
-// confidential-os-builder companion (loopback bind + baked attest-proxy
-// systemd unit + image-policy socket URL), tracked cross-repo; when it
-// lands, the chart's node-mode branch and this test flip to the socket shape
-// together.
-func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
+// TestChartNodeModeTLSLBAttestationSocket proves the tls-lb pod uses the
+// measured node image's stable Unix socket. Its endpoint is fixed in the
+// rendered argv; no HOST_IP value can redirect these verification clients.
+func TestChartNodeModeTLSLBAttestationSocket(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
+	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
 	// The exact shape `c8s install --cvm-mode=node` produces: the node image
-	// bakes attestation-api and nri-image-policy, so both chart components
-	// are off and consumers dial the baked host service via $(HOST_IP).
+	// bakes the attestation socket and nri-image-policy, so both chart
+	// components are off and tls-lb uses the fixed socket path.
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
 		"--set", "attestationApi.enabled=false",
@@ -2109,24 +2107,35 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 
 	// tls-lb c8s-cert sidecar (via c8s.getCertContainers).
 	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
-	assertContainerArgs(t, cert, hostIPURL)
-	if !hasHostIPEnv(cert) {
-		t.Errorf("tls-lb c8s-cert missing HOST_IP downward-API env; have %+v", cert.Env)
+	assertContainerArgs(t, cert, socketURL)
+	if hasHostIPEnv(cert) {
+		t.Errorf("tls-lb c8s-cert must not define HOST_IP; env %+v", cert.Env)
 	}
+	assertReadOnlySocketMount(t, cert)
 
 	// tls-lb cds-attest sidecar (rendered under tlsLb.attest.enabled).
 	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
-	assertContainerArgs(t, attest, hostIPURL)
-	if !hasHostIPEnv(attest) {
-		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
+	assertContainerArgs(t, attest, socketURL)
+	if hasHostIPEnv(attest) {
+		t.Errorf("tls-lb cds-attest must not define HOST_IP; env %+v", attest.Env)
 	}
+	assertReadOnlySocketMount(t, attest)
 
 	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
 	// the RA-TLS hop to CDS.
 	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
-	assertContainerArgs(t, allowlistProxy, hostIPURL)
-	if !hasHostIPEnv(allowlistProxy) {
-		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
+	assertContainerArgs(t, allowlistProxy, socketURL)
+	if hasHostIPEnv(allowlistProxy) {
+		t.Errorf("tls-lb allowlist-proxy must not define HOST_IP; env %+v", allowlistProxy.Env)
+	}
+	assertReadOnlySocketMount(t, allowlistProxy)
+	tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
+	assertPodVolume(t, &tlsLB.Spec.Template.Spec, "attestation-api-socket", func(volume corev1.Volume) bool {
+		return volume.HostPath != nil && volume.HostPath.Path == "/var/run/nri-image-policy" &&
+			volume.HostPath.Type != nil && *volume.HostPath.Type == corev1.HostPathDirectory
+	})
+	if sc := tlsLB.Spec.Template.Spec.SecurityContext; sc == nil || !slices.Contains(sc.SupplementalGroups, int64(65532)) {
+		t.Errorf("tls-lb pod must carry supplementalGroups [65532] for the socket; got %+v", sc)
 	}
 
 	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.

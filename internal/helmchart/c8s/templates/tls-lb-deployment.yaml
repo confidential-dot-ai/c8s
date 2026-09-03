@@ -243,7 +243,7 @@ spec:
             - --port={{ .Values.tlsLb.attest.port }}
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
-            - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
+            - --attestation-api-url={{ include "tls-lb.attestationApiURL" . }}
             # attest-lb needs a TEE-held serving key (cds, acme); webpki's
             # host-visible Secret key stays attest-pq-only.
             - --front-door-mode={{ $publicTLSMode }}
@@ -283,12 +283,6 @@ spec:
             - --upstream-server-name={{ $attestUpstreamServerName }}
             {{- end }}
             {{- end }}
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
-          # IP so this pod-netns pod reaches the node-baked host attestation-api.
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
           {{- if .Values.tlsLb.attest.expectedWorkload }}
           # Workload-verified ingress gate (docs/getcert-workload-binding.md):
           # ready only while the installed mesh identity leaf is a usable
@@ -318,7 +312,7 @@ spec:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
-            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- include "tls-lb.attestationApiSocketMount" . | nindent 12 }}
             {{- if eq $publicTLSMode "webpki" }}
             # cds-attest reads the same public leaf nginx serves
             # (--serving-cert-file).
@@ -355,7 +349,7 @@ spec:
             - --host=127.0.0.1
             - --port={{ include "c8s.int" .Values.tlsLb.allowlist.proxyPort }}
             - --cds-url={{ include "c8s.cdsURL" . }}
-            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            - --attestation-api-url={{ include "tls-lb.attestationApiURL" . }}
             {{- if .Values.cds.measurementsConfig }}
             - --measurements-config=/etc/c8s-measurements/cds.json
             {{- else }}
@@ -366,16 +360,10 @@ spec:
             - --cds-rtmrs={{ join "," . }}
             {{- end }}
             {{- end }}
-          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: the proxy verifies CDS through the node-baked
-          # attestation-api, reached from this pod via its node IP.
-          env:
-            {{- . | nindent 12 }}
-          {{- end }}
-          {{- if or (eq (include "c8s.attestationApiHostSocket" .) "true") .Values.cds.measurementsConfig }}
+          {{- if or (eq (include "tls-lb.attestationApiUsesSocket" .) "true") .Values.cds.measurementsConfig }}
           volumeMounts:
-            {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
-            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- if eq (include "tls-lb.attestationApiUsesSocket" .) "true" }}
+            {{- include "tls-lb.attestationApiSocketMount" . | nindent 12 }}
             {{- end }}
             {{- if .Values.cds.measurementsConfig }}
             - name: measurements-config
@@ -455,12 +443,12 @@ spec:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
             type: Directory
         {{- end }}
-        {{- /* Shares the admission inventory's socket directory — see c8s.attestationApiSocket. */}}
-        {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
+        {{- /* Shares the node-local attestation socket directory. */}}
+        {{- include "tls-lb.attestationApiSocketVolume" . | nindent 8 }}
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
         fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
-        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") (eq (include "c8s.attestationApiHostSocket" .) "true") }}
+        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") (eq (include "tls-lb.attestationApiUsesSocket" .) "true") }}
         # workloadclaims.InventorySocketGID: the inventory and attest-proxy
         # chgrp their sockets to this group so the non-root get-cert sidecar
         # (on the nginx uid) can connect. get-cert must stay on the nginx uid —
