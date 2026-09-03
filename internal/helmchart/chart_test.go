@@ -2947,6 +2947,19 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	}
 }
 
+func TestChartTLSLBAttestRequestsNvidiaGPUEvidence(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tlsLb.attest.enabled=true",
+		"--set", "tlsLb.attest.nvidiaGpuEvidence=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, sidecar, "--nvidia-gpu-evidence")
+}
+
 func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",

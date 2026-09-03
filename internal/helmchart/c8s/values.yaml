@@ -1424,6 +1424,10 @@ tlsLb:
     # nothing. The chart fails the render on either mistake. Empty keeps
     # today's always-ready behavior.
     expectedWorkload: ""
+    # -- Request nonce-bound NVIDIA GPU evidence from the node attestation API.
+    # Enable this only on GPU-backed ingress deployments whose node image
+    # contains the NVIDIA attestation provider.
+    nvidiaGpuEvidence: false
     # -- Container resource requests/limits for the sidecar.
     resources: {}
 

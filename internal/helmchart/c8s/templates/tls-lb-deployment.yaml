@@ -244,6 +244,9 @@ spec:
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
             - --attestation-api-url={{ include "tls-lb.attestationApiURL" . }}
+            {{- if .Values.tlsLb.attest.nvidiaGpuEvidence }}
+            - --nvidia-gpu-evidence
+            {{- end }}
             # attest-lb needs a TEE-held serving key (cds, acme); webpki's
             # host-visible Secret key stays attest-pq-only.
             - --front-door-mode={{ $publicTLSMode }}

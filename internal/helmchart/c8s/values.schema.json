@@ -362,6 +362,7 @@
             "enabled": {},
             "expectedWorkload": {},
             "generation": {},
+            "nvidiaGpuEvidence": {},
             "platform": {},
             "port": {},
             "resources": {}
