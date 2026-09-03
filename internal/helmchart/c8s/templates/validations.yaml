@@ -234,4 +234,3 @@ a platform with no runtime register, a pod shape whose plugin does not seal
 {{- end -}}
 {{- end -}}
 {{- end -}}
-

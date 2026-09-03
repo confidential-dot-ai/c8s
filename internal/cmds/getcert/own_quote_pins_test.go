@@ -76,7 +76,7 @@ func TestCDSHTTPClientPinsFromOwnQuote(t *testing.T) {
 
 // The self-attestation runs under the caller's context so a SIGTERM during a
 // slow verifier answer ends the sidecar instead of waiting out
-// ownQuoteTimeout.
+// attestationclient.OwnTupleTimeout.
 func TestCDSPinsFromOwnQuoteHonorsContext(t *testing.T) {
 	stub, url := testattest.NewUnix(t)
 	stub.SetPlatform(types.PlatformTdx)

@@ -32,8 +32,9 @@
 # what reviews.json, the reviewer's completion of the RKE2 system floor,
 # means for this lane.
 #
-# NOT COVERED, DELIBERATELY. Two assertions in the design need a fault
-# injector inside the guest: delaying the plugin past its deadline and
+# NOT COVERED, DELIBERATELY. Two assertions in docs/static-allowlist.md
+# (Known gaps) need a fault injector inside the guest: delaying the plugin
+# past its deadline and
 # asserting no entrypoint runs, and a container present when the plugin
 # synchronizes. The locked image has no console, no ssh and, in static mode,
 # no privileged pod, and a dev image variant boots to another measurement;

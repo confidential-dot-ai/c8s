@@ -70,6 +70,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          livenessProbe:
+            exec:
+              command: ["/bin/cds", "healthz"]
           volumeMounts:
             - name: data
               mountPath: /var/lib/cds
@@ -91,7 +94,7 @@ spec:
         - name: attestation-api
           image: ghcr.io/confidential-dot-ai/attestation-api:dev
           command: ["/attestation-api"]
-          args: ["--node-ip=$(HOST_IP)"]
+          args: ["--listen=:8400"]
           env:
             - name: HOST_IP
               valueFrom:
@@ -269,11 +272,19 @@ func TestRenderSealed(t *testing.T) {
 	if got := strings.Join(api.Privileges.HostPaths, " "); got != "/dev/tdx_guest "+pkgallowlist.KubeletVolumesRoot {
 		t.Errorf("attestation-api hostPaths = %q, want the cleaned device path and the kubelet volumes root", got)
 	}
+	for dest, want := range map[string]pkgallowlist.MountRule{
+		"/dev/tdx_guest":   {Source: pkgallowlist.SourceHostPath, Path: "/dev/tdx_guest"},
+		"/etc/attestation": {Source: pkgallowlist.SourceHostPath, Path: pkgallowlist.KubeletVolumesRoot},
+	} {
+		if got := api.Mounts.Rules[dest]; got != want {
+			t.Errorf("attestation-api mount %s = %+v, want %+v (a hostPath rule binds its source)", dest, got, want)
+		}
+	}
 	if api.Mounts.Rules["/run/c8s"].Source != pkgallowlist.SourcePlatform {
 		t.Errorf("/run/c8s source = %q, want platform (bound from the operator's --workload-claims-host-dir)", api.Mounts.Rules["/run/c8s"].Source)
 	}
-	if api.Args.Policy != pkgallowlist.PolicyAny || api.Command.Policy != pkgallowlist.PolicyExact {
-		t.Errorf("attestation-api argv = %s/%s, want exact command and any args ($(HOST_IP) varies per node)", api.Command.Policy, api.Args.Policy)
+	if api.Args.Policy != pkgallowlist.PolicyExact || api.Command.Policy != pkgallowlist.PolicyExact {
+		t.Errorf("attestation-api argv = %s/%s, want exact command and args", api.Command.Policy, api.Args.Policy)
 	}
 	if _, ok := api.Mounts.Rules[serviceAccountMountPath]; !ok {
 		t.Error("attestation-api lacks the service account token mount")
@@ -317,7 +328,11 @@ func TestRenderSealed(t *testing.T) {
 		"argv: command=exact[/bin/app] args=exact[cds --listen=:8443 --kubernetes=" + defaultKubernetesServiceHost + "]",
 		"env: HOSTNAME from podName",
 		"mount: /var/lib/cds source=emptyDir",
+		"mount: /etc/attestation source=hostPath path=" + pkgallowlist.KubeletVolumesRoot,
+		`mount: /var/run/secrets/kubernetes.io/serviceaccount source=serviceAccountToken review=""`,
 		"privileges: privileged=true hostNamespaces=[net]",
+		`warning: pod c8s-system/c8s-cds container cds: livenessProbe runs "/bin/cds healthz" through CRI exec`,
+		"serviceAccountToken bind without a review",
 		"note: platform socket directory: /run/nri-image-policy",
 		`note: pod c8s-system/c8s-attestation-api container attestation-api: hostPath "/dev/tdx_guest/" is bound as "/dev/tdx_guest"`,
 		"skipped: DaemonSet c8s-system/c8s-uninstall is a helm hook",
@@ -418,7 +433,8 @@ func TestRenderSealed_Refusals(t *testing.T) {
 		{"claim on the default class", chartFixture + "---\nkind: PersistentVolumeClaim\nmetadata:\n  name: cds-data\nspec:\n  accessModes: [ReadWriteOnce]\n", "", nil, "PersistentVolumeClaim cds-data uses local-path storage"},
 		{"statefulset volumeClaimTemplates on the default class", chartFixture, "kind: StatefulSet\nmetadata:\n  name: db\nspec:\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: [ReadWriteOnce]\n  template:\n    spec:\n      containers:\n        - name: db\n          image: registry.example.com/db:1\n", nil, "StatefulSet db volumeClaimTemplates data uses local-path storage"},
 		{"ephemeral volume on the default class", chartFixture, strings.Replace(workloadsFixture, "      containers:", "      volumes:\n        - name: scratch\n          ephemeral:\n            volumeClaimTemplate:\n              spec:\n                accessModes: [ReadWriteOnce]\n      containers:", 1), nil, "Deployment web ephemeral volume scratch uses local-path storage"},
-		{"unprivileged argv with a per-pod variable", chartFixture, strings.Replace(workloadsFixture, `value: "8080"`, "valueFrom:\n                fieldRef:\n                  fieldPath: status.podIP\n          args: [\"--port=$(PORT)\"]", 1), nil, "expands $(PORT)"},
+		{"argv with a per-pod variable", chartFixture, strings.Replace(workloadsFixture, `value: "8080"`, "valueFrom:\n                fieldRef:\n                  fieldPath: status.podIP\n          args: [\"--port=$(PORT)\"]", 1), nil, "expands $(PORT)"},
+		{"privileged argv with a per-pod variable", strings.Replace(chartFixture, `args: ["--listen=:8400"]`, `args: ["--node-ip=$(HOST_IP)"]`, 1), "", nil, "args expands $(HOST_IP)"},
 		{"envFrom", chartFixture, strings.Replace(workloadsFixture, "env:", "envFrom:\n            - configMapRef:\n                name: cm\n          env:", 1), nil, "envFrom"},
 		{"secretKeyRef", chartFixture, strings.Replace(workloadsFixture, `value: "8080"`, "valueFrom:\n                secretKeyRef:\n                  name: s\n                  key: k", 1), nil, "Secret"},
 		{"unknown volume", chartFixture, strings.Replace(workloadsFixture, "env:", "volumeMounts:\n            - name: nope\n              mountPath: /x\n          env:", 1), nil, "names no volume"},
@@ -477,8 +493,7 @@ func TestExpandEnv(t *testing.T) {
 
 // argvRules follows the kubelet: command/args override Entrypoint/Cmd, and
 // $(VAR) expands only against the Service variables and the template env,
-// never the image config. A per-pod reference is admissible only for a
-// privileged entry, and then the segment it lands in is unconstrained.
+// never the image config. A per-pod reference is an error for every entry.
 func TestArgvRules(t *testing.T) {
 	img := &imageFacts{entrypoint: []string{"/bin/app"}, cmd: []string{"serve"}}
 	cmdOnly := &imageFacts{cmd: []string{"/pause"}}
@@ -486,7 +501,6 @@ func TestArgvRules(t *testing.T) {
 		literals: map[string]string{"KUBERNETES_SERVICE_HOST": "10.53.0.1", "PORT": "8080"},
 		dynamic:  map[string]bool{"HOST_IP": true},
 	}
-	unconstrained := pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}
 	deny := pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny}
 	exact := func(argv ...string) pkgallowlist.ArgvPolicy {
 		return pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: argv}
@@ -495,7 +509,6 @@ func TestArgvRules(t *testing.T) {
 		name        string
 		c           corev1.Container
 		img         *imageFacts
-		privileged  bool
 		wantCommand pkgallowlist.ArgvPolicy
 		wantArgs    pkgallowlist.ArgvPolicy
 		wantErr     string
@@ -507,17 +520,14 @@ func TestArgvRules(t *testing.T) {
 		{name: "cmd-only image runs its cmd", img: cmdOnly, wantCommand: exact("/pause"), wantArgs: deny},
 		{name: "image env is not expanded", c: corev1.Container{Args: []string{"$(PATH)"}}, img: img, wantCommand: exact("/bin/app"), wantArgs: exact("$(PATH)")},
 		{name: "HOSTNAME is not expanded", c: corev1.Container{Args: []string{"$(HOSTNAME)"}}, img: img, wantCommand: exact("/bin/app"), wantArgs: exact("$(HOSTNAME)")},
-		{name: "per-pod reference unprivileged", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: img, wantErr: "args expands $(HOST_IP)"},
-		{name: "per-pod reference in args privileged", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: img, privileged: true, wantCommand: exact("/bin/app"), wantArgs: unconstrained},
-		{name: "per-pod reference in command privileged", c: corev1.Container{Command: []string{"/sync", "--node-ip", "$(HOST_IP)"}}, img: img, privileged: true, wantCommand: unconstrained, wantArgs: unconstrained},
-		{name: "per-pod reference in command with exact args privileged", c: corev1.Container{Command: []string{"/sync", "$(HOST_IP)"}, Args: []string{"-v"}}, img: img, privileged: true, wantCommand: unconstrained, wantArgs: unconstrained},
-		{name: "per-pod reference on a cmd-only image privileged", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: &imageFacts{}, privileged: true, wantCommand: unconstrained, wantArgs: unconstrained},
-		{name: "per-pod reference on a cmd-only image unprivileged", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: &imageFacts{}, wantErr: "args expands $(HOST_IP)"},
+		{name: "per-pod reference in args", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: img, wantErr: "args expands $(HOST_IP)"},
+		{name: "per-pod reference in command", c: corev1.Container{Command: []string{"/sync", "--node-ip", "$(HOST_IP)"}}, img: img, wantErr: "command expands $(HOST_IP)"},
+		{name: "per-pod reference on a cmd-only image", c: corev1.Container{Args: []string{"--ip=$(HOST_IP)"}}, img: &imageFacts{}, wantErr: "args expands $(HOST_IP)"},
 		{name: "no argv", img: &imageFacts{}, wantErr: "no argv"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.c
-			command, args, err := argvRules(&c, tc.img, env, tc.privileged)
+			command, args, err := argvRules(&c, tc.img, env)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("argvRules(%s) = %v, want error containing %q", tc.name, err, tc.wantErr)
@@ -531,21 +541,6 @@ func TestArgvRules(t *testing.T) {
 				t.Errorf("argvRules(%s) = %s, want %s", tc.name, got, want)
 			}
 		})
-	}
-}
-
-func TestHostPathAsBound(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"/etc/cni/net.d/", "/etc/cni/net.d"},
-		{"/var/run/nri-image-policy", "/run/nri-image-policy"},
-		{"/var/run/nri-image-policy/", "/run/nri-image-policy"},
-		{"/var/run", "/run"},
-		{"/var/runtime", "/var/runtime"},
-		{"/dev/../etc", "/etc"},
-	} {
-		if got := hostPathAsBound(tc.in); got != tc.want {
-			t.Errorf("hostPathAsBound(%q) = %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }
 

@@ -11,17 +11,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
-
-// selfAttestTimeout bounds the self-attestation round trip over the node's
-// attestation socket at start.
-const selfAttestTimeout = 15 * time.Second
 
 // staticSeedPath is the one --allowlist-seed static mode accepts: the bundle
 // member the node measured, read from the measurer's output directory.
@@ -98,7 +93,7 @@ func verifyStaticNode(ctx context.Context, cfg config, entry measurements.Entry)
 // cannot read the register, and the same verdict path is what /attest
 // applies to every requester.
 func verifySelfEvidence(ctx context.Context, attestationAPIURL string, entry measurements.Entry) error {
-	ctx, cancel := context.WithTimeout(ctx, selfAttestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, attestationclient.OwnTupleTimeout)
 	defer cancel()
 
 	own, err := attestationclient.NewClient(attestationAPIURL).OwnTupleEntry(ctx)

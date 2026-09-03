@@ -8,10 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// OwnTupleTimeout bounds one OwnTupleEntry round trip for every caller that
+// self-attests at start (the sidecars, CDS, the sealed NRI plugin): the
+// verifier is a local socket, so a slow answer means it is not serving.
+const OwnTupleTimeout = 30 * time.Second
 
 // OwnTupleEntry attests the calling TD through c and returns the image tuple
 // the verifier reports for it: MRTD as the digest and RTMR[1..3]. The

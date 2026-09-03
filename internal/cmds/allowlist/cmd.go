@@ -5,11 +5,11 @@
 // per-container argv and path policy, looked up by container digest).
 //
 // Reads (list, export, diff, workload list/get, lint, inspect-image) are
-// unauthenticated, and render and lint --sealed produce and check the sealed
-// document a static-allowlist node measures. Writes (add, remove, upload, workload apply/edit/delete) are
-// authorized by an operator EC private key whose public key CDS pins
-// (cds --operator-keys); the CLI mints a short-lived, body-bound token per write
-// via pkg/operatorauth.
+// unauthenticated. render and lint --sealed produce and check the sealed
+// document a static-allowlist node measures. Writes (add, remove, upload,
+// workload apply/edit/delete) are authorized by an operator EC private key
+// whose public key CDS pins (cds --operator-keys); the CLI mints a
+// short-lived, body-bound token per write via pkg/operatorauth.
 package allowlist
 
 import (

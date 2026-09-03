@@ -22,6 +22,12 @@
 # when that pin moves: a stale entry fails step 3 here (entry names carry the
 # tag), a wrong one shows up as a sealed node whose system pods never start.
 #
+# A sealed document has no open argv, env or mounts, privileged or not, so
+# every floor entry in reviews.json needs the env values and mount rules (and
+# the argv, where the static pod manifest overrides the image config) observed
+# on a dynamic node of the same image: the sealed plugin's deny log prints one
+# observation per refused container. A floor entry without them fails step 3.
+#
 # Needs c8s, helm, crane, jq, yq, go and one of xorrisofs, genisoimage or
 # mkisofs on PATH, registry access for the image configs, and:
 #   E2E_IMAGE_MANIFEST  manifest.json of the node image (tdx.mrtd/rtmr1/rtmr2)

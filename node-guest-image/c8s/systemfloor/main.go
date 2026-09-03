@@ -30,10 +30,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -171,14 +172,8 @@ func render(entries []entry) string {
 		seen[e.digest] = true
 		byRef[e.ref] = e.digest
 	}
-	refs := make([]string, 0, len(byRef))
-	for r := range byRef {
-		refs = append(refs, r)
-	}
-	sort.Strings(refs)
-
 	var b strings.Builder
-	for _, r := range refs {
+	for _, r := range slices.Sorted(maps.Keys(byRef)) {
 		fmt.Fprintf(&b, "    %q: %q\n", byRef[r], r)
 	}
 	return b.String()
@@ -197,11 +192,7 @@ func floorFile(entries []entry) ([]byte, error) {
 		seen[e.digest] = true
 		byRef[e.ref] = e
 	}
-	refs := make([]string, 0, len(byRef))
-	for r := range byRef {
-		refs = append(refs, r)
-	}
-	sort.Strings(refs)
+	refs := slices.Sorted(maps.Keys(byRef))
 	floor := allowlist.SystemFloor{Schema: allowlist.SystemFloorSchema, Images: make([]allowlist.SystemFloorImage, 0, len(refs))}
 	for _, r := range refs {
 		e := byRef[r]

@@ -44,7 +44,7 @@ func sealedDocument(t *testing.T) (*allowlist.Allowlist, []byte) {
 			Rules: map[string]allowlist.MountRule{
 				"/etc/hosts": {Source: allowlist.SourcePlatform},
 				"/data":      {Source: allowlist.SourceEmptyDir},
-				"/var/run/secrets/kubernetes.io/serviceaccount": {Source: allowlist.SourceServiceAccountToken},
+				"/var/run/secrets/kubernetes.io/serviceaccount": {Source: allowlist.SourceServiceAccountToken, Review: "the app reads nothing there"},
 			}},
 		Env: allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH", "POD_NAME", "NODE"},
 			Values: map[string]allowlist.EnvValue{
@@ -55,8 +55,12 @@ func sealedDocument(t *testing.T) (*allowlist.Allowlist, []byte) {
 	}
 	agent := allowlist.Container{
 		Digest:  mustDigest(t, pushDigestB),
-		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
-		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/agent"}},
+		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny},
+		Mounts: allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: []string{"/host/modules"},
+			Rules: map[string]allowlist.MountRule{"/host/modules": {Source: allowlist.SourceHostPath, Path: "/lib/modules/"}}},
+		Env: allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH"},
+			Values: map[string]allowlist.EnvValue{"PATH": {Value: str("/bin")}}},
 		Privileges: &allowlist.Privileges{Privileged: true, HostNamespaces: []string{allowlist.HostNamespaceNet},
 			HostPaths: []string{"/lib/modules/"}, Review: "node TCB: the CNI agent"},
 	}
@@ -341,13 +345,51 @@ allowlist:
   always_allow:
     "%s": image-a
   pull:
+    url: https://cds.example:8443
     attestation_api_url: unix://%s/attestation-api.sock
 policy:
   mode: fail-closed
   enforce_existing: false
 logging:
   level: error
-`, platform, dir, dir, policyDir, pushDigestA, dir)
+`, platform, dir, dir, policyDir, pushDigestC, dir)
+}
+
+// A sealed store holds the measured bundle alone: the config's always_allow
+// floor and pull URL, which the baked image-policy.yaml carries for dynamic
+// boots, must not reach the index or start the pull loop.
+func TestStartupPolicy(t *testing.T) {
+	doc, _ := sealedDocument(t)
+	cfg, err := loadConfig(writeConfigYAML(t, sealedConfigYAML(t, t.TempDir(), "tdx")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PullEnabled() || len(cfg.Allowlist.AlwaysAllow) != 1 {
+		t.Fatalf("fixture config: pull %v, always_allow %d; want a pull URL and one floor digest", cfg.PullEnabled(), len(cfg.Allowlist.AlwaysAllow))
+	}
+	for _, tc := range []struct {
+		name          string
+		sealed        *sealedPolicy
+		wantFloor     bool
+		wantBootstrap bool
+		wantPull      bool
+	}{
+		{"sealed", &sealedPolicy{doc: doc}, false, false, false},
+		{"dynamic", nil, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, bootstrap, pull := startupPolicy(cfg, tc.sealed)
+			if got := store.current().index.AdmitsDigest(pushDigestC); got != tc.wantFloor {
+				t.Errorf("startupPolicy(%s) index admits the always_allow digest = %v, want %v", tc.name, got, tc.wantFloor)
+			}
+			if (bootstrap != nil) != tc.wantBootstrap || pull != tc.wantPull {
+				t.Errorf("startupPolicy(%s) = bootstrap %v, pull %v; want bootstrap %v, pull %v", tc.name, bootstrap != nil, pull, tc.wantBootstrap, tc.wantPull)
+			}
+			if tc.sealed != nil && !store.current().index.AdmitsDigest(pushDigestA) {
+				t.Errorf("startupPolicy(%s) index lacks the bundle's own digest", tc.name)
+			}
+		})
+	}
 }
 
 func TestRun_PolicyMode(t *testing.T) {
@@ -365,11 +407,6 @@ func TestRun_PolicyMode(t *testing.T) {
 			overwrite(t, filepath.Join(dir, policybundle.ModeFile), []byte("audit\n"))
 			return dir
 		}, `holds "audit"`, 1},
-		{"dynamic on snp skips the register and reaches registration", "snp", func(t *testing.T) string {
-			dir := t.TempDir()
-			overwrite(t, filepath.Join(dir, policybundle.ModeFile), []byte("dynamic\n"))
-			return dir
-		}, "plugin: ", 0},
 		{"dynamic on tdx with a foreign register powers off", "tdx", func(t *testing.T) string {
 			dir := t.TempDir()
 			overwrite(t, filepath.Join(dir, policybundle.ModeFile), []byte("dynamic\n"))
@@ -403,6 +440,25 @@ func TestRun_PolicyMode(t *testing.T) {
 				t.Fatalf("Run(%s) powered off %d times, want %d", tc.name, got, tc.wantPoweroff)
 			}
 		})
+	}
+}
+
+// A dynamic boot on SEV-SNP has no register to check: Run must not read
+// sysfs (a foreign RTMR[3] there is ignored) and must get as far as NRI
+// registration. With the config's pull URL in force on a dynamic boot, the
+// plugin dies registering (no NRI socket here) during the initial pull,
+// which Run reports as errPluginDied.
+func TestRun_DynamicOnSNPSkipsRegister(t *testing.T) {
+	calls := recordPoweroff(t)
+	dir := t.TempDir()
+	overwrite(t, filepath.Join(dir, policybundle.ModeFile), []byte("dynamic\n"))
+	writeRegister(t, runtimemeasure.ForStaticAllowlist([]byte("{}")))
+	err := runWithDeadline(t, 20*time.Second, []string{"-config", writeConfigYAML(t, sealedConfigYAML(t, dir, "snp"))})
+	if !errors.Is(err, errPluginDied) {
+		t.Fatalf("Run(dynamic on snp) = %v, want %v from NRI registration", err, errPluginDied)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("Run(dynamic on snp) powered off %d times, want 0", got)
 	}
 }
 

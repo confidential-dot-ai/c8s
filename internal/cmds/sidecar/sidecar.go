@@ -18,15 +18,9 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
-
-// ownQuoteTimeout bounds the self-attestation round trip that derives the
-// CDS pins at start; the verifier is a local socket, so a slow answer means
-// it is not serving.
-const ownQuoteTimeout = 30 * time.Second
 
 // Config is the release plumbing every sidecar needs. The webhook renders all
 // of it; each command adds its own fields for what it fetches and where it
@@ -129,13 +123,11 @@ func (c *Config) Validate() error {
 // warning outside one.
 func (c *Config) CDSPins(ctx context.Context) (ratls.Pins, error) {
 	if c.CDSPinsFromOwnQuote {
-		ctx, cancel := context.WithTimeout(ctx, ownQuoteTimeout)
-		defer cancel()
-		entry, err := attestationclient.NewClient(c.AttestationApiURL).OwnTupleEntry(ctx)
+		pins, err := ratls.OwnTuplePins(ctx, attestationclient.NewClient(c.AttestationApiURL))
 		if err != nil {
 			return ratls.Pins{}, fmt.Errorf("--cds-pins-from-own-quote: %w", err)
 		}
-		return ratls.Pins{Entries: []measurements.Entry{entry}}, nil
+		return pins, nil
 	}
 	launch, err := ratls.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {

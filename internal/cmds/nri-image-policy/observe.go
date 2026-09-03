@@ -21,10 +21,6 @@ import (
 // sources of the binds it adds to every container.
 const criSandboxDir = "/io.containerd.grpc.v1.cri/sandboxes/"
 
-// localPathProvisionerRoot is where local-path-storage keeps hostPath-type
-// persistent volumes on the node image (local-path-storage.yaml).
-const localPathProvisionerRoot = "/opt/local-path-provisioner/"
-
 // hostDevShm is the bind source containerd's CRI uses for /dev/shm when the
 // pod shares the node's IPC namespace (container_create.go: NamespaceMode_NODE).
 const hostDevShm = "/dev/shm"
@@ -77,7 +73,7 @@ func (o observer) observe(pod *api.PodSandbox, ctr *api.Container, digest string
 		if m.GetType() != "bind" {
 			continue
 		}
-		src := runPath(m.GetSource())
+		src := allowlist.BindSource(m.GetSource())
 		obs.Mounts[path.Clean(m.GetDestination())] = allowlist.MountSource{
 			Path:  src,
 			Class: o.classify(src, pod.GetUid(), ctr.GetPodSandboxId(), hostIPC),
@@ -151,18 +147,21 @@ func (o observer) sources(pod *api.PodSandbox) map[string]string {
 // there. hostIPC says the container shares the node's IPC namespace:
 // containerd then binds the node's /dev/shm in place of the sandbox's, and
 // render emits the same platform rule for both.
+//
+// Only CSI volumes are pvc. A local volume (kubernetes.io~local-volume) is
+// bound from whatever host directory its PersistentVolume names, which the
+// operator chooses, so it is a host path with a kubelet-shaped source and
+// stays outside the reviewed classes.
 func (o observer) classify(source, podUID, sandboxID string, hostIPC bool) string {
 	switch {
-	case underDir(source, policybundle.NodeStateDir):
+	case allowlist.UnderDir(source, policybundle.NodeStateDir):
 		return allowlist.SourceNodeState
-	case underDir(source, o.platformDir):
+	case allowlist.UnderDir(source, o.platformDir):
 		return allowlist.SourcePlatform
 	case sandboxID != "" && strings.Contains(source, criSandboxDir+sandboxID+"/"):
 		return allowlist.SourcePlatform
 	case hostIPC && source == hostDevShm:
 		return allowlist.SourcePlatform
-	case strings.HasPrefix(source, localPathProvisionerRoot):
-		return allowlist.SourcePVC
 	}
 	if podUID == "" {
 		return allowlist.SourceHostPath
@@ -188,7 +187,7 @@ func (o observer) classify(source, podUID, sandboxID string, hostIPC bool) strin
 			return allowlist.SourceServiceAccountToken
 		}
 		return "projected"
-	case "kubernetes.io~csi", "kubernetes.io~local-volume":
+	case "kubernetes.io~csi":
 		return allowlist.SourcePVC
 	case "kubernetes.io~configmap":
 		return "configMap"
@@ -283,21 +282,6 @@ func hostNamespaces(namespaces []*api.LinuxNamespace) []string {
 func hooksPresent(h *api.Hooks) bool {
 	return len(h.GetPrestart())+len(h.GetCreateRuntime())+len(h.GetCreateContainer())+
 		len(h.GetStartContainer())+len(h.GetPoststart())+len(h.GetPoststop()) > 0
-}
-
-func underDir(p, dir string) bool {
-	return dir != "" && (p == dir || strings.HasPrefix(p, dir+"/"))
-}
-
-// runPath is a bind source as the runtime records it: cleaned, with /var/run
-// mapped to /run as on the node image (the same mapping render applies to
-// rule sources).
-func runPath(p string) string {
-	p = path.Clean(p)
-	if p == "/var/run" || strings.HasPrefix(p, "/var/run/") {
-		return "/run" + strings.TrimPrefix(p, "/var/run")
-	}
-	return p
 }
 
 // cdiSpec is the part of a CDI spec file the device explanation reads

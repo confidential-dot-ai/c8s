@@ -52,8 +52,8 @@ func TestClassify(t *testing.T) {
 		{"service account token", podRoot + "volumes/kubernetes.io~projected/kube-api-access-x7z9q", allowlist.SourceServiceAccountToken},
 		{"other projected", podRoot + "volumes/kubernetes.io~projected/certs", "projected"},
 		{"csi pvc", podRoot + "volumes/kubernetes.io~csi/pvc-1/mount", allowlist.SourcePVC},
-		{"local pv", podRoot + "volumes/kubernetes.io~local-volume/pv-1", allowlist.SourcePVC},
-		{"local-path pv", localPathProvisionerRoot + "pvc-1_default_data", allowlist.SourcePVC},
+		{"local pv is an operator-chosen host directory", podRoot + "volumes/kubernetes.io~local-volume/pv-1", "local-volume"},
+		{"local-path pv", "/opt/local-path-provisioner/pvc-1_default_data", allowlist.SourceHostPath},
 		{"configMap", podRoot + "volumes/kubernetes.io~configmap/cfg", "configMap"},
 		{"secret", podRoot + "volumes/kubernetes.io~secret/tls", "secret"},
 		{"downwardAPI", podRoot + "volumes/kubernetes.io~downward-api/info", "downwardAPI"},
@@ -278,19 +278,6 @@ func TestSpecSecurity(t *testing.T) {
 	}
 	if got := specSecurity(&oci.Spec{}); !reflect.DeepEqual(got, []any{"seccomp", "unconfined", "no_new_privileges", false}) {
 		t.Fatalf("specSecurity(empty) = %v, want unconfined, false", got)
-	}
-}
-
-func TestRunPath(t *testing.T) {
-	for in, want := range map[string]string{
-		"/var/run/nri-image-policy/": "/run/nri-image-policy",
-		"/var/run":                   "/run",
-		"/var/runner/x":              "/var/runner/x",
-		"/lib/modules/../modules":    "/lib/modules",
-	} {
-		if got := runPath(in); got != want {
-			t.Errorf("runPath(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

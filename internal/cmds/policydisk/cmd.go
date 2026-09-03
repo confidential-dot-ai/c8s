@@ -114,8 +114,8 @@ func Run(ctx context.Context, cfg Config, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// loadMembers reads each member file under the bundle's own bounds. Two
-// paths with one basename would silently drop one, so that is an error.
+// loadMembers reads each member file. Two paths with one basename would
+// silently drop one, so that is an error.
 func loadMembers(paths []string) (policybundle.Bundle, error) {
 	members := make(map[string][]byte, len(paths))
 	for _, path := range paths {
@@ -123,14 +123,9 @@ func loadMembers(paths []string) (policybundle.Bundle, error) {
 		if _, dup := members[name]; dup {
 			return policybundle.Bundle{}, fmt.Errorf("--member %s: a member named %q was already given", path, name)
 		}
-		f, err := os.Open(path)
+		data, err := policybundle.ReadMember(path)
 		if err != nil {
 			return policybundle.Bundle{}, fmt.Errorf("--member: %w", err)
-		}
-		data, err := io.ReadAll(io.LimitReader(f, policybundle.MaxMemberSize+1))
-		f.Close()
-		if err != nil {
-			return policybundle.Bundle{}, fmt.Errorf("--member %s: %w", path, err)
 		}
 		members[name] = data
 	}

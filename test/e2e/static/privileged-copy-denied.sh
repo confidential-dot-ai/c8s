@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Live-cluster check that a sealed node refuses a privileged copy of a
 # node-TCB image. The pod runs the node's own Cilium image, whose digest is
-# on every node's floor, privileged and with the host /sys bound in. On a
-# dynamic node the floor admits that on the digest alone (forge-rtmr3.sh
-# relies on it); on a sealed node the Cilium rule's reviewed host paths do
-# not include /sys, so the container is refused before it starts.
+# on every node's floor, privileged, with another argv (sleep) and with the
+# host /sys bound in. On a dynamic node the floor admits that on the digest
+# alone (forge-rtmr3.sh relies on it); on a sealed node the Cilium rule pins
+# the argv and its reviewed host paths do not include /sys, so the container
+# is refused before it starts.
 #
 # Needs kubectl pointed at a static-allowlist cluster.
 set -euo pipefail

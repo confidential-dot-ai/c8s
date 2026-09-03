@@ -80,14 +80,18 @@ type Container struct {
 // workload: host namespaces, extra capabilities, devices, host bind sources,
 // an unmasked /proc, or full privilege. A sealed document requires Review to
 // say why the entry is acceptable; the reviewer, not the tool, is the
-// authority on a privileged pod.
+// authority on a privileged pod. It does not loosen the argv, env or mount
+// rules: a sealed entry pins those exactly whether privileged or not.
 //
 // Capabilities lists capabilities beyond the runtime's default set, in OCI
 // form (CAP_NET_ADMIN); Privileged implies all of them and every device, so
-// those lists are not matched for a privileged entry. HostPaths lists host bind sources admitted for
-// classes outside the reviewed mount classes (hostPath, configMap, secret,
+// those lists are not matched for a privileged entry.
+//
+// HostPaths lists the host bind sources the entry may take for classes
+// outside the reviewed mount classes (hostPath, configMap, secret,
 // projected); an entry ending in "/" admits the subtree, and the kubelet's
-// own volumes live under KubeletVolumesRoot.
+// own volumes live under KubeletVolumesRoot. Each hostPath mount rule binds
+// one of them to its destination through MountRule.Path.
 type Privileges struct {
 	Privileged     bool     `json:"privileged,omitempty"`
 	HostNamespaces []string `json:"hostNamespaces,omitempty"`
@@ -144,12 +148,21 @@ type MountPolicy struct {
 	Rules        map[string]MountRule `json:"rules,omitempty"`
 }
 
-// MountRule is the reviewed source class of one bind destination. Review is
-// required for a pvc source (why operator-supplied contents at that path
-// cannot steer the workload) and for a nodeState source (why this entry may
-// reach the node's attestation socket or policy directory).
+// MountRule is the reviewed source class of one bind destination.
+//
+// Path is the host source a hostPath rule admits at this destination, as the
+// runtime binds it: the path itself, or a subtree when it ends in "/". A
+// sealed document requires it on every hostPath rule, so a listed source
+// cannot be bound at another rule's destination; other sources take none.
+//
+// Review is required for a pvc source (why operator-supplied contents at
+// that path cannot steer the workload), for a serviceAccountToken source
+// (the kubelet's volume name is not reserved, so why operator-chosen files
+// there cannot steer it either) and for a nodeState source (why this entry
+// may reach the node's attestation socket or policy directory).
 type MountRule struct {
 	Source string `json:"source"`
+	Path   string `json:"path,omitempty"`
 	Review string `json:"review,omitempty"`
 }
 
@@ -422,6 +435,12 @@ func normalizeMounts(p *MountPolicy) error {
 			default:
 				return fmt.Errorf("rule %q: unknown source %q (want %s, %s, %s, %s, %s or %s)", d, r.Source,
 					SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceNodeState, SourceHostPath)
+			}
+			if r.Path != "" && r.Source != SourceHostPath {
+				return fmt.Errorf("rule %q: path is only for a %s source", d, SourceHostPath)
+			}
+			if r.Path != "" && !path.IsAbs(r.Path) {
+				return fmt.Errorf("rule %q: path %q is not an absolute path", d, r.Path)
 			}
 		}
 	default:

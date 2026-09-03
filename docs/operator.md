@@ -613,11 +613,12 @@ What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,
 and (on TDX) ran exactly the expected measured workloads. Under
 `--static-allowlist` it proves instead that the node measured exactly the
-reviewed bundle, so its sealed plugin admits only that bundle's entries. What it does not prove: anything about images or keys the
-manifest and flags do not name, or the provenance of the manifest file itself
-— select it deliberately from the trusted image build. An RTMR[3]-only gate
-would prove much less: the untrusted host stages the operator public key, so
-it can boot **any** image and reproduce the operator-key/mode register — the
+reviewed bundle, so its sealed plugin admits only that bundle's entries.
+What it does not prove: anything about images or keys the manifest and
+flags do not name, or the provenance of the manifest file itself — select
+it deliberately from the trusted image build. An RTMR[3]-only gate would
+prove much less: the untrusted host stages the operator public key, so it
+can boot **any** image and reproduce the operator-key/mode register — the
 image tuple is the identity anchor, and RTMR[3] then binds the key and
 workload set to it.
 

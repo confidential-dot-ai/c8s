@@ -51,8 +51,10 @@ operator's own injection, so c8s-cert and its siblings get rules too.
 
 The canonical document goes to stdout; a review report listing every
 executable, argv, env rule, mount rule and privilege goes to stderr or
---report. Reviews (privileged entries, pvc and nodeState mounts) start empty:
-complete them, then run 'c8s allowlist lint --sealed'.`,
+--report. Reviews (privileged entries, pvc, serviceAccountToken and nodeState
+mounts) start empty: complete them, then run 'c8s allowlist lint --sealed'.
+Exec probes and lifecycle hooks are reported as warnings: the kubelet runs
+them through CRI exec, which no sealed rule covers.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !sealed {
@@ -194,7 +196,7 @@ func (r *renderer) addChart(rendered []byte, namespace string) error {
 	}
 	r.operator = &cfg
 	if cfg.WorkloadClaimsHostDir != "" {
-		r.cluster.platformDir = hostPathAsBound(cfg.WorkloadClaimsHostDir)
+		r.cluster.platformDir = pkgallowlist.BindSource(cfg.WorkloadClaimsHostDir)
 		r.report.notef("platform socket directory: %s (the operator's --workload-claims-host-dir); binds from it are platform mounts", r.cluster.platformDir)
 	}
 	return r.addManifests(manifests, namespace, "chart")
@@ -335,8 +337,11 @@ func writeContainerReport(w io.Writer, where string, c pkgallowlist.Container) {
 		for _, d := range c.Mounts.Destinations {
 			r := c.Mounts.Rules[d]
 			fmt.Fprintf(w, "    mount: %s source=%s", d, r.Source)
-			if r.Source == pkgallowlist.SourcePVC {
+			switch r.Source {
+			case pkgallowlist.SourcePVC, pkgallowlist.SourceNodeState, pkgallowlist.SourceServiceAccountToken:
 				fmt.Fprintf(w, " review=%q", r.Review)
+			case pkgallowlist.SourceHostPath:
+				fmt.Fprintf(w, " path=%s", r.Path)
 			}
 			fmt.Fprintln(w)
 		}

@@ -103,28 +103,12 @@ type clusterFacts struct {
 // cannot admit the attestation socket bound there.
 func (c clusterFacts) hostPathClass(hostPath string) string {
 	switch {
-	case underDir(hostPath, c.platformDir):
+	case pkgallowlist.UnderDir(hostPath, c.platformDir):
 		return pkgallowlist.SourcePlatform
-	case underDir(hostPath, policybundle.NodeStateDir):
+	case pkgallowlist.UnderDir(hostPath, policybundle.NodeStateDir):
 		return pkgallowlist.SourceNodeState
 	}
 	return pkgallowlist.SourceHostPath
-}
-
-func underDir(p, dir string) bool {
-	return dir != "" && (p == dir || strings.HasPrefix(p, dir+"/"))
-}
-
-// hostPathAsBound is the source the runtime records for a hostPath volume:
-// containerd cleans the path and resolves symlinks, and /var/run is a symlink
-// to /run on the node image. A trailing slash in the spec must not become a
-// subtree grant by accident, so the cleaned form is what the rule carries.
-func hostPathAsBound(specPath string) string {
-	p := path.Clean(specPath)
-	if p == "/var/run" || strings.HasPrefix(p, "/var/run/") {
-		return "/run" + strings.TrimPrefix(p, "/var/run")
-	}
-	return p
 }
 
 // serviceEnv is what the kubelet injects for the API server Service whatever
@@ -184,10 +168,11 @@ func containerRule(pod *corev1.Pod, c *corev1.Container, images *imageResolver, 
 		len(priv.HostNamespaces) == 0 && len(priv.Capabilities) == 0 {
 		priv = nil
 	}
-	command, args, err := argvRules(c, img, kubeletEnv, priv != nil)
+	command, args, err := argvRules(c, img, kubeletEnv)
 	if err != nil {
 		return pkgallowlist.Container{}, err
 	}
+	reportKubeletExec(pod, c, rep)
 	return pkgallowlist.Container{
 		Digest:     img.digest,
 		Image:      img.label,
@@ -287,24 +272,19 @@ func expandEnv(s string, env kubeletEnv) (string, string) {
 
 // argvRules pins the effective argv with Kubernetes semantics: command
 // overrides the image Entrypoint, args overrides Cmd, and a command without
-// args drops the image Cmd. A privileged entry whose argv expands a per-pod
-// variable gets an unconstrained segment; an unprivileged one is an error.
-func argvRules(c *corev1.Container, img *imageFacts, env kubeletEnv, privileged bool) (command, args pkgallowlist.ArgvPolicy, err error) {
-	// expand substitutes literals; a per-pod reference leaves the segment
-	// unconstrained for a privileged entry and is an error otherwise.
-	expand := func(tokens []string, what string) (out []string, unconstrained bool, err error) {
+// args drops the image Cmd. An argv that expands a per-pod variable is an
+// error for every entry: a sealed document has no open argv.
+func argvRules(c *corev1.Container, img *imageFacts, env kubeletEnv) (command, args pkgallowlist.ArgvPolicy, err error) {
+	expand := func(tokens []string, what string) ([]string, error) {
+		var out []string
 		for _, t := range tokens {
 			v, dynamic := expandEnv(t, env)
-			if dynamic == "" {
-				out = append(out, v)
-				continue
+			if dynamic != "" {
+				return nil, fmt.Errorf("%s expands $(%s), whose value varies per pod; no exact rule can pin it", what, dynamic)
 			}
-			if !privileged {
-				return nil, false, fmt.Errorf("%s expands $(%s), whose value varies per pod; no exact rule can pin it", what, dynamic)
-			}
-			return nil, true, nil
+			out = append(out, v)
 		}
-		return out, false, nil
+		return out, nil
 	}
 	cmdPart, argPart := img.entrypoint, img.cmd
 	switch {
@@ -316,32 +296,51 @@ func argvRules(c *corev1.Container, img *imageFacts, env kubeletEnv, privileged 
 	case len(c.Args) > 0:
 		argPart = c.Args
 	}
-	cmdPart, cmdAny, err := expand(cmdPart, "command")
-	if err != nil {
+	if cmdPart, err = expand(cmdPart, "command"); err != nil {
 		return command, args, err
 	}
-	argPart, argAny, err := expand(argPart, "args")
-	if err != nil {
+	if argPart, err = expand(argPart, "args"); err != nil {
 		return command, args, err
 	}
-	if len(cmdPart) == 0 && len(argPart) == 0 && !cmdAny && !argAny {
+	if len(cmdPart) == 0 && len(argPart) == 0 {
 		return command, args, fmt.Errorf("no argv: the image has no Entrypoint or Cmd and the template sets neither command nor args")
 	}
-	if len(cmdPart) == 0 && !cmdAny {
+	if len(cmdPart) == 0 {
 		// An image with only a Cmd runs it as the whole argv.
-		cmdPart, cmdAny, argPart, argAny = argPart, argAny, nil, false
+		cmdPart, argPart = argPart, nil
 	}
-	command, args = pkgallowlist.ArgvRule(cmdPart), pkgallowlist.ArgvRule(argPart)
-	unconstrained := pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}
-	switch {
-	case cmdAny:
-		// An unconstrained command consumes the whole argv, so nothing is
-		// left for an args rule to anchor on.
-		command, args = unconstrained, unconstrained
-	case argAny:
-		args = unconstrained
+	return pkgallowlist.ArgvRule(cmdPart), pkgallowlist.ArgvRule(argPart), nil
+}
+
+// reportKubeletExec warns about every argv the kubelet runs inside the
+// container through CRI exec: exec probes and lifecycle hooks. No NRI hook
+// sees those, so the sealed plugin cannot hold them to a rule, and whoever
+// can edit the pod can replace them on an admitted container. The reviewer
+// has to know the bundle does not cover them.
+func reportKubeletExec(pod *corev1.Pod, c *corev1.Container, rep *report) {
+	where := fmt.Sprintf("pod %s/%s container %s", pod.Namespace, pod.Name, c.Name)
+	exec := func(kind string, argv []string) {
+		rep.warnf("%s: %s runs %q through CRI exec, which the sealed plugin cannot see; any exec probe or lifecycle hook on an admitted container runs an argv the bundle does not pin", where, kind, strings.Join(argv, " "))
 	}
-	return command, args, nil
+	for _, p := range []struct {
+		kind  string
+		probe *corev1.Probe
+	}{{"livenessProbe", c.LivenessProbe}, {"readinessProbe", c.ReadinessProbe}, {"startupProbe", c.StartupProbe}} {
+		if p.probe != nil && p.probe.Exec != nil {
+			exec(p.kind, p.probe.Exec.Command)
+		}
+	}
+	if c.Lifecycle == nil {
+		return
+	}
+	for _, h := range []struct {
+		kind    string
+		handler *corev1.LifecycleHandler
+	}{{"lifecycle.postStart", c.Lifecycle.PostStart}, {"lifecycle.preStop", c.Lifecycle.PreStop}} {
+		if h.handler != nil && h.handler.Exec != nil {
+			exec(h.kind, h.handler.Exec.Command)
+		}
+	}
 }
 
 // privilegesOf reads the pod and container security settings into a
@@ -377,8 +376,8 @@ func privilegesOf(pod *corev1.Pod, c *corev1.Container) *pkgallowlist.Privileges
 
 // mountRules classifies every bind the container will carry: the template's
 // volumeMounts by their volume source, plus what the kubelet adds. A source
-// the node supplies goes under privileges.hostPaths, recorded as the runtime
-// binds it.
+// the node supplies is bound to its destination by the rule's path and
+// listed under privileges.hostPaths, both recorded as the runtime binds it.
 func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privileges, cluster clusterFacts, rep *report) (map[string]pkgallowlist.MountRule, error) {
 	volumes := make(map[string]corev1.Volume, len(pod.Spec.Volumes))
 	for _, v := range pod.Spec.Volumes {
@@ -386,7 +385,7 @@ func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privile
 	}
 	rules := map[string]pkgallowlist.MountRule{}
 	hostPath := func(dest, source string) {
-		rules[dest] = pkgallowlist.MountRule{Source: pkgallowlist.SourceHostPath}
+		rules[dest] = pkgallowlist.MountRule{Source: pkgallowlist.SourceHostPath, Path: source}
 		priv.HostPaths = append(priv.HostPaths, source)
 	}
 	for _, vm := range c.VolumeMounts {
@@ -398,12 +397,14 @@ func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privile
 		switch {
 		case v.EmptyDir != nil:
 			rules[dest] = pkgallowlist.MountRule{Source: pkgallowlist.SourceEmptyDir}
-		case v.PersistentVolumeClaim != nil, v.Ephemeral != nil:
-			// The review stays empty here; the sealed findings in the report
-			// ask for it.
+		case v.PersistentVolumeClaim != nil, v.Ephemeral != nil, v.CSI != nil:
+			// The kubelet binds an inline CSI volume from the same
+			// kubernetes.io~csi path as a claim's, which the plugin classifies
+			// as pvc. The review stays empty here; the sealed findings in the
+			// report ask for it.
 			rules[dest] = pkgallowlist.MountRule{Source: pkgallowlist.SourcePVC}
 		case v.HostPath != nil:
-			source := hostPathAsBound(v.HostPath.Path)
+			source := pkgallowlist.BindSource(v.HostPath.Path)
 			if source != v.HostPath.Path {
 				rep.notef("pod %s/%s container %s: hostPath %q is bound as %q", pod.Namespace, pod.Name, c.Name, v.HostPath.Path, source)
 			}
@@ -415,7 +416,7 @@ func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privile
 			default:
 				rules[dest] = pkgallowlist.MountRule{Source: class}
 			}
-		case v.ConfigMap != nil, v.Secret != nil, v.Projected != nil, v.DownwardAPI != nil, v.CSI != nil:
+		case v.ConfigMap != nil, v.Secret != nil, v.Projected != nil, v.DownwardAPI != nil:
 			hostPath(dest, pkgallowlist.KubeletVolumesRoot)
 		default:
 			return nil, fmt.Errorf("volume %q has a source type this tool cannot classify", vm.Name)
@@ -433,6 +434,9 @@ func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privile
 	if _, taken := rules[termination]; !taken {
 		rules[termination] = pkgallowlist.MountRule{Source: pkgallowlist.SourcePlatform}
 	}
+	// The review stays empty here too: the kubelet's volume name is not
+	// reserved, so the reviewer says why operator-chosen files at that path
+	// cannot steer the workload.
 	automount := pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken
 	if _, taken := rules[serviceAccountMountPath]; automount && !taken {
 		rules[serviceAccountMountPath] = pkgallowlist.MountRule{Source: pkgallowlist.SourceServiceAccountToken}

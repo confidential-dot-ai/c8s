@@ -101,7 +101,7 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
-	pull := cfg.PullEnabled() && sealed == nil
+	store, bootstrap, pull := startupPolicy(cfg, sealed)
 
 	logger.Info("starting nri-image-policy",
 		"version", version.Version,
@@ -121,15 +121,8 @@ func Run(args []string) error {
 
 	auditLogger := audit.NewLogger()
 
-	// A sealed store starts empty and holds the bundle alone: no floor, no
-	// pull, so nothing the control plane serves can enter the index.
-	bootstrap := alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow)
-	store := newPolicyStore(bootstrap)
 	var pins ratls.Pins
 	if sealed != nil {
-		bootstrap = nil
-		store = newPolicyStore(nil)
-		store.apply(sealed.doc, 0)
 		protectFromOOM(logger)
 	} else if pins, err = configuredPins(cfg.Allowlist.Pull); err != nil {
 		return err
@@ -318,6 +311,20 @@ func openPolicyMode(cfg *config, logger *slog.Logger) (*sealedPolicy, error) {
 	logger.Info("sealed to the measured policy bundle", "policy_dir", dir, "rtmr3", fmt.Sprintf("%x", sealed.rtmr3[:]),
 		"workloads", len(sealed.doc.Workloads), "host_ip", sealed.hostIP, "node_name", sealed.nodeName)
 	return sealed, nil
+}
+
+// startupPolicy chooses what the index starts from and whether the pull
+// loop runs. A sealed store starts empty and holds the measured bundle
+// alone: no always_allow floor, no pull, so nothing the control plane serves
+// can enter the index.
+func startupPolicy(cfg *config, sealed *sealedPolicy) (store *policyStore, bootstrap *allowlist.Allowlist, pull bool) {
+	if sealed != nil {
+		store = newPolicyStore(nil)
+		store.apply(sealed.doc, 0)
+		return store, nil, false
+	}
+	bootstrap = alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow)
+	return newPolicyStore(bootstrap), bootstrap, cfg.PullEnabled()
 }
 
 // sealedFatal powers the node off for a startup failure in sealed mode and

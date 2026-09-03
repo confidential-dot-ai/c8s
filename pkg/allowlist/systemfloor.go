@@ -27,10 +27,10 @@ type SystemFloor struct {
 }
 
 // SystemFloorImage is one system image and its rule skeleton. Env keys and
-// Mounts keys become the exact names and destinations of the rendered rule.
-// The skeleton carries an empty Privileges block; the reviewer completes it
-// for a node-TCB image or sets it to null for an unprivileged one, whose
-// env and mounts must then be exact.
+// Mounts keys become the exact names and destinations of the rendered rule;
+// both must be complete before the document seals, privileged or not. The
+// skeleton carries an empty Privileges block; the reviewer completes it for
+// a node-TCB image or sets it to null for an unprivileged one.
 type SystemFloorImage struct {
 	Ref        string               `json:"ref"`
 	Digest     string               `json:"digest"`
@@ -146,7 +146,8 @@ func ArgvRule(argv []string) ArgvPolicy {
 }
 
 // EnvRules builds an exact env policy from name-keyed rules; an empty map is
-// the unconstrained policy, which only a privileged entry may keep.
+// the unconstrained policy, which LintSealed refuses until the reviewer
+// completes it.
 func EnvRules(values map[string]EnvValue) EnvPolicy {
 	if len(values) == 0 {
 		return EnvPolicy{Policy: PolicyAny}
@@ -160,7 +161,8 @@ func EnvRules(values map[string]EnvValue) EnvPolicy {
 }
 
 // MountRules builds an exact mount policy from destination-keyed rules; an
-// empty map is the unconstrained policy.
+// empty map is the unconstrained policy, which LintSealed refuses until the
+// reviewer completes it.
 func MountRules(rules map[string]MountRule) MountPolicy {
 	if len(rules) == 0 {
 		return MountPolicy{Policy: PolicyAny}

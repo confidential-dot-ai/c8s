@@ -155,7 +155,8 @@ func TestSealedCreateContainer_PrivilegedEntry(t *testing.T) {
 	ctr := &api.Container{
 		Id: "cni", PodSandboxId: testSandboxID, Name: "agent",
 		Annotations: map[string]string{annotationImageName: "registry/cni@" + pushDigestB},
-		Args:        []string{"/agent", "--anything"},
+		Args:        []string{"/agent"},
+		Env:         []string{"PATH=/bin"},
 		Mounts:      []*api.Mount{sysfsMount("nosuid"), bind("/host/modules", "/lib/modules/6.12/kernel")},
 		Linux: &api.LinuxContainer{Namespaces: []*api.LinuxNamespace{{Type: "pid"}, {Type: "ipc"}},
 			Devices: []*api.LinuxDevice{{Path: "/dev/kvm"}}},
@@ -166,6 +167,11 @@ func TestSealedCreateContainer_PrivilegedEntry(t *testing.T) {
 	ctr.Mounts = append(ctr.Mounts, bind("/host/etc", "/etc"))
 	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
 		t.Fatal("CreateContainer(privileged entry, hostPath outside hostPaths) admitted")
+	}
+	ctr.Mounts = ctr.Mounts[:2]
+	ctr.Args = []string{"/bin/sh", "-c", "id"}
+	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+		t.Fatal("CreateContainer(privileged entry, other argv) admitted: a privileged image with an open argv is a shell on the node")
 	}
 }
 

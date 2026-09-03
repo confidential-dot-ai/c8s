@@ -25,13 +25,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// operatorPubkeyPath is where the measured initrd stages the operator public
-// key it read off the opkeydata disk (and hashed into RTMR[3]). The service
-// reads this file rather than mounting the ISO itself — mounting fails under
-// the unit's systemd hardening, and the initrd is the single, measured reader
-// of the disk anyway.
-// Var (not const) so tests can point it at a temp file.
-var operatorPubkeyPath = "/etc/confai/operator-pubkey"
+// operatorPubkeyPath is the initrd-staged operator key. The service reads
+// the file rather than mounting the ISO itself: mounting fails under the
+// unit's systemd hardening. A var so tests point it at a temp file.
+var operatorPubkeyPath = policybundle.OperatorPubkeyPath
 
 // verifyKeyMeasured is the load-bearing anchor check: the operator pubkey file
 // is NOT itself measured (only its hash, via RTMR[3]), so before trusting the

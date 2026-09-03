@@ -1,10 +1,14 @@
 // Command complete finishes the sealed allowlist the static e2e lane renders.
 // `c8s allowlist render --sealed` leaves every review empty and pins each
-// system-floor image to the argv its image config bakes, because only a
-// reviewer who observed the node can say more. The lane's reviewer is the
-// checked-in test/e2e/static/reviews.json: this command applies it, drops
-// the floor images the node never runs, and prints the canonical document
-// once it passes the same LintSealed a node runs at boot.
+// system-floor image to the argv its image config bakes with no env and no
+// mounts, because only a reviewer who observed the node can say more. The
+// lane's reviewer is the checked-in test/e2e/static/reviews.json: this
+// command applies it, drops the floor images the node never runs, and
+// prints the canonical document once it passes the same LintSealed a node
+// runs at boot. A floor entry the reviews file leaves without env and
+// mounts fails that lint: a sealed document has no open policy, privileged
+// or not, so the floor must be completed from a dynamic node's observation
+// (the sealed plugin's deny log prints one per refused container).
 //
 //	go run ./test/e2e/static/complete -reviews reviews.json rendered.json > static-allowlist.json
 //
@@ -42,18 +46,24 @@ type Reviews struct {
 
 // EntryReview fills the review slots of one entry. Privileges goes to every
 // container that carries a privileges block; Mounts goes to every container
-// whose rule at that destination is a pvc or nodeState bind.
+// whose rule at that destination is a pvc, serviceAccountToken or nodeState
+// bind.
 type EntryReview struct {
 	Privileges string            `json:"privileges,omitempty"`
 	Mounts     map[string]string `json:"mounts,omitempty"`
 }
 
-// FloorReview replaces a floor entry's privileges with the reviewed block.
-// Argv "any" lifts the image-config argv pin, for a static pod whose
-// manifest overrides it; empty keeps the pin.
+// FloorReview completes a floor entry from the reviewer's observation of a
+// dynamic node: the reviewed privileges block, the env values and mount
+// rules the skeleton left empty, and, when the static pod manifest overrides
+// the image config, the argv. Command and Args unset keep the image-config
+// pin; Env and Mounts unset leave the entry open, which the lint refuses.
 type FloorReview struct {
-	Privileges allowlist.Privileges `json:"privileges"`
-	Argv       string               `json:"argv,omitempty"`
+	Privileges allowlist.Privileges           `json:"privileges"`
+	Command    []string                       `json:"command,omitempty"`
+	Args       []string                       `json:"args,omitempty"`
+	Env        map[string]allowlist.EnvValue  `json:"env,omitempty"`
+	Mounts     map[string]allowlist.MountRule `json:"mounts,omitempty"`
 }
 
 func main() {
@@ -127,18 +137,19 @@ func complete(doc []byte, r Reviews) ([]byte, error) {
 			errs = append(errs, fmt.Errorf("floor: entry %q is not in the document", name))
 			continue
 		}
-		if fr.Argv != "" && fr.Argv != allowlist.PolicyAny {
-			errs = append(errs, fmt.Errorf("floor: entry %q: argv must be %q or empty, got %q", name, allowlist.PolicyAny, fr.Argv))
+		if len(fr.Command) == 0 && len(fr.Args) != 0 {
+			errs = append(errs, fmt.Errorf("floor: entry %q: args without command; an observed argv is given as command plus args", name))
 			continue
 		}
 		for _, list := range [][]allowlist.Container{w.InitContainers, w.Containers} {
 			for i := range list {
 				priv := fr.Privileges
 				list[i].Privileges = &priv
-				if fr.Argv == allowlist.PolicyAny {
-					list[i].Command = allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}
-					list[i].Args = allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}
+				if len(fr.Command) != 0 {
+					list[i].Command, list[i].Args = allowlist.ArgvRule(fr.Command), allowlist.ArgvRule(fr.Args)
 				}
+				list[i].Env = allowlist.EnvRules(fr.Env)
+				list[i].Mounts = allowlist.MountRules(fr.Mounts)
 			}
 		}
 	}
@@ -209,7 +220,7 @@ func applyEntryReview(name string, w allowlist.Workload, er EntryReview) []error
 		hit := false
 		for _, c := range containers {
 			rule, ok := c.Mounts.Rules[dest]
-			if !ok || (rule.Source != allowlist.SourcePVC && rule.Source != allowlist.SourceNodeState) {
+			if !ok || !reviewedMount(rule.Source) {
 				continue
 			}
 			rule.Review = review
@@ -217,8 +228,17 @@ func applyEntryReview(name string, w allowlist.Workload, er EntryReview) []error
 			hit = true
 		}
 		if !hit {
-			errs = append(errs, fmt.Errorf("entries: %q reviews mount %q but no container binds a pvc or nodeState source there", name, dest))
+			errs = append(errs, fmt.Errorf("entries: %q reviews mount %q but no container binds a pvc, serviceAccountToken or nodeState source there", name, dest))
 		}
 	}
 	return errs
+}
+
+// reviewedMount reports the source classes whose rule carries a review.
+func reviewedMount(source string) bool {
+	switch source {
+	case allowlist.SourcePVC, allowlist.SourceServiceAccountToken, allowlist.SourceNodeState:
+		return true
+	}
+	return false
 }

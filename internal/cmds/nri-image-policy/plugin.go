@@ -157,7 +157,7 @@ func newPlugin(
 	}
 	if sealed != nil {
 		p.observer = observer{
-			platformDir:    runPath(cfg.WorkloadClaims.SocketDir),
+			platformDir:    allowlist.BindSource(cfg.WorkloadClaims.SocketDir),
 			hostIP:         sealed.hostIP,
 			nodeName:       sealed.nodeName,
 			cdiDeviceNodes: cdiDeviceNodesFrom(defaultCDISpecDirs),

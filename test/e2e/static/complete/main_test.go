@@ -28,8 +28,9 @@ func mustDigest(t *testing.T, s string) types.Digest {
 }
 
 // rendered is the shape `render --sealed` leaves behind: an unprivileged
-// workload whose nodeState bind has no review, and two floor entries pinned
-// to their image-config argv with an empty review.
+// workload whose nodeState and token binds have no review, and two floor
+// entries pinned to their image-config argv with open env and mounts and
+// an empty review.
 func rendered(t *testing.T) []byte {
 	t.Helper()
 	app := allowlist.Container{
@@ -37,9 +38,10 @@ func rendered(t *testing.T) []byte {
 		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: []string{"/app"}},
 		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyDeny},
 		Env:     allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Names: []string{"PATH"}, Values: map[string]allowlist.EnvValue{"PATH": {Value: str("/bin")}}},
-		Mounts: allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: []string{"/etc/hosts", "/run/confai"}, Rules: map[string]allowlist.MountRule{
+		Mounts: allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: []string{"/etc/hosts", "/run/confai", "/var/run/secrets/kubernetes.io/serviceaccount"}, Rules: map[string]allowlist.MountRule{
 			"/etc/hosts":  {Source: allowlist.SourcePlatform},
 			"/run/confai": {Source: allowlist.SourceNodeState},
+			"/var/run/secrets/kubernetes.io/serviceaccount": {Source: allowlist.SourceServiceAccountToken},
 		}},
 	}
 	floor := func(d string) allowlist.Container {
@@ -70,11 +72,20 @@ func rendered(t *testing.T) []byte {
 
 func fullReviews() Reviews {
 	return Reviews{
-		Entries: map[string]EntryReview{"app": {Mounts: map[string]string{"/run/confai": "dials the node verifier"}}},
+		Entries: map[string]EntryReview{"app": {Mounts: map[string]string{
+			"/run/confai": "dials the node verifier",
+			"/var/run/secrets/kubernetes.io/serviceaccount": "reads nothing there",
+		}}},
 		Floor: map[string]FloorReview{"system-agent": {
 			// Unsorted on purpose: the output must be the normalized form.
 			Privileges: allowlist.Privileges{Privileged: true, HostNamespaces: []string{"pid", "net"}, HostPaths: []string{"/sys/fs/bpf", "/proc"}, Review: "node TCB"},
-			Argv:       "any",
+			Command:    []string{"/agent"},
+			Args:       []string{"--config-dir=/tmp/cm"},
+			Env:        map[string]allowlist.EnvValue{"PATH": {Value: str("/bin")}, "NODE": {From: allowlist.FromNodeName}},
+			Mounts: map[string]allowlist.MountRule{
+				"/etc/hosts": {Source: allowlist.SourcePlatform},
+				"/host/bpf":  {Source: allowlist.SourceHostPath, Path: "/sys/fs/bpf"},
+			},
 		}},
 		Drop: []string{"system-spare"},
 	}
@@ -97,8 +108,14 @@ func TestComplete(t *testing.T) {
 		t.Errorf("complete() kept dropped entry system-spare")
 	}
 	agent := al.Workloads["system-agent"].Containers[0]
-	if agent.Command.Policy != allowlist.PolicyAny || agent.Args.Policy != allowlist.PolicyAny {
-		t.Errorf("system-agent argv = %s/%s, want any/any", agent.Command.Policy, agent.Args.Policy)
+	if got := strings.Join(append(agent.Command.Argv, agent.Args.Argv...), " "); agent.Command.Policy != allowlist.PolicyExact || agent.Args.Policy != allowlist.PolicyExact || got != "/agent --config-dir=/tmp/cm" {
+		t.Errorf("system-agent argv = %s/%s %q, want the observed argv pinned exactly", agent.Command.Policy, agent.Args.Policy, got)
+	}
+	if got := agent.Env.Values["NODE"].From; got != allowlist.FromNodeName {
+		t.Errorf("system-agent env NODE = %+v, want from nodeName", agent.Env.Values["NODE"])
+	}
+	if got := agent.Mounts.Rules["/host/bpf"]; got.Source != allowlist.SourceHostPath || got.Path != "/sys/fs/bpf" {
+		t.Errorf("system-agent mount /host/bpf = %+v, want the observed hostPath bound to /sys/fs/bpf", got)
 	}
 	if !agent.Privileges.Privileged || agent.Privileges.Review != "node TCB" {
 		t.Errorf("system-agent privileges = %+v, want the reviewed block", agent.Privileges)
@@ -122,18 +139,36 @@ func TestCompleteErrors(t *testing.T) {
 		{"unknown floor", func(r *Reviews) { r.Floor["system-gone"] = r.Floor["system-agent"] }, `floor: entry "system-gone" is not in the document`},
 		{"unknown entry", func(r *Reviews) { r.Entries["gone"] = EntryReview{Privileges: "x"} }, `entries: entry "gone" is not in the document`},
 		{"privileges review without a slot", func(r *Reviews) { r.Entries["app"] = EntryReview{Privileges: "x"} }, `no container has a privileges block`},
-		{"mount review without a slot", func(r *Reviews) { r.Entries["app"] = EntryReview{Mounts: map[string]string{"/etc/hosts": "x"}} }, `no container binds a pvc or nodeState source`},
-		{"bad argv policy", func(r *Reviews) {
+		{"mount review without a slot", func(r *Reviews) { r.Entries["app"] = EntryReview{Mounts: map[string]string{"/etc/hosts": "x"}} }, `no container binds a pvc, serviceAccountToken or nodeState source`},
+		{"args without command", func(r *Reviews) {
 			fr := r.Floor["system-agent"]
-			fr.Argv = "exact"
+			fr.Command = nil
 			r.Floor["system-agent"] = fr
-		}, `argv must be "any" or empty`},
+		}, `args without command`},
+		{"floor without env fails lint", func(r *Reviews) {
+			fr := r.Floor["system-agent"]
+			fr.Env = nil
+			r.Floor["system-agent"] = fr
+		}, `env must be exact`},
+		{"floor without mounts fails lint", func(r *Reviews) {
+			fr := r.Floor["system-agent"]
+			fr.Mounts = nil
+			r.Floor["system-agent"] = fr
+		}, `mounts must be exact`},
+		{"floor host path outside hostPaths fails lint", func(r *Reviews) {
+			fr := r.Floor["system-agent"]
+			fr.Privileges.HostPaths = []string{"/proc"}
+			r.Floor["system-agent"] = fr
+		}, `privileges.hostPaths does not cover`},
 		{"empty floor review fails lint", func(r *Reviews) {
 			fr := r.Floor["system-agent"]
 			fr.Privileges.Review = ""
 			r.Floor["system-agent"] = fr
 		}, `privileges.review is empty`},
 		{"missing mount review fails lint", func(r *Reviews) { delete(r.Entries, "app") }, `nodeState bind without a review`},
+		{"missing token review fails lint", func(r *Reviews) {
+			r.Entries["app"] = EntryReview{Mounts: map[string]string{"/run/confai": "dials the node verifier"}}
+		}, `serviceAccountToken bind without a review`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,8 +189,9 @@ func TestRunReadsFilesAndWritesCanonicalBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	reviewsPath := filepath.Join(dir, "reviews.json")
-	reviews := `{"entries":{"app":{"mounts":{"/run/confai":"dials the node verifier"}}},` +
-		`"floor":{"system-agent":{"privileges":{"privileged":true,"review":"node TCB"},"argv":"any"}},"drop":["system-spare"]}`
+	reviews := `{"entries":{"app":{"mounts":{"/run/confai":"dials the node verifier","/var/run/secrets/kubernetes.io/serviceaccount":"reads nothing there"}}},` +
+		`"floor":{"system-agent":{"privileges":{"privileged":true,"review":"node TCB"},` +
+		`"env":{"PATH":{"value":"/bin"}},"mounts":{"/etc/hosts":{"source":"platform"}}}},"drop":["system-spare"]}`
 	if err := os.WriteFile(reviewsPath, []byte(reviews), 0o600); err != nil {
 		t.Fatal(err)
 	}

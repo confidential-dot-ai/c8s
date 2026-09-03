@@ -11,37 +11,30 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/confidential-dot-ai/c8s/internal/tdxrtmr"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
-// operatorPubkeyPath is where the measured initrd stages the operator public
-// key on a dynamic boot; the same path cred-release reads. A var so tests
-// point it at a temp file.
-var operatorPubkeyPath = "/etc/confai/operator-pubkey"
+// operatorPubkeyPath is the initrd-staged operator key of a dynamic boot. A
+// var so tests point it at a temp file.
+var operatorPubkeyPath = policybundle.OperatorPubkeyPath
 
 // poweroff powers the node off after a sealed-mode fatal condition. The plugin
 // is a containerd child, not a unit, so no FailureAction= applies to it. A var
 // so tests inject a recorder instead of powering off the test host.
 var poweroff = systemPoweroff
 
-// selfAttestTimeout bounds the own-quote round trip at startup; the socket
-// is local, so a slow answer means the verifier is not serving. It exceeds
-// containerd's plugin_registration_timeout, so Run registers the stub before
-// it attests (see pinOwnTuple).
-const selfAttestTimeout = 30 * time.Second
-
 // pinOwnTuple derives the CDS pins from the node's own quote. A var so tests
-// observe when Run calls it relative to stub registration.
+// observe when Run calls it relative to stub registration: the round trip
+// (attestationclient.OwnTupleTimeout) can outlast containerd's
+// plugin_registration_timeout, so Run registers the stub first.
 var pinOwnTuple = ownTuplePins
 
 // sealedPolicy is what a static boot pins the plugin to: the linted document,
@@ -137,23 +130,19 @@ func checkDynamicRegister(pubkeyPath string) error {
 	return nil
 }
 
-// ownTuplePins pins the CDS peer to this node's own image tuple {MRTD,
-// RTMR1, RTMR2, RTMR3} as the attestation-api reports it from a fresh quote,
-// so no installer writes pins into the measured config. The reported RTMR[3]
-// must be the one the sealed load proved, or the verifier is not looking at
-// this node.
+// ownTuplePins pins the CDS peer to this node's own image tuple, so no
+// installer writes pins into the measured config. The reported RTMR[3] must
+// be the one the sealed load proved, or the verifier is not looking at this
+// node.
 func ownTuplePins(ctx context.Context, attestationAPIURL string, rtmr3 [runtimemeasure.Size]byte) (ratls.Pins, error) {
-	ctx, cancel := context.WithTimeout(ctx, selfAttestTimeout)
-	defer cancel()
-
-	entry, err := attestationclient.NewClient(attestationAPIURL).OwnTupleEntry(ctx)
+	pins, err := ratls.OwnTuplePins(ctx, attestationclient.NewClient(attestationAPIURL))
 	if err != nil {
 		return ratls.Pins{}, err
 	}
-	if got := entry.RTMRs[3]; !bytes.Equal(got, rtmr3[:]) {
+	if got := pins.Entries[0].RTMRs[3]; !bytes.Equal(got, rtmr3[:]) {
 		return ratls.Pins{}, fmt.Errorf("the verifier reports RTMR[3] %x, the sealed register is %x", got, rtmr3[:])
 	}
-	return ratls.Pins{Entries: []measurements.Entry{entry}}, nil
+	return pins, nil
 }
 
 // oomScoreAdjPath is where the plugin lowers its own OOM score in sealed

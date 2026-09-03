@@ -58,16 +58,19 @@ func TestSystemFloorWorkloads(t *testing.T) {
 	}
 }
 
-// A reviewer who nulls privileges owes exact env and mounts: the sealed lint
-// holds an unprivileged floor entry to the same rule as any workload.
-func TestSystemFloorWorkloads_UnprivilegedNeedsCompleteRule(t *testing.T) {
+// The skeleton's empty env and mounts owe completion whatever the
+// privileges say: the sealed lint holds a floor entry to the same rule as
+// any workload.
+func TestSystemFloorWorkloads_NeedsCompleteRule(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		images string
 		want   []string
 	}{
-		{"privileged with review passes with empty env and mounts",
-			`[{"ref":"a/b:1","digest":"` + digestA + `","entrypoint":["/b"],"env":{},"mounts":{},"privileges":{"review":"node TCB"}}]`, nil},
+		{"privileged with empty env and mounts",
+			`[{"ref":"a/b:1","digest":"` + digestA + `","entrypoint":["/b"],"env":{},"mounts":{},"privileges":{"review":"node TCB"}}]`, []string{"mounts must be exact", "env must be exact"}},
+		{"privileged with complete rules",
+			`[{"ref":"a/b:1","digest":"` + digestA + `","entrypoint":["/b"],"env":{"PATH":{"value":"/bin"}},"mounts":{"/etc/hosts":{"source":"platform"}},"privileges":{"review":"node TCB"}}]`, nil},
 		{"unprivileged with empty env and mounts",
 			`[{"ref":"a/b:1","digest":"` + digestA + `","entrypoint":["/b"],"env":{},"mounts":{},"privileges":null}]`, []string{"mounts must be exact", "env must be exact"}},
 		{"unprivileged with complete rules",

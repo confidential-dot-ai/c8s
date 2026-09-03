@@ -20,7 +20,7 @@ func sealedContainer(t *testing.T) Container {
 				"/etc/hosts":  {Source: SourcePlatform},
 				"/data":       {Source: SourcePVC, Review: "opaque blob store; the app never executes its contents"},
 				"/run/confai": {Source: SourceNodeState, Review: "c8s sidecar; attests over the node socket"},
-				"/var/run/secrets/kubernetes.io/serviceaccount": {Source: SourceServiceAccountToken},
+				"/var/run/secrets/kubernetes.io/serviceaccount": {Source: SourceServiceAccountToken, Review: "the app reads nothing there"},
 			}},
 		Env: EnvPolicy{Policy: PolicyExact, Names: []string{"PATH", "HOSTNAME"},
 			Values: map[string]EnvValue{"PATH": {Value: str("/bin")}, "HOSTNAME": {From: FromPodName}}},
@@ -99,20 +99,23 @@ func TestIndexAdmit_Privileged(t *testing.T) {
 	cs := []Container{{
 		Digest:  mustDigest(t, digestB),
 		Command: ArgvPolicy{Policy: PolicyExact, Argv: []string{"/cilium-agent"}},
-		Args:    ArgvPolicy{Policy: PolicyAny},
+		Args:    ArgvPolicy{Policy: PolicyExact, Argv: []string{"--config-dir=/tmp/cm"}},
 		Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/host/etc/cni", "/run/cilium", "/tmp/cm"},
 			Rules: map[string]MountRule{
-				"/host/etc/cni": {Source: SourceHostPath},
+				"/host/etc/cni": {Source: SourceHostPath, Path: "/etc/cni/net.d"},
 				"/run/cilium":   {Source: SourceEmptyDir},
-				"/tmp/cm":       {Source: SourceHostPath},
+				"/tmp/cm":       {Source: SourceHostPath, Path: KubeletVolumesRoot},
 			}},
+		Env: EnvPolicy{Policy: PolicyExact, Names: []string{"NODE"}, Values: map[string]EnvValue{"NODE": {From: FromNodeName}}},
 		Privileges: &Privileges{HostNamespaces: []string{HostNamespaceNet},
 			Capabilities: []string{"CAP_NET_ADMIN"}, HostPaths: []string{"/etc/cni/net.d", KubeletVolumesRoot},
 			Review: "CNI agent; node TCB"},
 	}, {
 		Digest:     mustDigest(t, digestC),
-		Command:    ArgvPolicy{Policy: PolicyAny},
-		Args:       ArgvPolicy{Policy: PolicyAny},
+		Command:    ArgvPolicy{Policy: PolicyExact, Argv: []string{"/device-plugin"}},
+		Args:       ArgvPolicy{Policy: PolicyDeny},
+		Mounts:     MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}, Rules: map[string]MountRule{"/etc/hosts": {Source: SourcePlatform}}},
+		Env:        EnvPolicy{Policy: PolicyExact, Names: []string{"PATH"}, Values: map[string]EnvValue{"PATH": {Value: str("/bin")}}},
 		Privileges: &Privileges{Privileged: true, Review: "device plugin; node TCB"},
 	}}
 	if err := normalizeContainers("cni", "containers", cs); err != nil {
@@ -122,8 +125,9 @@ func TestIndexAdmit_Privileged(t *testing.T) {
 	idx := al.BuildIndex()
 	base := func() Observation {
 		return Observation{
-			Digest: digestB, Argv: []string{"/cilium-agent", "--any-args"},
-			Env:            map[string]string{"ANY": "thing"},
+			Digest: digestB, Argv: []string{"/cilium-agent", "--config-dir=/tmp/cm"},
+			Env:            map[string]string{"NODE": "node-a"},
+			Sources:        map[string]string{FromNodeName: "node-a"},
 			HostNamespaces: []string{HostNamespaceNet},
 			Capabilities:   []string{"CAP_NET_ADMIN"},
 			Mounts: map[string]MountSource{
@@ -140,6 +144,9 @@ func TestIndexAdmit_Privileged(t *testing.T) {
 	}{
 		{"declared privileges and host paths", func(*Observation) {}, true},
 		{"hostPath outside hostPaths", func(o *Observation) { o.Mounts["/host/etc/cni"] = MountSource{Path: "/", Class: SourceHostPath} }, false},
+		{"listed source at another rule's destination", func(o *Observation) {
+			o.Mounts["/host/etc/cni"] = MountSource{Path: KubeletVolumesRoot + "u/volumes/kubernetes.io~secret/s", Class: "secret"}
+		}, false},
 		{"subtree entry admits a path under it", func(o *Observation) {
 			o.Mounts["/tmp/cm"] = MountSource{Path: KubeletVolumesRoot + "u/volumes/kubernetes.io~secret/s", Class: "secret"}
 		}, true},
@@ -150,11 +157,15 @@ func TestIndexAdmit_Privileged(t *testing.T) {
 			o.Mounts["/host/etc/cni"] = MountSource{Path: "/etc/../etc/cni/net.d", Class: SourceHostPath}
 		}, true},
 		{"emptyDir where a hostPath rule stands", func(o *Observation) { o.Mounts["/tmp/cm"] = MountSource{Path: "/x", Class: SourceEmptyDir} }, false},
+		{"other argv on a privileged image", func(o *Observation) { o.Argv = []string{"/bin/sh", "-c", "id"} }, false},
+		{"undeclared env on a privileged image", func(o *Observation) { o.Env["LD_PRELOAD"] = "/tmp/cm/x.so" }, false},
 		{"undeclared host namespace", func(o *Observation) { o.HostNamespaces = append(o.HostNamespaces, HostNamespacePID) }, false},
 		{"undeclared capability", func(o *Observation) { o.Capabilities = append(o.Capabilities, "CAP_SYS_ADMIN") }, false},
 		{"privileged without a privileged rule", func(o *Observation) { o.Privileged = true }, false},
 		{"privileged rule admits every capability and device", func(o *Observation) {
-			*o = Observation{Digest: digestC, Privileged: true, Capabilities: []string{"CAP_SYS_ADMIN"}, Devices: []string{"/dev/vfio/1"}}
+			*o = Observation{Digest: digestC, Argv: []string{"/device-plugin"}, Env: map[string]string{"PATH": "/bin"},
+				Mounts:     map[string]MountSource{"/etc/hosts": {Path: "/var/lib/kubelet/pods/u/etc-hosts", Class: SourcePlatform}},
+				Privileged: true, Capabilities: []string{"CAP_SYS_ADMIN"}, Devices: []string{"/dev/vfio/1"}}
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,6 +173,36 @@ func TestIndexAdmit_Privileged(t *testing.T) {
 			tc.mutate(&obs)
 			if _, ok := idx.Admit(obs); ok != tc.wantOK {
 				t.Errorf("Admit(%s) = %v, want %v", tc.name, ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// A rule with an open policy admits nothing, privileged or not: the lint
+// refuses such a document, and Admit does not rely on the lint having run.
+func TestIndexAdmit_RefusesOpenPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(c *Container)
+	}{
+		{"command any", func(c *Container) { c.Command = ArgvPolicy{Policy: PolicyAny} }},
+		{"args any", func(c *Container) { c.Args = ArgvPolicy{Policy: PolicyAny} }},
+		{"env any", func(c *Container) { c.Env = EnvPolicy{Policy: PolicyAny} }},
+		{"mounts any", func(c *Container) { c.Mounts = MountPolicy{Policy: PolicyAny} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := sealedContainer(t)
+			c.Privileges = &Privileges{Privileged: true, Review: "node TCB"}
+			tc.edit(&c)
+			cs := []Container{c}
+			if err := normalizeContainers("web", "containers", cs); err != nil {
+				t.Fatal(err)
+			}
+			al := &Allowlist{Schema: Schema, Workloads: map[string]Workload{"web": {Containers: cs}}}
+			obs := sealedObservation()
+			obs.Privileged = true
+			if rule, ok := al.BuildIndex().Admit(obs); ok {
+				t.Errorf("Admit(%s) = (%q, true), want refusal", tc.name, rule)
 			}
 		})
 	}
@@ -204,6 +245,10 @@ func TestSealedFieldValidation(t *testing.T) {
 		{"mount destination without rule", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/a", "/b"},
 			Rules: map[string]MountRule{"/a": {Source: SourceEmptyDir}}}}, `"/b" has no rule`},
 		{"mount any with rules", Container{Mounts: MountPolicy{Policy: PolicyAny, Rules: map[string]MountRule{"/a": {Source: SourceEmptyDir}}}}, "takes no rules"},
+		{"mount path on a reviewed source", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/a"},
+			Rules: map[string]MountRule{"/a": {Source: SourceEmptyDir, Path: "/x"}}}}, "path is only for a hostPath source"},
+		{"mount relative path", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"/a"},
+			Rules: map[string]MountRule{"/a": {Source: SourceHostPath, Path: "etc"}}}}, "not an absolute path"},
 		{"privileges unknown namespace", Container{Privileges: &Privileges{HostNamespaces: []string{"uts"}}}, "unknown host namespace"},
 		{"privileges capability not OCI form", Container{Privileges: &Privileges{Capabilities: []string{"NET_ADMIN"}}}, "not in OCI form"},
 		{"privileges relative device", Container{Privileges: &Privileges{Devices: []string{"dev/null"}}}, "not an absolute path"},
@@ -270,7 +315,7 @@ func TestCanonical_ExistingDocumentBytesUnchanged(t *testing.T) {
 }
 
 func TestCanonical_NewFieldsRoundTrip(t *testing.T) {
-	doc := `{"schema":"c8s.allowlist/v1","digests":null,"workloads":{"w":{"initContainers":null,"containers":[{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a","/b"],"rules":{"/a":{"source":"emptyDir"},"/b":{"source":"pvc","review":"why"}}},"env":{"policy":"exact","names":["A","B"],"values":{"A":{"value":""},"B":{"from":"podIP"}}},"privileges":{"privileged":true,"hostNamespaces":["net"],"capabilities":["CAP_NET_ADMIN"],"devices":["/dev/x"],"hostPaths":["/etc/"],"unmaskedProc":true,"review":"r"}}]}}}`
+	doc := `{"schema":"c8s.allowlist/v1","digests":null,"workloads":{"w":{"initContainers":null,"containers":[{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a","/b","/c"],"rules":{"/a":{"source":"emptyDir"},"/b":{"source":"pvc","review":"why"},"/c":{"source":"hostPath","path":"/etc/"}}},"env":{"policy":"exact","names":["A","B"],"values":{"A":{"value":""},"B":{"from":"podIP"}}},"privileges":{"privileged":true,"hostNamespaces":["net"],"capabilities":["CAP_NET_ADMIN"],"devices":["/dev/x"],"hostPaths":["/etc/"],"unmaskedProc":true,"review":"r"}}]}}}`
 	al := mustParse(t, doc)
 	got, err := al.Canonical()
 	if err != nil {
@@ -308,13 +353,28 @@ func TestLintSealed(t *testing.T) {
 	complete := `{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},` +
 		`"mounts":{"policy":"exact","destinations":["/etc/hosts"],"rules":{"/etc/hosts":{"source":"platform"}}},` +
 		`"env":{"policy":"exact","names":["PATH"],"values":{"PATH":{"value":"/bin"}}}}`
+	// privileged pins everything complete does and binds one host path.
+	privileged := func(rule, hostPaths string) string {
+		return `{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/agent"]},"args":{"policy":"deny"},` +
+			`"mounts":{"policy":"exact","destinations":["/host/cni"],"rules":{"/host/cni":` + rule + `}},` +
+			`"env":{"policy":"exact","names":["PATH"],"values":{"PATH":{"value":"/bin"}}},` +
+			`"privileges":{"privileged":true,"hostPaths":` + hostPaths + `,"review":"node TCB"}}`
+	}
 	for _, tc := range []struct {
 		name string
 		doc  []byte
 		want string // "" for clean
 	}{
 		{"complete unprivileged entry", sealedDoc(t, `"w":{"containers":[`+complete+`]}`), ""},
-		{"privileged entry with review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"privileges":{"privileged":true,"review":"node TCB"}}]}`), ""},
+		{"privileged entry with a bound host path", sealedDoc(t, `"w":{"containers":[`+privileged(`{"source":"hostPath","path":"/etc/cni/net.d"}`, `["/etc/cni/net.d"]`)+`]}`), ""},
+		{"privileged entry with a subtree host path", sealedDoc(t, `"w":{"containers":[`+privileged(`{"source":"hostPath","path":"/etc/cni/"}`, `["/etc/"]`)+`]}`), ""},
+		{"hostPath rule without a path", sealedDoc(t, `"w":{"containers":[`+privileged(`{"source":"hostPath"}`, `["/etc/cni/net.d"]`)+`]}`), "hostPath rule without a path"},
+		{"hostPath path outside hostPaths", sealedDoc(t, `"w":{"containers":[`+privileged(`{"source":"hostPath","path":"/etc/cni/net.d"}`, `["/opt/cni/"]`)+`]}`), "privileges.hostPaths does not cover"},
+		{"hostPath subtree under an exact grant", sealedDoc(t, `"w":{"containers":[`+privileged(`{"source":"hostPath","path":"/etc/cni/"}`, `["/etc/cni"]`)+`]}`), "privileges.hostPaths does not cover"},
+		{"privileged entry with an open argv", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}},"privileges":{"privileged":true,"review":"node TCB"}}]}`), "command must be exact"},
+		{"privileged entry with open env and mounts", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"privileges":{"privileged":true,"review":"node TCB"}}]}`), "env must be exact"},
+		{"serviceAccountToken with review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/var/run/secrets/kubernetes.io/serviceaccount"],"rules":{"/var/run/secrets/kubernetes.io/serviceaccount":{"source":"serviceAccountToken","review":"reads nothing there"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), ""},
+		{"serviceAccountToken without review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/var/run/secrets/kubernetes.io/serviceaccount"],"rules":{"/var/run/secrets/kubernetes.io/serviceaccount":{"source":"serviceAccountToken"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "serviceAccountToken bind without a review"},
 		{"non-canonical bytes", append(sealedDoc(t, `"w":{"containers":[`+complete+`]}`), '\n'), "not its canonical form"},
 		{"floor digest", []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestC + `":"x"},"workloads":{}}`), "digests must be empty"},
 		{"digests null", []byte(`{"schema":"c8s.allowlist/v1","digests":null,"workloads":{}}`), `"digests" must be {}`},
@@ -330,7 +390,7 @@ func TestLintSealed(t *testing.T) {
 		{"nodeState without review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/run/confai"],"rules":{"/run/confai":{"source":"nodeState"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "nodeState bind without a review"},
 		{"pvc without review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"pvc"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "pvc without a review"},
 		{"hostPath rule on unprivileged entry", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"hostPath"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "hostPath on an unprivileged entry"},
-		{"privileged without review", sealedDoc(t, `"w":{"initContainers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"privileges":{"privileged":true}}]}`), "privileges.review is empty"},
+		{"privileged without review", sealedDoc(t, `"w":{"initContainers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}},"privileges":{"privileged":true}}]}`), "privileges.review is empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := LintSealed(tc.doc)

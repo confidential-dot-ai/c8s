@@ -19,7 +19,7 @@ they can then verify that the cluster runs only that set of pods and that the
 operator, who holds `cluster-admin`, cannot read user data. The operator can
 still scale, restart, and delete allowed pods.
 
-Out of scope, by decision: availability and liveness (any failure may power
+Out of scope: availability and liveness (any failure may power
 the node off), routing and where tls-lb forwards plaintext, SEV-SNP,
 pod-as-CVM, operator keys, and browser clients. Clusters with the same image
 tuple and the same bundle are indistinguishable to a relying party.
@@ -201,7 +201,7 @@ byte-identically.
               "/data": { "source": "pvc", "review": "read-only model weights; the server parses them with a bounded loader" },
               "/dev/shm": { "source": "platform" },
               "/etc/hosts": { "source": "platform" },
-              "/var/run/secrets/kubernetes.io/serviceaccount": { "source": "serviceAccountToken" }
+              "/var/run/secrets/kubernetes.io/serviceaccount": { "source": "serviceAccountToken", "review": "nginx reads nothing under the token directory" }
             }
           }
         }
@@ -228,19 +228,27 @@ Under `mounts.policy: exact`, every bind destination carries a `source` class:
 | Class | What the plugin classifies there | Review |
 |---|---|---|
 | `emptyDir` | `kubernetes.io~empty-dir` volumes | no |
-| `serviceAccountToken` | the kubelet's `kube-api-access-*` projected volume | no |
-| `pvc` | CSI and local volumes, and local-path-storage's `/opt/local-path-provisioner/` | required: why operator-supplied contents cannot steer the workload |
+| `serviceAccountToken` | a `kube-api-access-*` projected volume | required: the name is not reserved, so why operator-chosen files at that path cannot steer the workload |
+| `pvc` | CSI volumes (`kubernetes.io~csi`), from a claim or inline | required: why operator-supplied contents cannot steer the workload |
 | `platform` | the kubelet's `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/dev/termination-log`, `/dev/shm`, and the plugin's own socket directory `/run/nri-image-policy` | no |
 | `nodeState` | binds from `/run/confai`: the attestation socket and the policy directory | required: why the entry may reach the node's verifier or policy state |
-| `hostPath` | anything else, admitted only through `privileges.hostPaths` | through `privileges.review` |
+| `hostPath` | anything else, admitted only from the rule's `path` and through `privileges.hostPaths` | through `privileges.review` |
 
 `nodeState` is its own class rather than `platform` so the `platform` rule
 every container carries for `/etc/hosts` can never admit the attestation
-socket bound there. ConfigMap, Secret, other projected, downward-API, and
-hostPath volumes classify outside the reviewed classes; `render --sealed`
-turns them into a `hostPath` rule with `privileges.hostPaths:
-["/var/lib/kubelet/pods/"]` (or the host path as bound) and a `privileges`
-block the reviewer must complete.
+socket bound there. ConfigMap, Secret, other projected, downward-API,
+hostPath, and local (`kubernetes.io~local-volume`, whose backing directory
+the PersistentVolume names) volumes classify outside the reviewed classes;
+`render --sealed` turns them into a `hostPath` rule whose `path` is the host
+source as bound (`/var/lib/kubelet/pods/` for the kubelet's volumes), lists
+the same source under `privileges.hostPaths`, and leaves a `privileges` block
+the reviewer must complete. A `path` ending in `/` admits the subtree; a
+listed source is admitted only at the destination whose rule names it.
+
+The `serviceAccountToken` review exists because Kubernetes reserves nothing
+about the volume name: a pod may declare its own projected volume called
+`kube-api-access-x` with ConfigMap or Secret items and mount it at the
+token path. The rule admits it; the review says why that cannot matter.
 
 ### Privileges
 
@@ -249,8 +257,16 @@ block the reviewer must complete.
 runtime default set), `devices`, `hostPaths` (an entry ending in `/` admits
 the subtree), `unmaskedProc`, and a `review` string that says why the entry is
 acceptable. A privileged entry holds every capability and device, so those
-lists are not compared for it. An entry without `privileges` must pin
-`command`, `mounts`, and `env` exactly and `args` exactly or `deny`.
+lists are not compared for it.
+
+`privileges` loosens nothing else. Every entry, privileged or not, pins
+`command`, `mounts`, and `env` exactly and `args` exactly or `deny`: an open
+argv on a privileged image is a root shell on the node for anyone who can
+create a pod with that digest, and open env or mounts steer a fixed argv
+(`LD_PRELOAD` from an operator volume). An RKE2 static pod whose argv
+carries node-specific values (`--advertise-address`) therefore cannot be
+sealed until the schema can express them; `lint --sealed` refuses the bundle
+rather than admit `any`.
 
 ### What `lint --sealed` checks
 
@@ -260,11 +276,12 @@ lists are not compared for it. An entry without `privileges` must pin
 - `digests` is `{}` and `workloads` is an object (the form the CDS store
   serves back, so the stamp matches the measured bytes);
 - every `privileges` block has a non-empty `review`;
-- every unprivileged entry has exact `command`, `mounts`, and `env`, and
-  `args` exact or deny;
+- every entry has exact `command`, `mounts`, and `env`, and `args` exact or
+  deny;
 - every exact `env` carries `values` and every exact `mounts` carries `rules`;
-- every `pvc` and `nodeState` rule has a `review`;
-- a `hostPath` rule appears only on an entry with `privileges`.
+- every `pvc`, `serviceAccountToken`, and `nodeState` rule has a `review`;
+- a `hostPath` rule appears only on an entry with `privileges`, carries a
+  `path`, and that path lies within `privileges.hostPaths`.
 
 The same function runs in the node (`c8s policy-measure`), the plugin,
 `c8s policy-disk`, `c8s install`, `c8s get-kubeconfig`, and `c8s verify`, so
@@ -393,7 +410,8 @@ c8s allowlist render --sealed --system-floor system-floor.json \
   beside `manifest.json`: one skeleton entry per RKE2 floor image with the
   image's own `entrypoint` and `cmd`. The build cannot see the static pod
   manifests, so `env`, `mounts`, and `privileges.review` start empty. Complete
-  them from a dynamic node's observations before linting.
+  them from a dynamic node's observations before linting; `lint --sealed`
+  refuses an open `env` or `mounts` on a floor entry like on any other.
 - `--chart-values` renders the chart with `helm template` and derives one
   entry per c8s pod from the image configs and the templates.
 - `--workloads` takes Pod, Deployment, StatefulSet, DaemonSet, Job, and
@@ -403,8 +421,12 @@ c8s allowlist render --sealed --system-floor system-floor.json \
   code that injects them.
 - `render` needs `helm` on `PATH`, and `crane` to read image configs.
 - The report lists every executable, argv, env rule, mount rule, and
-  privilege. Reviews for privileged entries, `pvc`, and `nodeState` mounts
-  start empty; `lint --sealed` refuses the document until you complete them.
+  privilege. Reviews for privileged entries and for `pvc`,
+  `serviceAccountToken`, and `nodeState` mounts start empty; `lint --sealed`
+  refuses the document until you complete them.
+- Exec probes and lifecycle hooks are reported as warnings: the kubelet runs
+  them through CRI exec, which no rule covers (see
+  [Known gaps](#known-gaps-and-follow-ups)).
 - Pods that do not set `enableServiceLinks: false` get a warning: the kubelet
   adds one environment variable per Service in the namespace, which no rule
   can pin. `KUBERNETES_SERVICE_HOST` defaults to `10.53.0.1`, the node
@@ -471,10 +493,10 @@ Before the chart renders, `install`:
   plugin's.
 
 A static install emits no image tag: every component is pinned by the
-digest the bundle names for its repository. For GitOps, `c8s render-values` takes the same `--static-allowlist` and
-`--image-manifest` flags and emits the install-time values, static entry
-included. Rendering the bundle again against those values produces the same
-bytes.
+digest the bundle names for its repository. For GitOps, `c8s render-values`
+takes the same `--static-allowlist` and `--image-manifest` flags and emits
+the install-time values, static entry included. Rendering the bundle again
+against those values produces the same bytes.
 
 ### 6. Verify from outside
 
@@ -506,11 +528,17 @@ disk on the node: they recompute the index and RTMR[3] from it.
 - Supply PVC contents at mount paths whose rule's `review` says why that
   cannot steer the workload. Volume integrity and encryption are the volume
   design ([`volumes.md`](volumes.md)).
-- Run another copy of a privileged platform pod with its sealed argv and env
-  and drive it through its own API. Such entries are reviewed node TCB.
+- Run another copy of a privileged platform pod with its sealed argv, env,
+  and mounts and drive it through its own API. Such entries are reviewed
+  node TCB.
 - Read Kubernetes Secrets in etcd. Workloads take secrets from CDS
   `/secrets`; the sealed rules admit no Secret or ConfigMap mount outside a
-  reviewed `privileges.hostPaths`.
+  reviewed `privileges.hostPaths`, except as a projected volume named
+  `kube-api-access-*` at a `serviceAccountToken` destination, which is what
+  that rule's `review` covers.
+- Add an exec probe or a lifecycle hook to an admitted pod, or edit one.
+  The kubelet runs its argv inside the container, and the plugin cannot see
+  it (see [Known gaps](#known-gaps-and-follow-ups)).
 - Obtain the operator kubeconfig: `cred-release` serves any caller in
   static mode. `cluster-admin` is the adversary already.
 
@@ -540,9 +568,36 @@ disk on the node: they recompute the index and RTMR[3] from it.
   OCI hooks and host bind mounts; the hooks rule denies the container, and the
   binds classify as `hostPath`. GPU workloads on a sealed node need a typed
   rule.
+- **Exec probes and lifecycle hooks run unchecked.** The kubelet runs
+  `livenessProbe`, `readinessProbe`, `startupProbe` `exec` commands and
+  `postStart`/`preStop` `exec` hooks inside an admitted container through
+  CRI `ExecSync`, which has no NRI hook, and which
+  `enable-debugging-handlers=false` does not touch (that closes the kubelet's
+  HTTP exec, attach, and logs endpoints only). `cluster-admin` can therefore
+  run an argv of their choosing inside any admitted container and read its
+  output from the pod's events (a failing probe's stdout lands in the event
+  message) without any network egress. `render --sealed` warns about every
+  such probe and hook so the reviewer sees them, and the RA-TLS mesh key
+  under `/run/c8s/certs` is one thing such a probe can read. Closing it
+  needs an `ExecSync` refusal in the fail-closed containerd patch and a
+  plugin that refuses a containerd without it. Until then the bundle does
+  not protect against it.
+- **Not sealed: working directory, user, seccomp, and pod pid sharing.** A
+  rule pins argv, env, and mounts; the operator still chooses the
+  container's `workingDir`, `runAsUser`/`runAsGroup`, the seccomp profile,
+  and `shareProcessNamespace`, and the plugin does not read those from the
+  spec. With every argv, env, and mount pinned, a sibling container in a
+  shared pid namespace can read this one's `/proc/<pid>/root` only through
+  its own sealed argv. Sealing them needs schema fields the reviewer can
+  fill (`render` cannot resolve a named image `USER` without the image's
+  `/etc/passwd`), a follow-up.
 - **local-path-storage's helper pod has no admissible rule.** Its `busybox`
-  argv is per PVC. Static images ship without local-path-storage until a
-  typed rule exists.
+  argv is per PVC. The generic image still ships local-path-storage
+  (`node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml`),
+  so a sealed bundle omits its floor entry (as the e2e lane's `reviews.json`
+  does) and its pods are refused on a sealed node until a typed per-PVC
+  argv rule exists. A `local` PersistentVolume classifies as a host path
+  for the same reason: its backing directory is the operator's choice.
 - **SEV-SNP** has no runtime register. The same policy digest would go
   through HOSTDATA, as `HostDataForOperatorKey` does for the operator key.
 - **The threat model and requirements documents** live in the c8s-workspace

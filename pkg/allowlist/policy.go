@@ -2,7 +2,8 @@ package allowlist
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -34,12 +35,7 @@ func (a *Allowlist) BuildIndex() *Index {
 	for d := range a.Digests {
 		idx.floor[d] = true
 	}
-	names := make([]string, 0, len(a.Workloads))
-	for name := range a.Workloads {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	for _, name := range slices.Sorted(maps.Keys(a.Workloads)) {
 		w := a.Workloads[name]
 		idx.add(name, "initContainers", w.InitContainers)
 		idx.add(name, "containers", w.Containers)

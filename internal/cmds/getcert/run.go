@@ -40,7 +40,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -205,24 +204,15 @@ func cdsHTTPClient(ctx context.Context, cfg config) (*http.Client, error) {
 	return client, nil
 }
 
-// ownQuoteTimeout bounds the self-attestation that derives the CDS pins at
-// start; the verifier is a local socket, so a slow answer means it is not
-// serving.
-const ownQuoteTimeout = 30 * time.Second
-
 // cdsPins is what get-cert holds CDS's RA-TLS certificate to: the node's own
-// tuple under --cds-pins-from-own-quote (a sealed node's argv carries no
-// per-cluster digest, and the tuple includes RTMR[3], so a CDS on an unsealed
-// node of the same image is refused), else the flat flags.
+// tuple under --cds-pins-from-own-quote, else the flat flags.
 func cdsPins(ctx context.Context, cfg config) (ratls.Pins, error) {
 	if cfg.CDSPinsFromOwnQuote {
-		ctx, cancel := context.WithTimeout(ctx, ownQuoteTimeout)
-		defer cancel()
-		entry, err := attestationclient.NewClient(cfg.AttestationApiURL).OwnTupleEntry(ctx)
+		pins, err := ratls.OwnTuplePins(ctx, attestationclient.NewClient(cfg.AttestationApiURL))
 		if err != nil {
 			return ratls.Pins{}, fmt.Errorf("--cds-pins-from-own-quote: %w", err)
 		}
-		return ratls.Pins{Entries: []measurements.Entry{entry}}, nil
+		return pins, nil
 	}
 	launch, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
 	if err != nil {

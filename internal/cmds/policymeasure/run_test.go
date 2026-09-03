@@ -367,7 +367,7 @@ func TestRunFailsClosed(t *testing.T) {
 		{"mount fails", func(t *testing.T, fx *fixture) {
 			staticBoot(t, fx)
 			mountISO = func(string, string) error { return errors.New("EINVAL: not an iso9660 image") }
-		}, "mount"},
+		}, filepath.Join("disks", "policydata") + ": EINVAL"},
 		{"unmount fails", func(t *testing.T, fx *fixture) {
 			staticBoot(t, fx)
 			unmountISO = func(string) error { return errors.New("EBUSY") }

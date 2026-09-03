@@ -22,9 +22,9 @@ const (
 	DefaultOpkeyDisk = "/dev/disk/by-label/opkeydata"
 	// DefaultPolicyDisk is the policy bundle launch ISO.
 	DefaultPolicyDisk = "/dev/disk/by-label/policydata"
-	// DefaultOperatorPubkey is where the confos initrd stages the operator
-	// public key it measured into RTMR[3] (cred-release reads the same file).
-	DefaultOperatorPubkey = "/etc/confai/operator-pubkey"
+	// DefaultOperatorPubkey is the initrd-staged operator key every
+	// dynamic-boot reader shares.
+	DefaultOperatorPubkey = policybundle.OperatorPubkeyPath
 )
 
 // Config is the measurer's input.

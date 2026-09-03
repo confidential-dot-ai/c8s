@@ -75,9 +75,8 @@ func Run(cfg Config) error {
 }
 
 // launchSeed returns the register the initrd left: ForOperatorKey of the
-// staged pubkey, or Zero when no key was staged. The design admits either
-// value on its own; tying them together refuses a staged key the initrd
-// did not measure (a pubkey file written after boot).
+// staged pubkey, or Zero when no key was staged. Requiring the two to agree
+// refuses a pubkey file written after boot that the initrd never measured.
 func launchSeed(pubkeyPath string) ([runtimemeasure.Size]byte, error) {
 	pub, err := os.ReadFile(pubkeyPath)
 	if errors.Is(err, os.ErrNotExist) {

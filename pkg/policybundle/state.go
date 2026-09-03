@@ -28,6 +28,13 @@ const (
 	// StaticMode and DynamicMode are the two values ModeFile carries.
 	StaticMode  = "static"
 	DynamicMode = "dynamic"
+
+	// OperatorPubkeyPath is where the measured initrd stages the operator
+	// public key it read off the opkeydata disk and hashed into RTMR[3] on a
+	// dynamic boot. The initrd is the single measured reader of that disk;
+	// c8s-policy-measure, cred-release and the NRI plugin read the staged
+	// file.
+	OperatorPubkeyPath = "/etc/confai/operator-pubkey"
 )
 
 // State is what a consumer reads back from the policy directory.

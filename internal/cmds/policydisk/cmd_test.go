@@ -20,6 +20,14 @@ import (
 
 // sealedDoc is a complete one-entry sealed allowlist in canonical bytes, the
 // only shape the member lint accepts.
+// goldenIndexDigest and goldenRTMR3 are IndexDigest and RTMR3 of the
+// one-member bundle holding sealedDoc, frozen so a change to what
+// policy-disk prints fails here rather than on a node.
+const (
+	goldenIndexDigest = "a9fcb41b544900137e2c78a784149e94e45ecc3ce1e17e385f471f876f124343"
+	goldenRTMR3       = "37f566599428ed639fac1e806a3c1dc0e18b3cd5a4443ed1f0bcd8b9098971d70be1bd83daf104409e9a9802025874c5"
+)
+
 func sealedDoc(t *testing.T) []byte {
 	t.Helper()
 	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","digests":{},"workloads":{"web":{"containers":[{
@@ -76,14 +84,19 @@ func TestRunWritesISOAndPrintsMeasurements(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
+	// Frozen for sealedDoc: the two lines are what a reviewer pastes into
+	// launch tooling, so they are held to fixed vectors, not recomputed
+	// through the helpers Run itself calls.
+	want := "index-digest: sha256:" + goldenIndexDigest + "\nrtmr3: " + goldenRTMR3 + "\n"
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
 	bundle, err := policybundle.FromMembers(map[string][]byte{policybundle.MemberStaticAllowlist: doc})
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, rtmr3 := bundle.IndexDigest(), bundle.RTMR3()
-	want := "index-digest: sha256:" + hex.EncodeToString(digest[:]) + "\nrtmr3: " + hex.EncodeToString(rtmr3[:]) + "\n"
-	if stdout.String() != want {
-		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	if digest, rtmr3 := bundle.IndexDigest(), bundle.RTMR3(); hex.EncodeToString(digest[:]) != goldenIndexDigest || hex.EncodeToString(rtmr3[:]) != goldenRTMR3 {
+		t.Errorf("policybundle derives %x / %x for sealedDoc, want the frozen %s / %s", digest, rtmr3, goldenIndexDigest, goldenRTMR3)
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty without --kubevirt-secret", stderr.String())

@@ -90,11 +90,15 @@ func (f staticFixture) writePolicyDir(t *testing.T, mode string) string {
 	return dir
 }
 
-// verdict is a TDX verdict carrying the fixture's tuple with rtmr3 as given.
-func (f staticFixture) verdict(t *testing.T, rtmr3 string) testattest.Verdict {
+// verdict is a TDX verdict carrying the fixture's tuple with rtmr3 as given;
+// edits apply on top.
+func (f staticFixture) verdict(t *testing.T, rtmr3 string, edits ...func(v *testattest.Verdict)) testattest.Verdict {
 	t.Helper()
 	v := tdxVerdict(t, testMRTD, testRTMR1, testRTMR2)
 	v.Claims.PlatformData["rtmr_3"] = rtmr3
+	for _, edit := range edits {
+		edit(&v)
+	}
 	return v
 }
 
@@ -170,19 +174,21 @@ func TestValidateStaticConfig(t *testing.T) {
 
 func TestVerifyStaticNode(t *testing.T) {
 	f := newStaticFixture(t)
+	other := strings.Repeat("ee", 48)
 	for _, tc := range []struct {
-		name  string
-		mode  string
-		rtmr3 string
-		tweak func(t *testing.T, dir string, cfg *config)
-		want  string
+		name    string
+		mode    string
+		rtmr3   string
+		verdict func(v *testattest.Verdict)
+		tweak   func(t *testing.T, dir string, cfg *config)
+		want    string
 	}{
-		{"sealed node", policybundle.StaticMode, f.rtmr3Hex(), nil, ""},
-		{"dynamic boot", policybundle.DynamicMode, f.rtmr3Hex(), nil, `mode "dynamic", want static`},
-		{"missing policy dir", policybundle.StaticMode, f.rtmr3Hex(), func(t *testing.T, dir string, cfg *config) {
+		{"sealed node", policybundle.StaticMode, f.rtmr3Hex(), nil, nil, ""},
+		{"dynamic boot", policybundle.DynamicMode, f.rtmr3Hex(), nil, nil, `mode "dynamic", want static`},
+		{"missing policy dir", policybundle.StaticMode, f.rtmr3Hex(), nil, func(t *testing.T, dir string, cfg *config) {
 			cfg.policyDir = filepath.Join(dir, "absent")
 		}, "policy mode"},
-		{"member rewritten after measurement", policybundle.StaticMode, f.rtmr3Hex(), func(t *testing.T, dir string, _ *config) {
+		{"member rewritten after measurement", policybundle.StaticMode, f.rtmr3Hex(), nil, func(t *testing.T, dir string, _ *config) {
 			member := filepath.Join(dir, policybundle.MemberStaticAllowlist)
 			if err := os.Remove(member); err != nil {
 				t.Fatal(err)
@@ -193,7 +199,7 @@ func TestVerifyStaticNode(t *testing.T) {
 		}, "members index to"},
 		// Node root can rewrite the member AND the digest file consistently;
 		// only the register says which bundle was measured.
-		{"member and digest rewritten together", policybundle.StaticMode, f.rtmr3Hex(), func(t *testing.T, dir string, _ *config) {
+		{"member and digest rewritten together", policybundle.StaticMode, f.rtmr3Hex(), nil, func(t *testing.T, dir string, _ *config) {
 			other, err := policybundle.FromMembers(map[string][]byte{policybundle.MemberStaticAllowlist: []byte(`{"schema":"c8s.allowlist/v1","digests":{},"workloads":{}}`)})
 			if err != nil {
 				t.Fatal(err)
@@ -211,12 +217,22 @@ func TestVerifyStaticNode(t *testing.T) {
 				}
 			}
 		}, "derive RTMR[3]"},
-		{"node sealed to another bundle", policybundle.StaticMode, strings.Repeat("ee", 48), nil, "RTMR[3] does not match"},
-		{"unsealed node of the same image", policybundle.StaticMode, strings.Repeat("00", 48), nil, "RTMR[3] does not match"},
+		{"node sealed to another bundle", policybundle.StaticMode, other, nil, nil, "RTMR[3] does not match"},
+		{"unsealed node of the same image", policybundle.StaticMode, strings.Repeat("00", 48), nil, nil, "RTMR[3] does not match"},
+		// The same bundle sealed on another image: every register but
+		// RTMR[3] is compared too, or a node running any image with this
+		// bundle would pin requesters on the wrong tuple.
+		{"other image MRTD", policybundle.StaticMode, f.rtmr3Hex(), func(v *testattest.Verdict) { v.Claims.LaunchDigest = other }, nil, "MRTD " + other + " does not match the static entry"},
+		{"other kernel RTMR[1]", policybundle.StaticMode, f.rtmr3Hex(), func(v *testattest.Verdict) { v.Claims.PlatformData["rtmr_1"] = other }, nil, "RTMR[1] does not match the static entry"},
+		{"other rootfs RTMR[2]", policybundle.StaticMode, f.rtmr3Hex(), func(v *testattest.Verdict) { v.Claims.PlatformData["rtmr_2"] = other }, nil, "RTMR[2] does not match the static entry"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub, url := unixAttestStub(t)
-			stub.SetVerdict(f.verdict(t, tc.rtmr3))
+			edits := []func(v *testattest.Verdict){}
+			if tc.verdict != nil {
+				edits = append(edits, tc.verdict)
+			}
+			stub.SetVerdict(f.verdict(t, tc.rtmr3, edits...))
 			dir := f.writePolicyDir(t, tc.mode)
 			cfg := config{policyDir: dir, attestationApiURL: url}
 			if tc.tweak != nil {
@@ -229,6 +245,11 @@ func TestVerifyStaticNode(t *testing.T) {
 				}
 				if tc.name == "member and digest rewritten together" && len(stub.AttestRequests()) != 0 {
 					t.Error("a bundle the register does not vouch for was self-attested; the register tie comes first")
+				}
+				// A tuple mismatch comes from the compare, after one
+				// attestation, not from a gate before it.
+				if tc.verdict != nil && len(stub.AttestRequests()) != 1 {
+					t.Errorf("attest requests = %d, want 1", len(stub.AttestRequests()))
 				}
 				return
 			}
@@ -348,6 +369,30 @@ func TestRun_StaticAllowlist(t *testing.T) {
 		err := run(cfg)
 		if err == nil || !strings.Contains(err.Error(), "--operator-keys") {
 			t.Fatalf("run() = %v, want --operator-keys refused under --static-allowlist", err)
+		}
+	})
+
+	// run() gates the seed on the stamp check: a member that passes the
+	// node's ReadDir and FromMembers but is not in the store's form (here
+	// "digests":null) must stop CDS before it serves, which surfaces as the
+	// stamp error rather than the inventory CIDR failure past it.
+	t.Run("member outside the store form is refused after the seed", func(t *testing.T) {
+		nullDigests := strings.Replace(staticMember, `"digests":{}`, `"digests":null`, 1)
+		bundle, err := policybundle.FromMembers(map[string][]byte{policybundle.MemberStaticAllowlist: []byte(nullDigests)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := staticFixture{bundle: bundle, pins: f.pins, entry: measurements.StaticReferenceValues(f.pins, bundle.RTMR3()).Entries[0]}
+		stub, url := unixAttestStub(t)
+		stub.SetVerdict(other.verdict(t, other.rtmr3Hex()))
+		cfg := staticConfig(t, url, other.writePolicyDir(t, policybundle.StaticMode))
+		cfg.measurementsConfig = other.writeMeasurementsConfig(t)
+		err = run(cfg)
+		if err == nil || !strings.Contains(err.Error(), "not in the form the store serves") {
+			t.Fatalf("run() = %v, want the stamp gate to refuse the member", err)
+		}
+		if strings.Contains(err.Error(), "inventory CIDR") {
+			t.Fatalf("run() = %v: reached the inventory CIDR check past the stamp gate", err)
 		}
 	})
 
