@@ -531,12 +531,12 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 
 // sandboxTokenSigner builds the inventory's sandbox-token signer. The key needs
 // no credential of its own: CDS reads it from this inventory's digests endpoint
-// on a privileged port, which is what establishes whose key it is. Without pull
-// config there is no CDS in the picture at all, so tokens are disabled and
-// get-cert issues without a sandbox ID.
+// on a privileged port, which is what establishes whose key it is. A static
+// policy does not pull updates, but it still uses CDS to issue workload
+// identities and therefore must issue sandbox tokens.
 func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.SandboxTokenSigner, error) {
-	if !cfg.PullEnabled() {
-		logger.Warn("admission inventory has no CDS pull config; sandbox tokens disabled")
+	if !cfg.PullEnabled() && !cfg.StaticEnabled() {
+		logger.Warn("admission inventory has no CDS policy config; sandbox tokens disabled")
 		return nil, nil
 	}
 	host, err := digestsAdvertiseHost(cfg)

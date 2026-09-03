@@ -1,10 +1,27 @@
 package nriimagepolicy
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestStaticPolicyEnablesSandboxTokenSigner(t *testing.T) {
+	cfg := config{
+		Allowlist:      allowlistConfig{StaticPath: "/etc/c8s/static-allowlist.json"},
+		WorkloadClaims: workloadClaimsConfig{AdvertiseHost: "10.0.0.1"},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	signer, err := sandboxTokenSigner(&cfg, logger)
+	if err != nil {
+		t.Fatalf("sandboxTokenSigner: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("static policy disabled sandbox token signing")
+	}
+}
 
 func TestLoadStaticAllowlist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "static-allowlist.json")
