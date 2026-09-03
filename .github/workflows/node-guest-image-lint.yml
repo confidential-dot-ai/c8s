@@ -13,6 +13,8 @@ on:
     paths:
       - "node-guest-image/**"
       - ".github/workflows/node-guest-image-lint.yml"
+      - ".github/build-pins.json"
+      - ".github/scripts/pin-manifest.sh"
       # The rke2-role job runs via make; a broken/renamed target must fail
       # here, not on the next node-guest-image change.
       - "Makefile"
@@ -35,25 +37,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve pinned CONFOS_REF
-        id: ref
+      - name: Resolve node-image pins
+        id: pins
         run: |
-          # The pin line is either a bare quoted sha or an expression whose
-          # fallback carries the sha ("inputs.confos_ref || '<sha>'"); take
-          # the 40-hex value off the CONFOS_REF line either way.
-          ref=$(grep -m1 'CONFOS_REF:' .github/workflows/c8s-image.yml | grep -oE '[0-9a-f]{40}' | head -1)
-          [ -n "$ref" ] || { echo "::error::could not extract CONFOS_REF from c8s-image.yml"; exit 1; }
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          bash .github/scripts/pin-manifest.sh export \
+            --manifest .github/build-pins.json \
+            --domain node-image \
+            --format github-output >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/confidential-os-builder
-          ref: ${{ steps.ref.outputs.ref }}
+          ref: ${{ steps.pins.outputs.confos }}
           path: confos
 
       - name: node-guest-image invariants
         env:
-          CONFOS_REF: ${{ steps.ref.outputs.ref }}
+          CONFOS_REF: ${{ steps.pins.outputs.confos }}
         run: .github/scripts/node-guest-image-invariants.sh
 
       - name: Resolve the confos base release

@@ -29,14 +29,14 @@ on:
         description: confos commit/ref to build the kernel from (default = pinned)
         required: false
         type: string
-        default: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
+        default: ""
   workflow_call:
     inputs:
       confos_ref:
         description: confos commit/ref to build the kernel from
         required: false
         type: string
-        default: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
+        default: ""
     outputs:
       snapshot_sha256:
         description: sha256 of the resolved kernel-config snapshot
@@ -44,11 +44,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  # confos ref — keep the default in lockstep with kata-guest-base.yml's
-  # CONFOS_REF until the two share this workflow. Overridable per call/dispatch.
-  CONFOS_REF: ${{ inputs.confos_ref }}
 
 jobs:
   kernel:
@@ -68,20 +63,39 @@ jobs:
         with:
           path: c8s
 
+      - name: Load measured-build pins
+        id: pins
+        env:
+          CONFOS_REF_OVERRIDE: ${{ inputs.confos_ref }}
+        run: |
+          set -euo pipefail
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain kernel-snapshot \
+            --format github-env \
+            --confos-override "$CONFOS_REF_OVERRIDE" >> "$GITHUB_ENV"
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain kernel-snapshot \
+            --format github-output \
+            --confos-override "$CONFOS_REF_OVERRIDE" >> "$GITHUB_OUTPUT"
+
       - name: Checkout confidential-os-builder
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/confidential-os-builder
-          ref: ${{ env.CONFOS_REF }}
+          ref: ${{ steps.pins.outputs.confos }}
           path: confidential-os-builder
 
       # --- confos kernel-builder sandbox deps (mirror kata-guest-base.yml) ----
-      - name: Setup uv (mkosi v26 toolchain)
+      - name: Setup uv (mkosi toolchain)
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Setup mkosi
-        # Keep in lockstep with confidential-os-builder/.github/workflows/base.yml + kata-guest-base.yml.
-        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+        # Local action accepts the exact ref resolved from the pin manifest.
+        uses: ./c8s/.github/actions/setup-mkosi
+        with:
+          ref: ${{ steps.pins.outputs.mkosi }}
 
       - name: Install systemd-container (mkosi sandbox dep)
         run: sudo apt-get update && sudo apt-get install -y systemd-container
@@ -118,7 +132,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ runner.os }}-confos-tools-tree-mkosi-v26-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
+          key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ steps.pins.outputs.mkosi }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
 
       - name: Unpack kernel-builder tools tree
         if: steps.tools-tree-cache.outputs.cache-hit == 'true'
@@ -135,9 +149,9 @@ jobs:
           path: |
             confidential-os-builder/output/kernel
             confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
           restore-keys: |
-            ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-
+            ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-
 
       # Resolve + compile the kernel and capture the snapshot. Mirrors
       # build.sh Step 1 (`cd confidential-os-builder && confos kernel --kernel-config-fragment
@@ -208,4 +222,4 @@ jobs:
           path: |
             confidential-os-builder/output/kernel
             confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}

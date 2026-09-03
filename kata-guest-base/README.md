@@ -101,8 +101,9 @@ it to a snapshot in its own tree (there is no `--kernel-snapshot` /
 `kernel/config-x86_64.snapshot` in **this** repo: the committed, reviewable
 record of the resolved guest-kernel config (confos's baseline + this
 fragment, merged). It is a lockfile, not a build input — editing the
-fragment or re-pinning confos (`CONFOS_REF` in the workflow) moves it, so
-commit the snapshot alongside that change and review its diff. It is the
+fragment or re-pinning confos (the `kata-guest` entry in
+`.github/build-pins.json`) moves it, so commit the snapshot alongside that
+change and review its diff. It is the
 only place a change in confos's kernel base that affects our guest kernel
 shows up. For kernel version bumps see
 [base-images/rke2/README.md](https://github.com/confidential-dot-ai/base-images/blob/master/rke2/README.md)
@@ -172,7 +173,10 @@ a debug image can't silently stand in for a locked one. Select it with
 
 - **osbuilder needs Docker + root + loop devices.** It cannot run inside a
   user-namespaced dev container (same constraint the old confos/mkosi path
-  had). CI uses an `ubuntu-latest` runner; locally use a real host.
+  had). CI uses the persistent self-hosted `the-machine` runner; locally use a
+  real host. Docker/AppArmor compatibility and unprivileged-userns policy are
+  runner-provisioning invariants. CI does not disable AppArmor or relax host
+  user-namespace controls during a job.
 - **No SSH server, no shell into a locked guest.** The image is driven by
   kata-runtime via vsock + cloud-init, and the locked policy denies the
   host exec/stream RPCs — `kubectl exec`/`logs` work only on the `-debug`

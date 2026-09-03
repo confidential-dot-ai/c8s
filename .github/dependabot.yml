@@ -15,7 +15,6 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-
   - package-ecosystem: gomod
     directories:
       - /

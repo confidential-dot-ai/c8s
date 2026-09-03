@@ -1,0 +1,116 @@
+# Watches the confos / attestation-rs source pins the measured builds ride
+# and opens bump PRs when upstream main moves — never merges: each bump
+# rolls a measurement, so a human owns the merge. The mkosi ref is not
+# watched independently: it is scraped from the target confos commit's own
+# base.yml, which keeps MinimumVersion= and the installed mkosi in lockstep
+# by construction. The canonical data lives in .github/build-pins.json;
+# .github/scripts/pin-manifest.sh validates the full schema before updating it.
+#
+# One matrix leg per measurement domain, so each roll is its own PR:
+#   node-image: node rootfs / RTMR + SNP digests
+#   kata-guest: kata guest + kernel-snapshot lineage
+#
+# Authentication prefers a short-lived, repository-scoped GitHub App token.
+# Checkout, push, and gh use one credential; an unconfigured App falls back to
+# GITHUB_TOKEN, while invalid configured credentials fail before checkout.
+name: confos pin watch
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # weekly; a no-op while the pins match upstream main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: confos-pin-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - domain: node-image
+          - domain: kata-guest
+    steps:
+      - name: Create pin-watch GitHub App token
+        id: pin-watch-app-token
+        if: ${{ vars.PIN_WATCH_APP_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PIN_WATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PIN_WATCH_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Persist the same token used by gh so App-created PR updates also
+          # trigger CI automatically; github.token remains the fallback.
+          token: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
+      - name: Bump stale pins and open the PR
+        env:
+          GH_TOKEN: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
+          DOMAIN: ${{ matrix.domain }}
+        run: |
+          set -euo pipefail
+          confos=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main --jq .sha)
+          attest=$(gh api repos/confidential-dot-ai/attestation-rs/commits/main --jq .sha)
+          mapfile -t mkosi_lines < <(
+            curl -fsSL --retry 3 \
+              "https://raw.githubusercontent.com/confidential-dot-ai/confidential-os-builder/${confos}/.github/workflows/base.yml" |
+              grep -oE 'systemd/mkosi@[0-9a-f]{40} # v[0-9.]+'
+          )
+          if (( ${#mkosi_lines[@]} != 1 )); then
+            echo "::error::expected exactly one mkosi pin in confos base.yml; found ${#mkosi_lines[@]}"
+            exit 1
+          fi
+          mkosi_line=${mkosi_lines[0]}
+          out=$(bash .github/scripts/pin-manifest.sh update \
+            --manifest .github/build-pins.json \
+            --domain "$DOMAIN" \
+            --confos "$confos" --attest "$attest" \
+            --mkosi-sha "$(grep -oE '[0-9a-f]{40}' <<<"$mkosi_line")" \
+            --mkosi-ver "$(grep -oE 'v[0-9.]+$' <<<"$mkosi_line")")
+          echo "$out"
+          grep -q '^no-drift$' <<<"$out" && exit 0
+          changes=$(git status --short --untracked-files=all)
+          if [ "$changes" != " M .github/build-pins.json" ]; then
+            echo "::error::pin updater changed an unexpected path"
+            printf '%s\n' "$changes"
+            exit 1
+          fi
+          branch="pin-watch/${DOMAIN}-refs"
+          title="build(${DOMAIN}): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}"
+          git config user.name "confos-pin-watch"
+          git config user.email "actions@github.com"
+          git checkout -b "$branch"
+          git add -- .github/build-pins.json
+          test "$(git diff --cached --name-only)" = ".github/build-pins.json"
+          git commit -m "$title"
+          open_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
+          local_tree=$(git rev-parse 'HEAD^{tree}')
+          remote_oid=
+          remote_tree=
+          if git fetch --no-tags origin \
+            "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+            remote_oid=$(git rev-parse "refs/remotes/origin/$branch")
+            remote_tree=$(git rev-parse "${remote_oid}^{tree}")
+            if [ "$local_tree" = "$remote_tree" ] && [ -n "$open_pr" ]; then
+              echo "pin-watch PR #$open_pr already has the proposed tree"
+              exit 0
+            fi
+          fi
+          if [ -z "$remote_oid" ]; then
+            git push origin "HEAD:refs/heads/$branch"
+          elif [ "$local_tree" != "$remote_tree" ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_oid" \
+              origin "HEAD:refs/heads/$branch"
+          fi
+          if [ -z "$open_pr" ]; then
+            gh pr create --title "$title" --body "Automated \`${DOMAIN}\` pin-set bump in \`.github/build-pins.json\`: confos main \`${confos:0:9}\`, attestation-rs main \`${attest:0:9}\`, and mkosi \`${mkosi_line#systemd/mkosi@}\` from that confos commit's base workflow. This rolls the affected measurements; review the upstream logs and reproducibility gate before merging. With the default GITHUB_TOKEN fallback, approve the PR's workflow run; GitHub App-created PR checks start automatically."
+          fi
