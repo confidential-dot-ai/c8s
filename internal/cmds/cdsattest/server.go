@@ -119,15 +119,6 @@ var (
 // arrived on.
 const exporterHeader = "X-C8s-Exporter"
 
-// Front-door modes: which credential terminates the public TLS in front of
-// this sidecar. attest-lb transport trust rests on the serving key being
-// TEE-held, so it is served only in cds mode; a WebPKI Secret's key is
-// host-visible and that deployment shape is attest-pq-only.
-const (
-	FrontDoorModeCDS    = "cds"
-	FrontDoorModeWebPKI = "webpki"
-)
-
 // Backend handles a decrypted application request and returns the response. The
 // sidecar seals the response back to the client. Implementations forward the
 // reconstructed request to the real backend (see backend.go).
@@ -140,11 +131,11 @@ type Config struct {
 	Logger   *slog.Logger
 	Evidence EvidenceProvider
 	// FrontDoorMode says which credential terminates public TLS in front of
-	// this sidecar (FrontDoorModeCDS or FrontDoorModeWebPKI). Anything but
-	// cds — including an unset mode — refuses attest-lb, so a
-	// misconfiguration can never serve a transport binding for a
-	// host-visible key.
-	FrontDoorMode string
+	// this sidecar. Both endpoints commit it into their report_data
+	// transcripts; anything but cds or acme — including an unset mode —
+	// refuses attest-lb, so a misconfiguration can never serve a transport
+	// binding for a host-visible key.
+	FrontDoorMode types.FrontDoorMode
 	// ServingCertFile is the path to the LB serving-leaf PEM (the cert nginx
 	// presents on the wire). In cds front-door mode, GET .../attest-lb binds
 	// report_data to this exact leaf DER plus the mesh identity. Re-read per
@@ -439,11 +430,12 @@ func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce
 
 // handleAttestPQ serves the identity-bound over-encryption binding, client
 // first: the client POSTs its nonce and X-Wing encapsulation key, the server
-// encapsulates once, and report_data commits the complete key exchange — the
-// client's key, the server's ciphertext, the session id, and the nonce — plus
-// the exact mesh leaf and issuing mesh CA to one domain-separated transcript.
-// The leaf signs that transcript to prove possession of its private key, and
-// the session is live when the response leaves; there is no second round trip.
+// encapsulates once, and report_data commits the front-door mode and the
+// complete key exchange — the client's key, the server's ciphertext, the
+// session id, and the nonce — plus the exact mesh leaf and issuing mesh CA to
+// one domain-separated transcript. The leaf signs that transcript to prove
+// possession of its private key, and the session is live when the response
+// leaves; there is no second round trip.
 func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	req, nonce, xwingEK := parseAttestPQRequest(w, r)
 	if nonce == nil {
@@ -456,11 +448,15 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		s.refuseSession(w, err)
 		return
 	}
+	if s.cfg.FrontDoorMode == "" {
+		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable, "no front-door mode is configured on this LB")
+		return
+	}
 	if s.cfg.MeshIdentityCertFile == "" || s.cfg.MeshIdentityKeyFile == "" || s.cfg.MeshIdentityCAFile == "" {
 		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable, "identity-bound PQ is not configured on this LB")
 		return
 	}
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		s.log.Error("mesh identity binding unavailable", "error", err)
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "identity-bound PQ credentials are temporarily unavailable")
@@ -479,7 +475,7 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reportData, proof, err := identity.bind(xwingEK, xwingCT, sessionID, nonce)
+	reportData, proof, err := identity.bind(s.cfg.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce)
 	if err != nil {
 		s.log.Error("bind mesh identity", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "mesh identity binding failed")
@@ -513,6 +509,7 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		Nonce:         req.Nonce,
 		Evidence:      evidence,
 		CDSCertPEM:    string(identity.bundlePEM),
+		FrontDoorMode: s.cfg.FrontDoorMode,
 		XWingEK:       req.XWingEK,
 		XWingCT:       base64.RawURLEncoding.EncodeToString(xwingCT),
 		SessionID:     id,
@@ -521,9 +518,10 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAttestLB serves the ordinary-TLS binding: report_data commits the
-// nonce, the exact serving leaf nginx presents, the exact mesh leaf, and the
-// issuing mesh CA (overenc.LBTranscriptHash), and the mesh leaf signs that
-// transcript. No over-encryption key exchange happens and no session is
+// front-door mode, nonce, the exact serving leaf nginx presents, the exact
+// mesh leaf, and the issuing mesh CA (overenc.LBTranscriptHash), and the mesh
+// leaf signs that transcript. No over-encryption key exchange happens and no
+// session is
 // stored — the client recomputes the transcript from the leaf it observed on
 // its own TLS connection and then rides that TLS.
 func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
@@ -534,10 +532,10 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	// The exact-DER binding detects leaf substitution, not key sharing: a
 	// WebPKI Secret's serving key is host-visible, so the host could terminate
 	// the client's TLS with the same leaf and proxy this request. Only a
-	// TEE-held (cds-mode) serving key supports transport binding.
-	if s.cfg.FrontDoorMode != FrontDoorModeCDS {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeUnsupportedFrontDoor,
-			"attest-lb requires a TEE-held serving key (public_tls.mode=cds); this front door is attest-pq-only")
+	// TEE-held (cds or acme) serving key supports transport binding.
+	if s.cfg.FrontDoorMode != types.FrontDoorModeCDS && s.cfg.FrontDoorMode != types.FrontDoorModeACME {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeExternalTLS,
+			"attest-lb requires a TEE-held serving key (public_tls.mode=cds or acme); this front door is attest-pq-only")
 		return
 	}
 	servingLeafDER, err := s.servingLeafDER()
@@ -547,14 +545,14 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 			"the serving certificate is unavailable; attest-lb cannot bind this connection")
 		return
 	}
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		s.log.Error("mesh identity binding unavailable", "error", err)
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "mesh identity credentials are temporarily unavailable")
 		return
 	}
 
-	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce)
+	reportData, proof, err := identity.bindServingLeaf(s.cfg.FrontDoorMode, servingLeafDER, nonce)
 	if err != nil {
 		s.log.Error("bind serving leaf", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "serving-leaf binding failed")
@@ -576,9 +574,15 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		Nonce:             nonceB64,
 		Evidence:          evidence,
 		CDSCertPEM:        string(identity.bundlePEM),
+		FrontDoorMode:     s.cfg.FrontDoorMode,
 		IdentityProof:     proof,
 		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
 	})
+}
+
+// meshIdentity loads the mesh credential set from the three files.
+func (s *Server) meshIdentity() (*meshIdentity, error) {
+	return loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
 }
 
 // servingLeafDER reads the LB serving-leaf PEM and returns the whole leaf DER.
@@ -652,7 +656,7 @@ func (s *Server) computeReadiness() (int, string) {
 	// alone would report ready on a credential those endpoints refuse — an
 	// expired leaf above all, which is what this gate exists to catch, since
 	// stamped leaves carry a short TTL (issuer.MaxNamedLeafTTL).
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		return notReady("mesh identity credentials unusable", "error", err)
 	}

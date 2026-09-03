@@ -49,6 +49,19 @@ type MeshIdentityProof struct {
 	Signature    string `json:"signature"`      // base64url ASN.1 DER ECDSA signature
 }
 
+// FrontDoorMode names the credential model terminating public TLS in front of
+// an attestation endpoint: cds (TEE-held mesh-issued serving key), acme
+// (TEE-held in-guest ACME serving key), or webpki (host-visible Secret).
+// attest-lb's transport binding rests on the serving key being TEE-held, so
+// it is served only in the cds and acme shapes.
+type FrontDoorMode string
+
+const (
+	FrontDoorModeCDS    FrontDoorMode = "cds"
+	FrontDoorModeWebPKI FrontDoorMode = "webpki"
+	FrontDoorModeACME   FrontDoorMode = "acme"
+)
+
 // AttestationBundle is the response body of the two explicit attestation
 // endpoints, POST /.well-known/c8s/attest-pq and
 // GET /.well-known/c8s/attest-lb?nonce=<b64url>. attest-pq binds report_data
@@ -65,6 +78,9 @@ type AttestationBundle struct {
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
 	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
 	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
+	// FrontDoorMode is the credential model terminating public TLS in front
+	// of the responder, committed by the endpoint's report_data transcript.
+	FrontDoorMode FrontDoorMode `json:"front_door_mode"`
 	// XWingEK (attest-pq only) echoes the client's encapsulation key, so a
 	// saved bundle stays verifiable offline. A live client MUST compare it to
 	// the key it sent, exactly like the nonce echo.

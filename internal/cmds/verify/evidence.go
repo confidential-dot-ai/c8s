@@ -133,6 +133,7 @@ type attestationResponse struct {
 	Nonce         string                   `json:"nonce"`
 	Evidence      json.RawMessage          `json:"evidence"`
 	CDSCertPEM    string                   `json:"cds_cert_pem"`
+	FrontDoorMode types.FrontDoorMode      `json:"front_door_mode"`
 	XWingEK       string                   `json:"xwing_ek"`
 	XWingCT       string                   `json:"xwing_ct"`
 	SessionID     string                   `json:"session_id"`
@@ -390,7 +391,7 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 	// The transcript rejects wrong-size keys and nonces: report_data framing is
 	// length-prefixed, so a wrong-size field can never reproduce the served
 	// hash — refuse it here instead of failing report-data match downstream.
-	erd, err := overenc.IdentityTranscriptHash(xwingEK, xwingCT, sessionID, nonce, leaf.Raw, ca.Raw)
+	erd, err := overenc.IdentityTranscriptHash(r.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce, leaf.Raw, ca.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("compute identity transcript: %w", err)
 	}
@@ -418,7 +419,7 @@ func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string)
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
-		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		bindingNote:      "REPORTDATA binds the identity transcript: front-door mode + session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
 		frontDoor:        frontDoorNone,

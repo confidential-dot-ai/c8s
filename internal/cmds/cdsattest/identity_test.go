@@ -129,6 +129,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	provider := &capturingProvider{}
 	srv := NewServer(Config{
 		Evidence:             provider,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -160,7 +161,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantReportData, err := overenc.IdentityTranscriptHash(ck.EncapsulationKey(), ct, sessionIDRaw, nonce, identity.leaf.Raw, identity.ca.Raw)
+	wantReportData, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionIDRaw, nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func validAttestPQBody(t *testing.T) []byte {
 }
 
 func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
-	srv := NewServer(Config{Evidence: &capturingProvider{}})
+	srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: types.FrontDoorModeCDS})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	resp := postAttestPQ(t, ts.URL, validAttestPQBody(t))
@@ -221,6 +222,7 @@ func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
 func TestIdentityBoundAttestationFailsClosedOnInvalidConfiguredIdentity(t *testing.T) {
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: "/does/not/exist/cert.pem",
 		MeshIdentityKeyFile:  "/does/not/exist/key.pem",
 		MeshIdentityCAFile:   "/does/not/exist/ca.pem",
@@ -437,7 +439,7 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -499,6 +501,7 @@ func TestIdentityBoundAttestationRejectsDegenerateKey(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,

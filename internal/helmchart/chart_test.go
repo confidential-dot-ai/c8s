@@ -2251,6 +2251,7 @@ func hasPullSecret(refs []corev1.LocalObjectReference, name string) bool {
 
 func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	out, err := helmTemplate(t, noUpstreamArgs(
+		"--set-string", "tlsLb.publicTLS.mode=webpki",
 		"--set-string", "tlsLb.publicTLS.secretName=tls-lb-public-tls",
 		"--set-string", "tlsLb.publicTLS.mountPath=/edge-tls",
 		"--set-string", "tlsLb.publicTLS.certKey=public.crt",
@@ -2323,6 +2324,214 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
 		t.Fatalf("tls-lb shareProcessNamespace = %v, want true", got)
+	}
+}
+
+// TestChartTLSLBACMEMode pins the acme front door: the `c8s acme` native
+// sidecar issues one multi-SAN leaf for the sanList into a Memory emptyDir it
+// alone writes, nginx and cds-attest read it, the :80 server proxies HTTP-01
+// to the sidecar's loopback challenge port and 301s everything else, and the
+// mode string rides the attested surfaces (--front-door-mode,
+// --discovery-public-tls-mode).
+func TestChartTLSLBACMEMode(t *testing.T) {
+	acmeArgs := []string{
+		"--set-string", "tlsLb.publicTLS.mode=acme",
+		"--set", "tlsLb.san={lb.example.com,api.lb.example.com}",
+		"--set-string", "tlsLb.acme.email=ops@example.com",
+		"--set-string", "tlsLb.acme.directoryURL=https://acme-staging-v02.api.letsencrypt.org/directory",
+	}
+	out, err := helmTemplate(t, acmeArgs...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	acme := tlsLBGetCertContainer(t, out, "acme")
+	if len(acme.Args) == 0 || acme.Args[0] != "acme" {
+		t.Fatalf("acme sidecar args must start with the acme subcommand, got %v", acme.Args)
+	}
+	assertContainerArgs(t, acme,
+		"--domains=lb.example.com,api.lb.example.com",
+		"--acme-email=ops@example.com",
+		"--acme-directory-url=https://acme-staging-v02.api.letsencrypt.org/directory",
+		"--challenge-port=8402",
+		"--cert-dir=/etc/c8s-acme-tls",
+	)
+	if acme.RestartPolicy == nil || *acme.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("acme must be a native sidecar (restartPolicy Always), got %v", acme.RestartPolicy)
+	}
+	// SIGHUP-ing nginx across the shared PID namespace needs the nginx uid.
+	if got := acme.SecurityContext.RunAsUser; got == nil || *got != 101 {
+		t.Fatalf("acme runAsUser = %v, want the nginx uid 101", got)
+	}
+	if m, ok := containerVolumeMount(acme, "acme-tls"); !ok || m.MountPath != "/etc/c8s-acme-tls" || m.ReadOnly {
+		t.Fatalf("acme must mount acme-tls read-write at /etc/c8s-acme-tls, got (%+v, %v)", m, ok)
+	}
+
+	spec := renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec
+	vol, ok := podVolume(spec, "acme-tls")
+	if !ok || vol.EmptyDir == nil || vol.EmptyDir.Medium != corev1.StorageMediumMemory {
+		t.Fatalf("acme-tls must be a Memory-medium emptyDir, got %+v", vol)
+	}
+
+	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	if m, ok := containerVolumeMount(nginx, "acme-tls"); !ok || !m.ReadOnly {
+		t.Fatalf("nginx must mount acme-tls read-only, got (%+v, %v)", m, ok)
+	}
+	httpPort, ok := findContainerPort(nginx, "http")
+	if !ok || httpPort.ContainerPort != 8080 || httpPort.HostPort != 80 {
+		t.Fatalf("nginx http port = (%+v, %v), want containerPort 8080 hostPort 80", httpPort, ok)
+	}
+
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest,
+		"--front-door-mode=acme",
+		"--serving-cert-file=/etc/c8s-acme-tls/cert.pem",
+	)
+	if m, ok := containerVolumeMount(attest, "acme-tls"); !ok || !m.ReadOnly {
+		t.Fatalf("cds-attest must mount acme-tls read-only, got (%+v, %v)", m, ok)
+	}
+
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert, "--discovery-public-tls-mode=acme")
+	// The acme sidecar SIGHUPs nginx itself; get-cert watches nothing extra.
+	for _, a := range cert.Args {
+		if strings.HasPrefix(a, "--reload-watch=") {
+			t.Fatalf("get-cert must not watch the acme certs, got %v", cert.Args)
+		}
+	}
+
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if len(cfg.servers) != 2 {
+		t.Fatalf("nginx config has %d server blocks, want the :443 and :80 pair", len(cfg.servers))
+	}
+	cfg.servers[0].assertDirective(t, "ssl_certificate", "/etc/c8s-acme-tls/cert.pem")
+	cfg.servers[0].assertDirective(t, "ssl_certificate_key", "/etc/c8s-acme-tls/key.pem")
+	cfg.servers[1].assertDirective(t, "listen", "8080")
+	cfg.location(t, "prefix", "/.well-known/acme-challenge/").
+		assertDirective(t, "proxy_pass", "http://127.0.0.1:8402")
+	// The :80 server renders last, so its catch-all is the "/" the parser
+	// keeps: everything but the challenge upgrades.
+	cfg.location(t, "prefix", "/").assertDirective(t, "return", "301", "https://$host$request_uri")
+
+	// The Service and the ingress policy must open the :80 path the
+	// validators arrive on.
+	svc := renderedService(t, out, "c8s-tls-lb")
+	var httpSvcPort *corev1.ServicePort
+	for i, p := range svc.Spec.Ports {
+		if p.Name == "http" {
+			httpSvcPort = &svc.Spec.Ports[i]
+		}
+	}
+	if httpSvcPort == nil || httpSvcPort.Port != 80 || httpSvcPort.TargetPort.StrVal != "http" {
+		t.Fatalf("tls-lb Service must expose port 80 -> http, got %+v", svc.Spec.Ports)
+	}
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-tls-lb-ingress", &np) {
+		t.Fatal("render is missing the tls-lb ingress policy")
+	}
+	var npPorts []int32
+	for _, rule := range np.Spec.Ingress {
+		for _, p := range rule.Ports {
+			npPorts = append(npPorts, int32(p.Port.IntValue()))
+		}
+	}
+	if !slices.Contains(npPorts, int32(8080)) {
+		t.Fatalf("tls-lb ingress policy must admit the http port 8080, got %v", npPorts)
+	}
+
+	// hostPort follows the existing gating: disabling it drops both binds.
+	// A reachable front door must remain, so the LB Service takes over.
+	out, err = helmTemplate(t, append([]string{
+		"--set", "tlsLb.hostPort.enabled=false",
+		"--set", "tlsLb.service.type=LoadBalancer",
+	}, acmeArgs...)...)
+	if err != nil {
+		t.Fatalf("helm template (hostPort off): %v\n%s", err, out)
+	}
+	nginx = renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	httpPort, ok = findContainerPort(nginx, "http")
+	if !ok || httpPort.HostPort != 0 {
+		t.Fatalf("hostPort.enabled=false must not bind the node's :80, got (%+v, %v)", httpPort, ok)
+	}
+}
+
+// findContainerPort returns the named container port.
+func findContainerPort(c corev1.Container, name string) (corev1.ContainerPort, bool) {
+	for _, p := range c.Ports {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return corev1.ContainerPort{}, false
+}
+
+// TestChartTLSLBPublicTLSModeGuards pins the fail-closed mode/values
+// invariants: each rejected shape would silently serve the wrong credential
+// or an ACME order that can never complete.
+func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "webpki without the Secret",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=webpki"},
+			want: "tlsLb.publicTLS.mode=webpki requires tlsLb.publicTLS.secretName",
+		},
+		{
+			// The pre-mode values shape (secretName alone implied webpki)
+			// must not silently fall back to serving the mesh leaf.
+			name: "secret without webpki mode",
+			args: []string{"--set-string", "tlsLb.publicTLS.secretName=edge"},
+			want: `tlsLb.publicTLS.secretName is set but tlsLb.publicTLS.mode is "cds"; set mode=webpki to serve the Secret, or clear secretName`,
+		},
+		{
+			name: "acme with a Secret",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set-string", "tlsLb.publicTLS.secretName=edge"},
+			want: `tlsLb.publicTLS.secretName is set but tlsLb.publicTLS.mode is "acme"; set mode=webpki to serve the Secret, or clear secretName`,
+		},
+		{
+			name: "unknown mode",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=webpki-tee"},
+			want: "tlsLb.publicTLS.mode must be cds, webpki, or acme, got: webpki-tee",
+		},
+		{
+			// The ACME account and serving keys live in pod memory; outside a
+			// TEE the host reads them.
+			name: "acme without a confidential runtime",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=gke"},
+			want: "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (kata.enabled=true or attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held",
+		},
+		{
+			// The guest passthrough list exempts only tcp:8443, so the
+			// HTTP-01 challenge could never reach nginx.
+			name: "acme under kata",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme",
+				"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
+				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest},
+			want: "VALIDATION_ERROR kind=tlslb_acme_kata_port: tlsLb.publicTLS.mode=acme cannot render under kata.enabled: the guest exempts only tcp:8443 from the inbound mesh redirect (C8S_MESH_INBOUND_PASSTHROUGH), so the HTTP-01 challenge on :80 never reaches nginx. Use the node-CVM shape (attestationApi.cvmMode=node)",
+		},
+		{
+			name: "acme with a wildcard san",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "tlsLb.san={*.example.com}"},
+			want: `tlsLb.publicTLS.mode=acme cannot issue for wildcard san "*.example.com": HTTP-01 forbids wildcards`,
+		},
+		{
+			// No hostPort and no LB/NodePort Service: the CA could never
+			// reach the challenge.
+			name: "acme without a reachable front door",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "tlsLb.hostPort.enabled=false"},
+			want: "VALIDATION_ERROR kind=tlslb_acme_front_door: tlsLb.publicTLS.mode=acme needs an internet-reachable front door for the HTTP-01 challenge: set tlsLb.service.type=LoadBalancer (any LB implementation: cloud controller, MetalLB, kube-vip, ...) or tlsLb.hostPort.enabled=true",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("render succeeded, want a fail\n%s", out)
+			}
+			assertHelmFailMessage(t, out, tc.want)
+		})
 	}
 }
 

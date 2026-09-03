@@ -371,7 +371,7 @@ func fakeSession(fill byte) testSession {
 // this identity and session.
 func (id *endpointIdentity) transcript(t *testing.T, nonce []byte, s testSession) []byte {
 	t.Helper()
-	erd, err := overenc.IdentityTranscriptHash(s.ek, s.ct, s.sid, nonce, id.leaf.Raw, id.ca.Raw)
+	erd, err := overenc.IdentityTranscriptHash("cds", s.ek, s.ct, s.sid, nonce, id.leaf.Raw, id.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,13 +413,14 @@ func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []b
 	t.Helper()
 	b64u := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	resp := map[string]any{
-		"version":    types.BindingAttestPQ,
-		"platform":   "snp",
-		"nonce":      b64u(nonce),
-		"evidence":   evidence,
-		"xwing_ek":   b64u(s.ek),
-		"xwing_ct":   b64u(s.ct),
-		"session_id": b64u(s.sid),
+		"version":         types.BindingAttestPQ,
+		"platform":        "snp",
+		"nonce":           b64u(nonce),
+		"evidence":        evidence,
+		"front_door_mode": "cds",
+		"xwing_ek":        b64u(s.ek),
+		"xwing_ct":        b64u(s.ct),
+		"session_id":      b64u(s.sid),
 	}
 	if id != nil {
 		resp["cds_cert_pem"] = id.chainPEM
@@ -606,7 +607,7 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		// issuing relationship, which must fail closed.
 		other := mintEndpointIdentity(t)
 		b64u := base64.RawURLEncoding.EncodeToString
-		erd, err := overenc.IdentityTranscriptHash(sess.ek, sess.ct, sess.sid, nonce, id.leaf.Raw, other.ca.Raw)
+		erd, err := overenc.IdentityTranscriptHash("cds", sess.ek, sess.ct, sess.sid, nonce, id.leaf.Raw, other.ca.Raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -691,6 +692,23 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("missing front_door_mode rejected", func(t *testing.T) {
+		// The mode is a transcript field: a response without one cannot be
+		// recomputed, so it fails closed rather than verifying mode-lessly.
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		delete(obj, "front_door_mode")
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, sess.ek, "test"); err == nil || !strings.Contains(err.Error(), "front-door mode") {
+			t.Fatalf("expected a missing-mode transcript error, got %v", err)
+		}
+	})
+
 	t.Run("wrong-size key-exchange fields rejected", func(t *testing.T) {
 		// The transcript is length-framed; IdentityTranscriptHash refuses a
 		// non-canonical field size outright rather than producing a binding that
@@ -762,6 +780,7 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
     "cert_chain": { "vcek": %q }
   },
   "cds_cert_pem": %q,
+  "front_door_mode": "cds",
   "xwing_ek": %q,
   "xwing_ct": %q,
   "session_id": %q,

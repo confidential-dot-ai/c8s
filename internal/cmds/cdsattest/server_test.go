@@ -32,6 +32,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 			Platform:   "snp",
 			Generation: "genoa",
 		},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -95,7 +96,7 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, ck *o
 	if len(certs) != 2 {
 		t.Fatalf("bundle chain has %d certs, want leaf + issuing CA", len(certs))
 	}
-	transcript, err := overenc.IdentityTranscriptHash(ck.EncapsulationKey(), ct, sessionID, nonce, certs[0].Raw, certs[1].Raw)
+	transcript, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionID, nonce, certs[0].Raw, certs[1].Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +245,7 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -304,6 +306,7 @@ func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -371,6 +374,7 @@ func TestTunnelRejectsIdleExpiredSession(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -397,6 +401,7 @@ func TestTunnelRejectsOverAgeSession(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -532,7 +537,7 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             failingProvider{},
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -672,6 +677,7 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		Backend:              hb,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -713,7 +719,7 @@ func TestServingLeafErrors(t *testing.T) {
 	rand.Read(nonce)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS, ServingCertFile: tc.file})
+			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: types.FrontDoorModeCDS, ServingCertFile: tc.file})
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
 			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
