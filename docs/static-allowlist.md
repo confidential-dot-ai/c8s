@@ -2,8 +2,11 @@
 
 `cds --static-allowlist` turns the allowlist
 into a launch-time constant. The seed document becomes the one policy the CDS
-instance enforces for its whole lifetime, every write endpoint is disabled,
-and the mesh CA certificate is minted carrying two extra extensions:
+instance enforces for its whole lifetime, every allowlist mutation endpoint is
+disabled, and the mesh CA certificate is minted carrying two extra extensions.
+If `--operator-keys` is also configured, those keys remain usable for operator
+`PUT /secrets/*` writes (for example, to restore gateway pepper and model-volume
+keys after a CDS restart); they never reopen an allowlist mutation route.
 
 - `1.3.6.1.4.1.66378.1.1` — the standard RA-TLS attestation extension, over
   the **CA public key** (`REPORTDATA = SHA-384(PKIX(pubkey))`, the same
@@ -18,7 +21,7 @@ tls-lb. The dynamic allowlist cannot give that guarantee: its seed is an
 operator-rendered ConfigMap and its write API accepts operator-signed
 mutations, so between two requests the operator can widen the policy, let a
 malicious image in, and have CDS issue it a valid mesh leaf. Sealing removes
-the write path and makes the enforced policy a *verifiable identity* of the
+the allowlist mutation path and makes the enforced policy a *verifiable identity* of the
 deployment.
 
 ## Why the CA certificate is the right carrier

@@ -667,7 +667,6 @@ func TestValidateConfig_StaticAllowlist(t *testing.T) {
 		wantSub string
 	}{
 		{"missing seed", func(cfg *config) { cfg.allowlistSeed = "" }, "--allowlist-seed"},
-		{"operator keys set", func(cfg *config) { cfg.operatorKeys = "keys.pem" }, "mutually exclusive"},
 		{"no ratls platform", func(cfg *config) { cfg.ratlsPlatform = "" }, "--ratls-platform"},
 		{"bad expected digest", func(cfg *config) { cfg.staticAllowlistDigest = "nothex" }, "--static-allowlist-digest"},
 	} {
@@ -679,6 +678,13 @@ func TestValidateConfig_StaticAllowlist(t *testing.T) {
 				t.Fatalf("validateConfig() = %v, want error containing %q", err, tc.wantSub)
 			}
 		})
+	}
+	// Static policy mode still accepts operator keys. CDS uses them for
+	// operator secret writes, while allowlist mutations remain disabled.
+	withOperatorKeys := base(t)
+	withOperatorKeys.operatorKeys = "keys.pem"
+	if err := validateConfig(withOperatorKeys); err != nil {
+		t.Fatalf("validateConfig(static + operator keys) = %v", err)
 	}
 	unsealed := validRunConfig(t, "http://127.0.0.1:1")
 	unsealed.staticAllowlistDigest = strings.Repeat("ab", 32)

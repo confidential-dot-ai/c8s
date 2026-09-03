@@ -1083,6 +1083,23 @@ func TestChartRendersOperatorKeysPEM(t *testing.T) {
 	}
 }
 
+// Static allowlist mode accepts operator keys for secret recovery, but the
+// CDS allowlist handler must still receive its static denying authorizer.
+func TestChartRendersStaticAllowlistWithOperatorKeys(t *testing.T) {
+	pemText := "-----BEGIN PUBLIC KEY-----\nMFkwfakefakefake\n-----END PUBLIC KEY-----\n"
+	path := filepath.Join(t.TempDir(), "operator.pub")
+	if err := os.WriteFile(path, []byte(pemText), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	out, err := helmTemplate(t, "--set", "cds.staticAllowlist=true", "--set-file", "cds.operatorKeys="+path)
+	if err != nil {
+		t.Fatalf("static allowlist with operator keys must render: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--static-allowlist")
+	assertContainerHasArg(t, "cds", args, "--operator-keys=/etc/cds-operator-keys/keys.pem")
+}
+
 func TestChartAcceptsPreStopSleepAtBoundary(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=15")
 	if err != nil {

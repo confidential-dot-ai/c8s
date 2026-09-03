@@ -42,26 +42,6 @@ func valuesFilesSetWritePolicy(files []string) (keys, static bool, err error) {
 	return keys, static, nil
 }
 
-// staticAllowlistPreflight rejects a sealed install that also pins operator
-// keys — from the flag or from a -f values file — before helm does, with the
-// reason instead of a render error: a sealed allowlist has no write path.
-func staticAllowlistPreflight(staticAllowlist bool, operatorKeys string, valuesFiles []string) error {
-	if !staticAllowlist {
-		return nil
-	}
-	if operatorKeys != "" {
-		return fmt.Errorf("--static-allowlist and --operator-keys are mutually exclusive: a sealed allowlist has no write path (docs/static-allowlist.md)")
-	}
-	keys, _, err := valuesFilesSetWritePolicy(valuesFiles)
-	if err != nil {
-		return err
-	}
-	if keys {
-		return fmt.Errorf("--static-allowlist cannot be combined with a values file that sets cds.operatorKeys: a sealed allowlist has no write path (docs/static-allowlist.md)")
-	}
-	return nil
-}
-
 // appendBootstrapAllowlistArgs folds a c8s.allowlist/v1 document into the
 // chart's seed: its floor digests join nriImagePolicy.bootstrapAllowlist.digests
 // and its workload entries become nriImagePolicy.bootstrapAllowlist.workloads.

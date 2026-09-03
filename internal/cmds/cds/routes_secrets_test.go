@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
@@ -130,6 +132,52 @@ func TestRouter_SecretsPutIsOperatorAuthorized(t *testing.T) {
 	r := secretsRouter(t, true)
 	if code := get(t, r, http.MethodPut, "/secrets/api/db"); code != http.StatusUnauthorized {
 		t.Fatalf("PUT /secrets/api/db = %d, want 401", code)
+	}
+}
+
+// Static mode keeps the allowlist mutation door closed, but the operator key
+// authorizer remains on the secret door so restart recovery can restore
+// gateway and model-volume keys.
+func TestRouter_StaticAllowlistKeepsSecretOperatorWrites(t *testing.T) {
+	limiter, err := issuer.NewIPRateLimiter(rate.Limit(1000), 1000, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := attestation.NewChallengeStore(time.Minute)
+	secretsCS := attestation.NewChallengeStore(time.Minute)
+	deps := dependencies{
+		AttestHandler:    AttestHandler{Challenges: &cs},
+		ReadyFn:          func() bool { return true },
+		RateLimiter:      limiter,
+		ChallengeLimiter: newTestRateLimiter(t),
+		MaxRequestSize:   65536,
+		AllowlistHandler: allowlist.Handler{
+			WriteAuthorizer: func(*http.Request, []byte) error {
+				return errors.New("static allowlist")
+			},
+		},
+		SecretsHandler:    &secrets.Handler{},
+		SecretsChallenges: &secretsCS,
+		SecretsOperator: &secrets.OperatorHandler{
+			Store:     secrets.NewMemoryStore(8, 7, 64),
+			Authorize: func(*http.Request, []byte) error { return nil },
+		},
+		SecretsExplain: &secrets.ExplainHandler{},
+	}
+	r := newRouter(deps)
+
+	allowlistBody := `{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(allowlistBody)))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /allowlist/digests = %d, want 401", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	secretBody := `{"value":"a2V5"}`
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/secrets/gateway/pepper", strings.NewReader(secretBody)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("PUT /secrets/gateway/pepper = %d, want 201: %s", w.Code, w.Body.String())
 	}
 }
 

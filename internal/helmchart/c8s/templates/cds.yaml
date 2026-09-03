@@ -8,9 +8,6 @@ metadata:
     app.kubernetes.io/component: cds
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
-{{- if and .Values.cds.staticAllowlist .Values.cds.operatorKeys }}
-{{- fail "cds.staticAllowlist and cds.operatorKeys are mutually exclusive: a sealed allowlist has no write path" }}
-{{- end }}
 {{- if and .Values.cds.staticAllowlist .Values.kata.enabled }}
 {{- fail "cds.staticAllowlist is not supported with kata.enabled yet (https://github.com/confidential-dot-ai/c8s/issues/530): seal a node-as-CVM install with a baked policy instead" }}
 {{- end }}
@@ -46,8 +43,9 @@ metadata:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: cds
 data:
-  # PEM bundle of operator EC public keys that authorize allowlist writes.
-  # Public key material — not a secret.
+  # PEM bundle of operator EC public keys that authorize allowlist mutations
+  # (unless static mode) and operator secret writes. Public key material — not
+  # a secret.
   keys.pem: {{ .Values.cds.operatorKeys | quote }}
 ---
 {{- end }}

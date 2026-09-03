@@ -245,11 +245,14 @@ trust boundary.
 The chart installs a CDS Deployment, Service, ServiceAccount, and either an
 `emptyDir` allowlist DB or a PVC when `cds.persistence.enabled=true`. The
 operator injects pods with the chart-managed CDS Service URL. Allowlist
-writes (`POST`, `PUT`, `DELETE /allowlist`) are authorized by an operator key:
+writes (`POST`, `PUT`, `DELETE /allowlist`) are authorized by an operator key
+in dynamic mode:
 the caller presents a short-lived token signed by an operator EC private key
 whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
 that token (see the README, "Managing the image allowlist"). Without
 `cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
+When `cds.staticAllowlist` is true, allowlist writes stay rejected even when
+`cds.operatorKeys` is set; those keys remain available for operator secret writes.
 
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
 those flows comes from EAR validation, measurement allowlists, and CA

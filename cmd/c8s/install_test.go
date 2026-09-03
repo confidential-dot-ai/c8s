@@ -103,22 +103,6 @@ func TestOperatorKeysPreflight(t *testing.T) {
 	}
 }
 
-func TestStaticAllowlistPreflight(t *testing.T) {
-	if err := staticAllowlistPreflight(false, "operator.pub", nil); err != nil {
-		t.Fatalf("not sealed: %v", err)
-	}
-	if err := staticAllowlistPreflight(true, "", nil); err != nil {
-		t.Fatalf("sealed, no keys: %v", err)
-	}
-	if err := staticAllowlistPreflight(true, "operator.pub", nil); err == nil {
-		t.Fatal("sealed + --operator-keys must be refused")
-	}
-	withKeys := writeValuesFile(t, "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n    x\n    -----END PUBLIC KEY-----\n")
-	if err := staticAllowlistPreflight(true, "", []string{withKeys}); err == nil {
-		t.Fatal("sealed + cds.operatorKeys in -f must be refused")
-	}
-}
-
 func TestDefaultInstallImageTag(t *testing.T) {
 	tests := []struct {
 		name         string

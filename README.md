@@ -228,7 +228,7 @@ make install
 # Label the node that will run CDS
 kubectl label node <cds-node> role=cds
 
-# Generate the operator keypair whose public half authorizes allowlist writes
+# Generate the operator keypair whose public half authorizes operator writes
 openssl ecparam -name prime256v1 -genkey -noout -out operator.key
 openssl ec -in operator.key -pubout -out operator.pub
 
@@ -413,9 +413,12 @@ CDS serves the image-digest allowlist that `nri-image-policy` (host) and
 `policy-monitor` (in-guest) enforce on every node. The `c8s allowlist`
 command reads and mutates it. Deployments that need the policy to be a
 verifiable constant instead of an operator-mutable document can seal it:
-`cds --static-allowlist` disables every write and stamps the policy's
+`cds --static-allowlist` disables every allowlist mutation and stamps the policy's
 canonical SHA-256, next to CDS's own attestation evidence, into the mesh CA
-certificate — see [docs/static-allowlist.md](docs/static-allowlist.md). By default, tls-lb publishes the complete
+certificate. You can still configure `--operator-keys` in static mode; those
+keys authorize operator secret writes, such as restoring gateway pepper and
+model-volume keys after a CDS restart, but never allowlist mutations — see
+[docs/static-allowlist.md](docs/static-allowlist.md). By default, tls-lb publishes the complete
 `/allowlist` API and verifies CDS's attestation before forwarding requests.
 When tls-lb uses the chart default CDS-issued public certificate
 (`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at

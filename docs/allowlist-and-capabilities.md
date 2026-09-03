@@ -318,11 +318,12 @@ cannot be replayed against a different payload) and CDS verifies it against the
 operator public keys it pins. The same operator keys authorize floor and workload
 writes alike.
 
-Under `cds --static-allowlist` there are no writes at all: the seed document is
-the one policy for the CDS instance's lifetime, and its canonical SHA-256 is
-sealed into the mesh CA certificate next to CDS's own attestation evidence, so
-relying parties can pin the enforced policy rather than trusting the write
-authorization. See [`static-allowlist.md`](static-allowlist.md).
+Under `cds --static-allowlist` there are no allowlist mutations: the seed
+document is the one policy for the CDS instance's lifetime, and its canonical
+SHA-256 is sealed into the mesh CA certificate next to CDS's own attestation
+evidence, so relying parties can pin the enforced policy rather than trusting
+the allowlist write authorization. When configured, the same operator keys
+still authorize operator secret writes. See [`static-allowlist.md`](static-allowlist.md).
 
 ### Refresh, floor, and anti-rollback
 

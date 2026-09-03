@@ -160,7 +160,8 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 // operatorKeysPreflight enforces that installing with allowlist writes disabled
 // is a deliberate choice. Writes are enabled by --operator-keys or by a -f
 // values file that sets cds.operatorKeys; a sealed install (--static-allowlist,
-// or cds.staticAllowlist in a values file) has no write path by design. Any
+// or cds.staticAllowlist in a values file) has no allowlist mutation path by
+// design, but can still use those keys for operator secret writes. Any
 // other shape requires --force, because the resulting CDS has allowlist writes
 // disabled and nobody could add/remove/upload entries via `c8s allowlist` — a
 // values file that simply omits the key does not clear the guard.
@@ -1139,9 +1140,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if _, err := upstreamAddress(installUpstream, adoptions); err != nil {
-			return err
-		}
-		if err := staticAllowlistPreflight(installStaticAllowlist, installOperatorKeys, installValues); err != nil {
 			return err
 		}
 		if installStaticAllowlist && cvmModeIsPod(installCvmMode) {
@@ -2533,8 +2531,8 @@ func init() {
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
-	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installStaticAllowlist, "static-allowlist", false, "seal the allowlist (cds.staticAllowlist=true): the install seed becomes the one immutable policy for the CDS instance's lifetime, writes stay disabled (mutually exclusive with --operator-keys), and the mesh CA certificate is minted carrying the policy's canonical SHA-256 plus TEE evidence binding the CA key, so relying parties can pin the enforced policy. Add workload entries with --bootstrap-allowlist; see docs/static-allowlist.md")
+	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes (unless static mode) and operator secret writes; sets cds.operatorKeys. Without it, operator writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
+	installCmd.Flags().BoolVar(&installStaticAllowlist, "static-allowlist", false, "seal the allowlist (cds.staticAllowlist=true): the install seed becomes the one immutable policy for the CDS instance's lifetime, allowlist mutations stay disabled even with --operator-keys, and those keys remain available for operator secret writes; the mesh CA certificate is minted carrying the policy's canonical SHA-256 plus TEE evidence binding the CA key, so relying parties can pin the enforced policy. Add workload entries with --bootstrap-allowlist; see docs/static-allowlist.md")
 	installCmd.Flags().StringVar(&installBootstrapAllowlist, "bootstrap-allowlist", "", "path to a c8s.allowlist/v1 document folded into the install seed: its floor digests join nriImagePolicy.bootstrapAllowlist.digests and its workload entries become nriImagePolicy.bootstrapAllowlist.workloads. Under --static-allowlist this is the only way a workload entry enters the sealed policy")
 	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
 	rootCmd.AddCommand(installCmd)

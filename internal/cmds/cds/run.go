@@ -76,11 +76,19 @@ func run(cfg config) error {
 		return fmt.Errorf("init rate limiter: %w", err)
 	}
 
-	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
+	// Keep the allowlist mutation authorizer separate from the operator secret
+	// authorizer. Static policy mode must refuse every allowlist mutation even
+	// when operator keys are configured. Those same keys must still authorize
+	// operator secret writes, which are needed to restore values after a CDS
+	// restart.
+	var allowlistWriteAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
+		return fmt.Errorf("operator writes are disabled: set --operator-keys")
+	}
+	var operatorWriteAuthorizer = func(*http.Request, []byte) error {
 		return fmt.Errorf("operator writes are disabled: set --operator-keys")
 	}
 	if cfg.staticAllowlist {
-		writeAuthorizer = func(*http.Request, []byte) error {
+		allowlistWriteAuthorizer = func(*http.Request, []byte) error {
 			return fmt.Errorf("the allowlist is static (--static-allowlist): the sealed policy digest is stamped into the mesh CA; deploy a new CDS with a new seed to change it")
 		}
 	}
@@ -96,11 +104,14 @@ func run(cfg config) error {
 			return fmt.Errorf("hash --operator-keys %q: %w", cfg.operatorKeys, err)
 		}
 		operatorKeysPEM = pemBytes
-		writeAuthorizer = operatorauth.Verifier{
+		operatorWriteAuthorizer = operatorauth.Verifier{
 			Keys:      keys,
 			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
-		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
+		if !cfg.staticAllowlist {
+			allowlistWriteAuthorizer = operatorWriteAuthorizer
+		}
+		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash, "allowlist_mutations", !cfg.staticAllowlist, "secret_writes", true)
 	} else if !cfg.staticAllowlist {
 		// A sealed run is key-less by design and logs its own line, so this
 		// warning fires only on the ambiguous shape: writes disabled with
@@ -318,7 +329,7 @@ func run(cfg config) error {
 		}
 		secretsOperator = &secrets.OperatorHandler{
 			Store:        store,
-			Authorize:    writeAuthorizer,
+			Authorize:    operatorWriteAuthorizer,
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Logger:       slog.Default(),
 		}
@@ -329,7 +340,7 @@ func run(cfg config) error {
 			Bindings:       sandboxBindings,
 			Policy:         policy,
 			InventoryHosts: inventoryHosts,
-			Authorize:      writeAuthorizer,
+			Authorize:      operatorWriteAuthorizer,
 			Logger:         slog.Default(),
 		}
 		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
@@ -370,7 +381,7 @@ func run(cfg config) error {
 		},
 		AllowlistHandler: allowlist.Handler{
 			Store:             &allowlistStore,
-			WriteAuthorizer:   writeAuthorizer,
+			WriteAuthorizer:   allowlistWriteAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
 		AttestKeyHandler:  attestKeyHandler,
@@ -575,9 +586,6 @@ func validateConfig(cfg config) error {
 	if cfg.staticAllowlist {
 		if cfg.allowlistSeed == "" {
 			return fmt.Errorf("--static-allowlist requires --allowlist-seed: the seed document is the entire sealed policy")
-		}
-		if cfg.operatorKeys != "" {
-			return fmt.Errorf("--static-allowlist and --operator-keys are mutually exclusive: a sealed allowlist has no write path")
 		}
 		if cfg.ratlsPlatform == "" {
 			return fmt.Errorf("--static-allowlist requires --ratls-platform: the sealed mesh CA embeds its own TEE evidence")

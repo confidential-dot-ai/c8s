@@ -63,9 +63,10 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodPost, "/attest-key", deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey)))
 	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
 
-	// GET is unauthenticated (RA-TLS integrity only); every mutation goes
-	// through allowlistWrite (operator-JWT auth in the handler + rate limit +
-	// 1 MiB body cap).
+	// GET is unauthenticated (RA-TLS integrity only); every allowlist mutation
+	// goes through allowlistWrite (operator-JWT auth in the handler + rate limit
+	// + 1 MiB body cap). Static mode wires a denying authorizer here even when
+	// operator keys are configured.
 	r.Get("/allowlist", deps.AllowlistHandler.HandleList)
 	r.Method(http.MethodPut, "/allowlist", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleReplaceAll)))
 	r.Method(http.MethodPost, "/allowlist/digests", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleAddDigest)))
@@ -74,8 +75,9 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
 
 	// GET and POST are the workload's, authenticated by mesh leaf and sandbox
-	// token. PUT is the operator's, on allowlistWrite so it carries the same
-	// body-bound operator token an allowlist mutation does.
+	// token. PUT is the operator's, on allowlistWrite for the same rate and body
+	// limits as an allowlist mutation; its handler has the separate operator-key
+	// authorizer, so static mode still permits secret restoration.
 	if deps.SecretsHandler != nil {
 		if deps.SecretsOperator == nil || deps.SecretsExplain == nil {
 			panic("cds: dependencies.SecretsOperator and SecretsExplain must be set alongside SecretsHandler")
@@ -143,8 +145,8 @@ func handleCA(caCertPEM []byte) http.HandlerFunc {
 }
 
 // handleOperatorKeys serves the pinned operator public-key bundle (public
-// material, like /ca) so `c8s verify` can report which keys may mutate the
-// allowlist. 404 when allowlist writes are disabled (no pinned keys).
+// material, like /ca) so `c8s verify` can report which keys authorize operator
+// writes. 404 when no keys are pinned.
 // handleMeasurements serves the reference values this CDS is enforcing. An
 // empty set is served, not 404'd: "admitting any measurement" is the state a
 // verifier most needs to be told about.

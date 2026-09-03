@@ -198,11 +198,14 @@ PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 507 {"error": "secret_store_full"} the ceiling refused it
 ```
 
-Authorization is the operator key that CDS already pins for allowlist writes
-(`cds --operator-keys`) — the same key the `secrets` grants are rooted in. Its
-token binds the method, path, and body, so a captured one cannot be replayed
-against a different path or a different value. `overwrite` travels in the body
-for that reason: a query parameter is outside what the token covers.
+Authorization is the operator key that CDS pins with `--operator-keys` — the
+same key used for allowlist mutations in dynamic mode. In static allowlist mode,
+allowlist mutations remain disabled, but these keys still authorize this secret
+write route. This lets production restore gateway pepper and model-volume keys
+after a CDS restart. Its token binds the method, path, and body, so a captured
+one cannot be replayed against a different path or a different value.
+`overwrite` travels in the body for that reason: a query parameter is outside
+what the token covers.
 
 ### Replacing a value
 

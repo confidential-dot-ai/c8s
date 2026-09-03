@@ -217,10 +217,11 @@ cds:
   logLevel: info
   allowlistDB: /data/allowlist.db
   # -- Seal the allowlist (`cds --static-allowlist`): the seed document becomes
-  # the one immutable policy for the CDS instance's lifetime, writes stay
-  # disabled (mutually exclusive with operatorKeys), and the mesh CA
+  # the one immutable policy for the CDS instance's lifetime, allowlist
+  # mutations stay disabled even when operatorKeys is set, and the mesh CA
   # certificate carries the policy's canonical SHA-256 plus TEE evidence
-  # binding the CA key, so relying parties can pin the enforced policy.
+  # binding the CA key, so relying parties can pin the enforced policy. The
+  # same operatorKeys remain available for operator secret writes.
   # Node-as-CVM only; refused with kata.enabled. See docs/static-allowlist.md.
   staticAllowlist: false
   # -- Hex canonical SHA-256 the sealed seed must have. CDS refuses to start
@@ -297,9 +298,11 @@ cds:
   rtmrs: []
   ## PEM bundle of operator EC public keys (public material, not a secret).
   ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a
-  ## short-lived token signed by one of the matching operator private keys (see
-  ## `c8s allowlist` and the README "Operator allowlist credentials").
-  ## Empty = allowlist writes are rejected (reads are still served). Prefer
+  ## short-lived token signed by one of the matching operator private keys
+  ## (unless staticAllowlist is true). The same keys authorize operator secret
+  ## writes (see `c8s allowlist`, `c8s secrets`, and the README "Operator
+  ## allowlist credentials"). Empty = operator writes are rejected (reads are
+  ## still served). Prefer
   ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
   ## Measurements config: the JSON document listing the VM images this cluster
   ## runs, each pinned as a whole image. Content, not a path — set it with
