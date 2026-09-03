@@ -212,15 +212,21 @@ Requires a guest kernel exposing the TDX RTMR-extend sysfs
 [`pkg/runtimemeasure`](../pkg/runtimemeasure/runtimemeasure.go), the
 single source of truth for both sides:
 `event = SHA384("sha256:"+hex)`, `RTMR3' = SHA384(RTMR3 ‖ event)`,
-folded from the boot value (all zeros — or from the operator-key seed
-`ForOperatorKey` on nodes launched with one). Golden vectors in
+folded in this order: the boot value (all zeros), the operator-key seed
+(`ForOperatorKey`, on nodes launched with one), the mode event
+(`ModeDynamic`, extended by the node image's `c8s-policy-measure.service`
+before containerd starts; `ForDynamic`), then the per-workload events. A
+static-allowlist node folds `ModeStatic` and then the policy event instead
+and nothing after (`ForStaticAllowlist`,
+[`static-allowlist.md`](static-allowlist.md)). Golden vectors in
 `pkg/runtimemeasure/runtimemeasure_test.go` freeze it; every verifier
 MUST build on `pkg/runtimemeasure`, never re-derive the convention
-(`c8s get-kubeconfig` and `c8s verify --operator-pkey` already do;
-`c8s verify --rtmr 3=` takes the folded value directly). Note that
-`c8s verify --operator-pkey` pins the *bare* seed only — no per-workload
-extends — since `rtmr3-measurer` ships in this guest image, not on the node
-CVMs that command targets.
+(`c8s get-kubeconfig`, `c8s verify --operator-pkey` and
+`c8s verify --static-allowlist` already do; `c8s verify --rtmr 3=` takes
+the folded value directly). `c8s verify --operator-pkey` pins the
+seed-plus-mode register only — no per-workload extends — since
+`rtmr3-measurer` ships in this guest image, not on the node CVMs that
+command targets.
 
 **Dedup and restart safety.** RTMR[3] is hardware-append-only, so each
 DISTINCT image must extend exactly once: restarts and replicas (same

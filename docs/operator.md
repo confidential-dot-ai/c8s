@@ -332,11 +332,43 @@ off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
 Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
 entries, are also enforced from the baked floor.
 
+### Static allowlist
+
+Under `staticAllowlist.enabled=true` (set by `c8s install --static-allowlist`,
+see [`static-allowlist.md`](static-allowlist.md)) CDS serves the bundle the
+node measured into RTMR[3] and nothing else. The chart renders CDS with
+`--static-allowlist --policy-dir /run/confai/policy --allowlist-seed
+/run/confai/policy/static-allowlist.json` and
+`--attestation-api-url unix:///run/confai/attestation-api.sock`, mounts the
+policy directory and the socket directory read-only as `hostPath` volumes of
+type `Directory`, and gives the pod supplementary group 65532 so it can
+connect to the root-owned socket. There is no `cds.operatorKeys`, no
+persistence, and no seed ConfigMap: every start reseeds from the measured
+member, so a restart cannot add entries and allowlist writes do not exist.
+`cds.measurementsConfig` carries one entry, `{MRTD, RTMR[1], RTMR[2],
+RTMR[3] = ForStaticAllowlist(index)}`, which `/attest` requires of every
+requester and CDS requires of its own evidence at start. The render fails
+(`VALIDATION_ERROR kind=static_allowlist_*`) on `cds.operatorKeys`,
+`cds.persistence.enabled`, `kata.enabled`, `attestationApi.enabled`,
+`nriImagePolicy.enabled`, a `cvmMode` other than `node`, a platform other than
+TDX, or an empty `cds.measurementsConfig`.
+
 ## Attestation-api
 
 The attestation-api DaemonSet binds pod loopback and is served to on-node
 consumers by its attest-proxy sidecar over a Unix socket in
 `nriImagePolicy.hostPaths.runtimeDir`; no Service renders.
+
+The c8s node image serves the same API itself: `c8s-attest-socket.service`
+runs `c8s attest-proxy` in front of the baked attestation-api on the
+root-owned `unix:///run/confai/attestation-api.sock` (mode 0660, group
+65532). The baked NRI plugin config dials that path, and under
+`staticAllowlist.enabled` so do CDS, tls-lb, ratls-mesh, the operator, and
+every injected sidecar (`staticAllowlist.attestationSocketDir`, default
+`/run/confai`). A path in a measured config, unlike an address, is one the
+control plane cannot repoint; the verdict stays unsigned, the socket is what
+makes it immutable. The chart refuses `attestationApi.enabled` beside
+`staticAllowlist.enabled` because nothing would dial the DaemonSet.
 
 Two operational notes:
 
@@ -446,6 +478,19 @@ extends into the expected register. Supplying any of these
 flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
 has no runtime measurement registers.
 
+`--static-allowlist <bundle>` is the static-mode sibling of
+`--operator-pkey` ([`static-allowlist.md`](static-allowlist.md)). The bundle
+is a directory of members or the `static-allowlist.json` alone (an `.iso` is
+refused). `verify` lints the member as sealed, derives the static register
+`Extend(Extend(Zero, SHA-384("c8s/rtmr3/mode/static/v1")),
+SHA-384("c8s/rtmr3/policy/v1:" ‖ index))` from it, and holds the leaf's
+matched-workload stamp to the member's own bytes. It requires
+`--image-manifest`, `--workload`, and `--mesh-ca` (the stamp is CA-vouched,
+and the mesh CA carries no evidence of its own yet), and conflicts with
+`--operator-pkey`, `--expected-rtmr3`, `--rtmr 3=`, and `--allowlist`. A
+verified verdict reports `static_policy_digest`, the index digest the
+register was derived from.
+
 A TDX verdict pinned on MRTD alone is **rejected**, not warned about, when no
 operator-pinned CA anchor (`--mesh-ca`) stands beside the measurements: the
 measurement pins are then the entire trust anchor, so an incomplete image
@@ -512,7 +557,12 @@ and again on the RA-TLS credential-release connection:
   extended by the dynamic mode event (`runtimemeasure.ForDynamic`), then, in
   order, by each digest-pinned `--workload-image` ref (tags are rejected).
   With no `--workload-image` the register must equal `ForDynamic(seed)`; the
-  bare seed is rejected;
+  bare seed is rejected. With `--static-allowlist <bundle>` in place of
+  `--operator-key` the register must instead equal
+  `runtimemeasure.ForStaticAllowlist` over the bundle's index, the static
+  mode event followed by the policy event ([`static-allowlist.md`](static-allowlist.md));
+  `--workload-image` is then a usage error, and the credential is fetched
+  without an operator token;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
   one of the per-SMP launch digests pinned by `snp_variants` (one image has
   one digest per vCPU count), and HOSTDATA must equal `SHA-256(operator
@@ -553,9 +603,17 @@ design. To revoke durably, relaunch without `opkeydata`, or with a rotated
 operator key, so the old key can no longer obtain a certificate. A certificate
 already issued stays usable for the remainder of its one-hour TTL.
 
+A static node has no operator key and nothing to revoke: `cred-release`
+serves any caller once the node's RTMR[3] matches the bundle, because the
+static design already treats `cluster-admin` as the adversary. Relaunching
+with another bundle changes the register, and clients pinned to the old
+bundle refuse the node.
+
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,
-and (on TDX) ran exactly the expected measured workloads. What it does not prove: anything about images or keys the
+and (on TDX) ran exactly the expected measured workloads. Under
+`--static-allowlist` it proves instead that the node measured exactly the
+reviewed bundle, so its sealed plugin admits only that bundle's entries. What it does not prove: anything about images or keys the
 manifest and flags do not name, or the provenance of the manifest file itself
 — select it deliberately from the trusted image build. An RTMR[3]-only gate
 would prove much less: the untrusted host stages the operator public key, so

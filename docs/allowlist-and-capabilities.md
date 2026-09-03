@@ -7,6 +7,14 @@ read and write. This document complements
 a kata guest) and [`ratls.md`](ratls.md) (how the allowlist is bound into
 attestation).
 
+The allowlist runs in one of two modes. In **dynamic** mode, the default, CDS
+serves a document an operator key can change at runtime and the enforcers
+described here poll it. In **static** mode a TDX node boots a reviewed policy
+bundle, measures it into RTMR[3], and the baked NRI plugin enforces the
+**sealed** document it contains with no write path at all; see
+[`static-allowlist.md`](static-allowlist.md). This document describes the
+dynamic behaviour and names each point where sealed mode differs.
+
 > **Trust model.** The host, hypervisor, and Kubernetes control plane are
 > untrusted; the trust boundary is the TEE. The image *reference* a pod presents
 > (`docker.io/vllm/vllm-openai:v0.6.3`) is chosen by the untrusted host and is
@@ -61,6 +69,40 @@ semantics](#a-digest-may-run-many-ways).
   }
 }
 ```
+
+A sealed document adds three optional fields per container, which dynamic
+consumers ignore and which existing documents canonicalize without:
+
+```json
+{
+  "digest": "sha256:<vllm>",
+  "command": { "policy": "exact", "argv": ["python3"] },
+  "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server"] },
+  "env": {
+    "policy": "exact",
+    "names": ["PATH", "POD_IP"],
+    "values": { "PATH": { "value": "/usr/local/bin:/usr/bin" }, "POD_IP": { "from": "podIP" } }
+  },
+  "mounts": {
+    "policy": "exact",
+    "destinations": ["/etc/hosts", "/models"],
+    "rules": {
+      "/etc/hosts": { "source": "platform" },
+      "/models":    { "source": "pvc", "review": "weights are parsed by a bounded loader" }
+    }
+  }
+}
+```
+
+`env.values` pins each listed name to a literal (`value`) or to a pod field
+(`from`: `podIP`, `podName`, `podNamespace`, `podUID`, `hostIP`, `nodeName`).
+`mounts.rules` gives each destination a source class (`emptyDir`,
+`serviceAccountToken`, `pvc`, `platform`, `nodeState`, `hostPath`) and, for
+`pvc` and `nodeState`, a `review`. `privileges` is absent on an unprivileged
+entry; when present it marks a node-TCB entry: `privileged`,
+`hostNamespaces`, `capabilities`, `devices`, `hostPaths`, `unmaskedProc`, and
+a required `review`. The key sets of `values` and `rules`, when present, must
+equal `names` and `destinations`.
 
 `schema` is the format identity. It is the first field of the canonical
 serialization (`allowlist.Canonical`), so any holder of an equivalent document
@@ -178,9 +220,12 @@ data to a container running injected code.
 table names filesystem types (`proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`,
 `cgroup`) and carries nothing in, so pinning it would only make an operator
 restate the OCI base set to say nothing. `env` constrains variable **names**;
-values are never matched, because the allowlist is served to every enforcer and
-values carry secrets. `LD_PRELOAD` is the case that motivates it — an injected
-name is code execution inside an otherwise-allowlisted image.
+in dynamic mode values are never matched, because the allowlist is served to
+every enforcer and values carry secrets. `LD_PRELOAD` is the case that
+motivates it — an injected name is code execution inside an otherwise-allowlisted
+image. A sealed document is reviewed and measured, not secret, so there every
+name also carries a value rule (`values`), and the sealed plugin matches the
+value.
 
 ```json
 "mounts": { "policy": "exact", "destinations": ["/etc/hosts", "/config"] },
@@ -199,15 +244,24 @@ a `deny` default would refuse every real pod and adopting the field would mean
 adopting an outage. That makes these opt-in: a digest with no policy is
 constrained exactly as much as it was before.
 
-Two limits worth stating. They bind only digests a `workloads` entry names —
-floor digests are admitted on the digest alone, so `c8s allowlist add` does not
-produce a mount-gated image. And **the in-guest `policy-monitor` is the enforcer
-that honours them**: it reads the guest's own OCI spec, so it sees both the
-mount table and the environment. The host NRI plugin sees the CRI container and
-reports neither, and an unobserved field is treated as nothing-to-refuse rather
-than as a violation — so under `--cvm-mode=node`, where that plugin is the only
-enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
-lint` warns when a document carries one; `--cvm-mode=pod` silences it.
+Two limits worth stating for dynamic mode. They bind only digests a
+`workloads` entry names — floor digests are admitted on the digest alone, so
+`c8s allowlist add` does not produce a mount-gated image. And **the in-guest
+`policy-monitor` is the enforcer that honours them**: it reads the guest's own
+OCI spec, so it sees both the mount table and the environment. The dynamic
+host NRI plugin sees the CRI container and reports neither, and an unobserved
+field is treated as nothing-to-refuse rather than as a violation — so under
+`--cvm-mode=node`, where that plugin is the only enforcer, a `mounts` or `env`
+policy admits every container. `c8s allowlist lint` warns when a document
+carries one; `--cvm-mode=pod` silences it.
+
+Neither limit holds in sealed mode. There is no floor, and the sealed plugin
+observes every field: env names and values, each bind source classified from
+its kubelet path (`/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~<plugin>/<name>`)
+or from the platform and node-state directories, host namespaces, devices not
+explained by a CDI spec, and OCI hooks at CreateContainer; capabilities and
+masked paths from the OCI spec at PostCreateContainer. An observed field with
+no rule is a denial, never a pass ([`static-allowlist.md`](static-allowlist.md)).
 
 ## Secret grants (`secrets`)
 
@@ -243,10 +297,13 @@ Three independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), at CreateContainer, per container.
    Resolves the image digest and checks the effective argv against the allowlist
-   index. Digest and argv are its whole scope: it reports no mount table and no
-   environment, so `mounts` and `env` policy is vacuously satisfied here. Fail-closed before the allowlist first loads. Runs on the untrusted
-   side of the TEE boundary for kata pods, so it is defense-in-depth there, and
-   the primary gate for non-kata (base-mode) pods.
+   index. In dynamic mode digest and argv are its whole scope: it reports no
+   mount table and no environment, so `mounts` and `env` policy is vacuously
+   satisfied here. Fail-closed before the allowlist first loads. Runs on the
+   untrusted side of the TEE boundary for kata pods, so it is defense-in-depth
+   there, and the primary gate for non-kata (base-mode) pods. In sealed mode
+   the same plugin matches the whole observation against a complete rule
+   (`Index.Admit`), with no digest-only path.
 
 2. **In-guest policy-monitor** (under kata), watching each new container's
    `config.json`. This is the load-bearing gate for confidential pods: the host
@@ -292,12 +349,20 @@ is not implemented and is out of scope here.
 ### The injected-container carve-out
 
 c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: injected component images are allowlist floor entries, so a workload
-entry never has to enumerate c8s's own sidecars. Nothing rests on the container
-*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
-which is exactly why standalone/injected images are digest-only floor entries:
-their argv is not fixed and must not be argv-policed.
+(get-cert) and `c8s-cert-wait`. In dynamic mode they pass the issuance gate by
+**digest**, not by name: injected component images are allowlist floor entries,
+so a workload entry never has to enumerate c8s's own sidecars. Nothing rests on
+the container *name*, which the host writes. get-cert runs with per-pod dynamic
+arguments, which is exactly why standalone/injected images are digest-only floor
+entries there: their argv is not fixed and must not be argv-policed.
+
+A sealed document has no floor, so the injected containers need complete
+rules like any other. `c8s allowlist render --sealed --workloads` runs the
+webhook mutator in-process on each pod template and derives the rules for
+`c8s-cert`, `c8s-cert-wait`, `c8s-secret`, and `c8s-volume` from the
+containers it produces; per-pod values become `from` rules. That is why
+`--workloads` requires `--chart-values`: the sidecar argv comes from the
+operator the chart deploys.
 
 ## Distribution and trust
 
@@ -356,6 +421,12 @@ The guest-baked seed remains a flat `sha256_digests` list — it is the floor,
 measured into the SNP launch digest, and keeping it digest-only means a policy
 change never requires a guest-image rebuild.
 
+In static mode the seed is the measured bundle member itself:
+`--allowlist-seed /run/confai/policy/static-allowlist.json`, a `hostPath` the
+node's `c8s-policy-measure.service` wrote, with `digests` empty. The chart
+renders no seed ConfigMap, and CDS refuses to start unless its own evidence
+carries the register that commits to those bytes.
+
 ## CLI
 
 `c8s allowlist` reads and mutates the allowlist. Reads are unauthenticated (the
@@ -372,8 +443,11 @@ c8s allowlist
   add <digest> <image>              add a floor digest
   remove <digest>...                remove floor digests (warns on component-floor images)
   upload <file>                     replace the whole allowlist (diff-first, required-components guard)
-  lint <file|-> [--online] [--strict]
+  lint <file|-> [--online] [--strict] [--sealed]
   inspect-image <ref>               show an image's digest + baked entrypoint/cmd
+  render --sealed [--system-floor FILE] [--chart-values FILE] [--workloads FILE]
+                                    render a sealed document from the chart, the
+                                    node image's system floor and workload manifests
 
   workload list | get <name>
   workload apply <file|-> [--dry-run]
@@ -423,6 +497,18 @@ entries alike but for their grants are exactly the case worth catching.
 `workload apply` runs that check against the served allowlist as well as the
 file, because the entry a new one collides with is usually one already there.
 
+`lint --sealed` lints a static-allowlist bundle member. Every shortfall is an
+error: the file must be byte-equal to its canonical form, `digests` must be
+`{}` and `workloads` an object, every `privileges` block needs a `review`,
+every unprivileged entry needs exact `command`, `mounts`, and `env` and exact
+or deny `args`, every exact `env` needs `values` and every exact `mounts`
+needs `rules`, every `pvc` and `nodeState` rule needs a `review`, and a
+`hostPath` rule is allowed only on a privileged entry. The node, the sealed
+plugin, `c8s policy-disk`, `c8s install`, `c8s get-kubeconfig`, and
+`c8s verify` run the same function; CDS relies on the node's measurement and
+refuses to start unless the members index to `digest` and derive the pinned
+RTMR[3].
+
 ## Operator credentials
 
 Generating an operator key and pinning its public half is unchanged; see the
@@ -430,3 +516,8 @@ README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
 a verifier detects a changed write policy by comparing the served
 `/operator-keys` list against its own bundle. Secret grants (`secrets`) are
 managed with the same `workload edit`/`apply` flow.
+
+A static cluster has no operator keys: the chart refuses `cds.operatorKeys`
+beside `staticAllowlist.enabled`, CDS refuses `--operator-keys` beside
+`--static-allowlist`, and every `c8s allowlist` write is rejected. Changing
+the policy means rendering a new bundle and relaunching the nodes with it.
