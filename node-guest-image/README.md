@@ -76,6 +76,22 @@ The other disks are optional; each is owned by one unit under
   presence turns on attested credential release (`cred-release.service`,
   see [operator.md]).
 
+## Troubleshooting
+
+**`Read-only file system` under `/usr`, `/etc` or `/opt`** — from a unit log
+(`mkdir: cannot create directory '/etc/foo': Read-only file system`), a
+pod stuck in ContainerCreating with a FailedMount event for a hostPath
+there, or a tool you installed on the host by hand. The root is the
+read-only verity image; only `/var`, `/home`, `/root`, `/tmp` and the
+directories listed in `/usr/lib/confai/state.d/*.conf` on the node are
+writable, and nothing installed after boot is covered by the measurement.
+If the writer is part of the image, declare its directory in
+`c8s/mkosi.extra/usr/lib/confai/state.d/60-c8s.conf` (it must be baked; the
+lint checks) or point it at `/var`. If it is something an operator installs
+on the host afterwards, it does not belong on a measured node — run it as a
+pod. `cat /usr/lib/confai/state.d/*.conf` on the node shows the live list;
+a login shell prints it too.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
