@@ -393,8 +393,9 @@ logging:
 // serves the peer end, so registration blocks until its timeout rather than
 // failing on connect. The socket stays up for the whole test: the stub holds a
 // dup of the adopted end, and closing the peer end would make registration fail
-// immediately and restore the race.
-func holdNRISocket(t *testing.T) {
+// immediately and restore the race. The returned peer reads what the stub
+// sends, so a test can tell when registration has started.
+func holdNRISocket(t *testing.T) net.Conn {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
@@ -403,8 +404,19 @@ func holdNRISocket(t *testing.T) {
 	// nri's NewFdConn dups the adopted descriptor and closes the original, so
 	// fds[0] belongs to the stub from here on and its number is recycled: the
 	// test owns only the peer end.
-	t.Cleanup(func() { _ = syscall.Close(fds[1]) })
+	peerFile := os.NewFile(uintptr(fds[1]), "nri-peer")
+	peer, err := net.FileConn(peerFile)
+	if err != nil {
+		t.Fatalf("peer conn: %v", err)
+	}
+	// peerFile stays referenced until cleanup: its finalizer would otherwise
+	// close the peer end mid-test.
+	t.Cleanup(func() {
+		_ = peer.Close()
+		_ = peerFile.Close()
+	})
 	t.Setenv(api.PluginSocketEnvVar, strconv.Itoa(fds[0]))
+	return peer
 }
 
 // --- allowlistPullHTTPClient ------------------------------------------------
@@ -511,7 +523,7 @@ func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 				Policy:         policyConfig{Mode: ModeFailClosed},
 				WorkloadClaims: workloadClaimsConfig{SocketDir: tc.socketDir, ProcRoot: tc.procRoot},
 			}
-			p, err := newPlugin(cfg, &fakeContainerd{}, store, audit.NewLogger(), discardLogger())
+			p, err := newPlugin(cfg, &fakeContainerd{}, store, nil, audit.NewLogger(), discardLogger())
 			if err != nil {
 				t.Fatalf("newPlugin: %v", err)
 			}

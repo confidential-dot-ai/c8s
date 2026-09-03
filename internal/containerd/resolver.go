@@ -1,4 +1,6 @@
-// Package containerd provides tag-to-digest resolution via the containerd image store.
+// Package containerd is the plugin's view of the containerd daemon: image
+// tag-to-digest resolution, killing a container, and loading the OCI spec
+// containerd stored for a container.
 package containerd
 
 import (
@@ -10,6 +12,7 @@ import (
 
 	containerdclient "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"google.golang.org/grpc/codes"
@@ -91,6 +94,27 @@ func (r *Resolver) StopContainer(ctx context.Context, containerID string) error 
 	}
 
 	return nil
+}
+
+// Spec returns the OCI spec containerd stored for a container: the
+// authoritative process capabilities, masked and read-only paths, seccomp and
+// no_new_privileges, which the NRI container message does not carry.
+func (r *Resolver) Spec(ctx context.Context, containerID string) (*oci.Spec, error) {
+	nsCtx := namespaces.WithNamespace(ctx, r.namespace)
+
+	var container containerdclient.Container
+	if err := r.withReconnect(func() error {
+		var err error
+		container, err = r.client.LoadContainer(nsCtx, containerID)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("load container %s: %w", containerID, err)
+	}
+	spec, err := container.Spec(nsCtx)
+	if err != nil {
+		return nil, fmt.Errorf("load spec of %s: %w", containerID, err)
+	}
+	return spec, nil
 }
 
 // withReconnect runs op; if it fails because the containerd connection is

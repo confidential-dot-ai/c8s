@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -76,18 +77,22 @@ type fakeContainers struct {
 	containersapi.UnimplementedContainersServer
 
 	knownID string
+	// spec is the JSON OCI spec Get returns for knownID; nil returns none.
+	spec []byte
 }
 
 func (f *fakeContainers) Get(_ context.Context, req *containersapi.GetContainerRequest) (*containersapi.GetContainerResponse, error) {
 	if req.ID != f.knownID {
 		return nil, status.Errorf(codes.NotFound, "container %q: not found", req.ID)
 	}
-	return &containersapi.GetContainerResponse{
-		Container: &containersapi.Container{
-			ID:      req.ID,
-			Runtime: &containersapi.Container_Runtime{Name: "io.containerd.runc.v2"},
-		},
-	}, nil
+	c := &containersapi.Container{
+		ID:      req.ID,
+		Runtime: &containersapi.Container_Runtime{Name: "io.containerd.runc.v2"},
+	}
+	if f.spec != nil {
+		c.Spec = &anypb.Any{TypeUrl: "types.containerd.io/opencontainers/runtime-spec/1/Spec", Value: f.spec}
+	}
+	return &containersapi.GetContainerResponse{Container: c}, nil
 }
 
 // fakeTasks is a minimal tasks service whose Get/Kill behavior is scriptable.
@@ -373,6 +378,47 @@ func TestStopContainer(t *testing.T) {
 		}
 		if want := "kill task for " + containerID; !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	})
+}
+
+func TestSpec(t *testing.T) {
+	const containerID = "abc123"
+	specJSON := []byte(`{"ociVersion":"1.1.0","process":{"args":["/bin/sh"],"noNewPrivileges":true,"capabilities":{"bounding":["CAP_CHOWN","CAP_NET_ADMIN"]}},"linux":{"maskedPaths":["/proc/kcore"]}}`)
+
+	t.Run("returns the stored spec", func(t *testing.T) {
+		socket := startFakeContainerd(t, nil, &fakeContainers{knownID: containerID, spec: specJSON}, &fakeTasks{})
+		r := newTestResolver(t, socket)
+
+		spec, err := r.Spec(context.Background(), containerID)
+		if err != nil {
+			t.Fatalf("Spec(%s) = %v, want nil error", containerID, err)
+		}
+		if got, want := spec.Process.Capabilities.Bounding, []string{"CAP_CHOWN", "CAP_NET_ADMIN"}; strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("Spec(%s).Process.Capabilities.Bounding = %v, want %v", containerID, got, want)
+		}
+		if !spec.Process.NoNewPrivileges || len(spec.Linux.MaskedPaths) != 1 {
+			t.Fatalf("Spec(%s) = noNewPrivileges %v, maskedPaths %v; want true, 1 path", containerID, spec.Process.NoNewPrivileges, spec.Linux.MaskedPaths)
+		}
+	})
+
+	t.Run("unknown container fails at load", func(t *testing.T) {
+		socket := startFakeContainerd(t, nil, &fakeContainers{knownID: containerID, spec: specJSON}, &fakeTasks{})
+		r := newTestResolver(t, socket)
+
+		_, err := r.Spec(context.Background(), "no-such-id")
+		if err == nil || !strings.Contains(err.Error(), "load container no-such-id") {
+			t.Fatalf("Spec(no-such-id) = %v, want a load container error", err)
+		}
+	})
+
+	t.Run("malformed spec is an error", func(t *testing.T) {
+		socket := startFakeContainerd(t, nil, &fakeContainers{knownID: containerID, spec: []byte("{")}, &fakeTasks{})
+		r := newTestResolver(t, socket)
+
+		_, err := r.Spec(context.Background(), containerID)
+		if err == nil || !strings.Contains(err.Error(), "load spec of "+containerID) {
+			t.Fatalf("Spec(%s) = %v, want a load spec error", containerID, err)
 		}
 	})
 }

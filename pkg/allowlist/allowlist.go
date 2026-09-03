@@ -145,22 +145,27 @@ type MountPolicy struct {
 }
 
 // MountRule is the reviewed source class of one bind destination. Review is
-// required for a pvc source: it names why operator-supplied contents at that
-// path cannot steer the workload.
+// required for a pvc source (why operator-supplied contents at that path
+// cannot steer the workload) and for a nodeState source (why this entry may
+// reach the node's attestation socket or policy directory).
 type MountRule struct {
 	Source string `json:"source"`
 	Review string `json:"review,omitempty"`
 }
 
 // Mount source classes. The first four are what a pod spec and the kubelet
-// put there; SourceHostPath marks a destination whose content the node
-// supplies (hostPath, configMap, secret, projected) and is admitted only
-// through Privileges.HostPaths.
+// put there. SourceNodeState is a bind from the measured image's state
+// directory (the attestation socket and the policy directory); it is its
+// own class, not platform, so a platform rule at /etc/hosts can never admit
+// the socket bound there. SourceHostPath marks a destination whose content
+// the node supplies (hostPath, configMap, secret, projected) and is admitted
+// only through Privileges.HostPaths.
 const (
 	SourceEmptyDir            = "emptyDir"
 	SourceServiceAccountToken = "serviceAccountToken"
 	SourcePVC                 = "pvc"
 	SourcePlatform            = "platform"
+	SourceNodeState           = "nodeState"
 	SourceHostPath            = "hostPath"
 )
 
@@ -413,10 +418,10 @@ func normalizeMounts(p *MountPolicy) error {
 		}
 		for d, r := range p.Rules {
 			switch r.Source {
-			case SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceHostPath:
+			case SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceNodeState, SourceHostPath:
 			default:
-				return fmt.Errorf("rule %q: unknown source %q (want %s, %s, %s, %s or %s)", d, r.Source,
-					SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceHostPath)
+				return fmt.Errorf("rule %q: unknown source %q (want %s, %s, %s, %s, %s or %s)", d, r.Source,
+					SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceNodeState, SourceHostPath)
 			}
 		}
 	default:

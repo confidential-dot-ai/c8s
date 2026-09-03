@@ -68,7 +68,7 @@ func Load(path string) (Bundle, error) {
 		if !info.Mode().IsRegular() {
 			return Bundle{}, fmt.Errorf("policy bundle: %s is not a regular file", path)
 		}
-		data, err := readMember(path)
+		data, err := ReadMember(path)
 		if err != nil {
 			return Bundle{}, err
 		}
@@ -91,7 +91,7 @@ func Load(path string) (Bundle, error) {
 		if !e.Type().IsRegular() {
 			return Bundle{}, fmt.Errorf("policy bundle: %s is not a regular file", member)
 		}
-		data, err := readMember(member)
+		data, err := ReadMember(member)
 		if err != nil {
 			return Bundle{}, err
 		}
@@ -100,10 +100,11 @@ func Load(path string) (Bundle, error) {
 	return FromMembers(members)
 }
 
-// readMember bounds the read itself, not a Stat size, so a file that grows
-// after Stat or a node whose Stat size is not its content is still refused
-// past MaxMemberSize instead of buffered.
-func readMember(path string) ([]byte, error) {
+// ReadMember reads one member file. The bound applies to the read itself,
+// not a Stat size, so a file that grows after Stat or a node whose Stat
+// size is not its content is still refused past MaxMemberSize instead of
+// buffered. The node's measurer reads the policydata disk through it.
+func ReadMember(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("policy bundle: %w", err)

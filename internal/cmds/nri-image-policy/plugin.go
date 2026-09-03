@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
 	"k8s.io/apimachinery/pkg/labels"
@@ -94,6 +96,7 @@ func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 type containerdOps interface {
 	Resolve(ctx context.Context, imageRef string) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
+	Spec(ctx context.Context, containerID string) (*oci.Spec, error)
 }
 
 // plugin implements the NRI plugin interface for image policy enforcement.
@@ -105,6 +108,16 @@ type plugin struct {
 	logger     *slog.Logger
 	ready      atomic.Bool
 	containerd containerdOps
+
+	// sealed is non-nil on a static boot: admission then runs the sealed
+	// hooks (sealed_plugin.go) against the measured bundle and nothing
+	// else. observer builds their observations, verdicts carries the
+	// PostCreateContainer decision to StartContainer, and poweroff is what a
+	// fatal condition calls.
+	sealed   *sealedPolicy
+	observer observer
+	verdicts verdictCache
+	poweroff func() error
 
 	// exempt admits an exempt namespace's containers by the digest set captured
 	// running in it, not by the namespace name. nil ⇔ not opted in
@@ -129,6 +142,7 @@ func newPlugin(
 	cfg *config,
 	ctrd containerdOps,
 	store *policyStore,
+	sealed *sealedPolicy,
 	auditLogger *audit.Logger,
 	logger *slog.Logger,
 ) (*plugin, error) {
@@ -138,6 +152,16 @@ func newPlugin(
 		audit:      auditLogger,
 		logger:     logger,
 		containerd: ctrd,
+		sealed:     sealed,
+		poweroff:   poweroff,
+	}
+	if sealed != nil {
+		p.observer = observer{
+			platformDir:    runPath(cfg.WorkloadClaims.SocketDir),
+			hostIP:         sealed.hostIP,
+			nodeName:       sealed.nodeName,
+			cdiDeviceNodes: cdiDeviceNodesFrom(defaultCDISpecDirs),
+		}
 	}
 	if cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
@@ -195,15 +219,27 @@ func (p *plugin) Run(ctx context.Context) error {
 	return p.stub.Run(ctx)
 }
 
-// Configure is called when the plugin is registered with the runtime.
+// Configure is called when the plugin is registered with the runtime. In
+// sealed mode it also subscribes the post-create and start hooks and, when
+// the config requires it, refuses a containerd without the fail-closed fix:
+// returning an error fails registration, and Run exits.
 func (p *plugin) Configure(ctx context.Context, config, runtime, version string) (api.EventMask, error) {
 	p.logger.Info("plugin configured",
 		"runtime", runtime,
 		"version", version,
+		"sealed", p.sealed != nil,
 	)
 
 	var mask api.EventMask
 	mask.Set(api.Event_CREATE_CONTAINER)
+	if p.sealed != nil {
+		if p.cfg.Runtime.RequireFailClosed && !strings.Contains(version, FailClosedRuntimeMarker) {
+			return 0, fmt.Errorf("sealed mode requires a containerd built with the NRI fail-closed fix (version containing %q), got %s %s", FailClosedRuntimeMarker, runtime, version)
+		}
+		mask.Set(api.Event_POST_CREATE_CONTAINER)
+		mask.Set(api.Event_START_CONTAINER)
+		mask.Set(api.Event_REMOVE_CONTAINER)
+	}
 	if p.inventory != nil {
 		// The inventory needs eviction on stop to stay correct across pod churn,
 		// and the pod-sandbox lifecycle to keep its sandbox set (the /sandbox
@@ -222,6 +258,7 @@ func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	if p.inventory != nil {
 		p.inventory.remove(ctr.GetId())
 	}
+	p.verdicts.drop(ctr.GetId())
 	return nil
 }
 
@@ -582,6 +619,10 @@ func (p *plugin) captureExempt(ctx context.Context, pods []*api.PodSandbox, ctrs
 func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
 	cfg := p.cfg
 
+	if p.sealed != nil {
+		return p.sealedSynchronize(pods, ctrs)
+	}
+
 	// Seed the inventory's sandbox set now, even when the container check is
 	// deferred: sandbox existence needs no allowlist.
 	if p.inventory != nil {
@@ -718,6 +759,15 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	cfg := p.cfg
 	imageRef := ctr.GetAnnotations()[annotationImageName]
+
+	// Sealed admission needs no readiness: the index is loaded before the
+	// stub registers, and there is no audit mode to pass through.
+	if p.sealed != nil {
+		if err := p.sealedCreate(ctx, pod, ctr); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
+	}
 
 	if !p.Ready() {
 		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {

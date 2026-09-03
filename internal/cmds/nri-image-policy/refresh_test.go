@@ -144,7 +144,7 @@ func TestStartupSourceMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := startupSourceMode(tt.cfg); got != tt.want {
+			if got := startupSourceMode(tt.cfg, nil); got != tt.want {
 				t.Fatalf("startupSourceMode() = %q, want %q", got, tt.want)
 			}
 		})

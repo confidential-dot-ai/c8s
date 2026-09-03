@@ -382,12 +382,12 @@ func TestLintSealed(t *testing.T) {
 	complete := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},` +
 		`"mounts":{"policy":"exact","destinations":["/etc/hosts"],"rules":{"/etc/hosts":{"source":"platform"}}},` +
 		`"env":{"policy":"exact","names":["PATH"],"values":{"PATH":{"value":"/bin"}}}}`
-	al := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{"web":{"containers":[`+complete+`]}}}`)
+	al := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","digests":{},"workloads":{"web":{"containers":[`+complete+`]}}}`)
 	canonical, err := al.Canonical()
 	if err != nil {
 		t.Fatal(err)
 	}
-	incomplete := `{"schema":"c8s.allowlist/v1","digests":null,"workloads":{"web":{"initContainers":null,"containers":[{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"},"env":{"policy":"any"}}]}}}`
+	incomplete := `{"schema":"c8s.allowlist/v1","digests":{},"workloads":{"web":{"initContainers":null,"containers":[{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"},"env":{"policy":"any"}}]}}}`
 	dynamicWarning := "only the in-guest policy-monitor observes"
 	for _, tc := range []struct {
 		name      string

@@ -36,7 +36,8 @@ same.
 --sealed lints a static-allowlist bundle member: the file must be byte-equal
 to its canonical form, carry no floor digests, and give every container a
 complete rule (exact argv, env values, mount sources; a review for every pvc
-mount and every privileged entry). Every shortfall is an error.`,
+mount, every nodeState mount and every privileged entry). Every shortfall is
+an error.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := readFileOrStdin(cmd, args[0])

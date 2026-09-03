@@ -15,6 +15,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/crane"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -94,10 +95,24 @@ type clusterFacts struct {
 	platformDir string
 }
 
-// platformSource reports whether a host path is the node's socket directory
-// or lies under it.
-func (c clusterFacts) platformSource(hostPath string) bool {
-	return c.platformDir != "" && (hostPath == c.platformDir || strings.HasPrefix(hostPath, c.platformDir+"/"))
+// hostPathClass is the rule class of a hostPath volume as the runtime binds
+// it: platform for the node's socket directory, nodeState for the measured
+// image's state directory (policybundle.NodeStateDir: the policy dir and the
+// attestation socket), hostPath for everything else. nodeState is kept apart
+// from platform so the platform rule every container carries for /etc/hosts
+// cannot admit the attestation socket bound there.
+func (c clusterFacts) hostPathClass(hostPath string) string {
+	switch {
+	case underDir(hostPath, c.platformDir):
+		return pkgallowlist.SourcePlatform
+	case underDir(hostPath, policybundle.NodeStateDir):
+		return pkgallowlist.SourceNodeState
+	}
+	return pkgallowlist.SourceHostPath
+}
+
+func underDir(p, dir string) bool {
+	return dir != "" && (p == dir || strings.HasPrefix(p, dir+"/"))
 }
 
 // hostPathAsBound is the source the runtime records for a hostPath volume:
@@ -392,11 +407,14 @@ func mountRules(pod *corev1.Pod, c *corev1.Container, priv *pkgallowlist.Privile
 			if source != v.HostPath.Path {
 				rep.notef("pod %s/%s container %s: hostPath %q is bound as %q", pod.Namespace, pod.Name, c.Name, v.HostPath.Path, source)
 			}
-			if cluster.platformSource(source) {
-				rules[dest] = pkgallowlist.MountRule{Source: pkgallowlist.SourcePlatform}
-				continue
+			// A nodeState review stays empty here, like a pvc's; the sealed
+			// findings in the report ask for it.
+			switch class := cluster.hostPathClass(source); class {
+			case pkgallowlist.SourceHostPath:
+				hostPath(dest, source)
+			default:
+				rules[dest] = pkgallowlist.MountRule{Source: class}
 			}
-			hostPath(dest, source)
 		case v.ConfigMap != nil, v.Secret != nil, v.Projected != nil, v.DownwardAPI != nil, v.CSI != nil:
 			hostPath(dest, pkgallowlist.KubeletVolumesRoot)
 		default:

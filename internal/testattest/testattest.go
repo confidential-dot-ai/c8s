@@ -20,9 +20,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -52,6 +56,18 @@ func PassingVerdict(launchDigest string) Verdict {
 		ReportDataMatch: &match,
 		Claims:          types.Claims{LaunchDigest: launchDigest},
 	}
+}
+
+// TDXVerdict is PassingVerdict for TDX evidence: mrtd is the launch digest
+// and each register is reported as the real api does, hex under
+// claims.platform_data rtmr_<index>.
+func TDXVerdict(mrtd string, rtmrs map[int]string) Verdict {
+	v := PassingVerdict(mrtd)
+	v.Claims.PlatformData = map[string]any{}
+	for i, reg := range rtmrs {
+		v.Claims.PlatformData[fmt.Sprintf("rtmr_%d", i)] = reg
+	}
+	return v
 }
 
 // ErrorReply is an error response from the attestation-api. A non-empty Code
@@ -92,12 +108,46 @@ type Stub struct {
 // New starts a stub attestation-api, closed at test cleanup.
 func New(t testing.TB) *Stub {
 	t.Helper()
+	s := newStub()
+	s.Start()
+	t.Cleanup(s.Close)
+	return s
+}
+
+// NewUnix starts a stub attestation-api on a unix socket, the transport
+// callers that only accept a node-local verifier dial, and returns its
+// unix:// URL. The socket is owned by the test process and not
+// world-writable, as attestationclient requires. It lives under a short temp
+// path: a unix path is capped at 108 bytes and t.TempDir() names can exceed
+// it.
+func NewUnix(t testing.TB) (*Stub, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "testattest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "attestation-api.sock")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := newStub()
+	s.Listener = l
+	s.Start()
+	t.Cleanup(s.Close)
+	return s, "unix://" + socket
+}
+
+func newStub() *Stub {
 	s := &Stub{verdict: PassingVerdict(""), platform: types.PlatformSnp}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /attest", s.handleAttest)
 	mux.HandleFunc("POST /verify", s.handleVerify)
-	s.Server = httptest.NewServer(mux)
-	t.Cleanup(s.Close)
+	s.Server = httptest.NewUnstartedServer(mux)
 	return s
 }
 

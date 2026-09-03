@@ -154,7 +154,7 @@ func (p MountPolicy) admitsSources(mounts map[string]MountSource, priv *Privileg
 
 func reviewedClass(class string) bool {
 	switch class {
-	case SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform:
+	case SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceNodeState:
 		return true
 	}
 	return false
@@ -220,10 +220,24 @@ func SealedFindings(doc []byte) ([]string, error) {
 	return append(out, al.sealedFindings()...), nil
 }
 
+// storeForm is why a sealed document spells its empty maps as {}: CDS seeds
+// its store from the member and stamps every leaf with the digest of the
+// document the store serves back, which always carries "digests":{} and a
+// "workloads" object. A null or absent map canonicalizes to null, so it
+// would be measured under one digest and stamped under another, and no
+// verifier holding the bundle could match the stamp.
+const storeForm = "CDS stamps leaves with the digest of the document its store serves, which carries both as objects; `c8s allowlist render --sealed` writes that form"
+
 func (a *Allowlist) sealedFindings() []string {
 	var out []string
 	if len(a.Digests) > 0 {
 		out = append(out, "digests must be empty: a sealed document admits nothing by digest alone")
+	}
+	if a.Digests == nil {
+		out = append(out, `"digests" must be {} (not null or absent): `+storeForm)
+	}
+	if a.Workloads == nil {
+		out = append(out, `"workloads" must be an object (not null or absent): `+storeForm)
 	}
 	names := make([]string, 0, len(a.Workloads))
 	for name := range a.Workloads {
@@ -275,6 +289,9 @@ func (c Container) sealedFindings(where string) []string {
 			r := c.Mounts.Rules[d]
 			if r.Source == SourcePVC && r.Review == "" {
 				add("mount %q is a pvc without a review; say why its contents cannot steer the workload", d)
+			}
+			if r.Source == SourceNodeState && r.Review == "" {
+				add("mount %q is a nodeState bind without a review; say why this entry may reach the node's attestation socket or policy directory", d)
 			}
 			if r.Source == SourceHostPath && c.Privileges == nil {
 				add("mount %q is a hostPath on an unprivileged entry; list its host source under privileges.hostPaths", d)

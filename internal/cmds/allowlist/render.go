@@ -51,8 +51,8 @@ operator's own injection, so c8s-cert and its siblings get rules too.
 
 The canonical document goes to stdout; a review report listing every
 executable, argv, env rule, mount rule and privilege goes to stderr or
---report. Reviews (privileged entries, pvc mounts) start empty: complete them,
-then run 'c8s allowlist lint --sealed'.`,
+--report. Reviews (privileged entries, pvc and nodeState mounts) start empty:
+complete them, then run 'c8s allowlist lint --sealed'.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !sealed {

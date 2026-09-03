@@ -82,7 +82,7 @@ func TestSystemFloorWorkloads_UnprivilegedNeedsCompleteRule(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			doc, err := (&Allowlist{Schema: Schema, Workloads: ws}).Canonical()
+			doc, err := (&Allowlist{Schema: Schema, Digests: map[string]string{}, Workloads: ws}).Canonical()
 			if err != nil {
 				t.Fatal(err)
 			}

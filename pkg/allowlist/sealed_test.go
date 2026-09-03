@@ -15,10 +15,11 @@ func sealedContainer(t *testing.T) Container {
 		Command: ArgvPolicy{Policy: PolicyExact, Argv: []string{"/app"}},
 		Args:    ArgvPolicy{Policy: PolicyExact, Argv: []string{"serve"}},
 		Mounts: MountPolicy{Policy: PolicyExact,
-			Destinations: []string{"/etc/hosts", "/data", "/var/run/secrets/kubernetes.io/serviceaccount"},
+			Destinations: []string{"/etc/hosts", "/data", "/run/confai", "/var/run/secrets/kubernetes.io/serviceaccount"},
 			Rules: map[string]MountRule{
-				"/etc/hosts": {Source: SourcePlatform},
-				"/data":      {Source: SourcePVC, Review: "opaque blob store; the app never executes its contents"},
+				"/etc/hosts":  {Source: SourcePlatform},
+				"/data":       {Source: SourcePVC, Review: "opaque blob store; the app never executes its contents"},
+				"/run/confai": {Source: SourceNodeState, Review: "c8s sidecar; attests over the node socket"},
 				"/var/run/secrets/kubernetes.io/serviceaccount": {Source: SourceServiceAccountToken},
 			}},
 		Env: EnvPolicy{Policy: PolicyExact, Names: []string{"PATH", "HOSTNAME"},
@@ -36,8 +37,9 @@ func sealedObservation() Observation {
 		Argv:   []string{"/app", "serve"},
 		Env:    map[string]string{"PATH": "/bin", "HOSTNAME": "web-0"},
 		Mounts: map[string]MountSource{
-			"/etc/hosts": {Path: "/var/lib/kubelet/pods/u/etc-hosts", Class: SourcePlatform},
-			"/data":      {Path: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~csi/pvc-1/mount", Class: SourcePVC},
+			"/etc/hosts":  {Path: "/var/lib/kubelet/pods/u/etc-hosts", Class: SourcePlatform},
+			"/data":       {Path: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~csi/pvc-1/mount", Class: SourcePVC},
+			"/run/confai": {Path: "/run/confai", Class: SourceNodeState},
 			"/var/run/secrets/kubernetes.io/serviceaccount": {Path: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~projected/kube-api-access-x", Class: SourceServiceAccountToken},
 		},
 		Sources: map[string]string{FromPodName: "web-0"},
@@ -63,6 +65,15 @@ func TestIndexAdmit(t *testing.T) {
 		{"undeclared env name", func(o *Observation) { o.Env["LD_PRELOAD"] = "/x.so" }, "", false},
 		{"undeclared mount", func(o *Observation) { o.Mounts["/x"] = MountSource{Path: "/tmp/x", Class: SourceEmptyDir} }, "", false},
 		{"mount class drift", func(o *Observation) { o.Mounts["/data"] = MountSource{Path: "/etc", Class: SourceHostPath} }, "", false},
+		{"node state bind where a platform rule stands", func(o *Observation) {
+			o.Mounts["/etc/hosts"] = MountSource{Path: "/run/confai/attestation-api.sock", Class: SourceNodeState}
+		}, "", false},
+		{"platform bind where a nodeState rule stands", func(o *Observation) {
+			o.Mounts["/run/confai"] = MountSource{Path: "/var/lib/kubelet/pods/u/etc-hosts", Class: SourcePlatform}
+		}, "", false},
+		{"hostPath bind where a nodeState rule stands", func(o *Observation) {
+			o.Mounts["/run/confai"] = MountSource{Path: "/run/confai-evil", Class: SourceHostPath}
+		}, "", false},
 		{"configMap at a declared destination", func(o *Observation) {
 			o.Mounts["/etc/hosts"] = MountSource{Path: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/c", Class: "configMap"}
 		}, "", false},
@@ -285,7 +296,7 @@ func TestAdmitsContainerIgnoresSealedFields(t *testing.T) {
 
 func sealedDoc(t *testing.T, workloads string) []byte {
 	t.Helper()
-	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{`+workloads+`}}`)
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{},"workloads":{`+workloads+`}}`)
 	b, err := al.Canonical()
 	if err != nil {
 		t.Fatal(err)
@@ -305,13 +316,18 @@ func TestLintSealed(t *testing.T) {
 		{"complete unprivileged entry", sealedDoc(t, `"w":{"containers":[`+complete+`]}`), ""},
 		{"privileged entry with review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"privileges":{"privileged":true,"review":"node TCB"}}]}`), ""},
 		{"non-canonical bytes", append(sealedDoc(t, `"w":{"containers":[`+complete+`]}`), '\n'), "not its canonical form"},
-		{"floor digest", []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestC + `":"x"},"workloads":null}`), "digests must be empty"},
+		{"floor digest", []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestC + `":"x"},"workloads":{}}`), "digests must be empty"},
+		{"digests null", []byte(`{"schema":"c8s.allowlist/v1","digests":null,"workloads":{}}`), `"digests" must be {}`},
+		{"workloads null", []byte(`{"schema":"c8s.allowlist/v1","digests":{},"workloads":null}`), `"workloads" must be an object`},
+		{"store form with no entries", []byte(`{"schema":"c8s.allowlist/v1","digests":{},"workloads":{}}`), ""},
 		{"command any", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "command must be exact"},
 		{"args any", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"any"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "args must be exact or deny"},
 		{"mounts any", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "mounts must be exact"},
 		{"env any", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}}}]}`), "env must be exact"},
 		{"env without values", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"emptyDir"}}},"env":{"policy":"exact","names":["A"]}}]}`), "carry no values"},
 		{"mounts without rules", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"]},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "carry no rules"},
+		{"nodeState with review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/run/confai"],"rules":{"/run/confai":{"source":"nodeState","review":"c8s sidecar"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), ""},
+		{"nodeState without review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/run/confai"],"rules":{"/run/confai":{"source":"nodeState"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "nodeState bind without a review"},
 		{"pvc without review", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"pvc"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "pvc without a review"},
 		{"hostPath rule on unprivileged entry", sealedDoc(t, `"w":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/a"]},"args":{"policy":"deny"},"mounts":{"policy":"exact","destinations":["/a"],"rules":{"/a":{"source":"hostPath"}}},"env":{"policy":"exact","names":["A"],"values":{"A":{"value":"x"}}}}]}`), "hostPath on an unprivileged entry"},
 		{"privileged without review", sealedDoc(t, `"w":{"initContainers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"privileges":{"privileged":true}}]}`), "privileges.review is empty"},

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type config struct {
 	Plugin         pluginConfig         `yaml:"plugin"`
 	Allowlist      allowlistConfig      `yaml:"allowlist"`
 	Containerd     containerdConfig     `yaml:"containerd"`
+	Runtime        runtimeConfig        `yaml:"runtime"`
 	Policy         policyConfig         `yaml:"policy"`
 	Logging        loggingConfig        `yaml:"logging"`
 	WorkloadClaims workloadClaimsConfig `yaml:"workload_claims"`
@@ -66,7 +68,27 @@ type workloadClaimsConfig struct {
 type allowlistConfig struct {
 	AlwaysAllow map[string]string `yaml:"always_allow"`
 	Pull        pullConfig        `yaml:"pull"`
+	// PolicyDir is the tmpfs directory c8s-policy-measure fills at boot
+	// (docs/static-allowlist.md). Set, the plugin reads <PolicyDir>/mode
+	// and refuses to start unless it says static or dynamic; static seals
+	// the plugin to the bundle in that directory. Empty keeps the pull and
+	// always_allow behaviour with no mode check, which is what a
+	// chart-installed plugin on a host without the measured unit needs.
+	PolicyDir string `yaml:"policy_dir"`
 }
+
+// runtimeConfig describes what the plugin requires of containerd.
+type runtimeConfig struct {
+	// RequireFailClosed, in sealed mode, refuses a containerd whose version
+	// lacks FailClosedRuntimeMarker: without the nri fix a request that times
+	// out is admitted, so a sealed node needs the patched build.
+	RequireFailClosed bool `yaml:"require_fail_closed"`
+}
+
+// FailClosedRuntimeMarker is the build-metadata suffix a containerd built with
+// node-guest-image/c8s/patches/containerd-nri-fail-closed.patch reports as its
+// version. Configure compares the runtime version against it in sealed mode.
+const FailClosedRuntimeMarker = "+c8s.nri-failclosed"
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
@@ -264,6 +286,12 @@ func (c *config) Validate() error {
 	}
 	if len(c.Policy.ExemptNamespaces) > 0 && c.Policy.ExemptSnapshotPath == "" {
 		return fmt.Errorf("policy.exempt_namespaces requires policy.exempt_snapshot_path: the captured digest set must persist across restarts")
+	}
+	if d := c.Allowlist.PolicyDir; d != "" && !path.IsAbs(d) {
+		return fmt.Errorf("allowlist.policy_dir %q must be an absolute path", d)
+	}
+	if c.Runtime.RequireFailClosed && c.Allowlist.PolicyDir == "" {
+		return fmt.Errorf("runtime.require_fail_closed needs allowlist.policy_dir: the check runs in sealed mode only")
 	}
 	return validateLabelRules(c.Policy.LabelRules)
 }

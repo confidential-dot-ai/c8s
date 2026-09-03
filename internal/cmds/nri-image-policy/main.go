@@ -1,7 +1,10 @@
 // Package nriimagepolicy is an NRI plugin that validates container images
 // against a digest allowlist. Every plugin polls a remote CDS service (pull
 // mode) for the allowlist, with a bootstrap file on disk (always_allow) as the
-// cold-boot baseline.
+// cold-boot baseline. On a static boot (allowlist.policy_dir holds
+// mode=static) it is sealed instead: it admits only what the measured policy
+// bundle describes, pulls nothing, and powers the node off on any fatal
+// condition (sealed.go, sealed_plugin.go).
 package nriimagepolicy
 
 import (
@@ -28,7 +31,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -45,7 +50,10 @@ var (
 	errPluginDied                  = errors.New("NRI plugin died during allowlist init")
 )
 
-func startupSourceMode(cfg *config) string {
+func startupSourceMode(cfg *config, sealed *sealedPolicy) string {
+	if sealed != nil {
+		return "sealed"
+	}
 	if cfg.PullEnabled() {
 		return "pull"
 	}
@@ -89,10 +97,16 @@ func Run(args []string) error {
 	}
 	slog.SetDefault(logger)
 
+	sealed, err := openPolicyMode(cfg, logger)
+	if err != nil {
+		return err
+	}
+	pull := cfg.PullEnabled() && sealed == nil
+
 	logger.Info("starting nri-image-policy",
 		"version", version.Version,
 		"config", *configPath,
-		"mode", startupSourceMode(cfg),
+		"mode", startupSourceMode(cfg, sealed),
 	)
 
 	logger.Debug("initializing containerd resolver",
@@ -107,11 +121,22 @@ func Run(args []string) error {
 
 	auditLogger := audit.NewLogger()
 
+	// A sealed store starts empty and holds the bundle alone: no floor, no
+	// pull, so nothing the control plane serves can enter the index.
 	bootstrap := alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow)
 	store := newPolicyStore(bootstrap)
+	var pins ratls.Pins
+	if sealed != nil {
+		bootstrap = nil
+		store = newPolicyStore(nil)
+		store.apply(sealed.doc, 0)
+		protectFromOOM(logger)
+	} else if pins, err = configuredPins(cfg.Allowlist.Pull); err != nil {
+		return err
+	}
 
 	var wlClient allowlistclient.Client
-	if cfg.PullEnabled() {
+	if pull {
 		logger.Info("initializing allowlist client", "url", cfg.Allowlist.Pull.URL)
 		httpClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
 		if err != nil {
@@ -120,7 +145,7 @@ func Run(args []string) error {
 		wlClient = allowlistclient.NewClientWithHTTP(cfg.Allowlist.Pull.URL, httpClient)
 	}
 
-	plugin, err := newPlugin(cfg, resolver, store, auditLogger, logger)
+	plugin, err := newPlugin(cfg, resolver, store, sealed, auditLogger, logger)
 	if err != nil {
 		return fmt.Errorf("create plugin: %w", err)
 	}
@@ -157,8 +182,18 @@ func Run(args []string) error {
 		pluginErrCh <- plugin.Run(ctx)
 	}()
 
+	// The stub is registering by now. The own-quote round trip can outlast
+	// containerd's plugin_registration_timeout (10s on the node image), and
+	// a plugin that misses registration is killed and dropped, never powered
+	// off. Admission needs no pins; only the digests endpoint waits.
+	if sealed != nil {
+		if pins, err = pinOwnTuple(ctx, cfg.Allowlist.Pull.AttestationApiURL, sealed.rtmr3); err != nil {
+			return sealedFatal(logger, fmt.Errorf("pin CDS to the node's own tuple: %w", err))
+		}
+	}
+
 	if plugin.inventory != nil {
-		signer, err := sandboxTokenSigner(cfg, logger)
+		signer, err := sandboxTokenSigner(cfg, logger, pull || sealed != nil)
 		if err != nil {
 			return err
 		}
@@ -170,15 +205,19 @@ func Run(args []string) error {
 		// plugin (required_plugins), so exiting takes container creation down
 		// node-wide. A missing digests endpoint only degrades issuance — CDS
 		// refuses tokens it cannot check — which is the cheaper failure.
+		// Sealed mode has no cheaper failure: the node is either whole or off.
 		if signer != nil {
-			if err := startSandboxDigests(ctx, logger, cfg, plugin.inventory, signer); err != nil {
+			if err := startSandboxDigests(ctx, logger, cfg, plugin.inventory, signer, pins); err != nil {
+				if sealed != nil {
+					return sealedFatal(logger, fmt.Errorf("start sandbox-digests endpoint: %w", err))
+				}
 				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
 			}
 		}
 	}
 
 	var initialETag string
-	if cfg.PullEnabled() {
+	if pull {
 		initialETag, err = pullInitial(ctx, pullArgs{
 			client:      wlClient,
 			store:       store,
@@ -214,7 +253,7 @@ func Run(args []string) error {
 	plugin.SetReady()
 	logger.Info("plugin ready")
 
-	if cfg.PullEnabled() {
+	if pull {
 		go runPullLoop(ctx, pullLoopArgs{
 			client:   wlClient,
 			store:    store,
@@ -241,22 +280,82 @@ func Run(args []string) error {
 	return nil
 }
 
+// openPolicyMode reads the boot mode c8s-policy-measure recorded when the
+// config names a policy dir. static returns the sealed policy the register
+// commits to; dynamic proves the register carries the dynamic chain (on TDX,
+// the only platform with a register) and returns nil. A missing or foreign
+// mode, a register that disagrees with the mode, and a sealed load that
+// fails all power the node off: with a policy dir configured, the measured
+// unit wrote the mode before containerd started, so a disagreement now is
+// tampering, not a misconfiguration.
+func openPolicyMode(cfg *config, logger *slog.Logger) (*sealedPolicy, error) {
+	dir := cfg.Allowlist.PolicyDir
+	if dir == "" {
+		return nil, nil
+	}
+	state, err := policybundle.ReadDir(dir)
+	if err != nil {
+		return nil, sealedFatal(logger, fmt.Errorf("policy state in %s: %w", dir, err))
+	}
+	if state.Mode == policybundle.DynamicMode {
+		if cfg.NormalizedPlatform() == ratls.NormalizePlatform(string(types.PlatformTdx)) {
+			if err := checkDynamicRegister(operatorPubkeyPath); err != nil {
+				return nil, sealedFatal(logger, fmt.Errorf("dynamic boot: %w", err))
+			}
+		}
+		return nil, nil
+	}
+	sealed, err := loadSealed(state.Bundle)
+	if err != nil {
+		return nil, sealedFatal(logger, fmt.Errorf("sealed load from %s: %w", dir, err))
+	}
+	sealed.hostIP, _ = nodeIP(cfg)
+	host, err := os.Hostname()
+	if err != nil {
+		return nil, sealedFatal(logger, fmt.Errorf("read hostname: %w", err))
+	}
+	sealed.nodeName = kubeletNodeName(host)
+	logger.Info("sealed to the measured policy bundle", "policy_dir", dir, "rtmr3", fmt.Sprintf("%x", sealed.rtmr3[:]),
+		"workloads", len(sealed.doc.Workloads), "host_ip", sealed.hostIP, "node_name", sealed.nodeName)
+	return sealed, nil
+}
+
+// sealedFatal powers the node off for a startup failure in sealed mode and
+// returns the error for the exit path, should the power-off not land.
+func sealedFatal(logger *slog.Logger, err error) error {
+	logger.Error("sealed image policy: fatal at startup, powering the node off", "error", err)
+	if perr := poweroff(); perr != nil {
+		logger.Error("power-off failed", "error", perr)
+	}
+	return err
+}
+
+// configuredPins parses the CDS pins the config carries; empty pins accept
+// any attested CDS, which every dynamic boot starts from.
+func configuredPins(cfg pullConfig) (ratls.Pins, error) {
+	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS measurements: %w", err)
+	}
+	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS RTMR pins: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+}
+
 // allowlistPullHTTPClient builds the RA-TLS client for the CDS pull. The pull
 // URL is always https (enforced by config.Validate), so this always verifies
 // the CDS attestation handshake.
 func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	pins, err := configuredPins(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parse CDS measurements: %w", err)
+		return nil, err
 	}
-	if len(measurements) == 0 {
+	if len(pins.Measurements) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("parse CDS RTMR pins: %w", err)
-	}
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
@@ -493,11 +592,12 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 
 // sandboxTokenSigner builds the inventory's sandbox-token signer. The key needs
 // no credential of its own: CDS reads it from this inventory's digests endpoint
-// on a privileged port, which is what establishes whose key it is. Without pull
-// config there is no CDS in the picture at all, so tokens are disabled and
-// get-cert issues without a sandbox ID.
-func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.SandboxTokenSigner, error) {
-	if !cfg.PullEnabled() {
+// on a privileged port, which is what establishes whose key it is. enabled is
+// false when there is no CDS in the picture at all (no pull config on a
+// dynamic boot); tokens are then disabled and get-cert issues without a
+// sandbox ID.
+func sandboxTokenSigner(cfg *config, logger *slog.Logger, enabled bool) (*workloadclaims.SandboxTokenSigner, error) {
+	if !enabled {
 		logger.Warn("admission inventory has no CDS pull config; sandbox tokens disabled")
 		return nil, nil
 	}
@@ -526,9 +626,7 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 	// can only fail closed, never redirect.
 	host := cfg.WorkloadClaims.AdvertiseHost
 	if host == "" {
-		if b, err := os.ReadFile(filepath.Join(cfg.WorkloadClaims.SocketDir, NodeIPFile)); err == nil {
-			host = strings.TrimSpace(string(b))
-		}
+		host, _ = nodeIP(cfg)
 	}
 	if host == "" {
 		host = strings.TrimSpace(os.Getenv("C8S_SANDBOX_DIGESTS_ADVERTISE_HOST"))
@@ -540,18 +638,11 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 }
 
 // startSandboxDigests serves the CDS-facing digests endpoint over
-// mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
-func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
-	if err != nil {
-		return fmt.Errorf("parse CDS measurements: %w", err)
-	}
-	if len(measurements) == 0 {
+// mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity"), accepting
+// only a CDS peer matching pins.
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, pins ratls.Pins) error {
+	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
-	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.Allowlist.Pull.CDSRTMRs)
-	if err != nil {
-		return fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
 	// The attest func is platform-agnostic despite its name (see its doc
@@ -559,7 +650,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs})
+		attestationApiURL, pins)
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).
