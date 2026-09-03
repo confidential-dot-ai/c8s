@@ -6,30 +6,37 @@ Documentation=https://github.com/confidential-dot-ai/c8s
 # not spin. 5 tries in 5 min, then give up until the next boot.
 StartLimitIntervalSec=300
 StartLimitBurst=5
-# Needs the RKE2 client-CA (to sign operator certs) and the attestation-api
-# (to fetch the RA-TLS serving cert's quote from :8400). rke2-server
-# creates /var/lib/rancher/rke2/server/tls/client-ca.* only once it has
-# initialised, so we order after it and gate on the key existing (the Exec
-# startpre below), rather than racing a half-initialised control plane.
-After=network-online.target rke2-role.service rke2-server.service attestation-api.service
+# Needs the RKE2 client-CA (to sign operator certs), the attestation-api
+# (to fetch the RA-TLS serving cert's quote from :8400) and the policy mode
+# c8s-policy-measure wrote (static or dynamic). rke2-server creates
+# /var/lib/rancher/rke2/server/tls/client-ca.* only once it has initialised,
+# so we order after it and gate on the key existing (the Exec startpre
+# below), rather than racing a half-initialised control plane.
+After=network-online.target rke2-role.service rke2-server.service attestation-api.service c8s-policy-measure.service
 Wants=network-online.target
-Requires=rke2-role.service attestation-api.service
-# Only run on operator boots. A VM launched without --operator-key has no
-# opkeydata disk; the condition makes systemd SKIP the unit (not fail it), so
-# there's no restart-loop on non-operator nodes. The launcher attaches the
-# disk with ISO label "opkeydata".
-ConditionPathExists=/dev/disk/by-label/opkeydata
+Requires=rke2-role.service attestation-api.service c8s-policy-measure.service
+# Only run on operator or static boots. A VM launched with neither an
+# operator key (ISO label "opkeydata") nor a policy bundle (ISO label
+# "policydata") has nothing to release; the `|` conditions OR each other,
+# and make systemd SKIP the unit (not fail it), so there's no restart-loop
+# on such nodes. Which of the two applies is decided by the policy mode, not
+# by the disk: c8s-policy-measure refuses a boot with both.
+ConditionPathExists=|/dev/disk/by-label/opkeydata
+ConditionPathExists=|/dev/disk/by-label/policydata
 # Server role only: agent nodes have no client CA to sign with.
 ConditionPathExists=/run/confos/role-server
 
 [Service]
 Type=simple
-# The operator key is bound into the platform's launch identity (TDX: the
-# initrd extends its hash into RTMR[3]; SNP: the launcher commits its sha256
-# as HOSTDATA); the service verifies the on-disk pubkey against that binding
-# via the local attestation-api and refuses (exits non-zero) if it was
-# substituted.
-# Non-operator boots never reach here (ConditionPathExists skips the unit).
+# Dynamic mode: the operator key is bound into the platform's launch
+# identity (TDX: the initrd extends its hash into RTMR[3]; SNP: the launcher
+# commits its sha256 as HOSTDATA); the service verifies the on-disk pubkey
+# against that binding via the local attestation-api and refuses (exits
+# non-zero) if it was substituted. Static mode: there is no operator key and
+# no token check; RTMR[3] must equal the bundle-derived value recomputed
+# from /run/confai/policy, and any attested caller gets the credential
+# (cluster-admin is the adversary the static design already assumes).
+# Keyless dynamic boots never reach here (ConditionPathExists skips the unit).
 # Waits bounded (10 min) rather than failing fast: on a slow first boot the
 # CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart
 # would exhaust StartLimitBurst in under a minute and give up until reboot.
@@ -50,16 +57,21 @@ ExecStart=/usr/local/bin/c8s cred-release \
     --listen :8443 \
     --attestation-api-url http://127.0.0.1:8400 \
     --platform=${CRED_PLATFORM} \
+    --policy-dir /run/confai/policy \
     --cert-ttl 1h \
     --cert-org c8s:node-operators \
     --cert-cn operator
 Restart=on-failure
 RestartSec=10
-# Reads the initrd-staged operator pubkey (/etc/confai), the RKE2 client-CA
-# key, and (ExecStartPre only) the RKE2 admin kubeconfig. Writes only the
-# kubectl cache under /run. Keep the rest of the FS read-only.
+# Reads the initrd-staged operator pubkey (/etc/confai), the policy mode and
+# bundle (/run/confai/policy), the RKE2 client-CA key, and (ExecStartPre
+# only) the RKE2 admin kubeconfig. Writes only the kubectl cache under /run.
+# Keep the rest of the FS read-only. /etc/confai exists only on an opkeydata
+# boot (the initrd creates it while staging the pubkey); the `-` prefix
+# keeps a static boot, which has no operator key, from failing at namespace
+# setup before the command runs.
 ProtectSystem=strict
-ReadOnlyPaths=/etc/confai /var/lib/rancher/rke2/server/tls
+ReadOnlyPaths=-/etc/confai /run/confai/policy /var/lib/rancher/rke2/server/tls
 ReadWritePaths=/run
 ProtectHome=yes
 NoNewPrivileges=yes

@@ -19,6 +19,7 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 		{"listen", ":8443"},
 		{"attestation-api-url", "http://127.0.0.1:8400"},
 		{"platform", ""},
+		{"policy-dir", "/run/confai/policy"},
 		{"client-ca-cert", defaultClientCACert},
 		{"client-ca-key", defaultClientCAKey},
 		{"server-ca-cert", defaultServerCACert},

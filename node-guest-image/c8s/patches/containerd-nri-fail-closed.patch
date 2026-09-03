@@ -1,0 +1,139 @@
+containerd/nri v0.12.2: fail closed on a required plugin's fatal error.
+
+Upstream registers every plugin with the validators before it replies and
+turns a fatal reply error (request timeout, connection loss) into a nil
+reply, so the request that timed out is admitted while later ones are
+refused. Closed plugins are then dropped from the plugin list, so a later
+PostCreateContainer or StartContainer for a container the plugin admitted
+runs with no required plugin and no error. This registers a plugin only
+after a successful reply, makes a globally required plugin's fatal error
+the error of CreateContainer, PostCreateContainer and StartContainer, and
+fails PostCreateContainer and StartContainer while a globally required
+plugin is absent. See README.md in this directory.
+
+--- a/pkg/adaptation/adaptation.go
++++ b/pkg/adaptation/adaptation.go
+@@ -72,6 +72,7 @@
+ 	listener    net.Listener
+ 	plugins     []*plugin
+ 	validators  []*plugin
++	required    map[string]struct{}
+ 	builtin     []*builtin.BuiltinPlugin
+ 	syncLock    sync.RWMutex
+ 	wasmService *api.PluginPlugin
+@@ -154,6 +155,12 @@
+ 	return func(r *Adaptation) error {
+ 		if plugin := validator.GetDefaultValidator(cfg); plugin != nil {
+ 			r.builtin = append([]*builtin.BuiltinPlugin{plugin}, r.builtin...)
++			if r.required == nil {
++				r.required = map[string]struct{}{}
++			}
++			for _, name := range cfg.RequiredPlugins {
++				r.required[name] = struct{}{}
++			}
+ 		}
+ 		return nil
+ 	}
+@@ -339,13 +346,19 @@
+ 	}
+ 
+ 	for _, plugin := range r.plugins {
+-		if validate != nil {
+-			validate.AddPlugin(plugin.base, plugin.idx)
+-		}
+ 		rpl, err := plugin.createContainer(ctx, req)
+ 		if err != nil {
+ 			return nil, err
+ 		}
++		if err := r.requiredPluginFailed(plugin, "CreateContainer"); err != nil {
++			return nil, err
++		}
++		// Register the plugin with the validators only after it replied: a
++		// plugin closed on a fatal error (request timeout, connection loss)
++		// did not process this request and must not count as present.
++		if validate != nil && !plugin.isClosed() {
++			validate.AddPlugin(plugin.base, plugin.idx)
++		}
+ 		err = result.apply(rpl, plugin.name())
+ 		if err != nil {
+ 			return nil, err
+@@ -361,11 +374,17 @@
+ 	defer r.Unlock()
+ 	defer r.removeClosedPlugins()
+ 
++	if err := r.requiredPluginMissing("PostCreateContainer"); err != nil {
++		return err
++	}
+ 	for _, plugin := range r.plugins {
+ 		_, err := plugin.postCreateContainer(ctx, req)
+ 		if err != nil {
+ 			return err
+ 		}
++		if err := r.requiredPluginFailed(plugin, "PostCreateContainer"); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	return nil
+@@ -377,11 +396,17 @@
+ 	defer r.Unlock()
+ 	defer r.removeClosedPlugins()
+ 
++	if err := r.requiredPluginMissing("StartContainer"); err != nil {
++		return err
++	}
+ 	for _, plugin := range r.plugins {
+ 		_, err := plugin.startContainer(ctx, req)
+ 		if err != nil {
+ 			return err
+ 		}
++		if err := r.requiredPluginFailed(plugin, "StartContainer"); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	return nil
+@@ -482,6 +507,43 @@
+ 	return r.updateFn(ctx, req)
+ }
+ 
++// requiredPluginFailed reports a globally required plugin that was closed
++// while handling op (a fatal error: request timeout, connection loss). The
++// plugin wrapper turns such an error into a nil reply so the request goes
++// on without the plugin; for a required plugin that silence must fail the
++// request instead, or the container the plugin never saw is admitted.
++func (r *Adaptation) requiredPluginFailed(p *plugin, op string) error {
++	if !p.isClosed() {
++		return nil
++	}
++	if _, ok := r.required[p.base]; !ok {
++		return nil
++	}
++	return fmt.Errorf("required plugin %q failed to handle %s and was closed", p.name(), op)
++}
++
++// requiredPluginMissing reports a globally required plugin with no open
++// entry in r.plugins. removeClosedPlugins drops a plugin closed on a fatal
++// error, so a later lifecycle request for a container that plugin admitted
++// would otherwise run with no required plugin and no error. CreateContainer
++// needs no such check: the default validator refuses a missing required
++// plugin there, with its toleration annotations.
++func (r *Adaptation) requiredPluginMissing(op string) error {
++	for name := range r.required {
++		present := false
++		for _, p := range r.plugins {
++			if p.base == name && !p.isClosed() {
++				present = true
++				break
++			}
++		}
++		if !present {
++			return fmt.Errorf("required plugin %q is not present to handle %s", name, op)
++		}
++	}
++	return nil
++}
++
+ // Validate requested container adjustments.
+ func (r *Adaptation) validateContainerAdjustment(ctx context.Context, req *ValidateContainerAdjustmentRequest, result *result) (*CreateContainerResponse, error) {
+ 	rpl := result.createContainerResponse()

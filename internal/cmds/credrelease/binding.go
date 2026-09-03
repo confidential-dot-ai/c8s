@@ -20,6 +20,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/tdxrtmr"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -57,6 +58,26 @@ func verifyKeyMeasured(pubkey []byte) error {
 	if own != want {
 		return fmt.Errorf(
 			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s = ForDynamic(ForOperatorKey(key)) (was the pubkey file substituted after boot, or the dynamic mode event not extended?)",
+			hex.EncodeToString(own[:]), hex.EncodeToString(want[:]))
+	}
+	return nil
+}
+
+// verifyBundleMeasured is the static-mode anchor check: the published bundle
+// under the policy dir is NOT itself measured (only its index, via RTMR[3]),
+// so before serving the service confirms the register holds exactly
+// ForStaticAllowlist of the index recomputed from those files. A member
+// swapped after c8s-policy-measure ran, or a mode file written by hand on a
+// dynamic node, produces a mismatch here.
+func verifyBundleMeasured(bundle policybundle.Bundle) error {
+	own, err := tdxrtmr.Read(3)
+	if err != nil {
+		return err
+	}
+	want := bundle.RTMR3()
+	if own != want {
+		return fmt.Errorf(
+			"published policy bundle does not match the measured RTMR[3]: got %s, bundle implies %s = ForStaticAllowlist(index) (was a member substituted after boot, or mode=static written on a dynamic node?)",
 			hex.EncodeToString(own[:]), hex.EncodeToString(want[:]))
 	}
 	return nil

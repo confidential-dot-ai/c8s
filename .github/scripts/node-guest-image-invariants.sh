@@ -81,6 +81,27 @@ if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
   exit 1
 fi
 
+# The policy mode is measured on every boot: the preset must enable the
+# measurer and the socket unit (RequiredBy links exist only for enabled
+# units), mkosi.sync must render the measurer's platform drop-in, and the
+# README must document the policydata disk the measurer reads.
+preset="$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset"
+for unit in c8s-policy-measure.service c8s-attest-socket.service; do
+  if ! grep -qxF "enable $unit" "$preset"; then
+    echo "::error::$preset must enable $unit; without the preset line rke2 starts without it"
+    exit 1
+  fi
+done
+if ! grep -q 'Environment=POLICY_PLATFORM=' "$ngi/c8s/mkosi.sync" \
+   || ! grep -q -- '--platform=\${POLICY_PLATFORM}' "$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-policy-measure.service"; then
+  echo "::error::c8s-policy-measure.service takes --platform=\${POLICY_PLATFORM}, which mkosi.sync must render"
+  exit 1
+fi
+if ! grep -qF 'label `policydata`' "$ngi/README.md"; then
+  echo "::error::$ngi/README.md must document the policydata disk beside joindata and opkeydata"
+  exit 1
+fi
+
 # The rke2-role drop-ins only bind if mkosi.sync keeps staging the
 # rke2 tarball's units under /usr/local (systemd's search path);
 # the systemd harness installs its fakes at the same prefix.

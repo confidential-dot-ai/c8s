@@ -1,0 +1,51 @@
+# Node-local attestation verifier socket. attestation-api (from the confos
+# attest profile) listens on http://127.0.0.1:8400 only; this unit fronts it
+# with `c8s attest-proxy` on /run/confai/attestation-api.sock so the baked
+# NRI plugin config and the static-mode CDS argv can pin a verifier URL that
+# no chart value, pod restart or control-plane action can repoint. Root owns
+# the socket (0660); the group lets CDS (uid 65532, given that supplementary
+# group by the chart in static mode) connect. The verdict stays unsigned:
+# the socket is what makes it immutable to the control plane.
+[Unit]
+Description=attestation-api on the node-local unix socket
+Documentation=https://github.com/confidential-dot-ai/c8s
+After=attestation-api.service
+Requires=attestation-api.service
+# Up before containerd: the sealed NRI plugin self-attests over the socket
+# once at startup and powers the node off on failure. Before= on a simple
+# unit only orders the fork, so the ExecStartPost readiness gate below is
+# what makes "started" mean "serving": rke2 waits until a health probe
+# through the socket and the proxy reaches attestation-api.
+Before=rke2-server.service rke2-agent.service
+
+[Service]
+Type=simple
+# --socket-gid is pkg/workloadclaims.InventorySocketGID; policymeasure's
+# node_image_test.go pins the literal to the constant.
+ExecStart=/usr/local/bin/c8s attest-proxy \
+    --socket /run/confai/attestation-api.sock \
+    --upstream http://127.0.0.1:8400 \
+    --socket-gid 65532
+# Readiness gate (see Before= above): the probe dials the socket the way a
+# consumer does (owner and mode checks included) and proxies GET /health to
+# attestation-api, so one passing probe covers socket, proxy and upstream.
+# Bounded to 30 s; a failure fails the start and Restart= tries again.
+ExecStartPost=/bin/sh -c 'for _ in $(seq 1 30); do /usr/local/bin/c8s attest-proxy healthcheck --socket /run/confai/attestation-api.sock && exit 0; sleep 1; done; exit 1'
+TimeoutStartSec=60
+Restart=on-failure
+RestartSec=2
+# Serves a unix socket, dials loopback TCP. Nothing else.
+ProtectSystem=strict
+ReadWritePaths=/run/confai
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+# vsock fence: only attestation-api may use AF_VSOCK (see kernel/gpu.config).
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target
+# Preset creates the .requires links: no verifier socket, no containers.
+RequiredBy=rke2-server.service rke2-agent.service

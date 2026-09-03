@@ -13,6 +13,9 @@ import (
 	"gopkg.in/yaml.v3"
 	rbacv1 "k8s.io/api/rbac/v1"
 	sigsyaml "sigs.k8s.io/yaml"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/policymeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 )
 
 // The node image bakes the operator identity twice: the unit spells out the
@@ -88,6 +91,44 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 	flags := NewCmd().Flags()
 	if err := flags.Parse(args[2:]); err != nil {
 		t.Fatalf("parse baked ExecStart flags: %v", err)
+	}
+	// The policy dir is the measurer's output; the unit must read the one the
+	// measurer writes and be ordered after it, and start on either disk.
+	if dir, _ := flags.GetString("policy-dir"); dir != policybundle.DefaultPolicyDir {
+		t.Errorf("baked --policy-dir = %q, want %q", dir, policybundle.DefaultPolicyDir)
+	}
+	for _, line := range []string{
+		"\nAfter=", "\nRequires=",
+	} {
+		_, rest, ok := strings.Cut(joined, line)
+		directive, _, _ := strings.Cut(rest, "\n")
+		if !ok || !slices.Contains(strings.Fields(directive), "c8s-policy-measure.service") {
+			t.Errorf("cred-release.service %s does not name c8s-policy-measure.service: %q", strings.TrimSpace(line), directive)
+		}
+	}
+	for _, cond := range []string{
+		"ConditionPathExists=|" + policymeasure.DefaultOpkeyDisk,
+		"ConditionPathExists=|" + policymeasure.DefaultPolicyDisk,
+	} {
+		if !strings.Contains(joined, "\n"+cond+"\n") {
+			t.Errorf("cred-release.service lacks the OR condition %q", cond)
+		}
+	}
+	if strings.Contains(joined, "\nConditionPathExists="+policymeasure.DefaultOpkeyDisk+"\n") {
+		t.Error("cred-release.service still requires opkeydata unconditionally; static boots have no operator key")
+	}
+	// The unit now starts on static boots, where the initrd never creates
+	// /etc/confai; a ReadOnlyPaths entry without the `-` prefix makes systemd
+	// fail the mount namespace setup before ExecStart runs.
+	var readOnly []string
+	for _, line := range strings.Split(joined, "\n") {
+		if v, ok := strings.CutPrefix(line, "ReadOnlyPaths="); ok {
+			readOnly = append(readOnly, strings.Fields(v)...)
+		}
+	}
+	confai := filepath.Dir(policymeasure.DefaultOperatorPubkey)
+	if slices.Contains(readOnly, confai) || !slices.Contains(readOnly, "-"+confai) {
+		t.Errorf("cred-release.service ReadOnlyPaths = %q, want -%s: the directory exists only on an opkeydata boot", readOnly, confai)
 	}
 	org, _ := flags.GetString("cert-org")
 	cn, _ := flags.GetString("cert-cn")

@@ -161,6 +161,95 @@ func TestReleaseRefusesATokenBoundToAnotherCSR(t *testing.T) {
 	}
 }
 
+// TestOpenHandlerReleasesWithoutAToken: in static mode there is no operator
+// key, so a request without any Authorization header is served, and one with
+// a token for some unrelated key is served too (the header is not consulted).
+func TestOpenHandlerReleasesWithoutAToken(t *testing.T) {
+	h := NewOpenHandler(testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, key))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, _ := newOperatorAuth(t)
+	strayToken, err := signer.Authorization(http.MethodPost, ReleasePath, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		authz string
+	}{
+		{"no Authorization header", ""},
+		{"token for an unrelated key", strayToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, ReleasePath, bytes.NewReader(body))
+			if tc.authz != "" {
+				req.Header.Set("Authorization", tc.authz)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("open handler(%s) = %d, body %q; want 200", tc.name, rec.Code, rec.Body.String())
+			}
+			var resp ReleaseResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(resp.CertPEM, "BEGIN CERTIFICATE") {
+				t.Errorf("open handler(%s) released no certificate: %q", tc.name, resp.CertPEM)
+			}
+		})
+	}
+	// A bad CSR is still a client fault: the open handler skips only the
+	// token check, not CSR validation.
+	badBody, err := json.Marshal(ReleaseRequest{CSRPEM: "not a csr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, ReleasePath, bytes.NewReader(badBody)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("open handler(bad CSR) = %d, want 400", rec.Code)
+	}
+}
+
+// TestHandlerWithoutAnAuthorizerRefuses: open mode is opt-in through
+// NewOpenHandler. A Handler built any other way without a verifier (a
+// literal, a future constructor bug) must refuse, never release.
+func TestHandlerWithoutAnAuthorizerRefuses(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, key))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		h    *Handler
+	}{
+		{"zero value", &Handler{}},
+		{"CA but no verifier", &Handler{ca: testCA(t), certTTL: time.Hour, certOrg: defaultCertOrg, certCN: defaultCertCN, now: time.Now}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, ReleasePath, bytes.NewReader(body)))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("Handler(%s) = %d, body %q; want 500", tc.name, rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "BEGIN CERTIFICATE") {
+				t.Errorf("Handler(%s) released a certificate without an authorizer", tc.name)
+			}
+		})
+	}
+}
+
 // newOperatorAuth generates a fresh operator keypair, returning a token signer
 // (the operator side) and the PKIX public-key PEM (the measured side).
 func newOperatorAuth(t *testing.T) (*operatorauth.Signer, []byte) {

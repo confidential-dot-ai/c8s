@@ -26,6 +26,13 @@ enable gpu-cc-enforce.service
 # Fail closed when the initrd fell back to the tmpfs rootfs upper; RequiredBy
 # the rke2 pair so a scratch-less node powers off instead of flapping.
 enable scratch-enforce.service
+# Commit the policy mode (dynamic, or static plus the bundle) to RTMR[3]
+# before containerd; RequiredBy the rke2 pair so a node whose mode event did
+# not land powers off instead of running containers.
+enable c8s-policy-measure.service
+# attestation-api on the node-local unix socket the NRI plugin and static
+# CDS pin; RequiredBy the rke2 pair so no container runs without a verifier.
+enable c8s-attest-socket.service
 # Role dispatch + the role-gated rke2 pair.
 enable rke2-role.service
 enable rke2-server.service
@@ -35,6 +42,6 @@ enable rke2-agent.service
 # CVM's masquerade NAT.
 enable systemd-timesyncd.service
 # Attested operator credential release. Enabled always, but its
-# ConditionPathExists on the opkeydata disk means it only starts on operator
-# boots — a no-op on nodes launched without --operator-key.
+# ConditionPathExists on the opkeydata|policydata disks means it only starts
+# on operator or static boots — a no-op on keyless dynamic nodes.
 enable cred-release.service
