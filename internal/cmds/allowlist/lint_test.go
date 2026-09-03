@@ -374,3 +374,53 @@ func TestLintWarnsOnUnobservedMountAndEnvPolicy(t *testing.T) {
 		t.Fatalf("lint --cvm-mode=pod output = %q, want no findings", out)
 	}
 }
+
+// --sealed lints a bundle member: the bytes must be canonical and every
+// container needs a complete rule. It replaces the unobserved-field warning,
+// which describes the dynamic enforcers a sealed document never meets.
+func TestLintSealed(t *testing.T) {
+	complete := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},` +
+		`"mounts":{"policy":"exact","destinations":["/etc/hosts"],"rules":{"/etc/hosts":{"source":"platform"}}},` +
+		`"env":{"policy":"exact","names":["PATH"],"values":{"PATH":{"value":"/bin"}}}}`
+	al := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{"web":{"containers":[`+complete+`]}}}`)
+	canonical, err := al.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	incomplete := `{"schema":"c8s.allowlist/v1","digests":null,"workloads":{"web":{"initContainers":null,"containers":[{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"},"env":{"policy":"any"}}]}}}`
+	dynamicWarning := "only the in-guest policy-monitor observes"
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantErr   string
+		wantOut   []string
+		rejectOut []string
+	}{
+		{"clean", string(canonical), "", []string{"ok: no findings\n"}, []string{dynamicWarning}},
+		{"trailing newline", string(canonical) + "\n", "lint error(s)", []string{"error: document bytes are not its canonical form"}, nil},
+		{"incomplete rules", incomplete, "lint error(s)", []string{
+			"error: " + `workload "web" containers[0] ` + digA + ": mounts must be exact",
+			"error: " + `workload "web" containers[0] ` + digA + ": env must be exact",
+		}, []string{dynamicWarning}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := runCmd("lint", "--sealed", writeFile(t, "doc.json", tc.body))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("lint --sealed(%s) = %q, %v; want nil error", tc.name, out, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("lint --sealed(%s) = %q, %v; want error containing %q", tc.name, out, err, tc.wantErr)
+			}
+			for _, want := range tc.wantOut {
+				if !strings.Contains(out, want) {
+					t.Errorf("lint --sealed(%s) output = %q, want it to contain %q", tc.name, out, want)
+				}
+			}
+			for _, reject := range tc.rejectOut {
+				if strings.Contains(out, reject) {
+					t.Errorf("lint --sealed(%s) output = %q, want no %q", tc.name, out, reject)
+				}
+			}
+		})
+	}
+}

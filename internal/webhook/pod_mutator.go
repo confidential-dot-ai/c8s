@@ -676,12 +676,64 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("ephemeral container mounts no reserved c8s volume")
 	}
 
-	if err := validateWorkloadLabel(pod); err != nil {
+	// req.Namespace, not pod.Namespace: template-created pods reach
+	// admission with an empty metadata.namespace.
+	result, err := Mutate(pod, req.Namespace, m.cfg)
+	if err != nil {
+		var internal internalError
+		if errors.As(err, &internal) {
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+	if !result.Mutated() {
+		return admission.Allowed("no c8s annotation — passthrough")
+	}
+	if result.WorkloadID != "" {
+		l.Info("injecting c8s get-cert containers", "workload", result.WorkloadID)
+	}
+	if result.KataClass != "" {
+		l.Info("injecting kata runtimeClassName", "runtimeClass", result.KataClass)
+	}
+
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
+}
+
+// MutationResult says what Mutate changed: the workload whose get-cert
+// containers were injected, and the kata runtime class set, each empty when
+// that mutation did not apply.
+type MutationResult struct {
+	WorkloadID string
+	KataClass  string
+}
+
+// Mutated reports whether the pod changed at all.
+func (r MutationResult) Mutated() bool { return r.WorkloadID != "" || r.KataClass != "" }
+
+// internalError marks a failure that is the operator's, not the pod
+// author's, so Handle answers 500 instead of 400.
+type internalError struct{ err error }
+
+func (e internalError) Error() string { return e.err.Error() }
+func (e internalError) Unwrap() error { return e.err }
+
+// Mutate applies the c8s pod mutation in place, exactly as the admission
+// webhook does for a pod created in namespace: get-cert injection for a pod
+// carrying the confidential.ai/cw annotation and kata class injection under
+// KataEnforce. It is the whole decision, so a tool rendering rules for
+// injected containers sees the same containers a cluster runs. An error
+// means the pod is refused.
+func Mutate(pod *corev1.Pod, namespace string, cfg Config) (MutationResult, error) {
+	if err := validateWorkloadLabel(pod); err != nil {
+		return MutationResult{}, err
 	}
 	inj, err := parseAnnotations(pod)
 	if err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
+		return MutationResult{}, err
 	}
 	// A hostNetwork pod shares the node IP, so it cannot be a mesh endpoint
 	// and the cw inbound guard (which keys on distinct pod IPs) cannot cover
@@ -689,33 +741,31 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// no interception and no drop. Reject the contradictory combination at
 	// admission rather than let it onboard silently unprotected.
 	if inj != nil && pod.Spec.HostNetwork {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
-			errInvalidInjectionAnnotation, AnnotationWorkload))
+			errInvalidInjectionAnnotation, AnnotationWorkload)
 	}
 	// The fetcher redeems a sandbox token from an inventory: the mounted
 	// nri-image-policy socket on node-CVM, or policy-monitor on guest loopback
 	// under kata. An operator with neither has nothing to point it at, so
 	// injecting would produce a Running pod whose fetcher CrashLoops while the
 	// workload blocks forever on a file that never lands. Refuse at admission.
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+	if inj != nil && len(inj.Secrets.Specs) > 0 && cfg.WorkloadClaimsHostDir == "" && !cfg.WorkloadClaimsGuest {
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
-			errInvalidInjectionAnnotation, AnnotationSecrets))
+			errInvalidInjectionAnnotation, AnnotationSecrets)
 	}
 	// Same for volumes: the fetcher hands the key to volumed, over the mounted
 	// socket directory on node-CVM or on guest loopback under kata. An operator
 	// with neither shape has no daemon to hand it to, so the workload would wait
 	// on a mount that can never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+	if inj != nil && len(inj.Volumes.Specs) > 0 && cfg.WorkloadClaimsHostDir == "" && !cfg.WorkloadClaimsGuest {
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
-			errInvalidInjectionAnnotation, AnnotationVolumes))
+			errInvalidInjectionAnnotation, AnnotationVolumes)
 	}
 	if inj != nil && inj.SAN == "" {
-		// req.Namespace, not pod.Namespace: template-created pods reach
-		// admission with an empty metadata.namespace.
-		inj.SAN = workloadSAN(inj.WorkloadID, req.Namespace)
+		inj.SAN = workloadSAN(inj.WorkloadID, namespace)
 	}
 
 	// confidential.ai/cw drives both get-cert injection and confidential
@@ -731,20 +781,20 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
 	// every call), so it no longer keys off the confidential.ai/c8s-injected
 	// marker: an author cannot skip injection by pre-setting it.
-	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
-	kataClass := kataRuntimeClassFor(pod, m.cfg)
+	getCertNeeded := inj != nil && cfg.GetCertImage != ""
+	kataClass := kataRuntimeClassFor(pod, cfg)
 
 	// Covers a pod that set its own runtimeClassName too: injection skips it,
 	// but the shim still honors the annotations. Host-namespace pods are
 	// exempt like they are from class injection (kataIncompatible).
-	if m.cfg.KataEnforce && !kataIncompatible(pod) {
+	if cfg.KataEnforce && !kataIncompatible(pod) {
 		if err := rejectKataHypervisorAnnotations(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
 	}
 
 	if inj == nil && kataClass == "" {
-		return admission.Allowed("no c8s annotation — passthrough")
+		return MutationResult{}, nil
 	}
 
 	// Only the webhook may place a container under the reserved c8s-cert name.
@@ -753,41 +803,41 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// integrity is name-based.
 	if inj != nil {
 		if err := rejectReservedCertContainer(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
 	}
 
+	var result MutationResult
 	if getCertNeeded {
 		// ensureVolume keeps a pre-declared same-named volume rather than
 		// overwriting it, so a pod that declares the reserved cert volume as a
 		// hostPath/PVC/disk-backed emptyDir would have its private keys written
 		// to persistent, host-visible storage outside the TEE memory boundary.
 		// Reject anything but the expected memory-backed emptyDir.
-		if err := rejectReservedCertVolume(pod, inj.withDefaults(m.cfg).Cert.Volume); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+		if err := rejectReservedCertVolume(pod, inj.withDefaults(cfg).Cert.Volume); err != nil {
+			return MutationResult{}, err
 		}
 		// Same reasoning for the released secrets: a hostPath here would write
 		// them to host-visible storage.
 		if err := rejectReservedSecretsVolume(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
-		if err := rejectReservedVolumeVolume(pod, m.cfg.WorkloadClaimsGuest); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+		if err := rejectReservedVolumeVolume(pod, cfg.WorkloadClaimsGuest); err != nil {
+			return MutationResult{}, err
 		}
-		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
-		mutatePod(pod, inj, m.cfg)
+		mutatePod(pod, inj, cfg)
+		result.WorkloadID = inj.WorkloadID
 	}
 	if kataClass != "" {
-		l.Info("injecting kata runtimeClassName", "runtimeClass", kataClass)
 		pod.Spec.RuntimeClassName = &kataClass
-		if m.cfg.KataGuestReadyGate {
+		if cfg.KataGuestReadyGate {
 			requireGuestReadyNode(pod)
 		}
-		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements, m.cfg.CDSRTMRs); err != nil {
+		if err := stampInitData(pod, kataClass, cfg.CDSMeasurements, cfg.CDSRTMRs); err != nil {
 			if errors.Is(err, errInvalidInjectionAnnotation) {
-				return admission.Errored(http.StatusBadRequest, err)
+				return MutationResult{}, err
 			}
-			return admission.Errored(http.StatusInternalServerError, err)
+			return MutationResult{}, internalError{err}
 		}
 		// Stamp AnnotationInjected here too — mutatePod only runs when
 		// get-cert is needed, but a kata-only mutation is still a mutation
@@ -797,13 +847,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			pod.Annotations = map[string]string{}
 		}
 		pod.Annotations[AnnotationInjected] = "true"
+		result.KataClass = kataClass
 	}
-
-	raw, err := json.Marshal(pod)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
+	return result, nil
 }
 
 // workloadServiceNamePrefix marks the operator-managed headless Service inside

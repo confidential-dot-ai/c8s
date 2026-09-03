@@ -18,8 +18,8 @@ const (
 
 // Install prepends a crane stub to PATH: digest resolves any ref to DigA
 // (refs containing "unresolvable" fail with MANIFEST_UNKNOWN), config serves
-// a fixed image config (refs containing "badjson" serve garbage), and
-// manifest fails for DigB refs.
+// a fixed image config with Entrypoint, Cmd and Env (refs containing
+// "badjson" serve garbage), and manifest fails for DigB refs.
 func Install(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -34,7 +34,7 @@ digest)
 config)
   case "$ref" in
   *badjson*) echo "not json" ;;
-  *) echo '{"config":{"Entrypoint":["/bin/app"],"Cmd":["serve","--port=1"]}}' ;;
+  *) echo '{"config":{"Entrypoint":["/bin/app"],"Cmd":["serve","--port=1"],"Env":["PATH=/usr/bin:/bin","APP_MODE=prod"]}}' ;;
   esac ;;
 manifest)
   case "$ref" in

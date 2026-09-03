@@ -63,14 +63,52 @@ type Workload struct {
 }
 
 // Container binds a digest to the process policy permitted for it.
+//
+// Privileges is nil for an ordinary workload container. A pointer so a
+// document written before the field existed canonicalizes to the same bytes.
 type Container struct {
-	Digest  types.Digest `json:"digest"`
-	Image   string       `json:"image,omitempty"`
-	Command ArgvPolicy   `json:"command"`
-	Args    ArgvPolicy   `json:"args"`
-	Mounts  MountPolicy  `json:"mounts,omitempty"`
-	Env     EnvPolicy    `json:"env,omitempty"`
+	Digest     types.Digest `json:"digest"`
+	Image      string       `json:"image,omitempty"`
+	Command    ArgvPolicy   `json:"command"`
+	Args       ArgvPolicy   `json:"args"`
+	Mounts     MountPolicy  `json:"mounts,omitempty"`
+	Env        EnvPolicy    `json:"env,omitempty"`
+	Privileges *Privileges  `json:"privileges,omitempty"`
 }
+
+// Privileges declares what a node-TCB container may hold beyond an ordinary
+// workload: host namespaces, extra capabilities, devices, host bind sources,
+// an unmasked /proc, or full privilege. A sealed document requires Review to
+// say why the entry is acceptable; the reviewer, not the tool, is the
+// authority on a privileged pod.
+//
+// Capabilities lists capabilities beyond the runtime's default set, in OCI
+// form (CAP_NET_ADMIN); Privileged implies all of them and every device, so
+// those lists are not matched for a privileged entry. HostPaths lists host bind sources admitted for
+// classes outside the reviewed mount classes (hostPath, configMap, secret,
+// projected); an entry ending in "/" admits the subtree, and the kubelet's
+// own volumes live under KubeletVolumesRoot.
+type Privileges struct {
+	Privileged     bool     `json:"privileged,omitempty"`
+	HostNamespaces []string `json:"hostNamespaces,omitempty"`
+	Capabilities   []string `json:"capabilities,omitempty"`
+	Devices        []string `json:"devices,omitempty"`
+	HostPaths      []string `json:"hostPaths,omitempty"`
+	UnmaskedProc   bool     `json:"unmaskedProc,omitempty"`
+	Review         string   `json:"review"`
+}
+
+// Host namespaces a Privileges entry may share with the node.
+const (
+	HostNamespaceNet = "net"
+	HostNamespacePID = "pid"
+	HostNamespaceIPC = "ipc"
+)
+
+// KubeletVolumesRoot is where the kubelet materializes configMap, secret and
+// projected volumes (<root><pod uid>/volumes/kubernetes.io~<plugin>/<name>).
+// A Privileges.HostPaths entry naming it admits every such volume.
+const KubeletVolumesRoot = "/var/lib/kubelet/pods/"
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
 // a pod actually runs), mirroring the Kubernetes command/args split: Command is
@@ -96,19 +134,67 @@ type ArgvPolicy struct {
 // Any leaves them unconstrained, and is what an absent policy means — unlike
 // argv, a Deny default would refuse every real pod, since the base set is never
 // empty.
+//
+// Rules, keyed by destination, classify what may be bound there. A sealed
+// document (Index.Admit) requires one per destination; dynamic enforcers
+// ignore them. When present the key set must equal Destinations.
 type MountPolicy struct {
-	Policy       string   `json:"policy"`
-	Destinations []string `json:"destinations,omitempty"`
+	Policy       string               `json:"policy"`
+	Destinations []string             `json:"destinations,omitempty"`
+	Rules        map[string]MountRule `json:"rules,omitempty"`
 }
 
-// EnvPolicy governs the environment variable NAMES a container may run with.
-// Values are not matched: they carry secrets, and an allowlist is served to
-// every enforcer. Exact requires every name to appear in Names; Any, the
-// default, leaves them unconstrained.
-type EnvPolicy struct {
-	Policy string   `json:"policy"`
-	Names  []string `json:"names,omitempty"`
+// MountRule is the reviewed source class of one bind destination. Review is
+// required for a pvc source: it names why operator-supplied contents at that
+// path cannot steer the workload.
+type MountRule struct {
+	Source string `json:"source"`
+	Review string `json:"review,omitempty"`
 }
+
+// Mount source classes. The first four are what a pod spec and the kubelet
+// put there; SourceHostPath marks a destination whose content the node
+// supplies (hostPath, configMap, secret, projected) and is admitted only
+// through Privileges.HostPaths.
+const (
+	SourceEmptyDir            = "emptyDir"
+	SourceServiceAccountToken = "serviceAccountToken"
+	SourcePVC                 = "pvc"
+	SourcePlatform            = "platform"
+	SourceHostPath            = "hostPath"
+)
+
+// EnvPolicy governs the environment variable NAMES a container may run with,
+// and, in a sealed document, their values.
+//
+// Dynamic enforcers match names only: values carry secrets there, and the
+// allowlist is served to every enforcer. A sealed document is reviewed and
+// measured, not secret, so Values pins each name to a literal or to a pod
+// field (Index.Admit). When present the key set must equal Names.
+type EnvPolicy struct {
+	Policy string              `json:"policy"`
+	Names  []string            `json:"names,omitempty"`
+	Values map[string]EnvValue `json:"values,omitempty"`
+}
+
+// EnvValue pins one environment variable: Value matches byte-exact, From
+// matches the pod field the enforcer reports under that name. Exactly one is
+// set.
+type EnvValue struct {
+	Value *string `json:"value,omitempty"`
+	From  string  `json:"from,omitempty"`
+}
+
+// From sources an EnvValue may name. They are what the kubelet's fieldRef
+// injects and what the NRI PodSandbox (or the node) can report.
+const (
+	FromPodIP        = "podIP"
+	FromPodName      = "podName"
+	FromPodNamespace = "podNamespace"
+	FromPodUID       = "podUID"
+	FromHostIP       = "hostIP"
+	FromNodeName     = "nodeName"
+)
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
 // The subject is the entry, not a container: the value is delivered on a volume
@@ -285,6 +371,9 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if err := normalizeEnv(&c.Env); err != nil {
 			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
 		}
+		if err := normalizePrivileges(c.Privileges); err != nil {
+			return fmt.Errorf("workload %q %s %s privileges: %w", workload, field, c.Digest, err)
+		}
 	}
 	return nil
 }
@@ -299,8 +388,12 @@ func normalizeMounts(p *MountPolicy) error {
 		if len(p.Destinations) != 0 {
 			return fmt.Errorf("any policy takes no destinations")
 		}
+		if len(p.Rules) != 0 {
+			return fmt.Errorf("any policy takes no rules")
+		}
 		p.Policy = PolicyAny
 		p.Destinations = nil
+		p.Rules = nil
 	case PolicyExact:
 		if len(p.Destinations) == 0 {
 			return fmt.Errorf("exact policy requires at least one destination")
@@ -311,8 +404,44 @@ func normalizeMounts(p *MountPolicy) error {
 			}
 		}
 		p.Destinations = sortedUnique(p.Destinations)
+		if len(p.Rules) == 0 {
+			p.Rules = nil
+			break
+		}
+		if err := requireSameKeys(p.Rules, p.Destinations, "rule", "destination"); err != nil {
+			return err
+		}
+		for d, r := range p.Rules {
+			switch r.Source {
+			case SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceHostPath:
+			default:
+				return fmt.Errorf("rule %q: unknown source %q (want %s, %s, %s, %s or %s)", d, r.Source,
+					SourceEmptyDir, SourceServiceAccountToken, SourcePVC, SourcePlatform, SourceHostPath)
+			}
+		}
 	default:
 		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+	}
+	return nil
+}
+
+// requireSameKeys checks that a rule map covers exactly the listed names:
+// a name without a rule is a gap the reviewer never saw, and a rule for an
+// unlisted name is a typo that would otherwise pin nothing.
+func requireSameKeys[V any](rules map[string]V, names []string, ruleWord, nameWord string) error {
+	listed := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		listed[n] = struct{}{}
+	}
+	for k := range rules {
+		if _, ok := listed[k]; !ok {
+			return fmt.Errorf("%s for %q names no listed %s", ruleWord, k, nameWord)
+		}
+	}
+	for _, n := range names {
+		if _, ok := rules[n]; !ok {
+			return fmt.Errorf("%s %q has no %s", nameWord, n, ruleWord)
+		}
 	}
 	return nil
 }
@@ -325,8 +454,12 @@ func normalizeEnv(p *EnvPolicy) error {
 		if len(p.Names) != 0 {
 			return fmt.Errorf("any policy takes no names")
 		}
+		if len(p.Values) != 0 {
+			return fmt.Errorf("any policy takes no values")
+		}
 		p.Policy = PolicyAny
 		p.Names = nil
+		p.Values = nil
 	case PolicyExact:
 		if len(p.Names) == 0 {
 			return fmt.Errorf("exact policy requires at least one name")
@@ -337,10 +470,87 @@ func normalizeEnv(p *EnvPolicy) error {
 			}
 		}
 		p.Names = sortedUnique(p.Names)
+		if len(p.Values) == 0 {
+			p.Values = nil
+			break
+		}
+		if err := requireSameKeys(p.Values, p.Names, "value", "name"); err != nil {
+			return err
+		}
+		for n, v := range p.Values {
+			if err := v.validate(); err != nil {
+				return fmt.Errorf("value for %q: %w", n, err)
+			}
+		}
 	default:
 		return fmt.Errorf("unknown env policy %q (want any or exact)", p.Policy)
 	}
 	return nil
+}
+
+func (v EnvValue) validate() error {
+	switch {
+	case v.Value != nil && v.From != "":
+		return fmt.Errorf("value and from are mutually exclusive")
+	case v.Value == nil && v.From == "":
+		return fmt.Errorf("one of value or from is required")
+	case v.From != "" && !validFromSource(v.From):
+		return fmt.Errorf("unknown from source %q (want %s, %s, %s, %s, %s or %s)", v.From,
+			FromPodIP, FromPodName, FromPodNamespace, FromPodUID, FromHostIP, FromNodeName)
+	}
+	return nil
+}
+
+func validFromSource(from string) bool {
+	switch from {
+	case FromPodIP, FromPodName, FromPodNamespace, FromPodUID, FromHostIP, FromNodeName:
+		return true
+	}
+	return false
+}
+
+// normalizePrivileges validates a privileges block in place. A nil block is
+// the ordinary, unprivileged container. An empty non-nil block is kept: its
+// presence is the reviewer's declaration that the entry is node TCB, and the
+// sealed lint then insists on the review text.
+func normalizePrivileges(p *Privileges) error {
+	if p == nil {
+		return nil
+	}
+	for _, ns := range p.HostNamespaces {
+		switch ns {
+		case HostNamespaceNet, HostNamespacePID, HostNamespaceIPC:
+		default:
+			return fmt.Errorf("unknown host namespace %q (want %s, %s or %s)", ns, HostNamespaceNet, HostNamespacePID, HostNamespaceIPC)
+		}
+	}
+	for _, c := range p.Capabilities {
+		if !strings.HasPrefix(c, "CAP_") || strings.ToUpper(c) != c {
+			return fmt.Errorf("capability %q is not in OCI form (CAP_NAME)", c)
+		}
+	}
+	for _, d := range p.Devices {
+		if !path.IsAbs(d) {
+			return fmt.Errorf("device %q is not an absolute path", d)
+		}
+	}
+	for _, h := range p.HostPaths {
+		if !path.IsAbs(h) {
+			return fmt.Errorf("host path %q is not an absolute path", h)
+		}
+	}
+	p.HostNamespaces = emptyToNil(sortedUnique(p.HostNamespaces))
+	p.Capabilities = emptyToNil(sortedUnique(p.Capabilities))
+	p.Devices = emptyToNil(sortedUnique(p.Devices))
+	p.HostPaths = emptyToNil(sortedUnique(p.HostPaths))
+	return nil
+}
+
+func emptyToNil(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	return in
 }
 
 // sortedUnique makes a list a function of its content, so Canonical does not
@@ -466,8 +676,9 @@ func sortContainers(cs []Container) {
 	})
 }
 
+// policyKey renders every policy field; Image is informational and stays out.
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env, c.Privileges})
 	return string(b)
 }
 

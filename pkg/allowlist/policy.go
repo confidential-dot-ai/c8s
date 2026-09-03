@@ -1,12 +1,27 @@
 package allowlist
 
-import "github.com/confidential-dot-ai/c8s/pkg/types"
+import (
+	"fmt"
+	"sort"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+)
 
 // Index answers admission queries for enforcers in O(1). Build it once from a
 // normalized Allowlist.
 type Index struct {
 	floor    map[string]bool
 	byDigest map[string][]Container
+	// rules keeps the entry each container came from, in entry-name order,
+	// so Admit can name the rule that admitted an observation.
+	rules map[string][]indexedRule
+}
+
+// indexedRule is one container rule with its position in the document, the
+// name a sealed enforcer reports for it.
+type indexedRule struct {
+	name      string
+	container Container
 }
 
 // BuildIndex projects an Allowlist into an admission index.
@@ -14,19 +29,30 @@ func (a *Allowlist) BuildIndex() *Index {
 	idx := &Index{
 		floor:    make(map[string]bool, len(a.Digests)),
 		byDigest: map[string][]Container{},
+		rules:    map[string][]indexedRule{},
 	}
 	for d := range a.Digests {
 		idx.floor[d] = true
 	}
-	for _, w := range a.Workloads {
-		for _, c := range w.InitContainers {
-			idx.byDigest[c.Digest.String()] = append(idx.byDigest[c.Digest.String()], c)
-		}
-		for _, c := range w.Containers {
-			idx.byDigest[c.Digest.String()] = append(idx.byDigest[c.Digest.String()], c)
-		}
+	names := make([]string, 0, len(a.Workloads))
+	for name := range a.Workloads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w := a.Workloads[name]
+		idx.add(name, "initContainers", w.InitContainers)
+		idx.add(name, "containers", w.Containers)
 	}
 	return idx
+}
+
+func (i *Index) add(entry, field string, cs []Container) {
+	for n, c := range cs {
+		d := c.Digest.String()
+		i.byDigest[d] = append(i.byDigest[d], c)
+		i.rules[d] = append(i.rules[d], indexedRule{name: fmt.Sprintf("%s/%s[%d]", entry, field, n), container: c})
+	}
 }
 
 // AdmitsDigest reports whether an image with this digest may run at all — as a
