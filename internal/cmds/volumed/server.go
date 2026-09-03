@@ -19,6 +19,11 @@ import (
 // VolumePath is the route the fetcher sidecar posts to.
 const VolumePath = "/volume"
 
+// ClosePath is the route the sidecar posts to at termination, releasing its
+// pod's volumes before kubelet's emptyDir cleanup can delete through the live
+// mount. See docs/volumes.md — teardown.
+const ClosePath = "/volume/close"
+
 // GuestPort is the in-guest loopback port this daemon serves on under kata,
 // after the attestation-service on 8400 and the token route on 8401. A kata
 // guest holds one pod whose containers share its network namespace, so loopback
@@ -96,6 +101,7 @@ func (s *Server) logger() *slog.Logger {
 func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle("POST "+VolumePath, http.HandlerFunc(s.handleOpen))
+	mux.Handle("POST "+ClosePath, http.HandlerFunc(s.handleClose))
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -177,6 +183,33 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		s.logger().Error("volume open failed", "pod", pod.UID, "name", req.Name, "error", err)
 		http.Error(w, fmt.Sprintf("could not open the volume: %v", err), http.StatusInternalServerError)
 	}
+}
+
+// handleClose releases every volume the calling pod holds. The caller is
+// resolved from kernel peer credentials, so a pod can only ever close its own
+// volumes; closing what is not open is a no-op, because teardown races pod
+// deletion by design.
+func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
+	conn, _ := r.Context().Value(connKey{}).(net.Conn)
+	peer := workloadclaims.PeerFromConn(conn)
+	defer peer.Close()
+
+	pod, err := s.Identity.Resolve(peer)
+	if err != nil {
+		s.logger().Warn("volume close rejected", "reason", err)
+		http.Error(w, "caller could not be resolved", http.StatusForbidden)
+		return
+	}
+	release, ok := s.acquire(pod.UID)
+	if !ok {
+		http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+	if n := s.Opener.ClosePod(r.Context(), pod.UID); n > 0 {
+		s.logger().Info("volumes closed", "pod", pod.UID, "volumes", n)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // acquire bounds concurrent opens per pod.
