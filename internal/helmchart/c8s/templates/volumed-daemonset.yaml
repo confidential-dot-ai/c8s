@@ -1,4 +1,5 @@
 {{- if .Values.volumed.enabled }}
+{{- $kubeletRoot := required "volumed.hostPaths.kubeletRoot is required" .Values.volumed.hostPaths.kubeletRoot }}
 {{- /*
   Node agent that opens encrypted volumes for the pods on it (docs/volumes.md).
 
@@ -68,7 +69,7 @@ spec:
             - --socket-dir
             - {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
             - --kubelet-root
-            - {{ include "c8s.volumedKubeletRoot" . | quote }}
+            - {{ $kubeletRoot | quote }}
             - --cgroup-root
             - {{ .Values.volumed.hostPaths.cgroupRoot | quote }}
             - --reap-interval
@@ -79,7 +80,7 @@ spec:
             # Bidirectional: the mount is made here and has to reach the
             # workload's pod directory on the node.
             - name: kubelet-root
-              mountPath: {{ include "c8s.volumedKubeletRoot" . }}
+              mountPath: {{ $kubeletRoot }}
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
@@ -101,7 +102,7 @@ spec:
       volumes:
         - name: kubelet-root
           hostPath:
-            path: {{ include "c8s.volumedKubeletRoot" . }}
+            path: {{ $kubeletRoot }}
             type: Directory
         - name: dev
           hostPath:

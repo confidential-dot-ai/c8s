@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -45,11 +46,22 @@ func TestValidateRequiresEveryDependency(t *testing.T) {
 	}
 }
 
+// kubeletRootWithPods returns a kubelet-root stand-in carrying the pods
+// directory a live kubelet guarantees.
+func kubeletRootWithPods(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "pods"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // The daemon makes no network calls, so a full run is exercised here: it serves
 // on its socket and unwinds when its context goes.
 func TestRunDaemonServesUntilItsContextIsDone(t *testing.T) {
 	cfg := goodConfig(t.TempDir())
-	cfg.kubeletRoot, cfg.cgroupRoot = t.TempDir(), t.TempDir()
+	cfg.kubeletRoot, cfg.cgroupRoot = kubeletRootWithPods(t), t.TempDir()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -88,9 +100,33 @@ func TestRunDaemonRejectsAnIncompleteConfig(t *testing.T) {
 
 func TestRunDaemonReportsAnUnusableSocketDir(t *testing.T) {
 	cfg := goodConfig(filepath.Join(t.TempDir(), "absent"))
-	cfg.kubeletRoot, cfg.cgroupRoot = t.TempDir(), t.TempDir()
+	cfg.kubeletRoot, cfg.cgroupRoot = kubeletRootWithPods(t), t.TempDir()
 	if err := runDaemon(context.Background(), cfg); err == nil {
 		t.Fatal("ran with a socket directory that does not exist")
+	}
+}
+
+// A kubelet root without the pods directory every live kubelet creates is not
+// this node's kubelet root: refusing to serve beats mounting volumes where no
+// pod will look.
+func TestRunDaemonRejectsAKubeletRootWithoutPods(t *testing.T) {
+	withPodsFile := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withPodsFile, "pods"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, root := range map[string]string{
+		"no pods entry":  t.TempDir(),
+		"pods is a file": withPodsFile,
+	} {
+		cfg := goodConfig(t.TempDir())
+		cfg.kubeletRoot, cfg.cgroupRoot = root, t.TempDir()
+		err := runDaemon(context.Background(), cfg)
+		if err == nil {
+			t.Fatalf("%s: served without a pods directory", name)
+		}
+		if !strings.Contains(err.Error(), cfg.kubeletRoot) {
+			t.Errorf("%s: error does not name the bad root: %v", name, err)
+		}
 	}
 }
 
