@@ -1,0 +1,16 @@
+# Values `c8s install --static-allowlist` adds on top of a dynamic node-mode
+# install (cmd/c8s/install_static.go staticModeArgs and pinArgs). The bundle
+# is rendered from the dynamic values plus this overlay, and build-bundle.sh
+# proves the result equals what `c8s render-values --static-allowlist` emits
+# for that bundle, so the two cannot drift apart unnoticed.
+#
+# cds.measurementsConfig and ratlsMesh.measurementsConfig are filled in by
+# build-bundle.sh: the chart refuses static mode without them, and their
+# RTMR[3] is the value the bundle itself determines.
+staticAllowlist:
+  enabled: true
+nriImagePolicy:
+  enabled: false
+cds:
+  persistence:
+    enabled: false

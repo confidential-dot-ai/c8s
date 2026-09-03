@@ -1,0 +1,145 @@
+{
+  "entries": {
+    "c8s-cds": {
+      "privileges": "CDS reads the measurements config the chart mounts as a ConfigMap, which the kubelet binds from its pod volume path. The file pins the static tuple CDS holds itself and every requester to; a rewritten file cannot loosen it below the entry install renders, because CDS refuses to start unless its own evidence matches the entry.",
+      "mounts": {
+        "/run/confai": "CDS attests itself over the node's attestation socket and pins every requester on the tuple it proves; no other verifier is reachable.",
+        "/run/confai/policy": "CDS seeds its store from the measured static-allowlist.json and checks the member index against the measured digest; the directory is read-only tmpfs written once by c8s-policy-measure."
+      }
+    },
+    "c8s-ratls-mesh": {
+      "privileges": "ratls-mesh programs the node's netfilter rules from the host network namespace; it is measured image content pinned by digest and is node TCB by design.",
+      "mounts": {
+        "/run/confai": "ratls-mesh verifies peer evidence over the node's attestation socket; no chart value can point it at another verifier."
+      }
+    },
+    "c8s-tls-lb": {
+      "privileges": "tls-lb's nginx config and the attest sidecar's measurements config arrive as ConfigMaps the kubelet binds from its pod volume path. Routing content is out of scope for this lane; the sidecars pin CDS on the node tuple and cannot be steered to another CDS.",
+      "mounts": {
+        "/run/confai": "The tls-lb sidecars attest over the node's attestation socket and pin CDS on the node's own tuple."
+      }
+    },
+    "demo-nginx": {
+      "mounts": {
+        "/run/confai": "The injected c8s-cert sidecar attests over the node's attestation socket and pins CDS on the node's own tuple, so a CDS on an unsealed node of the same image is refused."
+      }
+    }
+  },
+  "floor": {
+    "system-hardened-kubernetes-v1.34.5-rke2r1-build20260227": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net"],
+        "hostPaths": ["/var/lib/rancher/rke2/", "/etc/rancher/rke2/", "/var/lib/kubelet/", "/var/log/", "/etc/ssl/certs/", "/usr/share/ca-certificates/", "/usr/local/share/ca-certificates/", "/etc/ca-certificates/", "/etc/pki/"],
+        "review": "RKE2 control-plane static pods (kube-apiserver, kube-controller-manager, kube-scheduler): measured image content, node TCB. argv is left open until a reviewer pins it from a dynamic node's observation; the host paths are RKE2's state, config, logs and CA bundles."
+      }
+    },
+    "system-hardened-etcd-v3.6.7-k3s1-build20260227": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net"],
+        "hostPaths": ["/var/lib/rancher/rke2/"],
+        "review": "RKE2 etcd static pod: measured image content, node TCB. Its database lives under the RKE2 state directory on the encrypted scratch disk."
+      }
+    },
+    "system-rke2-cloud-provider-v1.34.4-0.20260211145917-c6017918a65": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net"],
+        "hostPaths": ["/var/lib/rancher/rke2/", "/etc/rancher/rke2/"],
+        "review": "RKE2 cloud-controller-manager static pod: measured image content, node TCB."
+      }
+    },
+    "system-mirrored-cilium-cilium-v1.19.1": {
+      "argv": "any",
+      "privileges": {
+        "privileged": true,
+        "hostNamespaces": ["net"],
+        "hostPaths": ["/sys/fs/bpf", "/sys/fs/cgroup", "/proc", "/run/cilium/", "/lib/modules", "/run/xtables.lock", "/etc/cni/net.d", "/opt/cni/bin", "/var/lib/cilium/", "/var/lib/kubelet/pods/"],
+        "review": "Cilium agent and its init containers: the CNI the node image bakes, node TCB. Privileged covers the mount-bpf-fs init container and the agent's capability set. The host paths are the ones the rke2-cilium chart binds; a copy that binds anything else (the lane binds /sys) is refused on that ground even though argv is open."
+      }
+    },
+    "system-mirrored-cilium-operator-generic-v1.19.1": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net"],
+        "hostPaths": ["/var/lib/kubelet/pods/"],
+        "review": "Cilium operator: baked CNI control plane, node TCB. It reads the cilium ConfigMap from the kubelet volume path."
+      }
+    },
+    "system-mirrored-cilium-cilium-envoy-v1.35.9-1770979049-232ed4a2": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net"],
+        "capabilities": ["CAP_NET_ADMIN", "CAP_SYS_ADMIN"],
+        "hostPaths": ["/sys/fs/bpf", "/run/cilium/", "/var/lib/kubelet/pods/"],
+        "review": "Cilium Envoy DaemonSet: baked CNI data path, node TCB."
+      }
+    },
+    "system-hardened-coredns-v1.14.1-build20260206": {
+      "argv": "any",
+      "privileges": {
+        "capabilities": ["CAP_NET_BIND_SERVICE"],
+        "hostPaths": ["/var/lib/kubelet/pods/"],
+        "review": "CoreDNS: baked cluster DNS, node TCB. It reads its Corefile ConfigMap from the kubelet volume path."
+      }
+    },
+    "system-hardened-cluster-autoscaler-v1.10.3-build20260206": {
+      "argv": "any",
+      "privileges": {
+        "review": "CoreDNS proportional autoscaler shipped by the rke2-coredns chart: baked, node TCB; it holds no host binds."
+      }
+    },
+    "system-hardened-k8s-metrics-server-v0.8.1-build20260206": {
+      "argv": "any",
+      "privileges": {
+        "review": "metrics-server shipped by RKE2: baked, node TCB; it holds no host binds."
+      }
+    },
+    "system-hardened-snapshot-controller-v8.4.0-build20260205": {
+      "argv": "any",
+      "privileges": {
+        "review": "CSI snapshot controller shipped by RKE2: baked, node TCB; it holds no host binds."
+      }
+    },
+    "system-klipper-helm-v0.9.14-build20260210": {
+      "argv": "any",
+      "privileges": {
+        "hostPaths": ["/var/lib/kubelet/pods/"],
+        "review": "RKE2 helm-controller job image: installs the packaged charts the image bakes (cilium, coredns, metrics-server, snapshot-controller) from ConfigMaps and Secrets the kubelet binds from its pod volume path. Node TCB: cluster-admin can drive it, but every pod it creates still meets the sealed rules."
+      }
+    },
+    "system-hardened-cni-plugins-v1.9.0-build20260206": {
+      "argv": "any",
+      "privileges": {
+        "hostPaths": ["/opt/cni/bin", "/etc/cni/net.d", "/var/lib/kubelet/pods/"],
+        "review": "RKE2 CNI plugin installer: baked, node TCB; writes only the CNI binary and config directories."
+      }
+    },
+    "system-mirrored-pause-3.6": {
+      "argv": "any",
+      "privileges": {
+        "hostNamespaces": ["net", "pid", "ipc"],
+        "review": "Sandbox pause container for every pod, including host-namespace system pods: baked, node TCB; it runs /pause and binds nothing."
+      }
+    }
+  },
+  "drop": [
+    "system-busybox",
+    "system-local-path-provisioner",
+    "system-k8s-device-plugin",
+    "system-hardened-addon-resizer-1.8.23-build20260206",
+    "system-hardened-dns-node-cache-1.26.7-build20260206",
+    "system-klipper-lb-v0.4.14",
+    "system-mirrored-cilium-certgen-v0.3.2",
+    "system-mirrored-cilium-clustermesh-apiserver-v1.19.1",
+    "system-mirrored-cilium-hubble-relay-v1.19.1",
+    "system-mirrored-cilium-hubble-ui-backend-v0.13.3",
+    "system-mirrored-cilium-hubble-ui-v0.13.3",
+    "system-mirrored-cilium-operator-aws-v1.19.1",
+    "system-mirrored-cilium-operator-azure-v1.19.1",
+    "system-mirrored-ingress-nginx-kube-webhook-certgen-v1.6.7",
+    "system-nginx-ingress-controller-v1.14.3-hardened3",
+    "system-rke2-runtime-v1.34.5-rke2r1"
+  ]
+}

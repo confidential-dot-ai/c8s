@@ -1,0 +1,18 @@
+# demo-nginx with its command overridden: the rule pins argv exactly, so the
+# same image with another argv is refused at creation.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-nginx-argv
+  namespace: default
+  annotations:
+    confidential.ai/cw: demo-nginx
+spec:
+  enableServiceLinks: false
+  restartPolicy: Never
+  containers:
+    - name: nginx
+      image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      ports:
+        - containerPort: 80

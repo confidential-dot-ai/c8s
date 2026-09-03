@@ -9,6 +9,7 @@ covers and why the kind harness is shaped the way it is.
 | docker-compose | `make test-integration` | Integration | get-cert's RA-TLS flow against mock CDS + mock attestation-api, nginx serving the issued leaf |
 | kind cluster | `make test-integration-cluster` | Integration (cluster) | the full node-mode control plane and workload path (below) |
 | live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, allowlist enforcement, control-plane convergence on real TEEs |
+| static allowlist scripts | `test/e2e/static/*.sh` | tdx-metal-static-e2e | a TDX node sealed to a policy bundle: bundle build and fixed-point check, refused ConfigMap/env/argv variants of the sample workload, `kubectl exec`/`debug` refused, a privileged cilium copy refused, `c8s verify --static-allowlist`, and a dynamic node that cannot forge the static register |
 
 ## The kind harness
 
@@ -78,7 +79,12 @@ No TEE properties are asserted: hardware verification, measurements that mean
 anything, kata guests, encrypted volumes (volumed needs device-mapper control
 of the node kernel), `get-kubeconfig` (SNP-gated), and the
 `c8s allowlist`/`c8s verify` CLIs (in-process hardware verification, above).
-The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those.
+The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those. Static
+mode ([`static-allowlist.md`](static-allowlist.md)) is out of scope too: it
+needs a TDX node whose measured `c8s-policy-measure.service` extends RTMR[3],
+and mock-attestation serves SNP-shaped evidence with no registers, so the
+kind harness cannot render `staticAllowlist.enabled`; the tdx-metal-static
+lane owns it.
 
 ## Running it
 
