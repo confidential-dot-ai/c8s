@@ -101,6 +101,12 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
+	// Validate the explicit Kubernetes node address before looking for a
+	// second address family. Otherwise an unrelated address on a management
+	// interface can hide the actual configuration error.
+	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
+		return err
+	}
 	// Dual-stack: the chart only passes status.hostIP (IPv4 on most nodes),
 	// so pod-originated IPv6 TCP was never redirected. Auto-discover the
 	// missing family's address from local interfaces; verifyNodeIPsLocal
@@ -112,9 +118,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	for family, ip := range discovered {
 		nodeIPsByFamily[family] = ip
 	}
-	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
-		return err
-	}
+	// Discovery selects only addresses that are already bound locally.
 	cfg.nodeIPs = canonicalNodeIPs(nodeIPsByFamily)
 	excludeUIDs, err := parseExcludeUIDs(cfg.excludeUIDs)
 	if err != nil {
@@ -511,8 +515,9 @@ func composeIptablesSyncRules(outboundPort, uid int, excludeUIDs []uint32, cwPas
 
 // ifaceAddrSet groups the addresses bound to one interface.
 type ifaceAddrSet struct {
-	name  string
-	addrs []ifaceAddr
+	name         string
+	pointToPoint bool
+	addrs        []ifaceAddr
 }
 
 type ifaceAddr struct {
@@ -538,7 +543,10 @@ func collectInterfaceAddresses() ([]ifaceAddrSet, error) {
 		if err != nil {
 			return nil, fmt.Errorf("enumerate addresses on interface %s: %w", ifc.Name, err)
 		}
-		set := ifaceAddrSet{name: ifc.Name}
+		set := ifaceAddrSet{
+			name:         ifc.Name,
+			pointToPoint: ifc.Flags&net.FlagPointToPoint != 0,
+		}
 		seen := map[string]bool{}
 		for _, a := range addrs {
 			var ipnet *net.IPNet
@@ -611,6 +619,13 @@ func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[i
 		var cands []candidate
 		for si := range sets {
 			set := sets[si]
+			// VPN and tunnel interfaces can have a global address from the
+			// missing family even when Kubernetes is single-stack. They are not
+			// part of the Kubernetes node fabric and must not force dual-stack
+			// mesh configuration.
+			if set.pointToPoint {
+				continue
+			}
 			// The interface carries a provided node IP literal. That IP names
 			// the egress interface (kubelet's primary NIC), not an overlay.
 			carriesProvided := false

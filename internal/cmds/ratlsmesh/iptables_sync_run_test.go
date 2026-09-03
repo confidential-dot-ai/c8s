@@ -195,6 +195,28 @@ func TestSelectMissingFamilyNodeIPsErrorsOnOverlayOnly(t *testing.T) {
 	}
 }
 
+// A management VPN can add an address family that Kubernetes does not use.
+// It must not make a single-stack Kubernetes node look dual-stack.
+func TestSelectMissingFamilyNodeIPsSkipsPointToPointManagementInterface(t *testing.T) {
+	byFamily := map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.5"}
+	needed := map[iptablesFamily]bool{iptablesFamilyIPv6: true}
+	sets := []ifaceAddrSet{
+		{name: "eth0", addrs: []ifaceAddr{addr(t, "10.0.0.5", 24, 32)}},
+		{
+			name:         "tailscale0",
+			pointToPoint: true,
+			addrs:        []ifaceAddr{addr(t, "fd7a:115c:a1e0::1", 128, 128)},
+		},
+	}
+	got, err := selectMissingFamilyNodeIPs(byFamily, needed, sets)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if _, ok := got[iptablesFamilyIPv6]; ok {
+		t.Errorf("selected management VPN IPv6 %q; expected no IPv6 entry", got[iptablesFamilyIPv6])
+	}
+}
+
 // A network aggregate (prefix shorter than /64 with zero interface bits, e.g.
 // a /56) is not a host address and must not be selected as a DNAT target.
 func TestSelectMissingFamilyNodeIPsRejectsAggregate(t *testing.T) {
