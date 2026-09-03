@@ -29,7 +29,7 @@ on:
         type: string
         default: ""
       static_allowlist:
-        description: "Seal the image: base64 of a c8s.allowlist/v1 document baked at /etc/c8s/static-allowlist.json and enforced with no pull (docs/static-allowlist.md). Tags gain -sa<sha256 prefix of the document>."
+        description: "Base64 c8s.allowlist/v1, or c8s.node-build-inputs/v1 with an allowlist and measured consumer profile."
         required: false
         type: string
         default: ""
@@ -155,19 +155,97 @@ jobs:
           ref: ${{ env.CONFOS_REF }}
           path: confidential-os-builder
 
+      - name: Prepare sealed policy and production profile
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+          SEALED_BUILD_INPUT_B64: ${{ inputs.static_allowlist }}
+        run: |
+          set -euo pipefail
+
+          source_ref="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
+          [[ "$source_ref" =~ ^[0-9a-f]{7}$ ]] || {
+            echo "::error::c8s_ref must be the seven-character component image tag"
+            exit 1
+          }
+
+          static_allowlist_b64=""
+          profile_archive_b64=""
+          profile_commit=""
+          profile_sha256=""
+          if [ -n "$SEALED_BUILD_INPUT_B64" ]; then
+            printf '%s' "$SEALED_BUILD_INPUT_B64" | base64 -d > "$RUNNER_TEMP/sealed-build-input.json"
+            input_schema="$(jq -er '.schema' "$RUNNER_TEMP/sealed-build-input.json")"
+            if [ "$input_schema" = "c8s.node-build-inputs/v1" ]; then
+              jq -e 'keys | sort == ["consumerProfileArchiveB64", "consumerProfileCommit", "consumerProfileSha256", "schema", "staticAllowlistB64"]' \
+                "$RUNNER_TEMP/sealed-build-input.json" >/dev/null
+              static_allowlist_b64="$(jq -er '.staticAllowlistB64' "$RUNNER_TEMP/sealed-build-input.json")"
+              profile_archive_b64="$(jq -er '.consumerProfileArchiveB64' "$RUNNER_TEMP/sealed-build-input.json")"
+              profile_commit="$(jq -er '.consumerProfileCommit' "$RUNNER_TEMP/sealed-build-input.json")"
+              profile_sha256="$(jq -er '.consumerProfileSha256' "$RUNNER_TEMP/sealed-build-input.json")"
+            elif [ "$input_schema" = "c8s.allowlist/v1" ]; then
+              static_allowlist_b64="$SEALED_BUILD_INPUT_B64"
+            else
+              echo "::error::unsupported sealed build input schema: $input_schema"
+              exit 1
+            fi
+          fi
+
+          profile_suffix=""
+          if [ -n "$profile_archive_b64" ]; then
+            [[ "$profile_commit" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::consumer_profile_commit must be a full lowercase commit SHA"
+              exit 1
+            }
+            [[ "$profile_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::consumer_profile_sha256 must be a lowercase SHA-256"
+              exit 1
+            }
+            printf '%s' "$profile_archive_b64" | base64 -d > "$RUNNER_TEMP/control-plane-state.tar"
+            [ "$(stat -c%s "$RUNNER_TEMP/control-plane-state.tar")" -le 65536 ] || {
+              echo "::error::consumer profile archive is too large"
+              exit 1
+            }
+            echo "$profile_sha256  $RUNNER_TEMP/control-plane-state.tar" | sha256sum -c -
+            rm -rf "$GITHUB_WORKSPACE/consumer-profile"
+            mkdir -p "$GITHUB_WORKSPACE/consumer-profile"
+            python3 c8s/.github/scripts/extract-consumer-profile.py \
+              "$RUNNER_TEMP/control-plane-state.tar" \
+              "$GITHUB_WORKSPACE/consumer-profile"
+            profile_suffix="-cp${profile_sha256:0:12}"
+            {
+              echo "CONSUMER_PROFILE_DIR=$GITHUB_WORKSPACE/consumer-profile"
+              echo "CONSUMER_PROFILE_COMMIT=$profile_commit"
+              echo "CONSUMER_PROFILE_SHA256=$profile_sha256"
+            } >> "$GITHUB_ENV"
+          fi
+
+          allowlist_suffix=""
+          if [ -n "$static_allowlist_b64" ]; then
+            printf '%s' "$static_allowlist_b64" | base64 -d > "$RUNNER_TEMP/static-allowlist.json"
+            jq -e '.schema == "c8s.allowlist/v1"' "$RUNNER_TEMP/static-allowlist.json" >/dev/null
+            allowlist_sha="$(sha256sum "$RUNNER_TEMP/static-allowlist.json" | cut -d' ' -f1)"
+            allowlist_suffix="-sa${allowlist_sha:0:12}"
+            echo "C8S_STATIC_ALLOWLIST_PATH=$RUNNER_TEMP/static-allowlist.json" >> "$GITHUB_ENV"
+          fi
+
+          echo "BUILD_REF=${source_ref}${profile_suffix}${allowlist_suffix}" >> "$GITHUB_ENV"
+
       - name: Set image ref and variant
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
         run: |
-          echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base" >> "$GITHUB_ENV"
+          {
+            echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base"
           if [ "${{ inputs.dev }}" = "true" ]; then
-            echo "VARIANT=rke2-${{ matrix.platform }}-dev" >> "$GITHUB_ENV"
-            echo "KERNEL_FLAVOR=rke2-dev" >> "$GITHUB_ENV"
-            echo "C8S_DEV=1" >> "$GITHUB_ENV"
+              echo "VARIANT=rke2-${{ matrix.platform }}-dev"
+              echo "KERNEL_FLAVOR=rke2-dev"
+              echo "C8S_DEV=1"
           else
-            echo "VARIANT=rke2-${{ matrix.platform }}" >> "$GITHUB_ENV"
-            echo "KERNEL_FLAVOR=rke2" >> "$GITHUB_ENV"
-            echo "C8S_DEV=0" >> "$GITHUB_ENV"
+              echo "VARIANT=rke2-${{ matrix.platform }}"
+              echo "KERNEL_FLAVOR=rke2"
+              echo "C8S_DEV=0"
           fi
+          } >> "$GITHUB_ENV"
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -386,7 +464,6 @@ jobs:
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
-          STATIC_ALLOWLIST_B64: ${{ inputs.static_allowlist }}
           # Private half of the module signing certificate (org secret) — the
           # fetch script signs the NVIDIA modules with it and fails closed
           # without it. Signatures are deterministic (sign-file uses no
@@ -405,15 +482,18 @@ jobs:
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
           # A sealed build bakes the operator's policy document; the file is
           # per deployment and never committed, so it arrives as an input.
-          if [ -n "$STATIC_ALLOWLIST_B64" ]; then
-            printf '%s' "$STATIC_ALLOWLIST_B64" | base64 -d > "$RUNNER_TEMP/static-allowlist.json"
-            jq -e '.schema == "c8s.allowlist/v1"' "$RUNNER_TEMP/static-allowlist.json" >/dev/null
-            export C8S_STATIC_ALLOWLIST="$RUNNER_TEMP/static-allowlist.json"
+          if [ -n "${C8S_STATIC_ALLOWLIST_PATH:-}" ]; then
+            export C8S_STATIC_ALLOWLIST="$C8S_STATIC_ALLOWLIST_PATH"
             echo "sealed build: static allowlist sha256 $(sha256sum "$C8S_STATIC_ALLOWLIST" | cut -c1-16)…"
+          fi
+          extra_profiles=()
+          if [ -n "${CONSUMER_PROFILE_DIR:-}" ]; then
+            extra_profiles+=(--profile-dir "$CONSUMER_PROFILE_DIR")
           fi
           # The build script requires an explicit platform (no default). The
           # matrix publishes both measured platform variants.
-          C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+          C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" \
+            ../c8s/node-guest-image/build "${extra_profiles[@]}"
 
       - name: Make the tools trees cache-safe
         # The post-job cache tar runs unprivileged; mkosi builds these trees as
@@ -497,9 +577,9 @@ jobs:
             exit 0
           fi
 
-          # A c8s_ref rebuild compares against that release's own tag, not the
-          # floating one it never repoints.
-          tag="${VARIANT}${C8S_REF_INPUT:+-$C8S_REF_INPUT}"
+          # A sealed or consumer-profile build has its own content-qualified
+          # tag. It must never compare against a generic image.
+          tag="${VARIANT}-${BUILD_REF}"
           new=$(cat "output/${VARIANT}/roothash" 2>/dev/null || echo new)
           digest=$(oras manifest fetch "${IMAGE}:${tag}" 2>/dev/null \
                      | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "roothash") | .digest' \
@@ -522,21 +602,15 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
-          STATIC_ALLOWLIST_B64: ${{ inputs.static_allowlist }}
         run: |
           set -eux
-          SHORT_SHA="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          # A sealed image is one deployment's; it never moves a floating tag
-          # and is named by its policy as well as its commit.
-          if [ -n "$STATIC_ALLOWLIST_B64" ]; then
-            SHORT_SHA="${SHORT_SHA}-sa$(printf '%s' "$STATIC_ALLOWLIST_B64" | base64 -d | sha256sum | cut -c1-12)"
-            C8S_REF_INPUT="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          fi
+          SHORT_SHA="$BUILD_REF"
           # A c8s_ref rebuild repoints only that release's suffixed tags; the
           # floating tags keep tracking main builds.
           CDI_TAGS="${VARIANT}-cdi,${VARIANT}-cdi-${SHORT_SHA}"
           ORAS_TAGS="${VARIANT},${VARIANT}-${SHORT_SHA}"
-          if [ -n "$C8S_REF_INPUT" ]; then
+          if [ -n "$C8S_REF_INPUT" ] || [ -n "${CONSUMER_PROFILE_DIR:-}" ] || \
+             [ -n "${C8S_STATIC_ALLOWLIST_PATH:-}" ]; then
             CDI_TAGS="${VARIANT}-cdi-${SHORT_SHA}"
             ORAS_TAGS="${VARIANT}-${SHORT_SHA}"
           fi
@@ -557,6 +631,7 @@ jobs:
         if: |
           inputs.gate != true &&
           inputs.c8s_ref == '' &&
+          inputs.static_allowlist == '' &&
           steps.changed.outputs.skip == 'true'
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -596,7 +671,11 @@ jobs:
         run: |
           {
             echo "### ${VARIANT} confidential node image"
-            echo "- CDI image: \`${IMAGE}:${VARIANT}-cdi${C8S_REF_INPUT:+-$C8S_REF_INPUT}\`"
-            echo "- artifact: \`${IMAGE}:${VARIANT}${C8S_REF_INPUT:+-$C8S_REF_INPUT}\`"
+            echo "- CDI image: \`${IMAGE}:${VARIANT}-cdi-${BUILD_REF}\`"
+            echo "- artifact: \`${IMAGE}:${VARIANT}-${BUILD_REF}\`"
             echo "- confos ref: \`${CONFOS_REF}\`"
+            if [ -n "${CONSUMER_PROFILE_COMMIT:-}" ]; then
+              echo "- consumer profile commit: \`${CONSUMER_PROFILE_COMMIT}\`"
+              echo "- consumer profile archive sha256: \`${CONSUMER_PROFILE_SHA256}\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

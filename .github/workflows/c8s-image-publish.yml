@@ -44,7 +44,7 @@ on:
         type: boolean
         default: false
       static_allowlist:
-        description: "Seal the image with this base64-encoded c8s.allowlist/v1 document (compose it with `c8s render-allowlist`). Publishes only the :<variant>[-cdi]-<ref>-sa<digest> tags."
+        description: "Base64 c8s.allowlist/v1, or a c8s.node-build-inputs/v1 envelope with that policy and a measured consumer profile."
         required: false
         type: string
         default: ""

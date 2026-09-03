@@ -137,6 +137,9 @@ fi
 if [ "${C8S_GPU_ATTEST:-1}" != 0 ]; then
     bin/confos-fetch-attest-gpu
 fi
+# The private module key is needed only for the NVIDIA module-signing step.
+# Do not expose it to consumer profiles during the final mkosi build.
+unset MODULE_SIG_KEY_PEM MODULE_SIG_KEY
 bin/confos build "${C8S_NAME:-c8s}" \
     "${PROFILES[@]}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
