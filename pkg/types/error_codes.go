@@ -21,9 +21,10 @@ const (
 	// ErrorCodeTooManyRequests: the caller holds as many sessions as one
 	// client may. Retrying once the sessions it holds expire succeeds.
 	ErrorCodeTooManyRequests = "too_many_requests"
-	// ErrorCodeExternalTLS: attest-lb was requested on a front door whose TLS
-	// terminates outside the TEE (a WebPKI-secret deployment), so no TEE-held
-	// serving key exists to bind; that deployment shape is attest-pq-only.
+	// ErrorCodeExternalTLS: attest-lb was requested on a front door whose
+	// serving credential was generated outside the TEE (an operator-supplied
+	// WebPKI Secret), so there is no TEE-held serving key to bind; that
+	// deployment shape is attest-pq-only.
 	ErrorCodeExternalTLS = "external_tls"
 	// ErrorCodeSecretHolderQuota: the caller is at --secrets-max-paths-per-workload.
 	ErrorCodeSecretHolderQuota = "secret_holder_quota"
