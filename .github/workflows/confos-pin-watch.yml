@@ -11,27 +11,11 @@
 #   node-image:  c8s-image.yml            (node rootfs / RTMR + SNP digests)
 #   kata-guest:  kata-guest-base.yml + kernel-snapshot.yml (kata launch digest)
 #
-# Authentication setup:
-# - Create a dedicated organization-owned GitHub App. Grant no organization or
-#   account permissions and subscribe to no webhooks. Grant only repository
-#   Contents, Pull requests, and Workflows read/write; Workflows is required
-#   because these PRs edit workflow files. Install it only on repositories that
-#   run pin-watch.
-# - Store its client ID in the PIN_WATCH_APP_CLIENT_ID Actions variable and a
-#   generated private key in the PIN_WATCH_APP_PRIVATE_KEY Actions secret. For
-#   organization-level values, restrict both to the same selected repositories.
-#
-# A shared App private key can mint tokens for every App installation. Keep the
-# installation and variable/secret allowlists identical and minimal, and rotate
-# the key after suspected disclosure or compromise of any selected repository.
-#
-# When the client ID is present, the pinned action mints a short-lived token
-# scoped to this repository. Checkout, push, and gh use that same token; PRs
-# created with it start checks automatically, and the action revokes it in its
-# post-step. A missing or invalid key fails closed.
-# Leaving the client ID unset intentionally falls back to GITHUB_TOKEN, limited
-# by the permissions below. The repository must enable "Allow GitHub Actions to
-# create and approve pull requests"; resulting PR workflow runs await approval.
+# Authentication prefers a short-lived, repository-scoped GitHub App token.
+# This job additionally requests Workflows write because generated commits edit
+# workflow files. Checkout, push, and gh use one credential; an unconfigured
+# App falls back to GITHUB_TOKEN, while invalid configured credentials fail
+# before checkout.
 name: confos pin watch
 
 on:
