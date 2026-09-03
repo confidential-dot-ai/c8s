@@ -2760,6 +2760,65 @@ func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
 	assertHelmFailMessage(t, out, "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
 }
 
+func TestChartTLSLBServicePinsBareMetalNodePorts(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "tlsLb.publicTLS.mode=acme",
+		"--set", "tlsLb.san={api.example.com}",
+		"--set", "tlsLb.hostPort.enabled=false",
+		"--set", "tlsLb.service.type=LoadBalancer",
+		"--set", "tlsLb.service.nodePort=30443",
+		"--set", "tlsLb.service.httpNodePort=30080",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	svc := renderedService(t, out, "c8s-tls-lb")
+	want := map[string]int32{"https": 30443, "http": 30080}
+	for _, port := range svc.Spec.Ports {
+		if expected, ok := want[port.Name]; ok {
+			if port.NodePort != expected {
+				t.Fatalf("%s nodePort = %d, want %d", port.Name, port.NodePort, expected)
+			}
+			delete(want, port.Name)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("tls-lb Service lacks fixed ports: %v", want)
+	}
+}
+
+func TestChartTLSLBServiceRejectsInvalidFixedNodePorts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "ClusterIP",
+			args: []string{"--set", "tlsLb.service.nodePort=30443"},
+			want: "tlsLb.service nodePort settings require type NodePort or LoadBalancer",
+		},
+		{
+			name: "HTTP without ACME",
+			args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.httpNodePort=30080"},
+			want: "tlsLb.service.httpNodePort requires publicTLS.mode=acme",
+		},
+		{
+			name: "port collision",
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "tlsLb.san={api.example.com}", "--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.nodePort=30443", "--set", "tlsLb.service.httpNodePort=30443"},
+			want: "tlsLb.service.nodePort and httpNodePort must differ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("render succeeded, want failure\n%s", out)
+			}
+			assertHelmFailMessage(t, out, tc.want)
+		})
+	}
+}
+
 // With no adopted workload the upstream address is empty; the sidecar must
 // render without any --upstream* flag (its echo backend takes over) instead
 // of a scheme-only "--upstream=http://" that crash-loops the container.

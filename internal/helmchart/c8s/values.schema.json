@@ -489,6 +489,16 @@
           "properties": {
             "annotations": {},
             "externalTrafficPolicy": {},
+            "httpNodePort": {
+              "type": ["integer", "null"],
+              "minimum": 30000,
+              "maximum": 32767
+            },
+            "nodePort": {
+              "type": ["integer", "null"],
+              "minimum": 30000,
+              "maximum": 32767
+            },
             "port": {},
             "type": {}
           }

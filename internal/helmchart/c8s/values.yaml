@@ -124,6 +124,11 @@ webhook:
   annotations: {}
   service:
     port: 443
+    # -- Optional fixed node ports for reproducible bare-metal ingress.
+    # nodePort serves HTTPS. httpNodePort serves ACME HTTP-01 when mode=acme.
+    # Set service.type to NodePort or LoadBalancer when either value is set.
+    nodePort: null
+    httpNodePort: null
   failurePolicy: Fail
   extraExcluded: []
   ## ValidatingAdmissionPolicy guarding the confidential.ai/cw pod label
