@@ -25,7 +25,7 @@ type Config struct {
 	Platform string
 	// PolicyDir is where c8s-policy-measure published the boot's policy
 	// mode. mode=dynamic gates release on the measured operator key;
-	// mode=static has no operator key and releases to any attested caller
+	// mode=static has no operator key and releases to any caller
 	// once RTMR[3] matches the published bundle.
 	PolicyDir string
 	// ClientCACert / ClientCAKey locate the cluster's client-signing CA

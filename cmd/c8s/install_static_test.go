@@ -94,6 +94,13 @@ func TestStaticInstallPreflightFlagRules(t *testing.T) {
 		{"measurements", func(*cobra.Command) { installMeasurements = []string{"aa"} }, "--measurements"},
 		{"measurements config", func(*cobra.Command) { installMeasurementsConfig = "m.json" }, "--measurements-config"},
 		{"rtmrs", func(*cobra.Command) { installRTMRs = []string{"1=aa"} }, "--rtmrs"},
+		{"node attest without a bundle", func(*cobra.Command) {
+			installStaticAllowlist = ""
+			installStaticNodeAttest = map[string]string{"a": "203.0.113.9:8400"}
+		}, "--static-node-attest requires --static-allowlist"},
+		{"node attest without a port", func(*cobra.Command) {
+			installStaticNodeAttest = map[string]string{"a": "203.0.113.9"}
+		}, "--static-node-attest a=203.0.113.9"},
 		{"explicit resolve-digests", func(cmd *cobra.Command) {
 			if err := cmd.Flags().Set("resolve-digests", "true"); err != nil {
 				t.Fatal(err)
@@ -388,7 +395,7 @@ func TestPreflightStaticNodes(t *testing.T) {
 		verdicts["http://10.0.0.2:8400/attest"] = context.DeadlineExceeded
 		t.Cleanup(func() { delete(verdicts, "http://10.0.0.2:8400/attest") })
 		err := preflightStaticNodes(context.Background(), &bytes.Buffer{}, staticState)
-		if err == nil || !strings.Contains(err.Error(), "node b (10.0.0.2) is not sealed to this bundle") {
+		if err == nil || !strings.Contains(err.Error(), "node b (10.0.0.2:8400) is not sealed to this bundle") {
 			t.Fatalf("preflightStaticNodes = %v, want node b named", err)
 		}
 	})
@@ -399,6 +406,45 @@ func TestPreflightStaticNodes(t *testing.T) {
 		err := preflightStaticNodes(context.Background(), &bytes.Buffer{}, staticState)
 		if err == nil || !strings.Contains(err.Error(), "no InternalIP") {
 			t.Fatalf("preflightStaticNodes = %v, want the missing address named", err)
+		}
+	})
+
+	t.Run("an override replaces the InternalIP of the node it names", func(t *testing.T) {
+		calls = nil
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `/bin/cat "`+nodeListFile(t, node("a", "10.0.2.2"), node("b", ""))+`"`)
+		staticState.nodeAttest = map[string]string{"a": "203.0.113.9:8400", "b": "[fd00::9]:8401"}
+		t.Cleanup(func() { staticState.nodeAttest = nil })
+		var out bytes.Buffer
+		if err := preflightStaticNodes(context.Background(), &out, staticState); err != nil {
+			t.Fatalf("preflightStaticNodes: %v", err)
+		}
+		want := []string{"http://203.0.113.9:8400/attest", "http://[fd00::9]:8401/attest"}
+		if len(calls) != 2 {
+			t.Fatalf("verifier called %d times, want once per node", len(calls))
+		}
+		for i, c := range calls {
+			if c.url != want[i] {
+				t.Errorf("call %d = %s, want %s", i, c.url, want[i])
+			}
+		}
+		if !strings.Contains(out.String(), "attested at 203.0.113.9:8400, --static-node-attest") {
+			t.Errorf("progress = %q, want the override named", out.String())
+		}
+	})
+
+	t.Run("an override naming an absent node fails before any attest", func(t *testing.T) {
+		calls = nil
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `/bin/cat "`+nodeListFile(t, node("a", "10.0.0.1"))+`"`)
+		staticState.nodeAttest = map[string]string{"c": "203.0.113.9:8400", "b": "203.0.113.8:8400"}
+		t.Cleanup(func() { staticState.nodeAttest = nil })
+		err := preflightStaticNodes(context.Background(), &bytes.Buffer{}, staticState)
+		if err == nil || !strings.Contains(err.Error(), "nodes the cluster does not have: b, c") {
+			t.Fatalf("preflightStaticNodes = %v, want the absent nodes named", err)
+		}
+		if len(calls) != 0 {
+			t.Errorf("verifier called %d times, want none", len(calls))
 		}
 	})
 

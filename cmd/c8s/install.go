@@ -1110,7 +1110,9 @@ running container must carry a digest the bundle names. Component digests and
 the CDS measurements entry (MRTD, RTMR[1], RTMR[2], RTMR[3]) come from the
 bundle and the manifest, so --operator-keys, --resolve-digests, --measurements,
 --measurements-config and --rtmrs are refused. Sets staticAllowlist.enabled,
-nriImagePolicy.enabled=false and cds.persistence.enabled=false.
+nriImagePolicy.enabled=false and cds.persistence.enabled=false. A node whose
+InternalIP the installer cannot reach (a NAT binding between them) is attested
+at the host:port given by --static-node-attest <node-name>=<host:port>.
 
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 --resolve-digests=false or --static-allowlist is given.`,
@@ -2536,5 +2538,6 @@ func init() {
 	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart), and a --static-allowlist bundle that does not name every running image")
 	installCmd.Flags().StringVar(&installStaticAllowlist, "static-allowlist", "", "policy bundle the nodes booted with (a directory of members, or the static-allowlist.json alone). Pins every component digest and the CDS measurements entry from it, attests every node against its RTMR[3], and sets staticAllowlist.enabled. Requires --image-manifest, --cvm-mode=node and --hardware-platform=tdx; excludes --operator-keys, --resolve-digests, --measurements, --measurements-config and --rtmrs")
 	installCmd.Flags().StringVar(&installImageManifest, "image-manifest", "", "build-artifact manifest of the node image (mrtd, rtmr1, rtmr2): the image half of the static tuple; required with --static-allowlist")
+	installCmd.Flags().StringToStringVar(&installStaticNodeAttest, "static-node-attest", nil, "<node-name>=<host:port> (repeatable/comma-separated) where the --static-allowlist node preflight reaches that node's attestation-api instead of InternalIP:8400, for nodes behind a NAT binding (a KubeVirt masquerade guest). Every named node must exist; requires --static-allowlist")
 	rootCmd.AddCommand(installCmd)
 }

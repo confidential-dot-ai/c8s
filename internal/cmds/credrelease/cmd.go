@@ -40,7 +40,7 @@ func NewCmd() *cobra.Command {
 			"cluster already binds, or every request is denied.\n" +
 			"On a static-allowlist boot (--policy-dir mode=static) there is no\n" +
 			"operator key: RTMR[3] must equal the value recomputed from the\n" +
-			"published bundle and any attested caller receives the credential.",
+			"published bundle and any caller receives the credential.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return Run(cmd.Context(), cfg)
 		},
@@ -49,7 +49,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ListenAddr, "listen", ":8443", "HTTPS (RA-TLS) bind address")
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (RA-TLS serving quote; on SNP also the HOSTDATA self-verify)")
 	f.StringVar(&cfg.Platform, "platform", "", "TEE platform: tdx or snp (required)")
-	f.StringVar(&cfg.PolicyDir, "policy-dir", policybundle.DefaultPolicyDir, "policy mode directory c8s-policy-measure wrote; mode=static releases to any attested caller once RTMR[3] matches the bundle")
+	f.StringVar(&cfg.PolicyDir, "policy-dir", policybundle.DefaultPolicyDir, "policy mode directory c8s-policy-measure wrote; mode=static releases to any caller once RTMR[3] matches the bundle")
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")

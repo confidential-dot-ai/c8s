@@ -29,6 +29,10 @@ import (
 var (
 	installStaticAllowlist string
 	installImageManifest   string
+	// installStaticNodeAttest maps a node name to the host:port its
+	// attestation-api is reached at when that is not the node's InternalIP
+	// (a NAT binding between the installer and the node).
+	installStaticNodeAttest map[string]string
 )
 
 // staticInstall is what --static-allowlist resolves to, loaded once per run:
@@ -42,6 +46,8 @@ type staticInstall struct {
 	// tree take it through --set-file, so it lives on disk until the run
 	// ends.
 	measurementsFile string
+	// nodeAttest is --static-node-attest, host:port per node name, validated.
+	nodeAttest map[string]string
 }
 
 // staticState is the run's loaded --static-allowlist, nil when the flag is
@@ -62,7 +68,15 @@ const staticNodeTimeout = 30 * time.Second
 // flags that supply them by other means are refused rather than merged.
 func staticInstallPreflight(cmd *cobra.Command) error {
 	if installStaticAllowlist == "" {
+		if len(installStaticNodeAttest) > 0 {
+			return fmt.Errorf("--static-node-attest requires --static-allowlist: it only redirects the node attestation of a static install")
+		}
 		return nil
+	}
+	for name, addr := range installStaticNodeAttest {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("--static-node-attest %s=%s: want <node-name>=<host:port>: %w", name, addr, err)
+		}
 	}
 	if installImageManifest == "" {
 		return fmt.Errorf("--static-allowlist requires --image-manifest: the static entry pins the image tuple (MRTD, RTMR[1], RTMR[2]) beside the bundle's RTMR[3], and the bundle alone names no image")
@@ -97,6 +111,7 @@ func staticInstallPreflight(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	s.nodeAttest = maps.Clone(installStaticNodeAttest)
 	staticState = s
 	return nil
 }
@@ -267,31 +282,49 @@ func preflightStaticNodes(ctx context.Context, w io.Writer, s *staticInstall) er
 	if len(list.Items) == 0 {
 		return fmt.Errorf("--static-allowlist: the cluster reports no nodes to attest")
 	}
+	// An override for a node that does not exist is a typo that would
+	// silently fall back to an InternalIP; refuse before any attest.
+	unknown := maps.Clone(s.nodeAttest)
+	for _, node := range list.Items {
+		delete(unknown, node.Name)
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("--static-node-attest names nodes the cluster does not have: %s", strings.Join(slices.Sorted(maps.Keys(unknown)), ", "))
+	}
 	rtmr3 := s.bundle.RTMR3()
 	for _, node := range list.Items {
-		ip := internalIP(node)
-		if ip == "" {
-			return fmt.Errorf("--static-allowlist: node %s reports no InternalIP address to attest through", node.Name)
+		addr, source := attestAddress(node, s.nodeAttest)
+		if addr == "" {
+			return fmt.Errorf("--static-allowlist: node %s reports no InternalIP address to attest through; pass --static-node-attest %s=<host:port>", node.Name, node.Name)
 		}
 		nodeCtx, cancel := context.WithTimeout(ctx, staticNodeTimeout)
-		err := staticNodeVerifier(nodeCtx, "http://"+net.JoinHostPort(ip, "8400")+"/attest", s.pins, rtmr3)
+		err := staticNodeVerifier(nodeCtx, "http://"+addr+"/attest", s.pins, rtmr3)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("--static-allowlist: node %s (%s) is not sealed to this bundle: %w — every node must have booted the measured image with this bundle attached as its policydata disk", node.Name, ip, err)
+			return fmt.Errorf("--static-allowlist: node %s (%s) is not sealed to this bundle: %w — every node must have booted the measured image with this bundle attached as its policydata disk", node.Name, addr, err)
 		}
-		fmt.Fprintf(w, "+ node %s: static mode, RTMR[3] matches the bundle\n", node.Name)
+		fmt.Fprintf(w, "+ node %s: static mode, RTMR[3] matches the bundle (attested at %s, %s)\n", node.Name, addr, source)
 	}
 	return nil
 }
 
-// internalIP is the address the node's attestation-api listens on.
-func internalIP(node corev1.Node) string {
+// attestAddress is the host:port a node's attestation-api is reached at:
+// the --static-node-attest override when one names the node, else the
+// node's InternalIP on port 8400. source says which, for the progress line.
+// Empty when the node has neither.
+func attestAddress(node corev1.Node, overrides map[string]string) (addr, source string) {
+	if o, ok := overrides[node.Name]; ok {
+		// Validated by staticInstallPreflight; re-joined so an IPv6 host
+		// keeps its brackets.
+		host, port, _ := net.SplitHostPort(o)
+		return net.JoinHostPort(host, port), "--static-node-attest"
+	}
 	for _, a := range node.Status.Addresses {
 		if a.Type == corev1.NodeInternalIP {
-			return a.Address
+			return net.JoinHostPort(a.Address, "8400"), "InternalIP"
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // preflightStaticImages fails when a container the cluster runs has a digest

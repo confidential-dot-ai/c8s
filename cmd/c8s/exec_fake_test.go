@@ -4,6 +4,7 @@ package main
 
 import (
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -103,6 +104,7 @@ func resetCLIState(t *testing.T) {
 		installHardwarePlatform, installImagePullSecret, installImageTag             string
 		installOperatorKeys, installUpstream, renderValuesDistro                     string
 		installStaticAllowlist, installImageManifest, installMeasurementsConfig      string
+		installStaticNodeAttest                                                      map[string]string
 		uninstallNamespace, uninstallRelease                                         string
 		installValues, installWorkloadRefs, installMeasurements                      []string
 		installInventoryCIDRs, installRTMRs                                          []string
@@ -117,6 +119,7 @@ func resetCLIState(t *testing.T) {
 		installHardwarePlatform, installImagePullSecret, installImageTag,
 		installOperatorKeys, installUpstream, renderValuesDistro,
 		installStaticAllowlist, installImageManifest, installMeasurementsConfig,
+		maps.Clone(installStaticNodeAttest),
 		uninstallNamespace, uninstallRelease,
 		slices.Clone(installValues), slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements),
 		slices.Clone(installInventoryCIDRs), slices.Clone(installRTMRs),
@@ -132,6 +135,7 @@ func resetCLIState(t *testing.T) {
 		installHardwarePlatform, installImagePullSecret, installImageTag = saved.installHardwarePlatform, saved.installImagePullSecret, saved.installImageTag
 		installOperatorKeys, installUpstream, renderValuesDistro = saved.installOperatorKeys, saved.installUpstream, saved.renderValuesDistro
 		installStaticAllowlist, installImageManifest, installMeasurementsConfig = saved.installStaticAllowlist, saved.installImageManifest, saved.installMeasurementsConfig
+		installStaticNodeAttest = saved.installStaticNodeAttest
 		installRTMRs = saved.installRTMRs
 		uninstallNamespace, uninstallRelease = saved.uninstallNamespace, saved.uninstallRelease
 		installValues, installWorkloadRefs, installMeasurements = saved.installValues, saved.installWorkloadRefs, saved.installMeasurements
@@ -155,7 +159,7 @@ func resetCLIState(t *testing.T) {
 	installVolumes = false
 	installOperatorKeys, installForce = "", false
 	installStaticAllowlist, installImageManifest, installMeasurementsConfig = "", "", ""
-	installRTMRs = nil
+	installStaticNodeAttest, installRTMRs = nil, nil
 	cleanupStaticInstall()
 	installUpstream, installWorkloadRefs = "", nil
 	installResolveDigests, installAttestEnabled, installMeasurements = true, true, nil

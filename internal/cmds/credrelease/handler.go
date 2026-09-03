@@ -83,7 +83,7 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 // so no Authorization check. The caller MUST have verified RTMR[3] against
 // the published bundle first (verifyBundleMeasured); on a static node
 // cluster-admin is the adversary the design already assumes, so handing the
-// credential to every attested caller gives nothing away.
+// credential to every caller gives nothing away.
 func NewOpenHandler(ca *clusterCA, org, cn string, ttl time.Duration) *Handler {
 	return &Handler{
 		open:    true,
