@@ -164,7 +164,7 @@ func verifiedOwnInitData(ctx context.Context, attestationApiURL string) ([]byte,
 	}
 	var expected [64]byte
 	copy(expected[:], nonce)
-	verdict, err := attestationclient.NewClient(attestationApiURL).VerifyEvidence(ctx, types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: expected})
+	verdict, err := attestationclient.NewClient(attestationApiURL).VerifyEvidence(ctx, types.AttestationEvidence{Platform: resp.Platform, Evidence: resp.Evidence}, attestationclient.EvidencePolicy{ExpectedReportData: expected})
 	if err != nil {
 		return nil, fmt.Errorf("static allowlist: verify own evidence: %w", err)
 	}

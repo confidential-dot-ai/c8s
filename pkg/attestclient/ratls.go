@@ -104,7 +104,7 @@ func RATLSEvidence(resp types.AttestResponse) (string, error) {
 		return ExtractSNPReport(resp)
 	}
 
-	envelope := types.AttestationEvidence(resp)
+	envelope := types.AttestationEvidence{Platform: resp.Platform, Evidence: resp.Evidence}
 	if resp.Platform == string(types.PlatformTdx) {
 		stripped, err := stripTDXEventlog(envelope.Evidence)
 		if err != nil {

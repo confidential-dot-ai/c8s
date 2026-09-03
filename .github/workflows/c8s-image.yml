@@ -83,7 +83,7 @@ env:
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
   CONFOS_REF: ${{ inputs.confos_ref || '76ef49a32564682cb470b48dddf9354f3143e8fd' }} # pin: main — confos-fetch-attest-gpu fails closed on unresolved libnvat deps (confos#122); no measured content changed since the mkosi v27 pin (confos#116, #117)
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
+  ATTESTATION_RS_REF: "41ad0c5495ec3cf4dc7a69d2870084bdf6b92f98" # pin: gated NVIDIA GPU evidence collection; bump = new attestation-rs source + measurement refresh
 
 jobs:
   build-and-push:

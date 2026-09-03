@@ -33,9 +33,9 @@ type capturingProvider struct {
 	lastReportData []byte
 }
 
-func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (json.RawMessage, string, string, error) {
+func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (CollectedEvidence, error) {
 	p.lastReportData = append([]byte(nil), reportData...)
-	return json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), "snp", "genoa", nil
+	return CollectedEvidence{Evidence: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"}, nil
 }
 
 // writeTestServingLeaf writes a self-signed leaf PEM to a temp file and

@@ -34,6 +34,11 @@ const (
 
 	// MeshIdentityProofECDSASHA384 is the proof-of-possession algorithm.
 	MeshIdentityProofECDSASHA384 = "ecdsa-sha384"
+
+	// GPUAttestedUnknown means that the service did not collect GPU evidence.
+	GPUAttestedUnknown = "unknown"
+	// GPUAttestedEvidenceCollected means that raw GPU evidence exists.
+	GPUAttestedEvidenceCollected = "evidence_collected"
 )
 
 // MeshIdentityProof authenticates the PQ session transcript with the private
@@ -58,11 +63,15 @@ type MeshIdentityProof struct {
 // binding identifier (BindingAttestPQ / BindingAttestLB); a client requires
 // the one its endpoint mode selects.
 type AttestationBundle struct {
-	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
-	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
-	Generation string          `json:"generation"`   // AMD gen for "snp": milan|genoa|turin; empty otherwise
-	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
-	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
+	Version    string          `json:"version"`    // BindingAttestPQ | BindingAttestLB
+	Platform   string          `json:"platform"`   // "snp" | "az-snp" | "az-tdx" | "tdx"
+	Generation string          `json:"generation"` // AMD gen for "snp": milan|genoa|turin; empty otherwise
+	Nonce      string          `json:"nonce"`      // echoed client nonce (b64url)
+	Evidence   json.RawMessage `json:"evidence"`   // platform-shaped attestation-rs evidence
+	// GPUAttested reports collection state. It does not report verification.
+	GPUAttested string `json:"gpu_attested"`
+	// NvidiaGPU preserves the opaque attestation-rs NVIDIA evidence bundle.
+	NvidiaGPU  json.RawMessage `json:"nvidia_gpu,omitempty"`
 	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
 	// FrontDoorMode is the credential model terminating public TLS in front
 	// of the responder ("cds" | "webpki" | "acme"), committed by the

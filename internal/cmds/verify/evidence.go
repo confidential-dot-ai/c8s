@@ -47,6 +47,10 @@ type evidence struct {
 	platform string
 	// rawEvidence is the platform-specific evidence object, forwarded verbatim.
 	rawEvidence json.RawMessage
+	// nvidiaGPU is the raw attestation-rs bundle. gpuAttested records only
+	// collection state; verification is performed by the pinned helper.
+	nvidiaGPU   json.RawMessage
+	gpuAttested string
 	// erd is the expected freshness anchor — the exact bytes the producer bound,
 	// unpadded (48-byte SHA-384 for c8s bindings). Hardware-report verifiers
 	// zero-pad it to the 64-byte REPORTDATA field; the Azure vTPM verifiers
@@ -131,6 +135,8 @@ type attestationResponse struct {
 	Platform      string          `json:"platform"`
 	Nonce         string          `json:"nonce"`
 	Evidence      json.RawMessage `json:"evidence"`
+	GPUAttested   string          `json:"gpu_attested"`
+	NvidiaGPU     json.RawMessage `json:"nvidia_gpu"`
 	CDSCertPEM    string          `json:"cds_cert_pem"`
 	FrontDoorMode string          `json:"front_door_mode"`
 	SessionPubkey struct {
@@ -395,6 +401,8 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	return &evidence{
 		platform:         platformOrDefault(r.Platform),
 		rawEvidence:      r.Evidence,
+		nvidiaGPU:        r.NvidiaGPU,
+		gpuAttested:      r.GPUAttested,
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
@@ -552,6 +560,8 @@ func evidenceFromBareJSON(data []byte, erd []byte, source string) (*evidence, er
 	return &evidence{
 		platform:    platformOrDefault(r.Platform),
 		rawEvidence: r.Evidence,
+		nvidiaGPU:   r.NvidiaGPU,
+		gpuAttested: r.GPUAttested,
 		erd:         erd,
 		fresh:       false,
 		source:      source,

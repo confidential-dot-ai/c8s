@@ -442,8 +442,8 @@ func TestHTTPBackendRejectsOversizedUpstreamResponse(t *testing.T) {
 // failingProvider always fails, to exercise the evidence-unavailable paths.
 type failingProvider struct{}
 
-func (failingProvider) Evidence(context.Context, []byte) (json.RawMessage, string, string, error) {
-	return nil, "", "", errors.New("no TEE here")
+func (failingProvider) Evidence(context.Context, []byte) (CollectedEvidence, error) {
+	return CollectedEvidence{}, errors.New("no TEE here")
 }
 
 func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {

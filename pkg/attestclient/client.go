@@ -223,7 +223,7 @@ func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyD
 
 	body, err := json.Marshal(types.AttestKeyRequestBody{
 		Challenge: challengeResp.Challenge,
-		Evidence:  types.AttestationEvidence(asResp),
+		Evidence:  types.AttestationEvidence{Platform: asResp.Platform, Evidence: asResp.Evidence},
 		PublicKey: base64.StdEncoding.EncodeToString(pubKeyDER),
 	})
 	if err != nil {
