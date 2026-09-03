@@ -54,7 +54,7 @@ Needs helm and crane on PATH; touches no cluster.`,
 			return err
 		}
 		defer os.Remove(computed)
-		seed, err := renderSeedDocument(cmd.Context(), chartPath, nil, computed)
+		seed, err := renderSeedDocument(cmd.Context(), chartPath, nil, computed, renderAllowlistKubeVersion)
 		if err != nil {
 			return err
 		}
@@ -71,6 +71,8 @@ Needs helm and crane on PATH; touches no cluster.`,
 	},
 }
 
+var renderAllowlistKubeVersion string
+
 func init() {
 	f := renderAllowlistCmd.Flags()
 	f.StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape the document is for (REQUIRED): node, pod, gke, or aks")
@@ -81,5 +83,6 @@ func init() {
 	f.BoolVar(&installAttestEnabled, "attest", true, "include the tls-lb attestation sidecar, as the install default does")
 	f.StringVar(&renderValuesDistro, "distro", "", "host Kubernetes distro (k8s | rke2) the install would autodetect")
 	f.StringVar(&installImagePullSecret, "image-pull-secret", "", "registry-credential Secret name, when the install will use one (no effect on the document; accepted for flag parity)")
+	f.StringVar(&renderAllowlistKubeVersion, "kube-version", "1.30.0", "Kubernetes version used to render the c8s chart")
 	rootCmd.AddCommand(renderAllowlistCmd)
 }

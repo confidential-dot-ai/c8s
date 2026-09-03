@@ -32,7 +32,7 @@ func TestRenderAllowlistEmitsCanonicalDocument(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = runC8s(t, "render-allowlist", "--cvm-mode=node", "--image-tag=v1", "--bootstrap-allowlist", bootstrap)
+		err = runC8s(t, "render-allowlist", "--cvm-mode=node", "--image-tag=v1", "--kube-version=1.32.0", "--bootstrap-allowlist", bootstrap)
 	})
 	if err != nil {
 		t.Fatalf("render-allowlist: %v", err)
@@ -49,12 +49,16 @@ func TestRenderAllowlistEmitsCanonicalDocument(t *testing.T) {
 		t.Fatalf("output is not the canonical encoding:\n%s", out)
 	}
 	calls := f.calls(t)
-	var templated bool
+	var templated, versioned bool
 	for _, c := range calls {
 		templated = templated || strings.HasPrefix(c, "helm template c8s ")
+		versioned = versioned || strings.Contains(c, " --kube-version 1.32.0 ")
 	}
 	if !templated {
 		t.Errorf("helm template was not run:\n%s", strings.Join(calls, "\n"))
+	}
+	if !versioned {
+		t.Errorf("helm template did not use the requested Kubernetes version:\n%s", strings.Join(calls, "\n"))
 	}
 }
 

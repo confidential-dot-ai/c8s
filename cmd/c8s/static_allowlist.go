@@ -151,8 +151,8 @@ func appendNodeSealArgs(setArgs []string, bootstrapPath, seedPath string) ([]str
 // ordering and returns the allowlist seed the chart would put in the CDS
 // ConfigMap — the document `c8s render-allowlist` emits for a node image to
 // bake.
-func renderSeedDocument(ctx context.Context, chartPath string, valueFiles []string, computedValues string) ([]byte, error) {
-	args := []string{"template", "c8s", chartPath, "--show-only", "templates/cds.yaml"}
+func renderSeedDocument(ctx context.Context, chartPath string, valueFiles []string, computedValues, kubeVersion string) ([]byte, error) {
+	args := []string{"template", "c8s", chartPath, "--kube-version", kubeVersion, "--show-only", "templates/cds.yaml"}
 	for _, f := range valueFiles {
 		args = append(args, "-f", f)
 	}
