@@ -78,7 +78,7 @@ env:
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
   CONFOS_REF: ${{ inputs.confos_ref || 'cffb512383ca0cfdc966e4a981319411e7840ba9' }} # pin: main — mkosi v27 + MinimumVersion=27 (confos#116, needs the v27 setup-mkosi ref below), dropin-tree symlink-check exemption (confos#117); rolls measurements once (mkosi v26 -> v27)
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
+  ATTESTATION_RS_REF: "384d72aab9ae74eb1fff5a238babc1628e8d8f77" # pin: main 2026-09-02 (attestation-rs#86) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
   build-and-push:

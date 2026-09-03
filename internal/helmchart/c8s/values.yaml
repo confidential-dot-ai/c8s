@@ -27,7 +27,7 @@ c8sComponents:
     cdsExempt: false
     ## Released by attestation-rs. Bump with:
     ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:main
-    pinnedDigest: sha256:b81b6bd4304c1e66da1970990ebf6c7611d2a1fc211c3432e68dec5b7702c660
+    pinnedDigest: sha256:53a1bbe33746de94841cfd69e977b2f70db9ea2862be911be9d7af00f7ab7229
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
     cdsExempt: false

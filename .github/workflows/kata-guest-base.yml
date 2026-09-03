@@ -87,7 +87,7 @@ env:
   # measurement, and the committed kernel/config-x86_64.snapshot lockfile must
   # be refreshed in the same PR (kernel-snapshot.yml produces it).
   CONFOS_REF: "14e770f26f912d360f1a60a464145c3ee5615124" # v0.4.2 — apt pockets snapshot-pinned by URI, mirror-guarded (confos#96); rolls the kata kernel measurement once
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA; rolls the SNP launch measurement
+  ATTESTATION_RS_REF: "384d72aab9ae74eb1fff5a238babc1628e8d8f77" # pin: main 2026-09-02 (attestation-rs#86) — bump = new origin/main SHA; rolls the SNP launch measurement
 
 jobs:
   build:
