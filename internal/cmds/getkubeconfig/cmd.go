@@ -24,11 +24,11 @@ func NewCmd() *cobra.Command {
 		Long: "get-kubeconfig attests a measured c8s CVM and enforces its full\n" +
 			"measured identity. The build-artifact manifest selects the platform:\n" +
 			"on TDX the image tuple (MRTD, RTMR[1], RTMR[2]) plus the RTMR[3] chain\n" +
-			"seeded by the operator's key and extended by the expected workload\n" +
-			"images; on SEV-SNP the pinned per-SMP launch digest plus the\n" +
-			"operator-key HOSTDATA binding. It then exchanges a CSR for a\n" +
-			"short-lived kube client cert over the cred-release endpoint and writes\n" +
-			"a kubeconfig. Verification runs in-process (attestation-go).",
+			"seeded by the operator's key, extended by the dynamic mode event and\n" +
+			"then by the expected workload images; on SEV-SNP the pinned per-SMP\n" +
+			"launch digest plus the operator-key HOSTDATA binding. It then exchanges\n" +
+			"a CSR for a short-lived kube client cert over the cred-release endpoint\n" +
+			"and writes a kubeconfig. Verification runs in-process (attestation-go).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cfg.OperatorKeyPath == "" || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
 				return fmt.Errorf("--operator-key, --image-manifest and --out are required")

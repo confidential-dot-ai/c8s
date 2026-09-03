@@ -205,8 +205,8 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
-	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
-	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the dynamic-mode register of an operator-key boot: the seed SHA-384(0x00*48 ‖ SHA-384(pubkey)) extended by the dynamic mode event SHA-384(\"c8s/rtmr3/mode/dynamic/v1\"), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. That value is what a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/mode/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
@@ -761,13 +761,14 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		if err := checkOperatorPublicKeyPEM(pubPEM); err != nil {
 			return rtmrPins{}, fmt.Errorf("--operator-pkey %s: %w", cfg.operatorPubkey, err)
 		}
-		// The seed is derived by the shared convention package, never
-		// recomputed here: the initrd, cred-release and get-kubeconfig all go
-		// through ForOperatorKey, and a second implementation of the same
-		// arithmetic is a second thing to drift. It hashes the file bytes
-		// verbatim — the check above only inspects them.
-		seed := runtimemeasure.ForOperatorKey(pubPEM)
-		pins.rtmr3 = seed[:]
+		// The register is derived by the shared convention package, never
+		// recomputed here: the initrd, the node image, cred-release and
+		// get-kubeconfig all go through ForOperatorKey and ForDynamic, and a
+		// second implementation of the same arithmetic is a second thing to
+		// drift. It hashes the file bytes verbatim — the check above only
+		// inspects them.
+		reg := runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pubPEM))
+		pins.rtmr3 = reg[:]
 	}
 	if v, ok := manual[3]; ok {
 		pins.rtmr3 = v
@@ -1423,7 +1424,7 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 			return false
 		}
 	}
-	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
+	if pins.rtmr3 != nil && !check(3, rtmrMeaning(3), pins.rtmr3) {
 		return false
 	}
 	// Ascending index, so a target missing several pinned registers always
@@ -1446,7 +1447,7 @@ func rtmrMeaning(idx int) string {
 	case 2:
 		return "guest command line / dm-verity root hash"
 	case 3:
-		return "runtime operator-key/workload chain"
+		return "runtime operator-key/mode/workload chain"
 	default:
 		return "runtime measurement register"
 	}

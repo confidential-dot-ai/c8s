@@ -7,22 +7,22 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/tdxrtmr"
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
-// overrideBindingPaths points the package's sysfs/staging paths at files under
-// a temp dir for the duration of the test. The files do not exist yet; each
+// overrideBindingPaths points the staging path and the RTMR sysfs root at a
+// temp dir for the duration of the test. The files do not exist yet; each
 // test writes what its scenario needs.
 func overrideBindingPaths(t *testing.T) (pubPath, rtmrPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	pubPath = filepath.Join(dir, "operator-pubkey")
-	rtmrPath = filepath.Join(dir, "rtmr3")
-	origPub, origRTMR := operatorPubkeyPath, rtmr3SysfsPath
-	operatorPubkeyPath, rtmr3SysfsPath = pubPath, rtmrPath
-	t.Cleanup(func() { operatorPubkeyPath, rtmr3SysfsPath = origPub, origRTMR })
-	return pubPath, rtmrPath
+	origPub, origRoot := operatorPubkeyPath, tdxrtmr.SysfsRoot
+	operatorPubkeyPath, tdxrtmr.SysfsRoot = pubPath, dir
+	t.Cleanup(func() { operatorPubkeyPath, tdxrtmr.SysfsRoot = origPub, origRoot })
+	return pubPath, tdxrtmr.Path(3)
 }
 
 func writeFileT(t *testing.T, path string, data []byte) {
@@ -32,11 +32,12 @@ func writeFileT(t *testing.T, path string, data []byte) {
 	}
 }
 
-// expectedRTMR3ForKey adapts runtimemeasure.ForOperatorKey for the sysfs
-// fixtures the binding tests write. The formula and hardware vectors are
-// pinned in pkg/runtimemeasure.
+// expectedRTMR3ForKey is the register a dynamic operator-key boot leaves for
+// the sysfs fixtures the binding tests write: the seed extended by the
+// dynamic mode event. The formula and vectors are pinned in
+// pkg/runtimemeasure.
 func expectedRTMR3ForKey(pub []byte) []byte {
-	v := runtimemeasure.ForOperatorKey(pub)
+	v := runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pub))
 	return v[:]
 }
 
@@ -58,7 +59,8 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 }
 
 // TestLoadMeasuredOperatorKeyFailsClosed enumerates the ways the anchor check
-// must refuse: substituted key, malformed or missing RTMR, missing/empty key.
+// must refuse: substituted key, a register without the mode event or with
+// the wrong one, malformed or missing RTMR, missing/empty key.
 func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 	pub := []byte("operator public key bytes")
 	tests := []struct {
@@ -70,6 +72,30 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 			stage: func(t *testing.T, pubPath, rtmrPath string) {
 				writeFileT(t, pubPath, []byte("a different key the host swapped in"))
 				writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
+			},
+		},
+		{
+			name: "bare seed: mode event not extended",
+			stage: func(t *testing.T, pubPath, rtmrPath string) {
+				writeFileT(t, pubPath, pub)
+				seed := runtimemeasure.ForOperatorKey(pub)
+				writeFileT(t, rtmrPath, seed[:])
+			},
+		},
+		{
+			name: "static mode event on an operator-key boot",
+			stage: func(t *testing.T, pubPath, rtmrPath string) {
+				writeFileT(t, pubPath, pub)
+				reg := runtimemeasure.Extend(runtimemeasure.ForOperatorKey(pub), runtimemeasure.ModeStatic)
+				writeFileT(t, rtmrPath, reg[:])
+			},
+		},
+		{
+			name: "keyless dynamic register",
+			stage: func(t *testing.T, pubPath, rtmrPath string) {
+				writeFileT(t, pubPath, pub)
+				reg := runtimemeasure.ForDynamic(runtimemeasure.Zero)
+				writeFileT(t, rtmrPath, reg[:])
 			},
 		},
 		{

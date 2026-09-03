@@ -33,7 +33,8 @@ type Config struct {
 	ImageManifestPath string
 	// WorkloadImages are the digest-pinned image refs the node's measurer is
 	// expected to have extended into RTMR[3], in first-extend order. Empty
-	// means the register must equal the bare operator-key seed.
+	// means the register must equal the operator-key seed extended by the
+	// dynamic mode event alone.
 	WorkloadImages []string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
@@ -69,8 +70,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 1. Trust gate: attest the node and enforce the full measured identity —
 	//    the image tuple (MRTD, RTMR[1], RTMR[2]) from the manifest plus the
-	//    RTMR[3] chain seeded by THIS key and extended by the expected
-	//    workload images — with no host trust and not TOFU. Everything
+	//    RTMR[3] chain seeded by THIS key, extended by the dynamic mode event
+	//    and then by the expected workload images — with no host trust and
+	//    not TOFU. Everything
 	//    downstream depends on it.
 	attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	if err := attestAndVerify(attestCtx, cfg.AttestURL, exp); err != nil {

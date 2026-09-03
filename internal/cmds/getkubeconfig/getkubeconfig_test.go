@@ -14,8 +14,10 @@ import (
 )
 
 // TestPolicyForSeedMatchesGuestConvention checks the client computes the same
-// bare-seed value the guest measures at launch:
-// RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), via the shared convention.
+// value the guest measures on a dynamic operator-key boot, re-derived here by
+// hand: seed = SHA384(0x00*48 || SHA384(pubkey)) from the initrd, then
+// RTMR[3] = SHA384(seed || SHA384("c8s/rtmr3/mode/dynamic/v1")) from the
+// node image's mode event.
 func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 	pub := []byte("-----BEGIN PUBLIC KEY-----\nMFk...\n-----END PUBLIC KEY-----\n")
 	exp, err := policyFor(writeTestManifest(t, tdxManifest()), pub, nil)
@@ -24,7 +26,9 @@ func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 	}
 
 	keyDigest := sha512.Sum384(pub)
-	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
+	seed := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
+	modeDynamic := sha512.Sum384([]byte("c8s/rtmr3/mode/dynamic/v1"))
+	want := sha512.Sum384(append(seed[:], modeDynamic[:]...))
 	if hex.EncodeToString(exp.rtmr3[:]) != hex.EncodeToString(want[:]) {
 		t.Errorf("expected RTMR[3] = %x, want %x", exp.rtmr3, want)
 	}

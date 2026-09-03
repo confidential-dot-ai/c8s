@@ -397,9 +397,9 @@ func TestCheckMeasuredIdentityNoRTMR3Claim(t *testing.T) {
 	}
 }
 
-// --workload-image extends the expected RTMR[3] from the operator-key seed in
-// the given (first-extend) order; tags never pass, and order changes the
-// register.
+// --workload-image extends the expected RTMR[3] from the dynamic-mode register
+// (operator-key seed, then the mode event) in the given (first-extend) order;
+// tags never pass, and order changes the register.
 func TestPolicyForWorkloadImages(t *testing.T) {
 	pub := operatorPub(t)
 	manifest := writeTestManifest(t, tdxManifest())
@@ -410,18 +410,21 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bare.rtmr3 != runtimemeasure.ForOperatorKey(pub) {
-		t.Error("with no workload images the expected register must equal the bare operator-key seed")
+	if bare.rtmr3 != runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pub)) {
+		t.Error("with no workload images the expected register must equal the seed extended by the dynamic mode event")
+	}
+	if bare.rtmr3 == runtimemeasure.ForOperatorKey(pub) {
+		t.Error("the bare operator-key seed must not be accepted: the mode event is load-bearing")
 	}
 
 	chained, err := policyFor(manifest, pub, []string{digA, digB})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub),
+	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pub)),
 		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
 	if chained.rtmr3 != want {
-		t.Error("workload images must chain onto the operator-key seed via the shared convention")
+		t.Error("workload images must chain onto the dynamic-mode register via the shared convention")
 	}
 
 	reversed, err := policyFor(manifest, pub, []string{digB, digA})
@@ -469,7 +472,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig}) {
+	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pub)), []string{dig}) {
 		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
 	}
 }

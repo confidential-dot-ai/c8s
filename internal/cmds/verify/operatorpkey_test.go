@@ -61,17 +61,25 @@ func operatorKeypair(t *testing.T) (pubPath string, keyPaths []string, pubPEM []
 	return pubPath, keyPaths, pubPEM
 }
 
-// operatorSeed recomputes the register an initrd leaves behind —
-// SHA-384(0x00*48 ‖ SHA-384(pubkey)) — straight from the convention documented
-// in pkg/runtimemeasure, deliberately WITHOUT calling the helper the code under
-// test calls. Comparing that helper against itself would pin nothing; this is
-// the arithmetic an operator would otherwise have to do by hand, which is the
-// chore --operator-pkey exists to remove.
+// operatorSeed recomputes the register a dynamic operator-key boot leaves
+// behind — the initrd's seed SHA-384(0x00*48 ‖ SHA-384(pubkey)) extended by
+// the node image's mode event SHA-384("c8s/rtmr3/mode/dynamic/v1") — straight
+// from the convention documented in pkg/runtimemeasure, deliberately WITHOUT
+// calling the helpers the code under test calls. Comparing those helpers
+// against themselves would pin nothing; this is the arithmetic an operator
+// would otherwise have to do by hand, which is the chore --operator-pkey
+// exists to remove.
 func operatorSeed(pubPEM []byte) []byte {
 	inner := sha512.Sum384(pubPEM)
 	h := sha512.New384()
 	h.Write(make([]byte, 48))
 	h.Write(inner[:])
+	seed := h.Sum(nil)
+
+	mode := sha512.Sum384([]byte("c8s/rtmr3/mode/dynamic/v1"))
+	h = sha512.New384()
+	h.Write(seed)
+	h.Write(mode[:])
 	return h.Sum(nil)
 }
 
@@ -85,7 +93,7 @@ func TestOperatorPkeyDerivesTheRTMR3Pin(t *testing.T) {
 	cfg := config{imageManifest: writeTestManifest(t), operatorPubkey: pubPath}
 	plan := mustPlan(t, cfg)
 	if !bytes.Equal(plan.pins.rtmr3, want) {
-		t.Fatalf("derived RTMR[3] = %x, want the bare operator-key seed %x", plan.pins.rtmr3, want)
+		t.Fatalf("derived RTMR[3] = %x, want the dynamic-mode operator-key register %x", plan.pins.rtmr3, want)
 	}
 
 	// The hex an operator computes by hand and the key file must be two ways of

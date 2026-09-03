@@ -433,14 +433,16 @@ conflict with `--image-manifest` because they *are* the image, while 3
 requires it.) `--operator-pkey <file>` is the same pin
 without the arithmetic: point it at the operator **public** key PEM (the
 verbatim bytes the guest initrd hashed, as written by `openssl ec -pubout`)
-and `verify` derives the bare operator-key seed,
-`SHA-384(0x00*48 ‖ SHA-384(pubkey))`, itself. The two are mutually exclusive
-— one register, one expected value — and `--operator-pkey` carries the same
-`--image-manifest` requirement. Note its scope: it pins the **bare** seed,
-i.e. a node with no per-workload RTMR[3] extends on top. That is what every
-node reports today, because the workload measurer ships only inside the kata
-guest image; `c8s get-kubeconfig` is the command that also folds
-`--workload-image` extends into the expected register. Supplying any of these
+and `verify` derives the dynamic-mode register of an operator-key boot
+itself: the seed `SHA-384(0x00*48 ‖ SHA-384(pubkey))` extended by the mode
+event `SHA-384("c8s/rtmr3/mode/dynamic/v1")` that the node image extends
+before containerd starts. The two are mutually exclusive — one register, one
+expected value — and `--operator-pkey` carries the same `--image-manifest`
+requirement. Note its scope: it pins the seed-plus-mode register, i.e. a node
+with no per-workload RTMR[3] extends on top. That is what every node reports
+today, because the workload measurer ships only inside the kata guest image;
+`c8s get-kubeconfig` is the command that also folds `--workload-image`
+extends into the expected register. Supplying any of these
 flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
 has no runtime measurement registers.
 
@@ -507,8 +509,10 @@ and again on the RA-TLS credential-release connection:
   generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
   (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
-  extended, in order, by each digest-pinned `--workload-image` ref (tags are
-  rejected). With no `--workload-image` the register must equal the bare seed;
+  extended by the dynamic mode event (`runtimemeasure.ForDynamic`), then, in
+  order, by each digest-pinned `--workload-image` ref (tags are rejected).
+  With no `--workload-image` the register must equal `ForDynamic(seed)`; the
+  bare seed is rejected;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
   one of the per-SMP launch digests pinned by `snp_variants` (one image has
   one digest per vCPU count), and HOSTDATA must equal `SHA-256(operator
@@ -555,7 +559,7 @@ and (on TDX) ran exactly the expected measured workloads. What it does not prove
 manifest and flags do not name, or the provenance of the manifest file itself
 — select it deliberately from the trusted image build. An RTMR[3]-only gate
 would prove much less: the untrusted host stages the operator public key, so
-it can boot **any** image and reproduce the bare operator-key register — the
+it can boot **any** image and reproduce the operator-key/mode register — the
 image tuple is the identity anchor, and RTMR[3] then binds the key and
 workload set to it.
 
