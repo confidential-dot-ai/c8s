@@ -21,7 +21,7 @@ func TestCanonicalizeCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalize: %v", err)
 	}
-	want := digestTestDoc[:len(digestTestDoc)-1] + `,"workloads":{}}` + "\n"
+	want := digestTestDoc[:len(digestTestDoc)-1] + `,"workloads":{}}`
 	if out != want {
 		t.Fatalf("canonical output = %q, want %q", out, want)
 	}

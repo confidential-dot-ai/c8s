@@ -1,8 +1,6 @@
 package allowlist
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -29,7 +27,7 @@ the file or stdin. It does not contact a cluster.`,
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(canonical))
+			_, err = cmd.OutOrStdout().Write(canonical)
 			return err
 		},
 	}
