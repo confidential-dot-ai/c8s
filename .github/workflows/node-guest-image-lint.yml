@@ -54,6 +54,9 @@ jobs:
       - name: node-guest-image invariants
         env:
           CONFOS_REF: ${{ steps.ref.outputs.ref }}
+          # Flip to "1" in the PR that bumps CONFOS_REF past confos#120
+          # (immutable root); until then the state.d declaration is inert.
+          EXPECT_IMMUTABLE_ROOT: "0"
         run: .github/scripts/node-guest-image-invariants.sh
 
       - name: Resolve the confos base release

@@ -49,11 +49,16 @@ initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
 `tdx-metal-e2e.yml`); confidential-metal attaches one by default
 (`--datadisk-gi`, 0 opts out).
 
-The initrd encrypts the disk and mounts it as the rootfs upper, via a dm
-mapping named `scratch`. Without the disk it falls back to a 2G RAM tmpfs:
-the guest comes up Ready, then wedges once RKE2 fills it — a flapping
-node, not a boot error. `scratch-enforce.service` closes that hole by
-checking for the dm mapping and powering the VM off before rke2 starts.
+The initrd encrypts the disk and, via a dm mapping named `scratch`, backs the
+writable state overlays with it; the root itself is the read-only verity
+image. Which directories get an overlay is declared in
+`/usr/lib/confai/state.d/`: confos's base covers `/var`, `/home`, `/root`,
+`/tmp`, and this profile adds `/etc/rancher`, `/etc/cni`, `/opt/cni` and
+`/etc/nri` (`60-c8s.conf` says why each). Without the disk
+the initrd falls back to a 2G RAM tmpfs: the guest comes up Ready, then
+wedges once RKE2 fills it — a flapping node, not a boot error.
+`scratch-enforce.service` closes that hole by checking for the dm mapping
+and powering the VM off before rke2 starts.
 
 The other disks are optional; each is owned by one unit under
 `c8s/mkosi.extra`, whose header carries the full contract:
@@ -70,6 +75,22 @@ The other disks are optional; each is owned by one unit under
 - label `opkeydata` — an ISO carrying the operator public key; its
   presence turns on attested credential release (`cred-release.service`,
   see [operator.md]).
+
+## Troubleshooting
+
+**`Read-only file system` under `/usr`, `/etc` or `/opt`** — from a unit log
+(`mkdir: cannot create directory '/etc/foo': Read-only file system`), a
+pod stuck in ContainerCreating with a FailedMount event for a hostPath
+there, or a tool you installed on the host by hand. The root is the
+read-only verity image; only `/var`, `/home`, `/root`, `/tmp` and the
+directories listed in `/usr/lib/confai/state.d/*.conf` on the node are
+writable, and nothing installed after boot is covered by the measurement.
+If the writer is part of the image, declare its directory in
+`c8s/mkosi.extra/usr/lib/confai/state.d/60-c8s.conf` (it must be baked; the
+lint checks) or point it at `/var`. If it is something an operator installs
+on the host afterwards, it does not belong on a measured node — run it as a
+pod. `cat /usr/lib/confai/state.d/*.conf` on the node shows the live list;
+a login shell prints it too.
 
 Migration state (see [#264] for the full plan):
 

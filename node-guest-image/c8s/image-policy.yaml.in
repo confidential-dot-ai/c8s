@@ -13,10 +13,11 @@
 # built — the RKE2 system digests in it are resolved here and nowhere else.
 # `c8s install` runs the chart's installer in its baked form
 # (nriImagePolicy.baked), which writes the release's cds_measurements /
-# cds_rtmrs into this file on the overlay upper and leaves every other key
+# cds_rtmrs into this file — on the /etc/nri state overlay, declared in
+# mkosi.extra/usr/lib/confai/state.d/60-c8s.conf — and leaves every other key
 # alone. Expect one rke2-server restart from it when those pins change:
 # NRI does not respawn a pre-registered plugin, so the config reaches the
-# plugin only through containerd. The overlay upper is ephemeral, so each
+# plugin only through containerd. The overlay is ephemeral, so each
 # boot starts from the pins below and the installer re-applies.
 #
 # Field names/semantics validated against the plugin's config loader
