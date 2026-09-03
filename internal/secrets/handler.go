@@ -40,11 +40,11 @@ const (
 	ChallengeHeader = "X-C8s-Challenge"
 )
 
-// InjectedEntrypoints are the argv[0] values the admission webhook injects the
-// c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
-// get-secret for the fetcher, and get-volume for the volume fetcher. A
-// container must be running one of these, on an injected digest, to be excluded
-// from workload matching — see WorkloadContainers.
+// InjectedEntrypoints are the helper subcommands the admission webhook injects.
+// The c8s image has /c8s as its OCI entrypoint, so a live inventory normally
+// reports /c8s followed by one of these values. Older purpose-built images can
+// report the helper itself as argv[0]. A container must use an injected digest
+// and one of these exact helpers to be excluded from workload matching.
 //
 // An entrypoint added here widens the assumption in docs/secrets.md that no
 // floor image other than c8s's carries an executable at one of these names.
@@ -481,10 +481,18 @@ func isInjected(al *pkgallowlist.Allowlist, c workloadclaims.SandboxContainer) b
 	case "get-cert", "get-secret", "get-volume":
 		return true
 	case "/c8s":
-		// The webhook injects only the probe-file helper through the shared
-		// /c8s entrypoint. Never hide another c8s subcommand from the exact
-		// workload inventory.
-		return len(c.Argv) > 1 && c.Argv[1] == "probe-file"
+		// The published c8s image uses /c8s as its OCI entrypoint. Keep
+		// application helpers such as cds-attest in the exact workload
+		// inventory; drop only the four webhook-owned subcommands.
+		if len(c.Argv) < 2 {
+			return false
+		}
+		switch c.Argv[1] {
+		case "get-cert", "get-secret", "get-volume", "probe-file":
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}

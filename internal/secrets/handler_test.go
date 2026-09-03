@@ -53,18 +53,25 @@ const (
 	testBulkImg = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 )
 
-func TestWorkloadProxyAndHelpersRemainInNamedWorkloadInventory(t *testing.T) {
+func TestInjectedHelpersAreDroppedButApplicationHelpersRemain(t *testing.T) {
 	al := &pkgallowlist.Allowlist{Digests: map[string]string{testInjected: "c8s"}}
 	reported := []workloadclaims.SandboxContainer{
+		{Digest: testInjected, Argv: []string{"/c8s", "get-cert", "--san=x"}},
+		{Digest: testInjected, Argv: []string{"/c8s", "get-secret", "--secret=TOKEN=/app/token"}},
+		{Digest: testInjected, Argv: []string{"/c8s", "get-volume", "--volume=model=/app/model"}},
 		{Digest: testInjected, Argv: []string{"/c8s", "probe-file", "--wait", "/certs/tls.crt"}},
+		{Digest: testInjected, Argv: []string{"/c8s", "cds-attest", "--port=8800"}},
 		{Digest: testInjected, Argv: []string{"/workload-proxy", "--mode=client", "--peer-workload=sglang-router"}},
 	}
 	got := WorkloadContainers(al, reported)
-	if len(got) != 1 {
-		t.Fatalf("workload candidates = %d, want only the proxy", len(got))
+	if len(got) != 2 {
+		t.Fatalf("workload candidates = %d, want cds-attest and the proxy", len(got))
 	}
-	if got[0].Argv[0] != "/workload-proxy" {
-		t.Fatalf("workload candidate argv = %v, want the proxy alias", got[0].Argv)
+	if got[0].Argv[0] != "/c8s" || got[0].Argv[1] != "cds-attest" {
+		t.Fatalf("first workload candidate argv = %v, want cds-attest", got[0].Argv)
+	}
+	if got[1].Argv[0] != "/workload-proxy" {
+		t.Fatalf("second workload candidate argv = %v, want the proxy alias", got[1].Argv)
 	}
 }
 
