@@ -108,6 +108,12 @@ type Options struct {
 	// WorkloadClaimsGuest selects the kata shape: the inventory is reached on
 	// the guest's loopback address, so no socket is mounted.
 	WorkloadClaimsGuest bool
+
+	// StaticAllowlist selects the sealed node shape for the injected
+	// sidecars; AttestationSocketDir is the node's attestation socket
+	// directory they mount. See webhook.Config.
+	StaticAllowlist      bool
+	AttestationSocketDir string
 }
 
 var scheme = runtime.NewScheme()
@@ -280,6 +286,8 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			KataGuestReadyGate:    opts.KataGuestReadyGate,
 			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
 			WorkloadClaimsGuest:   opts.WorkloadClaimsGuest,
+			StaticAllowlist:       opts.StaticAllowlist,
+			AttestationSocketDir:  opts.AttestationSocketDir,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

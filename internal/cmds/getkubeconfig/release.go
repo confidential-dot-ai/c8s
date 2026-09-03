@@ -52,25 +52,16 @@ func (id *clientIdentity) csrPEM() ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil
 }
 
-// requestCredential mints an operator-signed JWT bound to the exact request
-// body, POSTs the CSR to the cred-release endpoint, and returns the issued
-// cert + cluster CA. httpClient is the (RA-TLS or plain) transport to :8443;
-// operatorKeyPEM is the operator PRIVATE key that authorizes the release.
+// requestCredential POSTs the CSR to the cred-release endpoint and returns
+// the issued cert + cluster CA. httpClient is the (RA-TLS or plain) transport
+// to :8443. operatorKeyPEM is the operator PRIVATE key that authorizes the
+// release; it signs a JWT bound to the exact request body. nil sends no
+// Authorization header at all, the static-mode wire form: a static
+// cred-release checks no operator token and refuses nothing on its absence.
 func requestCredential(ctx context.Context, httpClient *http.Client, baseURL string, operatorKeyPEM, csrPEM []byte) (*credrelease.ReleaseResponse, error) {
-	signer, err := operatorauth.NewSignerFromKeyPEM(operatorKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("operator key: %w", err)
-	}
-
 	body, err := json.Marshal(credrelease.ReleaseRequest{CSRPEM: string(csrPEM)})
 	if err != nil {
 		return nil, err
-	}
-
-	// The JWT binds method/path/body (pbh) — must match exactly what we send.
-	authz, err := signer.Authorization(http.MethodPost, credrelease.ReleasePath, body)
-	if err != nil {
-		return nil, fmt.Errorf("sign operator token: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+credrelease.ReleasePath, bytes.NewReader(body))
@@ -78,7 +69,18 @@ func requestCredential(ctx context.Context, httpClient *http.Client, baseURL str
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authz)
+	if operatorKeyPEM != nil {
+		signer, err := operatorauth.NewSignerFromKeyPEM(operatorKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("operator key: %w", err)
+		}
+		// The JWT binds method/path/body (pbh) — must match exactly what we send.
+		authz, err := signer.Authorization(http.MethodPost, credrelease.ReleasePath, body)
+		if err != nil {
+			return nil, fmt.Errorf("sign operator token: %w", err)
+		}
+		req.Header.Set("Authorization", authz)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

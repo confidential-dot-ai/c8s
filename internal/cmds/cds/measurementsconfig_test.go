@@ -174,3 +174,24 @@ func containsPin(pins []string, want string) bool {
 	}
 	return false
 }
+
+// A static entry's RTMR[3] is fanned into the flat list on purpose: the
+// gates that take one register set (/attest-key, the sandbox-digests
+// callback) then hold callers to the sealed register too, not only /attest.
+func TestResolveMeasurementsConfigCarriesStaticRTMR3(t *testing.T) {
+	reg3 := "333300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+	path := writeConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
+		{"name":"static-allowlist","mrtd":"00`+cfgDigestA+`","rtmr":[null,"`+cfgReg1+`","`+cfgReg2+`","`+reg3+`"]}]}`)
+
+	cfg := config{measurementsConfig: path, ratlsPlatform: "tdx"}
+	set, err := resolveMeasurementsConfig(&cfg)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if _, err := set.StaticEntry(); err != nil {
+		t.Fatalf("StaticEntry() = %v, want the parsed entry to qualify", err)
+	}
+	if !containsPin(cfg.rtmrs, "3="+reg3) {
+		t.Errorf("flat rtmrs %v missing the RTMR[3] pin", cfg.rtmrs)
+	}
+}

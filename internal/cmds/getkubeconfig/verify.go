@@ -48,11 +48,17 @@ type measuredPolicy struct {
 	platform teetypes.PlatformType
 
 	pins runtimemeasure.ImagePins
-	// rtmr3 = FromDigestsSeeded(ForDynamic(ForOperatorKey(pubPEM)), workload
-	// digests): the operator-key seed, the dynamic mode event the node image
-	// extends before containerd, then the workload extends. Equal to
-	// ForDynamic(seed) when no workload images are expected. TDX only.
+	// rtmr3 is the expected runtime register, TDX only. On an operator-key
+	// boot: FromDigestsSeeded(ForDynamic(ForOperatorKey(pubPEM)), workload
+	// digests) — the operator-key seed, the dynamic mode event the node image
+	// extends before containerd, then the workload extends (ForDynamic(seed)
+	// alone when no workload images are expected). On a static boot:
+	// ForStaticAllowlist(bundle index).
 	rtmr3 [runtimemeasure.Size]byte
+	// chainMeaning names, for diagnostics, what binds the operator to the
+	// node beyond the image tuple: the RTMR[3] chain on TDX, the HOSTDATA
+	// binding on SEV-SNP.
+	chainMeaning string
 
 	// SNP: the pinned per-SMP launch digests plus the operator-key binding
 	// committed as HOSTDATA at launch. No runtime-extend register, so there
@@ -92,9 +98,10 @@ func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workload
 		return measuredPolicy{}, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
 	}
 	return measuredPolicy{
-		platform: teetypes.PlatformSNP,
-		snpPins:  pins,
-		hostData: runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
+		platform:     teetypes.PlatformSNP,
+		snpPins:      pins,
+		hostData:     runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
+		chainMeaning: "operator-key HOSTDATA binding",
 	}, nil
 }
 
@@ -122,9 +129,10 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 		digests = append(digests, d)
 	}
 	return measuredPolicy{
-		platform: teetypes.PlatformTDX,
-		pins:     pins,
-		rtmr3:    runtimemeasure.FromDigestsSeeded(runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(operatorPubPEM)), digests),
+		platform:     teetypes.PlatformTDX,
+		pins:         pins,
+		rtmr3:        runtimemeasure.FromDigestsSeeded(runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(operatorPubPEM)), digests),
+		chainMeaning: "operator-key + dynamic mode event + workload chain",
 	}, nil
 }
 
@@ -212,7 +220,7 @@ func checkMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy)
 	}{
 		{1, "guest kernel", exp.pins.RTMR1},
 		{2, "guest rootfs", exp.pins.RTMR2},
-		{3, "operator-key + dynamic mode event + workload chain", exp.rtmr3},
+		{3, exp.chainMeaning, exp.rtmr3},
 	} {
 		got, err := res.Claims.RTMR(reg.idx)
 		if err != nil {
@@ -354,4 +362,10 @@ func verifySNPEvidence(env teetypes.AttestationEvidence, expectedReportData []by
 		return nil, err
 	}
 	return res, nil
+}
+
+// attestedSummary is the one-line account of what the gate proved, for the
+// final status line.
+func (p measuredPolicy) attestedSummary() string {
+	return "image tuple + " + p.chainMeaning + " verified"
 }

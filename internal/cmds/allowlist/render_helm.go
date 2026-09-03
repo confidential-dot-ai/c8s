@@ -200,6 +200,8 @@ func operatorConfig(manifests []manifest, namespace string) (webhook.Config, err
 	fs.StringVar(&cfg.WorkloadClaimsHostDir, "workload-claims-host-dir", "", "")
 	fs.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "")
 	fs.BoolVar(&cfg.KataGuestReadyGate, "kata-guest-ready-gate", false, "")
+	fs.BoolVar(&cfg.StaticAllowlist, "static-allowlist", false, "")
+	fs.StringVar(&cfg.AttestationSocketDir, "attestation-socket-dir", "", "")
 	if err := fs.Parse(operator.Args[1:]); err != nil {
 		return webhook.Config{}, fmt.Errorf("operator args: %w", err)
 	}

@@ -32,6 +32,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"golang.org/x/time/rate"
@@ -58,6 +59,13 @@ func run(cfg config) error {
 	}
 	if err := validateConfig(cfg); err != nil {
 		return err
+	}
+	var staticEntry measurementspkg.Entry
+	if cfg.staticAllowlist {
+		staticEntry, err = validateStaticConfig(cfg, pinned)
+		if err != nil {
+			return err
+		}
 	}
 	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
 
@@ -184,7 +192,23 @@ func run(cfg config) error {
 	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
-	if cfg.allowlistSeed != "" {
+	//
+	// Static mode gates the seed on the node's measured verdict and seeds the
+	// bytes that verdict covered, so the served allowlist is the measured one.
+	switch {
+	case cfg.staticAllowlist:
+		bundle, err := verifyStaticNode(ctx, cfg, staticEntry)
+		if err != nil {
+			return err
+		}
+		member := bundle.Members[policybundle.MemberStaticAllowlist]
+		if err := seedStoreFrom(&allowlistStore, member, cfg.allowlistSeed); err != nil {
+			return fmt.Errorf("seed allowlist: %w", err)
+		}
+		if err := checkStaticStamp(&allowlistStore, member); err != nil {
+			return fmt.Errorf("--static-allowlist: %w", err)
+		}
+	case cfg.allowlistSeed != "":
 		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
 			return fmt.Errorf("seed allowlist: %w", err)
 		}

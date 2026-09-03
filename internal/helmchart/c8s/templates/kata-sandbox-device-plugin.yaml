@@ -54,6 +54,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: kata-sandbox-device-plugin
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       serviceAccountName: {{ include "c8s.kataName" . }}-sandbox-device-plugin
       hostPID: true
       priorityClassName: system-node-critical

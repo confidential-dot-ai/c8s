@@ -16,7 +16,9 @@ with kube-system and any operator-supplied additions.
 One hostPath is carved out: the webhook injects a read-only mount of the
 inventory socket directory (nriImagePolicy.hostPaths.runtimeDir) into every
 CW pod's cert sidecar, so the policy admits exactly that dir, type Directory,
-with every referencing mount readOnly.
+with every referencing mount readOnly. Under a static allowlist the CDS pod
+reads the node's policy directory and attestation socket directory the same
+way, so those two are carved out on the same terms.
 */}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -69,7 +71,11 @@ spec:
     - expression: >-
         !has(object.spec.volumes) ||
         object.spec.volumes.all(v, !has(v.hostPath) ||
-          (v.hostPath.path == {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }} &&
+          ((v.hostPath.path == {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
+            {{- if .Values.staticAllowlist.enabled }} ||
+            v.hostPath.path == {{ .Values.staticAllowlist.policyDir | quote }} ||
+            v.hostPath.path == {{ .Values.staticAllowlist.attestationSocketDir | quote }}
+            {{- end }}) &&
            has(v.hostPath.type) && v.hostPath.type == 'Directory' &&
            object.spec.containers.all(c, !has(c.volumeMounts) ||
              c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))) &&

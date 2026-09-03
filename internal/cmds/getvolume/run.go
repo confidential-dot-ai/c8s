@@ -78,7 +78,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pins, err := cfg.ParsePins()
+	pins, err := cfg.CDSPins(ctx)
 	if err != nil {
 		return err
 	}

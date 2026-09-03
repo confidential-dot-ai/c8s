@@ -186,7 +186,7 @@ func TestCDSHTTPClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 
 	t.Run("unpinned warns", func(t *testing.T) {
 		c := captureDefaultLogger(t)
-		if _, err := cdsHTTPClient(base); err != nil {
+		if _, err := cdsHTTPClient(t.Context(), base); err != nil {
 			t.Fatalf("cdsHTTPClient: %v", err)
 		}
 		if _, ok := c.find(warnMsg); !ok {
@@ -198,7 +198,7 @@ func TestCDSHTTPClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 		c := captureDefaultLogger(t)
 		cfg := base
 		cfg.CDSMeasurements = strings.Repeat("ab", 48)
-		if _, err := cdsHTTPClient(cfg); err != nil {
+		if _, err := cdsHTTPClient(t.Context(), cfg); err != nil {
 			t.Fatalf("cdsHTTPClient: %v", err)
 		}
 		if _, ok := c.find(warnMsg); ok {
@@ -799,13 +799,13 @@ func TestCDSHTTPClientParsesRTMRPins(t *testing.T) {
 
 	cfg := base
 	cfg.CDSRTMRs = "1=zz"
-	if _, err := cdsHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "--cds-rtmrs") {
+	if _, err := cdsHTTPClient(t.Context(), cfg); err == nil || !strings.Contains(err.Error(), "--cds-rtmrs") {
 		t.Fatalf("err = %v, want an RTMR parse failure naming the flag", err)
 	}
 
 	cfg.CDSMeasurements = strings.Repeat("ab", 48)
 	cfg.CDSRTMRs = "1=" + strings.Repeat("cd", 48)
-	if _, err := cdsHTTPClient(cfg); err != nil {
+	if _, err := cdsHTTPClient(t.Context(), cfg); err != nil {
 		t.Fatalf("cdsHTTPClient with valid pins: %v", err)
 	}
 }

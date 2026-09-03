@@ -7434,7 +7434,7 @@ func TestChartIptablesSyncNamesNoClusterDNS(t *testing.T) {
 
 // schemaCoveredPaths are the values subtrees values.schema.json seals: the
 // component blocks the docs tell operators to write by hand.
-var schemaCoveredPaths = []string{"cds", "nriImagePolicy", "tlsLb", "volumed"}
+var schemaCoveredPaths = []string{"cds", "nriImagePolicy", "tlsLb", "volumed", "staticAllowlist"}
 
 // readChartFile decodes a file from the chart directory. JSON is a subset of
 // YAML, so one decoder serves values.yaml and values.schema.json alike.
@@ -7932,5 +7932,289 @@ func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
 	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
 	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
 		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
+	}
+}
+
+// staticMeasurementsConfig is a static entry document: the image tuple plus
+// the RTMR[3] a node sealed to the bundle reports, as `c8s install
+// --static-allowlist` computes it.
+const staticMeasurementsConfig = `{"schema_version":"1","tee":"tdx","measurements":[{"name":"static-allowlist",` +
+	`"mrtd":"1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",` +
+	`"rtmr":[null,"2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",` +
+	`"3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",` +
+	`"4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"]}]}`
+
+// staticAllowlistArgs is the value set `c8s install --cvm-mode=node
+// --hardware-platform=tdx --static-allowlist <bundle> --image-manifest <m>`
+// emits, with the measurements config written to a file the way --set-file
+// carries it.
+func staticAllowlistArgs(t *testing.T, extra ...string) []string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cds.json")
+	if err := os.WriteFile(path, []byte(staticMeasurementsConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return append([]string{
+		"--set", "staticAllowlist.enabled=true",
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "attestationApi.teeDevices.sevGuest=false",
+		"--set", "attestationApi.teeDevices.tdxGuest=true",
+		"--set-string", "cds.ratlsPlatform=tdx",
+		"--set-string", "ratlsMesh.platform=tdx",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "nriImagePolicy.baked=true",
+		"--set", "cds.persistence.enabled=false",
+		"--set-file", "cds.measurementsConfig=" + path,
+		"--set", "tlsLb.attest.enabled=true",
+	}, extra...)
+}
+
+// TestChartStaticAllowlistCDS pins the CDS pod shape under a static allowlist:
+// the seed is the measured bundle member on the node (hostPath, read-only),
+// the verifier is the node's own unix socket (no HOST_IP anywhere), no
+// operator keys and no persistent store, and the group that lets uid 65532
+// open the root-owned socket.
+func TestChartStaticAllowlistCDS(t *testing.T) {
+	out, err := helmTemplate(t, staticAllowlistArgs(t)...)
+	if err != nil {
+		t.Fatalf("helm template (static allowlist): %v\n%s", err, out)
+	}
+
+	dep := renderedDeployment(t, out, "c8s-cds")
+	spec := dep.Spec.Template.Spec
+	cds, ok := findContainer(spec.Containers, "cds")
+	if !ok {
+		t.Fatal("cds container missing")
+	}
+	assertContainerArgs(t, cds,
+		"--static-allowlist",
+		"--policy-dir=/run/confai/policy",
+		"--allowlist-seed=/run/confai/policy/static-allowlist.json",
+		"--attestation-api-url=unix:///run/confai/attestation-api.sock",
+		"--allowlist-persistent=false",
+		"--measurements-config=/etc/c8s-measurements/cds.json",
+		"--ratls-platform=tdx",
+	)
+	assertContainerNoArgPrefix(t, "cds", cds.Args, "--operator-keys")
+	assertContainerNoArgPrefix(t, "cds", cds.Args, "--rtmrs")
+	if hasHostIPEnv(cds) {
+		t.Errorf("cds carries the HOST_IP downward-API env; the static verifier is the unix socket: %+v", cds.Env)
+	}
+
+	assertPodVolume(t, &spec, "policy-dir", func(v corev1.Volume) bool {
+		return v.HostPath != nil && v.HostPath.Path == "/run/confai/policy" && v.HostPath.Type != nil && *v.HostPath.Type == corev1.HostPathDirectory
+	})
+	assertPodVolume(t, &spec, "attestation-api-socket", func(v corev1.Volume) bool {
+		return v.HostPath != nil && v.HostPath.Path == "/run/confai" && v.HostPath.Type != nil && *v.HostPath.Type == corev1.HostPathDirectory
+	})
+	for _, name := range []string{"policy-dir", "attestation-api-socket"} {
+		m, ok := containerVolumeMount(cds, name)
+		if !ok {
+			t.Errorf("cds mounts no %s volume", name)
+			continue
+		}
+		if !m.ReadOnly {
+			t.Errorf("cds %s mount is writable; a hostPath into the node TCB must be read-only", name)
+		}
+	}
+	for _, v := range spec.Volumes {
+		switch {
+		case v.Name == "allowlist-seed":
+			t.Error("cds still mounts the chart's allowlist-seed ConfigMap; the seed must be the measured member")
+		case v.PersistentVolumeClaim != nil:
+			t.Error("cds mounts a PVC; a persisted store could outlive the reseed")
+		}
+	}
+	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-cds-allowlist-seed") {
+		t.Error("the chart renders an allowlist-seed ConfigMap under a static allowlist")
+	}
+	if spec.SecurityContext == nil || !slices.Contains(spec.SecurityContext.SupplementalGroups, 65532) {
+		t.Errorf("cds pod lacks supplementalGroups [65532] (workloadclaims.InventorySocketGID), so uid 65532 cannot open the root-owned attestation socket: %+v", spec.SecurityContext)
+	}
+}
+
+// TestChartStaticAllowlistPods pins what the sealed rules rely on across every
+// c8s pod: enableServiceLinks false (the kubelet would otherwise add an env var
+// per Service, which no exact rule can list) and no argv reaching the verifier
+// through $(HOST_IP), which expands to a per-node value no exact rule can pin.
+func TestChartStaticAllowlistPods(t *testing.T) {
+	out, err := helmTemplate(t, staticAllowlistArgs(t, "--set", "volumed.enabled=true")...)
+	if err != nil {
+		t.Fatalf("helm template (static allowlist): %v\n%s", err, out)
+	}
+	pods := renderedPodSpecs(t, out)
+	if len(pods) == 0 {
+		t.Fatal("no pod-bearing manifests rendered")
+	}
+	for _, p := range pods {
+		if p.spec.EnableServiceLinks == nil || *p.spec.EnableServiceLinks {
+			t.Errorf("%s %s: enableServiceLinks is not false", p.kind, p.name)
+		}
+		for _, c := range slices.Concat(p.spec.InitContainers, p.spec.Containers) {
+			for _, arg := range slices.Concat(c.Command, c.Args) {
+				if strings.Contains(arg, "$(HOST_IP)") {
+					t.Errorf("%s %s container %s argv %q expands $(HOST_IP); the static verifier is the unix socket", p.kind, p.name, c.Name, arg)
+				}
+			}
+		}
+	}
+
+	// The operator forwards its CDS pins into the sidecars' argv, which the
+	// bundle measures, so under a static allowlist it gets none: the
+	// sidecars pin CDS from their own quote over the node socket instead.
+	operator := renderedOperatorArgs(t, out)
+	for _, want := range []string{"--static-allowlist", "--attestation-socket-dir=/run/confai"} {
+		if !slices.Contains(operator, want) {
+			t.Errorf("operator args %v lack %s", operator, want)
+		}
+	}
+	for _, prefix := range []string{"--measurements-config", "--cds-measurements", "--cds-rtmrs"} {
+		assertContainerNoArgPrefix(t, "operator", operator, prefix)
+	}
+	for _, v := range renderedDeployment(t, out, "c8s-operator").Spec.Template.Spec.Volumes {
+		if v.Name == "measurements-config" {
+			t.Error("the operator mounts the measurements ConfigMap under a static allowlist")
+		}
+	}
+	plain, err := helmTemplate(t, "--set", "cds.measurements[0]="+strings.Repeat("ab", 48))
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, plain)
+	}
+	if args := renderedOperatorArgs(t, plain); slices.Contains(args, "--static-allowlist") || !slices.Contains(args, "--cds-measurements="+strings.Repeat("ab", 48)) {
+		t.Errorf("default render operator args = %v, want the flat pin and no --static-allowlist", args)
+	}
+}
+
+// TestChartStaticAllowlistSocketConsumers: every pod that verifies evidence
+// dials the node's socket under a static allowlist, mounted from the node
+// image's own directory rather than the chart plugin's runtime dir.
+func TestChartStaticAllowlistSocketConsumers(t *testing.T) {
+	out, err := helmTemplate(t, staticAllowlistArgs(t)...)
+	if err != nil {
+		t.Fatalf("helm template (static allowlist): %v\n%s", err, out)
+	}
+	const socketURL = "--attestation-api-url=unix:///run/confai/attestation-api.sock"
+	for _, c := range []corev1.Container{
+		tlsLBGetCertContainer(t, out, "c8s-cert"),
+		renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"),
+		renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy"),
+	} {
+		assertContainerArgs(t, c, socketURL)
+		if m, ok := containerVolumeMount(c, "attestation-api-socket"); !ok || m.MountPath != "/run/confai" || !m.ReadOnly {
+			t.Errorf("tls-lb %s: attestation-api-socket mount = %+v, want /run/confai read-only", c.Name, m)
+		}
+	}
+	// The mesh leaf tls-lb serves is issued by a CDS pinned to this node's
+	// own tuple, RTMR[3] included, not to any RA-TLS-attested peer.
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert, "--cds-pins-from-own-quote")
+	assertContainerNoArgPrefix(t, cert.Name, cert.Args, "--cds-measurements")
+	assertContainerNoArgPrefix(t, cert.Name, cert.Args, "--cds-rtmrs")
+	mesh := findRATLSMeshDaemonSet(t, out)
+	assertPodVolume(t, &mesh.Spec.Template.Spec, "attestation-api-socket", func(v corev1.Volume) bool {
+		return v.HostPath != nil && v.HostPath.Path == "/run/confai"
+	})
+}
+
+// The deny-host-namespaces VAP admits exactly the hostPaths c8s pods need;
+// the two the static CDS reads are carved out only when static mode is on.
+func TestChartStaticAllowlistVAPCarveOuts(t *testing.T) {
+	hostPathExpr := func(t *testing.T, out string) string {
+		t.Helper()
+		var vap admissionregv1.ValidatingAdmissionPolicy
+		if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+			t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+		}
+		for _, v := range vap.Spec.Validations {
+			if strings.Contains(v.Expression, "hostPath") {
+				return v.Expression
+			}
+		}
+		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
+		return ""
+	}
+	static, err := helmTemplate(t, staticAllowlistArgs(t)...)
+	if err != nil {
+		t.Fatalf("helm template (static allowlist): %v\n%s", err, static)
+	}
+	expr := hostPathExpr(t, static)
+	for _, want := range []string{`"/var/run/nri-image-policy"`, `"/run/confai/policy"`, `"/run/confai"`, `'Directory'`, "m.readOnly"} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("static hostPath validation missing %s; expression=%q", want, expr)
+		}
+	}
+	plain, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, plain)
+	}
+	if expr := hostPathExpr(t, plain); strings.Contains(expr, "/run/confai") {
+		t.Errorf("default render carves out the static hostPaths; expression=%q", expr)
+	}
+}
+
+// Non-static node mode is untouched: the HOST_IP arm and the ConfigMap seed
+// stay exactly as TestChartNodeModeAttestationApiURLUsesHostIP and
+// TestChartServesAllowlistSeedInNodeMode pin them. This test guards the one
+// thing they cannot: that leaving staticAllowlist at its default renders no
+// static flag at all.
+func TestChartStaticAllowlistOffByDefault(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	assertContainerNoArgPrefix(t, "cds", cds.Args, "--static-allowlist")
+	assertContainerNoArgPrefix(t, "cds", cds.Args, "--policy-dir")
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerNoArgPrefix(t, cert.Name, cert.Args, "--cds-pins-from-own-quote")
+	for _, p := range renderedPodSpecs(t, out) {
+		if p.spec.EnableServiceLinks != nil {
+			t.Errorf("%s %s sets enableServiceLinks outside static mode", p.kind, p.name)
+		}
+	}
+}
+
+// One fail per shape a static allowlist cannot coexist with.
+func TestChartStaticAllowlistFails(t *testing.T) {
+	keysPath := filepath.Join(t.TempDir(), "keys.pem")
+	if err := os.WriteFile(keysPath, []byte("-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		kind string
+	}{
+		{"gke cvm mode", []string{"--set-string", "attestationApi.cvmMode=gke"}, "static_allowlist_requires_node"},
+		{"snp platform", []string{"--set", "attestationApi.teeDevices.tdxGuest=false", "--set", "attestationApi.teeDevices.sevGuest=true"}, "static_allowlist_requires_tdx"},
+		{"cds ratls platform snp", []string{"--set-string", "cds.ratlsPlatform=snp"}, "static_allowlist_requires_tdx"},
+		{"operator keys", []string{"--set-file", "cds.operatorKeys=" + keysPath}, "static_allowlist_no_operator_keys"},
+		{"persistence", []string{"--set", "cds.persistence.enabled=true"}, "static_allowlist_no_persistence"},
+		{"kata", []string{"--set", "kata.enabled=true"}, "static_allowlist_no_kata"},
+		{"chart nri plugin", []string{"--set", "nriImagePolicy.enabled=true"}, "static_allowlist_no_host_nri"},
+		{"chart attestation-api", []string{"--set", "attestationApi.enabled=true"}, "static_allowlist_no_chart_attestation_api"},
+		// helm applies --set-file after --set-string whatever the argv order,
+		// so the file pair is dropped rather than overridden.
+		{"no measurements config", nil, "static_allowlist_requires_measurements_config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := staticAllowlistArgs(t, tc.args...)
+			if tc.kind == "static_allowlist_requires_measurements_config" {
+				i := slices.IndexFunc(args, func(a string) bool { return strings.HasPrefix(a, "cds.measurementsConfig=") })
+				args = slices.Delete(args, i-1, i+1)
+			}
+			out, err := helmTemplate(t, args...)
+			if err == nil {
+				t.Fatalf("helm template rendered; want a %s failure", tc.kind)
+			}
+			if got := parseValidationErrorKind(out); got != tc.kind {
+				t.Fatalf("validation error kind = %q, want %q\n%s", got, tc.kind, out)
+			}
+		})
 	}
 }

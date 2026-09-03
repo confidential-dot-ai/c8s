@@ -301,11 +301,16 @@ a floating tag would be root on every GPU node — so the digest is what's used.
 
 {{- /*
 c8s.attestationApiURL — the attestation-api endpoint injected into the operator
-and CDS. Three shapes:
+and CDS. Four shapes:
 
   - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
     on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
     INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
+  - otherwise, when staticAllowlist.enabled: the node image serves the
+    attestation-api on <staticAllowlist.attestationSocketDir>/attestation-api.sock
+    (c8s-attest-socket.service). Every consumer dials that socket and no
+    HOST_IP env is rendered, so no chart value and no per-pod expansion can
+    pick another verifier; the sealed rules pin the argv as rendered.
   - otherwise, when attestationApi.enabled=true (the chart DaemonSet shape —
     the raw-values default, kept by gke/aks installs): the on-node Unix socket
     its attest-proxy sidecar serves
@@ -328,7 +333,7 @@ and CDS. Three shapes:
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if .Values.attestationApi.enabled -}}
+{{- else if or .Values.staticAllowlist.enabled .Values.attestationApi.enabled -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
@@ -336,22 +341,39 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- /*
-c8s.attestationApiSocket — the node-local socket the attest-proxy sidecar
-serves the attestation-api on. It lives in the admission inventory's socket
-directory: the one hostPath the deny-host-namespaces policy admits into a cw
-pod (read-only) and the one the webhook mounts into get-cert sidecars.
+c8s.attestationApiSocketDir — the node directory holding the attestation-api
+socket: under a static allowlist the node image's own
+(staticAllowlist.attestationSocketDir, served by c8s-attest-socket.service),
+otherwise the admission inventory's socket directory, where the chart's
+attest-proxy sidecar serves it.
 */ -}}
-{{- define "c8s.attestationApiSocket" -}}
-{{ .Values.nriImagePolicy.hostPaths.runtimeDir }}/attestation-api.sock
+{{- define "c8s.attestationApiSocketDir" -}}
+{{- if .Values.staticAllowlist.enabled -}}
+{{ .Values.staticAllowlist.attestationSocketDir }}
+{{- else -}}
+{{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+{{- end -}}
 {{- end -}}
 
 {{- /*
-c8s.attestationApiHostSocket — "true" when consumers reach the chart-managed
-attestation-api over the on-node Unix socket, i.e. the DaemonSet renders and
-the in-guest (kata) endpoint does not apply.
+c8s.attestationApiSocket — the node-local socket consumers verify evidence
+through. In the chart-managed shape it lives in the admission inventory's
+socket directory: the one hostPath the deny-host-namespaces policy admits
+into a cw pod (read-only) and the one the webhook mounts into get-cert
+sidecars.
+*/ -}}
+{{- define "c8s.attestationApiSocket" -}}
+{{ include "c8s.attestationApiSocketDir" . }}/attestation-api.sock
+{{- end -}}
+
+{{- /*
+c8s.attestationApiHostSocket — "true" when consumers reach the attestation-api
+over an on-node Unix socket: the chart DaemonSet renders and the in-guest
+(kata) endpoint does not apply, or the node image serves the socket itself
+(staticAllowlist.enabled).
 */ -}}
 {{- define "c8s.attestationApiHostSocket" -}}
-{{- if and .Values.attestationApi.enabled (not .Values.kata.enabled) -}}true{{- end -}}
+{{- if or .Values.staticAllowlist.enabled (and .Values.attestationApi.enabled (not .Values.kata.enabled)) -}}true{{- end -}}
 {{- end -}}
 
 {{- /*
@@ -365,15 +387,18 @@ DirectoryOrCreate so a consumer scheduled before the DaemonSet does not wedge
 {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
 - name: attestation-api-socket
   hostPath:
-    path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
-    type: DirectoryOrCreate
+    path: {{ include "c8s.attestationApiSocketDir" . }}
+    {{- /* The static socket directory is the node image's own: a node
+           missing it did not boot the measured image, and a pod must not
+           create it. */}}
+    type: {{ ternary "Directory" "DirectoryOrCreate" .Values.staticAllowlist.enabled }}
 {{- end }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketMount" -}}
 {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
 - name: attestation-api-socket
-  mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+  mountPath: {{ include "c8s.attestationApiSocketDir" . }}
   readOnly: true
 {{- end }}
 {{- end -}}
@@ -386,7 +411,7 @@ pod-netns consumers reach the node-baked host attestation-api via the node's
 own IP. Empty in every other shape.
 */ -}}
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (not .Values.staticAllowlist.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:
@@ -469,6 +494,12 @@ Caller passes a dict:
     - --renew-interval={{ .renewInterval }}
     - --reload-nginx={{ default "false" .reloadNginx }}
     - --continue-on-initial-error
+    {{- if $root.Values.staticAllowlist.enabled }}
+    # Sealed node: pin CDS to this node's own tuple (RTMR[3] included) from a
+    # quote over the mounted socket, so a CDS on an unsealed node of the same
+    # image is refused and the argv carries no per-cluster digest.
+    - --cds-pins-from-own-quote
+    {{- end }}
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
@@ -710,10 +741,32 @@ cache_max_entries = 1024
       until an operator hand-runs `c8s allowlist add`. The cvmMode arm also
       covers a node install that leaves the installer off entirely.
   Gating on nriImagePolicy.enabled alone dropped the seed under both pod and
-  node mode.
+  node mode. Under a static allowlist the seed is the measured bundle member
+  on the node (c8s.staticSeedPath), never a chart ConfigMap.
 */}}
 {{- define "c8s.serveAllowlistSeed" -}}
-{{- or .Values.nriImagePolicy.enabled .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node") -}}
+{{- and (not .Values.staticAllowlist.enabled) (or .Values.nriImagePolicy.enabled .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+{{- end -}}
+
+{{/*
+  c8s.staticPodSpec — pod-spec fields every c8s pod carries under a static
+  allowlist. The sealed rules pin every environment variable, and the kubelet
+  adds one per Service in the namespace unless enableServiceLinks is false;
+  the API server's own KUBERNETES_* set is added regardless and is what the
+  rules list. Empty otherwise.
+*/}}
+{{- define "c8s.staticPodSpec" -}}
+{{- if .Values.staticAllowlist.enabled -}}
+enableServiceLinks: false
+{{- end -}}
+{{- end -}}
+
+{{/*
+  c8s.staticSeedPath — the bundle member a static CDS seeds from: the file
+  c8s-policy-measure published and measured.
+*/}}
+{{- define "c8s.staticSeedPath" -}}
+{{ .Values.staticAllowlist.policyDir }}/static-allowlist.json
 {{- end -}}
 
 {{/*

@@ -22,7 +22,13 @@ func seedStore(store *allowlist.Store, path string) error {
 	if err != nil {
 		return fmt.Errorf("read allowlist seed %q: %w", path, err)
 	}
+	return seedStoreFrom(store, data, path)
+}
 
+// seedStoreFrom seeds store from an in-memory document; path names it in
+// errors. Static mode passes the bytes the boot verdict covered rather than
+// re-reading the file, so the seed is exactly what was measured.
+func seedStoreFrom(store *allowlist.Store, data []byte, path string) error {
 	seed, err := pkgallowlist.ParseJSON(data)
 	if err != nil {
 		return fmt.Errorf("parse allowlist seed %q: %w", path, err)

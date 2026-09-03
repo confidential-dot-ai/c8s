@@ -17,9 +17,16 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
+
+// ownQuoteTimeout bounds the self-attestation round trip that derives the
+// CDS pins at start; the verifier is a local socket, so a slow answer means
+// it is not serving.
+const ownQuoteTimeout = 30 * time.Second
 
 // Config is the release plumbing every sidecar needs. The webhook renders all
 // of it; each command adds its own fields for what it fetches and where it
@@ -29,6 +36,14 @@ type Config struct {
 	AttestationApiURL string
 	Measurements      []string
 	RTMRs             []string
+
+	// CDSPinsFromOwnQuote pins CDS to this node's own image tuple, read
+	// from a fresh quote of this pod at start, instead of Measurements and
+	// RTMRs. A sealed node's sidecar argv is in the measured bundle, so it
+	// cannot carry a digest that depends on the bundle; the node's own quote
+	// carries the same tuple with RTMR[3] included, so a CDS on an unsealed
+	// node of the same image is refused.
+	CDSPinsFromOwnQuote bool
 
 	CertPath string
 	KeyPath  string
@@ -65,6 +80,7 @@ func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
 	f.StringSliceVar(&cfg.RTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy (repeatable; ignored when CDS presents SNP evidence, empty pins no registers)")
+	f.BoolVar(&cfg.CDSPinsFromOwnQuote, "cds-pins-from-own-quote", false, "pin CDS to this node's own image tuple {MRTD, RTMR[1..3]}, taken from a fresh quote of this pod verified over the unix --attestation-api-url at start, instead of --measurements and --rtmrs (static allowlist nodes, where the argv is sealed)")
 	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
@@ -90,6 +106,14 @@ func (c *Config) Validate() error {
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", c.AttestationApiURL); err != nil {
 		return err
 	}
+	if c.CDSPinsFromOwnQuote {
+		if len(c.Measurements) > 0 || len(c.RTMRs) > 0 {
+			return fmt.Errorf("--cds-pins-from-own-quote replaces --measurements and --rtmrs; pass one form of CDS pin")
+		}
+		if !strings.HasPrefix(c.AttestationApiURL, "unix://") {
+			return fmt.Errorf("--cds-pins-from-own-quote requires a unix:// --attestation-api-url: the pins come from the node's own verifier, and a network endpoint is one the control plane can substitute")
+		}
+	}
 	if c.Attempts <= 0 {
 		return fmt.Errorf("--attempts must be positive")
 	}
@@ -99,14 +123,25 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParsePins decodes --measurements and --rtmrs, refusing an empty measurement
-// pin inside a kata guest and warning outside one.
-func (c *Config) ParsePins() (ratls.Pins, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(c.Measurements)
+// CDSPins is what the sidecar holds CDS's RA-TLS certificate to: the node's
+// own tuple under --cds-pins-from-own-quote, else --measurements and
+// --rtmrs decoded, refusing an empty measurement pin inside a kata guest and
+// warning outside one.
+func (c *Config) CDSPins(ctx context.Context) (ratls.Pins, error) {
+	if c.CDSPinsFromOwnQuote {
+		ctx, cancel := context.WithTimeout(ctx, ownQuoteTimeout)
+		defer cancel()
+		entry, err := attestationclient.NewClient(c.AttestationApiURL).OwnTupleEntry(ctx)
+		if err != nil {
+			return ratls.Pins{}, fmt.Errorf("--cds-pins-from-own-quote: %w", err)
+		}
+		return ratls.Pins{Entries: []measurements.Entry{entry}}, nil
+	}
+	launch, err := ratls.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), c.WorkloadClaimsGuest,
+	if err := cmdsutil.CheckCDSPinned(len(launch), c.WorkloadClaimsGuest,
 		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
 		return ratls.Pins{}, err
 	}
@@ -114,7 +149,7 @@ func (c *Config) ParsePins() (ratls.Pins, error) {
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
 	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	return ratls.Pins{Measurements: launch, RTMRs: rtmrs}, nil
 }
 
 // Terminal marks a non-nil error no later attempt can clear, so Retry stops on

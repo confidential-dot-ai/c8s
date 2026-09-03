@@ -96,6 +96,9 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       {{- if .Values.kata.enabled }}
       # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
       # keys live only in SEV-SNP-encrypted guest memory, and peers verify cds's
@@ -133,6 +136,11 @@ spec:
         runAsNonRoot: false
       {{- else }}
 {{ toYaml .Values.podSecurityContext | indent 8 }}
+        {{- if .Values.staticAllowlist.enabled }}
+        # workloadclaims.InventorySocketGID: the node's attestation socket is
+        # root-owned 0660 and group-owned by it, so uid 65532 can connect.
+        supplementalGroups: [65532]
+        {{- end }}
       {{- end }}
       containers:
         - name: cds
@@ -145,7 +153,14 @@ spec:
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
             - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+            {{- if .Values.staticAllowlist.enabled }}
+            # The node measured this bundle into RTMR[3] at boot; CDS refuses
+            # to start unless its own evidence carries that register
+            # (validations.yaml, kind=static_allowlist_*).
+            - --static-allowlist
+            - --policy-dir={{ .Values.staticAllowlist.policyDir }}
+            - --allowlist-seed={{ include "c8s.staticSeedPath" . }}
+            {{- else if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
             {{- end }}
             - --ear-issuer={{ .Values.cds.earIssuer }}
@@ -245,7 +260,11 @@ spec:
             - name: data
               mountPath: /data
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+            {{- if .Values.staticAllowlist.enabled }}
+            - name: policy-dir
+              mountPath: {{ .Values.staticAllowlist.policyDir }}
+              readOnly: true
+            {{- else if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - name: allowlist-seed
               mountPath: /etc/cds
               readOnly: true
@@ -282,7 +301,15 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
-        {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+        {{- if .Values.staticAllowlist.enabled }}
+        # Directory, not DirectoryOrCreate: a node without the measurer's
+        # output did not boot the measured image, and CDS must not start
+        # against an empty directory a pod created.
+        - name: policy-dir
+          hostPath:
+            path: {{ .Values.staticAllowlist.policyDir }}
+            type: Directory
+        {{- else if eq (include "c8s.serveAllowlistSeed" .) "true" }}
         - name: allowlist-seed
           configMap:
             name: {{ include "c8s.cdsName" . }}-allowlist-seed

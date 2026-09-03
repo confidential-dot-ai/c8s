@@ -338,6 +338,71 @@ func TestRenderSealed(t *testing.T) {
 
 func str(s string) *string { return &s }
 
+// staticChartFixture is chartFixture as the chart renders it under
+// staticAllowlist.enabled: the operator dials the node's attestation socket,
+// carries no CDS pins and gets --static-allowlist.
+var staticChartFixture = strings.NewReplacer(
+	"- --attestation-api-url=unix:///run/c8s/attestation-api.sock\n", "- --attestation-api-url=unix:///run/confai/attestation-api.sock\n",
+	"            - --cds-measurements=aa\n", "            - --static-allowlist\n            - --attestation-socket-dir=/run/confai\n",
+).Replace(chartFixture)
+
+// Under a static allowlist the injected sidecars take their CDS pins from
+// their own quote and reach the verifier over the node's state directory,
+// which render classifies as a nodeState mount owing a review.
+func TestRenderSealed_StaticAllowlist(t *testing.T) {
+	cranetest.Install(t)
+	if !strings.Contains(staticChartFixture, "--static-allowlist") || strings.Contains(staticChartFixture, "--cds-measurements") {
+		t.Fatalf("static fixture not derived:\n%s", staticChartFixture)
+	}
+	installHelm(t, staticChartFixture)
+	workloads := writeFile(t, "w.yaml", workloadsFixture)
+	report := filepath.Join(t.TempDir(), "report.txt")
+
+	out, stderr, err := runCmd(renderArgs(t, "--workloads", workloads, "--report", report)...)
+	if err != nil {
+		t.Fatalf("render: %v\n%s", err, stderr)
+	}
+	al, err := pkgallowlist.ParseJSON([]byte(out))
+	if err != nil {
+		t.Fatalf("ParseJSON(render output) = %v\n%s", err, out)
+	}
+	var cert pkgallowlist.Container
+	for _, c := range al.Workloads["web"].InitContainers {
+		if len(c.Args.Argv) > 0 && c.Args.Argv[0] == "get-cert" {
+			cert = c
+		}
+	}
+	if cert.Digest.String() == "" {
+		t.Fatalf("no c8s-cert rule among %+v", al.Workloads["web"].InitContainers)
+	}
+	argv := strings.Join(cert.Args.Argv, " ")
+	if !strings.Contains(argv, " --cds-pins-from-own-quote") || !strings.Contains(argv, " --attestation-api-url=unix:///run/confai/attestation-api.sock") {
+		t.Errorf("c8s-cert argv = %q, want the own-quote flag and the node socket URL", argv)
+	}
+	if strings.Contains(argv, "--cds-measurements") || strings.Contains(argv, "--cds-rtmrs") {
+		t.Errorf("c8s-cert argv = %q, want no flat CDS pin under a static allowlist", argv)
+	}
+	if got := cert.Mounts.Rules["/run/confai"].Source; got != pkgallowlist.SourceNodeState {
+		t.Errorf("c8s-cert /run/confai source = %q, want nodeState (the node's state directory)", got)
+	}
+	if got := cert.Mounts.Rules["/run/c8s/workload-claims"].Source; got != pkgallowlist.SourcePlatform {
+		t.Errorf("c8s-cert /run/c8s/workload-claims source = %q, want platform", got)
+	}
+	if cert.Privileges != nil {
+		t.Errorf("c8s-cert privileges = %+v, want none (the state directory is a nodeState mount, not a host path grant)", cert.Privileges)
+	}
+	rep, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `mount "/run/confai" is a nodeState bind without a review`; !strings.Contains(string(rep), want) {
+		t.Errorf("report lacks %q:\n%s", want, rep)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want the report in --report only", stderr)
+	}
+}
+
 func TestRenderSealed_Refusals(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

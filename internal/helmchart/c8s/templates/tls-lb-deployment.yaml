@@ -73,6 +73,9 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       {{- if .Values.kata.enabled }}
       # Chart-managed mesh component: the webhook excludes the release
       # namespace, so the chart pins the RuntimeClass directly (same pattern as

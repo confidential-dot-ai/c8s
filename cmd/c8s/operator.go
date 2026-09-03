@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,6 +33,30 @@ func validateOperatorPlatform(platform string, kataEnforce bool) error {
 	return nil
 }
 
+// validateStaticAllowlist refuses what a sealed node cannot use: under
+// --static-allowlist the injected sidecars pin CDS from their own quote, so
+// flat pins or a measurements file would be forwarded nowhere and only
+// suggest a pin that is not applied; and the kata guest shape has no node
+// socket to mount. The socket directory must be absolute and clean: the
+// webhook writes it verbatim into the sidecars' mounts and argv, and the
+// sealed rule the bundle carries (allowlist render --sealed) names the clean
+// form.
+func validateStaticAllowlist(static bool, measurements, rtmrs []string, measurementsConfig string, guest bool, socketDir string) error {
+	if !static {
+		return nil
+	}
+	if !filepath.IsAbs(socketDir) || filepath.Clean(socketDir) != socketDir {
+		return fmt.Errorf("--attestation-socket-dir %q must be an absolute, clean path (the node image serves the socket under %s)", socketDir, webhook.DefaultAttestationSocketDir)
+	}
+	if len(measurements) > 0 || len(rtmrs) > 0 || measurementsConfig != "" {
+		return fmt.Errorf("--static-allowlist pins CDS from each sidecar's own quote; it cannot be combined with --cds-measurements, --cds-rtmrs or --measurements-config")
+	}
+	if guest {
+		return fmt.Errorf("--static-allowlist cannot be combined with --workload-claims-guest: a sealed node mounts its attestation socket into the sidecars, which a kata guest cannot")
+	}
+	return nil
+}
+
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
 	Short: "Run the c8s controller-manager and admission webhook",
@@ -44,6 +69,9 @@ Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet, not
 by this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateOperatorPlatform(operatorHardwarePlatform, kataEnforce); err != nil {
+			return err
+		}
+		if err := validateStaticAllowlist(staticAllowlist, cdsMeasurements, cdsRTMRs, cdsMeasurementsConfig, workloadClaimsGuest, attestationSocketDir); err != nil {
 			return err
 		}
 		// The injected sidecars and the measured initdata document carry a
@@ -80,6 +108,8 @@ by this command.`,
 			HardwarePlatform:        operatorHardwarePlatform,
 			WorkloadClaimsHostDir:   workloadClaimsHostDir,
 			WorkloadClaimsGuest:     workloadClaimsGuest,
+			StaticAllowlist:         staticAllowlist,
+			AttestationSocketDir:    attestationSocketDir,
 		})
 	},
 }
@@ -112,6 +142,8 @@ var (
 	operatorHardwarePlatform string
 	workloadClaimsHostDir    string
 	workloadClaimsGuest      bool
+	staticAllowlist          bool
+	attestationSocketDir     string
 )
 
 func init() {
@@ -141,5 +173,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&operatorHardwarePlatform, "hardware-platform", "", "CPU TEE the injected confidential kata classes target: sev-snp or tdx (required with --kata-enforce; set by the chart to match the RuntimeClasses it renders)")
 	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy inventory socket (node-CVM); when set, the webhook mounts it into c8s-cert and injects --workload-claims so get-cert redeems a sandbox token (docs/ratls.md)")
 	operatorCmd.Flags().BoolVar(&workloadClaimsGuest, "workload-claims-guest", false, "kata shape: the inventory is policy-monitor inside the guest, reached on guest loopback, so the webhook injects --workload-claims with no socket mount (docs/ratls.md)")
+	operatorCmd.Flags().BoolVar(&staticAllowlist, "static-allowlist", false, "sealed node shape (set by the chart under staticAllowlist.enabled): the injected sidecars mount --attestation-socket-dir read-only, dial the attestation-api socket there and pin CDS to the tuple of their own quote (--cds-pins-from-own-quote) instead of --cds-measurements/--cds-rtmrs")
+	operatorCmd.Flags().StringVar(&attestationSocketDir, "attestation-socket-dir", webhook.DefaultAttestationSocketDir, "node directory holding attestation-api.sock, mounted into the injected sidecars under --static-allowlist")
 	rootCmd.AddCommand(operatorCmd)
 }

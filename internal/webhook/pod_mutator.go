@@ -30,6 +30,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -262,7 +263,27 @@ type Config struct {
 	// rather than a mounted socket, so no volume is injected. Mutually
 	// exclusive with WorkloadClaimsHostDir — the chart sets exactly one.
 	WorkloadClaimsGuest bool
+
+	// StaticAllowlist selects the sealed node shape: the injected sidecars
+	// mount AttestationSocketDir read-only at its own path, dial the
+	// verifier there and pin CDS to the tuple of their own quote
+	// (--cds-pins-from-own-quote) instead of CDSMeasurements and CDSRTMRs.
+	// The sidecar argv is a rule in the measured bundle, so it cannot carry
+	// a digest that depends on the bundle; the node's quote carries the
+	// same tuple with RTMR[3], so a CDS on an unsealed node is refused.
+	StaticAllowlist bool
+
+	// AttestationSocketDir is the node directory holding attestation-api.sock
+	// under StaticAllowlist; empty means DefaultAttestationSocketDir.
+	AttestationSocketDir string
 }
+
+// DefaultAttestationSocketDir is where the node image serves the
+// attestation-api socket on a sealed node (c8s-attest-socket.service).
+const DefaultAttestationSocketDir = policybundle.NodeStateDir
+
+// attestationSocketName is the socket file under AttestationSocketDir.
+const attestationSocketName = "attestation-api.sock"
 
 // Register wires the pod mutator onto the manager's webhook server.
 func Register(mgr ctrl.Manager, cfg Config) error {
@@ -1054,6 +1075,11 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		// connect fails closed and the pod hangs on its initial cert.
 		ensureSupplementalGroup(pod, workloadclaims.InventorySocketGID)
 	}
+	if vol, ok := attestationSocketVolume(cfg); ok {
+		ensureVolume(pod, vol)
+		// c8s-attest-socket.service serves the socket with the same group.
+		ensureSupplementalGroup(pod, workloadclaims.InventorySocketGID)
+	}
 
 	mountAll(pod, corev1.VolumeMount{
 		Name:      effective.Cert.Volume,
@@ -1147,14 +1173,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// get-cert names this one --cds-measurements and takes it comma-joined,
-	// where the secret and volume fetchers take a repeatable --measurements.
-	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
-		args = append(args, "--cds-measurements="+joined)
-	}
-	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
-		args = append(args, "--cds-rtmrs="+joined)
-	}
+	// get-cert names these --cds-measurements and --cds-rtmrs and takes them
+	// comma-joined, where the secret and volume fetchers repeat --measurements.
+	args = append(args, cfg.cdsPinArgs("--cds-measurements", "--cds-rtmrs", true)...)
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1176,7 +1197,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		RestartPolicy:   &always,
 		Args:            args,
 		Env:             getCertEnv(inj),
-		VolumeMounts:    append(getCertVolumeMounts(inj, true), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    append(getCertVolumeMounts(inj, true), nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 		// The workload is gated on the initial cert by the c8s-cert-wait
 		// init container (certWaitContainer), not a startupProbe here: a
@@ -1350,6 +1371,12 @@ func (cfg Config) withDefaults() Config {
 	if cfg.HardwarePlatform == "" {
 		cfg.HardwarePlatform = HardwarePlatformSNP
 	}
+	if cfg.AttestationSocketDir == "" {
+		cfg.AttestationSocketDir = DefaultAttestationSocketDir
+	}
+	// The dir is written verbatim into the sidecars' mounts and argv, which
+	// the sealed rule names in clean form.
+	cfg.AttestationSocketDir = filepath.Clean(cfg.AttestationSocketDir)
 	return cfg
 }
 
@@ -1577,12 +1604,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Volumes.Specs {
 		args = append(args, "--volume="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cfg.cdsPinArgs("--measurements", "--rtmrs", false)...)
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1599,7 +1621,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		// It reads the leaf and talks to the node agent's socket; the volumes
 		// themselves are mounted into the workload, not into this.
-		VolumeMounts:    append(getCertVolumeMounts(inj, false), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    append(getCertVolumeMounts(inj, false), nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1623,12 +1645,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Secrets.Specs {
 		args = append(args, "--secret="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cfg.cdsPinArgs("--measurements", "--rtmrs", false)...)
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.
 	if cfg.WorkloadClaimsGuest {
@@ -1651,7 +1668,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 				Name:      secretsVolumeName,
 				MountPath: inj.Secrets.Dir,
 			}),
-			workloadClaimsMounts(cfg)...),
+			nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1686,10 +1703,77 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 	}, true
 }
 
-// sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
-// the inventory's host directory onto the sidecar's mount of that directory
-// (workloadClaimsMounts); every other shape passes through verbatim.
+// cdsPinArgs is how a sidecar is told which CDS to trust: the own-quote flag
+// under a static allowlist, else the flat pins under the flag names the
+// command takes, comma-joined or repeated.
+func (cfg Config) cdsPinArgs(measurementsFlag, rtmrsFlag string, joined bool) []string {
+	if cfg.StaticAllowlist {
+		return []string{"--cds-pins-from-own-quote"}
+	}
+	var args []string
+	if joined {
+		if v := strings.Join(cfg.CDSMeasurements, ","); v != "" {
+			args = append(args, measurementsFlag+"="+v)
+		}
+		if v := strings.Join(cfg.CDSRTMRs, ","); v != "" {
+			args = append(args, rtmrsFlag+"="+v)
+		}
+		return args
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, measurementsFlag+"="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, rtmrsFlag+"="+r)
+	}
+	return args
+}
+
+// attestationSocketVolumeName is the injected volume that mounts the sealed
+// node's attestation socket directory into the sidecars.
+const attestationSocketVolumeName = "c8s-attestation-socket"
+
+// attestationSocketVolume is the read-only hostPath over the node's
+// attestation socket directory, under a static allowlist only. Type
+// Directory: the directory is the measured image's own, and a pod must not
+// create it on a node that lacks it.
+func attestationSocketVolume(cfg Config) (corev1.Volume, bool) {
+	if !cfg.StaticAllowlist {
+		return corev1.Volume{}, false
+	}
+	hpType := corev1.HostPathDirectory
+	return corev1.Volume{
+		Name: attestationSocketVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: cfg.AttestationSocketDir, Type: &hpType},
+		},
+	}, true
+}
+
+// nodeSocketMounts are the sidecar mounts of the node's socket directories:
+// the inventory's (node-CVM) and, under a static allowlist, the attestation
+// socket's at its own path, so the URL in the sealed argv is the host path.
+func nodeSocketMounts(cfg Config) []corev1.VolumeMount {
+	mounts := workloadClaimsMounts(cfg)
+	if cfg.StaticAllowlist {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      attestationSocketVolumeName,
+			MountPath: cfg.AttestationSocketDir,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+// sidecarAttestationApiURL is the verifier a sidecar dials: under a static
+// allowlist the node's socket at the path it is mounted on (whatever the
+// operator's own URL); otherwise a unix:// endpoint under the inventory's
+// host directory rebased onto the sidecar's mount of that directory
+// (workloadClaimsMounts), and every other shape verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
+	if cfg.StaticAllowlist {
+		return "unix://" + filepath.Join(cfg.AttestationSocketDir, attestationSocketName)
+	}
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL

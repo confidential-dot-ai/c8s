@@ -38,14 +38,14 @@ func TestCDSHTTPClientRejectsPlainHTTP(t *testing.T) {
 	// A non-https --cds-url must be refused, not quietly served over a client
 	// that skips RA-TLS attestation of CDS.
 	for _, scheme := range []string{"http://cds:8443", "cds:8443", "tcp://cds:8443"} {
-		if _, err := cdsHTTPClient(config{CDSURL: scheme, AttestationApiURL: "http://attestation-api:8400"}); err == nil {
+		if _, err := cdsHTTPClient(t.Context(), config{CDSURL: scheme, AttestationApiURL: "http://attestation-api:8400"}); err == nil {
 			t.Fatalf("cdsHTTPClient(%q) succeeded, want error for non-https scheme", scheme)
 		}
 	}
 }
 
 func TestCDSHTTPClientUsesRATLSForHTTPS(t *testing.T) {
-	client, err := cdsHTTPClient(config{
+	client, err := cdsHTTPClient(t.Context(), config{
 		CDSURL:            "https://cds:8443",
 		AttestationApiURL: "http://attestation-api:8400",
 	})
@@ -879,7 +879,7 @@ func TestBuildDiscoveryDocumentRejectsUnparseableCert(t *testing.T) {
 }
 
 func TestNewCDSClientInvalidURL(t *testing.T) {
-	if _, err := newCDSClient(config{CDSURL: "://bad"}); err == nil {
+	if _, err := newCDSClient(t.Context(), config{CDSURL: "://bad"}); err == nil {
 		t.Fatal("newCDSClient succeeded, want error for invalid URL")
 	}
 }

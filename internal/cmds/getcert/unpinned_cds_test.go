@@ -14,7 +14,7 @@ func TestUnpinnedCDSRefusedInsideAKataGuest(t *testing.T) {
 		SAN:                 "host.example.com",
 		WorkloadClaimsGuest: true,
 	}
-	_, err := cdsHTTPClient(cfg)
+	_, err := cdsHTTPClient(t.Context(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "--measurements is empty") {
 		t.Fatalf("error = %v, want a refusal to use an unpinned CDS", err)
 	}
@@ -27,7 +27,7 @@ func TestUnpinnedCDSAllowedOutsideAKataGuest(t *testing.T) {
 		AttestationApiURL: "http://attestation-api:8400",
 		SAN:               "host.example.com",
 	}
-	if _, err := cdsHTTPClient(cfg); err != nil {
+	if _, err := cdsHTTPClient(t.Context(), cfg); err != nil {
 		t.Fatalf("cdsHTTPClient: %v", err)
 	}
 }
@@ -41,7 +41,7 @@ func TestPinnedCDSAcceptedInsideAKataGuest(t *testing.T) {
 		CDSMeasurements:     strings.Repeat("ab", 48),
 		WorkloadClaimsGuest: true,
 	}
-	if _, err := cdsHTTPClient(cfg); err != nil {
+	if _, err := cdsHTTPClient(t.Context(), cfg); err != nil {
 		t.Fatalf("cdsHTTPClient: %v", err)
 	}
 }

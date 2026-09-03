@@ -34,6 +34,9 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       serviceAccountName: {{ include "c8s.operatorName" . }}
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
@@ -60,8 +63,18 @@ spec:
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             {{- /* The same measurements CDS is pinned to elsewhere: the
                    injected secret fetcher verifies CDS before handing it a
-                   sandbox token and taking a value back. */}}
-            {{- if .Values.cds.measurementsConfig }}
+                   sandbox token and taking a value back. Under a static
+                   allowlist the operator forwards no pins: the sidecars'
+                   argv is a rule in the measured bundle, so it cannot carry
+                   a digest derived from that bundle. Instead each sidecar
+                   pins CDS to the tuple of its own quote, taken over the
+                   node's attestation socket (--cds-pins-from-own-quote),
+                   which carries RTMR[3] and so refuses a CDS on an unsealed
+                   node of the same image. */}}
+            {{- if .Values.staticAllowlist.enabled }}
+            - --static-allowlist
+            - --attestation-socket-dir={{ .Values.staticAllowlist.attestationSocketDir }}
+            {{- else if .Values.cds.measurementsConfig }}
             - --measurements-config=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- range .Values.cds.measurements }}
@@ -122,7 +135,7 @@ spec:
             # this emptyDir rather than the immutable image.
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.cds.measurementsConfig }}
+            {{- if and .Values.cds.measurementsConfig (not .Values.staticAllowlist.enabled) }}
             - name: measurements-config
               mountPath: /etc/c8s-measurements
               readOnly: true
@@ -130,7 +143,7 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if .Values.cds.measurementsConfig }}
+        {{- if and .Values.cds.measurementsConfig (not .Values.staticAllowlist.enabled) }}
         - name: measurements-config
           configMap:
             name: {{ include "c8s.fullname" . }}-measurements

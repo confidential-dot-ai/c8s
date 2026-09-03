@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -136,5 +137,63 @@ func TestAttestSNPUnaffectedByRTMRPins(t *testing.T) {
 	w := postAttest(t, h, issueChallenge(t, h), csrPEM)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// staticEntries parses a static-allowlist measurements config exactly as CDS
+// loads it from the chart, so the wire shape (rtmr[3] pinned) is what is
+// enforced here.
+func staticEntries(t *testing.T, rtmr3 string) []measurements.Entry {
+	t.Helper()
+	set, err := measurements.Parse([]byte(`{"schema_version":"1","tee":"tdx","measurements":[
+		{"name":"static-allowlist","mrtd":"` + testMRTD + `","rtmr":[null,"` + testRTMR1 + `","` + testRTMR2 + `","` + rtmr3 + `"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := set.StaticEntry(); err != nil {
+		t.Fatal(err)
+	}
+	return set.Entries
+}
+
+// Static mode's whole point on /attest: the entry pins RTMR[3], so a pod on
+// an unsealed node of the same image (or a node sealed to another bundle)
+// presents a different register and is refused even though MRTD, RTMR[1] and
+// RTMR[2] all match.
+func TestAttestStaticEntryPinsRTMR3(t *testing.T) {
+	sealed := strings.Repeat("5e", 48)
+	for _, tc := range []struct {
+		name     string
+		reported string
+		want     int
+	}{
+		{"sealed node", sealed, http.StatusOK},
+		{"unsealed node of the same image", strings.Repeat("00", 48), http.StatusForbidden},
+		{"node sealed to another bundle", strings.Repeat("6f", 48), http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := tdxVerdict(t, testMRTD, testRTMR1, testRTMR2)
+			v.Claims.PlatformData["rtmr_3"] = tc.reported
+			stub := testattest.New(t)
+			stub.SetVerdict(v)
+
+			h := newTestAttestHandler(t, stub.URL, nil)
+			h.Entries = staticEntries(t, sealed)
+
+			csrPEM, _ := generateCSR(t)
+			w := postAttestTDX(t, h, issueChallenge(t, h), csrPEM)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusForbidden {
+				var envelope types.ErrorResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("decode error envelope: %v", err)
+				}
+				if envelope.Error != types.ErrorCodeMeasurementDenied {
+					t.Fatalf("error code = %q, want %q", envelope.Error, types.ErrorCodeMeasurementDenied)
+				}
+			}
+		})
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -72,8 +73,10 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.allowlistDB, "allowlist-db", "", "Path to the allowlist SQLite database")
 	flags.BoolVar(&cfg.allowlistPersistent, "allowlist-persistent", false, "whether --allowlist-db is on durable storage; false makes CDS warn at startup that operator-added digests and the mesh CA do not survive a restart")
 	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). It is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md). Unset, CDS derives one host route per node from the live node list and refuses sandbox tokens until that syncs")
-	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
+	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a c8s.allowlist/v1 document (digests map and workload entries) seeded into the store at startup before serving; missing digests and entries are added, existing ones are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
+	flags.BoolVar(&cfg.staticAllowlist, "static-allowlist", false, "serve the static allowlist a node measured into RTMR[3] at boot. Requires --ratls-platform=tdx, a --measurements-config with one entry pinning RTMR[1], RTMR[2] and RTMR[3], --allowlist-seed=<policy-dir>/static-allowlist.json and a unix:// --attestation-api-url; refuses --operator-keys and --allowlist-persistent. At start <policy-dir>/mode must read static, the members must match <policy-dir>/digest, and this pod's own evidence must match the entry, or CDS exits")
+	flags.StringVar(&cfg.policyDir, "policy-dir", policybundle.DefaultPolicyDir, "directory c8s-policy-measure publishes the boot's policy mode, bundle digest and bundle members in (read under --static-allowlist)")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
 	flags.IntVar(&cfg.rateBurst, "rate-burst", 20, "max burst size per source IP")
@@ -154,6 +157,8 @@ type config struct {
 	rotationJitter      float64
 	ratlsPlatform       string
 	ratlsCertTTL        time.Duration
+	staticAllowlist     bool
+	policyDir           string
 
 	rateLimit                float64
 	rateBurst                int

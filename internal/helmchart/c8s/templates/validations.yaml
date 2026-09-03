@@ -2,6 +2,41 @@
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (include "c8s.nriCDSURL" .) . -}}
 {{- /*
+Static allowlist: the node measured its policy bundle into RTMR[3] and CDS
+serves only that. Every shape below would let something outside the bundle
+in — operator writes, a store outliving the reseed, a chart-installed plugin
+beside the baked sealed one, a chart-deployed verifier beside the node's,
+a platform with no runtime register, a pod shape whose plugin does not seal
+— or leave CDS with no tuple to hold itself and every requester to.
+*/ -}}
+{{- if .Values.staticAllowlist.enabled }}
+{{- if ne .Values.attestationApi.cvmMode "node" }}
+{{- fail (printf "VALIDATION_ERROR kind=static_allowlist_requires_node: staticAllowlist.enabled needs attestationApi.cvmMode=node (got %q): the policy bundle is measured by the node image's c8s-policy-measure unit — use `c8s install --cvm-mode=node --static-allowlist <bundle>`" .Values.attestationApi.cvmMode) -}}
+{{- end }}
+{{- if or (not .Values.attestationApi.teeDevices.tdxGuest) (ne (.Values.cds.ratlsPlatform | toString) "tdx") }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_requires_tdx: staticAllowlist.enabled needs a TDX platform (attestationApi.teeDevices.tdxGuest=true and cds.ratlsPlatform=tdx): the policy is measured into RTMR[3], which only TDX has — use `c8s install --hardware-platform=tdx`" -}}
+{{- end }}
+{{- if .Values.cds.operatorKeys }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_no_operator_keys: staticAllowlist.enabled cannot be combined with cds.operatorKeys: the allowlist is sealed at boot and takes no operator writes — drop --operator-keys" -}}
+{{- end }}
+{{- if .Values.cds.persistence.enabled }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_no_persistence: staticAllowlist.enabled cannot be combined with cds.persistence.enabled: every CDS start reseeds from the measured bundle, and a persisted store could add entries to it — set cds.persistence.enabled=false" -}}
+{{- end }}
+{{- if .Values.kata.enabled }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_no_kata: staticAllowlist.enabled cannot be combined with kata.enabled: the sealed plugin runs on the node, not inside per-pod guests — use --cvm-mode=node" -}}
+{{- end }}
+{{- if .Values.attestationApi.enabled }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_no_chart_attestation_api: staticAllowlist.enabled cannot be combined with attestationApi.enabled: the node image serves the attestation socket under staticAllowlist.attestationSocketDir (c8s-attest-socket.service) and every consumer dials it, so a chart-deployed verifier would be a second one nothing dials — set attestationApi.enabled=false" -}}
+{{- end }}
+{{- if .Values.nriImagePolicy.enabled }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_no_host_nri: staticAllowlist.enabled cannot be combined with nriImagePolicy.enabled: the node image bakes the sealed plugin and its pins come from the node's own quote — set nriImagePolicy.enabled=false" -}}
+{{- end }}
+{{- if not .Values.cds.measurementsConfig }}
+{{- fail "VALIDATION_ERROR kind=static_allowlist_requires_measurements_config: staticAllowlist.enabled needs cds.measurementsConfig carrying the static entry (MRTD, RTMR[1], RTMR[2], RTMR[3]); `c8s install --static-allowlist <bundle> --image-manifest <manifest>` computes it" -}}
+{{- end }}
+{{- end }}
+
+{{- /*
   Helm silently ignores values keys the chart no longer reads, so a values
   file carried over from a release that still had tee-proxy would drop its
   settings (hostPort opt-out, upstream) without a trace. Fail loud instead.
@@ -199,3 +234,4 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+

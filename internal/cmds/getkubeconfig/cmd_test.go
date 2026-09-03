@@ -26,7 +26,7 @@ func execCmd(t *testing.T, args ...string) error {
 func TestNewCmdValidation(t *testing.T) {
 	t.Run("missing operator-key, image-manifest and out", func(t *testing.T) {
 		err := execCmd(t, "--node", "127.0.0.1")
-		if err == nil || !strings.Contains(err.Error(), "--operator-key, --image-manifest and --out are required") {
+		if err == nil || !strings.Contains(err.Error(), "--operator-key (or --static-allowlist), --image-manifest and --out are required") {
 			t.Fatalf("want required-flags error, got %v", err)
 		}
 	})

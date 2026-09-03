@@ -524,7 +524,7 @@ list.
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
 {{- if eq (include "c8s.attestationApiHostSocket" .) "true" -}}
-{{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
+{{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" (include "c8s.attestationApiSocketDir" .)) -}}
 {{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
 {{- if .Values.tlsLb.attest.expectedWorkload -}}

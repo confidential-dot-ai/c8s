@@ -1101,8 +1101,19 @@ resolves adopted workload images into nriImagePolicy.bootstrapAllowlist.digests
 so image admission (the host NRI plugin, or the in-guest policy-monitor under
 --cvm-mode=pod) allows those rollouts.
 
+--static-allowlist <bundle> installs onto nodes that booted a policy bundle
+(docs/static-allowlist.md): a directory of members, or the static-allowlist.json
+alone. Requires --image-manifest, --cvm-mode=node and --hardware-platform=tdx.
+The bundle is linted as sealed, every node is attested through its
+attestation-api and must report RTMR[3] = the bundle's static register, and every
+running container must carry a digest the bundle names. Component digests and
+the CDS measurements entry (MRTD, RTMR[1], RTMR[2], RTMR[3]) come from the
+bundle and the manifest, so --operator-keys, --resolve-digests, --measurements,
+--measurements-config and --rtmrs are refused. Sets staticAllowlist.enabled,
+nriImagePolicy.enabled=false and cds.persistence.enabled=false.
+
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
---resolve-digests=false.`,
+--resolve-digests=false or --static-allowlist is given.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateCvmMode(installCvmMode); err != nil {
 			return err
@@ -1113,6 +1124,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
+		if err := staticInstallPreflight(cmd); err != nil {
+			return err
+		}
+		defer cleanupStaticInstall()
 		// Substitute any "-f -" before anything reads installValues, so the
 		// preflights and helm all see the piped values at a real path.
 		substituted, stdinCleanup, err := materializeStdinValues(installValues, cmd.InOrStdin())
@@ -1131,17 +1146,21 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if _, err := upstreamAddress(installUpstream, adoptions); err != nil {
 			return err
 		}
-		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
-			return err
-		} else if warn != "" {
-			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		// A static install has no operator keys by design and pins every
+		// register from the bundle, so neither guard applies to it.
+		if staticState == nil {
+			if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
+				return err
+			} else if warn != "" {
+				fmt.Fprintln(os.Stderr, "warning: "+warn)
+			}
+			if warn, err := tdxRTMRPinWarning(installHardwarePlatform, installRTMRs, installValues); err != nil {
+				return err
+			} else if warn != "" {
+				fmt.Fprintln(os.Stderr, "warning: "+warn)
+			}
 		}
 		if warn, err := podModeMeasurementsPreflight(installCvmMode, installPinnedMeasurementArgs(), installValues, installForce); err != nil {
-			return err
-		} else if warn != "" {
-			fmt.Fprintln(os.Stderr, "warning: "+warn)
-		}
-		if warn, err := tdxRTMRPinWarning(installHardwarePlatform, installRTMRs, installValues); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1261,7 +1280,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// Digest resolution off + default values: verify at least the
 		// operator image exists (see preflightOperatorImage); a -f owner may
 		// pin different repositories or digests.
-		if !installResolveDigests && len(installValues) == 0 {
+		if !installResolveDigests && len(installValues) == 0 && staticState == nil {
 			if err := preflightOperatorImage(cmd.Context(), components, imageTag); err != nil {
 				return err
 			}
@@ -1288,6 +1307,20 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
+
+		// Static allowlist: every node must already be sealed to the bundle,
+		// and every running container must be one the bundle names. Both are
+		// facts about the cluster, read-only, so they run with -f too.
+		if staticState != nil {
+			if err := preflightStaticNodes(cmd.Context(), os.Stdout, staticState); err != nil {
+				return err
+			}
+			if warn, err := preflightStaticImages(cmd.Context(), staticState.allowlist, installForce); err != nil {
+				return err
+			} else if warn != "" {
+				fmt.Fprintln(os.Stderr, "warning: "+warn)
+			}
 		}
 
 		// --cvm-mode=pod: label every kata-targeted node for the declared
@@ -1361,6 +1394,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 // the hint says how to fix it.
 func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 	if !attestEnabled {
+		return
+	}
+	if installStaticAllowlist != "" {
+		printStaticVerifyHint(w)
 		return
 	}
 	if len(installMeasurements) > 0 {
@@ -2496,6 +2533,8 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart), and a --static-allowlist bundle that does not name every running image")
+	installCmd.Flags().StringVar(&installStaticAllowlist, "static-allowlist", "", "policy bundle the nodes booted with (a directory of members, or the static-allowlist.json alone). Pins every component digest and the CDS measurements entry from it, attests every node against its RTMR[3], and sets staticAllowlist.enabled. Requires --image-manifest, --cvm-mode=node and --hardware-platform=tdx; excludes --operator-keys, --resolve-digests, --measurements, --measurements-config and --rtmrs")
+	installCmd.Flags().StringVar(&installImageManifest, "image-manifest", "", "build-artifact manifest of the node image (mrtd, rtmr1, rtmr2): the image half of the static tuple; required with --static-allowlist")
 	rootCmd.AddCommand(installCmd)
 }

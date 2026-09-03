@@ -86,6 +86,15 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
+		if installStaticAllowlist != "" {
+			if err := validateHardwarePlatform(installHardwarePlatform); err != nil {
+				return err
+			}
+		}
+		if err := staticInstallPreflight(cmd); err != nil {
+			return err
+		}
+		defer cleanupStaticInstall()
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
 		}
@@ -166,7 +175,11 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	// --set-string (like repository/digest), never --set: an all-digit or
 	// zero-padded tag (a date or build-id tag) would otherwise be int-coerced
 	// (e.g. 0640 -> 640).
-	if !installResolveDigests {
+	//
+	// A static install pins every component from the bundle instead, so it
+	// emits no tag either.
+	static := installStaticAllowlist != ""
+	if !installResolveDigests && !static {
 		for _, c := range components {
 			setArgs = append(setArgs, "--set-string", c.valuePrefix+".tag="+imageTag)
 		}
@@ -228,12 +241,14 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 		}
 		setArgs = append(setArgs, "--set-file", "cds.operatorKeys="+installOperatorKeys)
 	}
-	if installResolveDigests {
-		var err error
+	switch {
+	case static:
+		setArgs, err = appendStaticDigestArgs(ctx, chartPath, setArgs, imageTag, components)
+	case installResolveDigests:
 		setArgs, err = resolveDigests(ctx, chartPath, setArgs, imageTag, components)
-		if err != nil {
-			return nil, err
-		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	return appendWebhookInstallArgs(setArgs, cmd), nil
 }
@@ -428,5 +443,7 @@ func init() {
 	renderValuesCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing dockerconfigjson Secret the chart wires into every component's imagePullSecrets")
 	renderValuesCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main'). Override to pin a specific branch/tag/release")
 	renderValuesCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; the file's content is embedded as cds.operatorKeys in the emitted values (the chart value is PEM content, never a path)")
+	renderValuesCmd.Flags().StringVar(&installStaticAllowlist, "static-allowlist", "", "policy bundle the nodes booted with (a directory of members, or the static-allowlist.json alone): emits staticAllowlist.enabled=true, the static measurements entry and every component digest from the bundle. Requires --image-manifest, --cvm-mode=node and --hardware-platform=tdx; excludes --operator-keys, --resolve-digests, --measurements, --measurements-config and --rtmrs")
+	renderValuesCmd.Flags().StringVar(&installImageManifest, "image-manifest", "", "build-artifact manifest of the node image (mrtd, rtmr1, rtmr2) the static measurements entry pins beside the bundle's RTMR[3]; required with --static-allowlist")
 	rootCmd.AddCommand(renderValuesCmd)
 }
