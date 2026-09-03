@@ -307,7 +307,9 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: https
+              # Named ports are resolved only against this container. The
+              # `https` port belongs to nginx, so use its numeric pod port.
+              port: {{ .Values.tlsLb.nginx.httpsPort }}
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10

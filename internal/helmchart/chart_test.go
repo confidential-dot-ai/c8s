@@ -2553,7 +2553,7 @@ func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
 }
 
 // assertTLSLBReadyzProbe pins the readiness gate's routing invariant in every
-// shape: the probe goes through nginx over HTTPS on the named `https` port —
+// shape: the probe goes through nginx over HTTPS on its numeric pod port —
 // never at the sidecar's own port, which is loopback-only and, under kata,
 // redirected into the guest's mutual-RA-TLS proxy that rejects the certless
 // kubelet prober — and nginx exact-matches /readyz onto the sidecar.
@@ -2563,7 +2563,7 @@ func assertTLSLBReadyzProbe(t *testing.T, out string) {
 	if rp == nil || rp.HTTPGet == nil {
 		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe, got %+v", rp)
 	}
-	if rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.StrVal != "https" || rp.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+	if rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.IntVal != 8443 || rp.HTTPGet.Scheme != corev1.URISchemeHTTPS {
 		t.Fatalf("readiness probe must be HTTPS /readyz on the nginx port, got %+v", rp.HTTPGet)
 	}
 	renderedTLSLBNginxConfig(t, out).location(t, "exact", "/readyz").
