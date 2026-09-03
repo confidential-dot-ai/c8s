@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: ""
+      sealed_build_input_gzip:
+        description: "Base64 gzip-compressed c8s.node-build-inputs/v1 envelope."
+        required: false
+        type: string
+        default: ""
       gate:
         required: false
         type: boolean
@@ -160,8 +165,14 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
           SEALED_BUILD_INPUT_B64: ${{ inputs.static_allowlist }}
+          SEALED_BUILD_INPUT_GZIP_B64: ${{ inputs.sealed_build_input_gzip }}
         run: |
           set -euo pipefail
+
+          if [ -n "$SEALED_BUILD_INPUT_B64" ] && [ -n "$SEALED_BUILD_INPUT_GZIP_B64" ]; then
+            echo "::error::provide only one sealed build input"
+            exit 1
+          fi
 
           source_ref="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
           [[ "$source_ref" =~ ^[0-9a-f]{7}$ ]] || {
@@ -173,8 +184,12 @@ jobs:
           profile_archive_b64=""
           profile_commit=""
           profile_sha256=""
-          if [ -n "$SEALED_BUILD_INPUT_B64" ]; then
-            printf '%s' "$SEALED_BUILD_INPUT_B64" | base64 -d > "$RUNNER_TEMP/sealed-build-input.json"
+          if [ -n "$SEALED_BUILD_INPUT_B64" ] || [ -n "$SEALED_BUILD_INPUT_GZIP_B64" ]; then
+            if [ -n "$SEALED_BUILD_INPUT_GZIP_B64" ]; then
+              printf '%s' "$SEALED_BUILD_INPUT_GZIP_B64" | base64 -d | gzip -dc > "$RUNNER_TEMP/sealed-build-input.json"
+            else
+              printf '%s' "$SEALED_BUILD_INPUT_B64" | base64 -d > "$RUNNER_TEMP/sealed-build-input.json"
+            fi
             input_schema="$(jq -er '.schema' "$RUNNER_TEMP/sealed-build-input.json")"
             if [ "$input_schema" = "c8s.node-build-inputs/v1" ]; then
               jq -e 'keys | sort == ["consumerProfileArchiveB64", "consumerProfileCommit", "consumerProfileSha256", "schema", "staticAllowlistB64"]' \
@@ -184,7 +199,7 @@ jobs:
               profile_commit="$(jq -er '.consumerProfileCommit' "$RUNNER_TEMP/sealed-build-input.json")"
               profile_sha256="$(jq -er '.consumerProfileSha256' "$RUNNER_TEMP/sealed-build-input.json")"
             elif [ "$input_schema" = "c8s.allowlist/v1" ]; then
-              static_allowlist_b64="$SEALED_BUILD_INPUT_B64"
+              static_allowlist_b64="$(base64 -w0 < "$RUNNER_TEMP/sealed-build-input.json")"
             else
               echo "::error::unsupported sealed build input schema: $input_schema"
               exit 1

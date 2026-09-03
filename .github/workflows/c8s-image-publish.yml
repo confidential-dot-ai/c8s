@@ -48,6 +48,11 @@ on:
         required: false
         type: string
         default: ""
+      sealed_build_input_gzip:
+        description: "Base64 gzip-compressed c8s.node-build-inputs/v1 envelope."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -123,6 +128,7 @@ jobs:
       confos_ref: ${{ inputs.confos_ref || '' }}
       gate: ${{ inputs.gate || false }}
       static_allowlist: ${{ inputs.static_allowlist || '' }}
+      sealed_build_input_gzip: ${{ inputs.sealed_build_input_gzip || '' }}
       release_tag: ${{ needs.release-context.outputs.tag }}
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
