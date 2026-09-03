@@ -11,11 +11,27 @@
 #   node-image:  c8s-image.yml            (node rootfs / RTMR + SNP digests)
 #   kata-guest:  kata-guest-base.yml + kernel-snapshot.yml (kata launch digest)
 #
-# With PIN_WATCH_TOKEN (a fine-grained PAT with Contents and Pull requests
-# read/write access), checkout, push, and PR creation all use the PAT and PR
-# checks start automatically. Without it, they consistently use GITHUB_TOKEN:
-# the repository must allow Actions to create pull requests, and the resulting
-# PR workflow runs wait for approval before starting.
+# Authentication setup:
+# - Create a dedicated organization-owned GitHub App. Grant no organization or
+#   account permissions and subscribe to no webhooks. Grant only repository
+#   Contents, Pull requests, and Workflows read/write; Workflows is required
+#   because these PRs edit workflow files. Install it only on repositories that
+#   run pin-watch.
+# - Store its client ID in the PIN_WATCH_APP_CLIENT_ID Actions variable and a
+#   generated private key in the PIN_WATCH_APP_PRIVATE_KEY Actions secret. For
+#   organization-level values, restrict both to the same selected repositories.
+#
+# A shared App private key can mint tokens for every App installation. Keep the
+# installation and variable/secret allowlists identical and minimal, and rotate
+# the key after suspected disclosure or compromise of any selected repository.
+#
+# When the client ID is present, the pinned action mints a short-lived token
+# scoped to this repository. Checkout, push, and gh use that same token; PRs
+# created with it start checks automatically, and the action revokes it in its
+# post-step. A missing or invalid key fails closed.
+# Leaving the client ID unset intentionally falls back to GITHUB_TOKEN, limited
+# by the permissions below. The repository must enable "Allow GitHub Actions to
+# create and approve pull requests"; resulting PR workflow runs await approval.
 name: confos pin watch
 
 on:
@@ -31,9 +47,6 @@ concurrency:
   group: confos-pin-watch
   cancel-in-progress: false
 
-env:
-  GH_TOKEN: ${{ secrets.PIN_WATCH_TOKEN || github.token }}
-
 jobs:
   watch:
     runs-on: ubuntu-latest
@@ -46,12 +59,24 @@ jobs:
           - domain: kata-guest
             files: .github/workflows/kata-guest-base.yml .github/workflows/kernel-snapshot.yml
     steps:
+      - name: Create pin-watch GitHub App token
+        id: pin-watch-app-token
+        if: ${{ vars.PIN_WATCH_APP_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PIN_WATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PIN_WATCH_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          # Persist the same token used by gh so PAT-created PR updates also
+          # Persist the same token used by gh so App-created PR updates also
           # trigger CI automatically; github.token remains the fallback.
-          token: ${{ secrets.PIN_WATCH_TOKEN || github.token }}
+          token: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
       - name: Bump stale pins and open the PR
+        env:
+          GH_TOKEN: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
         run: |
           set -euo pipefail
           confos_record=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main \
@@ -101,5 +126,5 @@ jobs:
               origin "HEAD:refs/heads/$branch"
           fi
           if [ -z "$open_pr" ]; then
-            gh pr create --title "$title" --body "Automated pin-watch bump to confos main \`${confos:0:9}\` / attestation-rs main \`${attest:0:9}\`, mkosi \`${mkosi_line#systemd/mkosi@}\` scraped from that confos commit's base.yml so the MinimumVersion= lockstep holds by construction. Rolls the affected measurements — review the upstream logs before merging, and run the repro gate. With the default GITHUB_TOKEN, approve the PR's workflow run; PIN_WATCH_TOKEN lets CI start automatically."
+            gh pr create --title "$title" --body "Automated pin-watch bump to confos main \`${confos:0:9}\` / attestation-rs main \`${attest:0:9}\`, mkosi \`${mkosi_line#systemd/mkosi@}\` scraped from that confos commit's base.yml so the MinimumVersion= lockstep holds by construction. Rolls the affected measurements — review the upstream logs before merging, and run the repro gate. With the default GITHUB_TOKEN fallback, approve the PR's workflow run; GitHub App-created PR checks start automatically."
           fi
