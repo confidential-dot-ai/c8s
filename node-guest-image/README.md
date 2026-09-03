@@ -85,7 +85,8 @@ Migration state (see [#264] for the full plan):
    `c8s-ref`/`c8s-registry` sync inputs explicitly. The
    `node-guest-image lint` workflow is permanent: it carries the
    invariants that moved here from confos `bin/lint` (fragment supersets
-   vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
+   vs confos's gpu/dev fragments at the `node-image` confos pin in
+   `.github/build-pins.json`, the NRI
    floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
    pod-CIDR match), plus the cloud-init disable gate.
 2. The switch was gated on building the same c8s ref both ways (confos

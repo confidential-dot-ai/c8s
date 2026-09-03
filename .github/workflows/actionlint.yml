@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Test pin bump script
-        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
+      - name: Test pin manifest utility
+        run: bash .github/scripts/tests/test-pin-manifest.sh
 
       - name: Install actionlint (checksum-pinned)
         env:
@@ -46,8 +46,10 @@ jobs:
             -ignore 'SC2086' \
             -ignore 'SC2129'
 
-      - name: Shellcheck release scripts
+      - name: Shellcheck scripts
         run: |
           shellcheck \
             .github/scripts/calculate-release-version.sh \
+            .github/scripts/pin-manifest.sh \
+            .github/scripts/tests/test-pin-manifest.sh \
             kata-guest-base/scripts/ci/publish-release-aliases.sh

@@ -15,11 +15,6 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-    ignore:
-      # confos-pin-watch owns the systemd/mkosi pins: they move in lockstep
-      # with CONFOS_REF (confos's MinimumVersion= floor), never independently.
-      - dependency-name: systemd/mkosi
-
   - package-ecosystem: gomod
     directories:
       - /
