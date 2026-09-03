@@ -407,7 +407,7 @@ because sprig's default treats an explicit false as unset.
 
 {{/*
 Render wide-open CORS directives for a c8s protocol-owned location (the
-attestation/handshake/tunnel namespace, the discovery document and
+attestation/tunnel namespace, the discovery document and
 certificate endpoints, the built-in allowlist route). These endpoints exist
 to be verified by any browser anywhere: every response is either
 self-authenticating (hardware evidence, CDS-signed certificates, sealed

@@ -263,7 +263,7 @@ data:
             {{- if .Values.tlsLb.attest.enabled }}
             # The sidecar's readiness gate, proxied so kubelet can reach it.
             # cds-attest listens on loopback (its one listener also carries the
-            # attestation, handshake and tunnel routes, which must not be
+            # attestation and tunnel routes, which must not be
             # published on the pod IP), and under kata the guest redirects every
             # inbound port but this one into the mutual RA-TLS proxy, which
             # rejects the certless prober. So the probe rides the front door:
@@ -279,11 +279,12 @@ data:
 
             # c8s-verify attestation + over-encryption sidecar (loopback).
             # nginx serves the static cert(s) via discovery above; the dynamic
-            # per-session endpoints — the explicit attest-pq and attest-lb
-            # challenges and the PQ handshake/tunnel — are proxied to the
-            # in-pod `cds-attest` sidecar. The prefix also covers the retired
-            # /attestation path so the sidecar serves its explicit versioned
-            # 400 (no alias or downgrade) instead of nginx 404ing it.
+            # per-session endpoints — the attest-pq attestation + key exchange,
+            # the attest-lb challenge, and the over-encrypted tunnel — are
+            # proxied to the in-pod `cds-attest` sidecar. The prefix also
+            # covers the retired /attestation and /handshake paths so the
+            # sidecar serves its explicit versioned 400 (no alias or
+            # downgrade) instead of nginx 404ing them.
             # X-Real-IP is the address the sidecar meters each client by.
             location /.well-known/c8s/ {
                 {{- if default false .Values.tlsLb.cors.enabled }}

@@ -22,6 +22,7 @@ func TestNewCmdDurationDefaults(t *testing.T) {
 		want string
 	}{
 		{"session-ttl", "5m0s"},
+		{"session-max-age", "5h0m0s"},
 		{"read-header-timeout", "5s"},
 	} {
 		f := flags.Lookup(tc.flag)

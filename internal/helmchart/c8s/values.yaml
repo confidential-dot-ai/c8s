@@ -1334,8 +1334,8 @@ tlsLb:
 
   # -- Attestation + over-encryption sidecar (the c8s-verify protocol). When
   # enabled, an in-pod `c8s cds-attest` container serves the *dynamic*
-  # client-facing endpoints (the explicit attest-pq and attest-lb per-session
-  # challenges and the post-quantum over-encryption handshake) and nginx
+  # client-facing endpoints (the attest-pq attestation + X-Wing key exchange,
+  # the attest-lb per-session challenge, and the over-encrypted tunnel) and nginx
   # reverse-proxies `/.well-known/c8s/` to it on loopback. The static CDS/mesh-CA certs are still served by nginx via
   # `discovery`. The browser client is lunal-dev/c8s-verify-js (wire contract:
   # c8s-verify-js/PROTOCOL.md).
@@ -1356,8 +1356,8 @@ tlsLb:
     # WASM verifier.
     platform: snp
     generation: genoa
-    # -- Attestation-api URL the sidecar binds session keys against. Empty
-    # defaults to this chart's attestation-api.
+    # -- Attestation-api URL the sidecar binds each session's key exchange
+    # against. Empty defaults to this chart's attestation-api.
     attestationApiURL: ""
     # -- Workload-verified ingress gate: when set to an allowlist entry name,
     # the sidecar serves /readyz as 200 only while the installed mesh identity

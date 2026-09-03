@@ -3,6 +3,7 @@ module github.com/confidential-dot-ai/c8s
 go 1.26.3
 
 require (
+	filippo.io/mlkem768 v0.0.0-20260214141301-2e7bebc7d88d
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/confidential-dot-ai/attestation-go v0.4.1
 	github.com/containerd/containerd/api v1.11.1

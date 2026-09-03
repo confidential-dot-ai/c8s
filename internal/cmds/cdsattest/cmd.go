@@ -32,6 +32,7 @@ type config struct {
 	platform             string
 	generation           string
 	sessionTTL           time.Duration
+	sessionMaxAge        time.Duration
 	readHeaderTimeout    time.Duration
 
 	// over-encryption backend
@@ -46,7 +47,7 @@ type config struct {
 // tls-lb pod and serves the *dynamic* client-facing attestation +
 // over-encryption endpoints (the c8s-verify protocol). The tls-lb nginx
 // front-end terminates public TLS, serves the static CDS/mesh-CA certs, and
-// reverse-proxies /.well-known/c8s/attest-pq, /attest-lb, /handshake, and the
+// reverse-proxies /.well-known/c8s/attest-pq, /attest-lb, and the
 // over-encrypted application paths to this sidecar on loopback.
 func NewCmd() *cobra.Command {
 	var cfg config
@@ -69,7 +70,8 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
 	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|az-snp|az-tdx|tdx")
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
-	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "pending-handshake TTL and established-session idle TTL")
+	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "established-session idle TTL")
+	f.DurationVar(&cfg.sessionMaxAge, "session-max-age", defaultSessionMaxAge, "absolute session lifetime: a session's keys retire this long after establishment, however busy it is")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
 	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Empty uses an echo backend (demo).")
 	f.StringVar(&cfg.upstreamCAFile, "upstream-ca", "", "PEM CA bundle to verify an https upstream (the mesh CA)")
@@ -142,6 +144,7 @@ func run(cfg config) error {
 		ExpectedWorkload:     cfg.expectedWorkload,
 		Backend:              backend,
 		SessionTTL:           cfg.sessionTTL,
+		SessionMaxAge:        cfg.sessionMaxAge,
 	})
 
 	addr := cfg.host + ":" + strconv.Itoa(cfg.port)

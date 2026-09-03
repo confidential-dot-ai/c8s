@@ -319,9 +319,10 @@ hardware, without trusting the operator's word for it.
 Browsers cannot inspect TLS certificates mid-handshake, so RA-TLS alone is
 not browser-verifiable. The [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js)
 npm package instead runs a challenge-response protocol: the client
-sends a fresh nonce, the TEE returns a hardware-signed attestation report
-binding that nonce and an ephemeral public key, and all further traffic flows
-over a post-quantum over-encrypted channel (ML-KEM) inside the regular TLS
+sends a fresh nonce and an X-Wing encapsulation key, the TEE returns a
+hardware-signed attestation report binding the complete key exchange in one
+round trip, and all further traffic flows over a post-quantum over-encrypted
+channel (X-Wing: X25519 + ML-KEM-768) inside the regular TLS
 session. A malicious TLS-terminating proxy in front of the real endpoint
 cannot forge it. The wire contract is
 [PROTOCOL.md](https://github.com/confidential-dot-ai/c8s-verify-js/blob/main/PROTOCOL.md).

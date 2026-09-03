@@ -41,38 +41,29 @@ func newTestServer(t *testing.T) *httptest.Server {
 
 func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// clientChannelFromBundle does what a real client does after verifying the
-// bundle: recompute the identity transcript from the served chain and derive
-// the channel from it.
-func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce []byte) (*overenc.Channel, overenc.Handshake) {
+// postAttestPQ POSTs the client-first attest-pq request and returns the raw
+// HTTP response.
+func postAttestPQ(t *testing.T, base string, body []byte) *http.Response {
 	t.Helper()
-	x, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.X25519)
-	m, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.MLKEM768)
-	pub := overenc.PublicKey{X25519: x, MLKEM768: m}
-	certs, err := certutil.ParsePEMCertificates([]byte(bundle.CDSCertPEM))
+	resp, err := http.Post(base+"/.well-known/c8s/attest-pq", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(certs) != 2 {
-		t.Fatalf("bundle chain has %d certs, want leaf + issuing CA", len(certs))
-	}
-	transcript, err := overenc.IdentityTranscriptHash(pub, nonce, certs[0].Raw, certs[1].Raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	channel, hs, err := overenc.ClientAgree(pub, transcript)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return channel, hs
+	return resp
 }
 
-func fetchBundle(t *testing.T, base string, nonce []byte) types.AttestationBundle {
+// fetchBundle establishes an attest-pq exchange with the given client key and
+// nonce and returns the decoded bundle.
+func fetchBundle(t *testing.T, base string, ck *overenc.ClientKey, nonce []byte) types.AttestationBundle {
 	t.Helper()
-	resp, err := http.Get(base + "/.well-known/c8s/attest-pq?nonce=" + b64url(nonce))
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   b64url(nonce),
+		XWingEK: b64url(ck.EncapsulationKey()),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp := postAttestPQ(t, base, body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("attestation status %d", resp.StatusCode)
@@ -84,31 +75,49 @@ func fetchBundle(t *testing.T, base string, nonce []byte) types.AttestationBundl
 	return b
 }
 
-func establishSession(t *testing.T, base string, nonce []byte) (*overenc.Channel, string) {
+// clientChannelFromBundle does what a real client does after verifying the
+// bundle: recompute the identity transcript from the served chain, decapsulate
+// the server's ciphertext, and derive the channel.
+func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, ck *overenc.ClientKey, nonce []byte) (*overenc.Channel, string) {
 	t.Helper()
-	bundle := fetchBundle(t, base, nonce)
-	channel, hs := clientChannelFromBundle(t, bundle, nonce)
-	hsBody, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(hs.ClientX25519),
-		MLKEMCt:      b64url(hs.MLKEMCiphertext),
-	})
-	hsResp, err := http.Post(base+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(hsBody))
+	ct, err := base64.RawURLEncoding.DecodeString(bundle.XWingCT)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hsResp.Body.Close()
-	if hsResp.StatusCode != http.StatusOK {
-		t.Fatalf("handshake status %d", hsResp.StatusCode)
-	}
-	var hr types.HandshakeResponse
-	if err := json.NewDecoder(hsResp.Body).Decode(&hr); err != nil {
+	sessionID, err := base64.RawURLEncoding.DecodeString(bundle.SessionID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if hr.SessionID == "" {
-		t.Fatal("no session id")
+	certs, err := certutil.ParsePEMCertificates([]byte(bundle.CDSCertPEM))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return channel, hr.SessionID
+	if len(certs) != 2 {
+		t.Fatalf("bundle chain has %d certs, want leaf + issuing CA", len(certs))
+	}
+	transcript, err := overenc.IdentityTranscriptHash(ck.EncapsulationKey(), ct, sessionID, nonce, certs[0].Raw, certs[1].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, err := ck.Decapsulate(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel, err := overenc.NewClientChannel(ss, transcript, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return channel, bundle.SessionID
+}
+
+func establishSession(t *testing.T, base string, nonce []byte) (*overenc.Channel, string) {
+	t.Helper()
+	ck, err := overenc.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := fetchBundle(t, base, ck, nonce)
+	return clientChannelFromBundle(t, bundle, ck, nonce)
 }
 
 func TestFullFlowOverEncryptedEcho(t *testing.T) {
@@ -117,7 +126,11 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
-	bundle := fetchBundle(t, ts.URL, nonce)
+	ck, err := overenc.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := fetchBundle(t, ts.URL, ck, nonce)
 
 	if bundle.Version != types.BindingAttestPQ || bundle.Platform != "snp" || bundle.Generation != "genoa" {
 		t.Fatalf("unexpected bundle header: %+v", bundle)
@@ -128,34 +141,22 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	if bundle.Nonce != b64url(nonce) {
 		t.Fatal("nonce not echoed")
 	}
-
-	x, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.X25519)
-	m, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.MLKEM768)
-	if len(x) != overenc.X25519PubBytes || len(m) != overenc.MLKEM768EKBytes {
-		t.Fatalf("bad session pubkey sizes: %d %d", len(x), len(m))
+	if bundle.XWingEK != b64url(ck.EncapsulationKey()) {
+		t.Fatal("encapsulation key not echoed")
+	}
+	ct, _ := base64.RawURLEncoding.DecodeString(bundle.XWingCT)
+	if len(ct) != overenc.XWingCTBytes {
+		t.Fatalf("xwing_ct = %d bytes, want %d", len(ct), overenc.XWingCTBytes)
+	}
+	sessionID, _ := base64.RawURLEncoding.DecodeString(bundle.SessionID)
+	if len(sessionID) != overenc.SessionIDBytes {
+		t.Fatalf("session_id = %d bytes, want %d", len(sessionID), overenc.SessionIDBytes)
 	}
 
-	channel, hs := clientChannelFromBundle(t, bundle, nonce)
+	channel, id := clientChannelFromBundle(t, bundle, ck, nonce)
 
-	// handshake
-	hsBody, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(hs.ClientX25519),
-		MLKEMCt:      b64url(hs.MLKEMCiphertext),
-	})
-	hsResp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(hsBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var hr types.HandshakeResponse
-	json.NewDecoder(hsResp.Body).Decode(&hr)
-	hsResp.Body.Close()
-	if hr.SessionID == "" {
-		t.Fatal("no session id")
-	}
-
-	// over-encrypted tunnel: seal a full request envelope, open the response.
-	resp := tunnel(t, ts.URL, channel, hr.SessionID, types.TunnelRequest{
+	// Over-encrypted tunnel: seal a full request envelope, open the response.
+	resp := tunnel(t, ts.URL, channel, id, types.TunnelRequest{
 		Method:  "POST",
 		Path:    "/v1/echo",
 		Headers: []types.HeaderField{{Name: "Content-Type", Value: "application/json"}},
@@ -169,11 +170,12 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	}
 }
 
-// tunnel seals req, posts it to the tunnel endpoint, and opens the response.
+// tunnel seals req, posts it to the tunnel endpoint, and opens the response,
+// verifying the response echoes the request's sequence.
 func tunnel(t *testing.T, base string, ch *overenc.Channel, sessionID string, req types.TunnelRequest) types.TunnelResponse {
 	t.Helper()
 	plain, _ := cbor.Marshal(req)
-	rec, err := ch.Seal(plain, overenc.RequestAAD())
+	rec, err := ch.SealRequest(plain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +196,7 @@ func tunnel(t *testing.T, base string, ch *overenc.Channel, sessionID string, re
 	if err := cbor.Unmarshal(outBytes, &outRec); err != nil {
 		t.Fatal(err)
 	}
-	respCBOR, err := ch.Open(outRec, overenc.ResponseAAD())
+	respCBOR, err := ch.OpenResponse(outRec, rec.Seq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +210,7 @@ func tunnel(t *testing.T, base string, ch *overenc.Channel, sessionID string, re
 func postSealedTunnel(t *testing.T, base string, ch *overenc.Channel, sessionID string, req types.TunnelRequest) *http.Response {
 	t.Helper()
 	plain, _ := cbor.Marshal(req)
-	rec, err := ch.Seal(plain, overenc.RequestAAD())
+	rec, err := ch.SealRequest(plain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +231,7 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("X-Echo-Method", r.Method)
 		w.Header().Set("X-Echo-Auth", r.Header.Get("Authorization"))
+		w.Header().Set("X-Echo-Exporter", r.Header.Get(exporterHeader))
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("upstream saw: " + r.URL.Path + " / " + string(body)))
 	}))
@@ -251,19 +254,17 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
-	bundle := fetchBundle(t, ts.URL, nonce)
-	channel, hs := clientChannelFromBundle(t, bundle, nonce)
-	hsBody, _ := json.Marshal(types.HandshakeRequest{Nonce: b64url(nonce), ClientX25519: b64url(hs.ClientX25519), MLKEMCt: b64url(hs.MLKEMCiphertext)})
-	hsResp, _ := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(hsBody))
-	var hr types.HandshakeResponse
-	json.NewDecoder(hsResp.Body).Decode(&hr)
-	hsResp.Body.Close()
+	channel, sessionID := establishSession(t, ts.URL, nonce)
 
-	resp := tunnel(t, ts.URL, channel, hr.SessionID, types.TunnelRequest{
-		Method:  "PUT",
-		Path:    "/v1/data",
-		Headers: []types.HeaderField{{Name: "Authorization", Value: "Bearer sekret"}},
-		Body:    []byte("payload"),
+	resp := tunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{
+		Method: "PUT",
+		Path:   "/v1/data",
+		Headers: []types.HeaderField{
+			{Name: "Authorization", Value: "Bearer sekret"},
+			// A client-supplied exporter header must be stripped, never trusted.
+			{Name: exporterHeader, Value: "spoofed"},
+		},
+		Body: []byte("payload"),
 	})
 	if resp.Status != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", resp.Status)
@@ -276,6 +277,9 @@ func TestTunnelForwardsToUpstream(t *testing.T) {
 	}
 	if got := headerValues(resp.Headers, "X-Echo-Auth"); len(got) != 1 || got[0] != "Bearer sekret" {
 		t.Fatalf("Authorization not forwarded confidentially: %q", got)
+	}
+	if got := headerValues(resp.Headers, "X-Echo-Exporter"); len(got) != 1 || got[0] != b64url(channel.Exporter()) {
+		t.Fatalf("exporter header = %q, want the channel exporter (spoofed value stripped)", got)
 	}
 }
 
@@ -328,58 +332,42 @@ func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
 	}
 }
 
-func TestHandshakeRejectsUnknownNonce(t *testing.T) {
+// The retired two-step handshake endpoint returns the explicit 400 — no
+// alias, no downgrade.
+func TestRetiredHandshakeEndpointReturns400(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	body, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url([]byte("never-issued-nonce-bytes-32xxxxx")),
-		ClientX25519: b64url(make([]byte, 32)),
-		MLKEMCt:      b64url(make([]byte, overenc.MLKEM768CTBytes)),
-	})
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader(`{"nonce":"AAAA"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for unknown nonce, got %d", resp.StatusCode)
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
+		t.Fatalf("error code = %q", e.Error)
 	}
 }
 
-func TestHandshakeRejectsExpiredNonce(t *testing.T) {
-	identity := writeTestMeshIdentity(t)
-	srv := NewServer(Config{
-		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
-		MeshIdentityCertFile: identity.certFile,
-		MeshIdentityKeyFile:  identity.keyFile,
-		MeshIdentityCAFile:   identity.caFile,
-		NonceTTL:             time.Millisecond,
-	})
-	ts := httptest.NewServer(srv.Handler())
+// The pre-client-first GET shape returns the explicit 400.
+func TestAttestPQGetReturns400(t *testing.T) {
+	ts := newTestServer(t)
 	defer ts.Close()
-
-	nonce := make([]byte, 32)
-	rand.Read(nonce)
-	bundle := fetchBundle(t, ts.URL, nonce)
-	time.Sleep(5 * time.Millisecond)
-
-	_, hs := clientChannelFromBundle(t, bundle, nonce)
-	body, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(hs.ClientX25519),
-		MLKEMCt:      b64url(hs.MLKEMCiphertext),
-	})
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(body))
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for expired nonce, got %d", resp.StatusCode)
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
+		t.Fatalf("error code = %q", e.Error)
 	}
 }
 
-func TestTunnelRejectsExpiredSession(t *testing.T) {
+func TestTunnelRejectsIdleExpiredSession(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
@@ -387,9 +375,6 @@ func TestTunnelRejectsExpiredSession(t *testing.T) {
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
 		SessionTTL:           time.Millisecond,
-		// Generous nonce TTL so the handshake survives establishment; this test
-		// exercises established-session idle expiry, not nonce expiry.
-		NonceTTL: time.Minute,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -402,14 +387,54 @@ func TestTunnelRejectsExpiredSession(t *testing.T) {
 	resp := postSealedTunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{Method: "GET", Path: "/"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for expired session, got %d", resp.StatusCode)
+		t.Fatalf("expected 401 for idle-expired session, got %d", resp.StatusCode)
+	}
+}
+
+// A busy session still dies at the absolute lifetime: activity refreshes the
+// idle TTL but never the max age.
+func TestTunnelRejectsOverAgeSession(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	srv := NewServer(Config{
+		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+		SessionTTL:           time.Minute,
+		SessionMaxAge:        50 * time.Millisecond,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	channel, sessionID := establishSession(t, ts.URL, nonce)
+
+	// Keep the session busy past its absolute lifetime.
+	deadline := time.Now().Add(120 * time.Millisecond)
+	sawExpiry := false
+	for time.Now().Before(deadline) {
+		resp := postSealedTunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{Method: "GET", Path: "/"})
+		code := resp.StatusCode
+		resp.Body.Close()
+		if code == http.StatusUnauthorized {
+			sawExpiry = true
+			break
+		}
+		if code != http.StatusOK {
+			t.Fatalf("unexpected tunnel status %d", code)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawExpiry {
+		t.Fatal("session survived its absolute max age under constant use")
 	}
 }
 
 func TestAppRequiresSession(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/tunnel", "application/json", strings.NewReader(`{"iv":"AA","ct":"BB"}`))
+	resp, err := http.Post(ts.URL+"/.well-known/c8s/tunnel", "application/json", strings.NewReader(`{"seq":1,"ct":"BB"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,26 +476,30 @@ func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {
 	return e
 }
 
-func TestAttestationRejectsBadNonces(t *testing.T) {
+func TestAttestPQRejectsBadRequests(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
+	validEK := b64url(make([]byte, overenc.XWingEKBytes))
 	tests := []struct {
-		name  string
-		query string
+		name string
+		body string
 	}{
-		{"missing nonce", ""},
-		{"nonce not base64url", "?nonce=%21%40%23"},
-		{"nonce too short", "?nonce=" + b64url(make([]byte, nonceBytes-1))},
-		{"nonce too long", "?nonce=" + b64url(make([]byte, nonceBytes+1))},
+		{"not JSON", "{nope"},
+		{"missing nonce", `{"xwing_ek":"` + validEK + `"}`},
+		{"nonce not base64url", `{"nonce":"!!!","xwing_ek":"` + validEK + `"}`},
+		{"nonce too short", `{"nonce":"` + b64url(make([]byte, nonceBytes-1)) + `","xwing_ek":"` + validEK + `"}`},
+		{"nonce too long", `{"nonce":"` + b64url(make([]byte, nonceBytes+1)) + `","xwing_ek":"` + validEK + `"}`},
+		{"missing ek", `{"nonce":"` + b64url(make([]byte, nonceBytes)) + `"}`},
+		{"ek not base64url", `{"nonce":"` + b64url(make([]byte, nonceBytes)) + `","xwing_ek":"!!!"}`},
+		{"ek too short", `{"nonce":"` + b64url(make([]byte, nonceBytes)) + `","xwing_ek":"` + b64url(make([]byte, overenc.XWingEKBytes-1)) + `"}`},
+		{"ek too long", `{"nonce":"` + b64url(make([]byte, nonceBytes)) + `","xwing_ek":"` + b64url(make([]byte, overenc.XWingEKBytes+1)) + `"}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq" + tc.query)
-			if err != nil {
-				t.Fatal(err)
-			}
+			resp := postAttestPQ(t, ts.URL, []byte(tc.body))
 			if resp.StatusCode != http.StatusBadRequest {
+				resp.Body.Close()
 				t.Fatalf("status = %d, want 400", resp.StatusCode)
 			}
 			if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
@@ -497,9 +526,7 @@ func TestCDSCertRouteAbsentWithoutCert(t *testing.T) {
 }
 
 // An evidence provider that cannot produce a quote is a 502 with the versioned
-// unavailable code on both split endpoints. This used to drive the single
-// /attestation endpoint through its two query selectors; the split retired
-// that endpoint, so the two cases are now the two paths.
+// unavailable code on both split endpoints.
 func TestAttestationEvidenceUnavailable(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	identity := writeTestMeshIdentity(t)
@@ -516,85 +543,31 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
-
-	for _, path := range []string{"/attest-pq", "/attest-lb"} {
-		resp, err := http.Get(ts.URL + "/.well-known/c8s" + path + "?nonce=" + b64url(nonce))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != http.StatusBadGateway {
-			resp.Body.Close()
-			t.Fatalf("%s: status = %d, want 502", path, resp.StatusCode)
-		}
-		if e := decodeErr(t, resp); e.Error != types.ErrorCodeAttestationUnavailable {
-			t.Fatalf("%s: error code = %q", path, e.Error)
-		}
-	}
-}
-
-func TestHandshakeRejectsInvalidJSON(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader("{nope"))
+	ck, err := overenc.GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+
+	body, _ := json.Marshal(types.AttestPQRequest{Nonce: b64url(nonce), XWingEK: b64url(ck.EncapsulationKey())})
+	pqResp := postAttestPQ(t, ts.URL, body)
+	if pqResp.StatusCode != http.StatusBadGateway {
+		pqResp.Body.Close()
+		t.Fatalf("attest-pq: status = %d, want 502", pqResp.StatusCode)
 	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
-		t.Fatalf("error code = %q", e.Error)
+	if e := decodeErr(t, pqResp); e.Error != types.ErrorCodeAttestationUnavailable {
+		t.Fatalf("attest-pq: error code = %q", e.Error)
 	}
-}
 
-func TestHandshakeRejectsBadFieldEncoding(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-
-	nonce := make([]byte, 32)
-	rand.Read(nonce)
-	fetchBundle(t, ts.URL, nonce) // registers the pending nonce
-
-	body, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: "!!!not-base64url!!!",
-		MLKEMCt:      b64url(make([]byte, overenc.MLKEM768CTBytes)),
-	})
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(body))
+	lbResp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if lbResp.StatusCode != http.StatusBadGateway {
+		lbResp.Body.Close()
+		t.Fatalf("attest-lb: status = %d, want 502", lbResp.StatusCode)
 	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
-		t.Fatalf("error code = %q", e.Error)
-	}
-}
-
-func TestHandshakeRejectsBadKeyMaterial(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-
-	nonce := make([]byte, 32)
-	rand.Read(nonce)
-	fetchBundle(t, ts.URL, nonce)
-
-	// Correct lengths, degenerate content: key agreement must fail.
-	body, _ := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(make([]byte, 32)),
-		MLKEMCt:      b64url(make([]byte, overenc.MLKEM768CTBytes)),
-	})
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeChannelError {
-		t.Fatalf("error code = %q", e.Error)
+	if e := decodeErr(t, lbResp); e.Error != types.ErrorCodeAttestationUnavailable {
+		t.Fatalf("attest-lb: error code = %q", e.Error)
 	}
 }
 
@@ -631,7 +604,7 @@ func TestTunnelRejectsMalformedRecords(t *testing.T) {
 		nonce := make([]byte, 32)
 		rand.Read(nonce)
 		_, sessionID := establishSession(t, ts.URL, nonce)
-		garbage, _ := cbor.Marshal(overenc.Record{IV: make([]byte, 12), CT: []byte("garbage-ciphertext")})
+		garbage, _ := cbor.Marshal(overenc.Record{Seq: 1, CT: []byte("garbage-ciphertext")})
 		resp := post(t, sessionID, garbage)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
@@ -641,12 +614,36 @@ func TestTunnelRejectsMalformedRecords(t *testing.T) {
 		}
 	})
 
+	t.Run("replayed record", func(t *testing.T) {
+		nonce := make([]byte, 32)
+		rand.Read(nonce)
+		channel, sessionID := establishSession(t, ts.URL, nonce)
+		plain, _ := cbor.Marshal(types.TunnelRequest{Method: "GET", Path: "/"})
+		rec, err := channel.SealRequest(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recBody, _ := cbor.Marshal(rec)
+		first := post(t, sessionID, recBody)
+		first.Body.Close()
+		if first.StatusCode != http.StatusOK {
+			t.Fatalf("first submission status = %d", first.StatusCode)
+		}
+		replay := post(t, sessionID, recBody)
+		if replay.StatusCode != http.StatusBadRequest {
+			t.Fatalf("replay status = %d, want 400", replay.StatusCode)
+		}
+		if e := decodeErr(t, replay); e.Error != types.ErrorCodeChannelError {
+			t.Fatalf("error code = %q", e.Error)
+		}
+	})
+
 	t.Run("plaintext is not a request envelope", func(t *testing.T) {
 		nonce := make([]byte, 32)
 		rand.Read(nonce)
 		channel, sessionID := establishSession(t, ts.URL, nonce)
 		plain, _ := cbor.Marshal(42) // decrypts fine, but is not a TunnelRequest
-		rec, err := channel.Seal(plain, overenc.RequestAAD())
+		rec, err := channel.SealRequest(plain)
 		if err != nil {
 			t.Fatal(err)
 		}

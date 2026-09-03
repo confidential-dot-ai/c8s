@@ -656,14 +656,13 @@ so nginx receives the public source address their per-client keys need;
 through nodes that run the tls-lb pod).
 
 The attestation sidecar bounds what one client may hold as well as how fast it
-may ask: 512 concurrent sessions and 512 handshakes in flight per client
-address (an IPv6 client is one /64), inside pools of 8192 each. A pool that is
-full gives up an entry only from a client above the share the pool divides
-between its holders and the caller, and never below 8 entries, so a client
-holding a handful is not drained by one holding thousands. Once every holder is
-down to that floor — which takes 1024 client addresses holding sessions — a new
-session is refused with 503 until one expires; established sessions are never
-taken to admit a new one.
+may ask: 512 concurrent sessions per client address (an IPv6 client is one
+/64), inside a pool of 8192. A pool that is full gives up the idlest session,
+and only from a client above the share the pool divides between its holders
+and the caller, never below 8 entries, so a client holding a handful is not
+drained by one holding thousands. Once every holder is down to that floor —
+which takes 1024 client addresses holding sessions — a new session is refused
+with 503 until one expires.
 
 The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still
