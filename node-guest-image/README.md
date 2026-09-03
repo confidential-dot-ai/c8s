@@ -39,6 +39,10 @@ Layout:
   contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
+  The locked image runs the kubelet with `enable-debugging-handlers=false`,
+  so `kubectl exec`, `attach`, `port-forward`, and `logs` fail for every
+  kubeconfig holder; `C8S_DEV=1` turns them back on (with the serial
+  autologin), at a different measurement.
 
 ## Launch requirements
 

@@ -64,6 +64,23 @@ if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   exit 1
 fi
 
+# The locked image must keep the kubelet debugging handlers off (no kubectl
+# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
+# turn them back on, and only through the sync-rendered drop-in.
+if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+  exit 1
+fi
+if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
+  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+  exit 1
+fi
+if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
+   || ! grep -q 'SYNC_INPUTS/dev' "$ngi/c8s/mkosi.sync"; then
+  echo "::error::the dev sync-input must flow from $ngi/build (C8S_DEV) into mkosi.sync"
+  exit 1
+fi
+
 # The rke2-role drop-ins only bind if mkosi.sync keeps staging the
 # rke2 tarball's units under /usr/local (systemd's search path);
 # the systemd harness installs its fakes at the same prefix.
