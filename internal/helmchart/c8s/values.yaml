@@ -1062,11 +1062,8 @@ volumed:
   ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only
   ## hostPath the deny-host-namespaces VAP admits into a cw pod.
   hostPaths:
-    ## The kubelet's root dir, holding per-pod volume directories. Empty
-    ## derives it from the host distro (kata.distro / nriImagePolicy.distro,
-    ## set by `c8s install` and required from GitOps installs for the
-    ## containerd layout anyway): rke2 keeps it under its agent dir.
-    kubeletRoot: ""
+    ## Kubelet's root dir; override only when the kubelet runs a custom --root-dir.
+    kubeletRoot: /var/lib/kubelet
     cgroupRoot: /sys/fs/cgroup
 
   ## Volumes open on one node at once. Each costs two device-mapper devices and
