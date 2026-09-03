@@ -648,6 +648,31 @@ it into the attest-pq and attest-lb report_data transcripts and echoes it as
 leaf — is served only for the TEE-held-key modes, `cds` and `acme`; `webpki`
 is attest-pq-only.
 
+### Verify a saved attest-lb receipt
+
+Save the receipt, challenge, and serving leaf from the same HTTPS connection.
+Do not fetch the leaf on a second connection. Routing can select a different
+TLS-LB replica.
+
+```bash
+c8s verify --kind workload --mode attest-lb \
+  --from-file receipt.json \
+  --attestation-nonce <32-byte-unpadded-base64url> \
+  --observed-serving-cert leaf.der \
+  --image-manifest node-image-manifest.json \
+  --operator-pkey operator-public-key.pem \
+  --mesh-ca mesh-ca.pem \
+  --allowlist allowlist.json \
+  --workload c8s-tls-lb \
+  -o json
+```
+
+The command rejects another nonce, serving leaf, front-door mode, mesh leaf,
+or mesh CA. It also applies the normal image, operator-key, mesh-CA, allowlist,
+and workload checks. JSON includes `tls_binding_verified` and the verified
+`serving_leaf_sha256`. Offline output has `fresh: false`: the receipt is bound
+to the supplied challenge, but a saved file does not prove current liveness.
+
 ## tls-lb upstream
 
 ### Built-in allowlist route

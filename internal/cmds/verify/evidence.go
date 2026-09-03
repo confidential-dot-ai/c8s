@@ -64,6 +64,11 @@ type evidence struct {
 	source string
 	// certSHA256 is the hex SHA-256 of the serving certificate (cert modes only).
 	certSHA256 string
+	// servingLeafSHA256 and tlsBindingVerified record an attest-lb check
+	// against the leaf observed by the caller on the same HTTPS connection.
+	// The digest uses the response protocol's unpadded base64url form.
+	servingLeafSHA256  string
+	tlsBindingVerified bool
 	// bindingNote explains what the REPORTDATA is bound to.
 	bindingNote string
 	// leaf is the CDS-issued leaf the evidence speaks for: the serving cert in
@@ -144,6 +149,8 @@ type attestationResponse struct {
 		Mlkem768 string `json:"mlkem768"`
 	} `json:"session_pubkey"`
 	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
+	// ServingLeafSHA256 exists only on attest-lb responses.
+	ServingLeafSHA256 string `json:"serving_leaf_sha256"`
 }
 
 // leafTrust is what a caller can offer to authenticate a leaf body that is
@@ -417,6 +424,92 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	}, nil
 }
 
+// evidenceFromAttestLBJSON verifies a saved attest-lb receipt against the
+// challenge and TLS leaf observed by the caller on one HTTPS connection. The
+// receipt alone is insufficient because it carries attacker-replayable claims
+// about both values.
+func evidenceFromAttestLBJSON(data, expectNonce, observedLeafDER []byte, source string) (*evidence, error) {
+	var r attestationResponse
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parse attestation response: %w", err)
+	}
+	if r.Version != types.BindingAttestLB {
+		return nil, fmt.Errorf("attestation response version %q is not the attest-lb binding %q", r.Version, types.BindingAttestLB)
+	}
+	if len(r.Evidence) == 0 {
+		return nil, fmt.Errorf("attestation response carries no evidence")
+	}
+	if len(expectNonce) != nonceSize {
+		return nil, fmt.Errorf("attest-lb verification requires a %d-byte expected nonce", nonceSize)
+	}
+	if len(observedLeafDER) == 0 {
+		return nil, fmt.Errorf("attest-lb verification requires the observed serving leaf DER")
+	}
+	if r.SessionPubkey.X25519 != "" || r.SessionPubkey.Mlkem768 != "" {
+		return nil, fmt.Errorf("attest-lb response must not carry a session_pubkey")
+	}
+	// Only these modes keep the serving key inside the TEE. A valid report
+	// that names webpki does not prove transport confidentiality.
+	if r.FrontDoorMode != "cds" && r.FrontDoorMode != "acme" {
+		return nil, &securityError{err: fmt.Errorf("attest-lb front_door_mode %q is not a TEE-held serving-key mode", r.FrontDoorMode)}
+	}
+
+	nonce, err := parseAttestationNonce(r.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("receipt nonce: %w", err)
+	}
+	if !bytes.Equal(nonce, expectNonce) {
+		return nil, &securityError{err: fmt.Errorf("response nonce does not echo the challenge (possible replay or MITM)")}
+	}
+
+	observedHash := sha256.Sum256(observedLeafDER)
+	observedHashB64 := base64.RawURLEncoding.EncodeToString(observedHash[:])
+	if r.ServingLeafSHA256 != observedHashB64 {
+		return nil, &securityError{err: fmt.Errorf("serving_leaf_sha256 does not match the leaf observed on the HTTPS connection")}
+	}
+
+	leaf, ca, err := committedMeshChain(r.CDSCertPEM, r.IdentityProof)
+	if err != nil {
+		return nil, err
+	}
+	transcript, err := overenc.LBTranscriptHash(
+		r.FrontDoorMode, nonce, observedLeafDER, leaf.Raw, ca.Raw,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("compute attest-lb transcript: %w", err)
+	}
+	if err := verifyIdentityProof(r.IdentityProof, leaf, transcript); err != nil {
+		return nil, &securityError{err: err}
+	}
+	if err := verifyCommittedChain(leaf, ca); err != nil {
+		return nil, &securityError{err: err}
+	}
+
+	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
+	return &evidence{
+		platform:    platformOrDefault(r.Platform),
+		rawEvidence: r.Evidence,
+		nvidiaGPU:   r.NvidiaGPU,
+		gpuAttested: r.GPUAttested,
+		erd:         transcript,
+		// A saved receipt is nonce-bound, but an offline check does not prove
+		// that it is current at verification time.
+		fresh:              false,
+		source:             source,
+		servingLeafSHA256:  observedHashB64,
+		tlsBindingVerified: true,
+		bindingNote:        "REPORTDATA binds the identity transcript: front-door mode + caller challenge + exact observed serving leaf + exact mesh leaf and issuing CA (mesh-leaf proof of possession verified)",
+		leaf:               leaf,
+		leafChainDerived:   true,
+		frontDoor:          frontDoorNone,
+		sandboxID:          sandboxID,
+		sandboxErr:         sandboxErr,
+		workload:           workload,
+		workloadErr:        workloadErr,
+	}, nil
+}
+
 // committedMeshChain parses the served mesh chain and returns the leaf plus
 // the issuing CA the identity proof commits: the first CERTIFICATE block is
 // the mesh leaf; the CA is selected among the remaining blocks by
@@ -544,6 +637,45 @@ func gatherFromFile(data []byte, overrideERD []byte, source string, trust leafTr
 		// fall through to full-response parsing if it wasn't bare evidence
 	}
 	return evidenceFromEndpointJSON(data, nil, source)
+}
+
+// parseObservedServingCertificate accepts one PEM certificate or exact DER.
+func parseObservedServingCertificate(data []byte) ([]byte, error) {
+	der := data
+	trimmed := bytes.TrimSpace(data)
+	if bytes.HasPrefix(trimmed, []byte("-----BEGIN")) {
+		block, rest := pem.Decode(trimmed)
+		if block == nil {
+			return nil, fmt.Errorf("parse observed serving certificate PEM")
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("observed serving certificate PEM block is %q, want CERTIFICATE", block.Type)
+		}
+		if len(bytes.TrimSpace(rest)) != 0 {
+			return nil, fmt.Errorf("observed serving certificate file must contain exactly one certificate")
+		}
+		der = block.Bytes
+	}
+	if _, err := x509.ParseCertificate(der); err != nil {
+		return nil, fmt.Errorf("parse observed serving certificate: %w", err)
+	}
+	return append([]byte(nil), der...), nil
+}
+
+// parseAttestationNonce requires the protocol's canonical 32-byte base64url
+// challenge. It rejects standard base64 and padded encodings.
+func parseAttestationNonce(value string) ([]byte, error) {
+	nonce, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("--attestation-nonce must be unpadded base64url: %w", err)
+	}
+	if len(nonce) != nonceSize {
+		return nil, fmt.Errorf("--attestation-nonce must decode to %d bytes, got %d", nonceSize, len(nonce))
+	}
+	if base64.RawURLEncoding.EncodeToString(nonce) != value {
+		return nil, fmt.Errorf("--attestation-nonce must use canonical unpadded base64url")
+	}
+	return nonce, nil
 }
 
 // evidenceFromBareJSON parses a bare {platform, evidence:{attestation_report,
