@@ -103,6 +103,7 @@ allowlist").`,
 		newLintCmd(o),
 		newInspectImageCmd(o),
 		newDigestCmd(o),
+		newCanonicalizeCmd(),
 	)
 	return cmd
 }
