@@ -10,7 +10,9 @@ import tarfile
 EXPECTED_FILES = {
     "mkosi.conf",
     "mkosi.extra/etc/systemd/system/control-plane-state-disk.service",
-    "mkosi.extra/etc/systemd/system/rke2-server.service.d/control-plane-state.conf",
+    # This must sort after c8s no-modprobe.conf. That drop-in clears the base
+    # RKE2 ExecStartPre list; an earlier consumer recovery hook is also lost.
+    "mkosi.extra/etc/systemd/system/rke2-server.service.d/zz-control-plane-state.conf",
     "mkosi.extra/usr/local/libexec/confidential-inference/control-plane-state-disk.sh",
     "mkosi.extra/usr/local/libexec/confidential-inference/rke2-single-control-recovery.sh",
 }
