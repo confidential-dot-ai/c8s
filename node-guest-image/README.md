@@ -69,7 +69,9 @@ The other disks are optional; each is owned by one unit under
   cluster; absent means single-node server (`rke2-role.service`).
 - label `opkeydata` — an ISO carrying the operator public key; its
   presence turns on attested credential release (`cred-release.service`,
-  see [operator.md]).
+  see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
+  issued certificate's group to `cluster-admin` through ordinary RBAC;
+  identity, TTL and revocation are documented in [operator.md].
 
 Migration state (see [#264] for the full plan):
 
