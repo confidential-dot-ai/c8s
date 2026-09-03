@@ -165,6 +165,34 @@ jobs:
           ref: ${{ env.CONFOS_REF }}
           path: confidential-os-builder
 
+      - name: Verify exact build source checkouts
+        run: |
+          set -euo pipefail
+          confos_actual="$(git -C confidential-os-builder rev-parse HEAD)"
+          attestation_actual="$(git -C attestation-rs rev-parse HEAD)"
+          test "$confos_actual" = "$CONFOS_REF" || {
+            echo "::error::ConfOS checkout is $confos_actual, not $CONFOS_REF"
+            exit 1
+          }
+          test "$attestation_actual" = "$ATTESTATION_RS_REF" || {
+            echo "::error::attestation-rs checkout is $attestation_actual, not $ATTESTATION_RS_REF"
+            exit 1
+          }
+          test -x confidential-os-builder/bin/host-deps || {
+            echo "::error::the selected ConfOS commit lacks executable bin/host-deps"
+            exit 1
+          }
+          test -x confidential-os-builder/bin/confos-fetch-attest-gpu || {
+            echo "::error::the selected ConfOS commit lacks the GPU evidence builder"
+            exit 1
+          }
+          {
+            echo "### Exact build sources"
+            echo "- c8s workflow source: \`$(git -C c8s rev-parse HEAD)\`"
+            echo "- ConfOS: \`$confos_actual\`"
+            echo "- attestation-rs: \`$attestation_actual\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Prepare sealed policy and production profile
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
