@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: ""
+      platform:
+        description: "Build all platforms, or only tdx or snp."
+        required: false
+        type: string
+        default: "all"
       gate:
         required: false
         type: boolean
@@ -76,7 +81,7 @@ concurrency:
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
     }}-${{ inputs.c8s_ref }}-${{ inputs.dev
     }}-${{ inputs.confos_ref }}-${{ inputs.release_tag }}-${{ inputs.gate
-    }}-${{ inputs.leg }}
+    }}-${{ inputs.leg }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 env:
@@ -112,7 +117,7 @@ jobs:
       # cancel the other platform's publish.
       fail-fast: false
       matrix:
-        platform: [tdx, snp]
+        platform: ${{ fromJSON(inputs.platform == 'tdx' && '["tdx"]' || inputs.platform == 'snp' && '["snp"]' || '["tdx","snp"]') }}
     steps:
       - name: Keep gate-only signing material out of published images
         if: inputs.gate_signing_artifact != '' && inputs.gate != true
@@ -647,6 +652,7 @@ jobs:
           inputs.gate != true &&
           inputs.c8s_ref == '' &&
           inputs.static_allowlist == '' &&
+          inputs.sealed_build_input_gzip == '' &&
           steps.changed.outputs.skip == 'true'
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}

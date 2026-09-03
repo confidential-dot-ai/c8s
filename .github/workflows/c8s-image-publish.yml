@@ -53,6 +53,15 @@ on:
         required: false
         type: string
         default: ""
+      platform:
+        description: "Build both platforms, or only the selected platform."
+        required: false
+        type: choice
+        options:
+          - all
+          - tdx
+          - snp
+        default: all
 
 permissions:
   contents: read
@@ -129,6 +138,7 @@ jobs:
       gate: ${{ inputs.gate || false }}
       static_allowlist: ${{ inputs.static_allowlist || '' }}
       sealed_build_input_gzip: ${{ inputs.sealed_build_input_gzip || '' }}
+      platform: ${{ inputs.platform || 'all' }}
       release_tag: ${{ needs.release-context.outputs.tag }}
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
