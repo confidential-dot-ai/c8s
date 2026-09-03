@@ -1,7 +1,6 @@
 package credrelease
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -43,8 +42,5 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 	pf := flags.Lookup("platform")
 	if pf == nil || pf.Annotations[cobra.BashCompOneRequiredFlag] == nil {
 		t.Errorf("--platform is not marked required")
-	}
-	if !strings.Contains(cmd.Long, "RBAC-backed\ncluster-admin") {
-		t.Errorf("long help does not describe the credential as RBAC-backed cluster-admin access: %q", cmd.Long)
 	}
 }

@@ -33,12 +33,19 @@ Type=simple
 # Waits bounded (10 min) rather than failing fast: on a slow first boot the
 # CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart
 # would exhaust StartLimitBurst in under a minute and give up until reboot.
-ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -r /var/lib/rancher/rke2/server/tls/client-ca.key ] && exit 0; sleep 5; done; exit 1'
+# Also waits for the c8s-node-operators ClusterRoleBinding (the baked
+# cred-release-rbac AddOn): the issued group has no authority until RKE2's
+# deploy controller has applied it, and nothing on the operator side retries
+# a 403, so do not release a credential the cluster would still refuse.
+ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -r /var/lib/rancher/rke2/server/tls/client-ca.key ] && /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml --cache-dir /run/cred-release/kubecache get clusterrolebinding c8s-node-operators >/dev/null 2>&1 && exit 0; sleep 5; done; exit 1'
 TimeoutStartSec=630
 # ${CRED_PLATFORM} comes from a drop-in the c8s sync hook renders from the
 # build's required C8S_PLATFORM. The `=` form matters: with the variable
 # unset systemd would elide a bare word, but --platform= expands to an empty
 # value, which platform validation rejects — fail closed, never a default.
+# The --cert-* flags equal the binary defaults; they are spelled out so the
+# measured unit states the issued identity, and the cred-release-rbac AddOn
+# must bind the same group (checked by credrelease's node_image_test.go).
 ExecStart=/usr/local/bin/c8s cred-release \
     --listen :8443 \
     --attestation-api-url http://127.0.0.1:8400 \
@@ -48,8 +55,9 @@ ExecStart=/usr/local/bin/c8s cred-release \
     --cert-cn operator
 Restart=on-failure
 RestartSec=10
-# Reads two files: the initrd-staged operator pubkey (/etc/confai) and the
-# RKE2 client-CA key. No mount needed. Keep the rest of the FS read-only.
+# Reads the initrd-staged operator pubkey (/etc/confai), the RKE2 client-CA
+# key, and (ExecStartPre only) the RKE2 admin kubeconfig. Writes only the
+# kubectl cache under /run. Keep the rest of the FS read-only.
 ProtectSystem=strict
 ReadOnlyPaths=/etc/confai /var/lib/rancher/rke2/server/tls
 ReadWritePaths=/run

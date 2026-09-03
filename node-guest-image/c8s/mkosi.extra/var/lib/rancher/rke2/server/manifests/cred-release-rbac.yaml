@@ -1,11 +1,9 @@
-# Baked into server/manifests so RKE2 grants credential-release operators
-# cluster-admin through an ordinary RBAC binding.
-# Deleting or changing the live ClusterRoleBinding immediately revokes its
-# access. RKE2 reapplies AddOn cred-release-rbac from this file at restart, so
-# durable revocation requires disabling or skipping that AddOn before changing
-# the binding. Alternatively, relaunch without opkeydata or with a different
-# operator key to stop renewal by the old key; already-issued certs remain
-# usable until their one-hour TTL expires while this binding exists.
+# Baked into server/manifests so RKE2 grants the group cred-release.service
+# issues (--cert-org) cluster-admin through an ordinary, revocable RBAC
+# binding instead of the unrevocable system:masters. cred-release.service
+# waits for this binding by name before it serves. RKE2 reapplies the AddOn
+# on every boot (the cluster state is ephemeral); revocation is a launch-time
+# decision, see docs/operator.md.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

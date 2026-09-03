@@ -2,284 +2,137 @@ package credrelease
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	rbacv1 "k8s.io/api/rbac/v1"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
+// The node image bakes the operator identity twice: the unit spells out the
+// cert flags, and the RKE2 AddOn binds that group to cluster-admin. Nothing
+// else ties the two files to this package, so load both here and check they
+// agree with each other and with the binary's defaults (which cmd_test.go
+// pins to literals).
 const (
 	nodeImageCredReleaseService = "../../../node-guest-image/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
+	nodeImageCredReleaseDropIns = nodeImageCredReleaseService + ".d/*.conf"
 	nodeImageCredReleaseRBAC    = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/cred-release-rbac.yaml"
 )
 
-type nodeImageClusterRoleBinding struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
-	Metadata   struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	RoleRef struct {
-		APIGroup string `yaml:"apiGroup"`
-		Kind     string `yaml:"kind"`
-		Name     string `yaml:"name"`
-	} `yaml:"roleRef"`
-	Subjects []struct {
-		APIGroup string `yaml:"apiGroup"`
-		Kind     string `yaml:"kind"`
-		Name     string `yaml:"name"`
-	} `yaml:"subjects"`
-}
-
-// TestNodeImageCredentialReleaseConfiguration is an independent oracle for
-// the baked privilege boundary. Keep the expected values literal: sharing
-// command defaults here would let both sides drift to a privileged value.
 func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
-	service, err := os.ReadFile(filepath.Clean(nodeImageCredReleaseService))
+	unit, err := os.ReadFile(filepath.Clean(nodeImageCredReleaseService))
 	if err != nil {
 		t.Fatalf("read node-image credential-release service: %v", err)
 	}
-
-	args, err := credentialReleaseExecStart(service)
+	// systemd continues a line only on a bare trailing backslash; one followed
+	// by whitespace makes the next line a bogus directive and the unit fails
+	// to load. Reject it here rather than letting the truncated ExecStart
+	// parse to the binary defaults below.
+	if regexp.MustCompile(`\\[ \t]+\n`).Match(unit) {
+		t.Fatal("cred-release.service has a backslash followed by whitespace: not a systemd continuation")
+	}
+	// Join continuation lines, then take the single ExecStart.
+	joined := strings.ReplaceAll(string(unit), "\\\n", " ")
+	if n := strings.Count(joined, "\nExecStart="); n != 1 {
+		t.Fatalf("ExecStart directive count = %d, want exactly 1", n)
+	}
+	_, rest, _ := strings.Cut(joined, "\nExecStart=")
+	execStart, _, _ := strings.Cut(rest, "\n")
+	args := strings.Fields(execStart)
+	if len(args) < 2 || args[0] != "/usr/local/bin/c8s" || args[1] != "cred-release" {
+		t.Fatalf("ExecStart = %q, want /usr/local/bin/c8s cred-release ...", execStart)
+	}
+	// The unit spells the identity out (see its comment); a missing flag here
+	// would otherwise pass silently on the binary defaults. And the only
+	// environment expansion is the platform: anything else would let a
+	// drop-in's Environment= rewrite the identity out of sight of this test.
+	for _, flag := range []string{"--cert-ttl", "--cert-org", "--cert-cn"} {
+		if !slices.Contains(args, flag) {
+			t.Errorf("ExecStart does not spell out %s", flag)
+		}
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "$") && arg != "--platform=${CRED_PLATFORM}" {
+			t.Errorf("ExecStart argument %q expands the environment", arg)
+		}
+	}
+	// Drop-ins can reset ExecStart or inject environment; mkosi.sync renders
+	// one with only Environment=CRED_PLATFORM, so any baked drop-in that
+	// touches Exec*/Environment* is an override this test would not see.
+	dropIns, err := filepath.Glob(nodeImageCredReleaseDropIns)
 	if err != nil {
-		t.Fatalf("parse node-image credential-release service: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(args, "\x00"), "system:masters") {
-		t.Fatal("credential-release ExecStart must not grant system:masters")
+	for _, path := range dropIns {
+		conf, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(conf), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "Exec") || strings.HasPrefix(line, "Environment") {
+				t.Errorf("%s overrides the unit: %q", path, line)
+			}
+		}
 	}
-	assertSingleNodeImageFlag(t, args, "--cert-ttl", "1h")
-	assertSingleNodeImageFlag(t, args, "--cert-org", "c8s:node-operators")
-	assertSingleNodeImageFlag(t, args, "--cert-cn", "operator")
+
+	// Parse the baked flags with the real command so the test sees exactly
+	// what the binary sees (last-wins duplicates, --flag=value forms, ...).
+	flags := NewCmd().Flags()
+	if err := flags.Parse(args[2:]); err != nil {
+		t.Fatalf("parse baked ExecStart flags: %v", err)
+	}
+	org, _ := flags.GetString("cert-org")
+	cn, _ := flags.GetString("cert-cn")
+	ttl, _ := flags.GetDuration("cert-ttl")
+	if org != defaultCertOrg || cn != defaultCertCN || ttl != defaultCertTTL {
+		t.Errorf("baked identity = O=%s CN=%s ttl=%v, want the binary defaults O=%s CN=%s ttl=%v",
+			org, cn, ttl, defaultCertOrg, defaultCertCN, defaultCertTTL)
+	}
+	// system:* groups are apiserver-reserved; system:masters in particular
+	// bypasses RBAC and cannot be revoked.
+	if strings.HasPrefix(org, "system:") {
+		t.Errorf("baked --cert-org %q is an apiserver-reserved group", org)
+	}
 
 	body, err := os.ReadFile(filepath.Clean(nodeImageCredReleaseRBAC))
 	if err != nil {
 		t.Fatalf("read node-image credential-release RBAC manifest: %v", err)
 	}
-	if bytes.Contains(body, []byte("system:masters")) {
-		t.Fatal("credential-release RBAC manifest must not grant system:masters")
+	// Exactly one document: a strict typed decode reads only the first, so
+	// count them separately.
+	docs := yaml.NewDecoder(bytes.NewReader(body))
+	if err := docs.Decode(new(yaml.Node)); err != nil {
+		t.Fatalf("decode RBAC manifest: %v", err)
 	}
-	binding, err := decodeSingleNodeImageRBAC(body)
-	if err != nil {
-		t.Fatalf("decode node-image credential-release RBAC manifest: %v", err)
+	if err := docs.Decode(new(yaml.Node)); err != io.EOF {
+		t.Fatalf("RBAC manifest must hold exactly one document (second decode: %v)", err)
+	}
+	var binding rbacv1.ClusterRoleBinding
+	if err := sigsyaml.UnmarshalStrict(body, &binding); err != nil {
+		t.Fatalf("decode RBAC manifest as ClusterRoleBinding: %v", err)
 	}
 	if binding.APIVersion != "rbac.authorization.k8s.io/v1" || binding.Kind != "ClusterRoleBinding" {
 		t.Errorf("typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRoleBinding", binding.APIVersion, binding.Kind)
 	}
-	if binding.Metadata.Name != "c8s-node-operators" {
-		t.Errorf("binding name = %q, want c8s-node-operators", binding.Metadata.Name)
+	// The unit's ExecStartPre waits for this binding by name so a released
+	// credential is never ahead of its authorization.
+	if binding.Name == "" || !strings.Contains(joined, "get clusterrolebinding "+binding.Name+" ") {
+		t.Errorf("cred-release.service does not wait for ClusterRoleBinding %q before serving", binding.Name)
 	}
-	if binding.RoleRef.APIGroup != "rbac.authorization.k8s.io" || binding.RoleRef.Kind != "ClusterRole" || binding.RoleRef.Name != "cluster-admin" {
-		t.Errorf("roleRef = %#v, want ClusterRole cluster-admin in rbac.authorization.k8s.io", binding.RoleRef)
+	wantRef := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "cluster-admin"}
+	if binding.RoleRef != wantRef {
+		t.Errorf("roleRef = %+v, want %+v", binding.RoleRef, wantRef)
 	}
-	if len(binding.Subjects) != 1 {
-		t.Fatalf("subjects = %#v, want exactly one group subject", binding.Subjects)
-	}
-	subject := binding.Subjects[0]
-	if subject.APIGroup != "rbac.authorization.k8s.io" || subject.Kind != "Group" || subject.Name != "c8s:node-operators" {
-		t.Errorf("subject = %#v, want Group c8s:node-operators in rbac.authorization.k8s.io", subject)
-	}
-}
-
-func credentialReleaseExecStart(service []byte) ([]string, error) {
-	logicalLines, err := systemdLogicalLines(string(service))
-	if err != nil {
-		return nil, err
-	}
-
-	var execStarts []string
-	for _, line := range logicalLines {
-		key, value, ok := strings.Cut(line, "=")
-		if ok && strings.TrimSpace(key) == "ExecStart" {
-			execStarts = append(execStarts, strings.TrimSpace(value))
-		}
-	}
-	if len(execStarts) != 1 {
-		return nil, fmt.Errorf("ExecStart directive count = %d, want exactly 1", len(execStarts))
-	}
-
-	args := strings.Fields(execStarts[0])
-	if len(args) < 2 || args[0] != "/usr/local/bin/c8s" || args[1] != "cred-release" {
-		return nil, fmt.Errorf("ExecStart command = %q, want /usr/local/bin/c8s cred-release", execStarts[0])
-	}
-	return args, nil
-}
-
-func systemdLogicalLines(service string) ([]string, error) {
-	var logicalLines []string
-	var continued []string
-	for _, physicalLine := range strings.Split(strings.ReplaceAll(service, "\r\n", "\n"), "\n") {
-		line := strings.TrimSpace(physicalLine)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-
-		continues := strings.HasSuffix(line, "\\")
-		if continues {
-			line = strings.TrimSpace(strings.TrimSuffix(line, "\\"))
-		}
-		continued = append(continued, line)
-		if !continues {
-			logicalLines = append(logicalLines, strings.Join(continued, " "))
-			continued = nil
-		}
-	}
-	if len(continued) != 0 {
-		return nil, fmt.Errorf("unterminated systemd line continuation")
-	}
-	return logicalLines, nil
-}
-
-func assertSingleNodeImageFlag(t *testing.T, args []string, flag, want string) {
-	t.Helper()
-	got, err := singleLongFlagValue(args, flag)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	if got != want {
-		t.Errorf("%s = %q, want literal %q", flag, got, want)
-	}
-}
-
-func singleLongFlagValue(args []string, flag string) (string, error) {
-	var values []string
-	equalsPrefix := flag + "="
-	for i, arg := range args {
-		switch {
-		case arg == flag:
-			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
-				values = append(values, "")
-			} else {
-				values = append(values, args[i+1])
-			}
-		case strings.HasPrefix(arg, equalsPrefix):
-			values = append(values, strings.TrimPrefix(arg, equalsPrefix))
-		}
-	}
-	if len(values) != 1 {
-		return "", fmt.Errorf("%s occurrence count = %d, want exactly 1", flag, len(values))
-	}
-	if values[0] == "" {
-		return "", fmt.Errorf("%s has no value", flag)
-	}
-	return values[0], nil
-}
-
-func decodeSingleNodeImageRBAC(body []byte) (nodeImageClusterRoleBinding, error) {
-	decoder := yaml.NewDecoder(bytes.NewReader(body))
-	decoder.KnownFields(true)
-
-	var binding nodeImageClusterRoleBinding
-	if err := decoder.Decode(&binding); err != nil {
-		return binding, err
-	}
-	for document := 2; ; document++ {
-		var extra yaml.Node
-		err := decoder.Decode(&extra)
-		if err == io.EOF {
-			return binding, nil
-		}
-		if err != nil {
-			return binding, fmt.Errorf("decode YAML document %d: %w", document, err)
-		}
-		if !emptyYAMLDocument(&extra) {
-			return binding, fmt.Errorf("unexpected non-empty YAML document %d", document)
-		}
-	}
-}
-
-func emptyYAMLDocument(document *yaml.Node) bool {
-	if document == nil || len(document.Content) == 0 {
-		return true
-	}
-	node := document
-	if document.Kind == yaml.DocumentNode {
-		node = document.Content[0]
-	}
-	return node.Kind == yaml.ScalarNode && node.Tag == "!!null" && node.Value == ""
-}
-
-func TestCredentialReleaseExecStartParserRejectsOverrides(t *testing.T) {
-	tests := []struct {
-		name    string
-		service string
-		flag    string
-	}{
-		{
-			name:    "missing ExecStart",
-			service: "[Service]\nExecStartPre=/bin/true\n",
-		},
-		{
-			name: "second ExecStart",
-			service: "[Service]\n" +
-				"ExecStart=/usr/local/bin/c8s cred-release --cert-org c8s:node-operators\n" +
-				"ExecStart=/usr/local/bin/c8s cred-release --cert-org system:masters\n",
-		},
-		{
-			name:    "separated duplicate flag",
-			service: "[Service]\nExecStart=/usr/local/bin/c8s cred-release --cert-org c8s:node-operators --cert-org system:masters\n",
-			flag:    "--cert-org",
-		},
-		{
-			name:    "equals duplicate flag",
-			service: "[Service]\nExecStart=/usr/local/bin/c8s cred-release --cert-org c8s:node-operators --cert-org=system:masters\n",
-			flag:    "--cert-org",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			args, err := credentialReleaseExecStart([]byte(tt.service))
-			if err == nil && tt.flag != "" {
-				_, err = singleLongFlagValue(args, tt.flag)
-			}
-			if err == nil {
-				t.Fatal("accepted ambiguous credential-release command")
-			}
-		})
-	}
-}
-
-func TestDecodeSingleNodeImageRBACRejectsAmbiguousYAML(t *testing.T) {
-	const valid = `apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: c8s-node-operators
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: Group
-    name: c8s:node-operators
-`
-	tests := []struct {
-		name string
-		body string
-	}{
-		{name: "duplicate field", body: valid + "kind: ServiceAccount\n"},
-		{name: "unknown top-level field", body: valid + "privileged: true\n"},
-		{
-			name: "unknown nested field",
-			body: strings.Replace(valid, "  name: c8s-node-operators\n", "  name: c8s-node-operators\n  namespace: kube-system\n", 1),
-		},
-		{name: "second resource", body: valid + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: hidden\n"},
-		{name: "empty object document", body: valid + "---\n{}\n"},
-		{name: "resource after empty document", body: valid + "---\n# empty\n---\napiVersion: v1\nkind: ConfigMap\n"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeSingleNodeImageRBAC([]byte(tt.body)); err == nil {
-				t.Fatal("accepted ambiguous RBAC YAML")
-			}
-		})
-	}
-
-	if _, err := decodeSingleNodeImageRBAC([]byte(valid + "---\n# an empty trailing document is harmless\n")); err != nil {
-		t.Fatalf("rejects empty trailing YAML document: %v", err)
+	wantSubjects := []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.GroupKind, Name: org}}
+	if len(binding.Subjects) != 1 || binding.Subjects[0] != wantSubjects[0] {
+		t.Errorf("subjects = %+v, want %+v (the baked --cert-org group)", binding.Subjects, wantSubjects)
 	}
 }

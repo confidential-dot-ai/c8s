@@ -54,12 +54,15 @@ func TestSignOperatorCert(t *testing.T) {
 	ca := testCA(t)
 	csr := testCSR(t)
 	now := time.Now()
+	// Distinct from the default so a signer that ignored signParams.ttl and
+	// used the default would fail here.
+	const ttl = 90 * time.Minute
 
 	certPEM, err := ca.signOperatorCert(signParams{
 		csr: csr,
 		org: defaultCertOrg,
 		cn:  defaultCertCN,
-		ttl: defaultCertTTL,
+		ttl: ttl,
 	}, now)
 	if err != nil {
 		t.Fatalf("signOperatorCert: %v", err)
@@ -89,8 +92,8 @@ func TestSignOperatorCert(t *testing.T) {
 		t.Errorf("issued cert does not chain to CA: %v", err)
 	}
 	// TTL.
-	if got := cert.NotAfter.Sub(now).Round(time.Hour); got != defaultCertTTL {
-		t.Errorf("TTL = %v, want %v", got, defaultCertTTL)
+	if got := cert.NotAfter.Sub(now).Round(time.Minute); got != ttl {
+		t.Errorf("TTL = %v, want %v", got, ttl)
 	}
 }
 
