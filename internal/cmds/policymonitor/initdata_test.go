@@ -3,7 +3,6 @@ package policymonitor
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +28,7 @@ import (
 // hostDataVerdict passes verification and reports hostData as the HOST_DATA claim.
 func hostDataVerdict(hostData []byte) testattest.Verdict {
 	v := testattest.PassingVerdict("")
-	v.Claims.InitData = hex.EncodeToString(hostData)
+	v.Claims.InitData = hostData
 	return v
 }
 
@@ -383,7 +382,7 @@ func unsupportedPlatformAttester(t *testing.T) string {
 	t.Helper()
 	stub := testattest.New(t)
 	stub.SetVerdict(hostDataVerdict(testHostData()))
-	stub.SetPlatform(types.Platform("gcp-tdx"))
+	stub.SetPlatform(types.Platform("dstack"))
 	return stub.URL
 }
 
@@ -492,11 +491,15 @@ func TestVerifiedSelfHostDataBindsTheAnchorItRequested(t *testing.T) {
 // MRCONFIGID is refused rather than padded or truncated, and is not a verifier
 // refusal.
 func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
-	for _, tc := range []struct{ name, claim string }{
-		{"absent", ""},
-		{"tdx mrconfigid with a non-zero tail", strings.Repeat("aa", 48)},
-		{"neither width", strings.Repeat("00", 40)},
-		{"not hex", "not-hex"},
+	// A not-hex wire claim is refused earlier, by the HexBytes decoder in the
+	// client; through the typed stub only decoded shapes are expressible.
+	for _, tc := range []struct {
+		name  string
+		claim []byte
+	}{
+		{"absent", nil},
+		{"tdx mrconfigid with a non-zero tail", bytes.Repeat([]byte{0xaa}, 48)},
+		{"neither width", make([]byte, 40)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := testattest.PassingVerdict("")
@@ -698,7 +701,7 @@ func TestVerifiedSelfHostDataAcceptsZeroPaddedMRCONFIGID(t *testing.T) {
 	padded := make([]byte, 48)
 	copy(padded, digest[:])
 	v := testattest.PassingVerdict("")
-	v.Claims.InitData = hex.EncodeToString(padded)
+	v.Claims.InitData = padded
 
 	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
 	if err != nil {

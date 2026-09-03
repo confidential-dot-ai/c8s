@@ -18,7 +18,7 @@ import (
 // launch digest empty.
 func verifyResult(platform string, sigValid bool, reportDataMatch *bool, measurement []byte) types.VerifyResponse {
 	resp := types.VerifyResponse{}
-	resp.Result.Platform = platform
+	resp.Result.Platform = types.Platform(platform)
 	resp.Result.SignatureValid = sigValid
 	resp.Result.ReportDataMatch = reportDataMatch
 	if measurement != nil {
