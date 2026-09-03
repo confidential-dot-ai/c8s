@@ -519,6 +519,22 @@ and again on the RA-TLS credential-release connection:
   none) and, being self-signed, verify its own signature with its attested
   key.
 
+The released kubeconfig's client certificate is
+`CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
+node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
+that group to the
+built-in `cluster-admin` ClusterRole through ordinary RBAC. This grants
+Kubernetes platform-admin access only; it does not grant guest OS or root
+access. `system:masters` is deliberately avoided because it bypasses normal
+authorization/Webhook policy and cannot be revoked through RBAC.
+
+Deleting or changing the live ClusterRoleBinding removes authorization
+immediately, but RKE2 reapplies the baked AddOn when the server restarts. For
+durable revocation, disable or skip the `cred-release-rbac` AddOn before
+removing the binding, or relaunch without `opkeydata` (or with rotated
+`opkeydata`) to stop renewal. An already-issued certificate can remain usable
+for up to its one-hour TTL while the binding exists.
+
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,
 and (on TDX) ran exactly the expected measured workloads. What it does not prove: anything about images or keys the

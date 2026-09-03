@@ -77,9 +77,9 @@ func runnableConfig(t *testing.T) Config {
 		ClientCACert:      clientCert,
 		ClientCAKey:       clientKey,
 		ServerCACert:      serverCert,
-		CertTTL:           time.Hour,
-		CertOrg:           "system:masters",
-		CertCN:            "operator",
+		CertTTL:           defaultCertTTL,
+		CertOrg:           defaultCertOrg,
+		CertCN:            defaultCertCN,
 	}
 }
 

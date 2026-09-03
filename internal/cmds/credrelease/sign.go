@@ -98,8 +98,10 @@ func parseCAKey(der []byte, pemType string) (crypto.Signer, error) {
 
 // signOperatorCert signs csr with the cluster CA, producing a kube CLIENT
 // certificate with the requested identity. The caller sets group/CN via
-// SignParams — v1 uses O=system:masters (cluster-admin), matching the baked
-// admin. TTL is short so the operator re-releases.
+// signParams. The baked RKE2 AddOn binds the default group to cluster-admin;
+// authorization therefore follows the live ClusterRoleBinding, not certificate
+// expiry alone. See Config.CertOrg for durable revocation requirements. TTL is
+// short so the operator re-releases.
 type signParams struct {
 	csr      *x509.CertificateRequest
 	org      string // certificate Subject O -> maps to a Kubernetes group

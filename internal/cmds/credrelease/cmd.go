@@ -6,6 +6,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	defaultCertTTL = time.Hour
+	defaultCertOrg = "c8s:node-operators"
+	defaultCertCN  = "operator"
+)
+
 // NewCmd builds the `cred-release` subcommand: the in-guest service that
 // issues an operator a short-lived kube client cert, gated on possession of
 // the operator key bound into the launch identity (TDX RTMR[3] / SNP
@@ -20,8 +26,9 @@ func NewCmd() *cobra.Command {
 			"kube client certificate to a caller who proves possession of the\n" +
 			"operator key whose public half was bound into the launch identity\n" +
 			"(TDX: RTMR[3]; SNP: HOSTDATA) at launch.\n" +
-			"It gives an external operator console-free, non-TOFU cluster-admin\n" +
-			"access with no pre-shared secret and no trust in the host. The cert\n" +
+			"It gives an external operator console-free, non-TOFU, RBAC-backed\n" +
+			"cluster-admin access with no pre-shared secret and no trust in the\n" +
+			"host. The cert\n" +
 			"is signed by the cluster's client CA and the kubeconfig anchors to\n" +
 			"the serving CA (RKE2 paths by default; any distribution works via\n" +
 			"--client-ca-cert/--client-ca-key/--server-ca-cert — on kubeadm all\n" +
@@ -37,9 +44,9 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")
-	f.DurationVar(&cfg.CertTTL, "cert-ttl", 24*time.Hour, "lifetime of issued operator certs")
-	f.StringVar(&cfg.CertOrg, "cert-org", "system:masters", "Kubernetes group (cert Subject O) for the issued cert")
-	f.StringVar(&cfg.CertCN, "cert-cn", "operator", "Kubernetes user (cert Subject CN) for the issued cert")
+	f.DurationVar(&cfg.CertTTL, "cert-ttl", defaultCertTTL, "lifetime of issued operator certs")
+	f.StringVar(&cfg.CertOrg, "cert-org", defaultCertOrg, "Kubernetes group (cert Subject O) for the issued cert")
+	f.StringVar(&cfg.CertCN, "cert-cn", defaultCertCN, "Kubernetes user (cert Subject CN) for the issued cert")
 	// No default: the baked unit always passes the flag explicitly.
 	_ = cmd.MarkFlagRequired("platform")
 	return cmd

@@ -69,7 +69,17 @@ The other disks are optional; each is owned by one unit under
   cluster; absent means single-node server (`rke2-role.service`).
 - label `opkeydata` — an ISO carrying the operator public key; its
   presence turns on attested credential release (`cred-release.service`,
-  see [operator.md]).
+  see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
+  issued certificate's `O=c8s:node-operators` group to the built-in
+  `cluster-admin` role through ordinary RBAC. Certificates use
+  `CN=operator` and a one-hour default/baked TTL. This is Kubernetes
+  platform-admin access only, not guest OS/root access; `system:masters` is
+  intentionally avoided because it bypasses authorization/Webhook policy and
+  is not RBAC-revocable. Deleting or changing the live binding revokes access
+  immediately, but RKE2 reapplies the baked AddOn at server restart. Disable
+  or skip that AddOn before removal for durable revocation, or relaunch
+  without `opkeydata`/with rotated key material to stop renewal; an existing
+  certificate remains usable for up to its TTL while the binding exists.
 
 Migration state (see [#264] for the full plan):
 

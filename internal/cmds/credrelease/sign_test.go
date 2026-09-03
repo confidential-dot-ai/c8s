@@ -57,9 +57,9 @@ func TestSignOperatorCert(t *testing.T) {
 
 	certPEM, err := ca.signOperatorCert(signParams{
 		csr: csr,
-		org: "system:masters",
-		cn:  "operator",
-		ttl: 24 * time.Hour,
+		org: defaultCertOrg,
+		cn:  defaultCertCN,
+		ttl: defaultCertTTL,
 	}, now)
 	if err != nil {
 		t.Fatalf("signOperatorCert: %v", err)
@@ -68,11 +68,11 @@ func TestSignOperatorCert(t *testing.T) {
 	cert := parseLeaf(t, certPEM)
 
 	// Identity: the signer sets Subject from signParams, not the CSR.
-	if cert.Subject.CommonName != "operator" {
-		t.Errorf("CN = %q, want operator", cert.Subject.CommonName)
+	if cert.Subject.CommonName != defaultCertCN {
+		t.Errorf("CN = %q, want %q", cert.Subject.CommonName, defaultCertCN)
 	}
-	if len(cert.Subject.Organization) != 1 || cert.Subject.Organization[0] != "system:masters" {
-		t.Errorf("O = %v, want [system:masters]", cert.Subject.Organization)
+	if len(cert.Subject.Organization) != 1 || cert.Subject.Organization[0] != defaultCertOrg {
+		t.Errorf("O = %v, want [%s]", cert.Subject.Organization, defaultCertOrg)
 	}
 	// Client auth only.
 	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
@@ -89,8 +89,8 @@ func TestSignOperatorCert(t *testing.T) {
 		t.Errorf("issued cert does not chain to CA: %v", err)
 	}
 	// TTL.
-	if got := cert.NotAfter.Sub(now).Round(time.Hour); got != 24*time.Hour {
-		t.Errorf("TTL = %v, want 24h", got)
+	if got := cert.NotAfter.Sub(now).Round(time.Hour); got != defaultCertTTL {
+		t.Errorf("TTL = %v, want %v", got, defaultCertTTL)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestSignOperatorCertValidityWindow(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	certPEM, err := ca.signOperatorCert(signParams{
-		csr: testCSR(t), org: "system:masters", cn: "operator", ttl: time.Hour,
+		csr: testCSR(t), org: defaultCertOrg, cn: defaultCertCN, ttl: time.Hour,
 	}, now)
 	if err != nil {
 		t.Fatalf("signOperatorCert: %v", err)
@@ -124,7 +124,7 @@ func TestSignOperatorCertRejectsBadCSR(t *testing.T) {
 	csr.Signature = []byte("tampered") // invalidate the self-signature
 
 	if _, err := ca.signOperatorCert(signParams{
-		csr: csr, org: "system:masters", cn: "operator", ttl: time.Hour,
+		csr: csr, org: defaultCertOrg, cn: defaultCertCN, ttl: time.Hour,
 	}, time.Now()); err == nil {
 		t.Error("expected error for CSR with invalid self-signature")
 	}
@@ -215,7 +215,7 @@ func TestLoadClusterCAReleasesServerCA(t *testing.T) {
 	// A cert issued by the loaded CA chains to the CLIENT CA: proves the cert
 	// and the key both came from the client-CA files.
 	certPEM, err := ca.signOperatorCert(signParams{
-		csr: testCSR(t), org: "system:masters", cn: "operator", ttl: time.Hour,
+		csr: testCSR(t), org: defaultCertOrg, cn: defaultCertCN, ttl: time.Hour,
 	}, time.Now())
 	if err != nil {
 		t.Fatal(err)

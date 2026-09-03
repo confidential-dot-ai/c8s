@@ -31,8 +31,13 @@ type Config struct {
 	ServerCACert string
 	// CertTTL is the lifetime of issued operator certs.
 	CertTTL time.Duration
-	// CertOrg / CertCN are the Kubernetes group / user the issued cert
-	// carries. v1: O=system:masters, CN=operator (cluster-admin).
+	// CertOrg / CertCN are the Kubernetes group / user the issued cert carries.
+	// The baked RKE2 AddOn grants defaultCertOrg cluster-admin. Deleting or
+	// changing the live binding revokes its RBAC access immediately, but RKE2
+	// reapplies the manifest at restart. To make revocation survive restart,
+	// disable or skip the cred-release-rbac AddOn before changing the binding;
+	// alternatively, relaunch without opkeydata or with a different operator key
+	// to prevent renewal by the old key (an issued cert lives until its TTL).
 	CertOrg string
 	CertCN  string
 }
