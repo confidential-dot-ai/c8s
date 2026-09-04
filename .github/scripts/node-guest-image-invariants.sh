@@ -121,4 +121,22 @@ if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratc
   exit 1
 fi
 
+# The restricted PodSecurity floor is an invariant: the admission config may
+# exempt only the platform namespaces that need privileged pods, and the
+# baked policy that stops tenants relabelling their namespaces must keep
+# naming `restricted` and failing closed.
+psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
+vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+exempt=$(sed -n '/^ *namespaces:/,$p' "$psa" | grep -E '^ *- ' | sed 's/^ *- //' | sort)
+if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage\n')" ]; then
+  echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got:"
+  echo "$exempt"
+  exit 1
+fi
+grep -q 'enforce: "restricted"' "$psa" \
+  || { echo "::error::$psa must default to enforce: restricted"; exit 1; }
+grep -q "== 'restricted'" "$vap" && grep -q 'failurePolicy: Fail' "$vap" \
+  && grep -q 'resources: \["namespaces"\]' "$vap" \
+  || { echo "::error::$vap must deny namespace labels below restricted and fail closed"; exit 1; }
+
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"

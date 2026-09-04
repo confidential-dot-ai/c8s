@@ -3,9 +3,15 @@
 #
 # Restricted enforcement by default. kube-system and local-path-storage are
 # exempt (they ship privileged daemonsets / hostPath helpers); add more
-# namespaces here for any privileged platform component you deploy. Workload
-# namespaces inherit the restricted policy unless explicitly labelled
-# otherwise.
+# namespaces here for any privileged platform component you deploy. Every
+# other namespace, `default` included, inherits restricted: no privileged
+# pods, no host namespaces, no root user, no added capabilities, no
+# unconfined seccomp or AppArmor. A namespace label can still pick a lower
+# level, but only for a caller that RBAC lets grant PodSecurity exemptions
+# (../../../var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml), so
+# a tenant with namespace-scoped access cannot lower its own namespace.
+# `c8s install` labels its release namespace privileged for the node-level
+# components it runs; the operator credential it uses is cluster-admin.
 apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration
 plugins:
@@ -26,7 +32,3 @@ plugins:
         namespaces:
           - kube-system
           - local-path-storage
-          # `default` is exempted because smoke tests run there. Move
-          # workloads to dedicated namespaces in production and drop this
-          # exemption.
-          - default

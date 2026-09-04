@@ -15,12 +15,24 @@ spec:
       annotations:
         confidential.ai/cw: demo-nginx
     spec:
+      # The node image enforces the restricted PodSecurity standard in every
+      # tenant namespace, `default` included, so the workload runs as a
+      # non-root user with every capability dropped. nginx-unprivileged is
+      # the upstream image built for exactly that; it listens on 8080.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: nginx
           # Confidential workloads reference images by digest: the guest pulls
           # this reference and admits it against the allowlist, and a tag names
           # whatever the registry serves at pull time. Bump with
-          # `c8s allowlist inspect-image nginx:<tag>`.
-          image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
+          # `c8s allowlist inspect-image nginxinc/nginx-unprivileged:<tag>`.
+          image: nginxinc/nginx-unprivileged@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 # 1.27-alpine
           ports:
-            - containerPort: 80
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

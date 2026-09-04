@@ -1,0 +1,48 @@
+# Keeps the restricted PodSecurity floor from psa-config.yaml an invariant.
+#
+# PodSecurity admission reads its level from namespace labels, so whoever can
+# label a namespace can hand its pods `privileged`: hostPath, host namespaces,
+# root, any capability. The admission config file on the measured root sets
+# the default and the exemption list, but says nothing about labels. This
+# policy does: a namespace may carry an `enforce` label other than
+# `restricted` only when the caller is authorized to grant PodSecurity
+# exemptions. That is expressed as an RBAC check on a virtual resource
+# (`podsecurityexemptions.confidential.ai`, verb `grant`) that no default role
+# grants, so cluster-admin (wildcard rules) and system:masters pass and a
+# tenant holding `admin`/`edit` in its own namespaces does not.
+#
+# RKE2 applies this file as an AddOn at server start, before any tenant can
+# reach the API. The policy is not a defence against cluster-admin, who can
+# delete it; the guarantee it upholds is the one the attestation can vouch
+# for: tenants scoped to their namespaces cannot lower the floor the image
+# booted with.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: confos-psa-level
+spec:
+  # Fail closed: a CEL evaluation error denies the namespace write. The
+  # expression is has()-guarded, so it should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+  validations:
+    - expression: >-
+        !has(object.metadata.labels) ||
+        !('pod-security.kubernetes.io/enforce' in object.metadata.labels) ||
+        object.metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted' ||
+        authorizer.group('confidential.ai').resource('podsecurityexemptions').check('grant').allowed()
+      message: "pod-security.kubernetes.io/enforce may only be lowered below restricted by a caller allowed to grant podsecurityexemptions.confidential.ai; this node image enforces the restricted PodSecurity standard for tenant namespaces."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: confos-psa-level
+spec:
+  policyName: confos-psa-level
+  validationActions:
+    - Deny
