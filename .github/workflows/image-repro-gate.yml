@@ -1,9 +1,11 @@
-# Reproducibility gate for the node image: PRs touching the image definition
-# or its pins build the image TWICE (parallel legs, separate runners) and fail
-# unless every measured value matches (c8s#264). Runs on every PR and decides
-# relevance itself — a paths: filter would leave the required `compare` check
-# forever pending on unrelated PRs. Fork PRs are exempt from the gate
-# (security-over-coverage); the post-merge main build remains the published gate.
+# Reproducibility gates for measured images. Node-image changes build the image
+# TWICE and require every measured value to match (c8s#264). Kernel-snapshot
+# changes rebuild the resolved config and require it to match the committed
+# lockfile. Manifest objects are classified independently, so one measurement
+# domain never starts the other's build. This runs on every PR and decides
+# relevance itself — a paths filter would leave the required `compare` check
+# pending on unrelated PRs. Fork PRs are exempt (security-over-coverage); the
+# post-merge builds remain the publication gates.
 name: image repro gate
 on:
   pull_request:
@@ -23,31 +25,43 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.diff.outputs.image }}
+      kernel_snapshot: ${{ steps.diff.outputs.kernel_snapshot }}
       c8s_ref: ${{ steps.diff.outputs.c8s_ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - id: diff
         env:
-          GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ -z "$PR" ]; then
-            image=true  # manual dispatch: always run the full gate
-          elif gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate \
-                 --jq '.[].filename' \
-               | grep -qE "^(node-guest-image/|\.github/build-pins\.json|\.github/scripts/pin-manifest\.sh|\.github/actions/setup-mkosi/action\.yml|\.github/workflows/(c8s-image(-publish)?|image-repro-gate)\.yml)"; then
             image=true
+            kernel_snapshot=true
           else
-            image=false
+            base_manifest="$RUNNER_TEMP/base-build-pins.json"
+            changed_paths="$RUNNER_TEMP/changed-paths"
+            git cat-file -e "${BASE_SHA}^{commit}"
+            git show "${BASE_SHA}:.github/build-pins.json" >"$base_manifest"
+            git diff --name-only -z "$BASE_SHA" HEAD -- >"$changed_paths"
+            result=$(bash .github/scripts/repro-gate-changes \
+              .github/build-pins.json "$base_manifest" "$changed_paths")
+            image=$(sed -n 's/^image=//p' <<<"$result")
+            kernel_snapshot=$(sed -n 's/^kernel_snapshot=//p' <<<"$result")
+            [[ "$image" =~ ^(true|false)$ ]]
+            [[ "$kernel_snapshot" =~ ^(true|false)$ ]]
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "kernel_snapshot=$kernel_snapshot" >> "$GITHUB_OUTPUT"
           # Bake the same published components production uses: mkosi.sync's
           # own C8S_REF default, the single source of truth.
           ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
           test -n "$ref"
           echo "c8s_ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "image-relevant: $image (components at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "node-image relevant: $image (components at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "kernel-snapshot relevant: $kernel_snapshot" >> "$GITHUB_STEP_SUMMARY"
 
       # PR code must never run with the production module-signing key. This
       # keypair is shared by both legs, used only in unpublished gate images,
@@ -101,17 +115,32 @@ jobs:
       c8s_ref: ${{ needs.changes.outputs.c8s_ref }}
       gate_signing_artifact: module-signing-${{ github.run_id }}
 
+  kernel_snapshot:
+    needs: changes
+    if: needs.changes.outputs.kernel_snapshot == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/kernel-snapshot.yml
+
   compare:
-    # The required check: green fast on image-irrelevant PRs (and fork PRs,
-    # whose changes job is skipped), otherwise only after both legs built
-    # and every measured value matched.
-    needs: [changes, build-a, build-b]
+    # The required check: green fast when neither domain is relevant (and on
+    # fork PRs, whose changes job is skipped); otherwise enforce every build
+    # and comparison selected by the classifier.
+    needs: [changes, build-a, build-b, kernel_snapshot]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Nothing image-relevant changed
-        if: needs.changes.outputs.image != 'true'
-        run: echo "no image paths touched — gate not applicable" >> "$GITHUB_STEP_SUMMARY"
+      - name: Change classification must have succeeded
+        if: needs.changes.result != 'success' && needs.changes.result != 'skipped'
+        env:
+          RESULT: ${{ needs.changes.result }}
+        run: |
+          echo "change-classification result: $RESULT" >&2
+          exit 1
+
+      - name: Nothing measurement-gate-relevant changed
+        if: needs.changes.outputs.image != 'true' && needs.changes.outputs.kernel_snapshot != 'true'
+        run: echo "no gated measurement inputs changed — gate not applicable" >> "$GITHUB_STEP_SUMMARY"
       - name: Legs must have succeeded
         if: needs.changes.outputs.image == 'true'
         env:
@@ -156,3 +185,42 @@ jobs:
           open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
           sys.exit(1 if fail else 0)
           EOF
+
+      - name: Kernel snapshot build must have succeeded
+        if: needs.changes.outputs.kernel_snapshot == 'true'
+        env:
+          RESULT: ${{ needs.kernel_snapshot.result }}
+        run: |
+          test "$RESULT" = success || {
+            echo "kernel snapshot build result: $RESULT" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.kernel_snapshot == 'true'
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.changes.outputs.kernel_snapshot == 'true'
+        with:
+          name: config-x86_64.snapshot
+          path: kernel-evidence
+
+      - name: Resolved kernel config must match the lockfile
+        if: needs.changes.outputs.kernel_snapshot == 'true'
+        env:
+          EXPECTED_SHA256: ${{ needs.kernel_snapshot.outputs.snapshot_sha256 }}
+        run: |
+          set -euo pipefail
+          committed=kata-guest-base/kernel/config-x86_64.snapshot
+          built=kernel-evidence/config-x86_64.snapshot
+          built_sha=$(sha256sum "$built" | awk '{print $1}')
+          [ "$built_sha" = "$EXPECTED_SHA256" ] || {
+            echo "::error::downloaded snapshot digest differs from the build output" >&2
+            exit 1
+          }
+          if ! cmp -s "$committed" "$built"; then
+            diff -u "$committed" "$built" || true
+            echo "::error::resolved kernel config drifted; commit the regenerated snapshot" >&2
+            exit 1
+          fi
+          echo "kernel snapshot matches \`${built_sha}\`" >> "$GITHUB_STEP_SUMMARY"
