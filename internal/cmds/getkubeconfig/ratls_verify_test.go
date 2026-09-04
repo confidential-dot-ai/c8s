@@ -65,7 +65,7 @@ func snpManifest() string {
 // key, with no workload images (bare-seed RTMR[3]).
 func testPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestVerifyServerCertAuthenticatesBody(t *testing.T) {
 // snpTestPolicy builds an SNP gate from a two-variant manifest.
 func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 // usage error rather than a silently-ignored flag.
 func TestSNPPolicyRejectsWorkloadImages(t *testing.T) {
 	p := writeTestManifest(t, snpManifest())
-	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)})
+	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)}, "")
 	if err == nil || !strings.Contains(err.Error(), "requires a TDX node") {
 		t.Fatalf("want workload-image rejection, got %v", err)
 	}

@@ -13,8 +13,10 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
@@ -157,13 +159,21 @@ func verifyKeyLaunchBound(ctx context.Context, attestationAPIURL string, pubkey 
 	return nil
 }
 
-// LoadMeasuredOperatorKey reads the operator pubkey the initrd staged off the
-// opkeydata disk and verifies it against the platform's launch binding: the
-// TDX RTMR[3] the initrd extended, or the SNP HOSTDATA the launcher committed.
-// The returned bytes are safe to trust as the authorized operator key. Called
-// once at service start; both bindings are fixed for the life of the guest.
+// LoadMeasuredOperatorKey returns the launch-bound operator public key.
+// launchDataDir, when it exists, is the launchdata arm: the key and the
+// binding come from the staged bundle's commitment. Otherwise the opkeydata
+// arm applies: the initrd-staged single key file, verified against the TDX
+// RTMR[3] the initrd extended or the SNP HOSTDATA the launcher committed.
+// Called once at service start; both bindings are fixed for the guest's life.
 // platform is the ratls-normalized platform ("tdx" or "sev-snp").
-func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL string) ([]byte, error) {
+func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL, launchDataDir string) ([]byte, error) {
+	if launchDataDir != "" {
+		if _, err := os.Stat(launchDataDir); err == nil {
+			return loadLaunchDataOperatorKey(ctx, platform, attestationAPIURL, launchDataDir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat %s: %w", launchDataDir, err)
+		}
+	}
 	pub, err := readOperatorPubkey()
 	if err != nil {
 		return nil, err
@@ -179,6 +189,52 @@ func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL st
 	}
 	if err != nil {
 		return nil, err
+	}
+	return pub, nil
+}
+
+// loadLaunchDataOperatorKey is the launchdata arm: dir holds exactly the
+// launchdata ISO's staged files, and the platform binding covers their
+// combined commitment (LaunchDataManifest) rather than one key file. The
+// operator key is the bundle's operator-pubkey, so the binding fixes the
+// exact key bytes together with every other staged file.
+func loadLaunchDataOperatorKey(ctx context.Context, platform, attestationAPIURL, dir string) ([]byte, error) {
+	manifest, err := runtimemeasure.LaunchDataManifest(dir)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := os.ReadFile(filepath.Join(dir, "operator-pubkey"))
+	if err != nil {
+		return nil, fmt.Errorf("read %s/operator-pubkey: %w — the launchdata bundle carries no operator key", dir, err)
+	}
+	if len(pub) == 0 {
+		return nil, fmt.Errorf("%s/operator-pubkey is empty", dir)
+	}
+	switch platform {
+	case "tdx":
+		own, err := readOwnRTMR3()
+		if err != nil {
+			return nil, err
+		}
+		want := runtimemeasure.Extend(runtimemeasure.Zero, runtimemeasure.LaunchDataRTMR3Digest(manifest))
+		if !bytes.Equal(own, want[:]) {
+			return nil, fmt.Errorf(
+				"launchdata does not match the measured RTMR[3]: got %s, staged bundle implies %s (were the staged files modified after boot?)",
+				hex.EncodeToString(own), hex.EncodeToString(want[:]))
+		}
+	case "sev-snp":
+		hostData, err := verifiedSelfHostData(ctx, attestationAPIURL)
+		if err != nil {
+			return nil, err
+		}
+		want := runtimemeasure.LaunchDataHostData(manifest)
+		if !bytes.Equal(hostData, want[:]) {
+			return nil, fmt.Errorf(
+				"launchdata does not match the launch-committed HOSTDATA: got %s, staged bundle implies %s (were the staged files modified after boot, or the VM launched with a different bundle?)",
+				hex.EncodeToString(hostData), hex.EncodeToString(want[:]))
+		}
+	default:
+		return nil, fmt.Errorf("no launchdata binding check for platform %q", platform)
 	}
 	return pub, nil
 }
