@@ -133,7 +133,7 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 		t.Fatal(err)
 	}
 	manifestPath := writeTestManifest(t, tdxManifest())
-	exp, err := policyFor(manifestPath, pub, nil)
+	exp, err := policyFor(manifestPath, pub, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	digA := "sha256:" + strings.Repeat("aa", 32)
 	digB := "ghcr.io/acme/api@sha256:" + strings.Repeat("bb", 32)
 
-	bare, err := policyFor(manifest, pub, nil)
+	bare, err := policyFor(manifest, pub, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 		t.Error("with no workload images the expected register must equal the bare operator-key seed")
 	}
 
-	chained, err := policyFor(manifest, pub, []string{digA, digB})
+	chained, err := policyFor(manifest, pub, []string{digA, digB}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 		t.Error("workload images must chain onto the operator-key seed via the shared convention")
 	}
 
-	reversed, err := policyFor(manifest, pub, []string{digB, digA})
+	reversed, err := policyFor(manifest, pub, []string{digB, digA}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	}
 
 	for _, bad := range []string{"nginx:latest", "ghcr.io/acme/api:v1", "sha256:" + strings.Repeat("AB", 32)} {
-		if _, err := policyFor(manifest, pub, []string{bad}); err == nil {
+		if _, err := policyFor(manifest, pub, []string{bad}, ""); err == nil {
 			t.Errorf("policyFor accepted non-canonical workload image %q", bad)
 		}
 	}
@@ -457,7 +457,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 		{"repeat separated by another image", []string{dig, "sha256:" + strings.Repeat("bb", 32), dig}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := policyFor(manifest, pub, tc.refs); err == nil {
+			if _, err := policyFor(manifest, pub, tc.refs, ""); err == nil {
 				t.Fatal("a repeated workload image must be rejected, not silently doubled into the chain")
 			}
 		})
@@ -465,7 +465,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 
 	// Sanity: the single-occurrence policy this rejection protects is exactly
 	// the one a node with that image can satisfy.
-	single, err := policyFor(manifest, pub, []string{dig})
+	single, err := policyFor(manifest, pub, []string{dig}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -35,6 +35,11 @@ type Config struct {
 	// expected to have extended into RTMR[3], in first-extend order. Empty
 	// means the register must equal the bare operator-key seed.
 	WorkloadImages []string
+	// LaunchDataDir is the operator's copy of the node's launchdata ISO
+	// contents. When set, the binding gate expects the launchdata commitment
+	// (SNP HOSTDATA / the RTMR[3] seed) instead of the bare operator key, and
+	// the key must match the dir's operator-pubkey file.
+	LaunchDataDir string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -62,7 +67,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("derive operator public key: %w", err)
 	}
-	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages)
+	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages, cfg.LaunchDataDir)
 	if err != nil {
 		return err
 	}

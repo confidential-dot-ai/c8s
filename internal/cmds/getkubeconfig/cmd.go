@@ -72,6 +72,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.APIServerURL, "apiserver-url", "", "apiserver URL for the kubeconfig (overrides --node)")
 	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM (its public half is bound into RTMR[3]) (required)")
 	f.StringVar(&cfg.ImageManifestPath, "image-manifest", "", "an explicitly selected, provenanced build-artifact manifest carrying the expected guest image's measured identity — TDX: mrtd/rtmr1/rtmr2; SNP: snp_variants. Its shape selects the platform, and the gate pins every value (required)")
+	f.StringVar(&cfg.LaunchDataDir, "launch-data", "", "directory holding the node's launchdata ISO contents. The binding gate then expects the launchdata commitment (SNP HOSTDATA; TDX RTMR[3] seed) instead of the bare operator key, and --operator-key must match the dir's operator-pubkey file")
 	f.StringArrayVar(&cfg.WorkloadImages, "workload-image", nil, "digest-pinned image ref (\"sha256:<hex>\" or \"name@sha256:<hex>\"; tags rejected) the node's measurer is expected to have extended into RTMR[3]; repeatable, in first-extend order. Omit if the node runs no measured workloads. TDX only — SNP has no runtime-extend register")
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")

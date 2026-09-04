@@ -48,7 +48,7 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 	writeFileT(t, pubPath, pub)
 	writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
 
-	got, err := LoadMeasuredOperatorKey(context.Background(), "tdx", "")
+	got, err := LoadMeasuredOperatorKey(context.Background(), "tdx", "", "")
 	if err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pubPath, rtmrPath := overrideBindingPaths(t)
 			tc.stage(t, pubPath, rtmrPath)
-			if _, err := LoadMeasuredOperatorKey(context.Background(), "tdx", ""); err == nil {
+			if _, err := LoadMeasuredOperatorKey(context.Background(), "tdx", "", ""); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})
@@ -127,7 +127,7 @@ func TestLoadMeasuredOperatorKeySNP(t *testing.T) {
 	want := runtimemeasure.HostDataForOperatorKey(pub)
 	url := snpAttester(t, want[:])
 
-	got, err := LoadMeasuredOperatorKey(context.Background(), "sev-snp", url)
+	got, err := LoadMeasuredOperatorKey(context.Background(), "sev-snp", url, "")
 	if err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pubPath, _ := overrideBindingPaths(t)
 			writeFileT(t, pubPath, pub)
-			if _, err := LoadMeasuredOperatorKey(context.Background(), tc.platform, tc.url(t)); err == nil {
+			if _, err := LoadMeasuredOperatorKey(context.Background(), tc.platform, tc.url(t), ""); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})

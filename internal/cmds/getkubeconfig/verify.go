@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -65,40 +67,84 @@ type measuredPolicy struct {
 // workload images the node's measurer is expected to have extended, in
 // first-extend order. Tag references are rejected — only a canonical digest
 // identifies an image.
-func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+//
+// launchDataDir, when set, is the operator's copy of the node's launchdata
+// ISO contents: the binding seed becomes the launchdata commitment instead of
+// the bare operator key, and the key must be the dir's operator-pubkey file
+// so the commitment covers the key used here.
+func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string, launchDataDir string) (measuredPolicy, error) {
+	var seeds *bindingSeeds
+	if launchDataDir != "" {
+		var err error
+		if seeds, err = launchDataSeeds(launchDataDir, operatorPubPEM); err != nil {
+			return measuredPolicy{}, err
+		}
+	}
 	// The manifest's shape names the platform: a TDX build publishes the
 	// mrtd/rtmr1/rtmr2 tuple, an SNP build publishes snp_variants (per-SMP
 	// launch digests). TDX is tried first so a manifest that is neither keeps
 	// the TDX error text.
 	pins, tdxErr := runtimemeasure.LoadImageManifest(manifestPath)
 	if tdxErr == nil {
-		return tdxPolicy(pins, operatorPubPEM, workloadImages)
+		return tdxPolicy(pins, operatorPubPEM, workloadImages, seeds)
 	}
 	snpPins, snpErr := runtimemeasure.LoadSNPImageManifest(manifestPath)
 	if snpErr != nil {
 		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", tdxErr)
 	}
-	return snpPolicy(snpPins, operatorPubPEM, workloadImages)
+	return snpPolicy(snpPins, operatorPubPEM, workloadImages, seeds)
+}
+
+// bindingSeeds carries the launchdata-derived binding expectations.
+type bindingSeeds struct {
+	hostData  [runtimemeasure.HostDataSize]byte
+	rtmr3Seed [runtimemeasure.Size]byte
+}
+
+// launchDataSeeds renders the commitment over dir and cross-checks that
+// operatorPubPEM is exactly the dir's operator-pubkey: the guest takes its
+// operator key from the same commitment, so a different key here could pass
+// the register gate yet fail the credential exchange.
+func launchDataSeeds(dir string, operatorPubPEM []byte) (*bindingSeeds, error) {
+	manifest, err := runtimemeasure.LaunchDataManifest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("--launch-data: %w", err)
+	}
+	staged, err := os.ReadFile(filepath.Join(dir, "operator-pubkey"))
+	if err != nil {
+		return nil, fmt.Errorf("--launch-data: read operator-pubkey: %w", err)
+	}
+	if !bytes.Equal(staged, operatorPubPEM) {
+		return nil, fmt.Errorf("--launch-data: %s/operator-pubkey is not the public half of --operator-key", dir)
+	}
+	return &bindingSeeds{
+		hostData:  runtimemeasure.LaunchDataHostData(manifest),
+		rtmr3Seed: runtimemeasure.Extend(runtimemeasure.Zero, runtimemeasure.LaunchDataRTMR3Digest(manifest)),
+	}, nil
 }
 
 // snpPolicy pins the per-SMP launch-digest set and the HOSTDATA operator-key
 // binding. SNP has no runtime-extend register, so there is no workload chain.
-func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workloadImages []string, seeds *bindingSeeds) (measuredPolicy, error) {
 	// Accepting --workload-image here would claim an enforcement that cannot
 	// exist rather than silently ignoring the flag.
 	if len(workloadImages) > 0 {
 		return measuredPolicy{}, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
 	}
+	hostData := runtimemeasure.HostDataForOperatorKey(operatorPubPEM)
+	if seeds != nil {
+		hostData = seeds.hostData
+	}
 	return measuredPolicy{
 		platform: teetypes.PlatformSNP,
 		snpPins:  pins,
-		hostData: runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
+		hostData: hostData,
 	}, nil
 }
 
 // tdxPolicy pins the image tuple and the RTMR[3] chain: the operator-key seed
 // extended, in first-extend order, by each digest-pinned workload image.
-func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadImages []string, seeds *bindingSeeds) (measuredPolicy, error) {
 	digests := make([]string, 0, len(workloadImages))
 	seen := make(map[string]string, len(workloadImages))
 	for _, ref := range workloadImages {
@@ -118,10 +164,14 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 		seen[d] = ref
 		digests = append(digests, d)
 	}
+	seed := runtimemeasure.ForOperatorKey(operatorPubPEM)
+	if seeds != nil {
+		seed = seeds.rtmr3Seed
+	}
 	return measuredPolicy{
 		platform: teetypes.PlatformTDX,
 		pins:     pins,
-		rtmr3:    runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(operatorPubPEM), digests),
+		rtmr3:    runtimemeasure.FromDigestsSeeded(seed, digests),
 	}, nil
 }
 
