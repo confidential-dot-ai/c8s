@@ -73,8 +73,11 @@ echo "workload: $cw_ns/$cw_pod (cw=$cw_id) at $cw_ip:$cw_port on $cw_node ($cw_n
 # --- client pod (fresh namespace: a normal, non-excluded mesh source) -------
 
 kubectl create namespace "$ns" >/dev/null
+# A plain client pod: restricted-compliant, since the fresh namespace inherits
+# the node image's restricted PodSecurity default.
 kubectl run "$client" -n "$ns" --image="$client_image" --restart=Never \
-  --command -- sleep 3600 >/dev/null
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$client"'","image":"'"$client_image"'","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  >/dev/null
 kubectl wait --for=condition=Ready pod/"$client" -n "$ns" --timeout=120s >/dev/null
 
 client_node=$(kubectl get pod "$client" -n "$ns" -o jsonpath='{.spec.nodeName}')
@@ -247,7 +250,7 @@ if [ -n "$drop_line" ] && [ -n "$dns_line" ] && [ "$dns_line" -gt "$drop_line" ]
   fail "the UDP/53 carve-out is ordered below the non-TCP drop, so it is unreachable:
 $egress_chain"
 fi
-echo "ok: cw egress DNS carve-out is scoped to $cluster_dns and ordered above the drop"
+echo "ok: cw egress DNS carve-out is unscoped and ordered above the drop"
 
 # Membership is what the guard keys on. An empty set is enforcement that is not
 # running, and reads identically to a guard that is simply not being exercised.

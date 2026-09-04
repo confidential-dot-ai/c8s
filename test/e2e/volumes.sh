@@ -51,7 +51,7 @@ MUT=${E2E_VOL_MUT_NAME:-mut}
 MARKER=${E2E_VOL_MUT_MARKER:-c8s-e2e-mut-proof}
 CDS_PORT=${E2E_CDS_LOCAL_PORT:-18443}
 
-ns=default                       # exempt from the node image's restricted PSA default
+ns=c8s-e2e-volumes               # opened for CW pods by cw_namespace below
 READER=e2e-vol-reader
 WRITER=e2e-vol-writer
 DENIED=e2e-vol-denied
@@ -68,11 +68,12 @@ writer_script="until mountpoint -q /run/c8s/volumes/$MUT; do sleep 1; done; prin
 PF_PODS=""
 cleanup() {
   for p in $PF_PODS ${PF_CDS:-}; do kill "$p" 2>/dev/null || true; done
-  kubectl -n "$ns" delete pod $READER $WRITER $DENIED --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   al workload delete "$READER" "$WRITER" >/dev/null 2>&1 || true
   return 0
 }
 trap cleanup EXIT
+cw_namespace "$ns"
 
 # Every CDS call goes over a port-forward: tls-lb fronts /allowlist but not
 # /secrets, and the RA-TLS client verifies attestation rather than PKI

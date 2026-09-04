@@ -1,42 +1,42 @@
-# Keeps the restricted PodSecurity floor from psa-config.yaml an invariant.
-#
+# Keeps the restricted PodSecurity floor from psa-config.yaml an invariant:
 # PodSecurity admission reads its level from namespace labels, so whoever can
-# label a namespace can hand its pods `privileged`: hostPath, host namespaces,
-# root, any capability. The admission config file on the measured root sets
-# the default and the exemption list, but says nothing about labels. This
-# policy does: a namespace may carry an `enforce` label other than
-# `restricted` only when the caller is authorized to grant PodSecurity
-# exemptions. That is expressed as an RBAC check on a virtual resource
-# (`podsecurityexemptions.confidential.ai`, verb `grant`) that no default role
-# grants, so cluster-admin (wildcard rules) and system:masters pass and a
-# tenant holding `admin`/`edit` in its own namespaces does not.
-#
-# RKE2 applies this file as an AddOn at server start, before any tenant can
-# reach the API. The policy is not a defence against cluster-admin, who can
-# delete it; the guarantee it upholds is the one the attestation can vouch
-# for: tenants scoped to their namespaces cannot lower the floor the image
-# booted with.
+# label a namespace could hand its pods `privileged`, or pin `enforce-version`
+# to an old standard that lacks the seccomp, capability and non-root checks.
+# A namespace may carry an `enforce` label other than `restricted`, or an
+# `enforce-version` other than `latest`, only when the caller passes an RBAC
+# check for a virtual resource (`podsecurityexemptions.confidential.ai`, verb
+# `grant`) that no default role grants: cluster-admin (wildcard rules) and
+# system:masters pass, a tenant holding `admin`/`edit` in its own namespaces
+# does not. A write that leaves both labels as they were passes without the
+# check, so a controller that touches an operator-labelled namespace's
+# annotations or status is not denied. The status and finalize subresources
+# are matched because their update strategies keep the labels a writer sends.
+# RKE2 applies this AddOn at server start, before any tenant can reach the
+# API. The tenancy assumption and the cluster-admin caveat are in
+# node-guest-image/README.md, "Workload isolation".
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: confos-psa-level
 spec:
   # Fail closed: a CEL evaluation error denies the namespace write. The
-  # expression is has()-guarded, so it should not error in practice.
+  # optional chains below cannot error on a missing label map or key.
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["namespaces"]
+        resources: ["namespaces", "namespaces/status", "namespaces/finalize"]
   validations:
     - expression: >-
-        !has(object.metadata.labels) ||
-        !('pod-security.kubernetes.io/enforce' in object.metadata.labels) ||
-        object.metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted' ||
+        (object.metadata.?labels[?'pod-security.kubernetes.io/enforce'].orValue('restricted') == 'restricted' &&
+         object.metadata.?labels[?'pod-security.kubernetes.io/enforce-version'].orValue('latest') == 'latest') ||
+        (oldObject != null &&
+         object.metadata.?labels[?'pod-security.kubernetes.io/enforce'] == oldObject.metadata.?labels[?'pod-security.kubernetes.io/enforce'] &&
+         object.metadata.?labels[?'pod-security.kubernetes.io/enforce-version'] == oldObject.metadata.?labels[?'pod-security.kubernetes.io/enforce-version']) ||
         authorizer.group('confidential.ai').resource('podsecurityexemptions').check('grant').allowed()
-      message: "pod-security.kubernetes.io/enforce may only be lowered below restricted by a caller allowed to grant podsecurityexemptions.confidential.ai; this node image enforces the restricted PodSecurity standard for tenant namespaces."
+      message: "pod-security.kubernetes.io/enforce may not be set below restricted, nor enforce-version below latest, without permission to grant podsecurityexemptions.confidential.ai"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

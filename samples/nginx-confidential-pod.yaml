@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: demo-nginx
-  namespace: default
 spec:
   replicas: 1
   selector:
@@ -15,10 +14,11 @@ spec:
       annotations:
         confidential.ai/cw: demo-nginx
     spec:
-      # The node image enforces the restricted PodSecurity standard in every
-      # tenant namespace, `default` included, so the workload runs as a
-      # non-root user with every capability dropped. nginx-unprivileged is
-      # the upstream image built for exactly that; it listens on 8080.
+      # The node image enforces restricted PodSecurity in every tenant
+      # namespace, `default` included. nginx-unprivileged runs non-root and
+      # listens on 8080. In node mode the injected sidecar still mounts the
+      # node's inventory socket as a hostPath, so deploy into a namespace the
+      # operator has labelled privileged (docs/DEMO.md).
       securityContext:
         runAsNonRoot: true
         seccompProfile:
