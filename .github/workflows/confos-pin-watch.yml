@@ -86,7 +86,12 @@ jobs:
           fi
           branch="pin-watch/${DOMAIN}-${confos:0:12}-${attest:0:12}"
           title="build(${DOMAIN}): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}"
-          open_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
+          open_pr=$(
+            gh pr list --state open --limit 100 \
+              --json headRefName,isCrossRepository,number |
+              jq -r --arg prefix "pin-watch/${DOMAIN}-" \
+                '[.[] | select(.isCrossRepository == false and (.headRefName | startswith($prefix)))][0].number // empty'
+          )
           if [ -n "$open_pr" ]; then
             echo "pin-watch PR #$open_pr is already open; leaving its review branch untouched" >> "$GITHUB_STEP_SUMMARY"
             exit 0
