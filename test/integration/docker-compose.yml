@@ -21,6 +21,16 @@ services:
     image: nginx:1.27-alpine
     # Default nginx serves a welcome page on port 80.
 
+  # Keeps the tmpfs volume mounted across the get-cert → nginx-lb handoff,
+  # the way kubelet holds a pod's emptyDir: docker unmounts a tmpfs-backed
+  # volume (discarding it) once no container uses it, and get-cert exits
+  # before nginx-lb starts.
+  tls-holder:
+    image: nginx:1.27-alpine
+    entrypoint: ["sleep", "2147483647"]
+    volumes:
+      - tls-certs:/tls
+
   get-cert:
     build:
       # cmd/get-cert/Dockerfile COPYs build/c8s, so the context must be the
@@ -41,6 +51,7 @@ services:
     depends_on:
       - mock-cds
       - mock-attestation
+      - tls-holder
 
   nginx-lb:
     image: nginx:1.27-alpine
@@ -56,4 +67,10 @@ services:
         condition: service_started
 
 volumes:
+  # tmpfs-backed like the Memory-medium emptyDir the webhook injects in
+  # production: get-cert refuses a --key-out on persistent storage.
   tls-certs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

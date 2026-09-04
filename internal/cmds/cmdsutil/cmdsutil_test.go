@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 func TestRunMainSuccess(t *testing.T) {
@@ -26,6 +28,35 @@ func TestRunMainHelpDoesNotExit(t *testing.T) {
 	RunMain(func(args []string) error {
 		return flag.ErrHelp
 	})
+}
+
+func TestRequireRAMBackedDir(t *testing.T) {
+	dir := t.TempDir()
+	err := RequireRAMBackedDir("--out-dir", dir)
+	if fileutil.RequireRAMBacked(dir) == nil {
+		if err != nil {
+			t.Fatalf("RAM-backed dir refused: %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "--out-dir") {
+		t.Fatalf("want a --out-dir-prefixed refusal, got %v", err)
+	}
+}
+
+func TestOpenRAMBackedDir(t *testing.T) {
+	dir := t.TempDir()
+	root, err := OpenRAMBackedDir("--out-dir", dir)
+	if fileutil.RequireRAMBacked(dir) == nil {
+		if err != nil {
+			t.Fatalf("RAM-backed dir refused: %v", err)
+		}
+		defer root.Close()
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "--out-dir") {
+		t.Fatalf("want a --out-dir-prefixed refusal, got %v", err)
+	}
 }
 
 func TestValidateHTTPURL(t *testing.T) {
