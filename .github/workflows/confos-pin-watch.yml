@@ -84,33 +84,76 @@ jobs:
             printf '%s\n' "$changes"
             exit 1
           fi
-          branch="pin-watch/${DOMAIN}-refs"
+          branch="pin-watch/${DOMAIN}-${confos:0:12}-${attest:0:12}"
           title="build(${DOMAIN}): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}"
-          git config user.name "confos-pin-watch"
-          git config user.email "actions@github.com"
-          git checkout -b "$branch"
+          open_pr=$(
+            gh pr list --state open --limit 100 \
+              --json headRefName,isCrossRepository,number |
+              jq -r --arg prefix "pin-watch/${DOMAIN}-" \
+                '[.[] | select(.isCrossRepository == false and (.headRefName | startswith($prefix)))][0].number // empty'
+          )
+          if [ -n "$open_pr" ]; then
+            echo "pin-watch PR #$open_pr is already open; leaving its review branch untouched" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           git add -- .github/build-pins.json
           test "$(git diff --cached --name-only)" = ".github/build-pins.json"
-          git commit -m "$title"
-          open_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
-          local_tree=$(git rev-parse 'HEAD^{tree}')
+          desired_tree=$(git write-tree)
+          base_oid=$(git rev-parse HEAD)
+          base_tree=$(git rev-parse 'HEAD^{tree}')
+
           remote_oid=
           remote_tree=
-          if git fetch --no-tags origin \
-            "+refs/heads/$branch:refs/remotes/origin/$branch"; then
-            remote_oid=$(git rev-parse "refs/remotes/origin/$branch")
+          if remote_ref=$(git ls-remote --exit-code --heads origin "refs/heads/$branch"); then
+            remote_oid=${remote_ref%%[[:space:]]*}
+            git fetch --no-tags origin \
+              "+refs/heads/$branch:refs/remotes/origin/$branch"
             remote_tree=$(git rev-parse "${remote_oid}^{tree}")
-            if [ "$local_tree" = "$remote_tree" ] && [ -n "$open_pr" ]; then
-              echo "pin-watch PR #$open_pr already has the proposed tree"
-              exit 0
+          else
+            remote_status=$?
+            [ "$remote_status" -eq 2 ] || exit "$remote_status"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/$branch" -f sha="$base_oid" >/dev/null
+            remote_oid=$base_oid
+            remote_tree=$base_tree
+          fi
+
+          if [ "$remote_tree" = "$desired_tree" ]; then
+            new_oid=$remote_oid
+          else
+            if [ "$remote_tree" != "$base_tree" ]; then
+              echo "::error::candidate branch $branch contains a different tree; refusing to overwrite it"
+              exit 1
             fi
+            mutation=$(cat <<'GRAPHQL'
+          mutation($repository: String!, $branch: String!, $expected: GitObjectID!, $headline: String!, $path: String!, $contents: Base64String!) {
+            createCommitOnBranch(input: {
+              branch: {repositoryNameWithOwner: $repository, branchName: $branch}
+              expectedHeadOid: $expected
+              message: {headline: $headline}
+              fileChanges: {additions: [{path: $path, contents: $contents}]}
+            }) {
+              commit { oid }
+            }
+          }
+          GRAPHQL
+            )
+            commit_json=$(gh api graphql \
+              -f query="$mutation" \
+              -f repository="$GITHUB_REPOSITORY" \
+              -f branch="$branch" \
+              -f expected="$remote_oid" \
+              -f headline="$title" \
+              -f path=.github/build-pins.json \
+              -f contents="$(base64 -w0 .github/build-pins.json)")
+            new_oid=$(jq -er '.data.createCommitOnBranch.commit.oid' <<<"$commit_json")
           fi
-          if [ -z "$remote_oid" ]; then
-            git push origin "HEAD:refs/heads/$branch"
-          elif [ "$local_tree" != "$remote_tree" ]; then
-            git push --force-with-lease="refs/heads/$branch:$remote_oid" \
-              origin "HEAD:refs/heads/$branch"
+
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${new_oid}" \
+            --jq '.commit.verification.verified')
+          if [ "$verified" != true ]; then
+            echo "::error::GitHub did not verify pin-watch commit $new_oid; refusing to open the PR"
+            exit 1
           fi
-          if [ -z "$open_pr" ]; then
-            gh pr create --title "$title" --body "Automated \`${DOMAIN}\` pin-set bump in \`.github/build-pins.json\`: confos main \`${confos:0:9}\`, attestation-rs main \`${attest:0:9}\`, and mkosi \`${mkosi_line#systemd/mkosi@}\` from that confos commit's base workflow. This rolls the affected measurements; review the upstream logs and reproducibility gate before merging. With the default GITHUB_TOKEN fallback, approve the PR's workflow run; GitHub App-created PR checks start automatically."
-          fi
+          gh pr create --head "$branch" --title "$title" --body "Automated \`${DOMAIN}\` pin-set bump in \`.github/build-pins.json\`: confos main \`${confos:0:9}\`, attestation-rs main \`${attest:0:9}\`, and mkosi \`${mkosi_line#systemd/mkosi@}\` from that confos commit's base workflow. This rolls the affected measurements; review the upstream logs and reproducibility gate before merging."
