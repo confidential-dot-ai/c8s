@@ -38,7 +38,7 @@ for pinning a workload's process policy (see 'allowlist workload').`,
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}
@@ -82,7 +82,7 @@ func newRemoveCmd(o *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}
@@ -181,7 +181,7 @@ before upload; --strict makes lint warnings fatal.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "proceeding anyway (--force)")
 			}
 
-			c, err := o.client(ctx(cmd))
+			c, err := o.client(cmd)
 			if err != nil {
 				return err
 			}

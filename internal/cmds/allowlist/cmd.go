@@ -117,13 +117,14 @@ func (o *options) validate() error {
 	return nil
 }
 
-// client builds the allowlist API client over the attested channel to CDS.
-func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
-	hc, err := o.HTTPClient(ctx)
+// client builds the allowlist API client over the attested channel to CDS,
+// wrapped with the transient-failure retry (see retry.go).
+func (o *options) client(cmd *cobra.Command) (client, error) {
+	hc, err := o.HTTPClient(ctx(cmd))
 	if err != nil {
-		return allowlistclient.Client{}, err
+		return client{}, err
 	}
-	return allowlistclient.NewClientWithHTTP(o.URL, hc), nil
+	return client{api: allowlistclient.NewClientWithHTTP(o.URL, hc), stderr: cmd.ErrOrStderr()}, nil
 }
 
 // signer builds the operator credential. Required only for write subcommands.

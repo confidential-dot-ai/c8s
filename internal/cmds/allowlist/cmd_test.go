@@ -404,7 +404,7 @@ func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	t.Run("unpinned warns", func(t *testing.T) {
 		o := base
 		out := captureStderr(t, func() {
-			if _, err := o.client(context.Background()); err != nil {
+			if _, err := o.client(&cobra.Command{}); err != nil {
 				t.Errorf("client: %v", err)
 			}
 		})
@@ -417,7 +417,7 @@ func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 		o := base
 		o.Measurements = []string{strings.Repeat("ab", 48)}
 		out := captureStderr(t, func() {
-			if _, err := o.client(context.Background()); err != nil {
+			if _, err := o.client(&cobra.Command{}); err != nil {
 				t.Errorf("client: %v", err)
 			}
 		})

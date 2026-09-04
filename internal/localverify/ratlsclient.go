@@ -23,52 +23,67 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, //nolint:gosec // attestation, not PKI, authenticates the peer — verified below
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("localverify: no peer certificate")
-			}
-			cert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("localverify: parse peer cert: %w", err)
-			}
-			// Authenticate the certificate body before touching the evidence:
-			// validity within the shared skew window (the nonce-free evidence
-			// has no other freshness bound) and, for a self-issued leaf, its
-			// own signature under its attested key. Cheap, and it keeps an
-			// expired cert from costing an evidence verification.
-			//
-			// Peers on this path are self-signed RA-TLS leaves (this client
-			// verifies no chain and holds no CA), so the classification must
-			// come back BodySelfSigned. Assert it instead of discarding it: a
-			// CA-vouched leaf here would have had NOTHING authenticate its
-			// body — no signature is checked when issuer != subject — so its
-			// window, subject and stamps would be whatever the producer of
-			// the bytes chose, under a genuine attestation extension.
-			body, err := certutil.AuthenticateLeafBody(cert, time.Now())
-			if err != nil {
-				return fmt.Errorf("localverify: peer certificate: %w", err)
-			}
-			if body != certutil.BodySelfSigned {
-				return fmt.Errorf("localverify: peer certificate is not self-signed (issuer != subject) and this client verifies no issuing chain, so nothing authenticates its body")
-			}
-			platform, evidence, erd, err := CertEnvelope(cert)
-			if err != nil {
-				return fmt.Errorf("localverify: peer attestation: %w", err)
-			}
-			// VerifyPeerCertificate carries no context; bound explicitly.
-			ctx := context.Background()
-			if verifyTimeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, verifyTimeout)
-				defer cancel()
-			}
-			if _, err := verify(ctx, platform, evidence, Params{
-				ExpectedReportData: erd,
-				Measurements:       measurements,
-			}); err != nil {
-				return fmt.Errorf("localverify: peer attestation failed: %w", err)
+			if err := verifyPeerRATLS(rawCerts, measurements, verify, verifyTimeout); err != nil {
+				return &PeerVerificationError{Err: err}
 			}
 			return nil
 		},
 	}
 	return ratls.HTTPClient(tlsCfg)
+}
+
+// PeerVerificationError marks a handshake failure that came from RA-TLS peer
+// verification rather than the transport. Unwrap [CollateralError] to tell a
+// failed collateral fetch (no verdict) from a rejection.
+type PeerVerificationError struct{ Err error }
+
+func (e *PeerVerificationError) Error() string { return e.Err.Error() }
+func (e *PeerVerificationError) Unwrap() error { return e.Err }
+
+func verifyPeerRATLS(rawCerts [][]byte, measurements [][]byte, verify VerifyFunc, verifyTimeout time.Duration) error {
+	if len(rawCerts) == 0 {
+		return fmt.Errorf("localverify: no peer certificate")
+	}
+	cert, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("localverify: parse peer cert: %w", err)
+	}
+	// Authenticate the certificate body before touching the evidence:
+	// validity within the shared skew window (the nonce-free evidence
+	// has no other freshness bound) and, for a self-issued leaf, its
+	// own signature under its attested key. Cheap, and it keeps an
+	// expired cert from costing an evidence verification.
+	//
+	// Peers on this path are self-signed RA-TLS leaves (this client
+	// verifies no chain and holds no CA), so the classification must
+	// come back BodySelfSigned. Assert it instead of discarding it: a
+	// CA-vouched leaf here would have had NOTHING authenticate its
+	// body — no signature is checked when issuer != subject — so its
+	// window, subject and stamps would be whatever the producer of
+	// the bytes chose, under a genuine attestation extension.
+	body, err := certutil.AuthenticateLeafBody(cert, time.Now())
+	if err != nil {
+		return fmt.Errorf("localverify: peer certificate: %w", err)
+	}
+	if body != certutil.BodySelfSigned {
+		return fmt.Errorf("localverify: peer certificate is not self-signed (issuer != subject) and this client verifies no issuing chain, so nothing authenticates its body")
+	}
+	platform, evidence, erd, err := CertEnvelope(cert)
+	if err != nil {
+		return fmt.Errorf("localverify: peer attestation: %w", err)
+	}
+	// VerifyPeerCertificate carries no context; bound explicitly.
+	ctx := context.Background()
+	if verifyTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, verifyTimeout)
+		defer cancel()
+	}
+	if _, err := verify(ctx, platform, evidence, Params{
+		ExpectedReportData: erd,
+		Measurements:       measurements,
+	}); err != nil {
+		return fmt.Errorf("localverify: peer attestation failed: %w", err)
+	}
+	return nil
 }

@@ -1,7 +1,6 @@
 package allowlist
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,7 @@ func newListCmd(o *options) *cobra.Command {
 		Short: "List the current allowlist floor and workload entries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			al, version, err := o.fetch(ctx(cmd))
+			al, version, err := o.fetch(cmd)
 			if err != nil {
 				return err
 			}
@@ -39,7 +38,7 @@ func newExportCmd(o *options) *cobra.Command {
 		Short: "Write the full allowlist as canonical JSON (default stdout) for backup or re-upload",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			al, _, err := o.fetch(ctx(cmd))
+			al, _, err := o.fetch(cmd)
 			if err != nil {
 				return err
 			}
@@ -75,7 +74,7 @@ func newDiffCmd(o *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			live, _, err := o.fetch(ctx(cmd))
+			live, _, err := o.fetch(cmd)
 			if err != nil {
 				return err
 			}
@@ -101,15 +100,15 @@ var errDifferences = fmt.Errorf("allowlist differs")
 // --- shared helpers ---
 
 // fetch builds the CDS client and returns the live allowlist and its version.
-func (o *options) fetch(ctx context.Context) (*pkgallowlist.Allowlist, string, error) {
+func (o *options) fetch(cmd *cobra.Command) (*pkgallowlist.Allowlist, string, error) {
 	if err := o.validate(); err != nil {
 		return nil, "", err
 	}
-	c, err := o.client(ctx)
+	c, err := o.client(cmd)
 	if err != nil {
 		return nil, "", err
 	}
-	return c.List(ctx)
+	return c.List(ctx(cmd))
 }
 
 // loadAllowlistFile reads and validates a full allowlist JSON file — the format

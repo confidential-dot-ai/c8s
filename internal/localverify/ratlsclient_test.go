@@ -261,8 +261,15 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 	t.Run("verifier rejection fails the handshake", func(t *testing.T) {
 		rec := &recordingVerify{err: errors.New("rejected")}
 		client := NewRATLSHTTPClient(nil, rec.fn, 5*time.Second)
-		if _, err := client.Get(srv.URL); err == nil {
+		_, err := client.Get(srv.URL)
+		if err == nil {
 			t.Fatal("a rejected attestation must fail the request")
+		}
+		// The marker lets callers tell a verification outcome from a
+		// transport failure without matching error shapes.
+		var pv *PeerVerificationError
+		if !errors.As(err, &pv) {
+			t.Fatalf("verification failure must surface as a PeerVerificationError, got %v", err)
 		}
 	})
 
