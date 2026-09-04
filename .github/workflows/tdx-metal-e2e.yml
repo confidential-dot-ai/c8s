@@ -498,7 +498,7 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          c8s install --cvm-mode node --single-node --hardware-platform tdx \
+          c8s install --cvm-mode node-image --single-node --hardware-platform tdx \
             --image-tag "$c8sRef" \
             --operator-keys /tmp/op.pub \
             --measurements "$mrtd" \
@@ -512,8 +512,8 @@ jobs:
           bash /tmp/c8s-src/test/e2e/components-ready.sh
 
       - name: assert the image floor denies, then opens to a signed write
-        # tls-lb fronts /allowlist on hostPort 443, and node mode puts CDS in
-        # the node CVM, so the endpoint pins to the node MRTD.
+        # tls-lb fronts /allowlist on hostPort 443, and the node-image shape
+        # puts CDS in the node CVM, so the endpoint pins to the node MRTD.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig

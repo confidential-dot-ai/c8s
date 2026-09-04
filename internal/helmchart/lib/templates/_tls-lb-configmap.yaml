@@ -1,0 +1,370 @@
+{{- define "c8s-lib.tlsLbConfigMap" -}}
+{{- if .Values.tlsLb.enabled }}
+{{- $sans := include "c8s-lib.tlsLb.sanList" . | fromJsonArray -}}
+{{- range $s := $sans -}}{{- include "c8s-lib.tlsLb.validateSan" $s -}}{{- end -}}
+{{- $serverNames := join " " $sans -}}
+{{- $publicTLSMode := include "c8s-lib.tlsLb.publicTLSMode" . -}}
+{{- include "c8s-lib.tlsLb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
+{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
+{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
+{{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
+{{- $upstreamMeshWrapped := eq (include "c8s-lib.tlsLb.meshWrappedUpstream" $upstreamAddress) "true" -}}
+{{- $renderAllowlistRoute := eq (include "c8s-lib.tlsLb.renderAllowlistRoute" .) "true" -}}
+{{- $allowlistProxyPort := 0 -}}
+{{- $allowlistWriteRate := 0 -}}
+{{- $allowlistWriteBurst := 0 -}}
+{{- $allowlistWriteTotalRate := 0 -}}
+{{- $allowlistWriteTotalBurst := 0 -}}
+{{- $allowlistReadRate := 0 -}}
+{{- $allowlistReadBurst := 0 -}}
+{{- if $renderAllowlistRoute -}}
+{{- $allowlistProxyPort = include "c8s-lib.int" .Values.tlsLb.allowlist.proxyPort | int -}}
+{{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if and .Values.tlsLb.attest.enabled (eq $allowlistProxyPort (int .Values.tlsLb.attest.port)) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if eq $allowlistProxyPort (int .Values.tlsLb.nginx.httpsPort) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- $allowlistWriteRate = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $allowlistWriteBurst = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
+{{- $allowlistWriteTotalRate = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $allowlistWriteTotalBurst = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
+{{- $allowlistReadRate = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.requestsPerSecond "label" "tlsLb.allowlist.readRateLimit.requestsPerSecond")) -}}
+{{- $allowlistReadBurst = int (include "c8s-lib.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.burst "label" "tlsLb.allowlist.readRateLimit.burst")) -}}
+{{- /* Cross-value budget invariants (per-client <= total < cds bucket) live
+   in validations.yaml, kind=tlslb_allowlist_rate_budget. */ -}}
+{{- end -}}
+{{- /*
+  No upstream is a legal state: tls-lb serves its cert and explicit routes with
+  no catch-all until one is wired (an install-then-attach-inference flow). The
+  address-format check, the secured-backend guard (validations.yaml), and the
+  location / block all render only when an upstream is set.
+*/ -}}
+{{- $upstreamServerName := "" -}}
+{{- if $upstreamAddress -}}
+{{- if not (regexMatch `^[^[:space:]{};/#]+$` $upstreamAddress) -}}
+{{- fail (printf "tlsLb.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $upstreamAddress) -}}
+{{- end -}}
+{{- $upstreamServerName = default (include "c8s-lib.tlsLb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
+{{- include "c8s-lib.tlsLb.validateProxyTLS" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "tlsLb.upstream") -}}
+{{- end -}}
+{{- include "c8s-lib.tlsLb.validateCORS" .Values.tlsLb.cors -}}
+{{- range $i, $route := .Values.tlsLb.routes -}}
+{{- include "c8s-lib.tlsLb.validateRouteCORS" (dict "cors" $route.cors "label" (printf "tlsLb.routes[%d]" $i)) -}}
+{{- end }}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s-lib.tlsLb.fullname" . }}-nginx
+  labels:
+    {{- include "c8s-lib.tlsLb.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /tmp/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent"';
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        keepalive_timeout 65;
+{{- if default false .Values.tlsLb.cors.enabled }}
+        {{- include "c8s-lib.tlsLb.corsMap" . | nindent 8 }}
+{{- end }}
+{{- if $renderAllowlistRoute }}
+
+        # Rate-limit /allowlist per public client (per-IP zones) and in
+        # aggregate (guards the shared per-pod-IP CDS bucket, docs/operator.md);
+        # empty map keys are not accounted by limit_req, so exempt methods map
+        # to "". The total key chains off the write key.
+        map $request_method $allowlist_write_rate_key {
+            default $binary_remote_addr;
+            GET "";
+            HEAD "";
+            OPTIONS "";
+        }
+        map $allowlist_write_rate_key $allowlist_write_total_key {
+            "" "";
+            default "all";
+        }
+        map $request_method $allowlist_read_rate_key {
+            default "";
+            GET $binary_remote_addr;
+            HEAD $binary_remote_addr;
+        }
+        limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate={{ $allowlistWriteRate }}r/s;
+        limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate={{ $allowlistWriteTotalRate }}r/s;
+        limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate={{ $allowlistReadRate }}r/s;
+{{- end }}
+
+        {{- if $upstreamMeshWrapped }}
+        # A mesh-wrapped catch-all re-resolves per record TTL (pod IPs churn);
+        # a static upstream block would pin startup IPs and 502. The answer is
+        # unauthenticated: an adversary forging cluster DNS retargets the hop
+        # (the mesh binds the pod IP, not the name). Only this upstream gets a
+        # resolver; every other uses a static block.
+        resolver {{ include "c8s-lib.tlsLbResolver" . }};
+        {{- end }}
+
+        {{- range $i, $route := .Values.tlsLb.routes }}
+        {{- if hasKey $route "upstream" }}
+        {{- fail (printf "tlsLb.routes[%d].upstream is not supported; set backend.address and backend.protocol instead" $i) }}
+        {{- end }}
+        {{- $backend := required (printf "tlsLb.routes[%d].backend is required" $i) $route.backend }}
+        {{- $backendAddress := required (printf "tlsLb.routes[%d].backend.address is required" $i) $backend.address }}
+        {{- if not (regexMatch `^[^[:space:]{};/#]+$` $backendAddress) }}
+        {{- fail (printf "tlsLb.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
+        {{- end }}
+        upstream route_{{ $i }} {
+            server {{ $backendAddress }};
+        }
+
+        {{- end }}
+        {{- if and $upstreamAddress (not $upstreamMeshWrapped) }}
+        upstream catch_all {
+            server {{ $upstreamAddress }};
+        }
+        {{- end }}
+
+        server {
+            listen {{ .Values.tlsLb.nginx.httpsPort }} ssl;
+            server_name {{ $serverNames }};
+
+            ssl_certificate     {{ include "c8s-lib.tlsLb.publicCertPath" . }};
+            ssl_certificate_key {{ include "c8s-lib.tlsLb.publicKeyPath" . }};
+
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
+            ssl_prefer_server_ciphers on;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 1d;
+
+            # Headroom for upstream responses with large headers.
+            proxy_buffer_size 16k;
+            proxy_buffers 4 16k;
+
+            {{- if $renderAllowlistRoute }}
+            # Built-in control-plane route. The exact + slash-prefix pair
+            # exposes only /allowlist and its API subtree, not lookalike paths.
+            {{- $allowlistLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
+            {{- include "c8s-lib.tlsLb.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
+            {{- include "c8s-lib.tlsLb.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
+
+            {{- end }}
+            {{- range $i, $route := .Values.tlsLb.routes }}
+            {{- $path := required (printf "tlsLb.routes[%d].path is required" $i) $route.path }}
+            {{- $match := default "prefix" $route.match }}
+            {{- if not (or (eq $match "exact") (eq $match "prefix")) }}
+            {{- fail (printf "tlsLb.routes[%d].match must be 'exact' or 'prefix', got: %s" $i $match) }}
+            {{- end }}
+            {{- if not (regexMatch `^/[A-Za-z0-9._~!$&()*+,=:@%/-]*$` $path) }}
+            {{- fail (printf "tlsLb.routes[%d].path must start with '/' and contain only URI path characters safe for nginx locations, got: %s" $i $path) }}
+            {{- end }}
+            {{- $backend := required (printf "tlsLb.routes[%d].backend is required" $i) $route.backend }}
+            {{- $backendAddress := required (printf "tlsLb.routes[%d].backend.address is required" $i) $backend.address }}
+            {{- $backendProtocol := default "http" $backend.protocol }}
+            {{- if not (or (eq $backendProtocol "http") (eq $backendProtocol "https")) }}
+            {{- fail (printf "tlsLb.routes[%d].backend.protocol must be 'http' or 'https', got: %s" $i $backendProtocol) }}
+            {{- end }}
+            {{- if not (regexMatch `^[^[:space:]{};/#]+$` $backendAddress) }}
+            {{- fail (printf "tlsLb.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
+            {{- end }}
+            {{- $backendTLS := default dict $backend.tls }}
+            {{- $backendTrustedCAPath := default $defaultMeshCAPath $backendTLS.trustedCAPath }}
+            {{- $backendServerName := default (include "c8s-lib.tlsLb.serverNameFromAddress" $backendAddress) $backendTLS.serverName }}
+            {{- include "c8s-lib.tlsLb.validateProxyTLS" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "label" (printf "tlsLb.routes[%d].backend" $i)) }}
+            {{- if and (ne $backendProtocol "https") (or (default false $backendTLS.verify) (default false $backendTLS.useCDSClientCert)) }}
+            {{- fail (printf "tlsLb.routes[%d].backend.tls.verify and useCDSClientCert require backend.protocol: https" $i) }}
+            {{- end }}
+            {{- include "c8s-lib.tlsLb.requireSecuredBackend" (dict "protocol" $backendProtocol "tls" $backendTLS "address" $backendAddress "label" (printf "tlsLb.routes[%d].backend" $i) "kind" "tlslb_unsecured_route" "suggest" "") }}
+            {{- /* Route inherits the global CORS block; route.cors.enabled (if set) toggles it on/off for this route only. */}}
+            {{- $routeCors := deepCopy $.Values.tlsLb.cors }}
+            {{- if and (hasKey $route "cors") (hasKey (default dict $route.cors) "enabled") }}
+            {{- $_ := set $routeCors "enabled" $route.cors.enabled }}
+            {{- end }}
+            # Route: {{ $path }} -> {{ $backendProtocol }}://{{ $backendAddress }}
+            {{- if eq $match "exact" }}
+            location = {{ $path }} {
+            {{- else }}
+            location {{ $path }} {
+            {{- end }}
+                {{- if default false $routeCors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" $routeCors | nindent 16 }}
+                {{- end }}
+                {{- if eq $backendProtocol "https" }}
+                {{- include "c8s-lib.tlsLb.proxySSLDirectives" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "tlsMountPath" $.Values.tlsLb.tlsMountPath) | nindent 16 }}
+                {{- end }}
+                proxy_pass {{ $backendProtocol }}://route_{{ $i }};
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            {{- end }}
+            {{- if .Values.tlsLb.discovery.enabled }}
+            location = {{ .Values.tlsLb.discovery.path }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "c8s-lib.tlsLb.protocolCorsEnabled" .) "true" }}
+                {{- include "c8s-lib.tlsLb.protocolCorsLocationDirectives" . | nindent 16 }}
+                {{- end }}
+                access_log off;
+                default_type application/json;
+                add_header Cache-Control "no-store" always;
+                alias {{ include "c8s-lib.tlsLb.discoveryFilePath" . }};
+            }
+
+            location = {{ .Values.tlsLb.discovery.cdsCertPath }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "c8s-lib.tlsLb.protocolCorsEnabled" .) "true" }}
+                {{- include "c8s-lib.tlsLb.protocolCorsLocationDirectives" . | nindent 16 }}
+                {{- end }}
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias {{ .Values.tlsLb.tlsMountPath }}/cert.pem;
+            }
+
+            {{- if .Values.tlsLb.meshCA.expose }}
+            location = {{ .Values.tlsLb.discovery.meshCAPath }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "c8s-lib.tlsLb.protocolCorsEnabled" .) "true" }}
+                {{- include "c8s-lib.tlsLb.protocolCorsLocationDirectives" . | nindent 16 }}
+                {{- end }}
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias {{ $defaultMeshCAPath }};
+            }
+            {{- end }}
+
+            {{- end }}
+            {{- if .Values.tlsLb.attest.enabled }}
+            # The sidecar's readiness gate, proxied so kubelet can reach it.
+            # cds-attest listens on loopback (its one listener also carries the
+            # attestation and tunnel routes, which must not be
+            # published on the pod IP), and under kata the guest redirects every
+            # inbound port but this one into the mutual RA-TLS proxy, which
+            # rejects the certless prober. So the probe rides the front door:
+            # exact-match, ahead of any catch-all upstream.
+            location = /readyz {
+                access_log off;
+                proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # c8s-verify attestation + over-encryption sidecar (loopback).
+            # nginx serves the static cert(s) via discovery above; the dynamic
+            # per-session endpoints — the attest-pq attestation + key exchange,
+            # the attest-lb challenge, and the over-encrypted tunnel — are
+            # proxied to the in-pod `cds-attest` sidecar. The prefix also
+            # covers the retired /attestation and /handshake paths so the
+            # sidecar serves its explicit versioned 400 (no alias or
+            # downgrade) instead of nginx 404ing them.
+            # X-Real-IP is the address the sidecar meters each client by.
+            location /.well-known/c8s/ {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "c8s-lib.tlsLb.protocolCorsEnabled" .) "true" }}
+                {{- include "c8s-lib.tlsLb.protocolCorsLocationDirectives" . | nindent 16 }}
+                {{- end }}
+                proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            {{- end }}
+            {{- if $upstreamAddress }}
+            location / {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "c8s-lib.tlsLb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- end }}
+                {{- if eq .Values.tlsLb.upstream.protocol "https" }}
+                {{- include "c8s-lib.tlsLb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
+                {{- end }}
+                {{- if $upstreamMeshWrapped }}
+                set $backend_addr {{ $upstreamAddress }};
+                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://$backend_addr;
+                {{- else }}
+                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://catch_all;
+                {{- end }}
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                {{- /*
+                  Stream responses through instead of accumulating them.
+
+                  nginx defaults to proxy_buffering on and HTTP/1.0 upstream, so
+                  a Server-Sent Events body is buffered and released in clumps.
+                  For token streaming that turns a smooth generation into
+                  bursts: measured on an 8xB300 TDX node-as-CVM, TTFT p50 rose
+                  22.4ms -> 287.2ms through this proxy while inter-token latency
+                  *fell* 5.49ms -> 1.58ms. ITL improving across an extra hop is
+                  the tell -- chunks arriving together compress measured ITL
+                  while first-token latency rises.
+
+                  proxy_http_version 1.1 is required alongside it: HTTP/1.0
+                  upstream has no chunked transfer-encoding, so nginx must read
+                  to EOF to know the body length, which re-buffers regardless of
+                  proxy_buffering.
+
+                  Both are safe for non-streaming responses -- they change when
+                  bytes are forwarded, not what is sent.
+                */}}
+                proxy_buffering off;
+                proxy_http_version 1.1;
+            }
+            {{- end }}
+
+            location /healthz {
+                access_log off;
+                return 200 "ok\n";
+                add_header Content-Type text/plain;
+            }
+        }
+        {{- if eq $publicTLSMode "acme" }}
+
+        # Public :80 (hostPort/Service -> acmeHTTPPort): HTTP-01 challenges
+        # reach the acme sidecar on loopback; everything else upgrades.
+        server {
+            listen {{ include "c8s-lib.tlsLb.acmeHTTPPort" . }};
+            server_name {{ $serverNames }};
+
+            location /.well-known/acme-challenge/ {
+                access_log off;
+                proxy_pass http://127.0.0.1:{{ include "c8s-lib.tlsLb.acmeChallengePort" . }};
+                proxy_set_header Host $host;
+            }
+
+            location / {
+                return 301 https://$host$request_uri;
+            }
+        }
+        {{- end }}
+    }
+{{- end }}
+{{- end }}

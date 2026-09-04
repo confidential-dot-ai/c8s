@@ -456,7 +456,7 @@ host.
 
 ## Puller DaemonSet
 
-`internal/helmchart/c8s/templates/kata-image-puller.yaml`. Per node, the
+`internal/helmchart/pod/templates/kata-image-puller.yaml`. Per node, the
 puller does two things:
 
 1. `oras pull ghcr.io/confidential-dot-ai/kata-guest-base:<tag>` into

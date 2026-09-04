@@ -69,7 +69,7 @@ same.`,
 	}
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
-	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode the allowlist targets (pod, node, gke, aks); pod silences the mount/env scope warning")
+	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "install shape the allowlist targets (pod, node-cloud, node-metal, node-image); pod silences the mount/env scope warning")
 	return cmd
 }
 

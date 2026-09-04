@@ -154,7 +154,7 @@ const reservedCertWaitContainerName = "c8s-cert-wait"
 // VM-isolated (non-confidential) pod; the confidential classes come in a
 // (CPU, GPU) pair per hardware platform, selected by Config.HardwarePlatform.
 // These are NOT configurable: the names are a fixed contract with the
-// RuntimeClasses the c8s chart installs (internal/helmchart/c8s/templates/kata.yaml)
+// RuntimeClasses the c8s-pod chart installs (internal/helmchart/pod/templates/kata.yaml)
 // AND with the kata-enforcement ValidatingAdmissionPolicy allowlist, so a custom
 // class would be rejected by the policy and have no matching shim or measurement.
 const kataRuntimeClass = "kata-qemu"
@@ -1225,13 +1225,13 @@ func getCertEnv(inj *injection) []corev1.EnvVar {
 		{Name: "C8S_POD_UID", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 		}},
-		// cvmMode=node: the chart passes the operator a verbatim
+		// node-image shape: the chart passes the operator a verbatim
 		// --attestation-api-url=http://$(HOST_IP):8400, which reaches this arg
 		// (certContainer) through sidecarAttestationApiURL — its pass-through of
 		// non-unix URLs is what keeps $(HOST_IP) unexpanded. The kubelet expands
 		// $(HOST_IP) against THIS tenant pod's node, so the sidecar reaches the
-		// node-baked host attestation-api on whichever node it lands. Unused
-		// (harmless) in modes whose URL has no $(HOST_IP).
+		// image-baked host attestation-api on whichever node it lands. Unused
+		// (harmless) on shapes whose URL has no $(HOST_IP).
 		{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"},
 		}},

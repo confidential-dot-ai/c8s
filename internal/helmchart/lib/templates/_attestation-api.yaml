@@ -1,0 +1,191 @@
+{{- define "c8s-lib.attestationApi" -}}
+{{- $device := include "c8s-lib.teeDevice" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "c8s-lib.attestationApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: attestation-api
+{{ include "c8s-lib.serviceAccountImagePullSecrets" . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s-lib.attestationApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: attestation-api
+data:
+  config.toml: |
+{{ include "c8s-lib.attestationApiConfig" (dict "root" .) | indent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s-lib.attestationApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: attestation-api
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: attestation-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: attestation-api
+      annotations:
+        checksum/config: {{ include "c8s-lib.attestationApiConfig" (dict "root" .) | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "c8s-lib.attestationApiName" . }}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: attestation-api
+          image: {{ include "c8s-lib.attestationApiImage" . }}
+          imagePullPolicy: {{ .Values.attestationApi.image.pullPolicy }}
+          args: [--config, /etc/attestation-api/config.toml]
+          ports:
+            - name: http
+              containerPort: {{ .Values.attestation.port }}
+          securityContext:
+            {{- /* A hostPath device mount does not add a device-cgroup rule,
+                   so open() on the TEE device is EPERM from an unprivileged
+                   container regardless of SYS_RAWIO. TODO: drop privileged by
+                   routing attest through the TSM configfs report interface. */}}
+            privileged: true
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          # The API's health signal is the attest-proxy's exec probe: the API
+          # binds pod loopback, which kubelet cannot dial.
+          volumeMounts:
+            - name: config
+              mountPath: /etc/attestation-api
+              readOnly: true
+            {{- if eq $device "sev-guest" }}
+            - name: sev-guest
+              mountPath: /dev/sev-guest
+            {{- end }}
+            {{- if eq $device "tdx" }}
+            # On a bare-metal TDX host /dev/tdx-guest does not exist — it is a
+            # guest-side device. The host path is the kernel ConfigFS TSM
+            # interface at /sys/kernel/config/tsm/report.
+            - name: tdx-tsm-configfs
+              mountPath: /sys/kernel/config
+            {{- end }}
+            {{- if eq $device "tpm" }}
+            - name: tpm
+              mountPath: /dev/tpm0
+            - name: tpmrm
+              mountPath: /dev/tpmrm0
+            {{- end }}
+          resources:
+{{ toYaml .Values.attestationApi.resources | indent 12 }}
+        # The on-node front door: publishes the pod-loopback API on a
+        # hostPath Unix socket next to the admission inventory's socket, so
+        # exactly host processes and pods the socket dir is mounted into can
+        # request evidence.
+        - name: attest-proxy
+          image: {{ include "c8s-lib.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - attest-proxy
+            - --socket={{ include "c8s-lib.attestationSocket" . }}
+            - --upstream=http://127.0.0.1:{{ .Values.attestation.port }}
+          # uid 0 so the socket is root-owned (callers reject a socket owned
+          # by anyone but root or themselves); runAsGroup is the socket's
+          # group so the chgrp needs no CAP_CHOWN.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          readinessProbe:
+            exec:
+              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s-lib.attestationSocket" . }}]
+            initialDelaySeconds: 2
+            # Above the healthcheck's internal 3s budget (kubelet default is 1s).
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s-lib.attestationSocket" . }}]
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/attestation-api
+              readOnly: true
+            - name: socket-dir
+              mountPath: {{ .Values.runtimeDir }}
+          resources:
+{{ toYaml .Values.attestationApi.proxy.resources | indent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "c8s-lib.attestationApiName" . }}
+        # hostPath.type=CharDevice forces a hard failure on nodes that
+        # lack the device, instead of silently mounting an empty file —
+        # attestation evidence would then be silently bogus.
+        {{- if eq $device "sev-guest" }}
+        - name: sev-guest
+          hostPath:
+            path: /dev/sev-guest
+            type: CharDevice
+        {{- end }}
+        {{- if eq $device "tdx" }}
+        # Mount /sys/kernel/config for the TSM ConfigFS report interface, NOT
+        # /dev/tdx-guest (guest-side only). Directory type keeps the same
+        # "hard fail on missing" semantics as CharDevice.
+        - name: tdx-tsm-configfs
+          hostPath:
+            path: /sys/kernel/config
+            type: Directory
+        {{- end }}
+        {{- if eq $device "tpm" }}
+        - name: tpm
+          hostPath:
+            path: /dev/tpm0
+            type: CharDevice
+        - name: tpmrm
+          hostPath:
+            path: /dev/tpmrm0
+            type: CharDevice
+        {{- end }}
+        # Shared with the admission inventory.
+        - name: socket-dir
+          hostPath:
+            path: {{ .Values.runtimeDir }}
+            type: DirectoryOrCreate
+---
+# The API binds pod loopback, so nothing on the pod network can reach it; this
+# policy is the second line, keeping even an accidental rebind pod-unreachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "c8s-lib.attestationApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: attestation-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: attestation-api
+  policyTypes:
+    - Ingress
+{{- end }}

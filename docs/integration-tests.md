@@ -14,10 +14,10 @@ covers and why the kind harness is shaped the way it is.
 
 `test/integration/cluster/run.sh` boots a single-node kind cluster, builds the
 component images from the checkout, and runs the real `c8s install
---cvm-mode=node`. The TEE is substituted at exactly one point: **evidence
+--cvm-mode=node-image`. The TEE is substituted at exactly one point: **evidence
 generation**. `test/mock-attestation` serves synthetic SNP reports (launch
-digest all-zero) on the node IP :8400 — the address node-mode consumers dial
-for the node-baked api — and an `attest-proxy` sidecar publishes it on the
+digest all-zero) on the node IP :8400 — the address node-image consumers dial
+for the image-baked api — and an `attest-proxy` sidecar publishes it on the
 hostPath unix socket the host plugin uses. Every component that delegates
 verification to the attestation-api (get-cert, CDS, ratls-mesh, the NRI
 plugin) works unchanged against it. The all-zero digest is pinned via

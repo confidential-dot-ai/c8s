@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -16,7 +17,7 @@ import (
 // components that match whole images, and the same values are also fanned out
 // flat so the consumers that read a plain digest list — the NRI plugin, the
 // operator's initdata — keep pinning exactly what they pin today.
-func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
+func installPins(shape helmchart.Shape) (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
 	if installMeasurementsConfig == "" {
 		digests, err = ratls.ParseHexMeasurementsList(installMeasurements)
 		if err != nil {
@@ -50,10 +51,11 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 			"images", len(set.Entries))
 	}
 	// The chart takes the file's content; helm reads the same path this
-	// command just validated.
-	helmArgs = []string{
-		"--set-file", "cds.measurementsConfig=" + path,
-		"--set-file", "ratlsMesh.measurementsConfig=" + path,
+	// command just validated. The mesh's copy exists only on the node shapes —
+	// under pod the mesh runs in-guest and mounts no cluster ConfigMap.
+	helmArgs = []string{"--set-file", "cds.measurementsConfig=" + path}
+	if shape.IsNode() {
+		helmArgs = append(helmArgs, "--set-file", "ratlsMesh.measurementsConfig="+path)
 	}
 	return set.Digests(), common, helmArgs, nil
 }

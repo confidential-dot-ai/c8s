@@ -23,7 +23,7 @@ import (
 // validation expressions, keyed by policy name.
 func renderedUIDPolicies(t *testing.T) map[string][]admissionregv1.Validation {
 	t.Helper()
-	out, err := helmTemplate(t)
+	out, err := helmTemplate(t, chartNodeMetal)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}

@@ -1,0 +1,148 @@
+{{- define "c8s-lib.validations" -}}
+{{- $tlsLB := .Values.tlsLb -}}
+{{/* The pod chart carries nriImagePolicy.bootstrapAllowlist only (the floor
+   the in-guest monitor pulls); the host-plugin knobs exist in the node
+   charts. node-shape covers every chart but pod. */ -}}
+{{- $hostNRI := and .Values.nriImagePolicy .Values.nriImagePolicy.policy -}}
+{{- $nodeShape := ne (include "c8s-lib.kata" .) "true" -}}
+{{- /*
+  Platform enum, per chart: the pod and node-metal charts accept only the
+  native TEEs; node-cloud additionally accepts the Azure vTPM platforms. The
+  schema constrains this too; this guard is the values-file-only backstop.
+*/ -}}
+{{- if not (has .Values.platform (list "snp" "tdx" "az-snp" "az-tdx")) -}}
+{{- fail (printf "VALIDATION_ERROR kind=platform_unknown: platform must be one of snp, tdx, az-snp, az-tdx (got %q)" .Values.platform) -}}
+{{- end -}}
+{{- /*
+  Under kata the webhook injects c8s-cert/c8s-secret/c8s-volume into every
+  confidential pod off `image`, and they run inside the guest, where the baked
+  kata-agent policy admits only digest-pinned image references. A tag renders
+  sidecars the guest refuses at CreateContainer, so no confidential pod starts.
+*/ -}}
+{{- if and (eq (include "c8s-lib.kata" .) "true") (not .Values.image.digest) -}}
+{{- fail "VALIDATION_ERROR kind=kata_image_digest: the pod shape requires image.digest to be set. The injected c8s sidecars run inside the confidential guest, which admits only digest-pinned image references — a tag names whatever the registry serves at pull time, so it cannot be checked against the allowlist. Pass --resolve-digests to c8s install, or set image.digest via -f." -}}
+{{- end -}}
+{{- if and (eq (include "c8s-lib.kata" .) "true") (ne .Values.webhook.failurePolicy "Fail") -}}
+{{- fail (printf "the pod shape requires webhook.failurePolicy=Fail (got %q): kata is enforcing — the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
+{{- end -}}
+{{- if and (eq (include "c8s-lib.kata" .) "true") (lt (int .Values.kata.gpu.guestImage.pcieRootPort) 1) -}}
+{{- fail (printf "VALIDATION_ERROR kind=gpu_pcie_root_port: kata.gpu.guestImage.pcieRootPort must be >= 1 (got %v). VFIO cold-plug attaches each passed-through GPU behind a pcie-root-port, so 0 disables passthrough: a GPU pod boots as a confidential VM with NO device and the only symptom is a missing /dev/nvidia* in-guest. Size it to the node's GPU count (default 8 = a full HGX board)." .Values.kata.gpu.guestImage.pcieRootPort) -}}
+{{- end -}}
+{{- /*
+  Every node shape runs image admission (the chart installer on cloud/metal,
+  the baked plugin on node-image), and its floor must admit CDS on its own
+  node — a floating CDS tag cannot be admitted by digest.
+*/ -}}
+{{- if and $nodeShape .Values.nriImagePolicy (not .Values.cds.image.digest) -}}
+{{- fail "VALIDATION_ERROR kind=cds_image_digest: the node shapes require cds.image.digest to be set. The CDS digest is pinned in every plugin's always_allow floor so image policy admits CDS on its own node. A floating tag cannot be admitted by digest. Pass --resolve-digests to c8s install, or set cds.image.digest via -f." -}}
+{{- end -}}
+{{- /*
+  In fail-closed mode with deriveComponents off, every enabled c8s component
+  that is digest-pinned must also be listed in bootstrapAllowlist.digests —
+  otherwise the NRI plugin would deny that component's pod on its own node.
+  cds.image is exempt: it is always added to the floor via the seed self-entry,
+  independent of derivation. This guard only applies in fail-closed mode (the
+  default); audit mode creates every container, but with workloadClaims on a
+  would-be denial still reaches /digests and costs its sandbox a certificate.
+*/ -}}
+{{- /* node-image has no policy section: the baked plugin is fail-closed by
+     construction. */ -}}
+{{- $failClosed := or (not $hostNRI) (eq .Values.nriImagePolicy.policy.mode "fail-closed") -}}
+{{- if and $nodeShape .Values.nriImagePolicy $failClosed (not .Values.nriImagePolicy.bootstrapAllowlist.deriveComponents) -}}
+{{- $floor := .Values.nriImagePolicy.bootstrapAllowlist.digests -}}
+{{- range $c := (include "c8s-lib.components" . | fromJsonArray) -}}
+{{- $img := get $c "image" -}}
+{{- if and (get $c "enabled") (not (get $c "cdsExempt")) (get $img "digest") (not (hasKey $floor (get $img "digest"))) -}}
+{{- fail (printf "VALIDATION_ERROR kind=uncovered_component_digest: nriImagePolicy.policy.mode=fail-closed with deriveComponents=false, but %s is digest-pinned (%s) and that digest is not in nriImagePolicy.bootstrapAllowlist.digests. The plugin would deny it on its own node. Add the digest to bootstrapAllowlist.digests, set deriveComponents=true, or use c8s install --resolve-digests." (get $c "name") (get $img "digest")) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $hostNRI (not (hasPrefix "https://" (tpl (include "c8s-lib.nriCDSURL" .) .))) -}}
+{{- fail (printf "nriImagePolicy.cds.url must start with https:// (got %q): the host plugin must fetch the allowlist over RA-TLS" (tpl (include "c8s-lib.nriCDSURL" .) .)) -}}
+{{- end -}}
+{{- /*
+  The derived form is a node-local NodePort address, so there has to be one.
+*/ -}}
+{{- if and $hostNRI (not .Values.nriImagePolicy.cds.url) -}}
+{{- if or (ne .Values.cds.service.type "NodePort") (not .Values.cds.service.nodePort) -}}
+{{- fail (printf "VALIDATION_ERROR kind=nri_cds_url_underivable: nriImagePolicy.cds.url is empty, so it derives https://127.0.0.1:<cds.service.nodePort>, but cds.service.type is %q and cds.service.nodePort is %v. Set cds.service.type=NodePort with a nodePort, or set nriImagePolicy.cds.url to the address the plugin should pull from." .Values.cds.service.type .Values.cds.service.nodePort) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+  Catch-all upstream check. No upstream is a legal state: tls-lb installs and
+  serves with no catch-all until a backend is wired (install-then-attach). When
+  an upstream IS set, it must be either:
+   - an operator-managed headless Service (c8s-<id>.<ns>.svc.cluster.local:<port>,
+     which `c8s install --upstream` derives): the app-layer hop is plaintext
+     http, the node mesh intercepts the pod-IP hop and wraps it in attested mTLS.
+     The shape match below is ADVISORY — it can't prove the Service is headless
+     (a ClusterIP Service of the same name would be a VIP the mesh skips), so the
+     real boundary is ratlsMesh.cwInboundEnforcement, which drops VIP/FORWARD-path
+     hops to cw pods at runtime. This guard only catches accidental plaintext.
+     An https protocol on this shape can only fail at runtime, so reject it.
+   - a manual address that terminates and verifies TLS itself (app-TLS): must
+     be https with tls.verify=true. A silently plaintext manual address would
+     leave the hop unprotected. There is no plaintext-to-unattested escape hatch.
+*/ -}}
+{{- if and $tlsLB.enabled $tlsLB.upstream.address -}}
+{{- if eq (include "c8s-lib.tlsLb.meshWrappedUpstream" $tlsLB.upstream.address) "true" -}}
+{{- if eq $tlsLB.upstream.protocol "https" -}}
+{{- fail "VALIDATION_ERROR kind=workload_https_upstream: a c8s-<id> headless-Service upstream is plaintext http at the app layer (the mesh wraps the hop in attested mTLS), but tlsLb.upstream.protocol=https; use protocol http for a mesh-wrapped upstream" -}}
+{{- end -}}
+{{- else -}}
+{{- include "c8s-lib.tlsLb.requireSecuredBackend" (dict "protocol" $tlsLB.upstream.protocol "tls" $tlsLB.upstream.tls "address" $tlsLB.upstream.address "label" "tlsLb.upstream" "kind" "tlslb_unsecured_upstream" "suggest" "To reach a confidential workload adopt it with --workload-ref <id>=<ns>/<kind>/<name>:<port> and pass --upstream <id> (the mesh wraps that plaintext hop in attested mTLS); ") -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+  Rate budget for the built-in /allowlist route. CDS rate-limits per source
+  IP and sees every front-door request as the one tls-lb pod IP, so the nginx
+  aggregate write bound must undercut the CDS bucket signed operator writes
+  share, and each per-client bound must fit inside the aggregate. Positivity
+  parsing lives with the zone rendering in the configmap (same
+  c8s-lib.positiveInt, so either template failing first reports the same
+  message).
+*/ -}}
+{{- if and $tlsLB.enabled (eq (include "c8s-lib.tlsLb.renderAllowlistRoute" .) "true") -}}
+{{- $writeRate := int (include "c8s-lib.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $writeBurst := int (include "c8s-lib.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
+{{- $writeTotalRate := int (include "c8s-lib.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $writeTotalBurst := int (include "c8s-lib.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
+{{- if gt $writeRate $writeTotalRate -}}
+{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (%d), got: %d" $writeTotalRate $writeRate) -}}
+{{- end -}}
+{{- if gt $writeBurst $writeTotalBurst -}}
+{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (%d), got: %d" $writeTotalBurst $writeBurst) -}}
+{{- end -}}
+{{- if ge (float64 $writeTotalRate) (float64 .Values.cds.rateLimit) -}}
+{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $writeTotalRate) -}}
+{{- end -}}
+{{- if ge $writeTotalBurst (int .Values.cds.rateBurst) -}}
+{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $writeTotalBurst) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+  CDS refuses to start unless the per-workload secret quota is strictly below
+  the store ceiling, so the pair is refused here instead.
+*/ -}}
+{{- $secretsCeiling := int (include "c8s-lib.positiveInt" (dict "value" .Values.cds.secretsMaxPaths "label" "cds.secretsMaxPaths")) -}}
+{{- $secretsQuota := int (include "c8s-lib.positiveInt" (dict "value" .Values.cds.secretsMaxPathsPerWorkload "label" "cds.secretsMaxPathsPerWorkload")) -}}
+{{- if ge $secretsQuota $secretsCeiling -}}
+{{- fail (printf "VALIDATION_ERROR kind=cds_secrets_path_budget: cds.secretsMaxPathsPerWorkload must be below cds.secretsMaxPaths (%d), got: %d" $secretsCeiling $secretsQuota) -}}
+{{- end -}}
+{{- /*
+  Per-container `paths` was replaced by an entry-level `secrets` grant. CDS
+  parses its seed with unknown fields rejected and fails closed on a parse
+  error, so a values file carried over from a release that used `paths` would
+  not misconfigure CDS — it would stop it booting, taking the mesh CA with it.
+  Catch it at upgrade time instead. See docs/secrets.md.
+*/ -}}
+{{- range $name, $entry := .Values.nriImagePolicy.bootstrapAllowlist.workloads -}}
+{{- range $field := (list "initContainers" "containers") -}}
+{{- range $ctr := (index $entry $field) -}}
+{{- if hasKey $ctr "paths" -}}
+{{- fail (printf "VALIDATION_ERROR kind=allowlist_container_paths: nriImagePolicy.bootstrapAllowlist.workloads.%s.%s has a container with a `paths` policy, which was replaced by an entry-level `secrets` grant. CDS rejects unknown fields in its seed and would fail to start. Move the grant up to the entry as `secrets: {policy: allow, read: [...], write: [...]}` (a deny grant is just omitted). See docs/secrets.md." $name $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

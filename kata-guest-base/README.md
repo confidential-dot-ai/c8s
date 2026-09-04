@@ -116,7 +116,7 @@ pins" for the full list, locations, and bump procedure.
 
 ## How it's consumed in-cluster
 
-The `c8s-kata-image-puller` DaemonSet (`internal/helmchart/c8s/templates/
+The `c8s-kata-image-puller` DaemonSet (`internal/helmchart/pod/templates/
 kata-image-puller.yaml`) `oras pull`s the published artifact onto each
 node and patches the `runtimes/qemu-snp/configuration-qemu-snp.toml` that
 containerd's `ConfigPath` references:
@@ -193,5 +193,5 @@ a debug image can't silently stand in for a locked one. Select it with
   digest (see
   [`docs/kata-image-policy.md`](../docs/kata-image-policy.md)).
 - **kata version pin.** `scripts/build.sh` (osbuilder source tag) must
-  stay in lockstep with `internal/helmchart/c8s/values.yaml` (kata-deploy
+  stay in lockstep with `internal/helmchart/pod/values.yaml` (kata-deploy
   version) — host/guest agent skew breaks the ttRPC contract.

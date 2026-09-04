@@ -1,0 +1,2345 @@
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-cds-ingress
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+  policyTypes:
+    - Ingress
+  ingress:
+    # RA-TLS from anywhere: get-cert runs beside every adopted workload, and the
+    # NodePort route arrives off-cluster.
+    - ports:
+        - protocol: TCP
+          port: 8443
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-operator-ingress
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: operator
+  policyTypes:
+    - Ingress
+  ingress:
+    # 9443 is the admission webhook, dialled by the API server, whose address no
+    # selector can name; 8081 carries the kubelet's probes; 8080 is metrics.
+    - ports:
+        - protocol: TCP
+          port: 9443
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8080
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-volumed-ingress
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: volumed
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: volumed
+  policyTypes:
+    - Ingress
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-tls-lb-ingress
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: ingress-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tls-lb
+      app.kubernetes.io/instance: c8s
+  policyTypes:
+    - Ingress
+  ingress:
+    # The public front door, from anywhere: the Service's only port targets it,
+    # and so does hostPort when enabled. Naming it leaves the cds-attest and
+    # allowlist-proxy sidecars — which bind pod loopback and are reached through
+    # nginx — unreachable if one ever rebinds.
+    - ports:
+        - protocol: TCP
+          port: 8443
+
+---
+# Source: c8s/templates/ratls-mesh-egress-tcp-only-policy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ratls-mesh-tcp-only-egress
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+    app.kubernetes.io/component: egress-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Allow all TCP egress (intercepted by ratls-mesh); non-TCP egress is
+    # dropped by the mesh's fail-closed guard. DNS/53 (UDP) to kube-system is
+    # the sanctioned plaintext exception.
+    - ports:
+        - protocol: TCP
+    - ports:
+        - protocol: UDP
+          port: 53
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+
+---
+# Source: c8s/templates/cds-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+
+---
+# Source: c8s/templates/ratls-mesh-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c8s-ratls-mesh
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: c8s-ratls-mesh
+      app.kubernetes.io/name: ratls-mesh
+      app.kubernetes.io/instance: c8s
+
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+---
+# Source: c8s/templates/ratls-mesh-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-ratls-mesh
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-cds-allowlist-seed
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+data:
+  allowlist-seed.json: "{\"digests\":{\"sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200\":\"nginxinc/nginx-unprivileged@sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200\",\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\":\"ghcr.io/confidential-dot-ai/cds@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"schema\":\"c8s.allowlist/v1\",\"workloads\":{}}"
+---
+# Source: c8s/templates/tls-lb-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-tls-lb-nginx
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /tmp/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent"';
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        keepalive_timeout 65;
+
+        # Rate-limit /allowlist while nginx still has the public client IP;
+        # empty map keys are not accounted by limit_req. Mutations count per
+        # client and in aggregate (the constant-key zone guards the shared
+        # per-pod-IP CDS bucket; see docs/operator.md), reads per client;
+        # OPTIONS (CORS preflight) is exempt. The total key chains off the
+        # write key so the exempt-method list exists once.
+        map $request_method $allowlist_write_rate_key {
+            default $binary_remote_addr;
+            GET "";
+            HEAD "";
+            OPTIONS "";
+        }
+        map $allowlist_write_rate_key $allowlist_write_total_key {
+            "" "";
+            default "all";
+        }
+        map $request_method $allowlist_read_rate_key {
+            default "";
+            GET $binary_remote_addr;
+            HEAD $binary_remote_addr;
+        }
+        limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate=1r/s;
+        limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate=8r/s;
+        limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate=20r/s;
+        # A mesh-wrapped catch-all is dialed via a variable (see location /), so
+        # nginx re-resolves it here at request time per record TTL: a static
+        # upstream block would pin the pod IPs the adopted workload's headless
+        # Service resolved to at startup and 502 after pod churn. Nothing
+        # authenticates the answer -- the app-layer hop is plaintext and the
+        # mesh binds the pod IP it is handed, not the name -- so an adversary
+        # who can forge cluster DNS retargets this hop. Every other upstream
+        # gets a static block below and no resolver is rendered at all.
+        resolver kube-dns.kube-system.svc.cluster.local;
+
+        server {
+            listen 8443 ssl;
+            server_name c8s-tls-lb.c8s-system.svc;
+
+            ssl_certificate     /tls/cert.pem;
+            ssl_certificate_key /tls/key.pem;
+
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
+            ssl_prefer_server_ciphers on;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 1d;
+
+            # Headroom for upstream responses with large headers.
+            proxy_buffer_size 16k;
+            proxy_buffers 4 16k;
+            # Built-in control-plane route. The exact + slash-prefix pair
+            # exposes only /allowlist and its API subtree, not lookalike paths.
+            location = /allowlist {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                # These run before nginx collapses callers onto the loopback proxy source.
+                # Each zone's map key is empty for the methods it does not cover, so
+                # mutations count per client and in aggregate, reads per client only.
+                limit_req zone=allowlist_write_per_client burst=5 nodelay;
+                limit_req zone=allowlist_write_total burst=15 nodelay;
+                limit_req zone=allowlist_read_per_client burst=40 nodelay;
+                limit_req_status 429;
+                proxy_pass http://127.0.0.1:8801$request_uri;
+                proxy_set_header Host $host;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location /allowlist/ {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                # These run before nginx collapses callers onto the loopback proxy source.
+                # Each zone's map key is empty for the methods it does not cover, so
+                # mutations count per client and in aggregate, reads per client only.
+                limit_req zone=allowlist_write_per_client burst=5 nodelay;
+                limit_req zone=allowlist_write_total burst=15 nodelay;
+                limit_req zone=allowlist_read_per_client burst=40 nodelay;
+                limit_req_status 429;
+                proxy_pass http://127.0.0.1:8801$request_uri;
+                proxy_set_header Host $host;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location = /v1/discovery {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/json;
+                add_header Cache-Control "no-store" always;
+                alias /discovery/discovery.json;
+            }
+
+            location = /.well-known/cds-cert.pem {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias /tls/cert.pem;
+            }
+            location = /.well-known/mesh-ca.pem {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias /tls/ca.pem;
+            }
+            # The sidecar's readiness gate, proxied so kubelet can reach it.
+            # cds-attest listens on loopback (its one listener also carries the
+            # attestation, handshake and tunnel routes, which must not be
+            # published on the pod IP), and under kata the guest redirects every
+            # inbound port but this one into the mutual RA-TLS proxy, which
+            # rejects the certless prober. So the probe rides the front door:
+            # exact-match, ahead of any catch-all upstream.
+            location = /readyz {
+                access_log off;
+                proxy_pass http://127.0.0.1:8800;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # c8s-verify attestation + over-encryption sidecar (loopback).
+            # nginx serves the static cert(s) via discovery above; the dynamic
+            # per-session endpoints — the explicit attest-pq and attest-lb
+            # challenges and the PQ handshake/tunnel — are proxied to the
+            # in-pod `cds-attest` sidecar. The prefix also covers the retired
+            # /attestation path so the sidecar serves its explicit versioned
+            # 400 (no alias or downgrade) instead of nginx 404ing it.
+            # X-Real-IP is the address the sidecar meters each client by.
+            location /.well-known/c8s/ {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                proxy_pass http://127.0.0.1:8800;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location / {
+                set $backend_addr c8s-infer.c8s-system.svc.cluster.local:8000;
+                proxy_pass http://$backend_addr;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_buffering off;
+                proxy_http_version 1.1;
+            }
+
+            location /healthz {
+                access_log off;
+                return 200 "ok\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+
+---
+# Source: c8s/templates/cds-rbac.yaml
+# CDS derives the sandbox-digests dial bound from the live node list unless
+# cds.sandboxInventoryCIDRs pins it statically — only the derived mode needs
+# the node read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: c8s-cds-node-reader
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: c8s/templates/ratls-mesh-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: c8s-ratls-mesh
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: c8s-operator
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [confidential.ai]
+    resources: [confidentialworkloads]
+    verbs: [get, list, watch]
+  - apiGroups: [confidential.ai]
+    resources: [confidentialworkloads/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    # delete: the startup reinject sweep deletes un-injected cw pods so their
+    # controllers recreate them through the webhook.
+    verbs: [get, list, watch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    # The workload-service reconciler watches these for the confidential.ai/cw
+    # pod-template annotation.
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    # The operator provisions one headless Service per annotated workload in
+    # the workload's namespace — the only c8s-managed resource outside the
+    # release namespace.
+    verbs: [get, list, watch, create, update, delete]
+  - apiGroups: [""]
+    resources: [events]
+    # The controller-runtime manager's event recorder (leader election,
+    # reconcile events) creates and patch-aggregates events across the
+    # namespaces it watches; without this it logs "events is forbidden".
+    verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations]
+    verbs: [get, update, patch]
+---
+# Source: c8s/templates/cds-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-cds-node-reader
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-cds-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: c8s-cds
+    namespace: c8s-system
+
+---
+# Source: c8s/templates/ratls-mesh-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-ratls-mesh
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-ratls-mesh
+subjects:
+  - kind: ServiceAccount
+    name: c8s-ratls-mesh
+    namespace: c8s-system
+
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-operator
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-operator
+subjects:
+  - kind: ServiceAccount
+    name: c8s-operator
+    namespace: c8s-system
+
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/component: cds
+  ports:
+    - name: http
+      port: 8443
+      targetPort: https
+      nodePort: 30808
+
+---
+# Source: c8s/templates/operator.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/component: operator
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+    # Webhook service port. The API server dials this Service:port; the
+    # MutatingWebhookConfiguration's clientConfig.service.port matches.
+    # controller-runtime's webhook server listens on 9443 by default.
+    - name: webhook
+      port: 443
+      targetPort: 9443
+
+---
+# Source: c8s/templates/tls-lb-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-tls-lb
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+
+---
+# Source: c8s/templates/nri-image-policy-installer-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-nri-image-policy-worker
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: nri-image-policy-0.3.0
+    app: c8s-nri-image-policy
+    app.kubernetes.io/name: nri-image-policy
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+    app.kubernetes.io/component: nri-installer-worker
+spec:
+  selector:
+    matchLabels:
+      app: c8s-nri-image-policy
+      app.kubernetes.io/name: nri-image-policy
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: nri-installer-worker
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        app: c8s-nri-image-policy
+        app.kubernetes.io/name: nri-image-policy
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: nri-installer-worker
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostPID: true
+      priorityClassName: system-node-critical
+      
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+      initContainers:
+        - name: install
+          image: ghcr.io/confidential-dot-ai/nri-image-policy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              
+              echo "==> nri-image-policy pins installer starting"
+              
+              result=$(/usr/local/bin/c8s nri-image-policy set-cds-pins \
+                --config "/host/etc/nri/conf.d/image-policy.yaml" \
+                --cds-measurements "" \
+                --cds-rtmrs "")
+              echo "CDS pins $result"
+              
+              restart_needed=0
+              if [ "$result" = "updated" ]; then
+                restart_needed=1
+              fi
+              RESTART_COMMAND="systemctl restart containerd"
+              restarted_containerd=0
+              if [ "$restart_needed" = "1" ]; then
+                restarted_containerd=1
+                echo "restarting containerd (detached via systemd-run): $RESTART_COMMAND"
+                # The restart tears down this pod's own containerd shim. Running it in this
+                # pod's process tree (nsenter ... sh -c) means it is killed together with the
+                # pod mid-restart — and on a sole control-plane node that interrupts the rke2
+                # bootstrap and wedges it (etcd/apiserver static manifests never rewritten,
+                # API server stays down). Hand the restart to host PID 1 via systemd-run so it
+                # runs as a transient unit and completes regardless of this pod's fate. The
+                # RESTART_COMMAND is `systemctl restart ...`, so systemd — and thus
+                # systemd-run — is always present on the host.
+                # shellcheck disable=SC2086
+                nsenter -t 1 -m -u -i -n -p -- \
+                  systemd-run --collect --description="c8s nri-image-policy containerd restart" \
+                  sh -c "$RESTART_COMMAND"
+              fi
+              
+              # The plugin goes ready once its initial CDS pull settles: 4 backoff sleeps
+              # (2+4+8+16s) plus per-attempt fetch timeouts (allowlistApi* consts in
+              # internal/cmds/nri-image-policy/main.go). A containerd restart adds the
+              # runtime's own recovery, and on a sole control-plane node that takes the
+              # apiserver down with it, so the budget is wider when we restarted it.
+              budget=120
+              if [ "$restarted_containerd" = "1" ]; then
+                budget=300
+              fi
+              # A wall-clock deadline, so the number in the failure message is the time that
+              # actually passed: each miss costs the curl timeout as well as the sleep.
+              deadline=$(($(date +%s) + budget))
+              
+              health_socket="/host/var/run/nri-image-policy/health.sock"
+              until health=$(curl --unix-socket "$health_socket" --silent --fail --max-time 2 \
+                  --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1); do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  # Re-read without --fail so the body and status come back rather than
+                  # being discarded: the plugin says why it is not ready, and curl exit 7
+                  # (nothing listening on the socket) is a different fault entirely.
+                  rc=0
+                  last=$(curl --unix-socket "$health_socket" --silent --max-time 2 \
+                    --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1) || rc=$?
+                  echo "ERROR: plugin not healthy after ${budget}s; last /healthz: ${last:-<no response>} (curl exit $rc)" >&2
+                  echo "       the plugin runs under containerd, so its log is the journal of the unit restarted by: $RESTART_COMMAND" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              echo "==> nri-image-policy installer finished; plugin healthy: $health"
+          volumeMounts:
+            - name: host-config-dir
+              mountPath: /host/etc/nri/conf.d
+            - name: host-runtime-dir
+              mountPath: /host/var/run/nri-image-policy
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
+      containers:
+        - name: pause
+          image: ghcr.io/confidential-dot-ai/nri-image-policy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        - name: host-config-dir
+          hostPath:
+            path: /etc/nri/conf.d
+            type: DirectoryOrCreate
+        - name: host-runtime-dir
+          hostPath:
+            path: /var/run/nri-image-policy
+            type: DirectoryOrCreate
+
+---
+# Source: c8s/templates/ratls-mesh-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-ratls-mesh
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+    app.kubernetes.io/component: service-mesh
+spec:
+  selector:
+    matchLabels:
+      app: c8s-ratls-mesh
+      app.kubernetes.io/name: ratls-mesh
+      app.kubernetes.io/instance: c8s
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: c8s-ratls-mesh
+        app.kubernetes.io/name: ratls-mesh
+        app.kubernetes.io/instance: c8s
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15021"
+        prometheus.io/path: "/metrics"
+    spec:
+      priorityClassName: system-node-critical
+      # iptables-sync must run in the host network namespace to intercept
+      # node-level pod traffic rather than only the mesh pod's own traffic.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: c8s-ratls-mesh
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      volumes:
+        - name: xtables-lock
+          hostPath:
+            path: /run/xtables.lock
+            type: FileOrCreate
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        
+      initContainers:
+        # Native sidecar (K8s 1.29+): cleanup runs last on shutdown because
+        # sidecars stop in reverse initContainer order.
+        - name: iptables-cleanup
+          restartPolicy: Always
+          image: ghcr.io/confidential-dot-ai/ratls-mesh:gold
+          securityContext:
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                # NET_ADMIN for iptables/ipset; NET_RAW for the xt_set match's
+                # socket to the ip_set subsystem (the nf_tables-compat path
+                # needs it, else `iptables -m set` fails with "Can't open socket
+                # to ipset" even though NET_ADMIN alone can run ipset commands).
+                - NET_ADMIN
+                - NET_RAW
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: xtables-lock
+              mountPath: /run/xtables.lock
+          command:
+            - /bin/sh
+            - -c
+            - "trap 'exit 0' TERM; while true; do sleep 3600 & wait $!; done"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    # --keep-guard keeps the guard live: unmeshed inbound and
+                    # non-TCP egress are still dropped; TCP to non-pod destinations
+                    # was never meshed.
+                    /app/c8s ratls-mesh iptables-cleanup --keep-guard
+                    sleep 5
+          resources:
+            limits:
+              cpu: 10m
+              memory: 16Mi
+            requests:
+              cpu: 1m
+              memory: 8Mi
+        - name: iptables-sync
+          restartPolicy: Always
+          image: ghcr.io/confidential-dot-ai/ratls-mesh:gold
+          securityContext:
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                # NET_ADMIN for iptables/ipset; NET_RAW for the xt_set match's
+                # socket to the ip_set subsystem (the nf_tables-compat path
+                # needs it, else `iptables -m set` fails with "Can't open socket
+                # to ipset" even though NET_ADMIN alone can run ipset commands).
+                - NET_ADMIN
+                - NET_RAW
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: xtables-lock
+              mountPath: /run/xtables.lock
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /app/c8s
+            - ratls-mesh
+            - iptables-sync
+            - --outbound-port
+            - "15001"
+            - --uid
+            - "1337"
+            - --exclude-uids
+            - "0"
+            - --exclude-source-namespaces
+            - "kube-system"
+            - --node-ip
+            - $(NODE_IP)
+            - --resync-period
+            - "30s"
+            - --watchdog-period
+            - "2s"
+            - --ipset-maxelem
+            - "262144"
+            - --cw-inbound-passthrough=udp:53,tcp:53
+            - --ready-file
+            - /tmp/ratls-iptables-ready
+            - --iptables-metrics-file
+            - /tmp/ratls-iptables-metrics.json
+            - --log-level
+            - "info"
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          startupProbe:
+            exec:
+              command:
+                - test
+                - -f
+                - /tmp/ratls-iptables-ready
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 5m
+              memory: 32Mi
+      containers:
+        - name: ratls-mesh
+          image: ghcr.io/confidential-dot-ai/ratls-mesh:gold
+          imagePullPolicy: IfNotPresent
+          workingDir: /tmp
+          securityContext:
+            runAsUser: 1337
+            runAsGroup: 1337
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            
+          args:
+            - --platform
+            - "sev-snp"
+            - --attestation-api-url
+            - "http://$(HOST_IP):8400"
+            - --outbound-port
+            - "15001"
+            - --inbound-port
+            - "15006"
+            - --health-port
+            - "15021"
+            - --drain-timeout
+            - "30s"
+            - --iptables-metrics-file
+            - /tmp/ratls-iptables-metrics.json
+            - --log-level
+            - "info"
+            - --max-conns
+            - "10000"
+            - --cert-mode
+            - "cds"
+            - --cds-url
+            - "https://c8s-cds.c8s-system.svc:8443"
+            - --cert-dns-san
+            - "ratls-mesh.c8s-system.svc"
+            - --ca-poll-interval
+            - "5m"
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: outbound
+              containerPort: 15001
+              protocol: TCP
+            - name: inbound
+              containerPort: 15006
+              hostPort: 15006
+              protocol: TCP
+            - name: health
+              containerPort: 15021
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 15021
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 15021
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 15021
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+
+---
+# Source: c8s/templates/volumed-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-volumed
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: volumed
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: volumed
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: volumed
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      # SO_PEERCRED reports a peer's PID in the reader's PID namespace, so a
+      # caller in another pod resolves to 0 without this.
+      hostPID: true
+      # It reaches no API server: everything it acts on is node-local.
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+      containers:
+        - name: volumed
+          image: ghcr.io/confidential-dot-ai/volumed:gold
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            # The image is nonroot (USER 65532) and privileged grants no
+            # effective caps to a non-root process; the daemon must be root.
+            runAsUser: 0
+            runAsGroup: 0
+          # The image entrypoint is ["/app/c8s", "volumed"], so args start at
+          # the first flag — same as cds.yaml.
+          args:
+            - --socket-dir
+            - "/var/run/nri-image-policy"
+            - --kubelet-root
+            - "/var/lib/kubelet"
+            - --cgroup-root
+            - "/sys/fs/cgroup"
+            - --reap-interval
+            - "15s"
+            - --max-mounts
+            - "64"
+          volumeMounts:
+            # Bidirectional: the mount is made here and has to reach the
+            # workload's pod directory on the node.
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: dev
+              mountPath: /dev
+            # /sys whole, not /sys/block: the block entries are symlinks into
+            # /sys/devices, and the serial is read through them.
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            # The daemon's socket must live in the inventory's socket directory:
+            # the deny-host-namespaces VAP carves out that exact path by string
+            # equality, and it is what the webhook mounts into cw pods.
+            - name: inventory-socket-dir
+              mountPath: /var/run/nri-image-policy
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      volumes:
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: inventory-socket-dir
+          hostPath:
+            path: /var/run/nri-image-policy
+            type: DirectoryOrCreate
+
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+  annotations:
+    confidential.ai/trust-root-mode: "inMemory"
+spec:
+  
+  replicas: 1
+  # Recreate: two pods would mint divergent roots and can't co-mount the RWO
+  # data PVC. Dependents ride out the gap via get-cert retry.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: cds
+      annotations:
+        confidential.ai/trust-root-mode: "inMemory"
+    spec:
+      serviceAccountName: c8s-cds
+      # The live node-list bound needs the API token; static CIDRs do not.
+      automountServiceAccountToken: true
+      nodeSelector:
+        role: cds
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          value: cds
+      
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: cds
+          image: ghcr.io/confidential-dot-ai/cds@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          args:
+            - --port=8443
+            - --log-level=info
+            # Per-mode resolution: see c8s.attestationApiURL.
+            - --attestation-api-url=http://$(HOST_IP):8400
+            - --allowlist-db=/data/allowlist.db
+            - --allowlist-persistent=false
+            - --allowlist-seed=/etc/cds/allowlist-seed.json
+            - --ear-issuer=cds
+            - --jwt-clock-skew=30
+            - --ca-common-name=c8s Mesh CA
+            - --ca-cert-validity=8760h
+            - --min-ca-validity=1h
+            - --cert-ttl=24h
+            - --named-cert-ttl=6h
+            - --max-ttl=24h
+            - --challenge-ttl=60s
+            - --request-timeout=5s
+            - --max-request-size=262144
+            - --secrets-max-paths=1024
+            - --secrets-max-paths-per-workload=64
+            - --readiness-interval=10s
+            - --san-validation=false
+            - --dns-san-pattern=^[a-z0-9-]+[.][a-z0-9-]+[.]svc$
+            - --token-signer-rotation-interval=720h
+            - --token-signer-overlap=25h
+            - --token-signer-rotation-jitter=0.1
+            - --rate-limit=10
+            - --rate-burst=20
+            - --rate-limiter-max-entries=10000
+            - --rate-limiter-evict-interval=1m
+            - --rate-limiter-idle-timeout=5m
+            - --ratls-platform=snp
+            - --ratls-cert-ttl=24h
+          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
+          # IP so this pod-netns pod reaches the node-baked host attestation-api.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 30
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            
+            - name: allowlist-seed
+              mountPath: /etc/cds
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          emptyDir: {}
+        
+        - name: allowlist-seed
+          configMap:
+            name: c8s-cds-allowlist-seed
+---
+# Source: c8s/templates/operator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  # The webhook serving CA is minted inside this pod and patched into one
+  # MutatingWebhookConfiguration. Running multiple replicas can race CA bundles
+  # and break admission TLS for requests routed to the wrong pod.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: c8s-operator
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: operator
+          image: ghcr.io/confidential-dot-ai/c8s-operator:gold
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: [ALL]
+          args:
+            - operator
+            - --leader-election-namespace=c8s-system
+            - --status-mirror-enabled=true
+            - --get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator:gold
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --webhook-config-name=c8s-pod-injector
+            - --webhook-service-name=c8s-operator
+            - --webhook-service-namespace=c8s-system
+            - --attestation-api-url=http://$(HOST_IP):8400
+            - --cert-fs-group=65532
+            - --cert-key-mode=0640
+            - --get-cert-renew-interval=2h
+            - --get-cert-run-as-user=65532
+            - --get-cert-run-as-group=65532
+            - --get-cert-run-as-non-root=true
+            - --workload-claims-host-dir=/var/run/nri-image-policy
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 30
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            # readOnlyRootFilesystem: true forces any transient files
+            # (controller-runtime cache tempfiles, etc.) to land in
+            # this emptyDir rather than the immutable image.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Source: c8s/templates/tls-lb-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-tls-lb
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tls-lb
+      app.kubernetes.io/instance: c8s
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tls-lb
+        app.kubernetes.io/instance: c8s
+      annotations:
+        checksum/nginx-config: 15f5d302ee06a0b3d43a40242361217af9937233fcff2b213c183fc49b78165f
+    spec:
+      
+      
+      shareProcessNamespace: true
+      initContainers:
+        - name: c8s-cert
+          image: ghcr.io/confidential-dot-ai/c8s-operator:gold
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          args:
+            - get-cert
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --attestation-api-url=http://$(HOST_IP):8400
+            - --san=c8s-tls-lb.c8s-system.svc
+            - --out=/tls/cert.pem
+            - --key-out=/tls/key.pem
+            - --key-mode=0640
+            - --ca-out=/tls/ca.pem
+            # Retry CDS in-process during a roll instead of exiting into kubelet
+            # CrashLoopBackOff; still fails closed once the timeout elapses.
+            - --initial-retry-timeout=2m
+            - --renew-interval=1h
+            - --reload-nginx=true
+            - --continue-on-initial-error
+            - --discovery-out=/discovery/discovery.json
+            - --discovery-cds-cert-url=/.well-known/cds-cert.pem
+            - --discovery-public-tls-mode=cds
+            - --discovery-mesh-ca-url=/.well-known/mesh-ca.pem
+            - --ca-watch-interval=1m
+          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node IP so
+          # this pod-netns sidecar reaches the node-baked host attestation-api.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+            - name: discovery
+              mountPath: /discovery
+          # The workload is gated on the initial cert by the c8s-cert-wait init
+          # container below, not a startupProbe here: a native sidecar is "started"
+          # the moment its process launches, and an exec startupProbe is denied by the
+          # locked kata-qemu-snp guest (ExecProcessRequest := false), so it could never
+          # pass there and the workload would hang in Init forever.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        # c8s-cert-wait gates the workload on the initial cert without an exec probe.
+        # A plain (run-once) init container that blocks on the cert file is a
+        # CreateContainerRequest the locked guest allows, and normal init-completion
+        # ordering holds the workload until the attested cert exists — fail-closed.
+        # The `/c8s` path is the binary location from cmd/c8s/Dockerfile; command
+        # bypasses the ENTRYPOINT so the full path must match.
+        - name: c8s-cert-wait
+          image: ghcr.io/confidential-dot-ai/c8s-operator:gold
+          imagePullPolicy: IfNotPresent
+          command:
+            - /c8s
+            - probe-file
+            - --wait
+            - --timeout=3m
+            - /tls/cert.pem
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged@sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8443
+              hostPort: 443
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+              readOnly: true
+            - name: discovery
+              mountPath: /discovery
+              readOnly: true
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+        - name: cds-attest
+          image: ghcr.io/confidential-dot-ai/c8s-operator:gold
+          imagePullPolicy: IfNotPresent
+          args:
+            - cds-attest
+            - --host=127.0.0.1
+            - --port=8800
+            - --platform=snp
+            - --generation=genoa
+            - --attestation-api-url=http://$(HOST_IP):8400
+            # attest-lb transport trust rests on the serving key being TEE-held:
+            # a publicTLS Secret's key is host-visible, so that front door is
+            # attest-pq-only and the sidecar refuses attest-lb with
+            # unsupported_front_door.
+            - --front-door-mode=cds
+            # Bind the *exact* leaf nginx presents on the wire (ssl_certificate =
+            # publicCertPath), so the attest-lb binding (GET
+            # /.well-known/c8s/attest-lb) commits report_data to the leaf DER a
+            # direct-TLS client actually sees. With the default (publicTLS
+            # unset) this is the mesh leaf at tlsMountPath/cert.pem; with a
+            # publicTLS secret it is that cert (mounted below, attest-pq-only
+            # per --front-door-mode above). Re-read per request, so get-cert
+            # renewals are picked up.
+            - --serving-cert-file=/tls/cert.pem
+            # The identity-bound PQ flow must use the TEE-held mesh
+            # credential, never the optional publicTLS Secret: report_data
+            # commits the hybrid session key to this leaf and the sidecar
+            # proves possession with its matching private key.
+            - --mesh-identity-cert-file=/tls/cert.pem
+            - --mesh-identity-key-file=/tls/key.pem
+            - --mesh-identity-ca-file=/tls/ca.pem
+            # Terminate over-encryption here and forward to the same workload
+            # backend nginx proxies to. An http upstream is plaintext at the
+            # app layer; pointed at a headless Service (an adopted workload),
+            # the node mesh wraps the pod-IP hop in attested mTLS. An https
+            # upstream terminates TLS itself and gets the mTLS args below.
+            # No adopted workload (empty upstream address) -> omit --upstream
+            # entirely; the sidecar then serves attestation with its echo
+            # backend instead of crashing on a scheme-only URL.
+            - --upstream=http://c8s-infer.c8s-system.svc.cluster.local:8000
+          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
+          # IP so this pod-netns pod reaches the node-baked host attestation-api.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+              readOnly: true
+            
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+        # nginx terminates the public, tls-lb-attested connection and forwards
+        # /allowlist over pod loopback. This sidecar establishes the second
+        # trust hop: it verifies CDS's RA-TLS evidence before proxying.
+        - name: allowlist-proxy
+          image: ghcr.io/confidential-dot-ai/c8s-operator:gold
+          imagePullPolicy: IfNotPresent
+          args:
+            - allowlist-proxy
+            - --host=127.0.0.1
+            - --port=8801
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --attestation-api-url=http://$(HOST_IP):8400
+          # cvmMode=node: the proxy verifies CDS through the node-baked
+          # attestation-api, reached from this pod via its node IP.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tls-certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: discovery
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # medium: Memory is load-bearing under kata-qemu-snp with
+        # shared_fs="none": a default (disk-backed) emptyDir gets provisioned
+        # through kata-agent's CDH secure-storage path inside the guest and
+        # fails CreateContainer ("[CDH] [ERROR]: Secure Mount failed").
+        # tmpfs-backed emptyDirs are mounted directly by the guest kernel.
+        - name: nginx-cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: nginx-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: nginx-config
+          configMap:
+            name: c8s-tls-lb-nginx
+        
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+---
+# Source: c8s/templates/webhook.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: c8s-pod-injector
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+webhooks:
+  - name: pods.c8s.confidential.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    reinvocationPolicy: IfNeeded
+    # get-cert injection is opt-in (confidential.ai/cw), so an un-annotated pod
+    # is a no-op regardless of namespace. The exclusion matters for kata
+    # enforcement, which forces a runtimeClassName onto any in-scope pod with
+    # no annotation: without it, --kata-enforce would try to run c8s's own
+    # control plane (operator, cds, attestation-api, tls-lb are not
+    # hostNetwork) as kata VMs. The reinject sweep excludes the same set.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+      # Ephemeral containers attach to a running pod and are stripped from a
+      # CREATE, so they are only visible on this subresource. Without it,
+      # `kubectl debug` could mount the volume holding a released secret or the
+      # pod's private key and read it out (docs/secrets.md).
+      - operations: [UPDATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods/ephemeralcontainers]
+        scope: Namespaced
+    clientConfig:
+      service:
+        namespace: c8s-system
+        name: c8s-operator
+        path: /mutate-pods
+        port: 443
+
+---
+# Source: c8s/templates/cw-label-integrity-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: c8s-cw-label-integrity
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cw-label-integrity
+spec:
+  # Fail closed: a CEL evaluation error denies the pod. The expressions are
+  # has()-guarded so they should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    # Absent keys collapse to ''. A literal empty value is treated as absent;
+    # it can never match a managed Service selector (cw ids are non-empty).
+    - name: cwLabel
+      expression: >-
+        has(object.metadata.labels) && 'confidential.ai/cw' in object.metadata.labels ?
+        object.metadata.labels['confidential.ai/cw'] : ''
+    - name: cwAnnotation
+      expression: >-
+        has(object.metadata.annotations) && 'confidential.ai/cw' in object.metadata.annotations ?
+        object.metadata.annotations['confidential.ai/cw'] : ''
+    - name: oldCwLabel
+      expression: >-
+        oldObject == null ? '' :
+        (has(oldObject.metadata.labels) && 'confidential.ai/cw' in oldObject.metadata.labels ?
+        oldObject.metadata.labels['confidential.ai/cw'] : '')
+    - name: oldCwAnnotation
+      expression: >-
+        oldObject == null ? '' :
+        (has(oldObject.metadata.annotations) && 'confidential.ai/cw' in oldObject.metadata.annotations ?
+        oldObject.metadata.annotations['confidential.ai/cw'] : '')
+    # The injected mesh-cert sidecar: a native init container (restartPolicy
+    # Always) named c8s-cert. The webhook stamps the cw label and injects this
+    # sidecar together, so the label without it means the sidecar was shed or
+    # the webhook bypassed. Structural check only (name + native-sidecar
+    # restartPolicy); the webhook owns the exact image/args and rebuilds them on
+    # CREATE (pod_mutator.go, replaceInitContainer).
+    - name: hasCertSidecar
+      expression: >-
+        has(object.spec.initContainers) &&
+        object.spec.initContainers.exists(c,
+        c.name == 'c8s-cert' &&
+        has(c.restartPolicy) && c.restartPolicy == 'Always')
+  validations:
+    - expression: >-
+        variables.cwLabel == '' || variables.cwLabel == variables.cwAnnotation
+      message: >-
+        The confidential.ai/cw pod label must match the confidential.ai/cw
+        annotation; it is stamped by the c8s injection webhook and selects the
+        workload's headless Service endpoints.
+      reason: Forbidden
+    - expression: >-
+        oldObject == null ||
+        (variables.cwLabel == variables.oldCwLabel &&
+        variables.cwAnnotation == variables.oldCwAnnotation)
+      message: >-
+        The confidential.ai/cw pod label and annotation are immutable after
+        admission; recreate the pod to change its workload identity.
+      reason: Forbidden
+    - expression: >-
+        variables.cwLabel == '' || variables.hasCertSidecar
+      message: >-
+        A confidential.ai/cw pod must carry the injected c8s-cert sidecar (a
+        native init container with restartPolicy Always); the c8s injection
+        webhook adds it alongside the label. A pod bearing the workload label
+        without the sidecar has shed attestation-bound injection.
+      reason: Forbidden
+---
+# Source: c8s/templates/host-namespace-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: c8s-deny-host-namespaces
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: host-namespace-policy
+spec:
+  # Fail closed: a CEL evaluation error denies the pod. Every expression is
+  # has()-guarded, so it should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        # pods/ephemeralcontainers is a separate resource to matchConstraints:
+        # "pods" alone leaves an ephemeral container unevaluated, and one can
+        # carry both a hostPath mount and a hostPort.
+        resources: ["pods", "pods/ephemeralcontainers"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+  validations:
+    - expression: >-
+        !has(object.spec.hostNetwork) || object.spec.hostNetwork == false
+      message: "hostNetwork is reserved for c8s node components: a pod sharing the node network namespace could bind the privileged port CDS uses to identify the admission inventory, and impersonate it."
+    - expression: >-
+        !has(object.spec.hostPID) || object.spec.hostPID == false
+      message: "hostPID is denied: sharing the node PID namespace defeats the kernel peer-credential binding the admission inventory uses to identify its caller."
+    - expression: >-
+        !has(object.spec.hostIPC) || object.spec.hostIPC == false
+      message: "hostIPC is denied for tenant pods."
+    - expression: >-
+        (!has(object.spec.containers) || object.spec.containers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "hostPort is reserved for c8s node components: workloadclaims.DigestsPort (1019) is the admission inventory's identity, and a hostPort publishes a pod on the node's address without hostNetwork — so a tenant pod could answer as the inventory and have CDS resolve its signing key."
+    - expression: >-
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(v, !has(v.hostPath) ||
+          (v.hostPath.path == "/var/run/nri-image-policy" &&
+           has(v.hostPath.type) && v.hostPath.type == 'Directory' &&
+           object.spec.containers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))) &&
+           (!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true)))) &&
+           (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))))))
+      message: "hostPath volumes are denied, except a read-only mount of the admission inventory socket directory (the webhook-injected claims volume; it also holds the attestation-api socket): a writable mount of the node filesystem could swap those sockets (docs/getcert-workload-binding.md, Corner 7)."
+---
+# Source: c8s/templates/ratls-mesh-uid-admission-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: deny-ratls-mesh-uid
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+  validations:
+    # 1337 is the mesh proxy's reserved UID; 0 means a root workload that
+    # falls in no exemption cgroup. Both egress outside the mesh's scope —
+    # deny them up-front.
+    - expression: >-
+        !has(object.spec.securityContext) ||
+        !has(object.spec.securityContext.runAsUser) ||
+        (object.spec.securityContext.runAsUser != 1337 &&
+         object.spec.securityContext.runAsUser != 0)
+      message: "Pod-level runAsUser 1337 is reserved for the ratls-mesh proxy; runAsUser 0 is not in any in-guest exemption cgroup."
+    - expression: >-
+        !has(object.spec.containers) ||
+        object.spec.containers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.runAsUser) ||
+          (c.securityContext.runAsUser != 1337 &&
+           c.securityContext.runAsUser != 0)
+        )
+      message: "Containers must not run as UID 1337 (reserved for the ratls-mesh proxy) or 0 (not in an exemption cgroup)."
+    - expression: >-
+        !has(object.spec.initContainers) ||
+        object.spec.initContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.runAsUser) ||
+          (c.securityContext.runAsUser != 1337 &&
+           c.securityContext.runAsUser != 0)
+        )
+      message: "Init containers must not run as UID 1337 (reserved for the ratls-mesh proxy) or 0 (not in an exemption cgroup)."
+---
+# Source: c8s/templates/ratls-mesh-uid-admission-policy.yaml
+# The pods/ephemeralcontainers subresource has its own object shape
+# (spec.ephemeralContainers only), so its validation lives in a separate
+# policy rather than sharing expressions that reference pod-only fields —
+# those would fail type-check/deny every kubectl debug.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: deny-ratls-mesh-uid-ephemeral
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+  validations:
+    - expression: >-
+        !has(object.spec.ephemeralContainers) ||
+        object.spec.ephemeralContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.runAsUser) ||
+          (c.securityContext.runAsUser != 1337 &&
+           c.securityContext.runAsUser != 0)
+        )
+      message: "Ephemeral containers must not run as UID 1337 (reserved for the ratls-mesh proxy) or 0 (not in an exemption cgroup)."
+---
+# Source: c8s/templates/cw-label-integrity-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: c8s-cw-label-integrity
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cw-label-integrity
+spec:
+  policyName: c8s-cw-label-integrity
+  validationActions: [Deny]
+  matchResources:
+    # Mirror the namespace exclusions of the pod webhook so injection scope
+    # and enforcement scope stay identical (shared helper, see _helpers.tpl).
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+            - kube-public
+            - kube-node-lease
+
+---
+# Source: c8s/templates/host-namespace-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: c8s-deny-host-namespaces
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: host-namespace-policy
+spec:
+  policyName: c8s-deny-host-namespaces
+  validationActions:
+    - Deny
+
+---
+# Source: c8s/templates/ratls-mesh-uid-admission-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: deny-ratls-mesh-uid
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+spec:
+  policyName: deny-ratls-mesh-uid
+  validationActions:
+    - Deny
+---
+# Source: c8s/templates/ratls-mesh-uid-admission-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: deny-ratls-mesh-uid-ephemeral
+  labels:
+    helm.sh/chart: ratls-mesh-0.1.0
+    app: c8s-ratls-mesh
+    app.kubernetes.io/name: ratls-mesh
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/version: ""
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: c8s
+spec:
+  policyName: deny-ratls-mesh-uid-ephemeral
+  validationActions:
+    - Deny
+---
+# Source: c8s/templates/volumed-uninstall-hook.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-volumed-teardown
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: volumed-teardown
+  annotations:
+    helm.sh/hook: pre-delete
+    # Ahead of the nri-image-policy uninstaller (weight 0): helm runs pre-delete
+    # hooks in weight order and waits for each, and that one restarts containerd,
+    # which would kill this pod mid-sweep.
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: volumed-teardown
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: volumed-teardown
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+      initContainers:
+        - name: teardown
+          image: ghcr.io/confidential-dot-ai/volumed:gold
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            # The image is nonroot (USER 65532) and privileged grants no
+            # effective caps to a non-root process.
+            runAsUser: 0
+            runAsGroup: 0
+          # The image entrypoint is ["/app/c8s", "volumed"]; this hook runs a
+          # shell script instead, so it overrides both.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # volumed teardown — run as a privileged pre-delete hook on every volumed node.
+              #
+              # Removes the device-mapper stack volumed opened for the pods on this node:
+              # unmount each c8s volume, then close the dm-verity and dm-crypt mappings
+              # behind it. The mappings keep the backing disk open, so a volume they cover
+              # cannot be reopened while they are there. Anything this hook cannot close is
+              # swept by volumed the next time it starts.
+              # Idempotent: a node with nothing open exits clean. A mapping that will not
+              # close exits non-zero — the alternative is an uninstall that reports success
+              # and leaves state no later run can reach.
+              #
+              # Names come from internal/cmds/volumed/open.go (mapperName): the mappings are
+              # c8s-crypt-<pod-uid>-<volume> and c8s-verity-<pod-uid>-<volume>. The mount
+              # source is the verity device for an immutable volume, the crypt device itself
+              # for a mutable one.
+              set -eu
+              
+              # Retry budget for a close. Sized to ride out kubelet's asynchronous unmount
+              # while staying far inside helm's hook timeout.
+              CLOSE_ATTEMPTS=5
+              CLOSE_RETRY_SECONDS=2
+              
+              # Prefixed onto the host paths below so the shipped bytes can be run against a
+              # fixture tree. The hook sets nothing and the prefix is empty.
+              root="${C8S_TEARDOWN_ROOT:-}"
+              
+              echo "==> volumed teardown starting"
+              
+              # 1. Unmount what the c8s devices back. /proc/mounts names the source device,
+              #    which holds even after kubelet has renamed the pod directory. Collect the
+              #    targets before unmounting any: /proc/mounts is generated as it is read, so
+              #    unmounting mid-scan would shift the rest of the file.
+              targets=""
+              while read -r source target _; do
+                case "$source" in
+                /dev/mapper/c8s-verity-* | /dev/mapper/c8s-crypt-*) targets="$targets $target" ;;
+                esac
+              done <"$root/proc/mounts"
+              
+              for target in $targets; do
+                if umount "$target"; then
+                  echo "unmounted $target"
+                else
+                  echo "WARNING: umount $target failed" >&2
+                fi
+              done
+              
+              # 2. Close the mappings, verity before crypt: verity is stacked on the crypt
+              #    device and holds it open.
+              closed=0
+              stuck=""
+              for dev in "$root"/dev/mapper/c8s-verity-* "$root"/dev/mapper/c8s-crypt-*; do
+                [ -e "$dev" ] || continue
+                name=${dev##*/}
+                close=veritysetup
+                case "$name" in
+                c8s-crypt-*) close=cryptsetup ;;
+                esac
+                # kubelet tears the consumer's mount down asynchronously, so a device that
+                # reads busy on the first try is often free a moment later.
+                attempt=1
+                while :; do
+                  if "$close" close "$name"; then
+                    closed=$((closed + 1))
+                    echo "closed $name"
+                    break
+                  fi
+                  if [ "$attempt" -ge "$CLOSE_ATTEMPTS" ]; then
+                    stuck="$stuck $name"
+                    break
+                  fi
+                  attempt=$((attempt + 1))
+                  sleep "$CLOSE_RETRY_SECONDS"
+                done
+              done
+              
+              echo "==> volumed teardown finished: $closed mapping(s) closed"
+              
+              if [ -n "$stuck" ]; then
+                # The host unmount above does not clear a consumer pod's own mount namespace,
+                # so a volume still in use stays busy here. Exiting 0 would hand helm a
+                # healthy hook and delete volumed, after which nothing on the node reaps
+                # these and the next install cannot reopen the disk.
+                echo "ERROR: still open after ${CLOSE_ATTEMPTS} attempts:$stuck" >&2
+                echo "       something is still using these volumes; the host-side unmount does not" >&2
+                echo "       release a consumer pod's own mount namespace. Delete the pods holding" >&2
+                echo "       them and re-run the uninstall; volumed sweeps whatever is left when it" >&2
+                echo "       next starts, so a reinstall clears them too." >&2
+                exit 1
+              fi
+              
+          volumeMounts:
+            # Bidirectional: the mounts live in the host namespace, so the
+            # unmount has to propagate back out of this pod.
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: dev
+              mountPath: /dev
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      containers:
+        - name: pause
+          image: ghcr.io/confidential-dot-ai/volumed:gold
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+

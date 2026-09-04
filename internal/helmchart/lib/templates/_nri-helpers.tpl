@@ -1,0 +1,477 @@
+{{/*
+  NRI image-policy helpers, shared by the full installer (node-cloud,
+  node-metal) and the pins installer (node-image).
+*/}}
+
+{{- define "c8s-lib.nri.name" -}}
+nri-image-policy
+{{- end }}
+
+{{- define "c8s-lib.nri.fullname" -}}
+{{- printf "%s-%s" .Release.Name (include "c8s-lib.nri.name" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "c8s-lib.nri.labels" -}}
+helm.sh/chart: {{ include "c8s-lib.nri.name" . }}-0.3.0
+{{ include "c8s-lib.nri.selectorLabels" . }}
+app.kubernetes.io/version: ""
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: c8s
+{{- end }}
+
+{{- define "c8s-lib.nri.selectorLabels" -}}
+app: {{ include "c8s-lib.nri.fullname" . }}
+app.kubernetes.io/name: {{ include "c8s-lib.nri.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "c8s-lib.nri.image" -}}
+{{ include "c8s-lib.common.image" .Values.nriImagePolicy.image }}
+{{- end }}
+
+{{- define "c8s-lib.nri.hostPluginPath" -}}
+{{ printf "%s/%s" .Values.nriImagePolicy.hostPaths.pluginDir .Values.nriImagePolicy.pluginFilename }}
+{{- end }}
+
+{{- define "c8s-lib.nri.hostConfigPath" -}}
+{{ printf "%s/image-policy.yaml" .Values.nriImagePolicy.hostPaths.configDir }}
+{{- end }}
+
+{{- define "c8s-lib.nri.hostHealthSocket" -}}
+{{ printf "%s/%s" .Values.runtimeDir .Values.nriImagePolicy.healthSocketName }}
+{{- end }}
+
+{{/*
+Shared hostPath mounts and volumes used by the full installer DaemonSet and
+the uninstall hook.
+*/}}
+{{- define "c8s-lib.nri.hostVolumeMounts" -}}
+- name: host-plugin-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.pluginDir }}
+- name: host-config-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.configDir }}
+- name: host-containerd-config
+  mountPath: /host{{ include "c8s-lib.nri.containerdConfigDir" . }}
+- name: host-cache-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.cacheDir }}
+- name: host-runtime-dir
+  mountPath: /host{{ .Values.runtimeDir }}
+{{- end }}
+
+{{- define "c8s-lib.nri.hostVolumes" -}}
+- name: host-plugin-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.pluginDir }}
+    type: DirectoryOrCreate
+- name: host-config-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.configDir }}
+    type: DirectoryOrCreate
+- name: host-containerd-config
+  hostPath:
+    path: {{ include "c8s-lib.nri.containerdConfigDir" . }}
+    type: Directory
+- name: host-cache-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.cacheDir }}
+    type: DirectoryOrCreate
+- name: host-runtime-dir
+  hostPath:
+    path: {{ .Values.runtimeDir }}
+    type: DirectoryOrCreate
+{{- end }}
+
+{{/*
+Host mounts for the node-image pins installer: the baked config it patches and
+the runtime dir holding the plugin's health socket. It touches neither the
+plugin binary nor containerd's config, so neither is mounted.
+*/}}
+{{- define "c8s-lib.nri.pinsVolumeMounts" -}}
+- name: host-config-dir
+  mountPath: /host{{ .Values.nriImagePolicy.hostPaths.configDir }}
+- name: host-runtime-dir
+  mountPath: /host{{ .Values.runtimeDir }}
+{{- end }}
+
+{{- define "c8s-lib.nri.pinsVolumes" -}}
+- name: host-config-dir
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.configDir }}
+    type: DirectoryOrCreate
+- name: host-runtime-dir
+  hostPath:
+    path: {{ .Values.runtimeDir }}
+    type: DirectoryOrCreate
+{{- end }}
+
+{{/*
+Host containerd layout, derived from the chart-wide distro unless a field
+overrides it.
+*/}}
+{{- define "c8s-lib.nri.containerdConfigDir" -}}
+{{- $ctrld := default dict .Values.nriImagePolicy.containerd -}}
+{{- if $ctrld.configDir -}}
+{{ $ctrld.configDir }}
+{{- else if eq (include "c8s-lib.distro" .) "rke2" -}}
+/var/lib/rancher/rke2/agent/etc/containerd
+{{- else if eq (include "c8s-lib.distro" .) "k8s" -}}
+/etc/containerd
+{{- else -}}
+{{ fail (printf "distro must be \"k8s\" or \"rke2\" (got %q), or set nriImagePolicy.containerd.configDir explicitly" (include "c8s-lib.distro" .)) }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+patch  = splice an in-place sentinel-delimited block into config.toml.
+dropin = write a standalone file the installer owns entirely.
+*/}}
+{{- define "c8s-lib.nri.containerdConfigMode" -}}
+{{- if eq (include "c8s-lib.distro" .) "rke2" -}}
+dropin
+{{- else if eq (include "c8s-lib.distro" .) "k8s" -}}
+patch
+{{- else -}}
+{{ fail (printf "distro must be \"k8s\" or \"rke2\" (got %q)" (include "c8s-lib.distro" .)) }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Host service restart that makes containerd re-read its config.
+*/}}
+{{- define "c8s-lib.nri.restartCommand" -}}
+{{- $ctrld := default dict .Values.nriImagePolicy.containerd -}}
+{{- if $ctrld.restartCommand -}}
+{{ $ctrld.restartCommand }}
+{{- else if eq (include "c8s-lib.distro" .) "rke2" -}}
+{{- /* A server/control-plane node runs rke2-server (which owns containerd); a
+       worker node runs rke2-agent. Restart whichever unit is active so the
+       install works on a single-node/server cluster too, not just workers. */ -}}
+if systemctl is-active --quiet rke2-server; then systemctl restart rke2-server; else systemctl restart rke2-agent; fi
+{{- else -}}
+systemctl restart containerd
+{{- end -}}
+{{- end -}}
+
+{{- define "c8s-lib.nri.containerdSocket" -}}
+{{- $ctrld := default dict .Values.nriImagePolicy.containerd -}}
+{{- if $ctrld.socket -}}
+{{ $ctrld.socket }}
+{{- else if eq (include "c8s-lib.distro" .) "rke2" -}}
+/run/k3s/containerd/containerd.sock
+{{- else -}}
+/run/containerd/containerd.sock
+{{- end -}}
+{{- end -}}
+
+{{/*
+Install shell script for the NRI plugin. Caller dict: .root, .bootConfig
+(rendered image-policy.yaml).
+*/}}
+{{- define "c8s-lib.nri.installScript" -}}
+{{- $root := .root -}}
+set -eu
+
+echo "==> nri-image-policy installer starting"
+
+install_file() {
+  src=$1; dst=$2; mode=$3
+  mkdir -p "$(dirname "$dst")"
+  if cmp -s "$src" "$dst" 2>/dev/null; then
+    return 1
+  fi
+  install -m "$mode" "$src" "$dst.tmp"
+  mv -f "$dst.tmp" "$dst"
+  return 0
+}
+
+write_file() {
+  dst=$1; mode=$2
+  mkdir -p "$(dirname "$dst")"
+  tmp=$(mktemp "$dst.XXXXXX")
+  cat > "$tmp"
+  chmod "$mode" "$tmp"
+  if cmp -s "$tmp" "$dst" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$dst"
+  return 0
+}
+
+mkdir -p "/host{{ $root.Values.nriImagePolicy.hostPaths.cacheDir }}"
+mkdir -p "/host{{ $root.Values.runtimeDir }}"
+# The workload-claims broker socket lives here; the non-root get-cert sidecar
+# must traverse the dir (o+x) to connect. Pin it explicitly so a strict root
+# umask can't drop o+x (get-cert is fail-closed — no traversal, no cert). Not
+# world-writable, so an untrusted pod can't swap the socket.
+chmod 0711 "/host{{ $root.Values.runtimeDir }}"
+
+# Written separately from the boot config so it never participates in the
+# config-changed comparison that decides whether to restart containerd.
+printf '%s' "${NODE_IP:?NODE_IP is required}" > "/host{{ $root.Values.runtimeDir }}/node-ip"
+chmod 0644 "/host{{ $root.Values.runtimeDir }}/node-ip"
+
+config_changed=0
+if write_file "/host{{ include "c8s-lib.nri.hostConfigPath" $root }}" 0644 <<'IMAGE_POLICY_EOF'
+{{ .bootConfig }}
+IMAGE_POLICY_EOF
+then
+  config_changed=1
+  echo "boot config updated"
+{{- if $root.Values.nriImagePolicy.policy.exemptNamespaces }}
+  # A rewritten boot config is the one event that re-captures the exempt-namespace
+  # snapshot: drop the stale file so the plugin freezes a fresh one from what is
+  # running now. A plain restart or reboot leaves the config unchanged and keeps
+  # the frozen snapshot — the plugin reloads it rather than re-learning.
+  rm -f "/host{{ $root.Values.nriImagePolicy.hostPaths.cacheDir }}/exempt-snapshot.json"
+{{- end }}
+fi
+
+binary_changed=0
+if install_file /usr/local/bin/nri-image-policy "/host{{ include "c8s-lib.nri.hostPluginPath" $root }}" 0755; then
+  binary_changed=1
+  echo "plugin binary updated"
+fi
+
+CONTAINERD_DIR=/host{{ include "c8s-lib.nri.containerdConfigDir" $root }}
+CONTAINERD_CONFIG_MODE={{ include "c8s-lib.nri.containerdConfigMode" $root | quote }}
+MARK_BEGIN='# BEGIN c8s-nri-image-policy (managed)'
+MARK_END='# END c8s-nri-image-policy (managed)'
+
+# containerd/RKE2 always render the active config to config.toml.
+main_config="$CONTAINERD_DIR/config.toml"
+
+render_nri_toml() {
+  cat <<EOF
+[plugins."io.containerd.nri.v1.nri"]
+  disable = false
+  plugin_path = "{{ $root.Values.nriImagePolicy.hostPaths.pluginDir }}"
+  plugin_config_path = "{{ $root.Values.nriImagePolicy.hostPaths.configDir }}"
+  plugin_registration_timeout = "10s"
+  plugin_request_timeout = "2s"
+  socket_path = "/var/run/nri/nri.sock"
+[plugins."io.containerd.nri.v1.nri.default_validator"]
+  enable = true
+  required_plugins = ["{{ $root.Values.nriImagePolicy.pluginName }}"]
+EOF
+}
+
+read_managed_block() {
+  awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+    $0==b { in_block=1 }
+    in_block { print }
+    $0==e { in_block=0 }
+  ' "$1" 2>/dev/null || true
+}
+
+containerd_changed=0
+if [ "$CONTAINERD_CONFIG_MODE" = "dropin" ]; then
+  ver=$(sed -n '/^[[:space:]]*\[/q; s/#.*//; s/^[[:space:]]*version[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$main_config" | head -n1)
+  if [ "${ver:-0}" -ge 3 ] 2>/dev/null; then
+    dropin_dir="$CONTAINERD_DIR/config-v3.toml.d"
+  elif [ "${ver:-}" = "2" ]; then
+    dropin_dir="$CONTAINERD_DIR/config.toml.d"
+  else
+    echo "ERROR: cannot determine containerd schema version from $main_config" >&2
+    exit 1
+  fi
+  CONFIG="$dropin_dir/nri-image-policy.toml"
+  if ! grep -qF "$(basename "$dropin_dir")" "$main_config" 2>/dev/null; then
+    echo "ERROR: $main_config does not import $(basename "$dropin_dir"); containerd-prep should have added it" >&2
+    exit 1
+  fi
+  desired=$(render_nri_toml)
+  mkdir -p "$dropin_dir"
+  if ! printf '%s\n' "$desired" | cmp -s - "$CONFIG" 2>/dev/null; then
+    containerd_changed=1
+    printf '%s\n' "$desired" > "$CONFIG.tmp"
+    mv -f "$CONFIG.tmp" "$CONFIG"
+    echo "containerd drop-in written: $CONFIG"
+  fi
+else
+  CONFIG="$main_config"
+  desired=$(printf '%s\n%s\n%s' "$MARK_BEGIN" "$(render_nri_toml)" "$MARK_END")
+  if [ "$(read_managed_block "$CONFIG")" != "$desired" ]; then
+    containerd_changed=1
+    if [ -f "$CONFIG" ]; then
+      awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+        $0==b { skip=1; next }
+        $0==e { skip=0; next }
+        !skip { print }
+      ' "$CONFIG" > "$CONFIG.tmp"
+    else
+      : > "$CONFIG.tmp"
+    fi
+    printf '\n%s\n' "$desired" >> "$CONFIG.tmp"
+    mv -f "$CONFIG.tmp" "$CONFIG"
+    echo "containerd config patched: $CONFIG"
+  fi
+fi
+
+restart_needed=0
+if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_changed" = "1" ]; then
+  restart_needed=1
+fi
+{{ include "c8s-lib.nri.restartAndWait" (dict "root" $root) }}
+{{- end }}
+
+{{/*
+Restart + readiness tail, shared by the installer and the node-image pins
+script. NRI does not respawn pre-registered plugins on exit, so a binary,
+config or containerd-registration change reaches the plugin only through a
+containerd restart. Shims survive it.
+
+Caller dict: .root. The script must set restart_needed to 0 or 1 first.
+*/}}
+{{- define "c8s-lib.nri.restartAndWait" -}}
+{{- $root := .root -}}
+RESTART_COMMAND={{ include "c8s-lib.nri.restartCommand" $root | quote }}
+restarted_containerd=0
+if [ "$restart_needed" = "1" ]; then
+  restarted_containerd=1
+  echo "restarting containerd (detached via systemd-run): $RESTART_COMMAND"
+  # The restart tears down this pod's own containerd shim. Running it in this
+  # pod's process tree (nsenter ... sh -c) means it is killed together with the
+  # pod mid-restart — and on a sole control-plane node that interrupts the rke2
+  # bootstrap and wedges it (etcd/apiserver static manifests never rewritten,
+  # API server stays down). Hand the restart to host PID 1 via systemd-run so it
+  # runs as a transient unit and completes regardless of this pod's fate. The
+  # RESTART_COMMAND is `systemctl restart ...`, so systemd — and thus
+  # systemd-run — is always present on the host.
+  # shellcheck disable=SC2086
+  nsenter -t 1 -m -u -i -n -p -- \
+    systemd-run --collect --description="c8s nri-image-policy containerd restart" \
+    sh -c "$RESTART_COMMAND"
+fi
+
+# The plugin goes ready once its initial CDS pull settles: 4 backoff sleeps
+# (2+4+8+16s) plus per-attempt fetch timeouts (allowlistApi* consts in
+# internal/cmds/nri-image-policy/main.go). A containerd restart adds the
+# runtime's own recovery, and on a sole control-plane node that takes the
+# apiserver down with it, so the budget is wider when we restarted it.
+budget=120
+if [ "$restarted_containerd" = "1" ]; then
+  budget=300
+fi
+# A wall-clock deadline, so the number in the failure message is the time that
+# actually passed: each miss costs the curl timeout as well as the sleep.
+deadline=$(($(date +%s) + budget))
+
+health_socket="/host{{ include "c8s-lib.nri.hostHealthSocket" $root }}"
+until health=$(curl --unix-socket "$health_socket" --silent --fail --max-time 2 \
+    --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1); do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    # Re-read without --fail so the body and status come back rather than
+    # being discarded: the plugin says why it is not ready, and curl exit 7
+    # (nothing listening on the socket) is a different fault entirely.
+    rc=0
+    last=$(curl --unix-socket "$health_socket" --silent --max-time 2 \
+      --write-out ' [http %{http_code}]' http://localhost/healthz 2>&1) || rc=$?
+    echo "ERROR: plugin not healthy after ${budget}s; last /healthz: ${last:-<no response>} (curl exit $rc)" >&2
+    echo "       the plugin runs under containerd, so its log is the journal of the unit restarted by: $RESTART_COMMAND" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "==> nri-image-policy installer finished; plugin healthy: $health"
+{{- end }}
+
+{{/*
+Pins script for the node-image shape, where the node image bakes the plugin
+binary, its containerd registration and the boot config — floor included, whose
+RKE2 system digests only the image build resolves. This release's CDS pins are
+the one thing that config cannot carry, so the installer patches those two keys
+into it and restarts containerd when they change.
+
+Caller dict: .root.
+*/}}
+{{- define "c8s-lib.nri.pinsScript" -}}
+{{- $root := .root -}}
+set -eu
+
+echo "==> nri-image-policy pins installer starting"
+
+result=$(/usr/local/bin/c8s nri-image-policy set-cds-pins \
+  --config "/host{{ include "c8s-lib.nri.hostConfigPath" $root }}" \
+  --cds-measurements {{ join "," $root.Values.cds.measurements | quote }} \
+  --cds-rtmrs {{ join "," $root.Values.cds.rtmrs | quote }})
+echo "CDS pins $result"
+
+restart_needed=0
+if [ "$result" = "updated" ]; then
+  restart_needed=1
+fi
+{{ include "c8s-lib.nri.restartAndWait" (dict "root" $root) }}
+{{- end }}
+
+{{/*
+Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
+runs pull mode (polls CDS); allowlist.always_allow is the floor that pins the
+install image + CDS digest so chart upgrades can roll.
+*/}}
+{{- define "c8s-lib.nri.bootConfig" -}}
+{{- $root := .root -}}
+{{/* Must stay the value CDS runs with: the two ends of one mutually-attested connection. */}}
+platform: {{ include "c8s-lib.ratlsPlatform" $root | quote }}
+plugin:
+  health_addr: {{ printf "unix://%s" (include "c8s-lib.nri.hostHealthSocket" $root) | quote }}
+workload_claims:
+  socket_dir: {{ $root.Values.runtimeDir | quote }}
+  # The plugin is launched by containerd on the host, so its /proc is the
+  # host's — a caller PID from SO_PEERCRED resolves directly.
+  proc_root: "/proc"
+  advertise_host: {{ $root.Values.nriImagePolicy.sandboxDigests.advertiseHost | quote }}
+allowlist:
+  pull:
+    url: {{ include "c8s-lib.nriCDSURL" $root | quote }}
+    interval: {{ $root.Values.nriImagePolicy.refresh.interval | quote }}
+    timeout: "30s"
+    # Node-local socket served by the DaemonSet's attest-proxy sidecar.
+    attestation_api_url: {{ printf "unix://%s" (include "c8s-lib.attestationSocket" $root) | quote }}
+    cds_measurements:
+{{- range $root.Values.cds.measurements }}
+      - {{ . | quote }}
+{{- else }}
+      []
+{{- end }}
+    cds_rtmrs:
+{{- range $root.Values.cds.rtmrs }}
+      - {{ . | quote }}
+{{- else }}
+      []
+{{- end }}
+{{- /* Self-allow the installer image first (load-bearing when
+       bootstrapAllowlist.deriveComponents=false, where the floor omits it), then
+       add the floor — skipping the installer digest so the map has no
+       duplicate key (the plugin loads this with yaml.v3, which rejects dups). */ -}}
+{{- $selfDigest := required "nriImagePolicy.image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest }}
+  always_allow:
+    {{ $selfDigest | quote }}: {{ printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest | quote }}
+{{- range $digest, $image := (include "c8s-lib.imageAllowlist" $root | fromJson) }}
+{{- if ne $digest $selfDigest }}
+    {{ $digest | quote }}: {{ $image | quote }}
+{{- end }}
+{{- end }}
+containerd:
+  socket: {{ include "c8s-lib.nri.containerdSocket" $root | quote }}
+  namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}
+policy:
+  mode: {{ $root.Values.nriImagePolicy.policy.mode | quote }}
+  enforce_existing: {{ $root.Values.nriImagePolicy.policy.enforceExisting }}
+  deny_missing_annotation: {{ $root.Values.nriImagePolicy.policy.denyMissingAnnotation }}
+{{- if $root.Values.nriImagePolicy.policy.exemptNamespaces }}
+  exempt_namespaces:
+{{- range $root.Values.nriImagePolicy.policy.exemptNamespaces }}
+    - {{ . | quote }}
+{{- end }}
+  exempt_snapshot_path: {{ printf "%s/exempt-snapshot.json" $root.Values.nriImagePolicy.hostPaths.cacheDir | quote }}
+{{- end }}
+  label_rules:
+{{- if $root.Values.nriImagePolicy.policy.labelRules }}
+{{- toYaml $root.Values.nriImagePolicy.policy.labelRules | nindent 4 }}
+{{- else }}
+    []
+{{- end }}
+logging:
+  level: {{ $root.Values.nriImagePolicy.logLevel | quote }}
+{{- end }}

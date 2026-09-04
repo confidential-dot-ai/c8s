@@ -1,0 +1,16 @@
+apiVersion: v2
+name: c8s-lib
+description: |
+  Shared manifest templates for the c8s shape charts (c8s-pod, c8s-node-cloud,
+  c8s-node-metal, c8s-node-image). Not installable on its own.
+type: library
+version: 0.1.0
+kubeVersion: ">=1.30.0-0"
+keywords:
+  - confidential
+  - tee
+  - attestation
+  - ratls
+maintainers:
+  - name: confidential-dot-ai
+home: https://github.com/confidential-dot-ai

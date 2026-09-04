@@ -359,17 +359,17 @@ func TestCraneDigestShellsOut(t *testing.T) {
 }
 
 func TestComponentEnabledPredicateExec(t *testing.T) {
-	values := "attestationApi:\n  enabled: true\n"
+	values := "volumed:\n  enabled: true\n"
 
 	t.Run("set override beats the chart default", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		enabled, err := componentEnabledPredicate(context.Background(), writeChart(t, values),
-			[]string{"--set", "attestationApi.enabled=false"})
+			[]string{"--set", "volumed.enabled=false"})
 		if err != nil {
 			t.Fatalf("componentEnabledPredicate: %v", err)
 		}
-		if on, _ := enabled("attestationApi.enabled"); on {
+		if on, _ := enabled("volumed.enabled"); on {
 			t.Error("override to false must win over the chart default true")
 		}
 	})
@@ -381,7 +381,7 @@ func TestComponentEnabledPredicateExec(t *testing.T) {
 		if err != nil {
 			t.Fatalf("componentEnabledPredicate: %v", err)
 		}
-		if on, _ := enabled("attestationApi.enabled"); !on {
+		if on, _ := enabled("volumed.enabled"); !on {
 			t.Error("chart default true must stand")
 		}
 	})
@@ -398,7 +398,7 @@ func TestComponentEnabledPredicateExec(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		_, err := componentEnabledPredicate(context.Background(), writeChart(t, values),
-			[]string{"--set", "attestationApi=x", "--set", "attestationApi.enabled=false"})
+			[]string{"--set", "volumed=x", "--set", "volumed.enabled=false"})
 		if err == nil {
 			t.Fatal("want error for a scalar/map overlay conflict")
 		}
@@ -833,13 +833,14 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 	}
 
 	// An unstamped build resolves digests at the fallback tag, and only for
-	// components the node shape actually renders. nri-image-policy is among
-	// them: the baked installer runs from that image, and its digest is what
-	// derives it into the seed the node's plugin admits it from.
+	// components the node-image chart actually renders. nri-image-policy is
+	// among them: the pins installer runs from that image, and its digest is
+	// what derives it into the seed the node's baked plugin admits it from.
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/c8s-operator:main")
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/cds:main")
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/ratls-mesh:main")
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/nri-image-policy:main")
+	// attestation-api is baked into the node image: not a chart component.
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/attestation-api")
 	// volumed stays off without --volumes.
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/volumed")
@@ -849,28 +850,22 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 		t.Errorf("stderr missing the operator-keys warning:\n%s", stderr)
 	}
 
-	// The computed values helm received, decoded and pinned.
+	// The computed values helm received, decoded and pinned. The shape flags
+	// collapse to the single platform selector; the chart encodes the rest.
 	tree := readYAMLTree(t, s.computed)
-	if got := treeAt(t, tree, "attestationApi", "cvmMode"); got != "node" {
-		t.Errorf("attestationApi.cvmMode = %#v, want node", got)
+	if got := treeAt(t, tree, "platform"); got != "snp" {
+		t.Errorf("platform = %#v, want snp", got)
 	}
-	if got := treeAt(t, tree, "attestationApi", "enabled"); got != false {
-		t.Errorf("attestationApi.enabled = %#v, want false (baked into the node image)", got)
-	}
-	// The plugin is baked, but its installer stays on (chart default enabled) —
-	// it is the only path that writes this release's CDS pins into the baked
-	// config, so node mode flips the installer's shape, not its presence.
-	if got := treeAt(t, tree, "nriImagePolicy", "baked"); got != true {
-		t.Errorf("nriImagePolicy.baked = %#v, want true", got)
-	}
-	if got := treeAt(t, tree, "attestationApi", "teeDevices", "sevGuest"); got != true {
-		t.Errorf("teeDevices.sevGuest = %#v, want true", got)
+	if _, ok := tree["attestationApi"]; ok {
+		t.Errorf("computed values carry attestationApi overrides %#v; the node-image chart owns that section", tree["attestationApi"])
 	}
 	if got := treeAt(t, tree, "image", "digest"); got != testDigest {
 		t.Errorf("image.digest = %#v, want %s", got, testDigest)
 	}
-	if got := treeAt(t, tree, "kata", "distro"); got != "k8s" {
-		t.Errorf("kata.distro = %#v, want the detected k8s", got)
+	// node-image skips distro detection: its nodes are RKE2 by construction
+	// and the chart has no distro value.
+	if _, ok := tree["distro"]; ok {
+		t.Errorf("computed values carry distro %#v; node-image plumbs none", tree["distro"])
 	}
 
 	// The namespace applied before helm must admit privileged pods.
@@ -1009,11 +1004,19 @@ func TestInstallPodModeLabelsAndPreflightsTEENodes(t *testing.T) {
 		}
 	}
 	tree := readYAMLTree(t, s.computed)
-	if got := treeAt(t, tree, "kata", "enabled"); got != true {
-		t.Errorf("kata.enabled = %#v, want true", got)
+	if got := treeAt(t, tree, "platform"); got != "snp" {
+		t.Errorf("platform = %#v, want snp", got)
 	}
-	if got := treeAt(t, tree, "ratlsMesh", "enabled"); got != false {
-		t.Errorf("ratlsMesh.enabled = %#v, want false (in-guest counterpart)", got)
+	// The guest tag pins to the component tag (an unstamped build's fallback).
+	if got := treeAt(t, tree, "kata", "guestImage", "tag"); got != "main" {
+		t.Errorf("kata.guestImage.tag = %#v, want the component tag main", got)
+	}
+	// The pod chart has no ratlsMesh/attestationApi sections (in-guest
+	// counterparts), so the computed values carry nothing for them.
+	for _, section := range []string{"ratlsMesh", "attestationApi"} {
+		if _, ok := tree[section]; ok {
+			t.Errorf("computed values carry %s %#v; the pod chart owns that shape", section, tree[section])
+		}
 	}
 }
 
@@ -1041,8 +1044,8 @@ func TestInstallTDXPreflightPerMode(t *testing.T) {
 			t.Fatal("helm upgrade did not run")
 		}
 		tree := readYAMLTree(t, s.computed)
-		if got := treeAt(t, tree, "attestationApi", "teeDevices", "tpm"); got != true {
-			t.Errorf("teeDevices.tpm = %#v, want true on aks", got)
+		if got := treeAt(t, tree, "platform"); got != "az-tdx" {
+			t.Errorf("platform = %#v, want az-tdx on aks+tdx", got)
 		}
 	})
 }
@@ -1149,7 +1152,7 @@ esac`)
 // effectiveValues must read it, and helm must receive the piped bytes as a
 // -f file ahead of the computed values.
 func TestInstallValuesFromStdin(t *testing.T) {
-	payload := "volumed:\n  enabled: true\nkata:\n  distro: rke2\n"
+	payload := "volumed:\n  enabled: true\ndistro: rke2\n"
 
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
@@ -1159,13 +1162,13 @@ func TestInstallValuesFromStdin(t *testing.T) {
 	resetCLIState(t)
 	t.Cleanup(func() { rootCmd.SetIn(nil) })
 	rootCmd.SetIn(strings.NewReader(payload))
-	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "--wait=false", "-f", "-"})
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=node-metal", "--wait=false", "-f", "-"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	calls := s.f.calls(t)
 
-	// The piped kata.distro owns the distro, so detection never runs.
+	// The piped distro owns the containerd layout, so detection never runs.
 	mustNotContainPrefix(t, calls, "kubectl get nodes -o jsonpath")
 
 	// The piped volumed.enabled=true is visible to the digest resolver, which
@@ -1190,8 +1193,8 @@ func TestInstallValuesFromStdin(t *testing.T) {
 	if content != payload {
 		t.Errorf("helm's stdin-derived -f content = %q, want the piped %q", content, payload)
 	}
-	if got := treeAt(t, readYAMLTree(t, s.computed), "attestationApi", "cvmMode"); got != "node" {
-		t.Errorf("computed values cvmMode = %#v, want node (last -f still the computed file)", got)
+	if got := treeAt(t, readYAMLTree(t, s.computed), "platform"); got != "snp" {
+		t.Errorf("computed values platform = %#v, want snp (last -f still the computed file)", got)
 	}
 }
 
@@ -1306,24 +1309,10 @@ func TestInstallValidatesHardwarePlatformBeforeTheCluster(t *testing.T) {
 	})
 }
 
-// The hosted lanes must render the exempt-namespace default themselves: a
-// plain `--cvm-mode=aks` install that renders digest-only admission denies the
-// platform's own kube-system pods at the containerd restart it performs.
-func TestInstallHostedLaneDefaultsExemptNamespaces(t *testing.T) {
-	s := newInstallStubs(t, "", false)
-	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false"); err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	got := treeAt(t, readYAMLTree(t, s.computed), "nriImagePolicy", "policy", "exemptNamespaces")
-	if want := []any{"kube-system"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("exemptNamespaces = %#v, want %#v", got, want)
-	}
-}
-
 // The computed values are helm's LAST -f, so they win on every key they set.
-// An operator who wrote exemptNamespaces must therefore see it reach helm
-// unchanged — the default must not be emitted at all.
+// An operator who wrote exemptNamespaces must see it reach helm unchanged —
+// the CLI emits no exemptNamespaces of its own (the node-cloud chart carries
+// the kube-system default), so nothing overrides the operator's file.
 func TestInstallHostedLaneKeepsOperatorExemptNamespaces(t *testing.T) {
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
@@ -1478,9 +1467,9 @@ func TestInstallNodeLaneReportsNoExemption(t *testing.T) {
 	}
 }
 
-// The hosted-lane default stands aside for a -f file that writes the key, and
-// `-f -` is such a file: the exempt scan runs after stdin is materialized, so
-// it reads the piped bytes rather than a literal "-".
+// `-f -` is a values file like any other: the computed values must not carry
+// an exemptNamespaces override that would beat the piped one (helm's last -f
+// wins).
 func TestInstallHostedLaneKeepsExemptNamespacesFromStdin(t *testing.T) {
 	payload := "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n"
 

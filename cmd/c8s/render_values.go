@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -39,10 +38,10 @@ var renderValuesDistro string
 // renderValuesCmd emits the resolved Helm values an install would apply, as a
 // values.yaml, without touching a cluster. It runs the same value computation
 // as `c8s install` — resolve each component image tag to its registry digest
-// (via crane), map --cvm-mode to the TEE devices, --single-node to the cleared
-// CDS node selector, --cvm-mode=pod runtime toggles, and enable the NRI
-// allowlist derivation — but writes the values to stdout instead of running
-// helm upgrade --install.
+// (via crane), map --cvm-mode to the shape chart and its platform selector,
+// --single-node to the cleared CDS node selector, and enable the NRI allowlist
+// derivation — but writes the values to stdout instead of running helm
+// upgrade --install.
 //
 // This is the GitOps seam: a Flux HelmRelease (or any chart consumer) can
 // valuesFrom a bundle produced here instead of recomputing digests and device
@@ -52,18 +51,19 @@ var renderValuesDistro string
 //
 // What it does NOT emit: the per-cluster overrides a consumer layers on top
 // (dnsSanPatterns, tls-lb SAN/LB IP/CORS, nodeSelectors) and anything the chart
-// renders off these values internally (e.g. the AKS webhook annotation off
-// attestationApi.cvmMode). The output is the install-computed base, not a full
-// per-cluster values file.
+// renders off these values internally. The output is the install-computed
+// base, not a full per-cluster values file.
 var renderValuesCmd = &cobra.Command{
 	Use:   "render-values",
 	Short: "Print the resolved Helm values an install would apply (no cluster needed)",
 	Long: `Computes the install-time Helm values that need a registry or the chart
-to resolve — resolved image digests, --cvm-mode TEE devices, --single-node node
-selector, --cvm-mode=pod toggles, and the NRI allowlist derivation — and writes them to
+to resolve — resolved image digests, the shape's platform selector, --single-node
+node selector, and the NRI allowlist derivation — and writes them to
 stdout as a values.yaml, without contacting a cluster. Per-cluster tuning a
 consumer already owns (webhook cert settings, tls-lb, nodeSelectors, …) is not
-emitted; layer it in the consuming HelmRelease values.
+emitted; layer it in the consuming HelmRelease values. The values target the
+shape chart --cvm-mode selects (c8s-pod, c8s-node-cloud, c8s-node-metal,
+c8s-node-image).
 
 Use it to feed a GitOps consumer: a Flux HelmRelease can valuesFrom the bundle
 this produces rather than recomputing digests and device mappings. Unlike
@@ -86,17 +86,20 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
+		shape, platform, err := resolveShape(installCvmMode, installHardwarePlatform, installEvidence)
+		if err != nil {
+			return err
+		}
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
 		}
 
-		dir, err := extractChart()
+		chartPath, tmpRoot, err := helmchart.ExtractChart(shape)
 		if err != nil {
 			return fmt.Errorf("extract embedded chart: %w", err)
 		}
-		defer os.RemoveAll(dir)
+		defer os.RemoveAll(tmpRoot)
 
-		chartPath := filepath.Join(dir, helmchart.ChartRoot)
 		components, err := chartComponents(cmd.Context(), chartPath)
 		if err != nil {
 			return fmt.Errorf("read chart components: %w", err)
@@ -110,7 +113,7 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 		if cmd.Flags().Changed("distro") {
 			distro = renderValuesDistro
 		}
-		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, resolveImageTag(), distro, appendResolvedDigestArgs)
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, shape, platform, resolveImageTag(), distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
 		}
@@ -140,13 +143,14 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 type digestResolver func(ctx context.Context, chartPath string, setArgs []string, imageTag string, components []c8sComponent) ([]string, error)
 
 // buildValueArgs assembles the helm --set/--set-string value args shared by
-// install and render-values. distro is passed in (install autodetects it from
-// the cluster; render-values takes it from --distro) so the builder itself
-// never touches a cluster. resolveDigests is injected (see digestResolver). The
-// returned slice is value args only — install prepends the `upgrade --install
-// <release> <chart>` verb and appends -f / wait flags, render-values converts
-// these to a values tree.
-func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, components []c8sComponent, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
+// install and render-values. shape/platform come from resolveShape in the
+// caller; distro is passed in (install autodetects it from the cluster;
+// render-values takes it from --distro) so the builder itself never touches a
+// cluster. resolveDigests is injected (see digestResolver). The returned slice
+// is value args only — install prepends the `upgrade --install <release>
+// <chart>` verb and appends -f / wait flags, render-values converts these to a
+// values tree.
+func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, components []c8sComponent, shape helmchart.Shape, platform, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
 	// Derive the upstream address from the same deduped adoptions install's RunE
 	// validates against, so the address the chart receives and the id the RunE
 	// checks can never diverge on duplicate refs.
@@ -174,13 +178,12 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	setArgs = appendInstallCRDArgs(setArgs, installCRDs)
 	// Empty distro means "don't plumb it" — both commands leave the chart
 	// default to stand: install when -f is given, render-values when --distro
-	// is unset (the values-file / chart owns kata.distro / nriImagePolicy.distro).
-	if distro != "" {
+	// is unset. node-image has no distro value: the node image is RKE2.
+	if distro != "" && shape != helmchart.ShapeNodeImage {
 		setArgs = appendDistroInstallArgs(setArgs, distro)
 	}
-	// --cvm-mode is required and validated in RunE, so always emit the mode's
-	// teeDevices/attestation-api values (and the --hardware-platform propagation).
-	setArgs, err = appendCvmModeInstallArgs(setArgs, installCvmMode, installHardwarePlatform)
+	// The shape flags collapse to the single platform selector.
+	setArgs, err = appendShapeInstallArgs(setArgs, platform, shape)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +193,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	// the axis and is left alone; installValues is empty for render-values,
 	// which registers no -f flag.
 	guestTag := ""
-	if cvmModeIsPod(installCvmMode) {
+	if shape == helmchart.ShapePod {
 		pinnedInValues, err := valuesFilesSetGuestImageTag(installValues)
 		if err != nil {
 			return nil, err
@@ -199,17 +202,11 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 			guestTag = imageTag
 		}
 	}
-	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug, guestTag)
-	// installValues is empty for render-values, which registers no -f flag, so
-	// the hosted-lane default always applies there.
-	setArgs, err = appendExemptNamespacesInstallArgs(setArgs, installCvmMode, installValues)
-	if err != nil {
-		return nil, err
-	}
+	setArgs = appendKataInstallArgs(setArgs, shape, installKataDebug, guestTag)
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
 	// Ahead of resolveDigests, which pins a component's image only while the
 	// effective values enable it.
-	setArgs = appendVolumedInstallArgs(setArgs, installVolumes, installCvmMode)
+	setArgs = appendVolumedInstallArgs(setArgs, installVolumes, shape)
 	// --upstream derives a c8s-<id>.<ns>.svc.cluster.local address; the chart
 	// recognizes that headless-Service shape as mesh-wrapped and admits plaintext
 	// http. Empty means "not plumbed" so an operator's -f (or the chart's
@@ -313,7 +310,7 @@ func valueArgsToTree(setArgs []string) (map[string]any, error) {
 // coerce mirrors helm's --set vs --set-string typing: --set-string keeps the
 // raw string; --set coerces null/bool/int the way helm's strvals does, so
 // `cds.node.selector=null` becomes a real null (clearing the map) and
-// `teeDevices.tpm=true` a real bool.
+// `kata.guestImage.debug=true` a real bool.
 func coerce(raw string, typed bool) any {
 	if !typed {
 		return raw
@@ -416,10 +413,11 @@ func init() {
 	renderValuesCmd.Flags().StringVar(&renderValuesDistro, "distro", "", "host Kubernetes distro (k8s | rke2) — install autodetects this from the cluster; render-values has no cluster, so pass it explicitly when you need it pinned. Unset leaves the chart default")
 	renderValuesCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration (cds.node.selector={}, cds.node.tolerations=[])")
 	renderValuesCmd.Flags().BoolVar(&installVolumes, "volumes", false, "emit volumed.enabled=true, deploying the node agent that opens encrypted volumes (docs/volumes.md). Emits nothing under --cvm-mode=pod, where volumed runs in-guest")
-	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod kata CVMs; disables host-side ratls-mesh/attestation-api/nri-image-policy) or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0). node/gke/aks are single-tenant — the node is one trust domain; only pod isolates workloads from each other")
-	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks")
-	renderValuesCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Emits cds.measurements + ratlsMesh.measurements; empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
-	renderValuesCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Emits cds.measurementsConfig + ratlsMesh.measurementsConfig and the flat pins alongside. Cannot be combined with --measurements or --rtmrs")
+	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "install shape / chart (REQUIRED): pod | node-cloud | node-metal | node-image (aliases: gke = node-cloud, aks = node-cloud --evidence=vtpm, node = node-image)")
+	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED): sev-snp or tdx")
+	renderValuesCmd.Flags().StringVar(&installEvidence, "evidence", "", "attestation evidence source for --cvm-mode=node-cloud: native (default) or vtpm (Azure vTPM)")
+	renderValuesCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Emits cds.measurements (+ ratlsMesh.measurements on the node shapes); empty = no pinning (UNSAFE). Under the node shapes this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	renderValuesCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Emits cds.measurementsConfig (+ ratlsMesh.measurementsConfig on the node shapes) and the flat pins alongside. Cannot be combined with --measurements or --rtmrs")
 	renderValuesCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Emits cds.rtmrs + ratlsMesh.rtmrs; ignored for SNP evidence")
 	renderValuesCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (requires --cvm-mode=pod)")
 	renderValuesCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "adopted workload as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Used here only to derive --upstream's address (render-values patches nothing)")

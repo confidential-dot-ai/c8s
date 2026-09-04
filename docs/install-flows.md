@@ -1,7 +1,7 @@
-# c8s install flows and features (non-kata vs kata)
+# c8s install flows and features (node shapes vs pod)
 
 How `c8s install` assembles the platform, and how the runtime behaviour
-differs across the two install modes. This is the overview that ties the
+differs across the install shapes. This is the overview that ties the
 deeper docs together:
 
 - [`kata.md`](kata.md) — the kata runtime install + enforcement, in depth.
@@ -18,39 +18,44 @@ deeper docs together:
 [`kata-image-policy.md`](kata-image-policy.md) (in-guest enforcement) →
 [`kata.md`](kata.md) (install/ops reference).
 
-The source of truth for the mode→helm-args mapping is `cmd/c8s/install.go`
-(`appendKataInstallArgs` / `appendDistroInstallArgs`); for the rendered
-resources, `internal/helmchart/c8s/templates/`.
+The source of truth is one chart per shape: `internal/helmchart/` holds
+four installable shape charts — `pod` (c8s-pod), `node-cloud`
+(c8s-node-cloud), `node-metal` (c8s-node-metal), `node-image`
+(c8s-node-image) — built on a shared library chart (`lib/`, c8s-lib). The
+CLI picks the chart from `--cvm-mode` (`resolveShape` in
+`cmd/c8s/install.go`); component enablement is the chart choice.
 
 ---
 
-## The two modes
+## The shapes
 
-`c8s install` runs `helm upgrade --install` against the embedded chart. The
-required `--cvm-mode` flag selects a **mode**, which is a fixed set of `--set`
-choices. `pod` is the kata shape; `node`, `gke`, and `aks` are the
-node-as-CVM shapes ("base" below), differing only in how the node's TEE
-evidence is read (native device, GKE managed CVM, Azure vTPM).
+`c8s install` runs `helm upgrade --install` against one of the four embedded
+shape charts. The required `--cvm-mode` flag selects the chart. `pod` is the
+kata shape; the others are node-as-CVM shapes, differing in where the node's
+TEE evidence comes from and what the node image already bakes.
 
-| Mode | Flag | One-liner |
+| Chart | Flag | One-liner |
 |---|---|---|
-| **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. **Single-tenant** — the node is one trust domain. Host-side mesh + attestation + image policy. The dev/baseline shape. |
-| **kata** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
+| **c8s-node-image** | `--cvm-mode=node-image` (alias `node`) | Nodes booted from the c8s node-guest-image: the attestation-api and the NRI image-policy plugin are baked, and the chart's pins installer carries the release's CDS pins to the baked plugin. Normal Kubernetes pods on CVM nodes — **single-tenant**, the node is one trust domain. The dev/baseline shape. |
+| **c8s-node-metal** | `--cvm-mode=node-metal` | Self-managed bare-metal CVM nodes (SEV-SNP or TDX) without the c8s node image: the chart installs the attestation-api DaemonSet and the full NRI installer. |
+| **c8s-node-cloud** | `--cvm-mode=node-cloud` (aliases `gke`, `aks`; `aks` pins `--evidence=vtpm`) | Cloud-managed confidential VM nodes (GKE, AKS): native TEE evidence, or the Azure vTPM. |
+| **c8s-pod** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
 
 ```mermaid
 flowchart LR
     A["c8s install"] --> B{--cvm-mode}
-    B -->|"node / gke / aks"| BASE["base<br/>host-side everything<br/>no per-pod confidentiality"]
+    B -->|"node-image / node-metal / node-cloud"| NODE["node-as-CVM<br/>host-side everything<br/>no per-pod confidentiality"]
     B -->|"--cvm-mode=pod"| KATA["kata (enforcing)<br/>all workloads forced<br/>into kata VMs"]
 ```
 
 There is no distro flag: the host distro (`k8s` vs `rke2`), which picks the
-containerd config paths for kata-deploy and nri-image-policy in every mode,
-is detected from the cluster's kubelet versions (`+rke2` build suffix →
-rke2). An install with `-f` values owns the distro instead: set
-`kata.distro` / `nriImagePolicy.distro` there if the chart default (`k8s`)
-doesn't fit — a mixed cluster cannot be detected and always needs that, plus
-nodeSelectors to partition the install.
+containerd config paths for kata-deploy and nri-image-policy, is detected
+from the cluster's kubelet versions (`+rke2` build suffix → rke2) — skipped
+under `node-image`, whose nodes are always RKE2. An install with `-f` values
+owns the distro instead: set the top-level `distro` value there (every chart
+but node-image carries it) if the chart default doesn't fit — a mixed
+cluster cannot be detected and always needs that, plus nodeSelectors to
+partition the install.
 
 The kata-image-puller is on by default under `--cvm-mode=pod`, and the install
 pins `kata.guestImage.tag` to the tag it resolves the component images at — the
@@ -73,44 +78,44 @@ only (see [`kata.md`](kata.md)).
 "CVM" = `kata-qemu-snp` confidential VM; "in-VM" = baked into the guest image,
 not a cluster resource.
 
-| Component | base | `--cvm-mode=pod` | Runs on |
+| Component | node shapes | `--cvm-mode=pod` | Runs on |
 |---|:--:|:--:|---|
 | c8s operator (webhook + controllers) | ✓ | ✓ | host (runc; always webhook-exempt) |
 | MWC `pod-injector` | ✓ | ✓ | cluster (release-tracked resource) |
-| **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
-| attestation-service | ✓ host | ✗ (in-VM) | host DaemonSet in base; baked into the guest image under kata |
-| ratls-mesh | ✓ host | ✗ (in-VM) | host DaemonSet in base; in-VM routing under kata |
-| nri-image-policy | ✓ host | ✗ (in-VM) | host NRI plugin in base; in-guest `policy-monitor` under kata (fed from CDS's served allowlist) |
+| **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc on the node shapes, `kata-qemu-snp` under kata |
+| attestation-service | ✓ host | ✗ (in-VM) | chart DaemonSet on node-cloud/node-metal, baked into the node image on node-image; baked into the kata guest image under pod |
+| ratls-mesh | ✓ host | ✗ (in-VM) | host DaemonSet on the node shapes; in-VM routing under kata |
+| nri-image-policy | ✓ host | ✗ (in-VM) | host NRI plugin (chart installer on node-cloud/node-metal, baked plugin + pins installer on node-image); in-guest `policy-monitor` under kata (fed from CDS's served allowlist) |
 | kata-deploy DaemonSet | ✗ | ✓ | host (privileged, hostPID/hostNetwork) |
 | kata RuntimeClasses | ✗ | ✓ | cluster |
 | kata-image-puller | ✗ | ✓¹ | host (privileged) |
 | kata-enforcement VAP | ✗ | ✓ | cluster |
 | RuntimeClass injection (workloads) | ✗ | ✓ | webhook (admission time) |
 | get-cert injection (`confidential.ai/cw` pods) | ✓ | ✓ | webhook (admission time) |
-| tls-lb (bundled workload) | ✓ | ✓ CVM | runc in base; `kata-qemu-snp` CVM under kata (pinned by the chart) |
+| tls-lb (bundled workload) | ✓ | ✓ CVM | runc on the node shapes; `kata-qemu-snp` CVM under kata (pinned by the chart) |
 
 ¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)
 
 Under kata, **every host-side security component (attestation-service,
 ratls-mesh, nri-image-policy) moves *inside* the confidential guest**, where
-the host (adversarial) cannot tamper with it. `c8s install --cvm-mode=pod` sets their
-`.enabled=false`, and the chart fails the render
-(`kind=enforce_host_components`, `templates/validations.yaml`) if any is left
-enabled alongside `kata.enabled` — the host versions would be a second,
-unattested enforcement path.
+the host (adversarial) cannot tamper with it. The pod chart has no values
+for them and renders none of them — component presence is the chart, so the
+host versions cannot be left behind as a second, unattested enforcement
+path.
 
 ---
 
-## Trust boundary by mode
+## Trust boundary by shape
 
-**base** — there is no per-pod confidentiality. Everything runs in ordinary
-containers the host kernel can read. The mesh/attestation components operate at
-the node level; they do not hide pod memory from the host. The node is a single
-trust domain, so this mode is **single-tenant**: every pod on it can reach what
-any other pod on it can reach. Multi-tenant isolation requires `--cvm-mode=pod`.
+**node shapes** — there is no per-pod confidentiality. Everything runs in
+ordinary containers the host kernel can read. The mesh/attestation
+components operate at the node level; they do not hide pod memory from the
+host. The node is a single trust domain, so these shapes are
+**single-tenant**: every pod on it can reach what any other pod on it can
+reach. Multi-tenant isolation requires `--cvm-mode=pod`.
 
 ```
- HOST (trusted in this mode)
+ HOST (trusted on these shapes)
  ┌─────────┐ ┌────────┐ ┌────────────┐ ┌───────────────────┐
  │operator │ │  CDS   │ │ratls-mesh  │ │attestation-service│
  │+webhook │ │ (runc) │ │nri-img-pol │ │   (host DaemonSet) │
@@ -251,15 +256,15 @@ sync):
 > **Why CDS doesn't use `cw` for its runtimeClass.** It must be a
 > CVM, but it must *not* get a get-cert sidecar: that sidecar dials CDS,
 > and CDS dialing itself from its own init container is a bootstrap deadlock.
-> So it pins `runtimeClassName: kata-qemu-snp` **directly** in its pod
-> template (gated on `kata.enabled`) and carries no `cw` annotation. It
-> self-provisions its serving cert via RA-TLS bound to the SNP measurement.
+> So the pod chart pins `runtimeClassName: kata-qemu-snp` **directly** in
+> CDS's pod template and carries no `cw` annotation. It self-provisions its
+> serving cert via RA-TLS bound to the SNP measurement.
 
 ---
 
 ## Certificate and attestation flows
 
-**base (host attestation).** Workloads annotated `cw` get a get-cert sidecar
+**Node shapes (host attestation).** Workloads annotated `cw` get a get-cert sidecar
 that dials CDS over the cluster Service (`--cds-url`); CDS verifies the request
 against the **host** attestation-service DaemonSet and signs the CSR with its
 in-memory mesh CA — verify and sign happen in one process.
@@ -275,9 +280,9 @@ sequenceDiagram
     A-->>W: leaf cert + key
 ```
 
-**kata (in-VM attestation + RA-TLS).** The host attestation-service is off;
-`attestationService.url` is `http://127.0.0.1:8400`, the in-VM service baked
-into the guest. CDS self-provisions its own *serving* cert via RA-TLS using SNP
+**kata (in-VM attestation + RA-TLS).** The pod chart renders no host
+attestation-service; consumers dial `http://127.0.0.1:8400`, the in-VM
+service baked into the guest. CDS self-provisions its own *serving* cert via RA-TLS using SNP
 evidence from its own CVM before it serves. Workloads still get-cert from CDS,
 but CDS now runs inside its CVM.
 
@@ -306,16 +311,17 @@ of the guest image whose SNP digest a client verifies — see
 The MWC is release-tracked, so `helm uninstall` deletes it along with every
 other release resource — a `failurePolicy: Fail` webhook pointing at a deleted
 operator Service cannot leak and block pod creation cluster-wide. The only
-`pre-delete` hook in the chart is the nri-image-policy uninstall DaemonSet
-(`templates/nri-image-policy-uninstall-hook.yaml`, base mode only), which
-unwinds the host-side NRI plugin install before the release goes.
+`pre-delete` hook in the charts is the nri-image-policy uninstall DaemonSet
+(node-cloud and node-metal only — node-image's plugin is baked into the node
+image), which unwinds the host-side NRI plugin install before the release
+goes.
 
 ```mermaid
 sequenceDiagram
     participant Helm as helm uninstall
     participant DS as nri uninstall DaemonSet
     participant K as kube-apiserver
-    Helm->>DS: pre-delete hook (base mode: unwind the host NRI plugin)
+    Helm->>DS: pre-delete hook (node-cloud/node-metal: unwind the host NRI plugin)
     Helm->>K: delete release resources (operator, MWC pod-injector, CDS, VAP, ...)
     Note over K: MWC removed with the release → no orphaned Fail webhook
 ```
@@ -343,8 +349,9 @@ already deleted. Full sweep inventory: [`kata.md`](kata.md#uninstalling).
 # --upstream (with the port on its --workload-ref) points tls-lb at an adopted
 # workload's mesh-wrapped headless Service (see operator.md, "tls-lb upstream").
 
-# Base — normal cluster, host-side components, no per-pod confidentiality.
-c8s install --cvm-mode=node --hardware-platform=sev-snp --operator-keys operator-pub.pem \
+# Node-image — nodes booted from the c8s node-guest-image, host-side
+# components, no per-pod confidentiality.
+c8s install --cvm-mode=node-image --hardware-platform=sev-snp --operator-keys operator-pub.pem \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # Kata (enforcing): every workload pod becomes a kata VM, non-kata pods

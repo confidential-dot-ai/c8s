@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -232,16 +231,17 @@ kata:
 nriImagePolicy:
   distro: rke2
 `)
-	cfg, err := kataConfigFromValues(tree)
+	cfg, err := kataConfigFromValues("c8s", tree)
 	if err != nil {
 		t.Fatalf("kataConfigFromValues: %v", err)
 	}
 	want := kataUninstallConfig{
-		Enabled:             true,
-		Distro:              "rke2",
-		ContainerdConfigDir: "/var/lib/rancher/rke2/agent/etc/containerd",
-		GuestImageHostPath:  "/var/lib/c8s/kata-images",
-		SweepImage:          "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
+		Enabled:                  true,
+		Distro:                   "rke2",
+		ContainerdConfigDir:      "/var/lib/rancher/rke2/agent/etc/containerd",
+		GuestImageHostPath:       "/var/lib/c8s/kata-images",
+		GuestImageNvidiaHostPath: "/var/lib/c8s/kata-images-nvidia", // chart default: no kata.gpu block in the values
+		SweepImage:               "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
 		// The NRI containerd dir follows nriImagePolicy.distro; the host
 		// paths fall back to the chart defaults when absent.
 		NriContainerdDir:  "/var/lib/rancher/rke2/agent/etc/containerd",
@@ -256,8 +256,8 @@ nriImagePolicy:
 	}
 }
 
-// A -f release can diverge the two distros; the NRI sweep must target the
-// NRI installer's containerd dir, not kata's.
+// A monolith release could diverge the two distros; the NRI sweep must target
+// the NRI installer's containerd dir, not kata's.
 func TestNriConfigFromValuesDivergentDistro(t *testing.T) {
 	tree := chartValuesTree(t, `
 kata:
@@ -274,7 +274,7 @@ nriImagePolicy:
   hostPaths:
     pluginDir: /custom/nri/plugins
 `)
-	cfg, err := kataConfigFromValues(tree)
+	cfg, err := kataConfigFromValues("c8s", tree)
 	if err != nil {
 		t.Fatalf("kataConfigFromValues: %v", err)
 	}
@@ -319,7 +319,7 @@ kata:
   guestImage:
     hostPath: /var/lib/c8s/kata-images
 `)
-	cfg, err := kataConfigFromValues(tree)
+	cfg, err := kataConfigFromValues("c8s", tree)
 	if err != nil {
 		t.Fatalf("kataConfigFromValues: %v", err)
 	}
@@ -336,8 +336,8 @@ kata:
 }
 
 // Every kata install carries a second GPU guest-image dir the sweep must
-// remove. The path is read from the kata.gpu.guestImage block; a pre-GPU
-// release (no kata.gpu block) leaves it empty and the sweep skips it.
+// remove. The path is read from the kata.gpu.guestImage block, defaulting to
+// the chart's dir when the block is absent.
 func TestKataConfigFromValuesExtractsGpuImagePath(t *testing.T) {
 	base := `
 kata:
@@ -357,7 +357,7 @@ kata:
     guestImage:
       hostPath: /var/lib/c8s/kata-images-nvidia
 `)
-		cfg, err := kataConfigFromValues(tree)
+		cfg, err := kataConfigFromValues("c8s", tree)
 		if err != nil {
 			t.Fatalf("kataConfigFromValues: %v", err)
 		}
@@ -366,27 +366,83 @@ kata:
 		}
 	})
 	t.Run("no gpu block (pre-GPU release)", func(t *testing.T) {
-		// A release that predates the GPU stack must not error.
-		cfg, err := kataConfigFromValues(chartValuesTree(t, base))
+		// A release that predates the GPU stack must not error; the sweep
+		// targets the standard dir so the leftover is still cleaned.
+		cfg, err := kataConfigFromValues("c8s", chartValuesTree(t, base))
 		if err != nil {
 			t.Fatalf("kataConfigFromValues: %v", err)
 		}
-		if cfg.GuestImageNvidiaHostPath != "" {
-			t.Errorf("GuestImageNvidiaHostPath = %q, want empty when no kata.gpu block", cfg.GuestImageNvidiaHostPath)
+		if cfg.GuestImageNvidiaHostPath != "/var/lib/c8s/kata-images-nvidia" {
+			t.Errorf("GuestImageNvidiaHostPath = %q, want the chart default when no kata.gpu block", cfg.GuestImageNvidiaHostPath)
 		}
 	})
 }
 
-// Values without a kata block mean the release isn't the c8s chart; sweeping
-// host paths based on guesses must fail loudly instead.
-func TestKataConfigFromValuesRejectsForeignChart(t *testing.T) {
-	if _, err := kataConfigFromValues(chartValuesTree(t, `foo: {bar: 1}`)); err == nil {
-		t.Fatal("values without a kata block: want error, got nil")
+// Values carrying neither kata containerd-prep nor NRI image pins give the
+// sweep nothing safe to run as; failing loudly beats guessing an image.
+func TestKataConfigFromValuesRejectsUnpinnedSweepImage(t *testing.T) {
+	if _, err := kataConfigFromValues("c8s", chartValuesTree(t, `foo: {bar: 1}`)); err == nil {
+		t.Fatal("values with no pinned sweep image: want error, got nil")
 	}
 }
 
-// The sweep config must parse out of the real embedded chart's values — the
-// uninstall reads them via `helm get values --all` (computed from these
+// A node-shape release's values have no kata block at all: the sweep config
+// must still parse (Enabled=false — nothing kata to drain), reading the NRI
+// paths and the top-level runtimeDir/distro the shape charts carry.
+func TestKataConfigFromValuesToleratesAbsentKataBlock(t *testing.T) {
+	tree := chartValuesTree(t, `
+distro: rke2
+runtimeDir: /run/custom-nri
+nriImagePolicy:
+  image:
+    repository: ghcr.io/confidential-dot-ai/nri-image-policy
+    digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+`)
+	cfg, err := kataConfigFromValues("c8s-node-metal", tree)
+	if err != nil {
+		t.Fatalf("kataConfigFromValues: %v", err)
+	}
+	if cfg.Enabled {
+		t.Error("Enabled = true, want false for a node-shape release")
+	}
+	if cfg.Distro != "rke2" || cfg.NriContainerdDir != "/var/lib/rancher/rke2/agent/etc/containerd" {
+		t.Errorf("distro dirs = %q / %q, want rke2 layout", cfg.Distro, cfg.NriContainerdDir)
+	}
+	if cfg.NriRuntimeDir != "/run/custom-nri" {
+		t.Errorf("NriRuntimeDir = %q, want the top-level runtimeDir", cfg.NriRuntimeDir)
+	}
+	if cfg.SweepImage != "ghcr.io/confidential-dot-ai/nri-image-policy@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028" {
+		t.Errorf("SweepImage = %q, want the pinned NRI plugin image", cfg.SweepImage)
+	}
+	// The guest-image dirs default to the chart paths: the sweep cleans
+	// cross-shape leftovers a node release's values cannot see.
+	if cfg.GuestImageHostPath != "/var/lib/c8s/kata-images" {
+		t.Errorf("GuestImageHostPath = %q, want the chart default", cfg.GuestImageHostPath)
+	}
+}
+
+// A pod-shape release is a kata release by construction: chart identity, not
+// a values flag, decides the drain guard.
+func TestKataConfigFromValuesPodShapeIsKata(t *testing.T) {
+	tree := chartValuesTree(t, `
+distro: k8s
+kata:
+  containerdPrep:
+    image:
+      repository: busybox
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+`)
+	cfg, err := kataConfigFromValues("c8s-pod", tree)
+	if err != nil {
+		t.Fatalf("kataConfigFromValues: %v", err)
+	}
+	if !cfg.Enabled {
+		t.Error("Enabled = false, want true for the pod shape")
+	}
+}
+
+// The sweep config must parse out of the real embedded pod chart's values —
+// the uninstall reads them via `helm get values --all` (computed from these
 // defaults) and via `helm show values` on the --host-sweep-only path, so a
 // renamed or removed values key would silently break the sweep. Mirrors
 // TestChartComponentsFromValues.
@@ -394,23 +450,22 @@ func TestKataConfigFromEmbeddedChartValues(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not on PATH")
 	}
-	dir, err := extractChart()
+	chartPath, tmpRoot, err := helmchart.ExtractChart(helmchart.ShapePod)
 	if err != nil {
-		t.Fatalf("extractChart: %v", err)
+		t.Fatalf("ExtractChart: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(tmpRoot)
 
-	out, err := exec.CommandContext(context.Background(), "helm", "show", "values",
-		filepath.Join(dir, helmchart.ChartRoot)).Output()
+	out, err := exec.CommandContext(context.Background(), "helm", "show", "values", chartPath).Output()
 	if err != nil {
 		t.Fatalf("helm show values: %v", err)
 	}
-	cfg, err := kataConfigFromValues(chartValuesTree(t, string(out)))
+	cfg, err := kataConfigFromValues("c8s-pod", chartValuesTree(t, string(out)))
 	if err != nil {
 		t.Fatalf("kataConfigFromValues on embedded chart defaults: %v", err)
 	}
-	if cfg.Enabled {
-		t.Error("chart default kata.enabled = true, want false")
+	if !cfg.Enabled {
+		t.Error("pod chart: Enabled = false, want true (the pod shape is the kata shape)")
 	}
 	if cfg.ContainerdConfigDir != "/etc/containerd" {
 		t.Errorf("ContainerdConfigDir = %q, want /etc/containerd (chart default distro k8s)", cfg.ContainerdConfigDir)

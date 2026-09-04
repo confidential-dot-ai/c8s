@@ -13,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -52,6 +51,7 @@ var (
 	installKataDebug        bool
 	installCvmMode          string
 	installHardwarePlatform string
+	installEvidence         string
 	installSingleNode       bool
 	installVolumes          bool
 	installImagePullSecret  string
@@ -80,22 +80,93 @@ const (
 	flagUpstream         = "upstream"
 )
 
-// allowedCvmModes is the --cvm-mode enum. pod is per-pod confidential VMs via
-// the Kata runtime (what --kata used to select before this replaced it); node/gke/aks are host-shaped
-// deployments. There is no default: the shape must be stated explicitly.
-var allowedCvmModes = []string{"pod", "node", "gke", "aks"}
+// allowedCvmModes is the --cvm-mode enum: the install shapes, one chart per
+// shape (gke/aks/node are accepted as aliases of the shapes they became).
+// There is no default: the shape must be stated explicitly.
+var allowedCvmModes = []string{"pod", "node-cloud", "node-metal", "node-image", "gke", "aks", "node"}
 
-// hostedCvmModes are the lanes whose platform pods belong to the cluster
-// provider rather than to c8s, so they are absent from the allowlist the
-// install derives. cvmMode=node is not one: its baked floor already carries the
-// system digests.
-var hostedCvmModes = []string{"pod", "gke", "aks"}
+// cvmModeIsPod reports whether the mode selects the pod-as-CVM (kata) chart.
+func cvmModeIsPod(cvmMode string) bool {
+	s, _, err := helmchart.ParseShape(cvmMode)
+	return err == nil && s == helmchart.ShapePod
+}
 
-// platformExemptNamespace is the namespace those provider pods run in.
-const platformExemptNamespace = "kube-system"
+// validateCvmMode requires --cvm-mode and validates it against the shape
+// enum (aliases included).
+func validateCvmMode(cvmMode string) error {
+	if cvmMode == "" {
+		return fmt.Errorf("--%s is required; one of %s", flagCvmMode, strings.Join(allowedCvmModes, ", "))
+	}
+	if _, _, err := helmchart.ParseShape(cvmMode); err != nil {
+		return fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
+	}
+	return nil
+}
 
-// cvmModeIsPod reports whether the mode selects the Kata per-pod-CVM stack.
-func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
+var allowedPlatforms = []string{"sev-snp", "tdx"}
+
+// validateHardwarePlatform requires --hardware-platform to name a CPU TEE.
+func validateHardwarePlatform(hardwarePlatform string) error {
+	if hardwarePlatform == "" {
+		return fmt.Errorf("--%s is required; one of %s", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "))
+	}
+	if !slices.Contains(allowedPlatforms, hardwarePlatform) {
+		return fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
+	}
+	return nil
+}
+
+// validateDebugFlag restricts --debug to the pod shape, the only one with a
+// debug guest-image variant.
+func validateDebugFlag(cvmMode string, debug bool) error {
+	if debug && !cvmModeIsPod(cvmMode) {
+		return fmt.Errorf("--debug selects the kata-guest-base debug image, which only exists under --%s=pod; set --%s=pod or drop --debug", flagCvmMode, flagCvmMode)
+	}
+	return nil
+}
+
+// resolveShape maps the --cvm-mode/--hardware-platform/--evidence flags to the
+// chart to install and the platform value it renders with: the single TEE
+// selector every chart derives from.
+//
+//	pod, node-metal           -> platform = snp | tdx (native device)
+//	node-cloud native         -> platform = snp | tdx (GKE native device)
+//	node-cloud --evidence=vtpm -> platform = az-snp | az-tdx (Azure vTPM; --cvm-mode=aks pins this)
+//	node-image                -> platform = snp | tdx (the baked attestation-api reads it natively)
+func resolveShape(cvmMode, hardwarePlatform, evidence string) (helmchart.Shape, string, error) {
+	shape, pinnedEvidence, err := helmchart.ParseShape(cvmMode)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateHardwarePlatform(hardwarePlatform); err != nil {
+		return "", "", err
+	}
+	if pinnedEvidence != "" && evidence != "" && evidence != pinnedEvidence {
+		return "", "", fmt.Errorf("--%s=%s implies --evidence=%s; drop --evidence=%s", flagCvmMode, cvmMode, pinnedEvidence, evidence)
+	}
+	if pinnedEvidence != "" {
+		evidence = pinnedEvidence
+	}
+	// sev-snp/tdx is the install CLI's --hardware-platform vocabulary; the
+	// chart's platform value uses the attestation-api's (snp/tdx/az-*).
+	tee := map[string]string{"sev-snp": "snp", "tdx": "tdx"}[hardwarePlatform]
+	switch shape {
+	case helmchart.ShapePod, helmchart.ShapeNodeMetal, helmchart.ShapeNodeImage:
+		if evidence != "" {
+			return "", "", fmt.Errorf("--evidence applies only to --%s=node-cloud", flagCvmMode)
+		}
+		return shape, tee, nil
+	case helmchart.ShapeNodeCloud:
+		switch evidence {
+		case "", "native":
+			return shape, tee, nil
+		case "vtpm":
+			return shape, "az-" + tee, nil
+		}
+		return "", "", fmt.Errorf("--evidence must be one of native, vtpm, got %q", evidence)
+	}
+	return "", "", fmt.Errorf("unhandled shape %q", shape)
+}
 
 // c8sComponent maps a chart image to the helm value keys --resolve-digests
 // pins. valuePrefix is the values path whose image the chart renders;
@@ -106,7 +177,7 @@ func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
 type c8sComponent struct {
 	valuePrefix  string // values path, e.g. "cds.image" (renders {repository}@{digest})
 	repository   string // values.yaml default repository resolved against
-	enabledPath  string // values path guarding the render, e.g. "attestationApi.enabled" ("" = always rendered)
+	enabledPath  string // values path guarding the render, e.g. "volumed.enabled" ("" = always rendered)
 	pinnedDigest string // chart-declared digest to pin instead of resolving at the install tag ("" = resolve)
 }
 
@@ -534,17 +605,6 @@ const deniedImagesListed = 20
 //
 // --force installs anyway, and returns the same list as a warning.
 func preflightImagePolicy(ctx context.Context, w io.Writer, values map[string]any, components []c8sComponent, releaseNamespace string, force bool) (warn string, err error) {
-	if !boolAtPath(values, "nriImagePolicy.enabled") {
-		return "", nil
-	}
-	// Under .baked the node's floor is the one the image build rendered — the
-	// RKE2 system digests included — and the chart cannot see it, so every
-	// baked-floor pod here reads as denied. The plugin has also been enforcing
-	// since boot, so what runs is already admitted and the pins the installer
-	// writes change who may serve the allowlist, not what it admits.
-	if boolAtPath(values, "nriImagePolicy.baked") {
-		return "", nil
-	}
 	// A mode the chart cannot read is the render guard's to reject, not this
 	// preflight's; either way nothing is denied here.
 	if mode, err := stringAtPath(values, "nriImagePolicy.policy.mode"); err != nil || mode != policyModeFailClosed {
@@ -839,7 +899,7 @@ func classifyDistroNodes(lines []string) (rke2, other []string) {
 // guessing.
 func chooseDistro(rke2Nodes, otherNodes []string) (string, error) {
 	if len(rke2Nodes) > 0 && len(otherNodes) > 0 {
-		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set kata.distro / nriImagePolicy.distro and restrict the install with kata.nodeSelector / nriImagePolicy.nodeSelector via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
+		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set distro and restrict the install with the component nodeSelectors via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
 	}
 	if len(rke2Nodes) > 0 {
 		return "rke2", nil
@@ -912,16 +972,16 @@ func decodeValuesFile(path string) (map[string]any, error) {
 }
 
 // valuesFilesSetDistro reports whether any -f values file explicitly sets
-// kata.distro or nriImagePolicy.distro. When one does, that file owns the host
-// containerd layout and cluster auto-detection must stand aside; when none
-// does, detection still applies even though other values were supplied.
+// distro. When one does, that file owns the host containerd layout and
+// cluster auto-detection must stand aside; when none does, detection still
+// applies even though other values were supplied.
 func valuesFilesSetDistro(files []string) (bool, error) {
 	for _, f := range files {
 		tree, err := decodeValuesFile(f)
 		if err != nil {
 			return false, err
 		}
-		for _, path := range []string{"kata.distro", "nriImagePolicy.distro"} {
+		for _, path := range []string{"distro"} {
 			if v, err := stringAtPath(tree, path); err == nil && v != "" {
 				return true, nil
 			}
@@ -1010,23 +1070,6 @@ func materializeStdinValues(files []string, stdin io.Reader) ([]string, func(), 
 // exemptNamespacesPath is the image-policy value the hosted lanes default.
 const exemptNamespacesPath = "nriImagePolicy.policy.exemptNamespaces"
 
-// valuesFilesSetExemptNamespaces reports whether any -f values file writes
-// nriImagePolicy.policy.exemptNamespaces. Key presence is the test, an empty
-// list included: writing one chooses digest-only admission, and the
-// hosted-lane default must leave that choice standing.
-func valuesFilesSetExemptNamespaces(files []string) (bool, error) {
-	for _, f := range files {
-		tree, err := decodeValuesFile(f)
-		if err != nil {
-			return false, err
-		}
-		if _, ok := valueAtPath(tree, exemptNamespacesPath); ok {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install the c8s operator, CRDs, attestation-api, and component charts via Helm",
@@ -1054,14 +1097,13 @@ from the locked one (attestation pinned to the locked value rejects it).
 Development only.
 
 The host distro (k8s vs rke2) is detected from the cluster's kubelet versions;
-override kata.distro / nriImagePolicy.distro via -f for a layout detection
-cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
+override distro via -f for a layout detection cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
 containerd-prep initContainer that wires up the drop-in import; no node
 preparation is required beyond a running cluster.
 
-On the hosted lanes (--cvm-mode=pod/gke/aks) the provider's kube-system pods are
-not on the c8s allowlist, so the install renders
-nriImagePolicy.policy.exemptNamespaces=[kube-system], admitting them by the
+On the cloud lane (--cvm-mode=node-cloud, or the gke/aks aliases) the
+provider's kube-system pods are not on the c8s allowlist, so the chart defaults
+nriImagePolicy.policy.exemptNamespaces to [kube-system], admitting them by the
 digests they run at the plugin's first connect. A -f file that sets that key
 owns it. Either way the install refuses, before it touches the cluster, when the
 resolved policy would deny a platform pod the cluster is already running:
@@ -1111,6 +1153,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
+			return err
+		}
+		shape, platform, err := resolveShape(installCvmMode, installHardwarePlatform, installEvidence)
+		if err != nil {
 			return err
 		}
 		// Substitute any "-f -" before anything reads installValues, so the
@@ -1166,31 +1212,29 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			workloadImages = append(workloadImages, images...)
 		}
 
-		dir, err := extractChart()
+		chartPath, tmpRoot, err := helmchart.ExtractChart(shape)
 		if err != nil {
 			return fmt.Errorf("extract embedded chart: %w", err)
 		}
-		defer os.RemoveAll(dir)
+		defer os.RemoveAll(tmpRoot)
 
-		chartPath := filepath.Join(dir, helmchart.ChartRoot)
 		components, err := chartComponents(cmd.Context(), chartPath)
 		if err != nil {
 			return fmt.Errorf("read chart components: %w", err)
 		}
 		imageTag := resolveImageTag()
-		// kata-deploy and nri-image-policy must bind the host's containerd
-		// layout in every install mode, so the distro is detected from the
-		// cluster's kubelet versions and plumbed; letting the chart default
-		// (k8s) stand would silently mis-target RKE2. Detection is suppressed
-		// only when a -f file actually sets kata.distro / nriImagePolicy.distro
-		// (that file then owns the layout) — not merely because some -f is
-		// present. buildValueArgs skips the distro when it is empty.
+		// kata-deploy and the NRI installer must bind the host's containerd
+		// layout, so the distro is detected from the cluster's kubelet versions
+		// and plumbed; letting the chart default stand would silently
+		// mis-target. Detection is suppressed when a -f file sets `distro`
+		// (that file then owns the layout), and skipped on node-image, whose
+		// nodes are RKE2 by construction.
 		distro := ""
 		distroInValues, err := valuesFilesSetDistro(installValues)
 		if err != nil {
 			return err
 		}
-		if !distroInValues {
+		if !distroInValues && shape != helmchart.ShapeNodeImage {
 			distro, err = detectDistro(cmd.Context())
 			if err != nil {
 				return err
@@ -1221,7 +1265,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// override an operator's -f is preserved by ordering: the computed file
 		// is the LAST -f, so it wins on the keys it sets (matching the previous
 		// "--set beats -f" precedence) while the operator's files supply the rest.
-		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, imageTag, distro, appendResolvedDigestArgs)
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, shape, platform, imageTag, distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
 		}
@@ -1236,7 +1280,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		defer os.Remove(computedValues)
-		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
+		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, shape == helmchart.ShapePod)
 
 		// Fail fast on the default path if the CDS node is unlabelled, before
 		// mutating the cluster. Skipped when -f is supplied: a custom values
@@ -1283,11 +1327,16 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// Fail fast when the policy this install renders would deny the
 		// cluster's own platform pods: registering the plugin restarts
 		// containerd, and a denied control-plane static pod takes the API
-		// server with it. Read-only, so it runs with -f too.
-		if warn, err := preflightImagePolicy(cmd.Context(), os.Stdout, values, components, installNamespace, installForce); err != nil {
-			return err
-		} else if warn != "" {
-			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		// server with it. Read-only, so it runs with -f too. Only the shapes
+		// with a chart-installed plugin deny anything the chart can see: under
+		// pod admission runs in-guest, and node-image's baked floor admits the
+		// image's own digest set.
+		if shape == helmchart.ShapeNodeCloud || shape == helmchart.ShapeNodeMetal {
+			if warn, err := preflightImagePolicy(cmd.Context(), os.Stdout, values, components, installNamespace, installForce); err != nil {
+				return err
+			} else if warn != "" {
+				fmt.Fprintln(os.Stderr, "warning: "+warn)
+			}
 		}
 
 		// --cvm-mode=pod: label every kata-targeted node for the declared
@@ -1298,7 +1347,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// selector; the preflight runs either way. NOT skipped under
 		// --single-node: a one-node cluster needs the label too. A `-f` values
 		// file no longer disables TEE node labelling.
-		if cvmModeIsPod(installCvmMode) {
+		if shape == helmchart.ShapePod {
 			selectorInValues, err := valuesFilesSetTEESelector(installValues, installHardwarePlatform)
 			if err != nil {
 				return err
@@ -1314,12 +1363,16 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 
 		// Fail fast when --hardware-platform=tdx but no node carries the TDX
-		// label. Under --cvm-mode=node the attestationApi DaemonSet needs at
+		// label. On the node shapes the attestation-api needs at
 		// least one TDX-capable node. Checks a fact about the cluster, not
 		// the values, so it runs with -f too — but under --cvm-mode=pod the
 		// block above already checked the effective tdxNodeSelector (which
 		// may be customized or cleared), so skip the fixed-key check there.
-		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !cvmModeIsPod(installCvmMode) {
+		// TDX nodes need the TDX label so the attestation-api DaemonSet lands
+		// on TDX hardware. The Azure vTPM shapes attest without the native
+		// device, and the pod shape's TEE-node block above already checked the
+		// effective selector.
+		if installHardwarePlatform == "tdx" && shape.IsNode() && !strings.HasPrefix(platform, "az-") {
 			if err := preflightTDXNodes(cmd.Context()); err != nil {
 				return err
 			}
@@ -1336,7 +1389,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 
-		if err := runHelmWithKataHeal(cmd.Context(), os.Stdout, os.Stderr, helmArgs, installNamespace, cvmModeIsPod(installCvmMode), installWait); err != nil {
+		if err := runHelmWithKataHeal(cmd.Context(), os.Stdout, os.Stderr, helmArgs, installNamespace, shape == helmchart.ShapePod, installWait); err != nil {
 			return err
 		}
 		for _, adoption := range adoptions {
@@ -1372,20 +1425,6 @@ func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 	fmt.Fprintln(w, "  attested TEE). Pin it with the node image's launch measurement M (its")
 	fmt.Fprintln(w, "  manifest.json): reinstall with --measurements <M>. Clients verify with the")
 	fmt.Fprintln(w, "  same M: c8s verify https://<tls-lb> --measurements <M>.")
-}
-
-// extractChart writes the embedded chart tree to a fresh tmpdir and returns
-// its path. Caller must RemoveAll when done.
-func extractChart() (string, error) {
-	dir, err := os.MkdirTemp("", "c8s-chart-*")
-	if err != nil {
-		return "", err
-	}
-	if err := os.CopyFS(dir, helmchart.ChartFS); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", err
-	}
-	return dir, nil
 }
 
 // applyNamespace creates the install namespace before helm, labelled to allow
@@ -1536,203 +1575,65 @@ func appendInstallCRDArgs(setArgs []string, installCRDs bool) []string {
 	return append(setArgs, "--set", "statusMirror.enabled=false")
 }
 
-// appendDistroInstallArgs translates the detected host distro into the
-// per-component values. Both targets are always set — each install shape uses
-// exactly one of them (nri-image-policy on the host shape, kata-deploy under
-// --cvm-mode=pod) and both must bind the containerd config layout the host distro
-// uses; the unused one is inert. No enum guard: the value comes from
-// chooseDistro, and the chart re-validates anyway.
+// appendDistroInstallArgs plumbs the detected (or render-values --distro)
+// host distro into the chart's single distro value. Empty distro means
+// "don't plumb it": install when -f is given, render-values when --distro is
+// unset. node-image has no distro value (the node image is RKE2) so the
+// caller skips it there.
 func appendDistroInstallArgs(helmArgs []string, distro string) []string {
-	return append(helmArgs,
-		"--set-string", "kata.distro="+distro,
-		"--set-string", "nriImagePolicy.distro="+distro,
-	)
+	return append(helmArgs, "--set-string", "distro="+distro)
 }
 
-// appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
-// values. The chart re-validates, so the allowed check is a fast typo guard
-// before shelling to helm.
+// appendShapeInstallArgs translates the shape flags into chart values: the
+// single `platform` selector every TEE derivation keys off, plus the
+// --measurements/--rtmrs/--node-cidr pins fanned out to the components that
+// verify CDS (and, on the node shapes, to the mesh's peer pins).
 //
-// cvm-mode selects which TEE device gets mounted (it does NOT vary the privilege
-// level — all modes render privileged: true, since a hostPath device mount alone
-// does not grant device-cgroup access):
-//
-//	pod, node, gke → native /dev/sev-guest (SEV-SNP) by default, or
-//	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
-//	aks            → vTPM /dev/tpm0
-//
-// pod, node, and gke are distinct deployment targets that happen to share the
-// native-TEE-device wiring (they are NOT aliases):
-//
-//	pod  → per-pod confidential VMs via the Kata runtime: every workload pod is
-//	       a kata CVM. appendKataInstallArgs turns on the kata stack and turns
-//	       off host-side attestation-api/nri/ratls-mesh (served by the in-guest
-//	       counterparts baked into kata-guest-base). The device is still mounted
-//	       for the host-side attestation-api that kata-guest-base derives from.
-//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
-//	       self-managed) are themselves confidential VMs. Pods run as ordinary
-//	       processes attested via the node's own quote. Cloud-agnostic. The node
-//	       image bakes attestation-api and nri-image-policy, so both are disabled
-//	       here (ratlsMesh is not baked, stays on).
-//	gke  → GKE specifically: Google's managed confidential VMs.
-//
-// GKE is the reason a plain managed→vTPM mapping is wrong: GKE confidential VMs
-// are a managed cloud but still expose the native /dev/sev-guest ioctl, not a
-// vTPM. The chart's teeDevices default is the SNP shape; this flips it as
-// needed per (mode, platform). Without it a `--cvm-mode aks` install would
-// mount /dev/sev-guest (absent on AKS), and a bare-metal TDX host would
-// similarly mount the wrong device — the attestation-api pod would fail the
-// hostPath CharDevice check.
-//
-// `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
-// ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
-// (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
-// tdx). aks uses the Azure vTPM path regardless of the CPU TEE: the node's
-// vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
-// on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
-// aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
-// from the vTPM), and the mesh/CDS RA-TLS platform is set to tdx accordingly.
-//
-// Mixed-hardware inside a single cluster (some SNP hosts, some TDX hosts) is
-// out of scope for now — a cluster is one hardware platform. Mixed support
-// would want the attestation-api DaemonSet split per-platform with per-node
-// label selectors, and ratlsmesh's `--platform` similarly per-node.
-// Follow-up work.
-//
-// aks also opts the pod-injector MutatingWebhookConfiguration out of AKS's
-// "admissionsenforcer" controller (annotation admissions.enforcer/disabled),
-// which otherwise rewrites the webhook namespaceSelector and makes every helm
-// re-apply conflict. That is rendered chart-side off attestationApi.cvmMode (so
-// GitOps/HelmRelease installs get it too), not emitted as a --set here; see
-// internal/helmchart/c8s/templates/webhook.yaml.
-func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
-	if !slices.Contains(allowedCvmModes, cvmMode) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
-	}
-	if err := validateHardwarePlatform(hardwarePlatform); err != nil {
-		return nil, err
-	}
-	helmArgs = append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode)
-	// Device wiring:
-	//   aks: vTPM (/dev/tpm0) regardless of --hardware-platform. On Azure the
-	//        node *is* the CVM and attestation rides the vTPM HCL report, which
-	//        wraps either an SNP report (az-snp) or a TD quote (az-tdx). AKS
-	//        exposes no /dev/sev-guest or /dev/tdx_guest to the guest, so the
-	//        vTPM is the only evidence source for both SNP and TDX aks nodes.
-	//   pod/node/gke + --hardware-platform sev-snp: native /dev/sev-guest
-	//   pod/node/gke + --hardware-platform tdx:     native /dev/tdx-guest
-	sevGuest, tdxGuest, tpm := "false", "false", "false"
-	switch {
-	case cvmMode == "aks":
-		tpm = "true"
-	case hardwarePlatform == "tdx":
-		tdxGuest = "true"
-	default:
-		sevGuest = "true"
-	}
-	helmArgs = append(helmArgs,
-		"--set", "attestationApi.teeDevices.sevGuest="+sevGuest,
-		"--set", "attestationApi.teeDevices.tdxGuest="+tdxGuest,
-		"--set", "attestationApi.teeDevices.tpm="+tpm,
-	)
-	// Propagate the CPU TEE to every component that names its RA-TLS platform.
-	// These default to SNP in the chart; on a TDX cluster CDS (which self-warms
-	// its serving cert via the attestation-api and is non-privileged, so it
-	// cannot probe /dev/tdx_guest to auto-detect) and the ratls-mesh must be
-	// told `tdx` explicitly, or CDS parses the attestation-api's TDX quote as an
-	// SNP report and crash-loops ("evidence contains neither attestation_report
-	// nor hcl_report"). This holds for the Azure-vTPM TDX shape (aks + tdx,
-	// i.e. az-tdx) too: the vTPM HCL report carries a TD quote, so CDS and the
-	// mesh must expect the TDX family. cds.ratlsPlatform uses `snp`/`tdx`;
-	// ratlsMesh.platform uses `sev-snp`/`tdx` (both normalize az-tdx -> tdx).
-	if hardwarePlatform == "tdx" {
-		helmArgs = append(helmArgs,
-			"--set-string", "cds.ratlsPlatform=tdx",
-			"--set-string", "ratlsMesh.platform=tdx",
-		)
-	}
-	// The tls-lb attestation sidecar is on by default (chart default); --attest=false
-	// omits it. When on, it passes this platform straight to the attestation-api
-	// as the evidence request, so the value must name the evidence SHAPE, not just
-	// the silicon: under aks the evidence is the Azure vTPM HCL report (az-snp /
-	// az-tdx), and the bare snp/tdx values would ask for /dev/sev-guest //dev/tdx_guest
-	// evidence that Azure CVM nodes cannot produce — every attest-pq/attest-lb call
-	// then fails 502 attestation_unavailable. generation is AMD-only (Genoa/Milan/…):
-	// az-snp auto-detects it from the report CPUID and TDX has no such concept, so
-	// every override blanks it rather than ship the chart-default codename (genoa)
-	// for hardware it never checked.
-	switch {
-	case !installAttestEnabled:
+// The shape chart itself encodes which components render; this is the one
+// cross-chart knob.
+func appendShapeInstallArgs(helmArgs []string, platform string, shape helmchart.Shape) ([]string, error) {
+	helmArgs = append(helmArgs, "--set-string", "platform="+platform)
+
+	// The tls-lb attestation sidecar is on by default; --attest=false omits it.
+	if !installAttestEnabled {
 		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")
-	case cvmMode == "aks":
-		attestPlatform := "az-snp"
-		if hardwarePlatform == "tdx" {
-			attestPlatform = "az-tdx"
-		}
-		helmArgs = append(helmArgs,
-			"--set-string", "tlsLb.attest.platform="+attestPlatform,
-			"--set-string", "tlsLb.attest.generation=",
-		)
-	case hardwarePlatform == "tdx":
-		helmArgs = append(helmArgs,
-			"--set-string", "tlsLb.attest.platform=tdx",
-			"--set-string", "tlsLb.attest.generation=",
-		)
 	}
-	// node: the node image bakes host attestation-api and nri-image-policy;
-	// re-rendering them duplicates the baked pair and the baked fail-closed NRI
-	// floor denies the chart copies' own images. ratlsMesh stays: it is not
-	// baked (unlike kata-guest-base). The NRI installer does stay on, in its
-	// baked form — the pins below are the one thing an image built before this
-	// release cannot carry, and the installer is the only path that reaches the
-	// baked plugin's config.
-	if cvmMode == "node" {
-		helmArgs = append(helmArgs,
-			"--set", "attestationApi.enabled=false",
-			"--set", "nriImagePolicy.baked=true",
-		)
-	}
+
 	// --measurements pins the expected launch measurement(s) of this cluster's
-	// CVM into both internal trust boundaries in one install: the mesh (and NRI)
-	// dial CDS pinned to it (cds.measurements), and mesh peers pin each other
-	// (ratlsMesh.measurements). The operator supplies M — it is a property of the
-	// deployed node image (its manifest.json), known before the cluster runs — so
-	// the mesh is pinned from first boot rather than accept-any-then-tighten.
-	// Empty = no pinning (UNSAFE, the chart default).
+	// CVM into the internal trust boundaries in one install: consumers dial CDS
+	// pinned to it (cds.measurements), and on the node shapes mesh peers pin
+	// each other (ratlsMesh.measurements). The operator supplies M — it is a
+	// property of the deployed node image (its manifest.json), known before the
+	// cluster runs — so the mesh is pinned from first boot rather than
+	// accept-any-then-tighten. Empty = no pinning (UNSAFE, the chart default).
 	//
 	// Parse here, on the shared builder path, so the pinned list is validated
-	// and normalized regardless of which command emitted it — and so the fanned
-	// list matches exactly what was validated (a blank/whitespace entry, e.g.
-	// from a trailing comma, is dropped by the parser, not silently emitted as
-	// an empty pin that would disable pinning at that index).
-	measurements, rtmrs, pinArgs, err := installPins()
+	// and normalized regardless of which command emitted it.
+	measurements, rtmrs, pinArgs, err := installPins(shape)
 	if err != nil {
 		return nil, err
 	}
 	helmArgs = append(helmArgs, pinArgs...)
-	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
-	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
-	// is the node image's M. In pod mode those components are per-pod kata
-	// guests, so the value is instead the kata-guest-base launch digest for the
-	// pod shape CDS runs in — compute it with `c8s kata measure`, not from the
-	// node image's manifest.json.
+	// In the node shapes the node IS the CVM, so M is the node image's
+	// manifest.json value. In the pod shape the measured units are the kata
+	// guests — compute the digest with `c8s kata measure`, not from the node
+	// image's manifest.json.
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
-		helmArgs = append(helmArgs,
-			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
-			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
-		)
+		helmArgs = append(helmArgs, "--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM))
+		if shape.IsNode() {
+			helmArgs = append(helmArgs, "--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM))
+		}
 	}
 	// --rtmrs completes the TDX pin: the launch measurement (MRTD) covers TDVF
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
-	// command line carrying the dm-verity root hash. Emitted normalized and in
-	// index order so the fanned values match what was validated.
+	// command line carrying the dm-verity root hash.
 	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
 		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
-		helmArgs = append(helmArgs,
-			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
-			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
-		)
+		helmArgs = append(helmArgs, "--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin))
+		if shape.IsNode() {
+			helmArgs = append(helmArgs, "--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin))
+		}
 	}
 	for i, c := range installInventoryCIDRs {
 		helmArgs = append(helmArgs,
@@ -1742,90 +1643,14 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	return helmArgs, nil
 }
 
-// validateDebugFlag rejects --debug outside --cvm-mode=pod: the flag selects the
-// kata-guest-base debug image, which only exists under the kata stack, so a
-// bare --debug is meaningless and almost certainly a mistaken expectation
-// (e.g. hoping for verbose install output). Checked first in RunE, before
-// anything touches the cluster.
-// validateCvmMode enforces that --cvm-mode is set and is a known shape. There
-// is no default: an unstated deployment shape silently mismatching the cluster
-// (baked vs chart-provided attestation stack, kata vs plain runtime) is exactly
-// the failure this makes impossible.
-func validateCvmMode(cvmMode string) error {
-	if cvmMode == "" {
-		return fmt.Errorf("--%s is required; one of %s", flagCvmMode, strings.Join(allowedCvmModes, ", "))
-	}
-	if !slices.Contains(allowedCvmModes, cvmMode) {
-		return fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
-	}
-	return nil
-}
-
-var allowedPlatforms = []string{"sev-snp", "tdx"}
-
-// validateHardwarePlatform enforces that --hardware-platform is set and known,
-// exactly like its sibling --cvm-mode. install checks it first in RunE, before
-// anything touches the cluster; appendCvmModeInstallArgs re-checks it on the
-// shared builder path so render-values is covered too.
-func validateHardwarePlatform(hardwarePlatform string) error {
-	if hardwarePlatform == "" {
-		return fmt.Errorf("--%s is required; one of %s", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "))
-	}
-	if !slices.Contains(allowedPlatforms, hardwarePlatform) {
-		return fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
-	}
-	return nil
-}
-
-// validateDebugFlag rejects --debug outside --cvm-mode=pod: the flag selects the
-// kata-guest-base debug image, which only exists under the pod (kata) stack.
-func validateDebugFlag(cvmMode string, debug bool) error {
-	if debug && !cvmModeIsPod(cvmMode) {
-		return fmt.Errorf("--debug selects the kata-guest-base debug image, which only exists under --%s=pod; set --%s=pod or drop --debug", flagCvmMode, flagCvmMode)
-	}
-	return nil
-}
-
-// appendKataInstallArgs translates --cvm-mode=pod into helm --set values. kata is
-// enforcing — there is no kata-without-enforcement shape: the chart renders
-// the runtime stack, the runtimeClass-injecting webhook behavior, and the
-// ValidatingAdmissionPolicy together off kata.enabled.
-//
-// It also turns off the host-side ratls-mesh, attestation-api, and
-// nri-image-policy: under kata every workload runs as a kata CVM, where their
-// function is served by the in-guest counterparts baked into kata-guest-base
-// (in-VM ratls routing, in-guest attestation-api on loopback, in-guest
-// policy-monitor image admission). The chart fails the render if they are
-// left enabled alongside kata.enabled (see validations.yaml).
-//
-// debug selects the kata-guest-base debug image variant (--debug; the chart
-// derives the `<tag>-debug` artifact tag). The confidential-GPU stack (runtime
-// class, shim, GPU image puller, sandbox device plugin) ships with every kata
-// install — it renders off kata.enabled, so there is no GPU flag here. RunE
-// rejects --debug outside --cvm-mode=pod before args are built; everything here still
-// keys on kata so a call-order change cannot emit a debug value for a non-kata
-// install.
-//
-// guestTag pins the kata-guest-base artifact to the same tag the component
-// images resolve at.
-//
-// INVARIANT: the guest's baked bootstrap allowlist admits the component digests
-// this install resolves. The seed is fixed when the guest is built, so it names
-// the components of exactly one commit; letting the two axes resolve from
-// different tags admits a guest whose seed predates the components, and
-// policy-monitor then SIGKILLs the injected get-cert — the install never
-// converges and says only "Broken pipe". Empty leaves the chart default, which
-// is what a -f file owning kata.guestImage.tag wants.
-func appendKataInstallArgs(helmArgs []string, cvmMode string, debug bool, guestTag string) []string {
-	if !cvmModeIsPod(cvmMode) {
+// appendKataInstallArgs adds the pod shape's guest-image values: the artifact
+// tag (pinned to the component image tag — the guest's baked allowlist seed
+// admits only the components of the commit it was built from) and the debug
+// variant toggle.
+func appendKataInstallArgs(helmArgs []string, shape helmchart.Shape, debug bool, guestTag string) []string {
+	if shape != helmchart.ShapePod {
 		return helmArgs
 	}
-	helmArgs = append(helmArgs,
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-	)
 	if debug {
 		helmArgs = append(helmArgs, "--set", "kata.guestImage.debug=true")
 	}
@@ -1930,39 +1755,14 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 	)
 }
 
-// appendVolumedInstallArgs turns on the node agent that opens encrypted volumes
-// (docs/volumes.md) for --volumes. Nothing is emitted under --cvm-mode=pod:
-// there volumed runs inside the guest from the kata-guest-base image, and the
-// chart's enforce_host_components validation rejects the host DaemonSet
-// alongside kata.
-func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []string {
-	if !volumes || cvmModeIsPod(cvmMode) {
+// appendVolumedInstallArgs enables the host volumed DaemonSet on the node
+// shapes. Under the pod shape volumes are served in-guest (`volumed --guest`),
+// so nothing is emitted.
+func appendVolumedInstallArgs(setArgs []string, volumes bool, shape helmchart.Shape) []string {
+	if !volumes || shape == helmchart.ShapePod {
 		return setArgs
 	}
 	return append(setArgs, "--set", "volumed.enabled=true")
-}
-
-// appendExemptNamespacesInstallArgs defaults image admission to admitting
-// kube-system by captured digest on the hosted lanes (see hostedCvmModes),
-// where the provider's platform pods are not on the c8s allowlist. Without it a
-// default install renders digest-only admission and then restarts containerd to
-// register the plugin, which on a self-managed control plane denies the static
-// pods and never brings the API server back.
-//
-// A -f file that writes the key owns it: the computed values are helm's last
-// -f, so injecting unconditionally would override an operator's choice.
-func appendExemptNamespacesInstallArgs(setArgs []string, cvmMode string, valuesFiles []string) ([]string, error) {
-	if !slices.Contains(hostedCvmModes, cvmMode) {
-		return setArgs, nil
-	}
-	set, err := valuesFilesSetExemptNamespaces(valuesFiles)
-	if err != nil {
-		return nil, err
-	}
-	if set {
-		return setArgs, nil
-	}
-	return append(setArgs, "--set-string", exemptNamespacesPath+"[0]="+platformExemptNamespace), nil
 }
 
 type workloadRef struct {
@@ -2484,13 +2284,14 @@ func init() {
 	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory. Under --cvm-mode=pod volumes are served by the in-guest volumed baked into kata-guest-base, so nothing is deployed")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod confidential VMs via the Kata runtime — every workload pod is a kata CVM, host-side attestation-api/nri/ratls-mesh served by the in-guest counterparts), node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant. Only pod isolates workloads from each other")
-	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Under --cvm-mode=aks the CPU TEE rides the Azure vTPM: sev-snp selects az-snp and tdx selects az-tdx (no guest device needed — the report comes from /dev/tpm0)")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "install shape / chart (REQUIRED): pod (per-pod kata CVMs, multi-tenant; host-side attestation/mesh/image-policy run in-guest), node-cloud (cloud-managed CVM nodes: GKE native TEE, or AKS vTPM with --evidence=vtpm), node-metal (self-managed bare-metal CVM nodes), node-image (nodes booted from the c8s node-guest-image — attestation-api and the NRI plugin are baked in). Aliases: gke = node-cloud, aks = node-cloud --evidence=vtpm, node = node-image. The node-* shapes are single-tenant — the node is one trust domain; only pod isolates workloads from each other")
+	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED): sev-snp or tdx. With --cvm-mode=node-cloud --evidence=vtpm the CPU TEE rides the Azure vTPM (az-snp / az-tdx)")
+	installCmd.Flags().StringVar(&installEvidence, "evidence", "", "attestation evidence source for --cvm-mode=node-cloud: native (the node's own TEE device; default) or vtpm (Azure vTPM at /dev/tpm0)")
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under the node shapes these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements, plus ratlsMesh.measurements on the node shapes); empty = no pinning (UNSAFE). Under the node shapes this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
 	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")

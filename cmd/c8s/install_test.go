@@ -244,39 +244,26 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 	})
 }
 
-func TestAppendKataInstallArgsNonPodModeIsNoOp(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks", ""} {
-		got := appendKataInstallArgs([]string{"upgrade"}, mode, false, "")
+func TestAppendKataInstallArgsNonPodShapeIsNoOp(t *testing.T) {
+	for _, shape := range []helmchart.Shape{helmchart.ShapeNodeCloud, helmchart.ShapeNodeMetal, helmchart.ShapeNodeImage, ""} {
+		got := appendKataInstallArgs([]string{"upgrade"}, shape, false, "")
 		assertArgsEqual(t, got, []string{"upgrade"})
 	}
 }
 
-func TestAppendKataInstallArgsPodModeIsEnforcing(t *testing.T) {
-	// --cvm-mode=pod is enforcing: alongside the kata stack it must turn off the
-	// host-side components whose function runs inside the kata-guest-base
-	// image (the chart's enforce_host_components validation rejects them left
-	// on). Enforcement itself (webhook injection + ValidatingAdmissionPolicy)
-	// is keyed on kata.enabled in the chart — no separate value.
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", false, "")
-	assertArgsEqual(t, got, []string{
-		"upgrade",
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-	})
+func TestAppendKataInstallArgsPodShapeWithoutDebugOrTagIsNoOp(t *testing.T) {
+	// The pod chart itself encodes the enforcing kata stack; the builder adds
+	// values only for the guest-image axes the flags select.
+	got := appendKataInstallArgs([]string{"upgrade"}, helmchart.ShapePod, false, "")
+	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
 func TestAppendKataInstallArgsDebugSelectsDebugGuestImage(t *testing.T) {
-	// --cvm-mode=pod --debug keeps the enforcing shape and additionally points
-	// the puller at the -debug guest image (host log/exec streams allowed).
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true, "")
+	// --cvm-mode=pod --debug points the puller at the -debug guest image (host
+	// log/exec streams allowed).
+	got := appendKataInstallArgs([]string{"upgrade"}, helmchart.ShapePod, true, "")
 	assertArgsEqual(t, got, []string{
 		"upgrade",
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
 		"--set", "kata.guestImage.debug=true",
 	})
 }
@@ -286,30 +273,26 @@ func TestAppendKataInstallArgsPinsGuestImageTagToTheComponentTag(t *testing.T) {
 	// built from, so a guest resolved from a different tag than the components
 	// admits neither: policy-monitor SIGKILLs the injected get-cert and the
 	// install never converges. --set-string, so an all-digit tag is not coerced.
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true, "v0.1.10")
+	got := appendKataInstallArgs([]string{"upgrade"}, helmchart.ShapePod, true, "v0.1.10")
 	assertArgsEqual(t, got, []string{
 		"upgrade",
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
 		"--set", "kata.guestImage.debug=true",
 		"--set-string", "kata.guestImage.tag=v0.1.10",
 	})
 }
 
-func TestAppendKataInstallArgsGuestImageTagNonPodModeIsNoOp(t *testing.T) {
-	// The guest axis exists only under --cvm-mode=pod; a non-pod install must
-	// not emit a guest tag even if one reaches the builder.
-	got := appendKataInstallArgs([]string{"upgrade"}, "node", false, "v0.1.10")
+func TestAppendKataInstallArgsGuestImageTagNonPodShapeIsNoOp(t *testing.T) {
+	// The guest axis exists only under the pod shape; a node install must not
+	// emit a guest tag even if one reaches the builder.
+	got := appendKataInstallArgs([]string{"upgrade"}, helmchart.ShapeNodeImage, false, "v0.1.10")
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
-func TestAppendKataInstallArgsDebugNonPodModeIsNoOp(t *testing.T) {
+func TestAppendKataInstallArgsDebugNonPodShapeIsNoOp(t *testing.T) {
 	// RunE rejects --debug outside --cvm-mode=pod before args are built; the
-	// builder still keys everything on the pod mode so a call-order change
-	// cannot silently emit a debug guest image for a non-pod install.
-	got := appendKataInstallArgs([]string{"upgrade"}, "node", true, "")
+	// builder still keys everything on the pod shape so a call-order change
+	// cannot silently emit a debug guest image for a node install.
+	got := appendKataInstallArgs([]string{"upgrade"}, helmchart.ShapeNodeMetal, true, "")
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
@@ -368,22 +351,21 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 }
 
 func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
-	got := appendVolumedInstallArgs([]string{"upgrade"}, false, "node")
+	got := appendVolumedInstallArgs([]string{"upgrade"}, false, helmchart.ShapeNodeMetal)
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
 func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks"} {
-		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
+	for _, shape := range []helmchart.Shape{helmchart.ShapeNodeCloud, helmchart.ShapeNodeMetal, helmchart.ShapeNodeImage} {
+		got := appendVolumedInstallArgs([]string{"upgrade"}, true, shape)
 		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
 	}
 }
 
-func TestAppendVolumedInstallArgsPodModeServesVolumesInGuest(t *testing.T) {
-	// kata-guest-base bakes `volumed --guest`, and the chart's
-	// enforce_host_components validation fails the render if the host DaemonSet
-	// is enabled alongside kata — so --volumes must emit nothing here.
-	got := appendVolumedInstallArgs([]string{"upgrade"}, true, "pod")
+func TestAppendVolumedInstallArgsPodShapeServesVolumesInGuest(t *testing.T) {
+	// kata-guest-base bakes `volumed --guest`, and the pod chart renders no
+	// host volumed DaemonSet — so --volumes must emit nothing here.
+	got := appendVolumedInstallArgs([]string{"upgrade"}, true, helmchart.ShapePod)
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
@@ -836,17 +818,15 @@ func TestCheckImagePullSecret(t *testing.T) {
 	}
 }
 
-func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
-	// The detected distro feeds both the kata-deploy and nri-image-policy
-	// installers; nri-image-policy installs regardless of --cvm-mode=pod, so the two
-	// values always travel together.
+func TestAppendDistroInstallArgsSetsTheSingleDistroValue(t *testing.T) {
+	// The detected distro plumbs the chart's one top-level distro value; every
+	// distro-aware template (kata-deploy, the NRI installer) derives from it.
 	for _, distro := range []string{"k8s", "rke2"} {
 		t.Run(distro, func(t *testing.T) {
 			got := appendDistroInstallArgs([]string{"upgrade"}, distro)
 			assertArgsEqual(t, got, []string{
 				"upgrade",
-				"--set-string", "kata.distro=" + distro,
-				"--set-string", "nriImagePolicy.distro=" + distro,
+				"--set-string", "distro=" + distro,
 			})
 		})
 	}
@@ -897,22 +877,22 @@ func TestChooseDistroHomogeneousClusters(t *testing.T) {
 
 // A mixed cluster has no single right distro — the installers patch a
 // distro-specific containerd path on every selected node — so detection must
-// demand explicit per-component values via -f instead of guessing.
+// demand an explicit distro via -f instead of guessing.
 func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 	_, err := chooseDistro([]string{"rke2-node"}, []string{"vanilla-node"})
 	if err == nil {
 		t.Fatal("mixed cluster: want error, got nil")
 	}
-	for _, want := range []string{"kata.distro", "nriImagePolicy.distro", "rke2-node", "vanilla-node"} {
+	for _, want := range []string{"distro", "rke2-node", "vanilla-node"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q (should name the fix and both node sets)", err.Error(), want)
 		}
 	}
 }
 
-// A -f file suppresses distro auto-detection only when it actually sets a
-// distro; passing -f for any other value must leave detection in force (the
-// bug: any -f used to silently drop the CLI to the chart's k8s default).
+// A -f file suppresses distro auto-detection only when it actually sets the
+// top-level distro value; passing -f for any other value must leave detection
+// in force.
 func TestValuesFilesSetDistro(t *testing.T) {
 	write := func(t *testing.T, body string) string {
 		t.Helper()
@@ -927,11 +907,10 @@ func TestValuesFilesSetDistro(t *testing.T) {
 		body string
 		want bool
 	}{
-		{"nri distro set", "nriImagePolicy:\n  distro: rke2\n", true},
-		{"kata distro set", "kata:\n  distro: rke2\n", true},
+		{"distro set", "distro: rke2\n", true},
 		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
-		{"distro key absent under section", "nriImagePolicy:\n  enabled: true\n", false},
-		{"empty distro string is not a choice", "nriImagePolicy:\n  distro: \"\"\n", false},
+		{"distro nested under a section is not the value", "kata:\n  distro: rke2\n", false},
+		{"empty distro string is not a choice", "distro: \"\"\n", false},
 		{"empty file", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -954,7 +933,7 @@ func TestValuesFilesSetDistro(t *testing.T) {
 
 	t.Run("one of several files sets it", func(t *testing.T) {
 		a := write(t, "tlsLb:\n  enabled: false\n")
-		b := write(t, "kata:\n  distro: rke2\n")
+		b := write(t, "distro: rke2\n")
 		got, err := valuesFilesSetDistro([]string{a, b})
 		if err != nil || !got {
 			t.Errorf("valuesFilesSetDistro(two files) = (%v, %v), want (true, nil)", got, err)
@@ -1087,117 +1066,136 @@ func TestHostPortConflict(t *testing.T) {
 	}
 }
 
-func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
-	// The attestation sidecar is on by default; the arg-builder reads the
-	// package flag, which cobra would set. Mirror that default here.
-	prevAttest := installAttestEnabled
-	installAttestEnabled = true
-	t.Cleanup(func() { installAttestEnabled = prevAttest })
-
-	// Two orthogonal axes:
-	//  --cvm-mode: pod (kata) / node (node-as-CVM) / gke (managed) / aks (vTPM)
-	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
-	// pod+node+gke all take either hardware-platform; aks always emits the vTPM
-	// device and rides the Azure vTPM HCL report for both SNP (az-snp) and TDX
-	// (az-tdx).
-	build := func(mode, platform, sevGuest, tdxGuest, tpm string) []string {
-		out := []string{
-			"upgrade",
-			"--set-string", "attestationApi.cvmMode=" + mode,
-			"--set", "attestationApi.teeDevices.sevGuest=" + sevGuest,
-			"--set", "attestationApi.teeDevices.tdxGuest=" + tdxGuest,
-			"--set", "attestationApi.teeDevices.tpm=" + tpm,
-		}
-		// Any TDX shape — native (/dev/tdx-guest) or Azure vTPM (az-tdx) —
-		// propagates the CPU TEE to the components that name their RA-TLS
-		// platform, or CDS parses the TDX quote as an SNP report.
-		if platform == "tdx" {
-			out = append(out,
-				"--set-string", "cds.ratlsPlatform=tdx",
-				"--set-string", "ratlsMesh.platform=tdx",
-			)
-		}
-		// The attest sidecar's platform names the evidence shape the sidecar
-		// requests from the attestation-api: az-snp/az-tdx under aks (Azure
-		// vTPM HCL report — bare snp/tdx would probe guest devices AKS nodes
-		// do not expose), bare tdx on native TDX. sev-snp outside aks keeps
-		// the chart default (snp). Every override blanks the AMD-only
-		// generation.
-		switch {
-		case mode == "aks" && platform == "tdx":
-			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-tdx",
-				"--set-string", "tlsLb.attest.generation=",
-			)
-		case mode == "aks":
-			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-snp",
-				"--set-string", "tlsLb.attest.generation=",
-			)
-		case platform == "tdx":
-			out = append(out,
-				"--set-string", "tlsLb.attest.platform=tdx",
-				"--set-string", "tlsLb.attest.generation=",
-			)
-		}
-		// node: the node image bakes attestation-api + nri-image-policy, so the
-		// attestation-api copy is skipped and the NRI installer switches to its
-		// baked form — the only path that reaches the baked plugin's CDS pins.
-		// ratlsMesh is not baked, stays on.
-		if mode == "node" {
-			out = append(out,
-				"--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.baked=true",
-			)
-		}
-		return out
-	}
+// resolveShape maps the flag vocabulary to (chart shape, chart platform):
+// pod/node-metal/node-image take the native device; node-cloud takes it
+// natively (gke) or rides the Azure vTPM (aks, or --evidence=vtpm).
+func TestResolveShape(t *testing.T) {
 	cases := map[string]struct {
 		cvmMode          string
 		hardwarePlatform string
-		want             []string
+		evidence         string
+		wantShape        helmchart.Shape
+		wantPlatform     string
 	}{
-		"pod + sev-snp":  {"pod", "sev-snp", build("pod", "sev-snp", "true", "false", "false")},
-		"gke + sev-snp":  {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
-		"node + sev-snp": {"node", "sev-snp", build("node", "sev-snp", "true", "false", "false")},
-		"pod + tdx":      {"pod", "tdx", build("pod", "tdx", "false", "true", "false")},
-		"gke + tdx":      {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
-		"node + tdx":     {"node", "tdx", build("node", "tdx", "false", "true", "false")},
-		"aks + sev-snp":  {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
-		// az-tdx: Azure vTPM (tpm=true, no guest device) + TDX RA-TLS platform.
-		"aks + tdx (az-tdx)": {"aks", "tdx", build("aks", "tdx", "false", "false", "true")},
+		"pod + sev-snp":        {"pod", "sev-snp", "", helmchart.ShapePod, "snp"},
+		"pod + tdx":            {"pod", "tdx", "", helmchart.ShapePod, "tdx"},
+		"node-metal + sev-snp": {"node-metal", "sev-snp", "", helmchart.ShapeNodeMetal, "snp"},
+		"node-metal + tdx":     {"node-metal", "tdx", "", helmchart.ShapeNodeMetal, "tdx"},
+		"node-image + sev-snp": {"node-image", "sev-snp", "", helmchart.ShapeNodeImage, "snp"},
+		"node alias":           {"node", "tdx", "", helmchart.ShapeNodeImage, "tdx"},
+		"node-cloud native":    {"node-cloud", "sev-snp", "", helmchart.ShapeNodeCloud, "snp"},
+		"node-cloud + tdx":     {"node-cloud", "tdx", "native", helmchart.ShapeNodeCloud, "tdx"},
+		"gke alias is native":  {"gke", "tdx", "", helmchart.ShapeNodeCloud, "tdx"},
+		"node-cloud vtpm":      {"node-cloud", "sev-snp", "vtpm", helmchart.ShapeNodeCloud, "az-snp"},
+		"aks alias pins vtpm":  {"aks", "sev-snp", "", helmchart.ShapeNodeCloud, "az-snp"},
+		// node-cloud itself pins nothing: --evidence (or its absence) decides.
+		"gke accepts matching native": {"gke", "sev-snp", "native", helmchart.ShapeNodeCloud, "snp"},
+		"aks accepts matching vtpm":   {"aks", "sev-snp", "vtpm", helmchart.ShapeNodeCloud, "az-snp"},
+		// az-tdx: the vTPM HCL report wraps a TD quote.
+		"aks + tdx (az-tdx)": {"aks", "tdx", "", helmchart.ShapeNodeCloud, "az-tdx"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, tc.cvmMode, tc.hardwarePlatform)
+			shape, platform, err := resolveShape(tc.cvmMode, tc.hardwarePlatform, tc.evidence)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			assertArgsEqual(t, got, tc.want)
+			if shape != tc.wantShape || platform != tc.wantPlatform {
+				t.Fatalf("resolveShape = (%q, %q), want (%q, %q)", shape, platform, tc.wantShape, tc.wantPlatform)
+			}
 		})
 	}
 }
 
-func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
-		t.Fatalf("empty --hardware-platform: err = %v, want required error", err)
-	}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure", "sev-snp"); err == nil {
-		t.Fatal("appendCvmModeInstallArgs accepted an unknown --cvm-mode, want error")
+func TestResolveShapeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		cvmMode          string
+		hardwarePlatform string
+		evidence         string
+		wantErr          string
+	}{
+		{"unknown mode", "azure", "sev-snp", "", "unknown shape"},
+		{"missing platform", "pod", "", "", "--hardware-platform is required"},
+		{"unknown platform", "node-metal", "sgx", "", "--hardware-platform must be one of"},
+		{"evidence on pod", "pod", "sev-snp", "vtpm", "--evidence applies only to"},
+		{"evidence on node-metal", "node-metal", "sev-snp", "native", "--evidence applies only to"},
+		{"evidence on node-image", "node", "sev-snp", "vtpm", "--evidence applies only to"},
+		{"unknown evidence", "node-cloud", "sev-snp", "tpm2", "--evidence must be one of native, vtpm"},
+		// An alias pins its evidence: a conflicting --evidence is a typo, not
+		// an override.
+		{"gke conflicts with vtpm", "gke", "sev-snp", "vtpm", "--cvm-mode=gke implies --evidence=native"},
+		{"aks conflicts with native", "aks", "tdx", "native", "--cvm-mode=aks implies --evidence=vtpm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := resolveShape(tc.cvmMode, tc.hardwarePlatform, tc.evidence); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("resolveShape(%q, %q, %q): err = %v, want one containing %q", tc.cvmMode, tc.hardwarePlatform, tc.evidence, err, tc.wantErr)
+			}
+		})
 	}
 }
 
-// --measurements fans each M into both mesh pin points, indexed, so the operator
-// pins the internal mesh on the install itself. A blank entry (e.g. from a
-// trailing comma) is dropped, not emitted as an empty index, and the emitted
-// indices are contiguous over the validated list.
-func TestAppendCvmModeInstallArgsMeasurements(t *testing.T) {
+// appendShapeInstallArgs collapses the shape flags to the single platform
+// selector every chart derivation keys off. The shape chart itself encodes
+// which components render — no per-component values travel.
+func TestAppendShapeInstallArgsEmitsPlatformSelector(t *testing.T) {
+	for _, tc := range []struct {
+		shape    helmchart.Shape
+		platform string
+	}{
+		{helmchart.ShapePod, "snp"},
+		{helmchart.ShapePod, "tdx"},
+		{helmchart.ShapeNodeCloud, "snp"},
+		{helmchart.ShapeNodeCloud, "az-tdx"},
+		{helmchart.ShapeNodeMetal, "tdx"},
+		{helmchart.ShapeNodeImage, "snp"},
+	} {
+		got, err := appendShapeInstallArgs([]string{"upgrade"}, tc.platform, tc.shape)
+		if err != nil {
+			t.Fatalf("%s/%s: unexpected error: %v", tc.shape, tc.platform, err)
+		}
+		assertArgsEqual(t, got, []string{"upgrade", "--set-string", "platform=" + tc.platform})
+	}
+}
+
+// --measurements fans each M into the CDS pin point, indexed, and — on the
+// node shapes, where mesh peers pin each other — into ratlsMesh too. A blank
+// entry (e.g. from a trailing comma) is dropped, not emitted as an empty
+// index, and the emitted indices are contiguous over the validated list.
+// --attest=false omits the tls-lb attestation sidecar; by default nothing is
+// emitted (the chart renders it).
+func TestAppendShapeInstallArgsAttestToggle(t *testing.T) {
+	prev := installAttestEnabled
+	defer func() { installAttestEnabled = prev }()
+
+	installAttestEnabled = false
+	got, err := appendShapeInstallArgs([]string{"upgrade"}, "snp", helmchart.ShapeNodeMetal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(got, "tlsLb.attest.enabled=false") {
+		t.Errorf("--attest=false must emit tlsLb.attest.enabled=false; got %v", got)
+	}
+
+	installAttestEnabled = true
+	got, err = appendShapeInstallArgs([]string{"upgrade"}, "snp", helmchart.ShapeNodeMetal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, a := range got {
+		if strings.Contains(a, "tlsLb.attest.enabled") {
+			t.Errorf("default install must not set tlsLb.attest.enabled; got %v", got)
+		}
+	}
+}
+
+func TestAppendShapeInstallArgsMeasurements(t *testing.T) {
 	prev := installMeasurements
 	defer func() { installMeasurements = prev }()
 	m0, m1 := strings.Repeat("aa", 48), strings.Repeat("bb", 48)
 	installMeasurements = []string{m0, "", m1} // blank middle entry
 
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
+	got, err := appendShapeInstallArgs([]string{"upgrade"}, "tdx", helmchart.ShapeNodeMetal)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1217,68 +1215,68 @@ func TestAppendCvmModeInstallArgsMeasurements(t *testing.T) {
 	}
 }
 
-func TestAppendCvmModeInstallArgsRejectsBadMeasurement(t *testing.T) {
-	prev := installMeasurements
-	defer func() { installMeasurements = prev }()
-	installMeasurements = []string{"not-hex"}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
-		t.Fatal("appendCvmModeInstallArgs accepted a malformed measurement, want error")
-	}
-}
-
-// Pod mode used to refuse --measurements because the per-pod kata guest digest
-// was not computable. `c8s kata measure` computes it, so the pin is now
-// accepted and emitted in every mode — same value, different provenance.
-func TestAppendCvmModeInstallArgsAcceptsMeasurementsInPodMode(t *testing.T) {
+// The pod chart has no ratlsMesh section (the mesh runs in-guest), so only the
+// CDS pin is emitted there; a node shape gets both.
+func TestAppendShapeInstallArgsMeasurementsPodVsNode(t *testing.T) {
 	prev := installMeasurements
 	defer func() { installMeasurements = prev }()
 	m := strings.Repeat("aa", 48)
 	installMeasurements = []string{m}
-	for _, mode := range []string{"pod", "node"} {
-		args, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode, "tdx")
-		if err != nil {
-			t.Fatalf("%s mode should accept --measurements: %v", mode, err)
-		}
-		joined := strings.Join(args, " ")
-		for _, want := range []string{"cds.measurements[0]=" + m, "ratlsMesh.measurements[0]=" + m} {
-			if !strings.Contains(joined, want) {
-				t.Errorf("%s mode: missing %q in %v", mode, want, args)
-			}
-		}
-	}
-}
 
-func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sgx"); err == nil {
-		t.Fatal("appendCvmModeInstallArgs accepted an unknown --hardware-platform, want error")
-	}
-}
-
-func TestAppendCvmModeInstallArgsAcceptsAksWithTdx(t *testing.T) {
-	// aks + tdx is the Azure-vTPM TDX (az-tdx) shape: the node's vTPM HCL report
-	// wraps a TD quote, so it needs the vTPM device (tpm=true, no guest device)
-	// and the TDX RA-TLS platform on CDS/mesh — not a refusal.
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "tdx")
+	got, err := appendShapeInstallArgs([]string{"upgrade"}, "snp", helmchart.ShapePod)
 	if err != nil {
-		t.Fatalf("appendCvmModeInstallArgs(aks, tdx): unexpected error %v", err)
+		t.Fatalf("pod shape should accept --measurements: %v", err)
 	}
-	joined := strings.Join(got, " ")
-	for _, want := range []string{
-		"attestationApi.cvmMode=aks",
-		"attestationApi.teeDevices.tpm=true",
-		"attestationApi.teeDevices.tdxGuest=false",
-		"cds.ratlsPlatform=tdx",
-		"ratlsMesh.platform=tdx",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("aks+tdx args missing %q; got %v", want, got)
+	if !slices.Contains(got, "cds.measurements[0]="+m) {
+		t.Errorf("pod shape: missing the CDS pin; got %v", got)
+	}
+	for _, arg := range got {
+		if strings.HasPrefix(arg, "ratlsMesh.") {
+			t.Errorf("pod shape emitted a ratlsMesh pin the chart has no section for: %v", got)
 		}
 	}
 }
 
-// testComponents mirrors the chart's c8sComponents for the resolver tests,
-// which exercise buildDigestArgs without reading a real chart. The chart-read
-// path (chartComponents) is covered separately by TestChartComponentsFromValues.
+func TestAppendShapeInstallArgsRejectsBadMeasurement(t *testing.T) {
+	prev := installMeasurements
+	defer func() { installMeasurements = prev }()
+	installMeasurements = []string{"not-hex"}
+	if _, err := appendShapeInstallArgs([]string{"upgrade"}, "tdx", helmchart.ShapeNodeMetal); err == nil {
+		t.Fatal("appendShapeInstallArgs accepted a malformed measurement, want error")
+	}
+}
+
+// --rtmrs completes the TDX pin: the entries fan into cds.rtmrs (every shape)
+// and ratlsMesh.rtmrs (node shapes), normalized and in index order.
+func TestAppendShapeInstallArgsRTMRs(t *testing.T) {
+	prev := installRTMRs
+	defer func() { installRTMRs = prev }()
+	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
+	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
+
+	got, err := appendShapeInstallArgs([]string{"upgrade"}, "tdx", helmchart.ShapeNodeCloud)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"cds.rtmrs[0]=1=" + r1, "ratlsMesh.rtmrs[0]=1=" + r1,
+		"cds.rtmrs[1]=2=" + r2, "ratlsMesh.rtmrs[1]=2=" + r2,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+
+	installRTMRs = []string{"0=" + r1}
+	if _, err := appendShapeInstallArgs([]string{"upgrade"}, "tdx", helmchart.ShapeNodeCloud); err == nil {
+		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")
+	}
+}
+
+// testComponents stands in for a chart's c8sComponents for the resolver
+// tests, which exercise buildDigestArgs without reading a real chart. The
+// chart-read path (chartComponents) is covered separately by
+// TestChartComponentsFromValues.
 var testComponents = []c8sComponent{
 	{valuePrefix: "image", repository: "ghcr.io/confidential-dot-ai/c8s-operator"},
 	{valuePrefix: "attestationApi.image", repository: "ghcr.io/confidential-dot-ai/attestation-api", enabledPath: "attestationApi.enabled"},
@@ -1517,54 +1515,87 @@ func TestBuildDigestArgsLeavesOtherResolveErrorsUnhinted(t *testing.T) {
 }
 
 // chartComponents reads the component set from the chart's values.yaml; this
-// asserts the parse against the embedded chart so the install-time list cannot
-// silently diverge from what the chart declares.
+// asserts the parse against every embedded shape chart so the install-time
+// list cannot silently diverge from what the chart declares.
 func TestChartComponentsFromValues(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not on PATH")
 	}
-	dir, err := extractChart()
-	if err != nil {
-		t.Fatalf("extractChart: %v", err)
-	}
-	defer os.RemoveAll(dir)
+	for _, shape := range helmchart.Shapes {
+		t.Run(string(shape), func(t *testing.T) {
+			chartPath, tmpRoot, err := helmchart.ExtractChart(shape)
+			if err != nil {
+				t.Fatalf("ExtractChart: %v", err)
+			}
+			defer os.RemoveAll(tmpRoot)
 
-	comps, err := chartComponents(context.Background(), filepath.Join(dir, helmchart.ChartRoot))
-	if err != nil {
-		t.Fatalf("chartComponents: %v", err)
-	}
+			comps, err := chartComponents(context.Background(), chartPath)
+			if err != nil {
+				t.Fatalf("chartComponents: %v", err)
+			}
 
-	got := map[string]string{}
-	for _, c := range comps {
-		got[c.valuePrefix] = c.repository
-	}
-	want := map[string]string{
-		"image":                "ghcr.io/confidential-dot-ai/c8s-operator",
-		"attestationApi.image": "ghcr.io/confidential-dot-ai/attestation-api",
-		"cds.image":            "ghcr.io/confidential-dot-ai/cds",
-		"ratlsMesh.image":      "ghcr.io/confidential-dot-ai/ratls-mesh",
-		"nriImagePolicy.image": "ghcr.io/confidential-dot-ai/nri-image-policy",
-		"volumed.image":        "ghcr.io/confidential-dot-ai/volumed",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("chart components = %v, want %v", got, want)
-	}
+			got := map[string]string{}
+			for _, c := range comps {
+				got[c.valuePrefix] = c.repository
+			}
+			// Every shape deploys the operator and CDS; the node shapes add
+			// the host-side mesh, image policy, and (behind --volumes) volumed.
+			want := map[string]string{
+				"image":     "ghcr.io/confidential-dot-ai/c8s-operator",
+				"cds.image": "ghcr.io/confidential-dot-ai/cds",
+			}
+			if shape.IsNode() {
+				want["ratlsMesh.image"] = "ghcr.io/confidential-dot-ai/ratls-mesh"
+				want["nriImagePolicy.image"] = "ghcr.io/confidential-dot-ai/nri-image-policy"
+				want["volumed.image"] = "ghcr.io/confidential-dot-ai/volumed"
+			}
+			// attestation-api is chart-installed only where it is not baked
+			// into the node image.
+			if shape == helmchart.ShapeNodeCloud || shape == helmchart.ShapeNodeMetal {
+				want["attestationApi.image"] = "ghcr.io/confidential-dot-ai/attestation-api"
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("chart components = %v, want %v", got, want)
+			}
 
-	// Exactly the components released outside the c8s train may carry a
-	// pinnedDigest. Pinning one that does publish at the install tag would
-	// freeze it there silently, and unpinning attestation-api puts back the
-	// abort that made `--image-tag <release>` uninstallable.
-	pinned := map[string]string{}
-	for _, c := range comps {
-		if c.pinnedDigest != "" {
-			pinned[c.valuePrefix] = c.pinnedDigest
-		}
-	}
-	if len(pinned) != 1 || pinned["attestationApi.image"] == "" {
-		t.Errorf("pinnedDigest components = %v, want only attestationApi.image", pinned)
-	}
-	if !strings.HasPrefix(pinned["attestationApi.image"], "sha256:") || len(pinned["attestationApi.image"]) != len("sha256:")+64 {
-		t.Errorf("attestationApi pinnedDigest is not a sha256 digest: %q", pinned["attestationApi.image"])
+			// Exactly the components released outside the c8s train may carry
+			// a pinnedDigest. Pinning one that does publish at the install tag
+			// would freeze it there silently, and unpinning attestation-api
+			// puts back the abort that made `--image-tag <release>`
+			// uninstallable.
+			pinned := map[string]string{}
+			for _, c := range comps {
+				if c.pinnedDigest != "" {
+					pinned[c.valuePrefix] = c.pinnedDigest
+				}
+			}
+			if shape == helmchart.ShapeNodeCloud || shape == helmchart.ShapeNodeMetal {
+				if len(pinned) != 1 || pinned["attestationApi.image"] == "" {
+					t.Errorf("pinnedDigest components = %v, want only attestationApi.image", pinned)
+				}
+				if !strings.HasPrefix(pinned["attestationApi.image"], "sha256:") || len(pinned["attestationApi.image"]) != len("sha256:")+64 {
+					t.Errorf("attestationApi pinnedDigest is not a sha256 digest: %q", pinned["attestationApi.image"])
+				}
+			} else if len(pinned) != 0 {
+				t.Errorf("pinnedDigest components = %v, want none on %s", pinned, shape)
+			}
+
+			// volumed renders only under --volumes, so its digest resolution
+			// must be gated on the effective volumed.enabled.
+			enabled := map[string]string{}
+			for _, c := range comps {
+				if c.enabledPath != "" {
+					enabled[c.valuePrefix] = c.enabledPath
+				}
+			}
+			if shape.IsNode() {
+				if enabled["volumed.image"] != "volumed.enabled" {
+					t.Errorf("enabledPath entries = %v, want volumed.image gated on volumed.enabled", enabled)
+				}
+			} else if len(enabled) != 0 {
+				t.Errorf("enabledPath entries = %v, want none on the pod chart", enabled)
+			}
+		})
 	}
 }
 
@@ -1576,12 +1607,11 @@ func TestComponentEnabledPredicateHonorsValuesFile(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not on PATH")
 	}
-	dir, err := extractChart()
+	chartPath, tmpRoot, err := helmchart.ExtractChart(helmchart.ShapeNodeCloud)
 	if err != nil {
-		t.Fatalf("extractChart: %v", err)
+		t.Fatalf("ExtractChart: %v", err)
 	}
-	defer os.RemoveAll(dir)
-	chartPath := filepath.Join(dir, helmchart.ChartRoot)
+	defer os.RemoveAll(tmpRoot)
 
 	vf := filepath.Join(t.TempDir(), "enable-volumed.yaml")
 	if err := os.WriteFile(vf, []byte("volumed:\n  enabled: true\n"), 0o600); err != nil {
@@ -1651,12 +1681,11 @@ func TestEffectiveValuesResolvesTEESelector(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not on PATH")
 	}
-	dir, err := extractChart()
+	chartPath, tmpRoot, err := helmchart.ExtractChart(helmchart.ShapePod)
 	if err != nil {
-		t.Fatalf("extractChart: %v", err)
+		t.Fatalf("ExtractChart: %v", err)
 	}
-	defer os.RemoveAll(dir)
-	chartPath := filepath.Join(dir, helmchart.ChartRoot)
+	defer os.RemoveAll(tmpRoot)
 
 	tmp := t.TempDir()
 	tlsLB := filepath.Join(tmp, "tlslb.yaml")
@@ -1835,92 +1864,6 @@ func writeValuesFile(t *testing.T, body string) string {
 		t.Fatalf("write values: %v", err)
 	}
 	return p
-}
-
-// A -f file that writes nriImagePolicy.policy.exemptNamespaces owns it, empty
-// list included: the computed values are helm's last -f, so a lane default
-// injected over it would silently replace a deliberate choice.
-func TestValuesFilesSetExemptNamespaces(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"list set", "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n", true},
-		{"empty list is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n", true},
-		{"null is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces:\n", true},
-		{"sibling policy key only", "nriImagePolicy:\n  policy:\n    mode: audit\n", false},
-		{"wrong nesting level", "nriImagePolicy:\n  exemptNamespaces: [kube-system]\n", false},
-		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
-		{"empty file", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := valuesFilesSetExemptNamespaces([]string{writeValuesFile(t, tc.body)})
-			if err != nil {
-				t.Fatalf("valuesFilesSetExemptNamespaces: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("valuesFilesSetExemptNamespaces(%q) = %v, want %v", tc.body, got, tc.want)
-			}
-		})
-	}
-
-	t.Run("no files means default", func(t *testing.T) {
-		got, err := valuesFilesSetExemptNamespaces(nil)
-		if err != nil || got {
-			t.Errorf("valuesFilesSetExemptNamespaces(nil) = (%v, %v), want (false, nil)", got, err)
-		}
-	})
-
-	t.Run("one of several files sets it", func(t *testing.T) {
-		a := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
-		b := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [kube-system]\n")
-		got, err := valuesFilesSetExemptNamespaces([]string{a, b})
-		if err != nil || !got {
-			t.Errorf("valuesFilesSetExemptNamespaces(two files) = (%v, %v), want (true, nil)", got, err)
-		}
-	})
-}
-
-func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
-	want := []string{"--set-string", "nriImagePolicy.policy.exemptNamespaces[0]=kube-system"}
-	for _, mode := range hostedCvmModes {
-		got, err := appendExemptNamespacesInstallArgs(nil, mode, nil)
-		if err != nil {
-			t.Fatalf("--cvm-mode=%s: %v", mode, err)
-		}
-		assertArgsEqual(t, got, want)
-	}
-
-	// node bakes the system digests into its own floor, so the chart's empty
-	// default stands.
-	got, err := appendExemptNamespacesInstallArgs(nil, "node", nil)
-	if err != nil || got != nil {
-		t.Errorf("--cvm-mode=node = (%v, %v), want (nil, nil)", got, err)
-	}
-
-	t.Run("a -f file that sets it wins", func(t *testing.T) {
-		f := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
-		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
-		if err != nil || got != nil {
-			t.Errorf("with an exemptNamespaces -f = (%v, %v), want (nil, nil)", got, err)
-		}
-	})
-
-	t.Run("an unrelated -f file does not suppress the default", func(t *testing.T) {
-		f := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
-		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
-		if err != nil {
-			t.Fatalf("appendExemptNamespacesInstallArgs: %v", err)
-		}
-		assertArgsEqual(t, got, want)
-	})
-
-	t.Run("an unreadable -f file is an error, not a silent default", func(t *testing.T) {
-		if _, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{"/nonexistent/values.yaml"}); err == nil {
-			t.Error("want an error for an unreadable values file")
-		}
-	})
 }
 
 func TestImageDigest(t *testing.T) {
@@ -2185,33 +2128,6 @@ func TestValuesFilesSetGuestImageTag(t *testing.T) {
 			t.Fatal("missing values file: want error, got nil")
 		}
 	})
-}
-
-// --rtmrs completes the TDX pin: the entries fan into cds.rtmrs and
-// ratlsMesh.rtmrs, normalized and in index order.
-func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
-	prev := installRTMRs
-	defer func() { installRTMRs = prev }()
-	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
-	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
-
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	for _, want := range []string{
-		"cds.rtmrs[0]=1=" + r1, "ratlsMesh.rtmrs[0]=1=" + r1,
-		"cds.rtmrs[1]=2=" + r2, "ratlsMesh.rtmrs[1]=2=" + r2,
-	} {
-		if !slices.Contains(got, want) {
-			t.Errorf("args missing %q; got %v", want, got)
-		}
-	}
-
-	installRTMRs = []string{"0=" + r1}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
-		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")
-	}
 }
 
 // A TDX install without RTMR pins warns that the measurement pin covers TDVF

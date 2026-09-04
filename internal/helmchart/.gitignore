@@ -1,0 +1,18 @@
+# Vendored by sync.sh / embed.go — do not commit.
+pod/charts/
+pod/crds/
+pod/files/
+node-cloud/charts/
+node-cloud/crds/
+node-cloud/files/
+node-metal/charts/
+node-metal/crds/
+node-metal/files/
+node-image/charts/
+node-image/crds/
+node-image/files/
+pod/Chart.lock
+node-cloud/Chart.lock
+node-metal/Chart.lock
+node-image/Chart.lock
+.sync.lock

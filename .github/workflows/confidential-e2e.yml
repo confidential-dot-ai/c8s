@@ -48,6 +48,6 @@ jobs:
     with:
       # Test the merge head. The metal lane installs the chart's own
       # attestation-api DaemonSet + attest-proxy socket as the node-local
-      # endpoint, so the staged rke2 image needs no baked AA for cvmMode=node
-      # (#88).
+      # endpoint, so the staged rke2 image needs no baked AA for the
+      # node-image shape (#88).
       c8s_ref: ${{ inputs.c8s_ref || github.event.workflow_run.head_sha }}

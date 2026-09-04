@@ -197,10 +197,11 @@ This enables rolling upgrades where some nodes have CDS-issued certificates and 
 
 ## Deployment
 
-The supported chart path is `internal/helmchart/c8s/charts/ratls-mesh`, included
-by the top-level `internal/helmchart/c8s` chart. The chart renders the proxy as
-a DaemonSet and uses Kubernetes 1.29+ native sidecar init containers for iptables
-synchronization and cleanup.
+The supported chart path is the node shape charts
+(`internal/helmchart/node-cloud`, `node-metal`, `node-image`), which render
+the mesh from the shared `internal/helmchart/lib` templates. The chart
+renders the proxy as a DaemonSet and uses Kubernetes 1.29+ native sidecar
+init containers for iptables synchronization and cleanup.
 
 **Kubernetes version requirement.** The chart's `Chart.yaml` declares
 `kubeVersion: ">=1.30.0-0"`. `iptables-cleanup` runs as a native sidecar

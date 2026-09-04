@@ -1,0 +1,2587 @@
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-cds-ingress
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+  policyTypes:
+    - Ingress
+  ingress:
+    # RA-TLS from anywhere: get-cert runs beside every adopted workload, and the
+    # NodePort route arrives off-cluster.
+    - ports:
+        - protocol: TCP
+          port: 8443
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-operator-ingress
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: operator
+  policyTypes:
+    - Ingress
+  ingress:
+    # 9443 is the admission webhook, dialled by the API server, whose address no
+    # selector can name; 8081 carries the kubelet's probes; 8080 is metrics.
+    - ports:
+        - protocol: TCP
+          port: 9443
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8080
+---
+# Source: c8s/templates/component-ingress-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c8s-tls-lb-ingress
+  namespace: c8s-system
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: ingress-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tls-lb
+      app.kubernetes.io/instance: c8s
+  policyTypes:
+    - Ingress
+  ingress:
+    # The public front door, from anywhere: the Service's only port targets it,
+    # and so does hostPort when enabled. Naming it leaves the cds-attest and
+    # allowlist-proxy sidecars — which bind pod loopback and are reached through
+    # nginx — unreachable if one ever rebinds.
+    - ports:
+        - protocol: TCP
+          port: 8443
+
+---
+# Source: c8s/templates/cds-pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+---
+# Source: c8s/templates/kata-image-puller.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-kata-deploy-image-puller
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-image-puller
+---
+# Source: c8s/templates/kata-sandbox-device-plugin.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-kata-deploy-sandbox-device-plugin
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-sandbox-device-plugin
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-kata-deploy
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-cds-allowlist-seed
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+data:
+  allowlist-seed.json: "{\"digests\":{\"sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200\":\"nginxinc/nginx-unprivileged@sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200\",\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\":\"ghcr.io/confidential-dot-ai/cds@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"schema\":\"c8s.allowlist/v1\",\"workloads\":{}}"
+---
+# Source: c8s/templates/kata-image-puller.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-kata-deploy-image-puller
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-image-puller
+data:
+  pull-and-configure.sh: |
+    #!/bin/sh
+    # Pull the kata-guest-base rootfs image (hardened kernel + dm-verity
+    # rootfs) into the host kata-images dir and rewrite the confidential
+    # kata runtime's config so kata-runtime boots our kernel + verity rootfs
+    # for every pod (measured direct-kernel boot, no IGVM).
+    #
+    # One kata-guest-base artifact serves both kata-qemu-snp (AMD SEV-SNP) and
+    # kata-qemu-tdx (Intel TDX): the vmlinuz has both TEE guest drivers built
+    # in (runtime-probed), the rootfs bytes are TEE-neutral, and the dm-verity
+    # root_hash is the same across shims. SHIM_NAME selects which shim's toml
+    # to rewrite. On the SNP shims we also pin default_vcpus=1 because the SNP
+    # launch digest measures per-vCPU VMSAs; the TDX shims need no pin — see
+    # the default_vcpus note below.
+    #
+    # The confidential-GPU shim (qemu-nvidia-gpu-snp) is driven by the same
+    # script from its own puller DaemonSet: TAG points at the separate
+    # kata-guest-base:<tag>-nvidia artifact (stock kata NVIDIA confidential
+    # rootfs, see docs/kata-gpu.md) and the GPU_* knobs add the VFIO
+    # cold-plug config on top. Same drop-in mechanism, same measured
+    # direct-kernel boot.
+    #
+    # Pure POSIX shell, kept as a standalone file (templated into the
+    # kata-image-puller ConfigMap via .Files.Get) so it gets shellcheck.
+    # All configuration comes from the environment, set on the puller
+    # initContainer from .Values.kata.guestImage.* — there is no helm
+    # interpolation inside this script.
+    #
+    #   REGISTRY        guest-image registry (e.g. ghcr.io/confidential-dot-ai)   [required]
+    #   TAG             kata-guest-base tag (e.g. main, or main-nvidia) [required]
+    #   HOST_IMG_DIR    /host-prefixed dir the puller writes into       [required]
+    #   SHIM_NAME       confidential shim to configure: qemu-snp, qemu-tdx, or
+    #                   qemu-nvidia-gpu-snp (confidential GPU — adds the VFIO
+    #                   cold-plug knobs below)
+    #                   [default qemu-snp — backward compat with pre-TDX chart]
+    #   GPU_PCIE_ROOT_PORT  `pcie_root_port = N` (VFIO cold-plug); REQUIRED for
+    #                   the GPU shim, ignored otherwise                 [optional]
+    #   GPU_DEFAULT_MEMORY  `default_memory = N` (MiB) for the GPU shim [optional]
+    #   KATA_DEBUG      "true" to keep debug_console_enabled + journal-to-console
+    #                   in the shim toml (dev only — host reads guest journal).
+    #                   Default false = puller strips both so a leaked hand-patch
+    #                   or a debug-variant install-then-normal-reinstall doesn't
+    #                   silently ship a guest that streams its journal to the host.
+    #   ORAS_INSECURE   "true" to pull over plain HTTP (local mirror)   [optional]
+    #
+    # Usage: pull-and-configure.sh [check]
+    #   "check" validates only (fingerprint + pulled artifacts) and exits 0/1
+    #   without pulling or writing — the puller's readiness probe.
+    set -eu
+    
+    MODE="${1:-reconcile}"
+    : "${REGISTRY:?REGISTRY must be set (kata.guestImage.repository)}"
+    : "${TAG:?TAG must be set (kata.guestImage.tag)}"
+    : "${HOST_IMG_DIR:?HOST_IMG_DIR must be set (/host + kata.guestImage.hostPath)}"
+    HOST_IMG_DIR="${HOST_IMG_DIR%/}"
+    SHIM_NAME="${SHIM_NAME:-qemu-snp}"
+    case "${SHIM_NAME}" in
+        qemu-snp|qemu-tdx|qemu-nvidia-gpu-snp|qemu-nvidia-gpu-tdx) ;;
+        *) echo "ERROR: SHIM_NAME must be qemu-snp, qemu-tdx, qemu-nvidia-gpu-snp, or qemu-nvidia-gpu-tdx (got '${SHIM_NAME}')" >&2; exit 1 ;;
+    esac
+    KATA_DEBUG="${KATA_DEBUG:-false}"
+    GPU_PCIE_ROOT_PORT="${GPU_PCIE_ROOT_PORT:-}"
+    GPU_DEFAULT_MEMORY="${GPU_DEFAULT_MEMORY:-}"
+    # pcie_root_port is load-bearing for the GPU shim: VFIO cold-plug attaches
+    # each passed-through GPU behind a pcie-root-port, and the stock SNP-GPU
+    # config ships 0 (passthrough disabled). A GPU pod boots fine with 0 but has
+    # NO device, surfacing only as a missing /dev/nvidia* in-guest — so an unset
+    # knob is a hard error, not a warning: the puller exits non-zero and stays
+    # NotReady (visible at rollout) rather than silently shipping a deviceless
+    # runtime. default_memory is a tuning knob (the in-guest NVIDIA driver's
+    # BAR-mapping path OOMs the stock guest during device init), not load-bearing
+    # for passthrough, so it stays optional.
+    case "${SHIM_NAME}" in
+        qemu-nvidia-gpu-*)
+            case "${GPU_PCIE_ROOT_PORT}" in
+                ''|0)
+                    echo "ERROR: GPU_PCIE_ROOT_PORT must be >= 1 for SHIM_NAME=${SHIM_NAME} (kata.gpu.guestImage.pcieRootPort, also enforced at chart render) — refusing to ship a GPU runtime with VFIO cold-plug disabled" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
+    # --plain-http makes oras talk to an insecure (HTTP, no TLS) registry — for
+    # local / in-cluster mirrors only. Empty for a normal TLS registry.
+    ORAS_OPTS=""
+    [ "${ORAS_INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+    HOST_KATA_DIR="${HOST_KATA_DIR:-/host/opt/kata}"
+    KATA_CONFIG_DIR="${HOST_KATA_DIR}/share/defaults/kata-containers"
+    
+    echo "==> c8s-kata-image-puller: registry=${REGISTRY} tag=${TAG}"
+    
+    # Resolve the target shim config before doing any work: the main toml is
+    # also an input to the drop-in (base kernel_params), and failing before the
+    # pull beats failing after it while kata-deploy is still installing.
+    cfg_dir="${KATA_CONFIG_DIR}/runtimes/${SHIM_NAME}"
+    main_cfg="${cfg_dir}/configuration-${SHIM_NAME}.toml"
+    if [ ! -f "${main_cfg}" ]; then
+        echo "ERROR: ${main_cfg} missing — has kata-deploy finished?" >&2
+        exit 1
+    fi
+    base_kernel_params="$(sed -n 's/^kernel_params = "\(.*\)"$/\1/p' "${main_cfg}" | head -1)"
+    
+    dropin_dir="${cfg_dir}/config.d"
+    dropin="${dropin_dir}/50-c8s.toml"
+    
+    # Level-triggered reconcile: the drop-in embeds a fingerprint of every input
+    # that shapes it. Re-run the full pull+rewrite when the fingerprint differs
+    # (values change, kata-deploy bumped the base kernel_params) or the artifact
+    # went missing; exit early otherwise so the steady-state tick stays free of
+    # writes (no clobber races) and network pulls. A re-published artifact under
+    # the SAME tag is deliberately not detected: running clusters do NOT pick up
+    # new kata-guest-base artifacts.
+    # gen= versions the generator itself: bump it whenever the emitted TOML
+    # changes shape, so nodes with unchanged inputs still rewrite. gen=3 wires the
+    # host qemu wrapper via `[hypervisor.qemu] path=`; an older drop-in without it
+    # leaves volume-annotated pods hanging at first StartContainer.
+    config_fingerprint="gen=3|registry=${REGISTRY}|tag=${TAG}|dir=${HOST_IMG_DIR}|shim=${SHIM_NAME}|debug=${KATA_DEBUG}|pcie=${GPU_PCIE_ROOT_PORT}|mem=${GPU_DEFAULT_MEMORY}|base_params=${base_kernel_params}"
+    marker="# c8s-config: ${config_fingerprint}"
+    
+    out_dir="${HOST_IMG_DIR}/base"
+    wrapper_dst="${HOST_KATA_DIR}/bin/kata-qemu-scratch-wrapper.sh"
+    up_to_date=false
+    if [ -f "${dropin}" ] && grep -qFx "${marker}" "${dropin}"; then
+        up_to_date=true
+        for required in vmlinuz kata-rootfs.img kernel_verity_params rootfs_type; do
+            [ -f "${out_dir}/${required}" ] || up_to_date=false
+        done
+        # A wrapper that got swept between reconciles must trigger the full pass so
+        # the drop-in and the on-disk wrapper stay in lockstep.
+        [ -x "${wrapper_dst}" ] || up_to_date=false
+    fi
+    if [ "${up_to_date}" = "true" ]; then
+        echo "==> c8s-kata-image-puller: up to date (shim=${SHIM_NAME}, mode=${MODE})"
+        exit 0
+    fi
+    # check = the readiness probe: report not-current, change nothing. Readiness
+    # gates on the CURRENT fingerprint + artifacts, so a stale drop-in left by
+    # older values cannot mark the pod Ready (or pass helm --wait) while the
+    # reconcile loop is failing to apply the new configuration.
+    if [ "${MODE}" = "check" ]; then
+        echo "check: node not reconciled to the current puller config (shim=${SHIM_NAME})" >&2
+        exit 1
+    fi
+    
+    mkdir -p "${HOST_IMG_DIR}" "${KATA_CONFIG_DIR}"
+    
+    # Pull into a clean staging dir and activate by whole-dir rename: oras does
+    # not remove files absent from the new artifact, so an in-place pull could
+    # leave a mix of releases that still passes the existence checks below.
+    staging="${HOST_IMG_DIR}/.staging"
+    rm -rf "${staging}"
+    mkdir -p "${staging}"
+    
+    echo "==> Pulling kata-guest-base:${TAG}"
+    # oras unpacks the artifact's contents into CWD.
+    # shellcheck disable=SC2086  # ORAS_OPTS is a controlled single flag ("" or --plain-http)
+    ( cd "${staging}" && oras pull ${ORAS_OPTS} "${REGISTRY}/kata-guest-base:${TAG}" )
+    
+    # Sanity, in staging BEFORE activation: the artifact must contain the
+    # kernel, the verity rootfs image, and the verity params + rootfs-type
+    # sidecars. Fail loudly and leave the previous artifact live — silently
+    # activating a config that points at a missing file (or, worse, one with
+    # empty verity params, which would DISABLE dm-verity and drop the rootfs
+    # out of the measurement) leaves the runtime broken or insecure in a way
+    # that only surfaces at pod start.
+    for required in vmlinuz kata-rootfs.img kernel_verity_params rootfs_type; do
+        if [ ! -f "${staging}/${required}" ]; then
+            echo "ERROR: ${staging}/${required} missing after oras pull" >&2
+            exit 1
+        fi
+    done
+    
+    # Verity params + rootfs type come from the build (these sidecars
+    # mirror manifest.json). kernel_verity_params is load-bearing: an
+    # empty value would make kata boot WITHOUT dm-verity (rootfs no longer
+    # measured / tamper-evident), so refuse anything but a real root_hash.
+    KVP="$(tr -d '\n' < "${staging}/kernel_verity_params")"
+    RFT="$(tr -d '\n' < "${staging}/rootfs_type")"
+    case "${KVP}" in
+        root_hash=*) ;;
+        *) echo "ERROR: kernel_verity_params is not a 'root_hash=…' string: '${KVP}'" >&2; exit 1 ;;
+    esac
+    [ -n "${RFT}" ] || RFT=ext4
+    
+    # Activate the validated staging dir in place of the previous artifact —
+    # nothing from an older release survives the swap.
+    old_dir="${out_dir}.old"
+    rm -rf "${old_dir}"
+    [ ! -d "${out_dir}" ] || mv "${out_dir}" "${old_dir}"
+    mv "${staging}" "${out_dir}"
+    rm -rf "${old_dir}"
+    
+    # Translate /host<...> back to the on-host absolute path the
+    # kata configuration TOML will reference. The puller pod sees
+    # the host root at /host; kata-runtime running on the host
+    # sees the same files without the prefix.
+    host_out_dir="${out_dir#/host}"
+    
+    # Install the host-side qemu wrapper next to kata's real qemu binary. It
+    # resolves the pod's encrypted-volume annotation into a `-device virtio-blk`
+    # argv addition before exec'ing the real qemu. Copy is via a temp path +
+    # rename so a puller restart mid-copy can't leave a partial script in the
+    # path kata is about to exec. Executable-bit is load-bearing: kata calls
+    # hypervisor.qemu path directly, no shell in between. wrapper_dst was pinned
+    # above so the up-to-date check gates on the same file this write produces.
+    wrapper_src="/scripts/kata-qemu-scratch-wrapper.sh"
+    host_wrapper_dst="${wrapper_dst#/host}"
+    mkdir -p "$(dirname "${wrapper_dst}")"
+    cp "${wrapper_src}" "${wrapper_dst}.c8s-tmp"
+    chmod 0755 "${wrapper_dst}.c8s-tmp"
+    mv -f "${wrapper_dst}.c8s-tmp" "${wrapper_dst}"
+    
+    # c8s writes ONLY a config.d/ drop-in — never the main configuration-<shim>.toml.
+    #
+    # kata-deploy owns the main toml (`configuration-qemu-snp.toml` /
+    # `configuration-qemu-tdx.toml`) and rewrites it every time the DaemonSet's pod
+    # restarts. Editing the main file in place produces a race the puller keeps
+    # losing: kata-deploy restarts → clobbers our patch → next sandbox launches
+    # with stock kata paths → containerd stack fails at rootfs mount (SNP: stock
+    # vmlinuz doesn't have the c8s in-guest bits; TDX: stock vmlinuz doesn't have
+    # TDX guest driver either).
+    #
+    # kata-runtime's config loader (src/runtime/pkg/katautils/config.go
+    # decodeDropIns / updateFromDropIn) reads every *.toml in a `config.d/`
+    # subdirectory next to the main file in alphabetical order AFTER the main
+    # file, and each drop-in's set fields override the main file's values.
+    # kata-deploy never touches config.d/, so a drop-in survives DS restarts
+    # by design. This is exactly the mechanism the main-toml header comment
+    # points operators at ("do not modify this file; put overrides in
+    # config.d/").
+    mkdir -p "${dropin_dir}"
+    
+    echo "  Writing ${dropin}"
+    # Compose the drop-in. Fields we set:
+    #
+    #   [hypervisor.qemu]
+    #     kernel / image       -> our hardened vmlinuz + dm-verity rootfs
+    #     rootfs_type          -> ext4 (from the osbuilder rootfs_type sidecar)
+    #     kernel_verity_params -> the root_hash/salt/blocks matching the rootfs;
+    #                             kata builds the dm-verity table from these and
+    #                             folds the resulting hash into the launch
+    #                             measurement (SNP kernel-hashes / TDX RTMR[1])
+    #     shared_fs = "none"   -> no virtio-fs into the confidential guest
+    #     kernel_params        -> the stock shim toml's params, preserved verbatim
+    #                             (re-emitted so a drop-in rewrite can't clobber them)
+    #     default_vcpus/maxvcpus = 1 -> SNP-ONLY (both SNP shims, CPU and GPU).
+    #                             Pins the boot-time VMSA count so the launch
+    #                             digest is stable across pods. No pin on the TDX
+    #                             shims: the one TDX register c8s pins (MRTD, the
+    #                             launch_digest allowlist) measures TDVF firmware
+    #                             pages + SEPT — vCPU init (TDH.VP.INIT) and guest
+    #                             RAM size never enter it. The (vCPU, memory)-
+    #                             sensitive register is RTMR[0] (TDVF's TD-HOB),
+    #                             which c8s does not verify (the CC event log is
+    #                             stripped — see c8s pkg/attestclient/tdx.go).
+    #     pcie_root_port        -> GPU shim only: VFIO cold-plug root ports
+    #                             (kata.gpu.pcieRootPort; validated non-empty
+    #                             above).
+    #     default_memory        -> GPU shim only, optional: guest memory floor
+    #                             for the NVIDIA driver's BAR mapping
+    #                             (kata.gpu.defaultMemoryMiB).
+    #     debug_console_enabled -> forced false unless KATA_DEBUG=true (the
+    #                             chart derives this from kata.guestImage.debug).
+    #
+    #   [runtime]
+    #     experimental_force_guest_pull = true -> with shared_fs="none" the
+    #                             kata-agent inside the VM pulls the workload
+    #                             OCI image over the guest network (image-rs +
+    #                             CDH). Without this, the shim fails at
+    #                             `failed to mount /run/kata-containers/shared/
+    #                             containers/<id>/rootfs ... ENOENT`.
+    tmp="${dropin}.c8s-tmp"
+    {
+        echo '# c8s kata-image-puller drop-in — MANAGED FILE, DO NOT EDIT.'
+        echo '#'
+        echo '# Layered on top of the sibling configuration-'"${SHIM_NAME}"'.toml by'
+        echo '# kata-runtime (see src/runtime/pkg/katautils/config.go decodeDropIns).'
+        echo '# Regenerated on every c8s-kata-image-puller reconcile from the'
+        echo '# published kata-guest-base:<tag> artifact under '"${host_out_dir}"'.'
+        echo '# The c8s-config line is the reconcile fingerprint — a mismatch with'
+        echo '# the current puller env triggers a full re-pull + rewrite.'
+        echo "${marker}"
+        echo ''
+        echo '[hypervisor.qemu]'
+        # Wrap qemu so the launcher can attach this pod's encrypted volume devices
+        # (docs/volumes.md): kata's direct-volume path assumes ciphertext-free
+        # storage kata-agent can mount, and the wrapper carries only the volume
+        # attachment logic — the base qemu path is CONFAI_REAL_QEMU. Without the
+        # override the LIO disk `c8s volume attach` writes to the node is never
+        # attached to the guest, and the sandbox times out at first StartContainer.
+        printf 'path = "%s"\n' "${host_wrapper_dst}"
+        printf 'kernel = "%s/vmlinuz"\n' "${host_out_dir}"
+        printf 'image = "%s/kata-rootfs.img"\n' "${host_out_dir}"
+        printf 'rootfs_type = "%s"\n' "${RFT}"
+        printf 'kernel_verity_params = "%s"\n' "${KVP}"
+        echo 'shared_fs = "none"'
+        # kata's decodeDropIns REPLACES scalar keys (updateFromDropIn decodes
+        # over the loaded struct), so a bare kernel_params here would clobber the
+        # stock toml's load-bearing params (qemu-tdx: cgroup_no_v1=all
+        # systemd.unified_cgroup_hierarchy=1; qemu-nvidia-gpu-*: cgroup_no_v1=all
+        # pci=realloc pci=nocrs pci=assign-busses nvrc.smi.srs=1 — dropping
+        # cgroup_no_v1 kills the NVRC-exec'd kata-agent at startup). Re-emit the
+        # base value verbatim. A live session once saw drop-in kernel_params edits
+        # not reach the qemu -append line — unexplained — but the config semantics
+        # make this preservation load-bearing whenever the drop-in IS honored, so
+        # it stays.
+        if [ -n "${base_kernel_params}" ]; then
+            printf 'kernel_params = "%s"\n' "${base_kernel_params}"
+        fi
+        case "${SHIM_NAME}" in
+            *-snp)
+                echo 'default_vcpus = 1'
+                echo 'default_maxvcpus = 1'
+                ;;
+        esac
+        case "${SHIM_NAME}" in
+            qemu-nvidia-gpu-*)
+                printf 'pcie_root_port = %s\n' "${GPU_PCIE_ROOT_PORT}"
+                if [ -n "${GPU_DEFAULT_MEMORY}" ]; then
+                    printf 'default_memory = %s\n' "${GPU_DEFAULT_MEMORY}"
+                fi
+                ;;
+        esac
+        # debug_console_enabled is an [agent.kata] key, not [hypervisor.qemu]:
+        # kata's decodeDropIns validates each drop-in key against the config
+        # struct and fails the whole sandbox on a misplaced key
+        # ("error applying key 'hypervisor.qemu.debug_console_enabled'").
+        echo ''
+        echo '[agent.kata]'
+        if [ "${KATA_DEBUG}" = "true" ]; then
+            echo 'debug_console_enabled = true'
+        else
+            echo 'debug_console_enabled = false'
+        fi
+        case "${SHIM_NAME}" in
+            qemu-snp|qemu-tdx)
+                # Stock CPU-shim dial/create timeouts (60-90s across kata
+                # versions) are too short for a large-memory TEE guest (TDX page
+                # acceptance, observed flaky at 128 GiB) to reach the agent's
+                # vsock listener. 600s matches the kubelet runtime-request-timeout
+                # guidance (QUICKSTART); the GPU shims already ship 1200s in their
+                # base toml — leave those alone.
+                echo 'dial_timeout = 600'
+                ;;
+        esac
+        echo ''
+        echo '[runtime]'
+        echo 'experimental_force_guest_pull = true'
+        case "${SHIM_NAME}" in
+            qemu-snp|qemu-tdx)
+                echo 'create_container_timeout = 600'
+                ;;
+        esac
+    } > "${tmp}"
+    mv -f "${tmp}" "${dropin}"
+    
+    echo "==> c8s-kata-image-puller: done (shim=${SHIM_NAME}, dropin=${dropin})"
+    
+  # Host-side qemu wrapper. Attaches this pod's encrypted volume devices to the
+  # kata guest, since kata's own direct-volume path assumes ciphertext-free
+  # storage. Installed onto the host and pointed at from the drop-in's
+  # [hypervisor.qemu] path by pull-and-configure.sh. Byte-identical to
+  # kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh (enforced by
+  # internal/helmchart/chart_test.go).
+  kata-qemu-scratch-wrapper.sh: |
+    #!/bin/bash
+    # PROTOTYPE kata qemu wrapper. It attaches two kinds of disk to a guest:
+    #
+    #  1. a per-VM ephemeral scratch disk, so the in-guest confidential image store
+    #     (extra/usr/local/lib/c8s/scratch-setup.sh) can unpack large images to
+    #     encrypted disk instead of RAM;
+    #  2. this pod's encrypted volumes (docs/volumes.md), so the in-guest volumed
+    #     can open them. kata-agent always mounts a block storage it is handed, and
+    #     these carry ciphertext it cannot mount, so they must reach the guest as
+    #     bare devices rather than through kata's direct-volume assignment.
+    #
+    # Kata has no native per-sandbox disk knob for either, so we intercept the qemu
+    # launch: set [hypervisor.qemu] path = <this script> in the kata-qemu-tdx
+    # config. Each disk is found in the guest by its virtio serial
+    # (/sys/block/<dev>/serial), and carries only ciphertext — the host cannot read
+    # either one.
+    #
+    # Which volumes to attach comes from the pod's host-written annotation, which is
+    # a selector and not a trust input: naming another tenant's device attaches
+    # ciphertext the host already holds, and the guest still cannot open it without
+    # the key CDS releases against the allowlist grant (docs/volumes.md, "The serial
+    # is a selector, not a trust input"). Devices are attached read-write: a mutable
+    # volume exists to be written, and the host cannot tell one from immutable —
+    # the mode lives in the key blob, which the host never sees. An immutable
+    # volume's writes are refused in the guest, at its dm-crypt mapping.
+    #
+    # PRODUCTION NOTE: still a prototype. The clean version attaches the disks from
+    # the kata runtime (or a CDI device) rather than wrapping qemu. Tunables via env:
+    # CONFAI_REAL_QEMU, CONFAI_SCRATCH_DIR, CONFAI_SCRATCH_SIZE, CONFAI_GC_GRACE_SECS,
+    # CONFAI_BUNDLE_ROOTS, CONFAI_SYS_BLOCK.
+    set -euo pipefail
+    
+    QEMU="${CONFAI_REAL_QEMU:-/opt/kata/bin/qemu-system-x86_64}"
+    SDIR="${CONFAI_SCRATCH_DIR:-/var/lib/kata-scratch}"
+    SIZE="${CONFAI_SCRATCH_SIZE:-30G}"
+    GRACE="${CONFAI_GC_GRACE_SECS:-120}"
+    SYSBLOCK="${CONFAI_SYS_BLOCK:-/sys/block}"
+    # Where containerd writes the sandbox's OCI bundle. RKE2/k3s keep their own
+    # state root, so both are searched unless overridden.
+    BUNDLE_ROOTS="${CONFAI_BUNDLE_ROOTS:-/run/containerd/io.containerd.runtime.v2.task/k8s.io /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io}"
+    
+    # The annotation naming this pod's volumes, and the serial prefix the guest
+    # matches on. Both must agree with the Go side: pkg/allowlist (the annotation)
+    # and internal/cmds/volume (SerialPrefix).
+    VOLUMES_ANNOTATION="confidential.ai/c8s-volumes"
+    SERIAL_PREFIX="c8s-vol-"
+    
+    # The scratch file MUST be keyed on a reliably-unique id: two VMs sharing one
+    # raw disk would corrupt each other. Kata passes the sandbox id in the -name
+    # argument ("-name sandbox-<64hex>,..."); take the id from THAT arg only (not
+    # "first 64-hex anywhere in argv", which could match an unrelated value). If we
+    # can't find it, FAIL — never fall back to a shared name.
+    name=""
+    prev=""
+    for a in "$@"; do
+        [ "$prev" = "-name" ] && { name="$a"; break; }
+        prev="$a"
+    done
+    SBID="$(printf '%s' "$name" | grep -oE '[a-f0-9]{64}' | head -1 || true)"
+    if [ -z "$SBID" ]; then
+        echo "kata-qemu-scratch-wrapper: no sandbox id in -name ('$name'); refusing to launch with a shared scratch disk" >&2
+        exit 1
+    fi
+    
+    mkdir -p "$SDIR"
+    
+    # GC scratch files from VMs that are gone: no process holds the file open AND it
+    # is older than the grace window. The grace window makes this safe against a
+    # concurrently-launching VM whose file already exists but whose qemu has not
+    # opened it yet — that file is fresh, so it is skipped.
+    for f in "$SDIR"/scratch-*.img; do
+        [ -e "$f" ] || continue
+        if [ -z "$(find "$f" -newermt "-${GRACE} seconds" 2>/dev/null)" ] && ! fuser "$f" >/dev/null 2>&1; then
+            rm -f "$f"
+        fi
+    done
+    
+    IMG="$SDIR/scratch-$SBID.img"
+    truncate -s "$SIZE" "$IMG"
+    
+    # volume_names prints this pod's volume names, one per line.
+    #
+    # The bundle's config.json holds the pod annotations. Rather than parse JSON,
+    # the fixed key's value is extracted and every candidate name is validated
+    # against the same DNS-1123 label rule (and 12-char serial cap) the webhook, the
+    # sidecar and volumed all apply — so a value crafted to confuse the extraction
+    # yields names that fail validation and are skipped, never a shell word.
+    volume_names() {
+        local cfg="" root
+        for root in $BUNDLE_ROOTS; do
+            if [ -f "$root/$SBID/config.json" ]; then
+                cfg="$root/$SBID/config.json"
+                break
+            fi
+        done
+        [ -n "$cfg" ] || return 0
+    
+        local raw
+        raw="$(grep -o "\"$VOLUMES_ANNOTATION\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$cfg" |
+            head -1 | sed 's/.*:[[:space:]]*"//; s/"$//' || true)"
+        [ -n "$raw" ] || return 0
+    
+        # Trailing newline matters: without it `read` drops the last entry, and the
+        # pod would silently lose its final volume.
+        printf '%s\n' "$raw" | tr ',' '\n' | while IFS= read -r entry; do
+            local name="${entry%%=*}"
+            if printf '%s' "$name" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$' &&
+                [ "${#name}" -le 12 ]; then
+                printf '%s\n' "$name"
+            else
+                echo "kata-qemu-scratch-wrapper: ignoring malformed volume entry '$entry'" >&2
+            fi
+        done
+    }
+    
+    # serial_of prints a block device's serial, from whichever sysfs spelling its
+    # transport provides: virtio-blk publishes <dev>/serial, SCSI publishes VPD
+    # page 0x80 at <dev>/device/vpd_pg80. `c8s volume attach` drives LIO, so a
+    # host that cannot set a virtio serial reaches the guest only through the
+    # latter. Prints nothing when the device has no serial at all.
+    # Mirrors SerialDevices.serialOf in internal/cmds/volumed.
+    serial_of() {
+        local d="$1"
+        if [ -r "$d/serial" ]; then
+            tr -d '[:space:]' <"$d/serial"
+            return 0
+        fi
+        [ -r "$d/device/vpd_pg80" ] || return 0
+        # Device type, page code 0x80, big-endian uint16 length, then the serial
+        # padded to a fixed width. sysfs reports size 0, so the declared length is
+        # the only bound; it is trusted only as far as the bytes actually read.
+        od -An -tu1 -v "$d/device/vpd_pg80" 2>/dev/null | awk '
+            { for (i = 1; i <= NF; i++) b[n++] = $i }
+            END {
+                if (n < 4) exit
+                end = 4 + b[2] * 256 + b[3]
+                if (end <= 4 || end > n) end = n
+                s = ""
+                for (i = 4; i < end; i++) if (b[i] != 0) s = s sprintf("%c", b[i])
+                print s
+            }' | tr -d '[:space:]'
+    }
+    
+    # device_for prints the block device carrying serial $SERIAL_PREFIX$1.
+    #
+    # A serial matching more than one device is refused rather than resolved to
+    # whichever was read first: the host can attach two devices claiming the same
+    # serial, and picking one would make which volume a pod gets depend on scan
+    # order. Mirrors SerialDevices.Device in internal/cmds/volumed.
+    device_for() {
+        local want="$SERIAL_PREFIX$1" found=() d serial
+        for d in "$SYSBLOCK"/*; do
+            serial="$(serial_of "$d")"
+            [ -n "$serial" ] || continue
+            [ "$serial" = "$want" ] && found+=("$(basename "$d")")
+        done
+        if [ "${#found[@]}" -ne 1 ]; then
+            echo "kata-qemu-scratch-wrapper: ${#found[@]} block devices carry serial $want; not attaching" >&2
+            return 1
+        fi
+        printf '/dev/%s\n' "${found[0]}"
+    }
+    
+    # A missing or ambiguous device is logged and skipped rather than failing the
+    # launch: refusing here surfaces as an opaque shim error on a pod that never
+    # starts, whereas letting it boot leaves the in-guest daemon to answer "volume
+    # device is not present", which is where an operator is already looking.
+    volume_args=()
+    n=0
+    while IFS= read -r vol; do
+        [ -n "$vol" ] || continue
+        if dev="$(device_for "$vol")"; then
+            volume_args+=(
+                -drive "file=$dev,format=raw,if=none,id=confaivol$n,cache=none"
+                -device "virtio-blk-pci,drive=confaivol$n,serial=$SERIAL_PREFIX$vol"
+            )
+            n=$((n + 1))
+        fi
+    done < <(volume_names)
+    
+    # file.locking left at the qemu default (on): with unique per-sandbox files a
+    # lock conflict now means a real bug (two launches, same id) and should fail
+    # loudly rather than silently share the disk.
+    exec "$QEMU" "$@" \
+        -drive "file=$IMG,format=raw,if=none,id=confaiscratch,cache=none" \
+        -device virtio-blk-pci,drive=confaiscratch,serial=confai-scratch \
+        "${volume_args[@]+"${volume_args[@]}"}"
+---
+# Source: c8s/templates/tls-lb-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c8s-tls-lb-nginx
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /tmp/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent"';
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        keepalive_timeout 65;
+
+        # Rate-limit /allowlist while nginx still has the public client IP;
+        # empty map keys are not accounted by limit_req. Mutations count per
+        # client and in aggregate (the constant-key zone guards the shared
+        # per-pod-IP CDS bucket; see docs/operator.md), reads per client;
+        # OPTIONS (CORS preflight) is exempt. The total key chains off the
+        # write key so the exempt-method list exists once.
+        map $request_method $allowlist_write_rate_key {
+            default $binary_remote_addr;
+            GET "";
+            HEAD "";
+            OPTIONS "";
+        }
+        map $allowlist_write_rate_key $allowlist_write_total_key {
+            "" "";
+            default "all";
+        }
+        map $request_method $allowlist_read_rate_key {
+            default "";
+            GET $binary_remote_addr;
+            HEAD $binary_remote_addr;
+        }
+        limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate=1r/s;
+        limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate=8r/s;
+        limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate=20r/s;
+        # A mesh-wrapped catch-all is dialed via a variable (see location /), so
+        # nginx re-resolves it here at request time per record TTL: a static
+        # upstream block would pin the pod IPs the adopted workload's headless
+        # Service resolved to at startup and 502 after pod churn. Nothing
+        # authenticates the answer -- the app-layer hop is plaintext and the
+        # mesh binds the pod IP it is handed, not the name -- so an adversary
+        # who can forge cluster DNS retargets this hop. Every other upstream
+        # gets a static block below and no resolver is rendered at all.
+        resolver kube-dns.kube-system.svc.cluster.local;
+
+        server {
+            listen 8443 ssl;
+            server_name c8s-tls-lb.c8s-system.svc;
+
+            ssl_certificate     /tls/cert.pem;
+            ssl_certificate_key /tls/key.pem;
+
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
+            ssl_prefer_server_ciphers on;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 1d;
+
+            # Headroom for upstream responses with large headers.
+            proxy_buffer_size 16k;
+            proxy_buffers 4 16k;
+            # Built-in control-plane route. The exact + slash-prefix pair
+            # exposes only /allowlist and its API subtree, not lookalike paths.
+            location = /allowlist {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                # These run before nginx collapses callers onto the loopback proxy source.
+                # Each zone's map key is empty for the methods it does not cover, so
+                # mutations count per client and in aggregate, reads per client only.
+                limit_req zone=allowlist_write_per_client burst=5 nodelay;
+                limit_req zone=allowlist_write_total burst=15 nodelay;
+                limit_req zone=allowlist_read_per_client burst=40 nodelay;
+                limit_req_status 429;
+                proxy_pass http://127.0.0.1:8801$request_uri;
+                proxy_set_header Host $host;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location /allowlist/ {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                # These run before nginx collapses callers onto the loopback proxy source.
+                # Each zone's map key is empty for the methods it does not cover, so
+                # mutations count per client and in aggregate, reads per client only.
+                limit_req zone=allowlist_write_per_client burst=5 nodelay;
+                limit_req zone=allowlist_write_total burst=15 nodelay;
+                limit_req zone=allowlist_read_per_client burst=40 nodelay;
+                limit_req_status 429;
+                proxy_pass http://127.0.0.1:8801$request_uri;
+                proxy_set_header Host $host;
+                proxy_set_header Authorization $http_authorization;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location = /v1/discovery {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/json;
+                add_header Cache-Control "no-store" always;
+                alias /discovery/discovery.json;
+            }
+
+            location = /.well-known/cds-cert.pem {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias /tls/cert.pem;
+            }
+            location = /.well-known/mesh-ca.pem {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias /tls/ca.pem;
+            }
+            # The sidecar's readiness gate, proxied so kubelet can reach it.
+            # cds-attest listens on loopback (its one listener also carries the
+            # attestation, handshake and tunnel routes, which must not be
+            # published on the pod IP), and under kata the guest redirects every
+            # inbound port but this one into the mutual RA-TLS proxy, which
+            # rejects the certless prober. So the probe rides the front door:
+            # exact-match, ahead of any catch-all upstream.
+            location = /readyz {
+                access_log off;
+                proxy_pass http://127.0.0.1:8800;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # c8s-verify attestation + over-encryption sidecar (loopback).
+            # nginx serves the static cert(s) via discovery above; the dynamic
+            # per-session endpoints — the explicit attest-pq and attest-lb
+            # challenges and the PQ handshake/tunnel — are proxied to the
+            # in-pod `cds-attest` sidecar. The prefix also covers the retired
+            # /attestation path so the sidecar serves its explicit versioned
+            # 400 (no alias or downgrade) instead of nginx 404ing it.
+            # X-Real-IP is the address the sidecar meters each client by.
+            location /.well-known/c8s/ {
+                proxy_hide_header Access-Control-Allow-Origin;
+                proxy_hide_header Access-Control-Allow-Methods;
+                proxy_hide_header Access-Control-Allow-Headers;
+                proxy_hide_header Access-Control-Allow-Credentials;
+                proxy_hide_header Access-Control-Expose-Headers;
+                if ($request_method = 'OPTIONS') {
+                    add_header Access-Control-Allow-Origin  "*" always;
+                    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+                    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+                    add_header Access-Control-Max-Age       "600" always;
+                    add_header Content-Length 0;
+                    return 204;
+                }
+                add_header Access-Control-Allow-Origin "*" always;
+                proxy_pass http://127.0.0.1:8800;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            location / {
+                set $backend_addr c8s-infer.c8s-system.svc.cluster.local:8000;
+                proxy_pass http://$backend_addr;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_buffering off;
+                proxy_http_version 1.1;
+            }
+
+            location /healthz {
+                access_log off;
+                return 200 "ok\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+
+---
+# Source: c8s/templates/cds-rbac.yaml
+# CDS derives the sandbox-digests dial bound from the live node list unless
+# cds.sandboxInventoryCIDRs pins it statically — only the derived mode needs
+# the node read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: c8s-cds-node-reader
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # Release-scoped name: a cluster may already carry an unrelated
+  # `kata-deploy` ClusterRole (e.g. from upstream's own chart or Ansible).
+  name: c8s-kata-deploy
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+rules:
+  # kata-deploy labels each node katacontainers.io/kata-runtime=true once the
+  # runtime is installed.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, patch, watch]
+  # RuntimeClass read-only: the chart owns the kata RuntimeClass objects
+  # (below) and the kube-kata container is started with
+  # CREATE_RUNTIMECLASSES=false so kata-deploy does not try to create,
+  # update, or delete them. A compromised kata-deploy with patch/update
+  # could rewrite the kata-qemu-snp handler to a non-confidential shim while
+  # the kata-enforcement allowlist still accepts the class name — keeping
+  # this read-only closes that bypass. If a kata-deploy version probe
+  # legitimately needs write verbs, scope by resourceNames to the three
+  # chart-owned classes rather than re-granting cluster-wide.
+  - apiGroups: [node.k8s.io]
+    resources: [runtimeclasses]
+    verbs: [get, list, watch]
+  # kata-deploy 3.30 probes for Node Feature Discovery by listing CRDs and
+  # creates NodeFeatureRule objects when NFD is present. The probe needs the
+  # get/list permission even on clusters without NFD.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch]
+  - apiGroups: [nfd.k8s-sigs.io]
+    resources: [nodefeaturerules]
+    verbs: [create, delete, get, list, patch, update, watch]
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: c8s-operator
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+rules:
+  - apiGroups: [confidential.ai]
+    resources: [confidentialworkloads]
+    verbs: [get, list, watch]
+  - apiGroups: [confidential.ai]
+    resources: [confidentialworkloads/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    # delete: the startup reinject sweep deletes un-injected cw pods so their
+    # controllers recreate them through the webhook.
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [nodes]
+    # For the kata-guest-ready controller's one label. RBAC cannot scope a
+    # patch to a label key, so taints and unschedulable come with it — hence
+    # kata-only.
+    verbs: [get, list, watch, patch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    # The workload-service reconciler watches these for the confidential.ai/cw
+    # pod-template annotation.
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    # The operator provisions one headless Service per annotated workload in
+    # the workload's namespace — the only c8s-managed resource outside the
+    # release namespace.
+    verbs: [get, list, watch, create, update, delete]
+  - apiGroups: [""]
+    resources: [events]
+    # The controller-runtime manager's event recorder (leader election,
+    # reconcile events) creates and patch-aggregates events across the
+    # namespaces it watches; without this it logs "events is forbidden".
+    verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations]
+    verbs: [get, update, patch]
+---
+# Source: c8s/templates/cds-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-cds-node-reader
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-cds-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: c8s-cds
+    namespace: c8s-system
+
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-kata-deploy
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-kata-deploy
+subjects:
+  - kind: ServiceAccount
+    name: c8s-kata-deploy
+    namespace: c8s-system
+---
+# Source: c8s/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: c8s-operator
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: c8s-operator
+subjects:
+  - kind: ServiceAccount
+    name: c8s-operator
+    namespace: c8s-system
+
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+spec:
+  # Headless under kata so cluster DNS returns the cds pod IP, not a Service
+  # ClusterIP. The in-guest ratls-mesh's outbound proxy reads the workload's
+  # SO_ORIGINAL_DST and dials <that-ip>:15006 (the peer mesh's inbound
+  # listener); a Service ClusterIP has no port-15006 endpoint, so the dial
+  # times out (see ratls_mesh_tls_dial_failures_total). A pod IP routes
+  # straight to the peer VM, where PREROUTING redirects port 15006 to the
+  # local mesh inbound. NodePort is unused under kata anyway — install --cvm-mode=pod
+  # disables nriImagePolicy, the only consumer of cds NodePort.
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/component: cds
+  ports:
+    - name: http
+      port: 8443
+      targetPort: https
+
+---
+# Source: c8s/templates/operator.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/component: operator
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+    # Webhook service port. The API server dials this Service:port; the
+    # MutatingWebhookConfiguration's clientConfig.service.port matches.
+    # controller-runtime's webhook server listens on 9443 by default.
+    - name: webhook
+      port: 443
+      targetPort: 9443
+
+---
+# Source: c8s/templates/tls-lb-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: c8s-tls-lb
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+
+---
+# Source: c8s/templates/kata-image-puller-nvidia.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-kata-deploy-image-puller-nvidia
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-image-puller-nvidia
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: kata-image-puller-nvidia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: kata-image-puller-nvidia
+      annotations:
+        checksum/config: d5a1d1811d35a79617874b40d1773d9314717a5ead8c313a913a73f4928259c4
+    spec:
+      serviceAccountName: c8s-kata-deploy-image-puller
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: reconcile
+          image: ghcr.io/oras-project/oras@sha256:0087224dd0decc354b5b0689068fbbc40cd5dc3dbf65fcb3868dfbd363dc790b
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                sh /scripts/pull-and-configure.sh || echo "reconcile(nvidia): not ready (kata-deploy still installing, or <tag>-nvidia artifact unpublished?)" >&2
+                sleep 30
+              done
+          env:
+            - name: REGISTRY
+              value: "ghcr.io/confidential-dot-ai"
+            - name: TAG
+              value: "gold-nvidia"
+            - name: HOST_IMG_DIR
+              value: "/host/var/lib/c8s/kata-images-nvidia"
+            - name: ORAS_INSECURE
+              value: "false"
+            # Target the platform's confidential-GPU runtime, not qemu-snp.
+            - name: SHIM_NAME
+              value: "qemu-nvidia-gpu-snp"
+            # VFIO cold-plug + BAR-mapping memory floor (kata.gpu.guestImage.*).
+            - name: GPU_PCIE_ROOT_PORT
+              value: "8"
+            - name: GPU_DEFAULT_MEMORY
+              value: "65536"
+            # Same debug semantics as the non-GPU puller: the drop-in carries
+            # debug_console_enabled, forced false unless kata.guestImage.debug.
+            - name: KATA_DEBUG
+              value: "false"
+          securityContext:
+            privileged: true
+          readinessProbe:
+            # Ready only once the node matches THIS pod's config (script check
+            # mode — same probe shape as the non-GPU puller).
+            exec:
+              command:
+                - /bin/sh
+                - /scripts/pull-and-configure.sh
+                - check
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: host
+              mountPath: /host
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: c8s-kata-deploy-image-puller
+            defaultMode: 0755
+        - name: host
+          hostPath:
+            path: /
+
+---
+# Source: c8s/templates/kata-image-puller.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-kata-deploy-image-puller
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-image-puller
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: kata-image-puller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: kata-image-puller
+      annotations:
+        # Re-run the puller when the tag (including the debug-variant
+        # suffix) or repository changes. Helm sees a different sha256 on
+        # the ConfigMap and rolls the DaemonSet.
+        checksum/config: 6a7d6c9f6a0af6efa846bfeacaa503b45bf28b6005ffe18771fe3fb635335c08
+    spec:
+      serviceAccountName: c8s-kata-deploy-image-puller
+      # Same node selector / tolerations as kata-deploy (templates/kata.yaml).
+      # The puller must land on every node kata-deploy lands on so the
+      # guest image is present before kata-runtime tries to boot a pod.
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      # Reconcile container: keep the c8s config.d drop-in next to kata-deploy's
+      # main shim toml in sync with the current values.
+      #
+      # kata-deploy owns the main configuration-<shim>.toml — it rewrites it
+      # on every DaemonSet restart. c8s writes ONLY a config.d/50-c8s.toml
+      # drop-in that kata-runtime layers on top; kata-deploy never touches
+      # config.d/, so the drop-in survives DS restarts by design (verified
+      # empirically). The script is level-triggered: it embeds a fingerprint of
+      # its inputs in the drop-in and exits early (no pull, no writes) when it
+      # matches, so calling it every tick is cheap and steady-state performs no
+      # writes that could race kata-deploy. A fingerprint mismatch (values
+      # change while the drop-in exists), a deleted drop-in, or a missing
+      # artifact triggers the full pull + rewrite.
+      containers:
+        - name: reconcile
+          image: ghcr.io/oras-project/oras@sha256:0087224dd0decc354b5b0689068fbbc40cd5dc3dbf65fcb3868dfbd363dc790b
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                sh /scripts/pull-and-configure.sh || echo "reconcile: not ready (kata-deploy still installing?)" >&2
+                sleep 30
+              done
+          # All puller config comes from the env (the script is pure POSIX shell
+          # with no helm interpolation — see files/scripts/pull-and-configure.sh).
+          env:
+            - name: REGISTRY
+              value: "ghcr.io/confidential-dot-ai"
+            - name: TAG
+              value: "gold"
+            - name: HOST_IMG_DIR
+              value: "/host/var/lib/c8s/kata-images"
+            - name: ORAS_INSECURE
+              value: "false"
+            # Shim to configure: qemu-snp on SNP hosts, qemu-tdx on TDX hosts.
+            # Same guest artifact bytes across shims — kernel + rootfs + verity
+            # params are TEE-neutral; only the target toml path (and TDX skips
+            # the SNP-specific default_vcpus=1 launch-digest pin) differ.
+            - name: SHIM_NAME
+              value: "qemu-snp"
+            # Under --debug the guest rootfs allows host log/exec streams AND
+            # the puller keeps debug_console_enabled / journal-to-console in
+            # the shim toml so `socat <console.sock>` reveals guest boot. In
+            # normal installs the puller strips both every reconcile so a
+            # debug-tainted node returns to prod posture on the next tick.
+            - name: KATA_DEBUG
+              value: "false"
+          securityContext:
+            # Privileged because we write into /opt/kata (kata-deploy's install
+            # location). Same posture as kata-deploy; the /host bind mount is the
+            # real escalation vector and privileged just avoids per-mount AppArmor
+            # surprises.
+            privileged: true
+          readinessProbe:
+            # Ready only once the node matches THIS pod's config: the script's
+            # check mode revalidates the drop-in fingerprint and the pulled
+            # artifacts, so a stale drop-in from older values cannot mark a new
+            # rollout Ready (helm --wait gates on this).
+            exec:
+              command:
+                - /bin/sh
+                - /scripts/pull-and-configure.sh
+                - check
+            # The check stats the pulled artifacts and the wrapper across the
+            # /host bind mount; kubelet's 1s default would fail it on a loaded
+            # node and drop the guest-ready label off a healthy one.
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: host
+              mountPath: /host
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: c8s-kata-deploy-image-puller
+            defaultMode: 0755
+        - name: host
+          hostPath:
+            path: /
+
+---
+# Source: c8s/templates/kata-sandbox-device-plugin.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-kata-deploy-sandbox-device-plugin
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-sandbox-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: kata-sandbox-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: kata-sandbox-device-plugin
+    spec:
+      serviceAccountName: c8s-kata-deploy-sandbox-device-plugin
+      hostPID: true
+      priorityClassName: system-node-critical
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-sandbox-device-plugin
+          image: nvcr.io/nvidia/cloud-native/nvidia-sandbox-device-plugin@sha256:a897db2f25b1b0ff6195726ba6c307d8567b2285f59cde5f8409683fd9bd12e5
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            # Empty → per-model resource names (e.g.
+            # nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION) so a
+            # heterogeneous fleet schedules to the right card.
+            - name: P_GPU_ALIAS
+              value: ""
+            - name: NVSWITCH_ALIAS
+              value: ""
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: vfio
+              mountPath: /dev/vfio
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            # CDI spec output. The plugin writes nvidia.com-<MODEL>.yaml here at
+            # startup; the host-side kata shim reads the SAME path. Without this
+            # hostPath bind the spec lands in the container's ephemeral layer and
+            # the shim sees no CDI provider, failing sandbox creation with
+            # "unresolvable CDI devices nvidia.com/<MODEL>=N".
+            - name: cdi
+              mountPath: /var/run/cdi
+            # Masked emptyDir over /dev/iommu — rolling the DaemonSet releases
+            # GPUs wedged by sandboxes killed mid-flight. Harmless: on no code
+            # path the plugin's iommufd auto-detection takes. See the prior-art
+            # role for the full history.
+            - name: mask-iommu
+              mountPath: /dev/iommu
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: vfio
+          hostPath:
+            path: /dev/vfio
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: cdi
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
+        - name: mask-iommu
+          emptyDir: {}
+
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: c8s-kata-deploy
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: kata-deploy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: kata-deploy
+    spec:
+      serviceAccountName: c8s-kata-deploy
+      # hostPID: kata-deploy nsenters into PID 1 to restart the runtime.
+      hostPID: true
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Install kata everywhere by default — including control-plane and
+      # otherwise-tainted nodes (the one-shot install posture). Scope it with
+      # kata.nodeSelector to limit which nodes get the runtime.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: kube-kata
+          image: quay.io/kata-containers/kata-deploy@sha256:b31cf13addbaf49af9e211bf6ab38335299015a754e2bc0341aa4ba47d8cb395
+          imagePullPolicy: IfNotPresent
+          args: [install]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # The shims kata-deploy registers as containerd runtimes
+            # (kata-<shim>): the two non-confidential shims plus the declared
+            # platform's confidential (CPU, GPU) pair — one CPU TEE per
+            # cluster, so the other platform's shims are not installed (see
+            # c8s.kataConfidentialShims). The non-confidential GPU shim
+            # (qemu-nvidia-gpu) is intentionally absent: c8s only runs GPU
+            # workloads as confidential VMs. Keep in sync with the
+            # RuntimeClasses below and the kata-enforcement allowlist.
+            - name: SHIMS_X86_64
+              value: "qemu clh qemu-snp qemu-nvidia-gpu-snp"
+            - name: DEFAULT_SHIM_X86_64
+              value: "qemu"
+            - name: ALLOWED_HYPERVISOR_ANNOTATIONS
+              value: ""
+            # The chart owns the kata RuntimeClass objects; tell kata-deploy
+            # not to create, update, or delete them so the ClusterRole above
+            # can stay read-only on runtimeclasses.
+            - name: CREATE_RUNTIMECLASSES
+              value: "false"
+            # Per-shim snapshotter routing: every confidential shim (CPU and
+            # GPU) routes through nydus-snapshotter in guest-pull mode.
+            # They ship `shared_fs = "none"` (host virtio-fs would defeat
+            # CC), so containerd's default overlayfs snapshotter — which
+            # prepares the rootfs on the host and expects it shared into the
+            # guest — fails sandbox creation with `failed to mount ...
+            # shared/containers/<id>/rootfs ... ENOENT`; with nydus,
+            # containerd emits an image_guest_pull annotation and the
+            # kata-agent pulls the OCI image inside the guest. kata-qemu /
+            # kata-clh keep overlayfs (they use host virtio-fs).
+            - name: SNAPSHOTTER_HANDLER_MAPPING_X86_64
+              value: "qemu-snp:nydus,qemu-nvidia-gpu-snp:nydus"
+            # SNAPSHOTTER_HANDLER_MAPPING only wires containerd's per-shim
+            # snapshotter selection. The nydus-snapshotter binary itself is
+            # not installed by default — kata-deploy gates that behind
+            # EXPERIMENTAL_SETUP_SNAPSHOTTER (comma-separated list of
+            # snapshotters to install as host systemd services). Without
+            # this the mapping resolves to a snapshotter that doesn't
+            # exist on the node → sandbox creation fails with the same
+            # ENOENT shape as the unmapped default snapshotter. `nydus`
+            # here is the snapshotter kind; kata-deploy installs it as
+            # `nydus-for-kata-tee.service` (see NYDUS_FOR_KATA_TEE in
+            # kata-deploy's config.rs).
+            - name: EXPERIMENTAL_SETUP_SNAPSHOTTER
+              value: "nydus"
+          lifecycle:
+            preStop:
+              exec:
+                # Remove kata from the host when the DaemonSet is deleted
+                # (helm uninstall). Best-effort — kata-deploy's own SIGTERM
+                # handler also runs cleanup.
+                command: [/usr/bin/kata-deploy, cleanup]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            # kata-deploy reads the host's rendered containerd config at the
+            # literal in-container path /etc/containerd/config.toml and
+            # writes the runtime drop-in beside it. Bind the host's real
+            # containerd config directory there — it differs by distro.
+            - name: containerd-conf
+              mountPath: /etc/containerd/
+            # Everything outside /etc/containerd: /opt/kata for the runtime
+            # artifacts, /proc/1 for the nsenter-driven runtime restart.
+            - name: host
+              mountPath: /host/
+            # Mounted unconditionally by upstream kata-deploy even on
+            # containerd-only hosts; harmless.
+            - name: crio-conf
+              mountPath: /etc/crio/
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: containerd-conf
+          hostPath:
+            path: /etc/containerd
+        - name: host
+          hostPath:
+            path: /
+        - name: crio-conf
+          hostPath:
+            path: /etc/crio/
+            type: DirectoryOrCreate
+---
+# Source: c8s/templates/cds.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-cds
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cds
+  annotations:
+    confidential.ai/trust-root-mode: "inMemory"
+spec:
+  
+  replicas: 1
+  # Recreate: two pods would mint divergent roots and can't co-mount the RWO
+  # data PVC. Dependents ride out the gap via get-cert retry.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: cds
+      annotations:
+        confidential.ai/trust-root-mode: "inMemory"
+    spec:
+      # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
+      # keys live only in SEV-SNP-encrypted guest memory, and peers verify cds's
+      # RA-TLS serving cert against the guest launch measurement. Pinned directly
+      # (not via the confidential.ai/cw webhook path) because get-cert would dial
+      # cds — cds fetching a leaf from itself is a bootstrap cycle. See
+      # docs/install-flows.md ("Why CDS doesn't use cw for its runtimeClass").
+      runtimeClassName: kata-qemu-snp
+      serviceAccountName: c8s-cds
+      # The live node-list bound needs the API token; static CIDRs do not.
+      automountServiceAccountToken: true
+      
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: confidential.ai/kata-guest-ready
+                    operator: In
+                    values: ["true"]
+      securityContext:
+        # In a kata-qemu-snp guest with shared_fs="none", the kubelet fsGroup
+        # chown lands on a host emptyDir the guest never mounts, so the agent
+        # creates a fresh root-owned /data inside the guest and UID 65532 cannot
+        # write allowlist.db. Run as in-guest root — safe, since the SNP VM is the
+        # trust boundary and cds is its sole workload.
+        runAsUser: 0
+        runAsNonRoot: false
+      containers:
+        - name: cds
+          image: ghcr.io/confidential-dot-ai/cds@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          args:
+            - --port=8443
+            - --log-level=info
+            # Per-mode resolution: see c8s.attestationApiURL.
+            - --attestation-api-url=http://127.0.0.1:8400
+            - --allowlist-db=/data/allowlist.db
+            - --allowlist-persistent=false
+            - --allowlist-seed=/etc/cds/allowlist-seed.json
+            - --ear-issuer=cds
+            - --jwt-clock-skew=30
+            - --ca-common-name=c8s Mesh CA
+            - --ca-cert-validity=8760h
+            - --min-ca-validity=1h
+            - --cert-ttl=24h
+            - --named-cert-ttl=6h
+            - --max-ttl=24h
+            - --challenge-ttl=60s
+            - --request-timeout=5s
+            - --max-request-size=262144
+            - --secrets-max-paths=1024
+            - --secrets-max-paths-per-workload=64
+            - --readiness-interval=10s
+            - --san-validation=false
+            - --dns-san-pattern=^[a-z0-9-]+[.][a-z0-9-]+[.]svc$
+            - --token-signer-rotation-interval=720h
+            - --token-signer-overlap=25h
+            - --token-signer-rotation-jitter=0.1
+            - --rate-limit=10
+            - --rate-burst=20
+            - --rate-limiter-max-entries=10000
+            - --rate-limiter-evict-interval=1m
+            - --rate-limiter-idle-timeout=5m
+            - --ratls-platform=snp
+            - --ratls-cert-ttl=24h
+          ports:
+            - name: https
+              containerPort: 8443
+          # In-guest cds serves mutual RA-TLS: the kubelet prober presents no
+          # attested client cert, so an httpGet handshake is rejected. The port
+          # only opens once cds has provisioned its RA-TLS serving cert (which
+          # needs a healthy in-guest attestation-service), so an open socket is
+          # the correct "attested and serving" signal.
+          readinessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 30
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            
+            - name: allowlist-seed
+              mountPath: /etc/cds
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsNonRoot: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          emptyDir: {}
+        
+        - name: allowlist-seed
+          configMap:
+            name: c8s-cds-allowlist-seed
+---
+# Source: c8s/templates/operator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-operator
+  namespace: c8s-system
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: operator
+spec:
+  # The webhook serving CA is minted inside this pod and patched into one
+  # MutatingWebhookConfiguration. Running multiple replicas can race CA bundles
+  # and break admission TLS for requests routed to the wrong pod.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: c8s
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: c8s-operator
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: operator
+          image: ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: [ALL]
+          args:
+            - operator
+            - --leader-election-namespace=c8s-system
+            - --status-mirror-enabled=true
+            - --get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --webhook-config-name=c8s-pod-injector
+            - --webhook-service-name=c8s-operator
+            - --webhook-service-namespace=c8s-system
+            - --attestation-api-url=http://127.0.0.1:8400
+            - --cert-fs-group=65532
+            - --cert-key-mode=0640
+            - --get-cert-renew-interval=2h
+            - --get-cert-run-as-user=65532
+            - --get-cert-run-as-group=65532
+            - --get-cert-run-as-non-root=true
+            - --kata-enforce=true
+            - --hardware-platform=sev-snp
+            - --kata-guest-ready-gate=true
+            - --workload-claims-guest
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 30
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            # readOnlyRootFilesystem: true forces any transient files
+            # (controller-runtime cache tempfiles, etc.) to land in
+            # this emptyDir rather than the immutable image.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Source: c8s/templates/tls-lb-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c8s-tls-lb
+  labels:
+    helm.sh/chart: tls-lb-0.5.0
+    app.kubernetes.io/name: tls-lb
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tls-lb
+      app.kubernetes.io/instance: c8s
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tls-lb
+        app.kubernetes.io/instance: c8s
+      annotations:
+        checksum/nginx-config: 15f5d302ee06a0b3d43a40242361217af9937233fcff2b213c183fc49b78165f
+    spec:
+      # Chart-managed mesh component: the webhook excludes the release
+      # namespace, so the chart pins the RuntimeClass directly (same pattern as
+      # cds.yaml). kata-qemu-snp specifically: the get-cert init containers dial
+      # the in-guest attestation-api on loopback under kata
+      # (c8s.attestationApiURL), which only exists inside an SNP guest — and
+      # tls-lb terminates client TLS with mesh-issued keys, so its plaintext
+      # must stay inside the TEE boundary.
+      runtimeClassName: kata-qemu-snp
+      
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: confidential.ai/kata-guest-ready
+                    operator: In
+                    values: ["true"]
+      
+      shareProcessNamespace: true
+      initContainers:
+        - name: c8s-cert
+          image: ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          args:
+            - get-cert
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --attestation-api-url=http://127.0.0.1:8400
+            - --san=c8s-tls-lb.c8s-system.svc
+            - --out=/tls/cert.pem
+            - --key-out=/tls/key.pem
+            - --key-mode=0640
+            - --ca-out=/tls/ca.pem
+            # Retry CDS in-process during a roll instead of exiting into kubelet
+            # CrashLoopBackOff; still fails closed once the timeout elapses.
+            - --initial-retry-timeout=2m
+            - --renew-interval=1h
+            - --reload-nginx=true
+            - --continue-on-initial-error
+            - --discovery-out=/discovery/discovery.json
+            - --discovery-cds-cert-url=/.well-known/cds-cert.pem
+            - --discovery-public-tls-mode=cds
+            - --discovery-mesh-ca-url=/.well-known/mesh-ca.pem
+            - --ca-watch-interval=1m
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+            - name: discovery
+              mountPath: /discovery
+          # The workload is gated on the initial cert by the c8s-cert-wait init
+          # container below, not a startupProbe here: a native sidecar is "started"
+          # the moment its process launches, and an exec startupProbe is denied by the
+          # locked kata-qemu-snp guest (ExecProcessRequest := false), so it could never
+          # pass there and the workload would hang in Init forever.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        # c8s-cert-wait gates the workload on the initial cert without an exec probe.
+        # A plain (run-once) init container that blocks on the cert file is a
+        # CreateContainerRequest the locked guest allows, and normal init-completion
+        # ordering holds the workload until the attested cert exists — fail-closed.
+        # The `/c8s` path is the binary location from cmd/c8s/Dockerfile; command
+        # bypasses the ENTRYPOINT so the full path must match.
+        - name: c8s-cert-wait
+          image: ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          command:
+            - /c8s
+            - probe-file
+            - --wait
+            - --timeout=3m
+            - /tls/cert.pem
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged@sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8443
+              hostPort: 443
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities:
+              drop:
+                - ALL
+          # Under kata the RA-TLS mesh moves into the guest, which redirects
+          # inbound TCP into a proxy expecting mutual attested TLS — but the
+          # guest exempts exactly this port (C8S_MESH_INBOUND_PASSTHROUGH=
+          # tcp:8443, pinned by the render guard above), so the certless kubelet
+          # prober does reach nginx. A TCP accept is kept as the liveness and
+          # readiness signal here because nginx's own /healthz says nothing the
+          # accept does not; the cds-attest gate below is what needs a real
+          # request, and it takes the httpGet path. Same shape as cds.yaml.
+          readinessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+              readOnly: true
+            - name: discovery
+              mountPath: /discovery
+              readOnly: true
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+        - name: cds-attest
+          image: ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          args:
+            - cds-attest
+            - --host=127.0.0.1
+            - --port=8800
+            - --platform=snp
+            - --generation=genoa
+            - --attestation-api-url=http://127.0.0.1:8400
+            # attest-lb transport trust rests on the serving key being TEE-held:
+            # a publicTLS Secret's key is host-visible, so that front door is
+            # attest-pq-only and the sidecar refuses attest-lb with
+            # unsupported_front_door.
+            - --front-door-mode=cds
+            # Bind the *exact* leaf nginx presents on the wire (ssl_certificate =
+            # publicCertPath), so the attest-lb binding (GET
+            # /.well-known/c8s/attest-lb) commits report_data to the leaf DER a
+            # direct-TLS client actually sees. With the default (publicTLS
+            # unset) this is the mesh leaf at tlsMountPath/cert.pem; with a
+            # publicTLS secret it is that cert (mounted below, attest-pq-only
+            # per --front-door-mode above). Re-read per request, so get-cert
+            # renewals are picked up.
+            - --serving-cert-file=/tls/cert.pem
+            # The identity-bound PQ flow must use the TEE-held mesh
+            # credential, never the optional publicTLS Secret: report_data
+            # commits the hybrid session key to this leaf and the sidecar
+            # proves possession with its matching private key.
+            - --mesh-identity-cert-file=/tls/cert.pem
+            - --mesh-identity-key-file=/tls/key.pem
+            - --mesh-identity-ca-file=/tls/ca.pem
+            # Terminate over-encryption here and forward to the same workload
+            # backend nginx proxies to. An http upstream is plaintext at the
+            # app layer; pointed at a headless Service (an adopted workload),
+            # the node mesh wraps the pod-IP hop in attested mTLS. An https
+            # upstream terminates TLS itself and gets the mTLS args below.
+            # No adopted workload (empty upstream address) -> omit --upstream
+            # entirely; the sidecar then serves attestation with its echo
+            # backend instead of crashing on a scheme-only URL.
+            - --upstream=http://c8s-infer.c8s-system.svc.cluster.local:8000
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /tls
+              readOnly: true
+            
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+        # nginx terminates the public, tls-lb-attested connection and forwards
+        # /allowlist over pod loopback. This sidecar establishes the second
+        # trust hop: it verifies CDS's RA-TLS evidence before proxying.
+        - name: allowlist-proxy
+          image: ghcr.io/confidential-dot-ai/c8s-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          imagePullPolicy: IfNotPresent
+          args:
+            - allowlist-proxy
+            - --host=127.0.0.1
+            - --port=8801
+            - --cds-url=https://c8s-cds.c8s-system.svc:8443
+            - --attestation-api-url=http://127.0.0.1:8400
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tls-certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: discovery
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # medium: Memory is load-bearing under kata-qemu-snp with
+        # shared_fs="none": a default (disk-backed) emptyDir gets provisioned
+        # through kata-agent's CDH secure-storage path inside the guest and
+        # fails CreateContainer ("[CDH] [ERROR]: Secure Mount failed").
+        # tmpfs-backed emptyDirs are mounted directly by the guest kernel.
+        - name: nginx-cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: nginx-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: nginx-config
+          configMap:
+            name: c8s-tls-lb-nginx
+        
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+---
+# Source: c8s/templates/webhook.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: c8s-pod-injector
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+webhooks:
+  - name: pods.c8s.confidential.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    reinvocationPolicy: IfNeeded
+    # get-cert injection is opt-in (confidential.ai/cw), so an un-annotated pod
+    # is a no-op regardless of namespace. The exclusion matters for kata
+    # enforcement, which forces a runtimeClassName onto any in-scope pod with
+    # no annotation: without it, --kata-enforce would try to run c8s's own
+    # control plane (operator, cds, attestation-api, tls-lb are not
+    # hostNetwork) as kata VMs. The reinject sweep excludes the same set.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+      # Ephemeral containers attach to a running pod and are stripped from a
+      # CREATE, so they are only visible on this subresource. Without it,
+      # `kubectl debug` could mount the volume holding a released secret or the
+      # pod's private key and read it out (docs/secrets.md).
+      - operations: [UPDATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods/ephemeralcontainers]
+        scope: Namespaced
+    clientConfig:
+      service:
+        namespace: c8s-system
+        name: c8s-operator
+        path: /mutate-pods
+        port: 443
+
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+handler: kata-qemu
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-clh
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+handler: kata-clh
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu-snp
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+handler: kata-qemu-snp
+scheduling:
+  nodeSelector:
+    confidential.ai/sev-snp: "true"
+---
+# Source: c8s/templates/kata.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu-snp-nvidia
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-deploy
+handler: kata-qemu-nvidia-gpu-snp
+scheduling:
+  nodeSelector:
+    confidential.ai/sev-snp: "true"
+
+---
+# Source: c8s/templates/cw-label-integrity-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: c8s-cw-label-integrity
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cw-label-integrity
+spec:
+  # Fail closed: a CEL evaluation error denies the pod. The expressions are
+  # has()-guarded so they should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    # Absent keys collapse to ''. A literal empty value is treated as absent;
+    # it can never match a managed Service selector (cw ids are non-empty).
+    - name: cwLabel
+      expression: >-
+        has(object.metadata.labels) && 'confidential.ai/cw' in object.metadata.labels ?
+        object.metadata.labels['confidential.ai/cw'] : ''
+    - name: cwAnnotation
+      expression: >-
+        has(object.metadata.annotations) && 'confidential.ai/cw' in object.metadata.annotations ?
+        object.metadata.annotations['confidential.ai/cw'] : ''
+    - name: oldCwLabel
+      expression: >-
+        oldObject == null ? '' :
+        (has(oldObject.metadata.labels) && 'confidential.ai/cw' in oldObject.metadata.labels ?
+        oldObject.metadata.labels['confidential.ai/cw'] : '')
+    - name: oldCwAnnotation
+      expression: >-
+        oldObject == null ? '' :
+        (has(oldObject.metadata.annotations) && 'confidential.ai/cw' in oldObject.metadata.annotations ?
+        oldObject.metadata.annotations['confidential.ai/cw'] : '')
+    # The injected mesh-cert sidecar: a native init container (restartPolicy
+    # Always) named c8s-cert. The webhook stamps the cw label and injects this
+    # sidecar together, so the label without it means the sidecar was shed or
+    # the webhook bypassed. Structural check only (name + native-sidecar
+    # restartPolicy); the webhook owns the exact image/args and rebuilds them on
+    # CREATE (pod_mutator.go, replaceInitContainer).
+    - name: hasCertSidecar
+      expression: >-
+        has(object.spec.initContainers) &&
+        object.spec.initContainers.exists(c,
+        c.name == 'c8s-cert' &&
+        has(c.restartPolicy) && c.restartPolicy == 'Always')
+  validations:
+    - expression: >-
+        variables.cwLabel == '' || variables.cwLabel == variables.cwAnnotation
+      message: >-
+        The confidential.ai/cw pod label must match the confidential.ai/cw
+        annotation; it is stamped by the c8s injection webhook and selects the
+        workload's headless Service endpoints.
+      reason: Forbidden
+    - expression: >-
+        oldObject == null ||
+        (variables.cwLabel == variables.oldCwLabel &&
+        variables.cwAnnotation == variables.oldCwAnnotation)
+      message: >-
+        The confidential.ai/cw pod label and annotation are immutable after
+        admission; recreate the pod to change its workload identity.
+      reason: Forbidden
+    - expression: >-
+        variables.cwLabel == '' || variables.hasCertSidecar
+      message: >-
+        A confidential.ai/cw pod must carry the injected c8s-cert sidecar (a
+        native init container with restartPolicy Always); the c8s injection
+        webhook adds it alongside the label. A pod bearing the workload label
+        without the sidecar has shed attestation-bound injection.
+      reason: Forbidden
+---
+# Source: c8s/templates/host-namespace-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: c8s-deny-host-namespaces
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: host-namespace-policy
+spec:
+  # Fail closed: a CEL evaluation error denies the pod. Every expression is
+  # has()-guarded, so it should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        # pods/ephemeralcontainers is a separate resource to matchConstraints:
+        # "pods" alone leaves an ephemeral container unevaluated, and one can
+        # carry both a hostPath mount and a hostPort.
+        resources: ["pods", "pods/ephemeralcontainers"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+  validations:
+    - expression: >-
+        !has(object.spec.hostNetwork) || object.spec.hostNetwork == false
+      message: "hostNetwork is reserved for c8s node components: a pod sharing the node network namespace could bind the privileged port CDS uses to identify the admission inventory, and impersonate it."
+    - expression: >-
+        !has(object.spec.hostPID) || object.spec.hostPID == false
+      message: "hostPID is denied: sharing the node PID namespace defeats the kernel peer-credential binding the admission inventory uses to identify its caller."
+    - expression: >-
+        !has(object.spec.hostIPC) || object.spec.hostIPC == false
+      message: "hostIPC is denied for tenant pods."
+    - expression: >-
+        (!has(object.spec.containers) || object.spec.containers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "hostPort is reserved for c8s node components: workloadclaims.DigestsPort (1019) is the admission inventory's identity, and a hostPort publishes a pod on the node's address without hostNetwork — so a tenant pod could answer as the inventory and have CDS resolve its signing key."
+    - expression: >-
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(v, !has(v.hostPath) ||
+          (v.hostPath.path == "/var/run/nri-image-policy" &&
+           has(v.hostPath.type) && v.hostPath.type == 'Directory' &&
+           object.spec.containers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))) &&
+           (!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true)))) &&
+           (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))))))
+      message: "hostPath volumes are denied, except a read-only mount of the admission inventory socket directory (the webhook-injected claims volume; it also holds the attestation-api socket): a writable mount of the node filesystem could swap those sockets (docs/getcert-workload-binding.md, Corner 7)."
+---
+# Source: c8s/templates/kata-enforcement.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: c8s-kata-enforcement
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-enforcement
+spec:
+  # Fail closed: a CEL evaluation error denies the pod. The expression is
+  # has()-guarded so it should not error in practice.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        # runtimeClassName is immutable after creation, so CREATE is the only
+        # operation that can introduce a disallowed value.
+        operations: [CREATE]
+        resources: [pods]
+  validations:
+    # Allow a pod when it requests one of the kata RuntimeClasses this chart
+    # installs — the non-confidential pair plus the declared platform's
+    # confidential (CPU, GPU) pair (c8s.kataAllowedRuntimeClasses; keep in
+    # lockstep with the RuntimeClasses and SHIMS_X86_64 in
+    # templates/kata.yaml) — or when it uses a host namespace (kata cannot
+    # run those — the webhook leaves them as ordinary containers). Reject
+    # everything else, including a pod with no runtimeClassName: with
+    # enforcement on the webhook injects one, so a pod reaching validation
+    # without a class means the webhook did not run.
+    - expression: >-
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName in ['kata-qemu', 'kata-clh', 'kata-qemu-snp', 'kata-qemu-snp-nvidia'])
+        || (has(object.spec.hostNetwork) && object.spec.hostNetwork)
+        || (has(object.spec.hostPID) && object.spec.hostPID)
+        || (has(object.spec.hostIPC) && object.spec.hostIPC)
+      message: >-
+        c8s kata enforcement: workload pods must run under a kata RuntimeClass
+        (kata-qemu, kata-clh, kata-qemu-snp, kata-qemu-snp-nvidia).
+        The c8s operator webhook injects one automatically for pods that do
+        not set runtimeClassName; a rejection here means the pod explicitly
+        set a non-kata runtimeClassName, or the c8s operator is not running.
+        Host-namespace pods are exempt.
+      reason: Forbidden
+---
+# Source: c8s/templates/cw-label-integrity-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: c8s-cw-label-integrity
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: cw-label-integrity
+spec:
+  policyName: c8s-cw-label-integrity
+  validationActions: [Deny]
+  matchResources:
+    # Mirror the namespace exclusions of the pod webhook so injection scope
+    # and enforcement scope stay identical (shared helper, see _helpers.tpl).
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+            - kube-public
+            - kube-node-lease
+
+---
+# Source: c8s/templates/host-namespace-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: c8s-deny-host-namespaces
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: host-namespace-policy
+spec:
+  policyName: c8s-deny-host-namespaces
+  validationActions:
+    - Deny
+
+---
+# Source: c8s/templates/kata-enforcement.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: c8s-kata-enforcement
+  labels:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: c8s
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kata-enforcement
+spec:
+  policyName: c8s-kata-enforcement
+  validationActions: [Deny]
+  matchResources:
+    # Mirror the namespace exclusions of the pod webhook
+    # (templates/webhook.yaml, the pods.c8s.confidential.ai entry) so the
+    # webhook's injection scope and this policy's rejection scope stay
+    # identical. A namespace the webhook skips but the policy covers would
+    # reject every pod in it.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - c8s-system
+            - kube-system
+            - kube-public
+            - kube-node-lease

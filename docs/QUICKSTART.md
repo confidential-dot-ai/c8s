@@ -1,6 +1,6 @@
 # c8s quickstart
 
-This is the supported install path for the consolidated c8s chart.
+This is the supported install path for the c8s shape charts.
 
 ## Prerequisites
 
@@ -10,7 +10,9 @@ This is the supported install path for the consolidated c8s chart.
 - c8s images published with the same tag as the release, for example `v0.1.0`,
   resolved to digests by default or supplied in a values file.
 - One node labelled to run CDS (`role=cds` by default).
-- Nodes with the TEE device shape expected by `attestationApi.teeDevices`.
+- Nodes booted from the c8s node-guest-image (it bakes the attestation-api
+  and NRI image-policy plugin the node-image shape relies on).
+- Nodes with a TEE device matching the install `platform` (`snp` or `tdx`).
 - Node kernels new enough for `SO_PEERPIDFD` (Linux ≥ 6.5), which the
   admission inventory (nri-image-policy) requires to pin a caller's peer
   credentials against PID reuse; a node without it fails sandbox-token fetches
@@ -20,19 +22,22 @@ This is the supported install path for the consolidated c8s chart.
 
 ## Install c8s
 
-This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
-webhook, attestation-api, and CDS.
+This installs the node-image shape's chart-managed components: operator,
+RBAC, CRDs, webhook, CDS, ratls-mesh, and the NRI pins installer (the node
+image bakes attestation-api and the NRI plugin).
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=node-image --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 `--cvm-mode` is required — one of `pod` (per-pod kata CVMs, multi-tenant),
-`node` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
-single-tenant), `gke`, or `aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
-`tdx` (under `aks` it selects the Azure vTPM shape instead). `--operator-keys`
+`node-image` (node-as-CVM on nodes booted from the c8s node-guest-image,
+shown here; single-tenant), `node-metal` (bare-metal CVM nodes), or
+`node-cloud` (GKE/AKS managed CVM nodes; `gke` and `aks` are aliases, `aks`
+pins vTPM evidence). So is `--hardware-platform`, naming the nodes' CPU TEE:
+`sev-snp` or `tdx`. `--operator-keys`
 takes a PEM bundle of EC public keys that authorize
 `c8s allowlist` writes; without it the install refuses to proceed (pass
 `--force` to install with allowlist writes disabled):
@@ -83,7 +88,7 @@ carries no default image tag of its own, so the image tag above is supplied by
 To install without the advisory CRDs:
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=node-image --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem --install-crds=false \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
@@ -106,7 +111,7 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-username=<user-or-x-access-token> \
   --docker-password="$GITHUB_TOKEN"
 
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=node-image --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
@@ -117,7 +122,7 @@ idempotently (re-run it to rotate the credential in place):
 
 ```sh
 IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=node-image --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm

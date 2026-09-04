@@ -68,6 +68,7 @@ func newUninstallStubs(t *testing.T, valuesFile, kubectlExtra string, helmUninst
 	}
 	f.tool(t, "helm", `case "$1" in
 get) `+getBody+` ;;
+list) echo '[{"name":"c8s","namespace":"c8s-system","chart":"c8s-1.0.0"}]' ;;
 show) /bin/cat "$3/values.yaml" ;;
 uninstall) `+fail+` ;;
 esac`)

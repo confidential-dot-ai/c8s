@@ -1,0 +1,209 @@
+{{- define "c8s-lib.nriInstaller" -}}
+{{/*
+One pull-mode installer DaemonSet on every node. Each plugin polls the CDS it
+can reach (node-local NodePort), so operator `c8s allowlist add` writes reach
+admission. CDS itself is pinned separately (cds.node.selector).
+The name keeps the historical `-worker` suffix to preserve DaemonSet identity
+across upgrade.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s-lib.nri.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "c8s-lib.nri.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nri-installer-worker
+spec:
+  selector:
+    matchLabels:
+      {{- include "c8s-lib.nri.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nri-installer-worker
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        {{- include "c8s-lib.nri.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nri-installer-worker
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostPID: true
+      {{- with .Values.nriImagePolicy.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- include "c8s-lib.imagePullSecrets" (dict "root" . "local" .Values.nriImagePolicy.imagePullSecrets) | nindent 6 }}
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+                  {{- range .Values.nriImagePolicy.nodeAffinity.excludeLabels }}
+                  - key: {{ .key }}
+                    operator: NotIn
+                    values:
+                      {{- toYaml .values | nindent 22 }}
+                  {{- end }}
+      initContainers:
+        {{- if eq (include "c8s-lib.distro" .) "rke2" }}
+        - name: containerd-prep
+          image: {{ include "c8s-lib.common.image" .Values.nriImagePolicy.containerdPrep.image }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.containerdPrep.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: HOST_CONTAINERD_DIR
+              value: {{ include "c8s-lib.nri.containerdConfigDir" . | quote }}
+            # The literal RKE2 base-config include, written verbatim into a
+            # freshly created config template. Escaped so Helm emits it as-is.
+            - name: BASE_DIRECTIVE
+              value: '{{ "{{ template \"base\" . }}" }}'
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ .Files.Get "files/scripts/containerd-prep.sh" | indent 14 }}
+          volumeMounts:
+            - name: host-containerd-config
+              mountPath: /host{{ include "c8s-lib.nri.containerdConfigDir" . }}
+          resources:
+            {{- toYaml .Values.nriImagePolicy.resources | nindent 12 }}
+        {{- end }}
+        - name: install
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            # The address CDS dials for this node's sandbox-digests endpoint.
+            # The plugin is a host process with no downward API of its own, so
+            # the install script hands it down through a file. Inferring it
+            # from the route to CDS does not work: the chart points the plugin
+            # at the CDS NodePort on loopback.
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ include "c8s-lib.nri.installScript" (dict "root" . "bootConfig" (include "c8s-lib.nri.bootConfig" (dict "root" .))) | indent 14 }}
+          volumeMounts:
+            {{- include "c8s-lib.nri.hostVolumeMounts" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.nriImagePolicy.resources | nindent 12 }}
+      containers:
+        - name: pause
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        {{- include "c8s-lib.nri.hostVolumes" . | nindent 8 }}
+{{- end }}
+
+{{- define "c8s-lib.nriPinsInstaller" -}}
+{{/*
+node-image shape: the node image bakes the plugin, its containerd
+registration and the boot config, so this DaemonSet runs the pins script —
+it writes this release's CDS pins into that config and restarts containerd
+when they change.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s-lib.nri.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "c8s-lib.nri.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nri-installer-worker
+spec:
+  selector:
+    matchLabels:
+      {{- include "c8s-lib.nri.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nri-installer-worker
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        {{- include "c8s-lib.nri.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nri-installer-worker
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostPID: true
+      {{- with .Values.nriImagePolicy.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- include "c8s-lib.imagePullSecrets" (dict "root" . "local" .Values.nriImagePolicy.imagePullSecrets) | nindent 6 }}
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+                  {{- range .Values.nriImagePolicy.nodeAffinity.excludeLabels }}
+                  - key: {{ .key }}
+                    operator: NotIn
+                    values:
+                      {{- toYaml .values | nindent 22 }}
+                  {{- end }}
+      initContainers:
+        - name: install
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ include "c8s-lib.nri.pinsScript" (dict "root" .) | indent 14 }}
+          volumeMounts:
+            {{- include "c8s-lib.nri.pinsVolumeMounts" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.nriImagePolicy.resources | nindent 12 }}
+      containers:
+        - name: pause
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        {{- include "c8s-lib.nri.pinsVolumes" . | nindent 8 }}
+{{- end }}

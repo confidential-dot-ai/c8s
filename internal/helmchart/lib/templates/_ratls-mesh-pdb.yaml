@@ -1,0 +1,14 @@
+{{- define "c8s-lib.ratlsMeshPDB" -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "c8s-lib.ratlsMesh.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "c8s-lib.ratlsMesh.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "c8s-lib.ratlsMesh.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -205,7 +205,7 @@ produce a mount-gated image. And **the in-guest `policy-monitor` is the enforcer
 that honours them**: it reads the guest's own OCI spec, so it sees both the
 mount table and the environment. The host NRI plugin sees the CRI container and
 reports neither, and an unobserved field is treated as nothing-to-refuse rather
-than as a violation — so under `--cvm-mode=node`, where that plugin is the only
+than as a violation — so on the node shapes, where that plugin is the only
 enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
 lint` warns when a document carries one; `--cvm-mode=pod` silences it.
 
