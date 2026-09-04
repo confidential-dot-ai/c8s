@@ -2,7 +2,9 @@ package cdsattest
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/snpvcek"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -134,5 +137,101 @@ func TestLiveEvidenceProviderError(t *testing.T) {
 	_, _, _, err := p.Evidence(context.Background(), []byte("rd"))
 	if err == nil || !strings.Contains(err.Error(), "attestation-api") {
 		t.Fatalf("expected attestation-api error, got %v", err)
+	}
+}
+
+// The real bare-metal evidence shared with localverify's tests: its report can
+// be paired with its true VCEK by a KDS-stubbed embedder.
+const snpFixturePath = "../../localverify/testdata/snp-evidence-genoa.json"
+
+func loadSnpFixture(t *testing.T) (chainless json.RawMessage, vcekDER []byte) {
+	t.Helper()
+	raw, err := os.ReadFile(snpFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Evidence struct {
+			AttestationReport string `json:"attestation_report"`
+			CertChain         struct {
+				Vcek string `json:"vcek"`
+			} `json:"cert_chain"`
+		} `json:"evidence"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	vcekDER, err = base64.StdEncoding.DecodeString(envelope.Evidence.CertChain.Vcek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chainless, err = json.Marshal(map[string]any{
+		"attestation_report": envelope.Evidence.AttestationReport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return chainless, vcekDER
+}
+
+type cannedGetter struct {
+	body []byte
+	err  error
+}
+
+func (g cannedGetter) Get(string) ([]byte, error) { return g.body, g.err }
+
+func chainlessEvidenceAPI(t *testing.T, evidence json.RawMessage) *httptest.Server {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: "snp", Evidence: evidence})
+	}))
+	t.Cleanup(api.Close)
+	return api
+}
+
+func TestLiveEvidenceProviderEmbedsVCEK(t *testing.T) {
+	chainless, vcekDER := loadSnpFixture(t)
+	api := chainlessEvidenceAPI(t, chainless)
+
+	p := LiveEvidenceProvider{
+		Client:     attestationclient.NewClient(api.URL),
+		Platform:   types.PlatformSnp,
+		Generation: "genoa",
+		VCEK:       snpvcek.NewWithGetter(cannedGetter{body: vcekDER}),
+	}
+	ev, _, _, err := p.Evidence(context.Background(), []byte("rd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		CertChain struct {
+			Vcek string `json:"vcek"`
+		} `json:"cert_chain"`
+	}
+	if err := json.Unmarshal(ev, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CertChain.Vcek != base64.StdEncoding.EncodeToString(vcekDER) {
+		t.Fatalf("cert_chain.vcek = %q, want the embedded VCEK", got.CertChain.Vcek)
+	}
+}
+
+func TestLiveEvidenceProviderServesChainlessWhenKDSUnreachable(t *testing.T) {
+	chainless, _ := loadSnpFixture(t)
+	api := chainlessEvidenceAPI(t, chainless)
+
+	p := LiveEvidenceProvider{
+		Client:     attestationclient.NewClient(api.URL),
+		Platform:   types.PlatformSnp,
+		Generation: "genoa",
+		VCEK:       snpvcek.NewWithGetter(cannedGetter{err: errors.New("kds unreachable")}),
+	}
+	ev, _, _, err := p.Evidence(context.Background(), []byte("rd"))
+	if err != nil {
+		t.Fatalf("a failed embed must not fail the request: %v", err)
+	}
+	if string(ev) != string(chainless) {
+		t.Fatalf("evidence = %s, want the original chainless evidence", ev)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/snpvcek"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -112,6 +113,8 @@ func run(cfg config) error {
 			Client:     attestationclient.NewClient(cfg.attestationAPIURL),
 			Platform:   types.Platform(cfg.platform),
 			Generation: cfg.generation,
+			VCEK:       snpvcek.New(),
+			Log:        logger,
 		}
 	default:
 		return fmt.Errorf("one of --attestation-api-url or --evidence-fixture is required")
