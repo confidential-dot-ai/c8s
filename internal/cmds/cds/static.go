@@ -14,9 +14,6 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/rand"
-	"crypto/sha512"
-	"crypto/subtle"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"fmt"
@@ -26,20 +23,13 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // staticCAEvidenceTimeout bounds the attestation-api call that produces the
 // sealed CA's own evidence at startup.
 const staticCAEvidenceTimeout = 30 * time.Second
-
-// initDataDocumentPath is where kata-agent writes the launch-committed
-// document; a variable so tests can point it at a fixture.
-var initDataDocumentPath = initdata.GuestDocumentPath
 
 // seedStoreStatic reads the JSON allowlist at path and REPLACES the store
 // contents with it, unlike seedStore's additive merge: a sealed CDS must
@@ -113,76 +103,4 @@ func checkExpectedSealedDigest(expectedHex string, got []byte) error {
 		return fmt.Errorf("static allowlist: the seed's canonical digest %x is not the expected %x — the baked (or seeded) document is not the one this install was given; rebuild the node image with that document or install with the document the node carries", got, want)
 	}
 	return nil
-}
-
-// checkInitDataSeal proves, from CDS's own hardware report, that the guest
-// was launched committed to this policy: the kata shim hashed the init-data
-// document into HOST_DATA / MRCONFIGID at launch, so a document whose digest
-// matches the verified claim is launch-committed, and its
-// c8s.cds.allowlist-seed-sha256 must be the sealed digest. Any gap fails
-// closed — an unsealed launch of the same guest image must not present as
-// sealed.
-func checkInitDataSeal(ctx context.Context, attestationApiURL string, sealed []byte) error {
-	raw, err := os.ReadFile(initDataDocumentPath)
-	if err != nil {
-		return fmt.Errorf("static allowlist: read launch-committed init-data %s: %w", initDataDocumentPath, err)
-	}
-	claim, err := verifiedOwnInitData(ctx, attestationApiURL)
-	if err != nil {
-		return err
-	}
-	want := initdata.Digest(raw)
-	if subtle.ConstantTimeCompare(claim, want[:]) != 1 {
-		return fmt.Errorf("static allowlist: init-data digest %x is not the launch-committed claim %x", want, claim)
-	}
-	doc, err := initdata.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("static allowlist: parse init-data: %w", err)
-	}
-	if doc.Data[initdata.KeyRole] != initdata.RoleCDS {
-		return fmt.Errorf("static allowlist: init-data role is %q, want %q", doc.Data[initdata.KeyRole], initdata.RoleCDS)
-	}
-	if got := doc.Data[initdata.KeyCDSAllowlistSeedSHA256]; got != hex.EncodeToString(sealed) {
-		return fmt.Errorf("static allowlist: launch-committed %s is %q, but the sealed digest is %x", initdata.KeyCDSAllowlistSeedSHA256, got, sealed)
-	}
-	return nil
-}
-
-// verifiedOwnInitData asks the local attestation-api for a report over a fresh
-// nonce and returns the init-data claim (HOST_DATA on SNP, the zero-padded
-// MRCONFIGID on TDX) from the verified result.
-func verifiedOwnInitData(ctx context.Context, attestationApiURL string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, staticCAEvidenceTimeout)
-	defer cancel()
-	nonce := make([]byte, sha512.Size384)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("static allowlist: nonce: %w", err)
-	}
-	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, attestationApiURL, nonce)
-	if err != nil {
-		return nil, fmt.Errorf("static allowlist: own evidence: %w", err)
-	}
-	var expected [64]byte
-	copy(expected[:], nonce)
-	verdict, err := attestationclient.NewClient(attestationApiURL).VerifyEvidence(ctx, types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: expected})
-	if err != nil {
-		return nil, fmt.Errorf("static allowlist: verify own evidence: %w", err)
-	}
-	claim, err := hex.DecodeString(verdict.Result.Claims.InitData)
-	if err != nil {
-		return nil, fmt.Errorf("static allowlist: init-data claim is not hex: %w", err)
-	}
-	switch len(claim) {
-	case initdata.DigestSize:
-		return claim, nil
-	case 48: // TDX MRCONFIGID: sha256 zero-padded to 48 bytes
-		for _, b := range claim[initdata.DigestSize:] {
-			if b != 0 {
-				return nil, fmt.Errorf("static allowlist: MRCONFIGID is not a zero-padded sha256")
-			}
-		}
-		return claim[:initdata.DigestSize], nil
-	default:
-		return nil, fmt.Errorf("static allowlist: init-data claim is %d bytes, want %d", len(claim), initdata.DigestSize)
-	}
 }

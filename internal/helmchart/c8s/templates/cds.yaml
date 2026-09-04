@@ -12,7 +12,7 @@ metadata:
 {{- fail "cds.staticAllowlist and cds.operatorKeys are mutually exclusive: a sealed allowlist has no write path" }}
 {{- end }}
 {{- if and .Values.cds.staticAllowlist .Values.kata.enabled }}
-{{- fail "cds.staticAllowlist is not supported with kata.enabled yet (https://github.com/confidential-dot-ai/c8s/issues/530): seal a node-as-CVM install with a baked policy instead" }}
+{{- fail "cds.staticAllowlist requires node-as-CVM (kata.enabled=false): the seal rests on a policy baked into the measured node image, which a shared kata guest image cannot carry" }}
 {{- end }}
 {{- if and .Values.cds.staticAllowlist (not (or (eq (include "c8s.serveAllowlistSeed" .) "true") .Values.cds.allowlistSeedHostPath)) }}
 {{- fail "cds.staticAllowlist needs an allowlist seed: the chart seed (nriImagePolicy / cvmMode=node installs) or cds.allowlistSeedHostPath" }}

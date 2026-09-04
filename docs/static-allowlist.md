@@ -70,12 +70,11 @@ the sealed set, anywhere. At startup CDS checks that the seed it read from the
 baked path hashes to `--static-allowlist-digest`, the digest the operator
 installed with, and refuses to come up otherwise.
 
-Pod-as-CVM (kata) is not supported yet: `c8s install` refuses
+Sealing is therefore node-as-CVM only. `c8s install` refuses
 `--static-allowlist` with `--cvm-mode=pod`, and the chart refuses
-`cds.staticAllowlist` with `kata.enabled`. The CDS guest image is shared with
-every other pod, so the policy cannot be baked per deployment; the launch-time
-binding through the CDS pod's init-data document is tracked in
-[#530](https://github.com/confidential-dot-ai/c8s/issues/530).
+`cds.staticAllowlist` with `kata.enabled`: a kata CDS runs a guest image
+shared with every other pod, so its measurement cannot carry this
+deployment's policy.
 
 ## Node-as-CVM
 

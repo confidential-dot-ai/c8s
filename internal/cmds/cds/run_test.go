@@ -682,7 +682,7 @@ func TestValidateConfig_StaticAllowlist(t *testing.T) {
 	}
 	unsealed := validRunConfig(t, "http://127.0.0.1:1")
 	unsealed.staticAllowlistDigest = strings.Repeat("ab", 32)
-	if err := validateConfig(unsealed); err == nil || !strings.Contains(err.Error(), "require --static-allowlist") {
+	if err := validateConfig(unsealed); err == nil || !strings.Contains(err.Error(), "requires --static-allowlist") {
 		t.Fatalf("expected digest without --static-allowlist must be refused: %v", err)
 	}
 }

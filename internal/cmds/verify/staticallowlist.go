@@ -85,8 +85,8 @@ func gatherStaticCA(ctx context.Context, cfg config, plan *verifyPlan) staticCAR
 		report.verifyErr = err
 		return report
 	}
-	// --init-data, when given, pins the CA's launch-committed document as
-	// well: on pod-as-CVM that is where the sealed digest is hardware-bound.
+	// --init-data, when given, pins the CA guest's launch-committed document
+	// on top of the launch measurement.
 	result, err := verifyInProcess(ctx, caEv, plan.policy, plan.initDataHash, nil)
 	if err != nil {
 		report.verifyErr = err

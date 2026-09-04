@@ -4674,7 +4674,7 @@ func TestChartKataRejectsStaticAllowlist(t *testing.T) {
 	if err == nil {
 		t.Fatalf("kata.enabled with cds.staticAllowlist rendered:\n%s", out)
 	}
-	if !strings.Contains(out, "cds.staticAllowlist is not supported with kata.enabled") {
+	if !strings.Contains(out, "cds.staticAllowlist requires node-as-CVM") {
 		t.Fatalf("render failed for another reason: %v\n%s", err, out)
 	}
 }

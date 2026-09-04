@@ -1145,7 +1145,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if installStaticAllowlist && cvmModeIsPod(installCvmMode) {
-			return fmt.Errorf("--static-allowlist is not supported under --cvm-mode=pod yet (https://github.com/confidential-dot-ai/c8s/issues/530); use --cvm-mode=node with a sealed node image")
+			return fmt.Errorf("--static-allowlist requires --cvm-mode=node: the seal rests on a policy baked into the measured node image")
 		}
 		if installStaticAllowlist && installBootstrapAllowlist == "" {
 			return fmt.Errorf("--static-allowlist requires --bootstrap-allowlist: the document the node image baked (composed with `c8s render-allowlist`) is the whole policy, and the install pins its digest")
