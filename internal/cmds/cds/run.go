@@ -2,10 +2,12 @@ package cds
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -77,6 +79,11 @@ func run(cfg config) error {
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
 		return fmt.Errorf("operator writes are disabled: set --operator-keys")
 	}
+	if cfg.staticAllowlist {
+		writeAuthorizer = func(*http.Request, []byte) error {
+			return fmt.Errorf("the allowlist is static (--static-allowlist): the sealed policy digest is stamped into the mesh CA; deploy a new CDS with a new seed to change it")
+		}
+	}
 	var operatorKeysPEM []byte
 	var operatorKeysHash string
 	if cfg.operatorKeys != "" {
@@ -94,8 +101,11 @@ func run(cfg config) error {
 			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
 		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
-	} else {
-		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served)")
+	} else if !cfg.staticAllowlist {
+		// A sealed run is key-less by design and logs its own line, so this
+		// warning fires only on the ambiguous shape: writes disabled with
+		// nothing telling a relying party the policy is frozen.
+		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served). If a frozen policy is the intent, --static-allowlist also seals its digest into the mesh CA so relying parties can verify what is enforced (docs/static-allowlist.md)")
 	}
 
 	allowlistStore, err := allowlist.OpenStore(cfg.allowlistDB)
@@ -104,9 +114,44 @@ func run(cfg config) error {
 	}
 	defer allowlistStore.Close()
 
+	// Seed before serving so the first GET /allowlist returns the bootstrap
+	// allowlist (CDS, attestation-api, system images) rather than an empty
+	// set; an unseeded store would deny every worker pull until an operator
+	// populated it. Fail closed on any seed error. Seeding also runs before
+	// the mesh CA is minted: a sealed CA carries the snapshot digest of the
+	// seeded policy.
+	if cfg.allowlistSeed != "" {
+		seed := seedStore
+		if cfg.staticAllowlist {
+			seed = seedStoreStatic
+		}
+		if err := seed(&allowlistStore, cfg.allowlistSeed); err != nil {
+			return fmt.Errorf("seed allowlist: %w", err)
+		}
+	}
+
 	// CDS generates its mesh CA in process at startup; the private key never
-	// touches a Kubernetes Secret.
-	mesh, err := issuer.NewCAWithCurve(cfg.caCommonName, cfg.caCertValidity, elliptic.P384())
+	// touches a Kubernetes Secret. Under --static-allowlist the CA also
+	// carries its own RA-TLS evidence and the sealed policy digest
+	// (static.go), so it is minted only after the store holds the seed.
+	var caExtensions func(crypto.PublicKey) ([]pkix.Extension, error)
+	if cfg.staticAllowlist {
+		snapshot, err := loadPolicySnapshot(&allowlistStore)
+		if err != nil {
+			return fmt.Errorf("static allowlist: %w", err)
+		}
+		if err := checkExpectedSealedDigest(cfg.staticAllowlistDigest, snapshot.Digest); err != nil {
+			return err
+		}
+		slog.Info("allowlist sealed: operator writes are disabled and the policy digest is stamped into the mesh CA",
+			"allowlist_digest", hex.EncodeToString(snapshot.Digest),
+			"floor", len(snapshot.Allowlist.Digests),
+			"workloads", len(snapshot.Allowlist.Workloads),
+			"expected_digest_checked", cfg.staticAllowlistDigest != "",
+		)
+		caExtensions = staticCAExtensions(ctx, cfg.attestationApiURL, snapshot.Digest)
+	}
+	mesh, err := issuer.NewCAWithExtensions(cfg.caCommonName, cfg.caCertValidity, elliptic.P384(), caExtensions)
 	if err != nil {
 		return fmt.Errorf("generate mesh CA: %w", err)
 	}
@@ -179,16 +224,6 @@ func run(cfg config) error {
 	// issuance redeemable against a secret, and vice versa.
 	secretsChallenges := attestation.NewChallengeStore(cfg.challengeTTL)
 	checker := readiness.NewChecker(asClient, cfg.readinessInterval)
-
-	// Seed before serving so the first GET /allowlist returns the bootstrap
-	// allowlist (CDS, attestation-api, system images) rather than an empty
-	// set; an unseeded store would deny every worker pull until an operator
-	// populated it. Fail closed on any seed error.
-	if cfg.allowlistSeed != "" {
-		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
-			return fmt.Errorf("seed allowlist: %w", err)
-		}
-	}
 
 	if !cfg.allowlistPersistent {
 		slog.Warn("allowlist store is not persistent (cds.persistence.enabled=false): a restart resets the served allowlist to the install seed and regenerates the mesh CA. Operator-added digests do not survive")
@@ -530,6 +565,25 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.maxRequestSize <= 0 {
 		return fmt.Errorf("--max-request-size must be positive")
+	}
+	if cfg.staticAllowlist {
+		if cfg.allowlistSeed == "" {
+			return fmt.Errorf("--static-allowlist requires --allowlist-seed: the seed document is the entire sealed policy")
+		}
+		if cfg.operatorKeys != "" {
+			return fmt.Errorf("--static-allowlist and --operator-keys are mutually exclusive: a sealed allowlist has no write path")
+		}
+		if cfg.ratlsPlatform == "" {
+			return fmt.Errorf("--static-allowlist requires --ratls-platform: the sealed mesh CA embeds its own TEE evidence")
+		}
+	}
+	if cfg.staticAllowlistDigest != "" && !cfg.staticAllowlist {
+		return fmt.Errorf("--static-allowlist-digest requires --static-allowlist")
+	}
+	if cfg.staticAllowlistDigest != "" {
+		if _, err := parseSealedDigest(cfg.staticAllowlistDigest); err != nil {
+			return fmt.Errorf("--static-allowlist-digest: %w", err)
+		}
 	}
 	if cfg.readinessInterval <= 0 {
 		return fmt.Errorf("--readiness-interval must be positive")

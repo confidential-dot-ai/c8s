@@ -6,6 +6,7 @@ package nriimagepolicy
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -48,6 +49,9 @@ var (
 func startupSourceMode(cfg *config) string {
 	if cfg.PullEnabled() {
 		return "pull"
+	}
+	if cfg.StaticEnabled() {
+		return "static"
 	}
 
 	sources := make([]string, 0, 2)
@@ -109,6 +113,21 @@ func Run(args []string) error {
 
 	bootstrap := alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow)
 	store := newPolicyStore(bootstrap)
+	if cfg.StaticEnabled() {
+		// The baked document is the whole policy. It is applied once, at the
+		// version a first pull would carry, and no pull loop ever runs, so the
+		// launch measurement that covers the file is what bounds admission for
+		// the life of the node. A bad file is fatal: a sealed node must not
+		// come up enforcing only the floor.
+		static, digest, err := loadStaticAllowlist(cfg.Allowlist.StaticPath)
+		if err != nil {
+			return err
+		}
+		store.apply(static, 1)
+		logger.Info("allowlist is static: enforcing the baked policy, no refresh",
+			"path", cfg.Allowlist.StaticPath, "allowlist_digest", digest,
+			"floor", len(static.Digests), "workloads", len(static.Workloads))
+	}
 
 	var wlClient allowlistclient.Client
 	if cfg.PullEnabled() {
@@ -262,6 +281,25 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	}
 	client.Timeout = cfg.Timeout
 	return client, nil
+}
+
+// loadStaticAllowlist reads the baked policy document and returns it with the
+// hex of its canonical digest — the value CDS seals into the mesh CA, so the
+// two logs can be compared by eye.
+func loadStaticAllowlist(path string) (*allowlist.Allowlist, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read allowlist.static_path: %w", err)
+	}
+	doc, err := allowlist.ParseJSON(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("allowlist.static_path %s: %w", path, err)
+	}
+	digest, err := doc.CanonicalDigest()
+	if err != nil {
+		return nil, "", fmt.Errorf("allowlist.static_path %s: %w", path, err)
+	}
+	return doc, hex.EncodeToString(digest), nil
 }
 
 // alwaysAllowAllowlist builds the static floor from the config's AlwaysAllow

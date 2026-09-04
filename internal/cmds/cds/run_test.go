@@ -282,6 +282,18 @@ func TestRun_ErrorPaths(t *testing.T) {
 			mutate:  func(_ *testing.T, cfg *config) { cfg.ratlsPlatform = "bogus-platform" },
 			wantSub: "unsupported TEE platform",
 		},
+		{
+			// A sealed CA needs its own evidence at startup; an
+			// attestation-api that cannot produce it must abort the run
+			// rather than mint an unattested root.
+			name: "static allowlist with no CA evidence fails closed",
+			mutate: func(t *testing.T, cfg *config) {
+				cfg.staticAllowlist = true
+				cfg.ratlsPlatform = "sev-snp"
+				cfg.allowlistSeed = writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+			},
+			wantSub: "attest the mesh CA key",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validRunConfig(t, api.URL)
@@ -634,5 +646,43 @@ func TestMeasurementDigests(t *testing.T) {
 	empty, err := measurementDigests(nil)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty allowlist: got %v, %v", empty, err)
+	}
+}
+
+func TestValidateConfig_StaticAllowlist(t *testing.T) {
+	base := func(t *testing.T) config {
+		cfg := validRunConfig(t, "http://127.0.0.1:1")
+		cfg.staticAllowlist = true
+		cfg.allowlistSeed = "seed.json"
+		cfg.ratlsPlatform = "sev-snp"
+		return cfg
+	}
+	if err := validateConfig(base(t)); err != nil {
+		t.Fatalf("validateConfig(valid static config) = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		mutate  func(cfg *config)
+		wantSub string
+	}{
+		{"missing seed", func(cfg *config) { cfg.allowlistSeed = "" }, "--allowlist-seed"},
+		{"operator keys set", func(cfg *config) { cfg.operatorKeys = "keys.pem" }, "mutually exclusive"},
+		{"no ratls platform", func(cfg *config) { cfg.ratlsPlatform = "" }, "--ratls-platform"},
+		{"bad expected digest", func(cfg *config) { cfg.staticAllowlistDigest = "nothex" }, "--static-allowlist-digest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base(t)
+			tc.mutate(&cfg)
+			err := validateConfig(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("validateConfig() = %v, want error containing %q", err, tc.wantSub)
+			}
+		})
+	}
+	unsealed := validRunConfig(t, "http://127.0.0.1:1")
+	unsealed.staticAllowlistDigest = strings.Repeat("ab", 32)
+	if err := validateConfig(unsealed); err == nil || !strings.Contains(err.Error(), "requires --static-allowlist") {
+		t.Fatalf("expected digest without --static-allowlist must be refused: %v", err)
 	}
 }

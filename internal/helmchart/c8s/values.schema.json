@@ -11,6 +11,9 @@
       "additionalProperties": false,
       "properties": {
         "allowlistDB": {},
+        "allowlistSeedHostPath": {},
+        "staticAllowlist": {},
+        "staticAllowlistDigest": {},
         "ca": {
           "type": [
             "object",

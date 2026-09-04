@@ -128,6 +128,26 @@ echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}"
 # (image-policy.yaml.in) so mkosi never copies the raw template; this rendered
 # copy is the only one at etc/nri/conf.d/image-policy.yaml, so it lands with no
 # extra-tree precedence ambiguity. Both digests track C8S_REF.
+# Sealed build: `node-guest-image/build` places the operator's policy document
+# at mkosi.profiles/c8s/static-allowlist.json (C8S_STATIC_ALLOWLIST; the path
+# is gitignored — the policy is per deployment). The build bakes it at
+# /etc/c8s/static-allowlist.json on the dm-verity root, so the policy content
+# is inside the node launch measurement, and renders the NRI config to enforce
+# exactly that document with no runtime pull. The chart mounts the same file
+# into CDS (cds.allowlistSeedHostPath), which seals its canonical digest into
+# the mesh CA. See docs/static-allowlist.md.
+STATIC_ALLOWLIST_SRC="$SRCDIR/mkosi.profiles/c8s/static-allowlist.json"
+STATIC_ALLOWLIST_PATH=""
+PULL_URL="https://127.0.0.1:30808"
+if [ -f "$STATIC_ALLOWLIST_SRC" ]; then
+    jq -e '.schema == "c8s.allowlist/v1"' "$STATIC_ALLOWLIST_SRC" >/dev/null || {
+        echo "c8s sync: FATAL static-allowlist.json is not a c8s.allowlist/v1 document" >&2
+        exit 1
+    }
+    STATIC_ALLOWLIST_PATH="/etc/c8s/static-allowlist.json"
+    PULL_URL=""
+fi
+
 render_nri_floor() {
     local tmpl="$SRCDIR/mkosi.profiles/c8s/image-policy.yaml.in"
     local dst="$STAGE_DIR/etc/nri/conf.d/image-policy.yaml"
@@ -139,8 +159,16 @@ render_nri_floor() {
         -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
         -e "s|@CDS_IMAGE@|${CDS_REPO}@${CDS_DIGEST}|g" \
         -e "s|@PLATFORM@|${PLATFORM}|g" \
+        -e "s|@STATIC_ALLOWLIST_PATH@|${STATIC_ALLOWLIST_PATH}|g" \
+        -e "s|^\(    url: \)\"https://127.0.0.1:30808\"|\1\"${PULL_URL}\"|" \
         "$tmpl" > "$dst"
-    echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
+    echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST}, static ${STATIC_ALLOWLIST_PATH:-no})"
+}
+
+stage_static_allowlist() {
+    [ -n "$STATIC_ALLOWLIST_PATH" ] || return 0
+    install -D -m 0644 "$STATIC_ALLOWLIST_SRC" "$STAGE_DIR$STATIC_ALLOWLIST_PATH"
+    echo "c8s sync: staged static allowlist at $STATIC_ALLOWLIST_PATH (file sha256 $(sha256sum "$STATIC_ALLOWLIST_SRC" | awk '{print $1}'))"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
@@ -226,6 +254,7 @@ if [ -f "$PLUGIN_CACHE" ]; then
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
     render_nri_floor
+    stage_static_allowlist
     echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
     exit 0
 fi
@@ -293,5 +322,6 @@ install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
 install -D -m 0755 "$BIN" "$C8S_TARGET"
 
 render_nri_floor
+stage_static_allowlist
 
 echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"

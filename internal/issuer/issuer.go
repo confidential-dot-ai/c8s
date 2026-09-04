@@ -4,10 +4,12 @@
 package issuer
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"net"
 	"strings"
@@ -66,6 +68,17 @@ func NewCA(commonName string, validity time.Duration) (*CA, error) {
 // NewCAWithCurve generates a fresh self-signed ECDSA CA on the given curve.
 // Use NewCA for the default P-256 mesh CA.
 func NewCAWithCurve(commonName string, validity time.Duration, curve elliptic.Curve) (*CA, error) {
+	return NewCAWithExtensions(commonName, validity, curve, nil)
+}
+
+// NewCAWithExtensions generates a fresh self-signed ECDSA CA on the given
+// curve, stamping the extensions extensionsFor returns for the freshly
+// generated CA public key into the certificate. The callback shape is what
+// lets a sealed-policy CDS embed an RA-TLS attestation extension binding the
+// CA key itself (the key must exist before its evidence can): any callback
+// error aborts CA creation, so a CA that was meant to carry its evidence can
+// never be minted without it. A nil callback yields a plain CA.
+func NewCAWithExtensions(commonName string, validity time.Duration, curve elliptic.Curve, extensionsFor func(pub crypto.PublicKey) ([]pkix.Extension, error)) (*CA, error) {
 	commonName = strings.TrimSpace(commonName)
 	if commonName == "" {
 		commonName = DefaultCACommonName
@@ -85,6 +98,13 @@ func NewCAWithCurve(commonName string, validity time.Duration, curve elliptic.Cu
 	}
 
 	tmpl := certutil.NewCATemplate(serial, commonName, time.Now().Add(validity))
+	if extensionsFor != nil {
+		exts, err := extensionsFor(&key.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("build ca extensions: %w", err)
+		}
+		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, exts...)
+	}
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, fmt.Errorf("self-sign ca: %w", err)

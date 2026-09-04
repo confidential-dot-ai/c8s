@@ -602,3 +602,32 @@ func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
+
+func TestValidate_StaticAllowlist(t *testing.T) {
+	static := func() config {
+		cfg := validConfig()
+		cfg.Allowlist.StaticPath = "/etc/c8s/static-allowlist.json"
+		cfg.Allowlist.Pull.URL = ""
+		return cfg
+	}
+	sealed := static()
+	if err := sealed.Validate(); err != nil {
+		t.Fatalf("static policy: %v", err)
+	}
+	if !sealed.StaticEnabled() || !sealed.AllowlistEnabled() || sealed.PullEnabled() {
+		t.Fatal("static_path must enable the allowlist without enabling pull")
+	}
+
+	both := static()
+	both.Allowlist.Pull.URL = "https://127.0.0.1:30808"
+	if err := both.Validate(); err == nil {
+		t.Fatal("static_path beside pull.url must be refused: a sealed node pulls nothing")
+	}
+
+	inventory := static()
+	inventory.WorkloadClaims.SocketDir = "/var/run/nri-image-policy"
+	inventory.Allowlist.Pull.AttestationApiURL = ""
+	if err := inventory.Validate(); err == nil {
+		t.Fatal("the inventory endpoint still needs attestation_api_url on a sealed node")
+	}
+}

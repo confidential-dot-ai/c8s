@@ -49,15 +49,17 @@ var (
 	installGetCertRunAsGroup    int64
 	installGetCertRunAsNonRoot  bool
 
-	installKataDebug        bool
-	installCvmMode          string
-	installHardwarePlatform string
-	installSingleNode       bool
-	installVolumes          bool
-	installImagePullSecret  string
-	installImageTag         string
-	installOperatorKeys     string
-	installForce            bool
+	installKataDebug          bool
+	installCvmMode            string
+	installHardwarePlatform   string
+	installSingleNode         bool
+	installVolumes            bool
+	installImagePullSecret    string
+	installImageTag           string
+	installOperatorKeys       string
+	installStaticAllowlist    bool
+	installBootstrapAllowlist string
+	installForce              bool
 
 	installUpstream     string
 	installWorkloadRefs []string
@@ -155,20 +157,28 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 	return comps, nil
 }
 
-// operatorKeysPreflight enforces that installing without pinned operator keys is
-// a deliberate choice. On the default path — no --operator-keys and no -f values
-// file that could carry cds.operatorKeys — it requires --force, because the
-// resulting CDS has allowlist writes disabled and nobody could add/remove/upload
-// allowlist entries via `c8s allowlist`. When keys are supplied, or the operator
-// is managing values via -f, it is a no-op.
-func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool) (warn string, err error) {
-	if operatorKeys != "" || len(valuesFiles) > 0 {
+// operatorKeysPreflight enforces that installing with allowlist writes disabled
+// is a deliberate choice. Writes are enabled by --operator-keys or by a -f
+// values file that sets cds.operatorKeys; a sealed install (--static-allowlist,
+// or cds.staticAllowlist in a values file) has no write path by design. Any
+// other shape requires --force, because the resulting CDS has allowlist writes
+// disabled and nobody could add/remove/upload entries via `c8s allowlist` — a
+// values file that simply omits the key does not clear the guard.
+func operatorKeysPreflight(operatorKeys string, staticAllowlist bool, valuesFiles []string, force bool) (warn string, err error) {
+	if operatorKeys != "" || staticAllowlist {
+		return "", nil
+	}
+	keysInValues, staticInValues, err := valuesFilesSetWritePolicy(valuesFiles)
+	if err != nil {
+		return "", err
+	}
+	if keysInValues || staticInValues {
 		return "", nil
 	}
 	if !force {
-		return "", fmt.Errorf("no operator keys provided: allowlist writes will be DISABLED — nobody can add/remove/upload allowlist entries via `c8s allowlist`. Re-run with --operator-keys <file> to enable writes, or --force to install with writes disabled anyway")
+		return "", fmt.Errorf("no operator keys provided: allowlist writes will be DISABLED — nobody can add/remove/upload allowlist entries via `c8s allowlist`. Re-run with --operator-keys <file> to enable writes, with --static-allowlist if a sealed, verifiable policy is the intent (docs/static-allowlist.md), or with --force to install with writes disabled anyway")
 	}
-	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall", nil
+	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall. If a frozen policy is the intent, --static-allowlist also seals its digest into the mesh CA so relying parties can verify it", nil
 }
 
 // podModeMeasurementsPreflight enforces that a pod-mode install without a
@@ -1131,7 +1141,16 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if _, err := upstreamAddress(installUpstream, adoptions); err != nil {
 			return err
 		}
-		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
+		if err := staticAllowlistPreflight(installStaticAllowlist, installOperatorKeys, installValues); err != nil {
+			return err
+		}
+		if installStaticAllowlist && cvmModeIsPod(installCvmMode) {
+			return fmt.Errorf("--static-allowlist requires --cvm-mode=node: the seal rests on a policy baked into the measured node image")
+		}
+		if installStaticAllowlist && installBootstrapAllowlist == "" {
+			return fmt.Errorf("--static-allowlist requires --bootstrap-allowlist: the document the node image baked (composed with `c8s render-allowlist`) is the whole policy, and the install pins its digest")
+		}
+		if warn, err := operatorKeysPreflight(installOperatorKeys, installStaticAllowlist, installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1235,7 +1254,20 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return err
 		}
-		defer os.Remove(computedValues)
+		defer func() { os.Remove(computedValues) }()
+		if installStaticAllowlist {
+			// The seal pins what CDS must load: the document the node image
+			// baked, whose digest CDS checks at startup. The computed values
+			// are already on disk, so extend and rewrite them.
+			setArgs, err = appendNodeSealArgs(setArgs, installBootstrapAllowlist, nodeStaticSeedPath)
+			if err != nil {
+				return err
+			}
+			os.Remove(computedValues)
+			if computedValues, err = writeComputedValues(setArgs); err != nil {
+				return err
+			}
+		}
 		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
 
 		// Fail fast on the default path if the CDS node is unlabelled, before
@@ -1346,6 +1378,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 
 		printAttestVerifyHint(os.Stdout, installAttestEnabled)
+		printStaticAllowlistHint(os.Stdout, installStaticAllowlist)
 		return nil
 	},
 }
@@ -1361,6 +1394,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 // the hint says how to fix it.
 func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 	if !attestEnabled {
+		return
+	}
+	if installMeasurementsConfig != "" {
+		fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled; mesh pinned to --measurements-config.")
+		fmt.Fprintln(w, "  Clients verify with the same file: c8s verify https://<tls-lb> --measurements-config <file>")
 		return
 	}
 	if len(installMeasurements) > 0 {
@@ -2496,6 +2534,8 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
+	installCmd.Flags().BoolVar(&installStaticAllowlist, "static-allowlist", false, "seal the allowlist (cds.staticAllowlist=true): the install seed becomes the one immutable policy for the CDS instance's lifetime, writes stay disabled (mutually exclusive with --operator-keys), and the mesh CA certificate is minted carrying the policy's canonical SHA-256 plus TEE evidence binding the CA key, so relying parties can pin the enforced policy. Add workload entries with --bootstrap-allowlist; see docs/static-allowlist.md")
+	installCmd.Flags().StringVar(&installBootstrapAllowlist, "bootstrap-allowlist", "", "path to a c8s.allowlist/v1 document folded into the install seed: its floor digests join nriImagePolicy.bootstrapAllowlist.digests and its workload entries become nriImagePolicy.bootstrapAllowlist.workloads. Under --static-allowlist this is the only way a workload entry enters the sealed policy")
 	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
 	rootCmd.AddCommand(installCmd)
 }

@@ -412,7 +412,11 @@ make clean
 
 CDS serves the image-digest allowlist that `nri-image-policy` (host) and
 `policy-monitor` (in-guest) enforce on every node. The `c8s allowlist`
-command reads and mutates it. By default, tls-lb publishes the complete
+command reads and mutates it. Deployments that need the policy to be a
+verifiable constant instead of an operator-mutable document can seal it:
+`cds --static-allowlist` disables every write and stamps the policy's
+canonical SHA-256, next to CDS's own attestation evidence, into the mesh CA
+certificate — see [docs/static-allowlist.md](docs/static-allowlist.md). By default, tls-lb publishes the complete
 `/allowlist` API and verifies CDS's attestation before forwarding requests.
 When tls-lb uses the chart default CDS-issued public certificate
 (`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at

@@ -216,6 +216,25 @@ cds:
     maxUnavailable: 0
   logLevel: info
   allowlistDB: /data/allowlist.db
+  # -- Seal the allowlist (`cds --static-allowlist`): the seed document becomes
+  # the one immutable policy for the CDS instance's lifetime, writes stay
+  # disabled (mutually exclusive with operatorKeys), and the mesh CA
+  # certificate carries the policy's canonical SHA-256 plus TEE evidence
+  # binding the CA key, so relying parties can pin the enforced policy.
+  # Node-as-CVM only; refused with kata.enabled. See docs/static-allowlist.md.
+  staticAllowlist: false
+  # -- Hex canonical SHA-256 the sealed seed must have. CDS refuses to start
+  # when the document it loaded hashes to anything else, which is how a
+  # node-as-CVM install proves the node image baked the policy it was
+  # installed with. `c8s install --static-allowlist` sets it from
+  # --bootstrap-allowlist.
+  staticAllowlistDigest: ""
+  # -- Absolute host path of the allowlist seed file to mount into CDS instead
+  # of the chart-rendered ConfigMap seed. On node-as-CVM this is how the seed
+  # comes from the measured dm-verity node image (bake the document at
+  # /etc/c8s/static-allowlist.json and point this at it), putting the policy
+  # content inside the node launch measurement. Empty = use the ConfigMap seed.
+  allowlistSeedHostPath: ""
   earIssuer: cds
   expectedIssuer: ""
   jwtClockSkew: 30

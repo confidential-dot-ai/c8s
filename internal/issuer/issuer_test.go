@@ -1,11 +1,14 @@
 package issuer_test
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -291,5 +294,35 @@ func TestIssueDefaultTTL(t *testing.T) {
 	got := leaf.NotAfter.Sub(leaf.NotBefore)
 	if got < issuer.DefaultLeafTTL-time.Minute || got > issuer.DefaultLeafTTL+time.Minute {
 		t.Errorf("default TTL %v not ~%v", got, issuer.DefaultLeafTTL)
+	}
+}
+
+func TestNewCAWithExtensions(t *testing.T) {
+	ext := pkix.Extension{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 3}, Value: []byte{0x30, 0x00}}
+	var seenKey crypto.PublicKey
+	ca, err := issuer.NewCAWithExtensions("c", time.Hour, elliptic.P384(), func(pub crypto.PublicKey) ([]pkix.Extension, error) {
+		seenKey = pub
+		return []pkix.Extension{ext}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewCAWithExtensions: %v", err)
+	}
+	if !ca.Key.PublicKey.Equal(seenKey.(*ecdsa.PublicKey)) {
+		t.Fatal("extension callback saw a different key than the CA's")
+	}
+	var found bool
+	for _, e := range ca.Cert.Extensions {
+		if e.Id.Equal(ext.Id) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("callback extension missing from the CA certificate")
+	}
+
+	if _, err := issuer.NewCAWithExtensions("c", time.Hour, elliptic.P384(), func(crypto.PublicKey) ([]pkix.Extension, error) {
+		return nil, fmt.Errorf("no evidence")
+	}); err == nil {
+		t.Fatal("a failing extension callback must abort CA creation")
 	}
 }

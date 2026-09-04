@@ -24,7 +24,7 @@ var (
 // the verdict policies, then applyInitDataNote on the final verdict.
 func finalOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, plan *verifyPlan) Outcome {
 	oc := newOutcome(cfg, ev, result, nil, plan)
-	applyVerdictPolicies(&oc, cfg, ev, nil, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
+	applyVerdictPolicies(&oc, cfg, ev, nil, operatorKeysReport{}, &verifyPlan{}, measurementsReport{}, staticCAReport{})
 	applyInitDataNote(&oc, result, plan)
 	return oc
 }
@@ -74,7 +74,7 @@ func TestVerifyEvidence_InitDataPinMatch(t *testing.T) {
 	plan := mustPlan(t, cfg)
 
 	var out, errOut bytes.Buffer
-	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
+	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &out, &errOut)
 	if code != exitVerified {
 		t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
 	}
@@ -87,7 +87,7 @@ func TestVerifyEvidence_InitDataPinMatch(t *testing.T) {
 
 	jsonCfg := config{initDataHex: genoaInitDataPin, output: "json"}
 	var jout, jerr bytes.Buffer
-	if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, &jout, &jerr); code != exitVerified {
+	if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &jout, &jerr); code != exitVerified {
 		t.Fatalf("json exit = %d, want %d; output:\n%s%s", code, exitVerified, jout.String(), jerr.String())
 	}
 	var parsed map[string]any
@@ -149,7 +149,7 @@ func TestVerifyEvidence_InitDataNoteAbsentOnFailedVerdict(t *testing.T) {
 			jsonCfg := tc.cfg
 			jsonCfg.output = "json"
 			var jout, jerr bytes.Buffer
-			if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), tc.ev(t), nil, opKeys, measurementsReport{}, &jout, &jerr); code != exitFailed {
+			if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), tc.ev(t), nil, opKeys, measurementsReport{}, staticCAReport{}, &jout, &jerr); code != exitFailed {
 				t.Fatalf("json exit = %d, want %d; output:\n%s%s", code, exitFailed, jout.String(), jerr.String())
 			}
 			var parsed map[string]any
@@ -169,7 +169,7 @@ func TestVerifyEvidence_InitDataNoteAbsentOnFailedVerdict(t *testing.T) {
 			textCfg := tc.cfg
 			textCfg.output = "text"
 			var tout, terr bytes.Buffer
-			verifyEvidence(context.Background(), textCfg, mustPlan(t, textCfg), tc.ev(t), nil, opKeys, measurementsReport{}, &tout, &terr)
+			verifyEvidence(context.Background(), textCfg, mustPlan(t, textCfg), tc.ev(t), nil, opKeys, measurementsReport{}, staticCAReport{}, &tout, &terr)
 			if text := tout.String(); strings.Contains(text, "init-data:") || strings.Contains(text, "matches --init-data") {
 				t.Errorf("a failed verdict must render no init-data line:\n%s", text)
 			}
@@ -190,7 +190,7 @@ func TestVerifyEvidence_InitDataNoteRidesPartialVerdict(t *testing.T) {
 
 	jsonCfg := config{initDataHex: genoaInitDataPin, output: "json"}
 	var jout, jerr bytes.Buffer
-	if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), makeEv(t), nil, operatorKeysReport{}, measurementsReport{}, &jout, &jerr); code != exitPartial {
+	if code := verifyEvidence(context.Background(), jsonCfg, mustPlan(t, jsonCfg), makeEv(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &jout, &jerr); code != exitPartial {
 		t.Fatalf("json exit = %d, want %d; output:\n%s%s", code, exitPartial, jout.String(), jerr.String())
 	}
 	var parsed map[string]any
@@ -209,7 +209,7 @@ func TestVerifyEvidence_InitDataNoteRidesPartialVerdict(t *testing.T) {
 
 	textCfg := config{initDataHex: genoaInitDataPin, output: "text"}
 	var tout, terr bytes.Buffer
-	verifyEvidence(context.Background(), textCfg, mustPlan(t, textCfg), makeEv(t), nil, operatorKeysReport{}, measurementsReport{}, &tout, &terr)
+	verifyEvidence(context.Background(), textCfg, mustPlan(t, textCfg), makeEv(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &tout, &terr)
 	text := tout.String()
 	for _, want := range []string{"~ PARTIALLY VERIFIED", "init-data:    " + genoaInitDataPin, "matches --init-data"} {
 		if !strings.Contains(text, want) {
@@ -226,7 +226,7 @@ func TestVerifyEvidence_InitDataPinMismatchIsRefused(t *testing.T) {
 	plan := mustPlan(t, cfg)
 
 	var out, errOut bytes.Buffer
-	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
+	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &out, &errOut)
 	if code != exitFailed {
 		t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitFailed, out.String(), errOut.String())
 	}
@@ -247,7 +247,7 @@ func TestVerifyEvidence_InitDataUnpinnedIsLabelled(t *testing.T) {
 	plan := mustPlan(t, config{})
 
 	var out, errOut bytes.Buffer
-	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
+	code := verifyEvidence(context.Background(), cfg, plan, genoaFileEvidence(t), nil, operatorKeysReport{}, measurementsReport{}, staticCAReport{}, &out, &errOut)
 	if code != exitVerified {
 		t.Fatalf("exit = %d, want %d; output:\n%s", code, exitVerified, out.String())
 	}

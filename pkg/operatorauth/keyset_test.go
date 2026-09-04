@@ -65,7 +65,7 @@ func TestKeySetDigestEmptySetIsDefined(t *testing.T) {
 	if !bytes.Equal(got, want[:]) {
 		t.Fatalf("empty-set digest = %x, want SHA-256 of the domain %x", got, want)
 	}
-	// The empty set must stay distinct from the unset config-claims sentinel.
+	// The empty set must stay distinct from an all-zero "unset" value.
 	if bytes.Equal(got, make([]byte, KeySetDigestSize)) {
 		t.Fatal("empty-set digest collides with the all-zero unset sentinel")
 	}

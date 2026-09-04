@@ -3,6 +3,7 @@ package cds
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
@@ -182,5 +183,69 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
 	if err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
+	}
+}
+
+// A static seed REPLACES the store: entries that predate it (a persistent DB
+// from a wider policy) must not survive into the sealed set.
+func TestSeedStoreStatic_ReplacesExistingEntries(t *testing.T) {
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if err := store.Add(digest(t, digestB), "ghcr.io/x/stale:v0"); err != nil {
+		t.Fatalf("pre-populate store: %v", err)
+	}
+
+	path := writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	if err := seedStoreStatic(&store, path); err != nil {
+		t.Fatalf("seedStoreStatic: %v", err)
+	}
+
+	_, got, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("sealed store holds %d digests, want exactly the seed: %v", len(got), got)
+	}
+	if got[digest(t, digestA)] != "ghcr.io/x/cds:v1" {
+		t.Errorf("digestA image = %q, want ghcr.io/x/cds:v1", got[digest(t, digestA)])
+	}
+}
+
+func TestSeedStoreStatic_FailsClosedOnBadSeed(t *testing.T) {
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if err := seedStoreStatic(&store, writeSeed(t, `{not json`)); err == nil {
+		t.Fatal("seedStoreStatic accepted an unparseable seed")
+	}
+	if err := seedStoreStatic(&store, "/does/not/exist.json"); err == nil {
+		t.Fatal("seedStoreStatic accepted a missing seed file")
+	}
+}
+
+func TestCheckExpectedSealedDigest(t *testing.T) {
+	got := make([]byte, 32)
+	got[0] = 0xab
+	if err := checkExpectedSealedDigest("", got); err != nil {
+		t.Fatalf("no expectation must pass: %v", err)
+	}
+	if err := checkExpectedSealedDigest("ab"+strings.Repeat("00", 31), got); err != nil {
+		t.Fatalf("matching expectation: %v", err)
+	}
+	if err := checkExpectedSealedDigest("cd"+strings.Repeat("00", 31), got); err == nil {
+		t.Fatal("a different expected digest must refuse startup")
+	}
+	if err := checkExpectedSealedDigest("zz", got); err == nil {
+		t.Fatal("a malformed expected digest must refuse startup")
+	}
+	if _, err := parseSealedDigest(strings.Repeat("ab", 31)); err == nil {
+		t.Fatal("a 31-byte digest must be refused")
 	}
 }

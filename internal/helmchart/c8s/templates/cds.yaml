@@ -8,7 +8,19 @@ metadata:
     app.kubernetes.io/component: cds
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
-{{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+{{- if and .Values.cds.staticAllowlist .Values.cds.operatorKeys }}
+{{- fail "cds.staticAllowlist and cds.operatorKeys are mutually exclusive: a sealed allowlist has no write path" }}
+{{- end }}
+{{- if and .Values.cds.staticAllowlist .Values.kata.enabled }}
+{{- fail "cds.staticAllowlist requires node-as-CVM (kata.enabled=false): the seal rests on a policy baked into the measured node image, which a shared kata guest image cannot carry" }}
+{{- end }}
+{{- if and .Values.cds.staticAllowlist (not (or (eq (include "c8s.serveAllowlistSeed" .) "true") .Values.cds.allowlistSeedHostPath)) }}
+{{- fail "cds.staticAllowlist needs an allowlist seed: the chart seed (nriImagePolicy / cvmMode=node installs) or cds.allowlistSeedHostPath" }}
+{{- end }}
+{{- if and .Values.cds.allowlistSeedHostPath .Values.kata.enabled }}
+{{- fail "cds.allowlistSeedHostPath needs the CDS filesystem to see the host: it is the node-as-CVM path (the node image is the measured root); under kata the guest cannot mount a host file" }}
+{{- end }}
+{{- if and (eq (include "c8s.serveAllowlistSeed" .) "true") (not .Values.cds.allowlistSeedHostPath) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -145,8 +157,14 @@ spec:
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
             - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+            {{- if or (eq (include "c8s.serveAllowlistSeed" .) "true") .Values.cds.allowlistSeedHostPath }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
+            {{- end }}
+            {{- if .Values.cds.staticAllowlist }}
+            - --static-allowlist
+            {{- with .Values.cds.staticAllowlistDigest }}
+            - --static-allowlist-digest={{ . }}
+            {{- end }}
             {{- end }}
             - --ear-issuer={{ .Values.cds.earIssuer }}
             {{- if .Values.cds.expectedIssuer }}
@@ -245,7 +263,11 @@ spec:
             - name: data
               mountPath: /data
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+            {{- if .Values.cds.allowlistSeedHostPath }}
+            - name: allowlist-seed
+              mountPath: /etc/cds/allowlist-seed.json
+              readOnly: true
+            {{- else if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - name: allowlist-seed
               mountPath: /etc/cds
               readOnly: true
@@ -282,7 +304,14 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
-        {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
+        {{- if .Values.cds.allowlistSeedHostPath }}
+        # Node-as-CVM: the seed comes from the measured dm-verity node image,
+        # so the policy content is inside the node launch measurement.
+        - name: allowlist-seed
+          hostPath:
+            path: {{ .Values.cds.allowlistSeedHostPath }}
+            type: File
+        {{- else if eq (include "c8s.serveAllowlistSeed" .) "true" }}
         - name: allowlist-seed
           configMap:
             name: {{ include "c8s.cdsName" . }}-allowlist-seed

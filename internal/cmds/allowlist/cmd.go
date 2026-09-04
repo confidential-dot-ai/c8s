@@ -102,6 +102,7 @@ allowlist").`,
 		newWorkloadCmd(o),
 		newLintCmd(o),
 		newInspectImageCmd(o),
+		newDigestCmd(o),
 	)
 	return cmd
 }

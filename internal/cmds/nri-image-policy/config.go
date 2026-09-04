@@ -66,6 +66,13 @@ type workloadClaimsConfig struct {
 type allowlistConfig struct {
 	AlwaysAllow map[string]string `yaml:"always_allow"`
 	Pull        pullConfig        `yaml:"pull"`
+	// StaticPath names a c8s.allowlist/v1 document on the measured root that
+	// is the node's entire policy: floor and workload entries, unioned with
+	// always_allow, never refreshed. A sealed node image sets it (docs/
+	// static-allowlist.md), which is what lets the launch measurement imply
+	// the policy — nothing pulled at runtime can widen it. Mutually exclusive
+	// with pull.url.
+	StaticPath string `yaml:"static_path"`
 }
 
 // pullConfig configures the CDS polling source.
@@ -205,9 +212,12 @@ func (c *config) NormalizedPlatform() string {
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
+// StaticEnabled reports whether the policy is a baked document.
+func (c *config) StaticEnabled() bool { return c.Allowlist.StaticPath != "" }
+
 // AllowlistEnabled reports whether any digest-based enforcement is active.
 func (c *config) AllowlistEnabled() bool {
-	return c.PullEnabled() || len(c.Allowlist.AlwaysAllow) > 0
+	return c.PullEnabled() || c.StaticEnabled() || len(c.Allowlist.AlwaysAllow) > 0
 }
 
 // Validate checks the configuration for errors.
@@ -218,6 +228,12 @@ func (c *config) Validate() error {
 	// the symptom.
 	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
+	}
+	if c.StaticEnabled() && c.PullEnabled() {
+		return fmt.Errorf("allowlist.static_path and allowlist.pull.url are mutually exclusive: a sealed node enforces exactly its baked policy, so nothing may be pulled")
+	}
+	if c.StaticEnabled() && c.WorkloadClaims.SocketDir != "" && c.Allowlist.Pull.AttestationApiURL == "" {
+		return fmt.Errorf("allowlist.pull.attestation_api_url must be set: the admission inventory serves RA-TLS to CDS even when the policy is static")
 	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
 		return fmt.Errorf("allowlist.always_allow must be non-empty when pull is configured (cold-boot baseline)")

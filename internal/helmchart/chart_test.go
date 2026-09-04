@@ -4666,6 +4666,19 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 	}, args...)...)
 }
 
+// cds.staticAllowlist is a node-as-CVM seal: the policy lives on the measured
+// node root. Under kata the CDS guest is shared with every other pod and the
+// launch-time binding is not wired yet (c8s#530), so the render refuses it.
+func TestChartKataRejectsStaticAllowlist(t *testing.T) {
+	out, err := helmTemplateKata(t, "--set", "cds.staticAllowlist=true")
+	if err == nil {
+		t.Fatalf("kata.enabled with cds.staticAllowlist rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "cds.staticAllowlist requires node-as-CVM") {
+		t.Fatalf("render failed for another reason: %v\n%s", err, out)
+	}
+}
+
 // Contract with the `c8s uninstall` running-pod guard (cmd/c8s/uninstall.go,
 // filterKataPods): it skips the release's own kata pods by release namespace +
 // app.kubernetes.io/instance, so every kata-pinned pod template must carry that

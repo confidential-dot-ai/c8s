@@ -28,6 +28,8 @@ func renderNodeImagePolicy(t *testing.T) string {
 		"@CDS_DIGEST@": digest('b'),
 		"@CDS_IMAGE@":  "ghcr.io/confidential-dot-ai/cds@" + digest('b'),
 		"@PLATFORM@":   "snp",
+		// Unsealed build: no baked policy, pull from the node-local CDS.
+		"@STATIC_ALLOWLIST_PATH@": "",
 	}
 	out := string(body)
 	for k, v := range repl {
@@ -110,5 +112,38 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		if !idx.AdmitsDigest(d) {
 			t.Errorf("floor key %q is not an admissible digest", d)
 		}
+	}
+}
+
+// A sealed build renders the same template with the policy path set and the
+// pull URL blanked; that shape must load, be static, and pull nothing.
+func TestNodeImageBootConfig_SealedShapeIsStatic(t *testing.T) {
+	tmpl, err := os.ReadFile("../../../node-guest-image/c8s/image-policy.yaml.in")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dg := func(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
+	out := string(tmpl)
+	for k, v := range map[string]string{
+		"@NRI_DIGEST@":            dg('a'),
+		"@NRI_IMAGE@":             "ghcr.io/confidential-dot-ai/nri-image-policy@" + dg('a'),
+		"@CDS_DIGEST@":            dg('b'),
+		"@CDS_IMAGE@":             "ghcr.io/confidential-dot-ai/cds@" + dg('b'),
+		"@PLATFORM@":              "tdx",
+		"@STATIC_ALLOWLIST_PATH@": "/etc/c8s/static-allowlist.json",
+		// mkosi.sync blanks the pull URL on a sealed build.
+		`url: "https://127.0.0.1:30808"`: `url: ""`,
+	} {
+		out = strings.ReplaceAll(out, k, v)
+	}
+	cfg, err := parseConfig([]byte(out))
+	if err != nil {
+		t.Fatalf("sealed boot config does not load: %v", err)
+	}
+	if !cfg.StaticEnabled() || cfg.PullEnabled() {
+		t.Fatalf("sealed shape: static=%v pull=%v, want static and no pull", cfg.StaticEnabled(), cfg.PullEnabled())
+	}
+	if cfg.Allowlist.Pull.AttestationApiURL == "" {
+		t.Fatal("the inventory endpoint still needs attestation_api_url on a sealed node")
 	}
 }

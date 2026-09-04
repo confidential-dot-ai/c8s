@@ -14,6 +14,10 @@ build/
 /nri-image-policy
 /ratls-mesh
 
+# Per-deployment sealed allowlist baked into the node image (see
+# node-guest-image/c8s/mkosi.sync and docs/static-allowlist.md).
+node-guest-image/c8s/static-allowlist.json
+
 # Go workspace sum
 go.work.sum
 
