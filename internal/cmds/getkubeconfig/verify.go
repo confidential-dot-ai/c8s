@@ -1,11 +1,5 @@
-// Package getkubeconfig implements the operator-side client (B4 client) that
-// obtains a kube credential from a measured CVM: it attests the node,
-// confirms the full measured identity — on TDX the image tuple (MRTD,
-// RTMR[1], RTMR[2]) plus the RTMR[3] chain seeded by the operator's key and
-// extended by the expected workload images; on SEV-SNP the pinned per-SMP
-// launch digest plus the operator-key HOSTDATA binding — then exchanges a CSR
-// for a short-lived kube client cert over the cred-release endpoint and
-// assembles a kubeconfig.
+// Package getkubeconfig obtains a kube credential after verifying the node's
+// image, direct or launchdata operator binding, and expected workload measurements.
 package getkubeconfig
 
 import (
@@ -24,6 +18,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
+	"github.com/confidential-dot-ai/c8s/internal/launchdata"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
@@ -44,7 +39,7 @@ type platformVerifier interface {
 }
 
 // measuredPolicy is the trust gate for one manifest: the pinned image, the
-// operator key the node must have been launched for, and the workload images
+// launch anchor the node must have been launched for, and the workload images
 // its measurer was expected to extend, in first-extend order. The image
 // identity carries its own family, so nothing here branches on a platform
 // string.
@@ -52,6 +47,11 @@ type measuredPolicy struct {
 	identity        runtimemeasure.ImageIdentity
 	operatorPubPEM  []byte
 	workloadDigests []string
+
+	// launchData, when set, is the launchdata manifest the node was launched
+	// with. Its commitment replaces the operator key as the launch binding:
+	// SNP HOSTDATA = SHA-256(manifest), TDX MRCONFIGID = SHA-384(manifest).
+	launchData []byte
 }
 
 // platform is the bare-metal tag of the manifest's family. Cloud overlays are
@@ -61,29 +61,8 @@ func (exp measuredPolicy) platform() teetypes.PlatformType {
 	return exp.identity.Family().DefaultPlatform()
 }
 
-// policyFor builds the trust gate from the operator's inputs: the image
-// manifest (loaded atomically, its shape naming the platform), the operator
-// public key PEM (the exact bytes the initrd hashed, so it must not be
-// re-encoded), and the digest-pinned workload images the node's measurer is
-// expected to have extended, in first-extend order. Tag references are
-// rejected — only a canonical digest identifies an image.
-func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
-	identity, err := runtimemeasure.LoadImageManifest(manifestPath)
-	if err != nil {
-		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", err)
-	}
-	if p := identity.Family().DefaultPlatform(); p == "" {
-		return measuredPolicy{}, fmt.Errorf("--image-manifest: %s carries an image pin this flow has no gate for (family %q)", manifestPath, identity.Family())
-	}
-	digests, err := workloadChain(identity.Family(), workloadImages)
-	if err != nil {
-		return measuredPolicy{}, err
-	}
-	return measuredPolicy{identity: identity, operatorPubPEM: operatorPubPEM, workloadDigests: digests}, nil
-}
-
 // workloadChain canonicalizes --workload-image into the deduped, ordered
-// digest set VerifyBinding folds onto the operator-key seed.
+// digest set the RTMR[3] chain folds onto its seed.
 func workloadChain(family teetypes.Family, workloadImages []string) ([]string, error) {
 	if len(workloadImages) == 0 {
 		return nil, nil
@@ -115,18 +94,53 @@ func workloadChain(family teetypes.Family, workloadImages []string) ([]string, e
 
 // checkIdentity checks both halves of the measured identity against the claims
 // attestation-go extracted from the signature-verified quote: the pinned image
-// booted, and the node was launched for the operator's key and measured
-// exactly these workloads. runtimemeasure resolves which field carries the
-// binding (RTMR[3] on TDX, HOSTDATA on SNP) and how wide it is.
+// booted, and the node was launched for the expected anchor and measured
+// exactly these workloads.
 //
-// workloadDigests is empty on SNP — it has no runtime-extend register, and
-// workloadChain refuses --workload-image there — so the binding checked is the
-// launch-committed HOSTDATA alone.
+// Without --launch-data the anchor is the operator key, and runtimemeasure
+// resolves which field carries the binding (RTMR[3] on TDX, HOSTDATA on SNP)
+// and how wide it is. workloadDigests is empty on SNP — it has no
+// runtime-extend register, and workloadChain refuses --workload-image there —
+// so the binding checked is the launch-committed HOSTDATA alone.
 func (exp measuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
 	if err := exp.identity.Verify(res); err != nil {
 		return err
 	}
+	if exp.launchData != nil {
+		return exp.checkLaunchDataBinding(res)
+	}
 	return runtimemeasure.VerifyBinding(res, exp.operatorPubPEM, exp.workloadDigests)
+}
+
+// checkLaunchDataBinding enforces the launchdata commitment in place of the
+// operator-key binding.
+//
+// On SNP the commitment is HOSTDATA = SHA-256(manifest), which is exactly the
+// anchor shape [runtimemeasure.VerifyBinding] derives, so the manifest bytes
+// are the anchor. On TDX the commitment is the full 48-byte MRCONFIGID =
+// SHA-384(manifest) and nothing seeds RTMR[3], so the chain carries the
+// workload extends alone.
+func (exp measuredPolicy) checkLaunchDataBinding(res *teetypes.VerificationResult) error {
+	if exp.identity.Family() != teetypes.FamilyTDX {
+		return runtimemeasure.VerifyBinding(res, exp.launchData, exp.workloadDigests)
+	}
+	want := launchdata.LaunchDataMRConfigID(exp.launchData)
+	got := []byte(res.Claims.InitData)
+	if len(got) != runtimemeasure.Size {
+		return fmt.Errorf("MRCONFIGID (the launchdata binding) is %d bytes, want %d", len(got), runtimemeasure.Size)
+	}
+	if !bytes.Equal(got, want[:]) {
+		return fmt.Errorf("MRCONFIGID mismatch: node reports %x, launchdata implies %x (the TD was not launched with this bundle)", got, want)
+	}
+	chain := runtimemeasure.FromDigestsSeeded(runtimemeasure.Zero, exp.workloadDigests)
+	reg, err := res.Claims.RTMR(3)
+	if err != nil {
+		return fmt.Errorf("RTMR[3] (workload chain): %w", err)
+	}
+	if !bytes.Equal(reg, chain[:]) {
+		return fmt.Errorf("RTMR[3] mismatch (workload chain): node reports %x, expected %x", reg, chain)
+	}
+	return nil
 }
 
 // verifyEvidence verifies an evidence envelope with attestation-go (HW chain +
@@ -281,7 +295,11 @@ func (exp measuredPolicy) verifySNPEvidence(env teetypes.AttestationEvidence, ex
 }
 
 func (exp measuredPolicy) verificationParams(reportData []byte) localverify.Params {
-	hostData := runtimemeasure.HostData(exp.operatorPubPEM)
+	anchor := exp.operatorPubPEM
+	if exp.launchData != nil {
+		anchor = exp.launchData
+	}
+	hostData := runtimemeasure.HostData(anchor)
 	variants := exp.identity.LaunchDigests()
 	measurements := make([][]byte, 0, len(variants))
 	for _, v := range variants {

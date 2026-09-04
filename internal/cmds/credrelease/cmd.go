@@ -14,9 +14,8 @@ const (
 
 // NewCmd builds the `cred-release` subcommand: the in-guest service that
 // issues an operator a short-lived kube client cert, gated on possession of
-// the operator key bound into the launch identity (TDX RTMR[3] / SNP
-// HOSTDATA). Baked as a systemd unit in the c8s node image; not run by hand
-// in normal operation.
+// the operator key bound into the launch identity. The c8s node image runs
+// it as a systemd unit.
 func NewCmd() *cobra.Command {
 	var cfg Config
 	cmd := &cobra.Command{
@@ -25,7 +24,10 @@ func NewCmd() *cobra.Command {
 		Long: "cred-release serves an RA-TLS endpoint that issues a short-lived\n" +
 			"kube client certificate to a caller who proves possession of the\n" +
 			"operator key whose public half was bound into the launch identity\n" +
-			"(TDX: RTMR[3]; SNP: HOSTDATA) at launch.\n" +
+			"at launch. With a launchdata directory, the bundle is verified against\n" +
+			"TDX MRCONFIGID or SNP HOSTDATA. With an empty --launch-data-dir or an\n" +
+			"absent directory, the opkeydata key is verified against TDX RTMR[3]\n" +
+			"or SNP HOSTDATA.\n" +
 			"It gives an external operator console-free, non-TOFU, RBAC-backed\n" +
 			"cluster-admin access with no pre-shared secret and no trust in the\n" +
 			"host. The cert is signed by the cluster's client CA and the\n" +
@@ -44,6 +46,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ListenAddr, "listen", ":8443", "HTTPS (RA-TLS) bind address")
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (RA-TLS serving quote; on SNP also the HOSTDATA self-verify)")
 	f.StringVar(&cfg.Platform, "platform", "", "TEE platform: tdx or snp (required)")
+	f.StringVar(&cfg.LaunchDataDir, "launch-data-dir", "/run/confai/launchdata", "directory where the boot verifier stages the launchdata ISO contents. When it exists, the operator key and its binding come from the bundle commitment. An empty value (--launch-data-dir=) or an absent directory selects the opkeydata single-key flow")
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")

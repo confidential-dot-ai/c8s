@@ -8,10 +8,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewCmd builds the `get-kubeconfig` subcommand: the operator-side client that
-// obtains an admin kubeconfig from a measured TDX CVM by attesting the
-// node, confirming it was launched to trust the operator's key (RTMR[3]), and
-// exchanging a CSR for a signed client cert over the cred-release endpoint.
+// NewCmd builds the operator-side command that attests a node and obtains a kubeconfig.
 func NewCmd() *cobra.Command {
 	var (
 		cfg  Config
@@ -21,14 +18,17 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get-kubeconfig",
 		Short: "Attest a c8s CVM and obtain an operator kubeconfig via the measured image + operator-key gate",
-		Long: "get-kubeconfig attests a measured c8s CVM and enforces its full\n" +
-			"measured identity. The build-artifact manifest selects the platform:\n" +
-			"on TDX the image tuple (MRTD, RTMR[1], RTMR[2]) plus the RTMR[3] chain\n" +
-			"seeded by the operator's key and extended by the expected workload\n" +
-			"images; on SEV-SNP the pinned per-SMP launch digest plus the\n" +
-			"operator-key HOSTDATA binding. It then exchanges a CSR for a\n" +
-			"short-lived kube client cert over the cred-release endpoint and writes\n" +
-			"a kubeconfig. Verification runs in-process (attestation-go).",
+		Long: "get-kubeconfig attests a c8s CVM, verifies its image and operator\n" +
+			"binding, and obtains a short-lived kube client certificate over RA-TLS.\n" +
+			"--image-manifest selects the platform and pins the image: the full TDX\n" +
+			"tuple or the SEV-SNP per-SMP launch measurements.\n" +
+			"With --launch-data, the ISO contents directory is bound through TDX\n" +
+			"MRCONFIGID or SNP HOSTDATA; its operator-pubkey must match the public\n" +
+			"half of --operator-key. Otherwise, that public key is bound directly\n" +
+			"through TDX RTMR[3] or SNP HOSTDATA. --operator-key and --image-manifest\n" +
+			"are required in both modes. On TDX, --workload-image adds expected\n" +
+			"RTMR[3] workload extends, starting from zero for launchdata or from\n" +
+			"the operator-key seed otherwise. The resulting kubeconfig is written to --out.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cfg.OperatorKeyPath == "" || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
 				return fmt.Errorf("--operator-key, --image-manifest and --out are required")
@@ -70,8 +70,9 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.AttestURL, "attest-url", "", "attestation-api /attest URL (overrides --node)")
 	f.StringVar(&cfg.ReleaseBaseURL, "release-url", "", "cred-release base URL (overrides --node)")
 	f.StringVar(&cfg.APIServerURL, "apiserver-url", "", "apiserver URL for the kubeconfig (overrides --node)")
-	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM (its public half is bound into RTMR[3]) (required)")
+	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM used to prove possession of the launch-bound key (required in both binding modes)")
 	f.StringVar(&cfg.ImageManifestPath, "image-manifest", "", "an explicitly selected, provenanced build-artifact manifest carrying the expected guest image's measured identity — TDX: mrtd/rtmr1/rtmr2; SNP: snp_variants. Its shape selects the platform, and the gate pins every value (required)")
+	f.StringVar(&cfg.LaunchDataDir, "launch-data", "", "directory holding the node's launchdata ISO contents. The binding gate then expects the launchdata commitment (SNP HOSTDATA; TDX MRCONFIGID) instead of the bare operator key, and --operator-key must match the dir's operator-pubkey file. Omit or leave empty to use the bare operator-key binding")
 	f.StringArrayVar(&cfg.WorkloadImages, "workload-image", nil, "digest-pinned image ref (\"sha256:<hex>\" or \"name@sha256:<hex>\"; tags rejected) the node's measurer is expected to have extended into RTMR[3]; repeatable, in first-extend order. Omit if the node runs no measured workloads. TDX only — SNP has no runtime-extend register")
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")
