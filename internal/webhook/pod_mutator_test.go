@@ -119,11 +119,12 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 }
 
 // TestMutatePodCertSidecarCarriesHostIPEnv proves the injected c8s-cert sidecar
-// defines HOST_IP from status.hostIP. Under cvmMode=node the chart passes the
-// operator --attestation-api-url=http://$(HOST_IP):8400 verbatim, forwarded into
-// this sidecar's args; the kubelet expands $(HOST_IP) against the tenant pod's
-// own node so the sidecar reaches the node-baked host attestation-api wherever
-// it lands. The env is unconditional (harmless when the URL has no placeholder).
+// defines HOST_IP from status.hostIP. Under the node-image shape the chart passes
+// the operator --attestation-api-url=http://$(HOST_IP):8400 verbatim, forwarded
+// into this sidecar's args; the kubelet expands $(HOST_IP) against the tenant
+// pod's own node so the sidecar reaches the image-baked host attestation-api
+// wherever it lands. The env is unconditional (harmless when the URL has no
+// placeholder).
 func TestMutatePodCertSidecarCarriesHostIPEnv(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},

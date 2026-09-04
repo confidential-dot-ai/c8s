@@ -1,0 +1,7 @@
+# Host scripts each shape chart's templates reference via .Files.Get. Consumed
+# by sync.sh (dev loop) and embed.go (`c8s install`). One line per shape:
+#   <shape>: <script>...
+pod: containerd-prep.sh pull-and-configure.sh kata-qemu-scratch-wrapper.sh
+node-cloud: containerd-prep.sh uninstall.sh volumed-teardown.sh
+node-metal: containerd-prep.sh uninstall.sh volumed-teardown.sh
+node-image: volumed-teardown.sh

@@ -13,7 +13,7 @@
 # The TEE is replaced at exactly one point: evidence generation. A
 # mock-attestation deployment (test/mock-attestation) serves synthetic SNP
 # reports — launch digest all-zero — on the node IP :8400, the address
-# cvmMode=node consumers dial for the node-baked api. Every stack component
+# node-image consumers dial for the image-baked api. Every stack component
 # that delegates verification to the attestation-api (get-cert, CDS, the
 # mesh, the NRI plugin) works unchanged. In-process hardware verification
 # (`c8s verify`, the `c8s allowlist` CLI) cannot pass synthetic evidence, so
@@ -155,7 +155,7 @@ node_exec ctr -n k8s.io images pull "docker.io/library/$WORKLOAD_IMAGE" >/dev/nu
 # tls-lb's nginx is pulled at install time — after the floor scan — so its
 # chart-pinned digest is pulled by reference and seeded up front; otherwise
 # the plugin's enforce-existing check kills the front door's own container.
-TLSLB_NGINX_REF="$(helm show values internal/helmchart/c8s | python3 -c '
+TLSLB_NGINX_REF="$(helm show values internal/helmchart/node-image | python3 -c '
 import sys, yaml
 img = yaml.safe_load(sys.stdin)["tlsLb"]["nginx"]["image"]
 repo = img["repository"]
@@ -182,13 +182,21 @@ for line in open(sys.argv[1]):
     floor.setdefault(digest, ref)
 # Kept out of the floor on purpose: the admission test's unseen digest.
 floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
+# The node charts refuse to render without cds.image.digest (the NRI floor
+# pins CDS by digest); with --resolve-digests=false the CLI pins nothing, so
+# the values file carries the loaded CDS image's store digest.
+cds_digest = next(d for d, r in floor.items() if r.split("/")[-1].startswith("cds:"))
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
+        "cds": {"image": {"digest": cds_digest}},
         "nriImagePolicy": {
-            # The kind node bakes no plugin or boot config, so the chart's
-            # installer stays off: its baked form would find no config to
-            # patch. The full installer is applied out-of-band below.
-            "enabled": False,
+            # The kind node bakes no plugin or boot config, so the node-image
+            # chart's pins installer (which patches that baked config) is
+            # scheduled off the node: it would crash-loop and hold --wait
+            # open. The full installer is applied out-of-band below.
+            "nodeAffinity": {
+                "excludeLabels": [{"key": "kubernetes.io/os", "values": ["linux"]}],
+            },
             "bootstrapAllowlist": {"digests": floor},
         },
     }, f)
@@ -212,7 +220,7 @@ openssl ecparam -genkey -name prime256v1 -noout -out "$WORKDIR/operator.key" 2>/
 openssl ec -in "$WORKDIR/operator.key" -pubout -out "$WORKDIR/operator-pub.pem" 2>/dev/null
 
 log "c8s install"
-./build/c8s install --namespace "$NS" --cvm-mode=node --hardware-platform=sev-snp \
+./build/c8s install --namespace "$NS" --cvm-mode=node-image --hardware-platform=sev-snp \
     --single-node --resolve-digests=false --image-tag="$IMAGE_TAG" \
     --operator-keys "$WORKDIR/operator-pub.pem" \
     --measurements "$MOCK_MEASUREMENT" \
@@ -246,11 +254,11 @@ cds_write() {
 # --- NRI image-policy plugin ---
 
 log "Installing the NRI image-policy plugin"
-# Under --cvm-mode=node the chart renders the installer only in its baked
-# pins-patching form, and the install above leaves even that off (values.yaml):
-# the kind node bakes no plugin for it to pin. The harness renders the full
-# installer from the chart source and applies it out-of-band — same installer,
-# same containerd patch, same plugin.
+# The node-image chart renders only the pins installer (it patches the config
+# the node image bakes), and the install above schedules even that off the
+# kind node (values.yaml): kind bakes no plugin to pin. The harness renders
+# the full installer from the node-metal chart and applies it out-of-band —
+# same installer, same containerd patch, same plugin.
 NRI_STORE_DIGEST="$(awk -F'\t' '$2 ~ /nri-image-policy:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 [ -n "$NRI_STORE_DIGEST" ] && [ -n "$CDS_STORE_DIGEST" ] || fail "loaded-image digests missing from the floor scan"
@@ -258,21 +266,24 @@ CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/flo
 # live server version, not helm's compiled-in default.
 KUBE_VERSION="$(kubectl version -o json \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["serverVersion"]["gitVersion"])')"
-helm template c8s internal/helmchart/c8s -n "$NS" \
+# sync.sh vendors the shared c8s-lib into the shape dirs (gitignored
+# otherwise); --set-json drops the values.yaml scheduling exclusion so the
+# installer does land on the node here.
+bash internal/helmchart/sync.sh
+helm template c8s internal/helmchart/node-metal -n "$NS" \
     --kube-version "$KUBE_VERSION" \
     --set-string image.tag="$IMAGE_TAG" \
-    --set-string attestationApi.cvmMode=node \
-    --set attestationApi.enabled=false \
-    --set nriImagePolicy.enabled=true \
+    --set-string ratlsMesh.image.tag="$IMAGE_TAG" \
+    --set-string attestationApi.image.tag="$IMAGE_TAG" \
     --set-string nriImagePolicy.image.tag="$IMAGE_TAG" \
     --set-string nriImagePolicy.image.digest="$NRI_STORE_DIGEST" \
     --set-string cds.image.digest="$CDS_STORE_DIGEST" \
     --set-string "cds.measurements[0]=$MOCK_MEASUREMENT" \
     --set tlsLb.enabled=false \
     --set volumed.enabled=false \
-    --set ratlsMesh.enabled=false \
+    --set-json 'nriImagePolicy.nodeAffinity.excludeLabels=[]' \
     -f "$WORKDIR/values.yaml" \
-    --show-only templates/nri-image-policy-installer-daemonset.yaml > "$WORKDIR/nri-installer.yaml" \
+    --show-only templates/nri-installer.yaml > "$WORKDIR/nri-installer.yaml" \
     || fail "could not render the NRI installer DaemonSet"
 kubectl apply -f "$WORKDIR/nri-installer.yaml"
 # The installer patches the node's containerd config and restarts it; the
@@ -660,7 +671,7 @@ log "Workload adoption"
 kubectl apply -f test/integration/cluster/manifests/adopt-me.yaml
 kubectl -n adopted wait --for=condition=Available deploy/web --timeout=120s \
     || fail "adoption fixture never became Available"
-./build/c8s install --namespace "$NS" --cvm-mode=node --hardware-platform=sev-snp \
+./build/c8s install --namespace "$NS" --cvm-mode=node-image --hardware-platform=sev-snp \
     --single-node --resolve-digests=false --image-tag="$IMAGE_TAG" \
     --operator-keys "$WORKDIR/operator-pub.pem" \
     --measurements "$MOCK_MEASUREMENT" \

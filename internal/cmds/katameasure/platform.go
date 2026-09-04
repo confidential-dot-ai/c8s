@@ -21,7 +21,7 @@ const dropInName = "50-c8s.toml"
 var kvmTDXParam = "/sys/module/kvm_intel/parameters/tdx"
 
 // shimPlatform maps the kata shims c8s configures (c8s.kataShimName in
-// internal/helmchart/c8s/templates/_helpers.tpl) to --platform values.
+// internal/helmchart/lib/templates/_helpers.tpl) to --platform values.
 var shimPlatform = map[string]string{
 	"qemu-snp":            platformSNP,
 	"qemu-nvidia-gpu-snp": platformSNP,

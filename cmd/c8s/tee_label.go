@@ -170,7 +170,7 @@ func planTEELabels(tree map[string]any, hardwarePlatform string) (teeLabelPlan, 
 			otherKey:     snpCapabilityNodeLabel,
 			nodeSelector: nodeSelector,
 		}, true, nil
-	default: // sev-snp — appendCvmModeInstallArgs already rejected anything else
+	default: // sev-snp — resolveShape already rejected anything else
 		sel, _ := nestedMap(tree, "kata", "snpNodeSelector")
 		key, value, ok := singleLabelPair(sel)
 		if !ok {

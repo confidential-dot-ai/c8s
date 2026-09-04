@@ -1,0 +1,11 @@
+{{- define "c8s-lib.volumed" -}}
+{{ include "c8s-lib.volumedDaemonSet" . }}
+---
+{{ include "c8s-lib.volumedUninstallHook" . }}
+{{- end }}
+
+{{/* volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
+   which the distroless operator image cannot. */}}
+{{- define "c8s-lib.volumedImage" -}}
+{{ include "c8s-lib.common.image" .Values.volumed.image }}
+{{- end -}}

@@ -154,7 +154,7 @@ echo "==> attestation-service: ${BIN_DIR}/attestation-service ($(stat -c '%s' "$
 # KATA_VERSION is kept only to stamp the bake marker below. The
 # authoritative kata pin for the build lives in scripts/build.sh (the
 # osbuilder source tag) and must stay in lockstep with
-# internal/helmchart/c8s/values.yaml (the kata-deploy version) — a
+# internal/helmchart/pod/values.yaml (the kata-deploy version) — a
 # host/guest version skew turns every kata RPC into a compatibility
 # gamble.
 KATA_VERSION="${KATA_VERSION:-3.30.0}"
@@ -292,7 +292,7 @@ echo "    c8s-operator: ${C8S_OPERATOR_DIGEST}"
 
 # tls-lb's nginx digest is the chart's pin, not a registry lookup: the seed
 # must cover exactly what the chart deploys.
-TLS_LB_NGINX_DIGEST="${TLS_LB_NGINX_DIGEST:-$(yq '.tlsLb.nginx.image.digest' "${C8S_DIR}/internal/helmchart/c8s/values.yaml")}"
+TLS_LB_NGINX_DIGEST="${TLS_LB_NGINX_DIGEST:-$(yq '.tlsLb.nginx.image.digest' "${C8S_DIR}/internal/helmchart/pod/values.yaml")}"
 [[ "${TLS_LB_NGINX_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]] || {
     echo "FATAL: tls-lb nginx digest '${TLS_LB_NGINX_DIGEST}' is not a sha256 pin — check .tlsLb.nginx.image.digest in the chart values" >&2
     exit 1

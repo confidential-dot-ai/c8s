@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"maps"
+
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -47,8 +49,8 @@ var (
 	uninstallDeleteNamespace bool
 )
 
-// kataRuntimeClassNames are the RuntimeClass objects the chart renders under
-// kata.enabled — a fixed contract with templates/kata.yaml (and, there, with
+// kataRuntimeClassNames are the RuntimeClass objects the pod chart renders —
+// a fixed contract with its templates/kata.yaml (and, there, with
 // kata-deploy's SHIMS_X86_64 and the kata-enforcement allowlist).
 // kata-qemu-snp-nvidia / kata-qemu-tdx-nvidia are the confidential-GPU classes
 // that ship with every kata install; listing them here keeps the running-pods
@@ -83,7 +85,7 @@ const kataRuntimeNodeLabel = "katacontainers.io/kata-runtime"
 
 // snpCapabilityNodeLabel is the c8s-owned SNP platform label the install
 // applies under --hardware-platform=sev-snp (the chart's kata.snpNodeSelector
-// default — keep in lockstep with internal/helmchart/c8s/values.yaml). The
+// default — keep in lockstep with internal/helmchart/pod/values.yaml). The
 // sweep removes only this exact key (plus tdxHostLabelKey, the TDX
 // counterpart the install applies under --hardware-platform=tdx): a custom
 // kata.snpNodeSelector (an NFD or provisioning-owned label) was never applied
@@ -97,12 +99,11 @@ const snpCapabilityNodeLabel = "confidential.ai/sev-snp"
 type kataUninstallConfig struct {
 	Enabled             bool
 	Distro              string
-	ContainerdConfigDir string // resolved absolute host dir (kata.distro)
+	ContainerdConfigDir string // resolved absolute host dir (distro)
 	GuestImageHostPath  string
-	// GuestImageNvidiaHostPath is the GPU guest-image dir (kata.gpu.guestImage.hostPath).
-	// The GPU stack ships with every kata install, so it is set for any kata
-	// release; empty only for a pre-GPU release (no kata.gpu block), where the
-	// sweep skips it.
+	// GuestImageNvidiaHostPath is the GPU guest-image dir (kata.gpu.guestImage.hostPath),
+	// defaulting to the chart path so a release without the block still sweeps
+	// the standard leftover.
 	GuestImageNvidiaHostPath string
 	SweepImage               string
 	// NRI image-policy host paths (nriImagePolicy.*): where the chart's
@@ -225,7 +226,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 
 		var cfg kataUninstallConfig
 		if found {
-			cfg, err = kataConfigFromValues(values)
+			chartName, _, err := releaseChartName(ctx, uninstallRelease, uninstallNamespace)
+			if err != nil {
+				return err
+			}
+			cfg, err = kataConfigFromValues(chartName, values)
 			if err != nil {
 				return fmt.Errorf("read kata config from release values: %w", err)
 			}
@@ -354,19 +359,25 @@ func releaseValues(ctx context.Context, release, namespace string) (map[string]a
 // cluster exactly as the install detects it (the chart default k8s would
 // silently mis-target RKE2 hosts).
 func chartDefaultKataConfig(ctx context.Context) (kataUninstallConfig, error) {
-	dir, err := extractChart()
-	if err != nil {
-		return kataUninstallConfig{}, fmt.Errorf("extract embedded chart: %w", err)
-	}
-	defer os.RemoveAll(dir)
-
-	out, err := exec.CommandContext(ctx, "helm", "show", "values", filepath.Join(dir, helmchart.ChartRoot)).Output()
-	if err != nil {
-		return kataUninstallConfig{}, fmt.Errorf("helm show values: %w", err)
-	}
-	var tree map[string]any
-	if err := yaml.Unmarshal(out, &tree); err != nil {
-		return kataUninstallConfig{}, fmt.Errorf("parse chart values: %w", err)
+	// The merged defaults of the pod chart (kata paths) and a node chart (NRI
+	// paths, runtimeDir): no single shape chart carries both, and the sweep
+	// covers cross-shape leftovers.
+	merged := map[string]any{}
+	for _, shape := range []helmchart.Shape{helmchart.ShapePod, helmchart.ShapeNodeMetal} {
+		chartPath, tmpRoot, err := helmchart.ExtractChart(shape)
+		if err != nil {
+			return kataUninstallConfig{}, fmt.Errorf("extract embedded chart: %w", err)
+		}
+		out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
+		os.RemoveAll(tmpRoot)
+		if err != nil {
+			return kataUninstallConfig{}, fmt.Errorf("helm show values %s: %w", chartPath, err)
+		}
+		var tree map[string]any
+		if err := yaml.Unmarshal(out, &tree); err != nil {
+			return kataUninstallConfig{}, fmt.Errorf("parse chart values: %w", err)
+		}
+		maps.Copy(merged, tree)
 	}
 
 	distro, err := detectDistro(ctx)
@@ -374,21 +385,13 @@ func chartDefaultKataConfig(ctx context.Context) (kataUninstallConfig, error) {
 		return kataUninstallConfig{}, err
 	}
 	fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
-	kata, ok := nestedMap(tree, "kata")
-	if !ok {
-		return kataUninstallConfig{}, fmt.Errorf("embedded chart values carry no kata block")
-	}
-	kata["distro"] = distro
-	if nri, ok := nestedMap(tree, "nriImagePolicy"); ok {
-		nri["distro"] = distro
-	}
+	merged["distro"] = distro
 
-	cfg, err := kataConfigFromValues(tree)
+	cfg, err := kataConfigFromValues(helmchart.ShapePod.ChartName(), merged)
 	if err != nil {
 		return kataUninstallConfig{}, err
 	}
-	// The sweep is the whole point of this path; the chart default
-	// kata.enabled=false must not veto it.
+	// The sweep is the whole point of this path; it must not be vetoed.
 	cfg.Enabled = true
 	return cfg, nil
 }
@@ -397,36 +400,78 @@ func chartDefaultKataConfig(ctx context.Context) (kataUninstallConfig, error) {
 // (helm get values --all, or helm show values for the chart-defaults path).
 // Any missing piece is an error: sweeping with a guessed path either misses
 // the artifacts or removes the wrong directory, both silently.
-func kataConfigFromValues(tree map[string]any) (kataUninstallConfig, error) {
-	kata, ok := nestedMap(tree, "kata")
-	if !ok {
-		return kataUninstallConfig{}, fmt.Errorf("values carry no kata block — is this release the c8s chart?")
-	}
-	cfg := kataUninstallConfig{}
-	cfg.Enabled, _ = kata["enabled"].(bool)
-
-	distro, err := stringAtPath(tree, "kata.distro")
+// releaseChartName reads the deployed release's chart name (c8s-pod,
+// c8s-node-cloud, ..., or "c8s" for a pre-split monolith release). found=false
+// means the release does not exist.
+func releaseChartName(ctx context.Context, release, namespace string) (string, bool, error) {
+	out, err := exec.CommandContext(ctx, "helm", "list", "--namespace", namespace,
+		"--filter", "^"+release+"$", "--output", "json").Output()
 	if err != nil {
-		return kataUninstallConfig{}, err
+		return "", false, fmt.Errorf("helm list %s -n %s: %w", release, namespace, err)
+	}
+	var entries []struct {
+		Name  string `json:"name"`
+		Chart string `json:"chart"`
+	}
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return "", false, fmt.Errorf("parse helm list: %w", err)
+	}
+	if len(entries) == 0 {
+		return "", false, nil
+	}
+	// The chart column is <name>-<version>; the shape chart names are known,
+	// so match by prefix. The monolith was exactly "c8s-<version>".
+	for _, s := range helmchart.Shapes {
+		if strings.HasPrefix(entries[0].Chart, s.ChartName()+"-") {
+			return s.ChartName(), true, nil
+		}
+	}
+	if strings.HasPrefix(entries[0].Chart, "c8s-") {
+		return "c8s", true, nil
+	}
+	return "", false, fmt.Errorf("release %q deploys an unrecognized chart %q", release, entries[0].Chart)
+}
+
+// kataConfigFromValues builds the sweep config from the release's computed
+// values and its chart identity. chartName is a shape chart name (kata state
+// exists only under c8s-pod) or "c8s" for a pre-split monolith release (kata
+// state when its values set kata.enabled). Values from a release of either
+// generation are honored: new paths win, the monolith's old paths are the
+// fallback, chart defaults the last resort.
+func kataConfigFromValues(chartName string, tree map[string]any) (kataUninstallConfig, error) {
+	cfg := kataUninstallConfig{}
+	if shape, err := helmchart.ShapeForChartName(chartName); err == nil {
+		cfg.Enabled = shape == helmchart.ShapePod
+	} else {
+		kata, _ := nestedMap(tree, "kata")
+		cfg.Enabled, _ = kata["enabled"].(bool)
+	}
+
+	// distro is a single top-level value in the shape charts; the monolith
+	// carried it per-component (kata.distro / nriImagePolicy.distro).
+	distro := stringOrDefault(tree, "distro", "")
+	if distro == "" {
+		distro = stringOrDefault(tree, "kata.distro", "")
+	}
+	if distro == "" {
+		// node-image carries no distro value: its nodes are RKE2.
+		distro = "rke2"
 	}
 	cfg.Distro = distro
 
+	kata, _ := nestedMap(tree, "kata")
 	override, _ := kata["containerdConfigDir"].(string)
+	var err error
 	cfg.ContainerdConfigDir, err = containerdConfigDirFor(override, distro)
 	if err != nil {
 		return kataUninstallConfig{}, err
 	}
 
-	cfg.GuestImageHostPath, err = stringAtPath(tree, "kata.guestImage.hostPath")
-	if err != nil {
-		return kataUninstallConfig{}, err
-	}
-
-	// GPU guest image — a second multi-GB dir the GPU puller wrote; see
-	// GuestImageNvidiaHostPath.
-	if gpuImg, ok := nestedMap(tree, "kata", "gpu", "guestImage"); ok {
-		cfg.GuestImageNvidiaHostPath, _ = gpuImg["hostPath"].(string)
-	}
+	// Guest-image dirs: only a pod release could have written them, but the
+	// sweep cleans cross-shape leftovers, so default to the chart's paths
+	// rather than refuse a node release's tree (which has no kata block).
+	cfg.GuestImageHostPath = stringOrDefault(tree, "kata.guestImage.hostPath", "/var/lib/c8s/kata-images")
+	cfg.GuestImageNvidiaHostPath = stringOrDefault(tree, "kata.gpu.guestImage.hostPath", "/var/lib/c8s/kata-images-nvidia")
 
 	cfg.SweepImage, err = sweepImageRef(tree)
 	if err != nil {
@@ -447,9 +492,9 @@ func nriConfigFromValues(tree map[string]any, cfg kataUninstallConfig) kataUnins
 	cfg.NriPluginDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.pluginDir", "/opt/nri/plugins")
 	cfg.NriPluginFilename = stringOrDefault(tree, "nriImagePolicy.pluginFilename", "10-nri-image-policy")
 	cfg.NriConfigDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.configDir", "/etc/nri/conf.d")
-	cfg.NriRuntimeDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.runtimeDir", "/var/run/nri-image-policy")
+	cfg.NriRuntimeDir = stringOrDefault(tree, "runtimeDir", stringOrDefault(tree, "nriImagePolicy.hostPaths.runtimeDir", "/var/run/nri-image-policy"))
 	cfg.NriCacheDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.cacheDir", "/var/lib/nri-image-policy")
-	distro := stringOrDefault(tree, "nriImagePolicy.distro", cfg.Distro)
+	distro := stringOrDefault(tree, "distro", stringOrDefault(tree, "nriImagePolicy.distro", cfg.Distro))
 	override := stringOrDefault(tree, "nriImagePolicy.containerd.configDir", "")
 	dir, err := containerdConfigDirFor(override, distro)
 	if err != nil {
@@ -507,7 +552,7 @@ func containerdConfigDirFor(override, distro string) (string, error) {
 	case "k8s":
 		return "/etc/containerd", nil
 	}
-	return "", fmt.Errorf("kata.distro %q has no known containerd config dir and kata.containerdConfigDir is unset", distro)
+	return "", fmt.Errorf("distro %q has no known containerd config dir and kata.containerdConfigDir is unset", distro)
 }
 
 // kataRestartCommand picks the host service restart that makes containerd

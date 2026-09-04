@@ -16,7 +16,7 @@ on:
       - "go.sum"
       - "go.work"
       - "go.work.sum"
-      - "internal/helmchart/c8s/values.yaml"
+      - "internal/helmchart/*/values.yaml"
       - ".github/workflows/grype.yml"
       - ".grype.yaml"
 
@@ -67,11 +67,19 @@ jobs:
       id: image
       run: |
         set -euo pipefail
-        repo=$(yq -r '.tlsLb.nginx.image.repository' internal/helmchart/c8s/values.yaml)
-        digest=$(yq -r '.tlsLb.nginx.image.digest' internal/helmchart/c8s/values.yaml)
+        repo=$(yq -r '.tlsLb.nginx.image.repository' internal/helmchart/pod/values.yaml)
+        digest=$(yq -r '.tlsLb.nginx.image.digest' internal/helmchart/pod/values.yaml)
         if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-          echo "::error file=internal/helmchart/c8s/values.yaml::tlsLb.nginx.image.digest must be a sha256 pin, got '$digest'"; exit 1
+          echo "::error file=internal/helmchart/pod/values.yaml::tlsLb.nginx.image.digest must be a sha256 pin, got '$digest'"; exit 1
         fi
+        # The pin is repeated in each shape chart's values.yaml; keep them in sync.
+        for shape in node-cloud node-metal node-image; do
+          v="internal/helmchart/$shape/values.yaml"
+          if [[ "$(yq -r '.tlsLb.nginx.image.repository' "$v")" != "$repo" || \
+                "$(yq -r '.tlsLb.nginx.image.digest' "$v")" != "$digest" ]]; then
+            echo "::error file=$v::tlsLb.nginx.image drifted from pod/values.yaml"; exit 1
+          fi
+        done
         echo "ref=${repo}@${digest}" >> "$GITHUB_OUTPUT"
 
     - name: Scan for High/Critical vulnerabilities

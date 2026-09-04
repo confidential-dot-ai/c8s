@@ -1,0 +1,641 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Sealed: every key of values.yaml appears here and unknown keys fail at render time. Leaf types stay unconstrained except where noted; maps whose keys belong to the consumer (resources, digests, workloads, annotations, selectors) are left open. Regenerate with internal/helmchart/gen_schema.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "c8sComponents": {},
+    "platform": {
+      "enum": [
+        "snp",
+        "tdx"
+      ]
+    },
+    "distro": {
+      "enum": [
+        "k8s",
+        "rke2"
+      ]
+    },
+    "image": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {},
+        "tag": {},
+        "digest": {},
+        "pullPolicy": {}
+      }
+    },
+    "operator": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "resources": {},
+        "podAnnotations": {},
+        "extraArgs": {}
+      }
+    },
+    "imagePullSecrets": {},
+    "imagePullSecret": {},
+    "certProvisioning": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "initialRetryTimeout": {}
+      }
+    },
+    "serviceAccount": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "imagePullSecrets": {}
+      }
+    },
+    "statusMirror": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {}
+      }
+    },
+    "hostNamespacePolicy": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {},
+        "exemptNamespaces": {}
+      }
+    },
+    "attestation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "port": {}
+      }
+    },
+    "runtimeDir": {},
+    "kata": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "repository": {},
+            "tag": {},
+            "digest": {},
+            "pullPolicy": {}
+          }
+        },
+        "containerdPrep": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "repository": {},
+                "tag": {},
+                "digest": {},
+                "pullPolicy": {}
+              }
+            }
+          }
+        },
+        "containerdConfigDir": {},
+        "nodeSelector": {},
+        "snpNodeSelector": {},
+        "tdxNodeSelector": {},
+        "resources": {},
+        "guestImage": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "repository": {},
+            "tag": {},
+            "debug": {},
+            "insecure": {},
+            "pullerAuthSecret": {},
+            "pullerImage": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "repository": {},
+                "tag": {},
+                "digest": {},
+                "pullPolicy": {}
+              }
+            },
+            "hostPath": {},
+            "resources": {}
+          }
+        },
+        "gpu": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "guestImage": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "hostPath": {},
+                "pcieRootPort": {},
+                "defaultMemory": {},
+                "resources": {}
+              }
+            },
+            "sandboxDevicePlugin": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {},
+                "image": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "repository": {},
+                    "tag": {},
+                    "digest": {},
+                    "pullPolicy": {}
+                  }
+                },
+                "resources": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "webhook": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "caBundle": {},
+        "annotations": {},
+        "service": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "port": {}
+          }
+        },
+        "failurePolicy": {},
+        "extraExcluded": {},
+        "cwLabelPolicy": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {}
+          }
+        },
+        "certVolume": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "fsGroup": {},
+            "keyMode": {}
+          }
+        },
+        "getCert": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "renewInterval": {},
+            "runAsUser": {},
+            "runAsGroup": {},
+            "runAsNonRoot": {}
+          }
+        }
+      }
+    },
+    "cds": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "repository": {},
+            "tag": {},
+            "digest": {},
+            "pullPolicy": {}
+          }
+        },
+        "port": {},
+        "sandboxInventoryCIDRs": {},
+        "node": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "selector": {},
+            "tolerations": {}
+          }
+        },
+        "podDisruptionBudget": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "maxUnavailable": {}
+          }
+        },
+        "logLevel": {},
+        "allowlistDB": {},
+        "earIssuer": {},
+        "expectedIssuer": {},
+        "jwtClockSkew": {},
+        "certTTL": {},
+        "namedCertTTL": {},
+        "maxTTL": {},
+        "challengeTTL": {},
+        "requestTimeout": {},
+        "maxRequestSize": {},
+        "secretsMaxPathsPerWorkload": {},
+        "secretsMaxPaths": {},
+        "readinessInterval": {},
+        "sanValidation": {},
+        "dnsSanPatterns": {},
+        "cnPattern": {},
+        "measurements": {},
+        "rtmrs": {},
+        "measurementsConfig": {},
+        "operatorKeys": {},
+        "tokenSignerRotationInterval": {},
+        "tokenSignerOverlap": {},
+        "tokenSignerRotationJitter": {},
+        "rateLimit": {},
+        "rateBurst": {},
+        "rateLimiterMaxEntries": {},
+        "rateLimiterEvictInterval": {},
+        "rateLimiterIdleTimeout": {},
+        "ratlsCertTTL": {},
+        "ca": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "commonName": {},
+            "certValidity": {},
+            "minValidity": {}
+          }
+        },
+        "persistence": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "size": {},
+            "storageClassName": {}
+          }
+        },
+        "resources": {}
+      }
+    },
+    "nriImagePolicy": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bootstrapAllowlist": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "deriveComponents": {},
+            "digests": {},
+            "workloads": {}
+          }
+        }
+      }
+    },
+    "tlsLb": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {},
+        "strategy": {},
+        "hostPort": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "https": {}
+          }
+        },
+        "san": {},
+        "upstream": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "address": {},
+            "protocol": {},
+            "tls": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "useCDSClientCert": {},
+                "verify": {},
+                "verifyDepth": {},
+                "serverName": {},
+                "trustedCAPath": {}
+              }
+            }
+          }
+        },
+        "allowlist": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "proxyPort": {},
+            "rateLimit": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "requestsPerSecond": {},
+                "burst": {},
+                "totalRequestsPerSecond": {},
+                "totalBurst": {}
+              }
+            },
+            "readRateLimit": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "requestsPerSecond": {},
+                "burst": {}
+              }
+            },
+            "resources": {}
+          }
+        },
+        "routes": {},
+        "cors": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "protocolEndpoints": {},
+            "allowOrigins": {},
+            "allowMethods": {},
+            "allowHeaders": {},
+            "exposeHeaders": {},
+            "allowCredentials": {},
+            "maxAge": {}
+          }
+        },
+        "publicTLS": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {},
+            "secretName": {},
+            "certKey": {},
+            "keyKey": {},
+            "mountPath": {}
+          }
+        },
+        "acme": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "email": {},
+            "directoryURL": {}
+          }
+        },
+        "discovery": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "path": {},
+            "mountPath": {},
+            "fileName": {},
+            "cdsCertPath": {},
+            "meshCAPath": {}
+          }
+        },
+        "meshCA": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "expose": {}
+          }
+        },
+        "imagePullSecrets": {},
+        "certProvisioning": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "verbose": {},
+            "renewInterval": {},
+            "caWatchInterval": {}
+          }
+        },
+        "attest": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {},
+            "port": {},
+            "generation": {},
+            "attestationApiURL": {},
+            "expectedWorkload": {},
+            "resources": {}
+          }
+        },
+        "nginx": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "repository": {},
+                "digest": {},
+                "tag": {},
+                "pullPolicy": {}
+              }
+            },
+            "replicas": {},
+            "httpsPort": {},
+            "resolver": {},
+            "runAsUser": {},
+            "runAsGroup": {},
+            "runAsNonRoot": {},
+            "resources": {}
+          }
+        },
+        "service": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {},
+            "port": {},
+            "externalTrafficPolicy": {},
+            "annotations": {}
+          }
+        },
+        "tlsMountPath": {}
+      }
+    },
+    "podSecurityContext": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fsGroup": {},
+        "runAsNonRoot": {},
+        "runAsUser": {}
+      }
+    },
+    "c8s-lib": {},
+    "global": {}
+  }
+}

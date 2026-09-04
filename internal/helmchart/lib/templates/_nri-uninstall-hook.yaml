@@ -1,0 +1,97 @@
+{{- define "c8s-lib.nriUninstallHook" -}}
+{{- if .Values.nriImagePolicy.uninstall.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s-lib.nri.fullname" . }}-uninstall
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "c8s-lib.nri.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nri-uninstaller
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  selector:
+    matchLabels:
+      {{- include "c8s-lib.nri.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nri-uninstaller
+  template:
+    metadata:
+      labels:
+        {{- include "c8s-lib.nri.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nri-uninstaller
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostPID: true
+      {{- with .Values.nriImagePolicy.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- include "c8s-lib.imagePullSecrets" (dict "root" $ "local" .Values.nriImagePolicy.imagePullSecrets) | nindent 6 }}
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+                  {{- range .Values.nriImagePolicy.nodeAffinity.excludeLabels }}
+                  - key: {{ .key }}
+                    operator: NotIn
+                    values:
+                      {{- toYaml .values | nindent 22 }}
+                  {{- end }}
+      initContainers:
+        - name: uninstall
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: HOST_PLUGIN_PATH
+              value: {{ include "c8s-lib.nri.hostPluginPath" . | quote }}
+            - name: HOST_CONFIG_PATH
+              value: {{ include "c8s-lib.nri.hostConfigPath" . | quote }}
+            - name: HOST_CONTAINERD_DIR
+              value: {{ include "c8s-lib.nri.containerdConfigDir" . | quote }}
+            - name: CONTAINERD_CONFIG_MODE
+              value: {{ include "c8s-lib.nri.containerdConfigMode" . | quote }}
+            - name: HOST_CACHE_DIR
+              value: {{ .Values.nriImagePolicy.hostPaths.cacheDir | quote }}
+            - name: HOST_HEALTH_SOCKET
+              value: {{ include "c8s-lib.nri.hostHealthSocket" . | quote }}
+            - name: RESTART_COMMAND
+              value: {{ include "c8s-lib.nri.restartCommand" . | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ .Files.Get "files/scripts/uninstall.sh" | indent 14 }}
+          volumeMounts:
+            {{- include "c8s-lib.nri.hostVolumeMounts" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.nriImagePolicy.resources | nindent 12 }}
+      containers:
+        - name: pause
+          image: {{ include "c8s-lib.nri.image" . }}
+          imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        {{- include "c8s-lib.nri.hostVolumes" . | nindent 8 }}
+{{- end }}
+{{- end }}

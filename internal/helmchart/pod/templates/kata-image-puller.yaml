@@ -1,0 +1,194 @@
+{{- if .Values.kata.guestImage.enabled }}
+{{- /*
+  c8s-kata-image-puller: DaemonSet that pulls the kata-guest-base oras
+  artifact onto each kata node and rewrites kata-runtime's qemu-snp config
+  to use it (guest-pull enabled). Rationale, threat model, ordering vs
+  kata-deploy and the single-variant decision live in
+  docs/kata-guest-base.md ("Puller DaemonSet").
+
+  The in-pod `oras pull` ignores kubelet imagePullSecrets, so the puller
+  needs its own dockerconfigjson mount. It defaults to the install-time
+  imagePullSecret — same dockerconfigjson shape, and the kata-guest-base
+  artifact lives in the same registry as the c8s images — so one
+  `c8s install --image-pull-secret` covers it; set pullerAuthSecret to use a
+  different credential.
+*/}}
+{{- $pullerAuthSecret := .Values.kata.guestImage.pullerAuthSecret | default .Values.imagePullSecret -}}
+{{- $shim := include "c8s-pod.shimName" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "c8s-pod.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+{{ include "c8s-lib.serviceAccountImagePullSecrets" . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s-pod.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+data:
+  pull-and-configure.sh: |
+{{ .Files.Get "files/scripts/pull-and-configure.sh" | indent 4 }}
+  # Host-side qemu wrapper. Attaches this pod's encrypted volume devices to the
+  # kata guest, since kata's own direct-volume path assumes ciphertext-free
+  # storage. Installed onto the host and pointed at from the drop-in's
+  # [hypervisor.qemu] path by pull-and-configure.sh. Byte-identical to
+  # kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh (enforced by
+  # internal/helmchart/chart_test.go).
+  kata-qemu-scratch-wrapper.sh: |
+{{ .Files.Get "files/scripts/kata-qemu-scratch-wrapper.sh" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s-pod.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s-lib.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: kata-image-puller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: kata-image-puller
+      annotations:
+        # Re-run the puller when the tag (including the debug-variant
+        # suffix) or repository changes. Helm sees a different sha256 on
+        # the ConfigMap and rolls the DaemonSet.
+        checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository (include "c8s-pod.guestImageTag" .) | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "c8s-pod.kataName" . }}-image-puller
+      # Same node selector / tolerations as kata-deploy (templates/kata.yaml).
+      # The puller must land on every node kata-deploy lands on so the
+      # guest image is present before kata-runtime tries to boot a pod.
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.kata.nodeSelector }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+      tolerations:
+        - operator: Exists
+      # Reconcile container: keep the c8s config.d drop-in next to kata-deploy's
+      # main shim toml in sync with the current values.
+      #
+      # kata-deploy owns the main configuration-<shim>.toml — it rewrites it
+      # on every DaemonSet restart. c8s writes ONLY a config.d/50-c8s.toml
+      # drop-in that kata-runtime layers on top; kata-deploy never touches
+      # config.d/, so the drop-in survives DS restarts by design (verified
+      # empirically). The script is level-triggered: it embeds a fingerprint of
+      # its inputs in the drop-in and exits early (no pull, no writes) when it
+      # matches, so calling it every tick is cheap and steady-state performs no
+      # writes that could race kata-deploy. A fingerprint mismatch (values
+      # change while the drop-in exists), a deleted drop-in, or a missing
+      # artifact triggers the full pull + rewrite.
+      containers:
+        - name: reconcile
+          image: {{ if .Values.kata.guestImage.pullerImage.digest -}}
+              {{ .Values.kata.guestImage.pullerImage.repository }}@{{ .Values.kata.guestImage.pullerImage.digest }}
+            {{- else -}}
+              {{ .Values.kata.guestImage.pullerImage.repository }}:{{ .Values.kata.guestImage.pullerImage.tag }}
+            {{- end }}
+          imagePullPolicy: {{ .Values.kata.guestImage.pullerImage.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                sh /scripts/pull-and-configure.sh || echo "reconcile: not ready (kata-deploy still installing?)" >&2
+                sleep 30
+              done
+          # All puller config comes from the env (the script is pure POSIX shell
+          # with no helm interpolation — see files/scripts/pull-and-configure.sh).
+          env:
+            - name: REGISTRY
+              value: {{ .Values.kata.guestImage.repository | quote }}
+            - name: TAG
+              value: {{ include "c8s-pod.guestImageTag" . | quote }}
+            - name: HOST_IMG_DIR
+              value: "/host{{ .Values.kata.guestImage.hostPath }}"
+            - name: ORAS_INSECURE
+              value: {{ .Values.kata.guestImage.insecure | quote }}
+            # Shim to configure: qemu-snp on SNP hosts, qemu-tdx on TDX hosts.
+            # Same guest artifact bytes across shims — kernel + rootfs + verity
+            # params are TEE-neutral; only the target toml path (and TDX skips
+            # the SNP-specific default_vcpus=1 launch-digest pin) differ.
+            - name: SHIM_NAME
+              value: {{ $shim | quote }}
+            # Under --debug the guest rootfs allows host log/exec streams AND
+            # the puller keeps debug_console_enabled / journal-to-console in
+            # the shim toml so `socat <console.sock>` reveals guest boot. In
+            # normal installs the puller strips both every reconcile so a
+            # debug-tainted node returns to prod posture on the next tick.
+            - name: KATA_DEBUG
+              value: {{ .Values.kata.guestImage.debug | default false | quote }}
+          securityContext:
+            # Privileged because we write into /opt/kata (kata-deploy's install
+            # location). Same posture as kata-deploy; the /host bind mount is the
+            # real escalation vector and privileged just avoids per-mount AppArmor
+            # surprises.
+            privileged: true
+          readinessProbe:
+            # Ready only once the node matches THIS pod's config: the script's
+            # check mode revalidates the drop-in fingerprint and the pulled
+            # artifacts, so a stale drop-in from older values cannot mark a new
+            # rollout Ready (helm --wait gates on this).
+            exec:
+              command:
+                - /bin/sh
+                - /scripts/pull-and-configure.sh
+                - check
+            # The check stats the pulled artifacts and the wrapper across the
+            # /host bind mount; kubelet's 1s default would fail it on a loaded
+            # node and drop the guest-ready label off a healthy one.
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: host
+              mountPath: /host
+            {{- if $pullerAuthSecret }}
+            # oras reads ~/.docker/config.json; the container runs as root
+            # (privileged), so $HOME=/root. The projected volume below renames
+            # the standard dockerconfigjson key (.dockerconfigjson) to the
+            # filename oras expects (config.json).
+            - name: dockercfg
+              mountPath: /root/.docker
+              readOnly: true
+            {{- end }}
+          resources:
+{{ toYaml .Values.kata.guestImage.resources | indent 12 }}
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "c8s-pod.kataName" . }}-image-puller
+            defaultMode: 0755
+        - name: host
+          hostPath:
+            path: /
+        {{- if $pullerAuthSecret }}
+        - name: dockercfg
+          projected:
+            sources:
+              - secret:
+                  name: {{ $pullerAuthSecret }}
+                  items:
+                    - key: .dockerconfigjson
+                      path: config.json
+        {{- end }}
+{{- end }}

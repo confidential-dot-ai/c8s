@@ -13,7 +13,9 @@ on:
 env:
   REGISTRY: ghcr.io
   CHART_REPO: ghcr.io/confidential-dot-ai/charts
-  CHART_DIR: internal/helmchart/c8s
+  # The four installable shape charts (internal/helmchart/<shape>). lib/ is a
+  # library chart sync.sh vendors into each of them; it is never packaged.
+  SHAPES: "pod node-cloud node-metal node-image"
 
 jobs:
   package:
@@ -31,22 +33,25 @@ jobs:
         with:
           version: v3.14.4
 
-      - name: Determine chart version
-        id: ver
-        run: .github/scripts/chart-version.sh
+      - name: Vendor shared chart sources
+        run: bash internal/helmchart/sync.sh
 
-      - name: Lint & template chart
+      - name: Lint & template charts
         run: .github/scripts/chart-verify.sh
 
       - name: Helm package
-        env:
-          CHART_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           mkdir -p dist
-          helm package "$CHART_DIR" \
-            --version "$CHART_VERSION" \
-            --app-version "$CHART_VERSION" \
-            -d dist/
+          for shape in $SHAPES; do
+            # chart-version.sh derives <Chart.yaml version>-g<short-sha> per chart.
+            CHART_DIR="internal/helmchart/$shape" GITHUB_OUTPUT="$RUNNER_TEMP/ver-$shape" \
+              .github/scripts/chart-version.sh
+            version="$(sed -n 's/^version=//p' "$RUNNER_TEMP/ver-$shape")"
+            helm package "internal/helmchart/$shape" \
+              --version "$version" \
+              --app-version "$version" \
+              -d dist/
+          done
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
@@ -59,8 +64,9 @@ jobs:
 
       - name: Helm push
         if: github.event_name == 'push'
-        env:
-          CHART_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          helm push "dist/c8s-$CHART_VERSION.tgz" \
-            "oci://$CHART_REPO"
+          for shape in $SHAPES; do
+            version="$(sed -n 's/^version=//p' "$RUNNER_TEMP/ver-$shape")"
+            helm push "dist/c8s-$shape-$version.tgz" \
+              "oci://$CHART_REPO"
+          done

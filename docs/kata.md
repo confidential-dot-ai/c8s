@@ -125,8 +125,8 @@ marker; on GPU guests the marker also relaxes the non-CC-GPU refusal) — see
 The host containerd config layout the installers target — it drives both
 kata-deploy and the nri-image-policy installer — is detected from the
 cluster's kubelet versions (RKE2 builds carry a `+rke2` suffix). A mixed
-cluster cannot be detected and requires explicit `kata.distro` /
-`nriImagePolicy.distro` values plus nodeSelectors via `-f`:
+cluster cannot be detected and requires an explicit top-level `distro`
+value plus nodeSelectors via `-f`:
 
 | distro | containerd config dir | Notes |
 |---|---|---|
@@ -221,10 +221,8 @@ kata-guest-base image:
 | `nri-image-policy` (host NRI plugin) | in-guest policy-monitor, fed from CDS's served `/allowlist`; also serves the sandbox-token route on loopback `:8401` |
 | `volumed` DaemonSet | in-guest `volumed --guest` on loopback `:8402` ([`docs/volumes.md`](volumes.md)) |
 
-`c8s install --cvm-mode=pod` sets `ratlsMesh.enabled=false`,
-`attestationApi.enabled=false`, and `nriImagePolicy.enabled=false` for you;
-the chart fails the render (`kind=enforce_host_components`) if any of them is
-left enabled alongside `kata.enabled`, since the host versions would be dead
+The pod chart renders none of them — it carries no values for host-side
+mesh, attestation, or image policy — since the host versions would be dead
 weight at best and a second, unattested enforcement path at worst.
 CDS still serves the allowlist seed in this shape — the in-guest
 policy-monitor consumes it even though the host NRI plugin is gone.
@@ -232,8 +230,8 @@ policy-monitor consumes it even though the host NRI plugin is gone.
 ### Chart-managed mesh components pin their own RuntimeClass
 
 The release namespace is excluded from the webhook (next section), so the
-chart-managed tls-lb Deployment cannot rely on injection. Under
-`kata.enabled` the chart pins the platform's confidential CPU class
+chart-managed tls-lb Deployment cannot rely on injection. The pod chart
+pins the platform's confidential CPU class
 (`kata-qemu-snp` / `kata-qemu-tdx`) on it directly, the same pattern as
 CDS: its get-cert containers dial the in-guest attestation-api on loopback,
 which only exists inside a confidential guest, and it terminates TLS with
@@ -314,7 +312,7 @@ If the field is empty, the operator is running without its `--kata-enforce`
 flag — i.e. the release was installed without `--cvm-mode=pod` (verify with
 `kubectl get deploy c8s-operator -n c8s-system -o yaml | grep kata-enforce`).
 The mutating webhook is wired in either way; injection is gated on the flag,
-which the chart sets whenever `kata.enabled` is.
+which the pod chart sets on the operator.
 
 **Negative — policy rejects a pod that asks for a non-Kata `runtimeClassName`:**
 
@@ -507,7 +505,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
      `kata-qemu-tdx` RuntimeClass nodeSelector expects it. On the default
      `--cvm-mode=pod` path the install applies it for you (see
      [Installing](#installing)); you own it when a `-f` values file sets
-     `kata.tdxNodeSelector` itself, or under `--cvm-mode=node`. Either
+     `kata.tdxNodeSelector` itself, or on a node-shape install. Either
      way `c8s install --hardware-platform=tdx` preflight-checks it and
      refuses to proceed if no node carries it.
 
@@ -556,8 +554,8 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   behavior). With enforcement on, if the c8s operator is down, workload pod
   creation is blocked cluster-wide until it recovers. This is unchanged from
   the get-cert webhook today; enforcement widens what a webhook outage stops
-  from "get-cert injection" to "all workload pod creation". The chart
-  refuses to render `kata.enabled=true` with `webhook.failurePolicy` set to
+  from "get-cert injection" to "all workload pod creation". The pod chart
+  refuses to render with `webhook.failurePolicy` set to
   anything other than `Fail` — the two halves must move together.
 
 - **Enforcement assumes a cluster-wide PodSecurityAdmission floor on
@@ -690,7 +688,7 @@ is pinned by `TestChartKataPinnedPodsCarryInstanceLabel`.
 If the release is already gone but the hosts are dirty — e.g. a previous bare
 `helm uninstall` — run `c8s uninstall --host-sweep-only`.
 
-A bare `helm uninstall` (or removing `kata.enabled`) still works: you keep
+A bare `helm uninstall` still works: you keep
 the preStop-hook cleanup, but none of the sweep guarantees above.
 
 ## Future work

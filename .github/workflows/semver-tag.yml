@@ -11,8 +11,9 @@ on:
 permissions: {}
 
 env:
-  CHART_DIR: internal/helmchart/c8s
-  CHART_IMAGE: ghcr.io/confidential-dot-ai/charts/c8s
+  # The four installable shape charts (internal/helmchart/<shape>), published
+  # as $CHART_REPO/c8s-<shape>. lib/ is never packaged on its own.
+  SHAPES: "pod node-cloud node-metal node-image"
   CHART_REPO: ghcr.io/confidential-dot-ai/charts
   GH_API_TIMEOUT: 30s
   GITHUB_API_VERSION: "2026-03-10"
@@ -272,7 +273,7 @@ jobs:
       - name: Lint and render chart
         run: .github/scripts/chart-verify.sh
 
-      - name: Package deterministic release chart
+      - name: Package deterministic release charts
         env:
           TARGET_SHA: ${{ inputs.target-sha }}
           VERSION: ${{ needs.calculate.outputs.version }}
@@ -284,23 +285,29 @@ jobs:
           source_epoch="$(git show -s --format=%ct "$TARGET_SHA")"
           [[ "$source_epoch" =~ ^[0-9]+$ ]]
 
-          raw="$RUNNER_TEMP/chart-raw"
-          tree="$RUNNER_TEMP/chart-tree"
-          mkdir -p "$raw" "$tree" dist
-          helm package "$CHART_DIR" \
-            --version "$VERSION" \
-            --app-version "$VERSION" \
-            --destination "$raw"
-          tar -xzf "$raw/c8s-$VERSION.tgz" -C "$tree"
-          if find "$tree" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
-            echo "::error::chart package contains a non-regular entry"
-            exit 1
-          fi
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-            --mtime="@$source_epoch" -C "$tree" -cf - c8s \
-            | gzip -n > "dist/c8s-$VERSION.tgz"
-          (cd dist && sha256sum "c8s-$VERSION.tgz" > SHA256SUMS)
-          helm show chart "dist/c8s-$VERSION.tgz" > /dev/null
+          # Vendors charts/c8s-lib into each shape chart before packaging.
+          bash internal/helmchart/sync.sh
+
+          mkdir -p dist
+          for shape in $SHAPES; do
+            raw="$RUNNER_TEMP/chart-raw-$shape"
+            tree="$RUNNER_TEMP/chart-tree-$shape"
+            mkdir -p "$raw" "$tree"
+            helm package "internal/helmchart/$shape" \
+              --version "$VERSION" \
+              --app-version "$VERSION" \
+              --destination "$raw"
+            tar -xzf "$raw/c8s-$shape-$VERSION.tgz" -C "$tree"
+            if find "$tree" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
+              echo "::error::$shape chart package contains a non-regular entry"
+              exit 1
+            fi
+            tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$source_epoch" -C "$tree" -cf - "c8s-$shape" \
+              | gzip -n > "dist/c8s-$shape-$VERSION.tgz"
+            helm show chart "dist/c8s-$shape-$VERSION.tgz" > /dev/null
+          done
+          (cd dist && sha256sum c8s-*-"$VERSION".tgz > SHA256SUMS)
 
       - name: Upload release chart
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -357,24 +364,26 @@ jobs:
           test "$RELEASE_TAG" = "v$VERSION"
 
           mapfile -t payload < <(find dist -mindepth 1 -maxdepth 1 -type f -print | sort)
-          test "${#payload[@]}" -eq 2
+          test "${#payload[@]}" -eq 5
           test -f dist/SHA256SUMS
           test ! -L dist/SHA256SUMS
           if find dist -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
             echo "::error::release payload contains a non-regular entry"
             exit 1
           fi
-          chart="dist/c8s-$VERSION.tgz"
-          test -f "$chart"
-          test ! -L "$chart"
-          manifest_hash="$(
-            awk -v file="c8s-$VERSION.tgz" \
-              '$2 == file { count++; digest=$1 } END { if (count == 1) print digest; else exit 1 }' \
-              dist/SHA256SUMS
-          )"
-          [[ "$manifest_hash" =~ ^[0-9a-f]{64}$ ]]
-          actual_hash="$(sha256sum "$chart")"
-          test "${actual_hash%% *}" = "$manifest_hash"
+          for shape in $SHAPES; do
+            chart="dist/c8s-$shape-$VERSION.tgz"
+            test -f "$chart"
+            test ! -L "$chart"
+            manifest_hash="$(
+              awk -v file="c8s-$shape-$VERSION.tgz" \
+                '$2 == file { count++; digest=$1 } END { if (count == 1) print digest; else exit 1 }' \
+                dist/SHA256SUMS
+            )"
+            [[ "$manifest_hash" =~ ^[0-9a-f]{64}$ ]]
+            actual_hash="$(sha256sum "$chart")"
+            test "${actual_hash%% *}" = "$manifest_hash"
+          done
 
           if ! jq -e '
             type == "object" and
@@ -435,17 +444,21 @@ jobs:
               >> "$RUNNER_TEMP/release-image-digests"
           done < "$RUNNER_TEMP/release-images"
 
-          chart_tags="$(oras repo tags "$CHART_IMAGE")"
-          chart_exists=false
-          if grep -Fxq -- "$VERSION" <<< "$chart_tags"; then
-            chart_exists=true
-            mkdir -p "$RUNNER_TEMP/chart-preflight"
-            helm pull "oci://$CHART_IMAGE" --version "$VERSION" \
-              --destination "$RUNNER_TEMP/chart-preflight"
-            cmp "dist/c8s-$VERSION.tgz" \
-              "$RUNNER_TEMP/chart-preflight/c8s-$VERSION.tgz"
-          fi
-          echo "chart-exists=$chart_exists" >> "$GITHUB_OUTPUT"
+          # A missing repo (first release of a chart) reads as no tags.
+          for shape in $SHAPES; do
+            chart_image="$CHART_REPO/c8s-$shape"
+            chart_tags="$(oras repo tags "$chart_image" 2>/dev/null || true)"
+            chart_exists=false
+            if grep -Fxq -- "$VERSION" <<< "$chart_tags"; then
+              chart_exists=true
+              mkdir -p "$RUNNER_TEMP/chart-preflight-$shape"
+              helm pull "oci://$chart_image" --version "$VERSION" \
+                --destination "$RUNNER_TEMP/chart-preflight-$shape"
+              cmp "dist/c8s-$shape-$VERSION.tgz" \
+                "$RUNNER_TEMP/chart-preflight-$shape/c8s-$shape-$VERSION.tgz"
+            fi
+            echo "chart-exists-$shape=$chart_exists" >> "$GITHUB_OUTPUT"
+          done
 
       # The Git reference reserves the version before registry writes. A retry
       # verifies the exact target and repairs only missing registry aliases.
@@ -560,18 +573,26 @@ jobs:
             fi
           done < "$RUNNER_TEMP/release-image-digests"
 
-      - name: Publish or verify Helm chart
+      - name: Publish or verify Helm charts
         env:
-          CHART_EXISTS: ${{ steps.preflight.outputs.chart-exists }}
+          CHART_EXISTS_POD: ${{ steps.preflight.outputs.chart-exists-pod }}
+          CHART_EXISTS_NODE_CLOUD: ${{ steps.preflight.outputs.chart-exists-node-cloud }}
+          CHART_EXISTS_NODE_METAL: ${{ steps.preflight.outputs.chart-exists-node-metal }}
+          CHART_EXISTS_NODE_IMAGE: ${{ steps.preflight.outputs.chart-exists-node-image }}
           VERSION: ${{ needs.calculate.outputs.version }}
         run: |
           set -euo pipefail
 
-          if [ "$CHART_EXISTS" = false ]; then
-            helm push "dist/c8s-$VERSION.tgz" "oci://$CHART_REPO"
-          fi
-          mkdir -p "$RUNNER_TEMP/chart-verify"
-          helm pull "oci://$CHART_IMAGE" --version "$VERSION" \
-            --destination "$RUNNER_TEMP/chart-verify"
-          cmp "dist/c8s-$VERSION.tgz" \
-            "$RUNNER_TEMP/chart-verify/c8s-$VERSION.tgz"
+          for shape in $SHAPES; do
+            exists_key="CHART_EXISTS_${shape^^}"
+            exists_key="${exists_key//-/_}"
+            chart_image="$CHART_REPO/c8s-$shape"
+            if [ "${!exists_key}" = false ]; then
+              helm push "dist/c8s-$shape-$VERSION.tgz" "oci://$CHART_REPO"
+            fi
+            mkdir -p "$RUNNER_TEMP/chart-verify-$shape"
+            helm pull "oci://$chart_image" --version "$VERSION" \
+              --destination "$RUNNER_TEMP/chart-verify-$shape"
+            cmp "dist/c8s-$shape-$VERSION.tgz" \
+              "$RUNNER_TEMP/chart-verify-$shape/c8s-$shape-$VERSION.tgz"
+          done

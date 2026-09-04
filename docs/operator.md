@@ -15,8 +15,11 @@ The operator tree is built around these pieces:
   admission webhook.
 - `cmd/c8s install` extracts the embedded chart from `internal/helmchart`
   and shells out to `helm upgrade --install`.
-- `internal/helmchart/c8s` installs the operator Deployment and Service, the
-  CRDs, RBAC, webhook configuration, attestation-api DaemonSet, and CDS.
+- `internal/helmchart/` (one installable chart per shape: `pod`,
+  `node-cloud`, `node-metal`, `node-image`, sharing the `lib/` library chart)
+  installs the operator Deployment and Service, the CRDs, RBAC, webhook
+  configuration, and CDS; the node shapes add the mesh, attestation, and
+  image-policy pieces of their shape.
 - `internal/webhook` injects get-cert containers into opted-in pods so each
   workload can fetch and renew a leaf certificate through CDS.
 
@@ -74,7 +77,7 @@ The main source directories are:
 | `cmd/c8s/` | User-facing operator and install CLI commands. |
 | `internal/controller/` | controller-runtime manager, webhook bootstrap, and status mirror setup. |
 | `internal/webhook/` | Pod mutation logic, get-cert args, cert volume permissions, and unit tests. |
-| `internal/helmchart/c8s/` | Embedded Helm chart templates and defaults. |
+| `internal/helmchart/` | Embedded Helm shape charts (`pod`, `node-cloud`, `node-metal`, `node-image`), shared `lib/` library chart, and defaults. |
 | `internal/helmchart/chart_test.go` | Helm render tests for the supported chart-managed CVM-only shape. |
 | `cmd/get-cert/` | Certificate bootstrap and renewal helper, including private-key file mode handling. |
 
@@ -335,8 +338,8 @@ entries, are also enforced from the baked floor.
 ## Attestation-api
 
 The attestation-api DaemonSet binds pod loopback and is served to on-node
-consumers by its attest-proxy sidecar over a Unix socket in
-`nriImagePolicy.hostPaths.runtimeDir`; no Service renders.
+consumers by its attest-proxy sidecar over a Unix socket in the top-level
+`runtimeDir`; no Service renders.
 
 Two operational notes:
 
@@ -915,33 +918,35 @@ standalone YAML parse chokes on the nri-image-policy installer's embedded
 host-config heredoc, while `helm template` — the path CI and the chart tests
 use — renders it correctly).
 
-The chart ships no default image tag, so a bare `helm template` must set one.
-`c8s install` injects this for you; `main` here is the same fallback tag it
-uses for a non-release build. The simplest validation disables the image-policy
-component, so only image tags are required (no digests). Disabling it renders
-only because the chart's default `attestationApi.cvmMode=node` bakes its own
-policy plugin and so is exempt from the `require_host_image_policy` guard; other
-modes (gke/aks) must keep nri-image-policy enabled and digest-pinned, as in the
-full-shape render below.
+The charts ship no default image tag, so a bare `helm template` must set
+one. `c8s install` injects this for you; `main` here is the same fallback tag
+it uses for a non-release build. Run `internal/helmchart/sync.sh` first — the
+vendored `charts/c8s-lib` the shape charts depend on is gitignored. The
+simplest validation renders the node-image chart: every node shape requires
+`cds.image.digest` (the NRI floor pins CDS by digest), and the remaining
+images take tags only.
 
 ```bash
-helm template c8s internal/helmchart/c8s \
+helm template c8s internal/helmchart/node-image \
   --namespace c8s-system \
   --set image.tag=main \
-  --set attestationApi.image.tag=main \
   --set cds.image.tag=main \
+  --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
   --set ratlsMesh.image.tag=main \
-  --set nriImagePolicy.enabled=false >/dev/null && echo OK
+  --set nriImagePolicy.image.tag=main >/dev/null && echo OK
 ```
 
-To render the full default shape (image policy enabled), the chart requires the
-nri-image-policy installer image and the CDS image to be digest-pinned. The CDS
-node selector defaults to `role: cds`; override it if your CDS node uses a
-different label. `c8s install` fills these digests from the registry by default
-(via `crane`); for a manual render the values below are placeholders:
+To render a chart with the full host-side stack (attestation-api DaemonSet,
+full NRI installer), use node-metal. Its fail-closed default also requires
+the digest-pinned installer image to be covered in the allowlist floor —
+`deriveComponents=true` covers it from the digests (what `c8s install
+--resolve-digests` turns on). The CDS node selector defaults to `role: cds`;
+override it if your CDS node uses a different label. `c8s install` fills
+these digests from the registry by default (via `crane`); for a manual
+render the values below are placeholders:
 
 ```bash
-helm template c8s internal/helmchart/c8s \
+helm template c8s internal/helmchart/node-metal \
   --namespace c8s-system \
   --set image.tag=main \
   --set attestationApi.image.tag=main \
@@ -949,7 +954,8 @@ helm template c8s internal/helmchart/c8s \
   --set ratlsMesh.image.tag=main \
   --set nriImagePolicy.image.tag=main \
   --set nriImagePolicy.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-  --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 >/dev/null && echo OK
+  --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set nriImagePolicy.bootstrapAllowlist.deriveComponents=true >/dev/null && echo OK
 ```
 
 Append `--set-file cds.operatorKeys=operator.pub` to either command to render

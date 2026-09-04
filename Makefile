@@ -12,8 +12,9 @@ KATA_POLICY_TESTS  ?= kata-guest-base/tests/default-policy_test.rego
 CONTROLLER_GEN         ?= controller-gen
 CONTROLLER_GEN_VERSION ?= v0.20.1
 
-# CRD YAMLs land in the helm chart's crds/ folder — the install vector.
-CRD_OUT_DIR    ?= ./internal/helmchart/c8s/crds
+# CRD YAMLs land in the helm charts' shared crds/ source (sync.sh copies it
+# into each shape chart) — the install vector.
+CRD_OUT_DIR    ?= ./internal/helmchart/crds
 
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_DIR  = ./build
@@ -181,8 +182,9 @@ test-e2e-cw-label-policy:
 # bypasses to cw pods fail closed. Needs kubectl pointed at a cluster with
 # the c8s chart installed and a Running confidential workload. Not CI-wired:
 # snp-metal's guest kernel lacks ratls-mesh's netfilter matches (the lane
-# installs ratlsMesh.enabled=false) and tdx-metal's vendored lane runs Cilium
-# kube-proxy-free, so VIP traffic never hits the FORWARD guard this asserts.
+# keeps the mesh off its nodes via ratlsMesh.nodeSelector) and tdx-metal's
+# vendored lane runs Cilium kube-proxy-free, so VIP traffic never hits the
+# FORWARD guard this asserts.
 test-e2e-mesh-cw-enforcement:
 	./test/e2e/mesh-cw-enforcement.sh
 

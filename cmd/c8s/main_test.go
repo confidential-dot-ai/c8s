@@ -11,6 +11,10 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(m.Run())
+}
+
 func TestNormalizeArgvAlias(t *testing.T) {
 	tests := []struct {
 		name string

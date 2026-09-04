@@ -547,7 +547,7 @@ the supplied mesh CA"), so an unqualified ID never reads as attested.
 Both shapes are wired.
 
 - **node-CVM.** nri-image-policy — a host process containerd launches, not a pod
-  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which the
+  — serves the token socket in the top-level `runtimeDir`, which the
   webhook mounts read-only into the `c8s-cert` sidecar, and `/identity` +
   `/digests` on `:1019`. The node IP it signs into tokens comes from the
   installer DaemonSet's downward API `status.hostIP`, written to a `node-ip`
@@ -769,12 +769,12 @@ POD-AS-CVM (kata) — one TEE, one identity, per pod
 ### Node-as-CVM (base layout on CVM nodes)
 
 The whole Kubernetes node is one confidential VM; pods are ordinary runc
-containers inside it. (This is the base component layout — `c8s install` with
-`--cvm-mode node|gke|aks` wiring the right TEE device — deployed onto nodes
-that are themselves CVMs. Base on non-CVM nodes has the same layout and no
-confidentiality.)
+containers inside it. (This is the node-shape component layout — `c8s
+install` with `--cvm-mode node-image|node-metal|node-cloud`, the `platform`
+value wiring the right TEE device — deployed onto nodes that are themselves
+CVMs. The same layout on non-CVM nodes has no confidentiality.)
 
-- **Evidence source:** the per-node attestation-api DaemonSet mounts the host
+- **Evidence source:** the per-node attestation-api mounts the host
   TEE interface (`/dev/sev-guest`; TSM ConfigFS reports on TDX hosts; vTPM on
   AKS). The API binds pod loopback and its attest-proxy sidecar serves it on a
   node-local Unix socket, so `/attest` is reachable only by on-node callers

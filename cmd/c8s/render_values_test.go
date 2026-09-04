@@ -19,6 +19,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 func TestValueArgsToTreeNestsDottedKeys(t *testing.T) {
@@ -79,10 +81,10 @@ func TestValueArgsToTreeCoercesSetTypes(t *testing.T) {
 	// stay strings. --set-string never coerces.
 	got, err := valueArgsToTree([]string{
 		"--set", "cds.node.selector=null",
-		"--set", "attestationApi.teeDevices.sevGuest=true",
-		"--set", "attestationApi.teeDevices.tpm=false",
+		"--set", "volumed.enabled=true",
+		"--set", "kata.guestImage.debug=false",
 		"--set", "webhook.getCert.runAsUser=65532",
-		"--set-string", "attestationApi.cvmMode=aks",
+		"--set-string", "platform=az-snp",
 		"--set-string", "image.tag=main",
 	})
 	if err != nil {
@@ -92,20 +94,19 @@ func TestValueArgsToTreeCoercesSetTypes(t *testing.T) {
 	if cds["selector"] != nil {
 		t.Errorf("selector: got %#v, want nil (real null)", cds["selector"])
 	}
-	tee := got["attestationApi"].(map[string]any)["teeDevices"].(map[string]any)
-	if tee["sevGuest"] != true {
-		t.Errorf("sevGuest: got %#v, want bool true", tee["sevGuest"])
+	if got["volumed"].(map[string]any)["enabled"] != true {
+		t.Errorf("volumed.enabled: got %#v, want bool true", got["volumed"])
 	}
-	if tee["tpm"] != false {
-		t.Errorf("tpm: got %#v, want bool false", tee["tpm"])
+	if got["kata"].(map[string]any)["guestImage"].(map[string]any)["debug"] != false {
+		t.Errorf("kata.guestImage.debug: got %#v, want bool false", got["kata"])
 	}
 	if got["webhook"].(map[string]any)["getCert"].(map[string]any)["runAsUser"] != int64(65532) {
 		t.Errorf("runAsUser: want int64 65532")
 	}
-	// --set-string keeps "aks"/"main" as strings (cvmMode and tag are never
-	// coerced even though they look plain).
-	if got["attestationApi"].(map[string]any)["cvmMode"] != "aks" {
-		t.Errorf("cvmMode: want string \"aks\"")
+	// --set-string keeps "az-snp"/"main" as strings (platform and tag are
+	// never coerced even though they look plain).
+	if got["platform"] != "az-snp" {
+		t.Errorf("platform: want string \"az-snp\"")
 	}
 	if got["image"].(map[string]any)["tag"] != "main" {
 		t.Errorf("tag: want string \"main\"")
@@ -181,25 +182,13 @@ func TestValueArgsToTreeRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
-// setCvmModeForTest pins the required --cvm-mode global for a buildValueArgs
-// test and restores the prior value, so a mode leaked from another test cannot
-// change the emitted args.
-func setCvmModeForTest(t *testing.T, mode string) {
-	t.Helper()
-	prev, prevPlat := installCvmMode, installHardwarePlatform
-	installCvmMode = mode
-	// --hardware-platform has no default anymore; state it like a caller must.
-	installHardwarePlatform = "sev-snp"
-	t.Cleanup(func() { installCvmMode, installHardwarePlatform = prev, prevPlat })
-}
-
 // buildValueArgs must assume nothing the operator did not pass — like install,
-// an unset --distro (distro == "") emits no distro keys, leaving the chart
-// default to stand; a set --distro plumbs both component distro keys.
+// an unset --distro (distro == "") emits no distro key, leaving the chart
+// default to stand; a set --distro plumbs the chart's single distro value.
+// node-image has no distro value (its nodes are RKE2 by construction), so it
+// never emits one.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
 
 	// Isolate the distro logic from the crane digest path (which needs the
 	// binary on PATH); this test is about what the builder assumes, not digests.
@@ -207,23 +196,30 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	installResolveDigests = false
 	defer func() { installResolveDigests = prev }()
 
-	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, helmchart.ShapeNodeMetal, "snp", "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if slices.ContainsFunc(args, func(a string) bool {
-		return a == "kata.distro=" || a == "nriImagePolicy.distro=" ||
-			a == "kata.distro=k8s" || a == "nriImagePolicy.distro=k8s"
+		return a == "distro=" || a == "distro=k8s"
 	}) {
-		t.Fatalf("unset distro should emit no distro keys, got %v", args)
+		t.Fatalf("unset distro should emit no distro key, got %v", args)
 	}
 
-	args, err = buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err = buildValueArgs(context.Background(), cmd, "", nil, helmchart.ShapeNodeMetal, "snp", "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !slices.Contains(args, "nriImagePolicy.distro=rke2") || !slices.Contains(args, "kata.distro=rke2") {
-		t.Fatalf("set distro should plumb both component keys, got %v", args)
+	if !slices.Contains(args, "distro=rke2") {
+		t.Fatalf("set distro should plumb the top-level distro value, got %v", args)
+	}
+
+	args, err = buildValueArgs(context.Background(), cmd, "", nil, helmchart.ShapeNodeImage, "snp", "main", "rke2", appendResolvedDigestArgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "distro=") }) {
+		t.Fatalf("node-image has no distro value, got %v", args)
 	}
 }
 
@@ -232,15 +228,13 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 // coerce never int-coerces it (0640 -> 640 would pin the wrong image).
 func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
 	prev := installResolveDigests
 	installResolveDigests = false // tag is the sole image ref only when digests are off
 	defer func() { installResolveDigests = prev }()
 
 	args, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
-		"0640", "", appendResolvedDigestArgs)
+		helmchart.ShapeNodeMetal, "snp", "0640", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,8 +255,6 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 // PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
 
 	prevFlag := installResolveDigests
 	defer func() { installResolveDigests = prevFlag }()
@@ -277,7 +269,7 @@ func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 
 	got, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
-		"main", "", stubResolver)
+		helmchart.ShapeNodeMetal, "snp", "main", "", stubResolver)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -302,7 +294,7 @@ func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 func TestWriteComputedValuesProducesReadableFile(t *testing.T) {
 	path, err := writeComputedValues([]string{
 		"--set-string", "image.repository=ghcr.io/x/c8s-operator",
-		"--set", "attestationApi.teeDevices.tpm=true",
+		"--set", "volumed.enabled=true",
 		"--set", "cds.node.selector=null",
 	})
 	if err != nil {
@@ -321,8 +313,8 @@ func TestWriteComputedValuesProducesReadableFile(t *testing.T) {
 	if got["image"].(map[string]any)["repository"] != "ghcr.io/x/c8s-operator" {
 		t.Errorf("repository not in computed values: %#v", got["image"])
 	}
-	if got["attestationApi"].(map[string]any)["teeDevices"].(map[string]any)["tpm"] != true {
-		t.Errorf("tpm should be bool true: %#v", got["attestationApi"])
+	if got["volumed"].(map[string]any)["enabled"] != true {
+		t.Errorf("volumed.enabled should be bool true: %#v", got["volumed"])
 	}
 	// null clears the key (real YAML null, not the string "null").
 	cds := got["cds"].(map[string]any)["node"].(map[string]any)
@@ -349,7 +341,6 @@ var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+(\[[0-9]+\])?=[^,]*$`
 // shared path hides the divergence) with every existing test still green.
 func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
 	cmd.Flags().Int64("webhook-cert-fs-group", 0, "")
 	cmd.Flags().String("webhook-cert-key-mode", "", "")
 	cmd.Flags().Duration("webhook-get-cert-renew-interval", 0, "")
@@ -357,7 +348,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	cmd.Flags().Int64("webhook-get-cert-run-as-group", 0, "")
 	cmd.Flags().Bool("webhook-get-cert-run-as-non-root", false, "")
 	for _, name := range []string{
-		flagCvmMode, "webhook-cert-fs-group", "webhook-cert-key-mode",
+		"webhook-cert-fs-group", "webhook-cert-key-mode",
 		"webhook-get-cert-renew-interval", "webhook-get-cert-run-as-user",
 		"webhook-get-cert-run-as-group", "webhook-get-cert-run-as-non-root",
 	} {
@@ -382,18 +373,17 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}()
 	// Drive every value-producing toggle. --install-crds=false exercises the
 	// non-default CRD path; --resolve-digests=false keeps crane off PATH (the
-	// digest-arg shape is covered separately via buildDigestArgs below).
-	// --cvm-mode=pod --debug exercises the kata stack args. --measurements
-	// (node mode — it is rejected in pod mode) exercises the one indexed key[i]=
-	// form the builder emits; asserted in a second pass below.
+	// digest-arg shape is covered separately via buildDigestArgs below). The
+	// pod shape with --debug exercises the kata guest-image args. --measurements
+	// exercises the one indexed key[i]= form the builder emits; asserted in a
+	// second pass below.
 	installCRDs, installSingleNode, installKataDebug, installResolveDigests = false, true, true, false
-	installImagePullSecret, installCvmMode = "regcred", "pod"
-	installHardwarePlatform = "sev-snp"
+	installImagePullSecret = "regcred"
 	installWorkloadRefs = []string{"infer=workloads/deployment/vllm:8000"}
 	installUpstream = "infer"
 	installOperatorKeys = writeTestOperatorKeys(t)
 
-	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, helmchart.ShapePod, "snp", "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}
@@ -433,14 +423,13 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 		t.Fatalf("cds.operatorKeys = %q, want the PEM content of %s", keys, installOperatorKeys)
 	}
 
-	// Second pass: node mode with --measurements exercises the indexed key[i]=
-	// form (rejected in pod mode above). Its args must also stay within the
-	// grammar and round-trip to a list.
-	installCvmMode = "node"
+	// Second pass: a node shape with --measurements exercises the indexed
+	// key[i]= form. Its args must also stay within the grammar and round-trip
+	// to a list.
 	installMeasurements = []string{strings.Repeat("ab", 48)}
-	mArgs, err := appendCvmModeInstallArgs(nil, installCvmMode, installHardwarePlatform)
+	mArgs, err := appendShapeInstallArgs(nil, "snp", helmchart.ShapeNodeMetal)
 	if err != nil {
-		t.Fatalf("appendCvmModeInstallArgs (node + measurements): %v", err)
+		t.Fatalf("appendShapeInstallArgs (node + measurements): %v", err)
 	}
 	for i := 0; i < len(mArgs); i += 2 {
 		if kv := mArgs[i+1]; !coerceSafeValueArg.MatchString(kv) {
@@ -457,8 +446,6 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 // duplicate ref dedups to one adoption, so --upstream still resolves it.
 func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
 
 	prev := struct {
 		resolveDigests bool
@@ -474,7 +461,7 @@ func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	installWorkloadRefs = []string{"infer=vllm/deployment/x:8000", "infer=vllm/deployment/x:8000"}
 	installUpstream = "infer"
 
-	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, helmchart.ShapeNodeMetal, "snp", "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}
@@ -541,28 +528,20 @@ func TestBuildValueArgsGuestImageTagPinning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newCmd := func(mode string) *cobra.Command {
-		cmd := &cobra.Command{}
-		cmd.Flags().String(flagCvmMode, mode, "")
-		return cmd
-	}
-
-	t.Run("pod mode pins the guest to the component tag", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
+	t.Run("pod shape pins the guest to the component tag", func(t *testing.T) {
 		installValues = nil
-		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		args, err := buildValueArgs(context.Background(), &cobra.Command{}, "", nil, helmchart.ShapePod, "snp", "v0.1.10", "", appendResolvedDigestArgs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !slices.Contains(args, "kata.guestImage.tag=v0.1.10") {
-			t.Fatalf("pod mode should pin the guest tag to the component tag, got %v", args)
+			t.Fatalf("pod shape should pin the guest tag to the component tag, got %v", args)
 		}
 	})
 
 	t.Run("a -f that sets the tag owns the axis", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
 		installValues = []string{pinned}
-		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		args, err := buildValueArgs(context.Background(), &cobra.Command{}, "", nil, helmchart.ShapePod, "snp", "v0.1.10", "", appendResolvedDigestArgs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -573,24 +552,22 @@ func TestBuildValueArgsGuestImageTagPinning(t *testing.T) {
 		}
 	})
 
-	t.Run("node mode emits no guest tag", func(t *testing.T) {
-		setCvmModeForTest(t, "node")
+	t.Run("node shape emits no guest tag", func(t *testing.T) {
 		installValues = nil
-		args, err := buildValueArgs(context.Background(), newCmd("node"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
+		args, err := buildValueArgs(context.Background(), &cobra.Command{}, "", nil, helmchart.ShapeNodeMetal, "snp", "v0.1.10", "", appendResolvedDigestArgs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if slices.ContainsFunc(args, func(a string) bool {
 			return strings.HasPrefix(a, "kata.guestImage.tag=")
 		}) {
-			t.Fatalf("non-pod mode has no guest axis, got %v", args)
+			t.Fatalf("a node shape has no guest axis, got %v", args)
 		}
 	})
 
 	t.Run("an unreadable -f aborts the render", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
 		installValues = []string{filepath.Join(dir, "absent.yaml")}
-		if _, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs); err == nil {
+		if _, err := buildValueArgs(context.Background(), &cobra.Command{}, "", nil, helmchart.ShapePod, "snp", "v0.1.10", "", appendResolvedDigestArgs); err == nil {
 			t.Fatal("unreadable values file: want error, got nil")
 		}
 	})

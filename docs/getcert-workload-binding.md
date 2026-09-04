@@ -594,7 +594,7 @@ see Enablement.
 
 ## Corner 8 — exempt namespaces admit on a captured digest, not the name
 
-On the hosted lanes (pod/gke/aks) the provider owns the platform pods in
+On the hosted lanes (pod, node-cloud) the provider owns the platform pods in
 `kube-system` — kube-proxy, CoreDNS, the CNI, CSI drivers — and their images are
 not on the c8s allowlist. Nothing baked into the node measures them either;
 unlike node-CVM, whose image carries the RKE2 system floor, these nodes run the
@@ -643,8 +643,8 @@ in a listed namespace before the plugin first connected is captured along with
 the genuine platform set. That is strictly narrower than the removed
 namespace-name exemption — bounded to one capture window per node and to
 concrete digests rather than "any image, forever" — but it is weaker than the
-node-CVM floor, which is why `exempt_namespaces` is left empty on `cvmMode=node`
-and the baked floor stands alone there.
+node-CVM floor, which is why `exempt_namespaces` is left empty on the
+node-image shape and the baked floor stands alone there.
 
 ---
 

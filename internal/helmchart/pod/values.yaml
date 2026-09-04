@@ -1,0 +1,567 @@
+## The c8s component image set: the single source the chart and `c8s install`
+## both enumerate from, so adding a component is one edit here.
+##   - valuePath:   dotted path to the component's image object.
+##   - enabledPath: dotted path to its deploy toggle ("" = always deployed); a
+##                  disabled component is neither derived into the NRI allowlist
+##                  nor coverage-checked.
+##   - cdsExempt:   cds is always seeded via its self-entry, so the fail-closed
+##                  coverage guard skips it.
+##   - pinnedDigest: the digest `c8s install` pins for this component instead of
+##                  resolving its repository at --image-tag.
+## Consumed by the c8s-lib.components helper and by `c8s install` (digest
+## resolution, via `helm show values`).
+c8sComponents:
+  - valuePath: image
+    enabledPath: ""
+    cdsExempt: false
+  - valuePath: cds.image
+    enabledPath: ""
+    cdsExempt: true
+
+## The host's TEE platform: snp | tdx. Selects the confidential kata shim,
+## RuntimeClasses, and RA-TLS platform strings. A cluster is one CPU TEE.
+platform: snp
+
+## Host Kubernetes distro: k8s | rke2. Selects the on-host containerd config
+## directory kata-deploy binds and patches, and the CoreDNS Service name
+## tls-lb resolves against. `c8s install` detects it from the cluster's
+## kubelet versions; a mixed cluster must set it here plus nodeSelectors.
+distro: k8s
+
+## Operator container image. The same image runs the controller manager and
+## the injected get-cert. `tag`/`digest` are consumer-supplied — the chart
+## fails to render if neither is set. TEE measurements depend on the exact
+## binary running, so floating tags break attestation semantics; prefer
+## `digest`.
+image:
+  repository: ghcr.io/confidential-dot-ai/c8s-operator
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+operator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  podAnnotations: {}
+  extraArgs: []
+
+## Chart-wide image pull secrets, used by every component unless that component
+## sets its own .imagePullSecrets.
+imagePullSecrets: []
+
+## Name of a pre-existing registry-credential Secret in the release namespace,
+## appended to every component's imagePullSecrets. The chart never creates the
+## Secret: `c8s install --image-pull-secret <name>` fails fast when it is
+## missing.
+imagePullSecret: ""
+
+certProvisioning:
+  ## How long an init get-cert container retries CDS in-process before failing
+  ## during a full-stack roll. Set comfortably above CDS's startup-to-serving
+  ## time; it still fails closed once elapsed.
+  initialRetryTimeout: "2m"
+
+## Common ServiceAccount imagePullSecrets for the operator, attestation-api,
+## and CDS. Leave empty to inherit the chart-wide imagePullSecrets.
+serviceAccount:
+  imagePullSecrets: []
+
+## CRD-backed status mirror for `kubectl get cwl` UX. Disable when CRDs are
+## intentionally not installed; pod injection does not depend on it.
+statusMirror:
+  enabled: true
+
+## Denies tenant pods the host-namespace and hostPath privileges that would let
+## them impersonate a node-level c8s component from inside the node's TCB.
+## Disable only if another admission policy already enforces the equivalent.
+hostNamespacePolicy:
+  enabled: true
+  ## Namespaces exempt in addition to the release namespace and kube-system.
+  exemptNamespaces: []
+
+## Attestation endpoint the chart's consumers dial: the attestation-service
+## baked into the kata guest image, on the CVM's loopback. Every consumer of
+## the chart value (CDS, get-cert sidecars) runs inside a guest.
+attestation:
+  port: 8400
+
+## Host directory the deny-host-namespaces policy admits into a cw pod as
+## the one read-only hostPath (the workload-claims inventory socket dir on the
+## node shapes; inert here but kept uniform).
+runtimeDir: /var/run/nri-image-policy
+
+## Kata Containers runtime installation and enforcement. The chart renders
+## the upstream kata-deploy DaemonSet (installs the runtime, shims, QEMU and
+## guest kernels onto every selected node) plus the RuntimeClass objects
+## kata-deploy does not create. Enforcement: the webhook injects a kata
+## RuntimeClass into in-scope workload pods and a ValidatingAdmissionPolicy
+## rejects non-kata pods. Host-namespace pods are exempt — a VM cannot share
+## the host's namespaces. See docs/kata.md.
+kata:
+  image:
+    repository: quay.io/kata-containers/kata-deploy
+    ## kata-deploy 3.30.0, digest-pinned: it runs privileged with the host
+    ## root mounted. To bump:
+    ##   curl -sS "https://quay.io/api/v1/repository/kata-containers/kata-deploy/tag/?specificTag=<ver>" | jq -r '.tags[0].manifest_digest'
+    tag: ""
+    digest: "sha256:b31cf13addbaf49af9e211bf6ab38335299015a754e2bc0341aa4ba47d8cb395"
+    pullPolicy: IfNotPresent
+  ## RKE2-only containerd-prep initContainer (privileged, host root mounted —
+  ## hence digest-pinned). busybox:1.37 multi-arch manifest list digest.
+  containerdPrep:
+    image:
+      repository: busybox
+      tag: ""
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+      pullPolicy: IfNotPresent
+  ## Explicit override for the host containerd config directory. Empty
+  ## derives from `distro`.
+  containerdConfigDir: ""
+  ## nodeSelector for the kata-deploy DaemonSet (merged with
+  ## kubernetes.io/os=linux). Empty installs kata on every Linux node.
+  nodeSelector: {}
+  ## Node labels rendered as scheduling.nodeSelector on the confidential
+  ## RuntimeClasses so a wrong-TEE node leaves pods Pending instead of
+  ## crash-looping QEMU. Scheduling aid, not a security boundary. Helm
+  ## coalesces nested maps: use `null` to drop the selector entirely.
+  snpNodeSelector:
+    confidential.ai/sev-snp: "true"
+  tdxNodeSelector:
+    confidential.ai/tdx: "true"
+  ## kata-deploy's payload copy peaks large; requests track the idle
+  ## footprint. No limits: a cap OOM-kills the installer mid-copy.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  ## In-guest image: the kata-image-puller DaemonSet fetches the published
+  ## kata-guest-base artifact onto each node and points kata-runtime's
+  ## configuration at it (the dm-verity guest rootfs + kernel).
+  guestImage:
+    ## Set false for local testing where the artifact isn't published and you
+    ## place it on the node + patch the kata config by hand.
+    enabled: true
+    repository: ghcr.io/confidential-dot-ai
+    ## `c8s install` overwrites this with the tag it resolves the component
+    ## images at: the guest's baked allowlist seed admits only the components
+    ## of the commit the guest was built from.
+    tag: main
+    ## Use the `<tag>-debug` guest variant: the baked policy allows host
+    ## log/exec (container I/O becomes host-readable) and the launch
+    ## measurement differs, so attestation pinned to the locked value rejects
+    ## it. Dev only; `c8s install --debug` sets this.
+    debug: false
+    ## Pull the oras artifact over plain HTTP — local registry mirror only.
+    insecure: false
+    ## Optional dockerconfigjson Secret in the release namespace for the
+    ## in-pod `oras pull` (private mirror). Defaults to the chart-wide
+    ## imagePullSecret; empty pulls anonymously (the public artifact).
+    pullerAuthSecret: ""
+    ## Puller image (oras + a shell), digest-pinned: it writes into a
+    ## privileged host path. Bump in pairs:
+    ##   oras manifest fetch ghcr.io/oras-project/oras:<new-tag>
+    pullerImage:
+      repository: ghcr.io/oras-project/oras
+      tag: "v1.2.0"
+      digest: "sha256:0087224dd0decc354b5b0689068fbbc40cd5dc3dbf65fcb3868dfbd363dc790b"
+      pullPolicy: IfNotPresent
+    ## Host directory the puller writes the guest image into; kata's
+    ## configuration-qemu-<tee>.toml references a subpath of it.
+    hostPath: /var/lib/c8s/kata-images
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  ## Confidential GPU (NVIDIA): a second puller fetches the `<tag>-nvidia`
+  ## guest variant and wires the qemu-nvidia-gpu-* shim, plus the sandbox
+  ## device plugin advertising vfio-bound GPUs. Host GPU provisioning
+  ## (vfio-pci binding, CC mode, BAR resize) is out of scope — docs/kata-gpu.md.
+  gpu:
+    guestImage:
+      hostPath: /var/lib/c8s/kata-images-nvidia
+      ## PCIe root ports QEMU pre-allocates for VFIO cold-plug — one per
+      ## passed-through GPU; 8 = a full HGX board. Must be >= 1.
+      pcieRootPort: 8
+      ## In-guest memory floor (MiB): the NVIDIA driver's BAR-mapping path
+      ## OOMs the stock 8 GiB guest.
+      defaultMemory: 65536
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+    ## Advertises vfio-bound GPUs as per-model nvidia.com/<MODEL> resources
+    ## and writes the CDI spec kata's cold-plug consumes. Privileged with
+    ## host /dev, /sys and the CDI dir — hence digest-pinned. Disable for
+    ## clusters that advertise GPU devices some other way.
+    sandboxDevicePlugin:
+      enabled: true
+      image:
+        repository: nvcr.io/nvidia/cloud-native/nvidia-sandbox-device-plugin
+        ## v0.0.3, digest-pinned. Bump in pairs.
+        tag: "v0.0.3"
+        digest: "sha256:a897db2f25b1b0ff6195726ba6c307d8567b2285f59cde5f8409683fd9bd12e5"
+        pullPolicy: IfNotPresent
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+
+## Mutating admission webhook that injects get-cert containers into pods
+## annotated with confidential.ai/cw.
+webhook:
+  caBundle: ""
+  annotations: {}
+  service:
+    port: 443
+  failurePolicy: Fail
+  extraExcluded: []
+  ## ValidatingAdmissionPolicy guarding the confidential.ai/cw pod label.
+  cwLabelPolicy:
+    enabled: true
+  certVolume:
+    fsGroup: 65532
+    keyMode: "0640"
+  getCert:
+    ## Must be strictly shorter than cds.namedCertTTL (6h). get-cert paces off
+    ## the installed leaf's own NotAfter, so a mis-set value degrades to more
+    ## frequent renewals rather than an expired certificate.
+    renewInterval: 2h
+    ## Defaults match distroless nonroot.
+    runAsUser: 65532
+    runAsGroup: 65532
+    runAsNonRoot: true
+
+## Certificate Distribution Service (cds): the c8s trust root. One binary, one
+## Service, one ServiceAccount serves EAR issuance, allowlist, JWKS, and
+## mesh-CA leaf signing. The mesh CA key is generated inside the cds process
+## and stays in memory only.
+cds:
+  ## Pin `image.digest` for production: the fail-closed NRI floor admits CDS
+  ## by digest.
+  image:
+    repository: ghcr.io/confidential-dot-ai/cds
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 8443
+  ## CIDR(s) holding this cluster's node addresses; CDS dials a node's
+  ## admission inventory inside them and nowhere else. Unset, CDS derives the
+  ## bound live from the node list (and the chart grants node read access).
+  sandboxInventoryCIDRs: []
+  ## CDS is a singleton in-memory trust root, so it must land on a known
+  ## node. Set selector: {} and tolerations: [] for a single-node cluster
+  ## (`c8s install --single-node` does this).
+  node:
+    selector:
+      role: cds
+    tolerations:
+      - key: dedicated
+        value: cds
+        effect: NoSchedule
+  ## Any voluntary eviction destroys the in-memory CA/EAR keys and forces every
+  ## workload to re-bootstrap; the PDB blocks drains. Set maxUnavailable: 1 to
+  ## allow them, or enabled: false to remove the PDB.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 0
+  logLevel: info
+  allowlistDB: /data/allowlist.db
+  earIssuer: cds
+  expectedIssuer: ""
+  jwtClockSkew: 30
+  certTTL: 24h
+  ## Upper bound on the TTL of a leaf carrying a matched-workload stamp. It may
+  ## only shorten the 6h built-in ceiling — CDS refuses a larger value or 0.
+  namedCertTTL: 6h
+  maxTTL: 24h
+  challengeTTL: 60s
+  requestTimeout: 5s
+  ## Sized for the largest evidence envelope served today: an Intel TDX quote +
+  ## full cc_eventlog (~90 KB).
+  maxRequestSize: 262144
+  ## Max secret paths per workload / in total; the per-workload quota must stay
+  ## below the ceiling or the chart refuses to render.
+  secretsMaxPathsPerWorkload: 64
+  secretsMaxPaths: 1024
+  readinessInterval: 10s
+  ## /sign-csr CSRs arrive without a matching TCP source IP under chart
+  ## routing, so pin DNS SAN / CN patterns instead.
+  sanValidation: false
+  ## Extra full-match regexes a CSR's DNS SANs may match, on top of the
+  ## always-present in-cluster Service DNS pattern. Only the first tlsLb.san
+  ## entry (the mesh-cert identity) needs a pattern here.
+  dnsSanPatterns: []
+  cnPattern: ""
+  ## The flat allowlist of SHA-384 hex launch digests: CDS admits these to call
+  ## /attest and /sign-csr, and the ratls-mesh daemonset pins CDS's RA-TLS
+  ## serving cert against it. Empty = no pinning (UNSAFE outside dev).
+  measurements: []
+  ## TDX RTMR pins, each "<index>=<sha384-hex>", completing `measurements` on
+  ## TDX (MRTD covers firmware only; RTMR[1]/[2] pin kernel and command line).
+  ## Ignored for SNP evidence. Empty = no RTMR pinning (on TDX the measurement
+  ## pin then confers no guest-code identity, UNSAFE).
+  rtmrs: []
+  ## Measurements config: the JSON document listing the VM images this cluster
+  ## runs, each pinned as a whole image. Content, not a path — set it with
+  ## `c8s install --measurements-config <file>` or `helm --set-file`.
+  measurementsConfig: ""
+  ## PEM bundle of operator EC public keys (public material, not a secret)
+  ## authorizing allowlist writes. Prefer `c8s install --operator-keys <file>`.
+  operatorKeys: ""
+  tokenSignerRotationInterval: 720h
+  tokenSignerOverlap: 25h
+  tokenSignerRotationJitter: 0.1
+  rateLimit: 10
+  rateBurst: 20
+  rateLimiterMaxEntries: 10000
+  rateLimiterEvictInterval: 1m
+  rateLimiterIdleTimeout: 5m
+  ratlsCertTTL: 24h
+  ca:
+    commonName: c8s Mesh CA
+    certValidity: 8760h
+    minValidity: 1h
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+## The bootstrap allowlist: the image-digest floor, rendered into CDS's
+## --allowlist-seed. The in-guest policy-monitor pulls it from CDS, so the
+## first pull returns a real list rather than an empty set. Format: map of
+## "sha256:<hex>" -> image ref.
+nriImagePolicy:
+  bootstrapAllowlist:
+    ## When true, the c8s component images this chart installs are auto-added
+    ## to the floor whenever their image.digest is set (`c8s install
+    ## --resolve-digests` turns this on). Never covers non-c8s system images —
+    ## pin those in `digests`.
+    deriveComponents: false
+    digests: {}
+    ## Named workload entries folded into the served seed: per-container argv
+    ## and secrets policy matched by digest (pkg/allowlist Workload JSON).
+    workloads: {}
+
+tlsLb:
+  enabled: true
+
+  ## Rollout strategy. Empty resolves by hostPort.enabled: Recreate when the
+  ## node port is bound (two pods on a node would collide on the host port,
+  ## and on a single-node cluster a surge pod deadlocks the roll), otherwise
+  ## RollingUpdate maxSurge=1/maxUnavailable=0 for gapless rolls.
+  strategy: {}
+
+  ## Host-network edge binding: nginx's TLS listener is published on the
+  ## node's host port so external clients reach the front door on the node IP.
+  ## This grabs the node's 443 — on clusters whose ingress already owns it
+  ## (RKE2's bundled ingress) the tls-lb pod stays Pending; set enabled: false
+  ## there or point https at a free host port. https empty derives 443.
+  hostPort:
+    enabled: true
+    https: ""
+
+  ## Public hostnames for the front door. Empty defaults to the chart-managed
+  ## Service DNS name. The FIRST entry is the identity on the CDS-issued mesh
+  ## cert — pin it in cds.dnsSanPatterns; the rest widen nginx server_name.
+  san: []
+
+  ## Upstream backend the front door proxies to. Two safe shapes: an adopted
+  ## confidential workload's headless Service (c8s-<id>.<ns>.svc.cluster.local,
+  ## what `c8s install --upstream` fills in — the mesh wraps the hop), or an
+  ## https address with tls.verify=true (app-TLS). Anything else fails the
+  ## render. Empty = no catch-all until a backend is wired.
+  upstream:
+    address: ""
+    protocol: http
+    tls:
+      useCDSClientCert: true
+      verify: true
+      verifyDepth: 2
+      ## SNI/verification name; must match the upstream cert SAN. Empty
+      ## defaults to the address host.
+      serverName: ""
+      ## CA file nginx verifies the upstream against; defaults to the get-cert
+      ## output (leaf+CA chain), so CDS-issued upstream certs verify as-is.
+      trustedCAPath: /tls/cert.pem
+
+  ## Publish CDS's /allowlist API through the front door via an in-pod
+  ## loopback proxy that verifies CDS's RA-TLS evidence. Writes still require
+  ## the operator token minted by `c8s allowlist --operator-key`.
+  allowlist:
+    enabled: true
+    ## Loopback-only port of the RA-TLS-verifying proxy (not a Service port).
+    proxyPort: 8801
+    ## Per-client and aggregate write limiting; the aggregate must undercut
+    ## cds.rateLimit/rateBurst (enforced at render). GET/HEAD/OPTIONS exempt.
+    rateLimit:
+      requestsPerSecond: 1
+      burst: 5
+      totalRequestsPerSecond: 8
+      totalBurst: 15
+    readRateLimit:
+      requestsPerSecond: 20
+      burst: 40
+    resources: {}
+
+  ## Additional path routes proxied before the catch-all upstream. A route
+  ## backend must be https with tls.verify=true (app-TLS).
+  routes: []
+    # - path: /allowlist
+    #   match: exact  # exact | prefix (default)
+    #   backend:
+    #     address: cds.default.svc.cluster.local:8443
+    #     protocol: https
+    #     tls:
+    #       useCDSClientCert: true
+    #       verify: true
+    #       verifyDepth: 2
+    #       serverName: cds.default.svc.cluster.local
+    #       trustedCAPath: ""
+    #   cors:
+    #     enabled: false  # opt this route out of the global CORS block
+
+  ## CORS headers on the proxied locations and discovery endpoints.
+  ## Independent of this block, the c8s protocol-owned endpoints
+  ## (/.well-known/c8s/*, discovery, /allowlist) serve wide-open CORS by
+  ## default — see protocolEndpoints.
+  cors:
+    enabled: false
+    ## Wide-open CORS on the c8s protocol-owned endpoints only: their
+    ## responses are self-authenticating or public by design, so an origin
+    ## allowlist cannot protect anything and only breaks verifiers.
+    protocolEndpoints: true
+    ## Use ["*"] for any origin (cannot combine with allowCredentials).
+    allowOrigins: []
+    allowMethods: ["GET", "POST", "OPTIONS"]
+    allowHeaders: ["Authorization", "Content-Type", "X-C8s-Session"]
+    exposeHeaders: []
+    allowCredentials: false
+    maxAge: 600
+
+  ## Public TLS credential presented to internet clients. mode selects it:
+  ## cds (default) serves the CDS-issued mesh leaf; webpki serves the operator
+  ## Secret named by secretName (host-visible key — the front door is
+  ## attest-pq only); acme has the in-pod `c8s acme` sidecar issue a multi-SAN
+  ## leaf for the san list (TEE-held key; node-image shape only). The
+  ## secretName/certKey/keyKey/mountPath keys apply to webpki only.
+  publicTLS:
+    mode: cds
+    secretName: ""
+    certKey: tls.crt
+    keyKey: tls.key
+    mountPath: "/public-tls"
+
+  ## ACME issuance (publicTLS.mode=acme). The sidecar answers HTTP-01 behind
+  ## nginx's :80 server and SIGHUPs nginx on install. Empty directoryURL is
+  ## Let's Encrypt production; use the staging URL for tests — key and state
+  ## live on a Memory emptyDir, so every pod recreation re-issues and counts
+  ## against LE duplicate-certificate limits. The CA must reach :80/:443 at
+  ## the sanList names, so DNS needs service.type=LoadBalancer or hostPort;
+  ## ClusterIP-only fails render.
+  acme:
+    email: ""
+    directoryURL: ""
+
+  ## Discovery/preflight metadata (issued cert + attestation evidence) served
+  ## by nginx so an unattested client (`c8s verify`, c8s-verify-js) can fetch
+  ## it without a client cert.
+  discovery:
+    enabled: true
+    path: "/v1/discovery"
+    mountPath: "/discovery"
+    fileName: "discovery.json"
+    cdsCertPath: "/.well-known/cds-cert.pem"
+    meshCAPath: "/.well-known/mesh-ca.pem"
+
+  meshCA:
+    ## Serve the mesh CA PEM at the discovery meshCAPath.
+    expose: true
+
+  imagePullSecrets: []
+
+  certProvisioning:
+    verbose: false
+    ## Must be shorter than the cert TTL issued by CDS.
+    renewInterval: "1h"
+    ## How often the sidecar checks the mesh CA it serves still matches CDS's
+    ## (a CDS restart regenerates it in-memory). "0" disables.
+    caWatchInterval: "1m"
+
+  ## Attestation + over-encryption sidecar (the c8s-verify protocol): serves
+  ## the per-session attestation challenges and the post-quantum
+  ## over-encryption handshake on loopback; nginx reverse-proxies
+  ## /.well-known/c8s/ to it. platform/generation derive from the chart's
+  ## top-level platform; generation applies only to AMD.
+  attest:
+    enabled: true
+    port: 8800
+    generation: genoa
+    ## Attestation-api URL override; empty uses the chart's.
+    attestationApiURL: ""
+    ## Workload-verified ingress gate: /readyz is 200 only while the mesh
+    ## identity leaf carries a matched-workload stamp with exactly this name.
+    ## Requires attest.enabled and hostPort.enabled=false (a hostPort bypasses
+    ## readiness). Empty keeps always-ready.
+    expectedWorkload: ""
+    resources: {}
+
+  nginx:
+    image:
+      repository: nginxinc/nginx-unprivileged
+      # stable-alpine-slim (nginx 1.30.4). Bump with a fresh digest.
+      digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+    ## Unprivileged (>=1024): nginx runs non-root. The Service presents 443.
+    httpsPort: 8443
+    ## DNS server nginx re-resolves a mesh-wrapped upstream against. Empty
+    ## derives from the distro (RKE2's CoreDNS Service name differs).
+    resolver: ""
+    runAsUser: 101
+    runAsGroup: 101
+    runAsNonRoot: true
+    resources: {}
+
+  service:
+    ## Set to LoadBalancer to expose the listener publicly, with annotations
+    ## for cloud-LB specifics.
+    type: ClusterIP
+    port: 443
+    ## Empty picks Local while the /allowlist route or the attestation
+    ## sidecar renders (their limiters key on the public peer address), and
+    ## Cluster otherwise.
+    externalTrafficPolicy: ""
+    annotations: {}
+
+  ## Volume mount path for the CDS-issued TLS certificate and key shared
+  ## between get-cert and nginx.
+  tlsMountPath: "/tls"
+
+## Common pod-level security knobs.
+podSecurityContext:
+  fsGroup: 65532
+  runAsNonRoot: true
+  runAsUser: 65532

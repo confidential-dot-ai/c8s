@@ -103,6 +103,7 @@ jobs:
           OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
           CDSTAG=$(resolve_tag cds)
           NRITAG=$(resolve_tag nri-image-policy)
+          MESHTAG=$(resolve_tag ratls-mesh)      # renders but never schedules (nodeSelector below)
           CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
           NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
           # The operator image is ALSO the injected get-cert/c8s-cert sidecar image
@@ -124,16 +125,20 @@ jobs:
           AATAG="${{ inputs.aa_ref || 'main' }}"
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
-          # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
+          # c8s-node-metal chart values — canonical per c8s/docs + the c8s-integration
+          # fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
           #    default pins role=cds, so CDS sits Pending forever on a single node.
           #  - measurements: RUNTIME_MEASUREMENT  : placeholder. The payload substitutes
           #    the node's OWN runtime launch digest ($MEAS from the primitive). The image
           #    manifest's snp_launch_digest is NOT that value (CDS -> measurement_denied).
-          #  - ratlsMesh disabled                 : the L4 mesh proxy needs kernel netfilter
-          #    modules the monolithic guest kernel lacks (base-images ask). nri-image-policy
-          #    is a containerd NRI hook — no netfilter — so it runs (audit mode for now).
+          #  - ratlsMesh.nodeSelector             : the L4 mesh proxy needs kernel netfilter
+          #    modules the monolithic guest kernel lacks (base-images ask), so the selector
+          #    matches no node here. nri-image-policy is a containerd NRI hook — no
+          #    netfilter — so it runs (audit mode for now).
           VALS=$(cat <<EOF | base64 -w0
+          platform: snp
+          distro: rke2
           image:
             tag: "$OPTAG"
             digest: "$OPDIG"
@@ -146,7 +151,6 @@ jobs:
               tolerations: null   # default incl.) -> renders NO selector. {} counts as
                                   # "empty" to the template's `default` -> role=cds
                                   # resurfaces -> CDS Pending (run 29536583462).
-            ratlsPlatform: sev-snp
             measurements: ["RUNTIME_MEASUREMENT"]
             # HOLDING ACTION, delete with console delivery (research/guest-transport.md).
             # c8s#385 has CDS derive this from the node list and dropped it here. That
@@ -160,24 +164,19 @@ jobs:
             # The real fix is an agent-bearing image, which needs the console-free
             # transport; until then the lane cannot move off the June image.
             sandboxInventoryCIDRs: ["NODE_CIDR"]
+          # node-metal, not node-image: this node image predates the baked
+          # host attestation-api, so the chart's own DaemonSet + attest-proxy
+          # sidecar supplies the node-local endpoint on its Unix socket, and
+          # no $(HOST_IP)/NodePort alignment is needed.
           attestationApi:
             image:
               tag: "$AATAG"
-            # cvmMode=node (what we ship on metal), but this node image
-            # predates the baked host attestation-api — so the chart's own
-            # DaemonSet + attest-proxy sidecar supplies the node-local
-            # endpoint on its Unix socket, and no $(HOST_IP)/NodePort
-            # alignment is needed.
-            cvmMode: node
-            teeDevices:
-              sevGuest: true
-              tdxGuest: false
-              tpm: false
           ratlsMesh:
-            enabled: false
+            image:
+              tag: "$MESHTAG"
+            nodeSelector:          # matches no node here — see the header comment
+              confidential.ai/ratls-mesh: "true"
           nriImagePolicy:
-            enabled: true          # NRI hook needs no netfilter (that was ratls-mesh's constraint)
-            distro: rke2
             image:
               tag: "$NRITAG"
               digest: "$NRIDIG"
@@ -210,7 +209,8 @@ jobs:
           # real node address is whatever KubeVirt assigns the VMI this run. The
           # payload substitutes both again in-guest; nothing here reaches runtime.
           printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' | sed 's|NODE_CIDR|10.0.0.1/32|' > /tmp/gate-vals.yaml
-          helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
+          bash c8s/internal/helmchart/sync.sh
+          helm template c8s c8s/internal/helmchart/node-metal -f /tmp/gate-vals.yaml > /dev/null
           echo "render gate: chart+values validate clean"
 
           # ── THE PAYLOAD: runs in-guest as root. Given $K, $MEAS; emits PAYLOAD_OK.
@@ -219,7 +219,8 @@ jobs:
           dl "https://codeload.github.com/confidential-dot-ai/c8s/tar.gz/$FULL" /tmp/src.tgz || { say FAIL_CHART_FETCH; exit 0; }
           tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_CHART_EXTRACT; exit 0; }
           CD=\$(echo /tmp/c8s-*/internal/helmchart)
-          tar -czf /tmp/chart.tgz -C "\$CD" c8s || { say FAIL_CHART_PACK; exit 0; }
+          bash "\$CD/sync.sh" || { say FAIL_CHART_SYNC; exit 0; }
+          tar -czf /tmp/chart.tgz -C "\$CD" node-metal || { say FAIL_CHART_PACK; exit 0; }
           CC=\$(base64 -w0 /tmp/chart.tgz)
           say CHART_FROM_SOURCE
           \$K create ns c8s-system >/dev/null 2>&1

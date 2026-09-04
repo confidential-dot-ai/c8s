@@ -1,0 +1,7 @@
+{{- define "c8s-lib.tlsLb" -}}
+{{ include "c8s-lib.tlsLbConfigMap" . }}
+---
+{{ include "c8s-lib.tlsLbDeployment" . }}
+---
+{{ include "c8s-lib.tlsLbService" . }}
+{{- end }}

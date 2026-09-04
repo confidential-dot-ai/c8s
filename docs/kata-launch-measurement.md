@@ -42,7 +42,7 @@ mode needs the *set* of per-shape digests, and until now the only way to learn
 one was to boot a pod, let attestation fail, and read the
 `measurement does not match any reference value` warning out of the CDS log. `c8s install
 --cvm-mode=pod --measurements` takes the digests this tool produces
-(`cmd/c8s/install.go`); under `--cvm-mode=node/gke/aks` the same flag takes the
+(`cmd/c8s/install.go`); on the node shapes the same flag takes the
 node image's `manifest.json` value instead.
 
 ## What goes into the digest
@@ -194,7 +194,7 @@ the same TDVF, differing only in vCPU shape:
 
 This is why the kata-image-puller pins `default_vcpus = 1` on the **SNP** shims
 only and deliberately leaves the TDX shims unpinned
-(`internal/helmchart/c8s/files/scripts/pull-and-configure.sh`).
+(`internal/helmchart/scripts/pull-and-configure.sh`).
 
 Practical consequence: give every TDX node the same TDVF and the whole fleet
 shares one allow-list entry. Changing the kata-static payload (and so `TDVF`)

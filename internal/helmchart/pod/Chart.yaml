@@ -1,0 +1,20 @@
+apiVersion: v2
+name: c8s-pod
+description: |
+  c8s pod-as-CVM shape: every in-scope workload pod is a kata confidential VM (SEV-SNP or TDX) and the host is adversarial. Installs the kata runtime and enforces it (webhook injection + ValidatingAdmissionPolicy), the operator, webhook, CDS trust root and tls-lb as kata CVMs, the guest-image pullers, and the GPU device plugin. Host-side attestation, mesh routing, and image admission run inside the guest image.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"
+keywords:
+  - confidential
+  - tee
+  - attestation
+  - ratls
+maintainers:
+  - name: confidential-dot-ai
+home: https://github.com/confidential-dot-ai
+dependencies:
+  - name: c8s-lib
+    version: 0.1.0
+    repository: file://../lib

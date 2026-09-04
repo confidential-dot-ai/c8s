@@ -11,14 +11,14 @@ it installs with tls-lb disabled. To also expose a workload through tls-lb, give
 it an upstream instead (see [tls-lb upstream](operator.md#tls-lb-upstream)).
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=node-image --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem -f - <<'EOF'
 tlsLb:
   enabled: false
 EOF
 ```
 
-`--cvm-mode` is required (`pod`, `node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`pod`, `node-image`, `node-metal`, or `node-cloud` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to

@@ -9,7 +9,7 @@ import (
 // SupportedKataVersion is the kata release whose command-line assembly Cmdline
 // reproduces. A guest built against another release must be measured with an
 // explicitly supplied --cmdline. Bump this together with the kata-deploy pin in
-// internal/helmchart/c8s/values.yaml, and re-check the golden cmdlines in
+// internal/helmchart/pod/values.yaml, and re-check the golden cmdlines in
 // testdata/.
 const SupportedKataVersion = "3.30.0"
 

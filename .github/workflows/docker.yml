@@ -44,7 +44,7 @@ on:
       - "go.work.sum"
       - "cmd/**/Dockerfile"
       - "cmd/nri-image-policy/enable-nri.sh"
-      - "internal/helmchart/c8s/**"
+      - "internal/helmchart/**"
       - "Makefile"
       - ".github/workflows/docker.yml"
   # Manual rebuild escape hatch, for a rebuild with NO new commit behind it: a

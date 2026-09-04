@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 const (
@@ -45,7 +47,7 @@ func TestInstallPinsEmitsFileAndFlatValues(t *testing.T) {
 		{"name":"b","mrtd":"00`+pinDigestB+`","rtmr":[null,"`+pinReg1+`","`+pinReg2+`"]}]}`)
 	withInstallFlags(t, path, nil, nil)
 
-	digests, rtmrs, helmArgs, err := installPins()
+	digests, rtmrs, helmArgs, err := installPins(helmchart.ShapeNodeMetal)
 	if err != nil {
 		t.Fatalf("installPins: %v", err)
 	}
@@ -69,6 +71,25 @@ func TestInstallPinsEmitsFileAndFlatValues(t *testing.T) {
 	}
 }
 
+// The pod chart has no ratlsMesh section, so the mesh copy of the config goes
+// only to the node shapes — under pod the mesh runs in-guest.
+func TestInstallPinsConfigFilePodShapeOmitsTheMeshCopy(t *testing.T) {
+	path := writePinConfig(t, `{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"00`+pinDigestA+`"}]}`)
+	withInstallFlags(t, path, nil, nil)
+
+	_, _, helmArgs, err := installPins(helmchart.ShapePod)
+	if err != nil {
+		t.Fatalf("installPins: %v", err)
+	}
+	joined := strings.Join(helmArgs, " ")
+	if !strings.Contains(joined, "cds.measurementsConfig="+path) {
+		t.Errorf("helm args %v missing the CDS config", helmArgs)
+	}
+	if strings.Contains(joined, "ratlsMesh.measurementsConfig") {
+		t.Errorf("pod shape emitted a ratlsMesh config the chart has no section for: %v", helmArgs)
+	}
+}
+
 // Images that disagree on registers cannot be flattened onto one register
 // list; the digests must still pin.
 func TestInstallPinsDropsDivergentRTMRs(t *testing.T) {
@@ -77,7 +98,7 @@ func TestInstallPinsDropsDivergentRTMRs(t *testing.T) {
 		{"name":"b","mrtd":"00`+pinDigestB+`","rtmr":[null,"`+pinReg2+`"]}]}`)
 	withInstallFlags(t, path, nil, nil)
 
-	digests, rtmrs, _, err := installPins()
+	digests, rtmrs, _, err := installPins(helmchart.ShapeNodeMetal)
 	if err != nil {
 		t.Fatalf("installPins: %v", err)
 	}
@@ -102,7 +123,7 @@ func TestInstallPinsRejectsMixedFlags(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withInstallFlags(t, path, tc.measurements, tc.rtmrs)
-			if _, _, _, err := installPins(); err == nil {
+			if _, _, _, err := installPins(helmchart.ShapeNodeMetal); err == nil {
 				t.Fatal("accepted a mixed configuration")
 			}
 		})
@@ -113,7 +134,7 @@ func TestInstallPinsRejectsMixedFlags(t *testing.T) {
 func TestInstallPinsFlatModeUnchanged(t *testing.T) {
 	withInstallFlags(t, "", []string{"00" + pinDigestA}, []string{"1=" + pinReg1})
 
-	digests, rtmrs, helmArgs, err := installPins()
+	digests, rtmrs, helmArgs, err := installPins(helmchart.ShapeNodeMetal)
 	if err != nil {
 		t.Fatalf("installPins: %v", err)
 	}
@@ -130,7 +151,7 @@ func TestInstallPinsFlatModeUnchanged(t *testing.T) {
 
 func TestInstallPinsFailsClosed(t *testing.T) {
 	withInstallFlags(t, filepath.Join(t.TempDir(), "absent.json"), nil, nil)
-	if _, _, _, err := installPins(); err == nil {
+	if _, _, _, err := installPins(helmchart.ShapeNodeMetal); err == nil {
 		t.Fatal("a missing config produced pins")
 	}
 }
@@ -166,7 +187,7 @@ func TestInstallPinsEmitsAnAbsolutePath(t *testing.T) {
 	t.Chdir(dir)
 	withInstallFlags(t, "measurements.json", nil, nil)
 
-	_, _, helmArgs, err := installPins()
+	_, _, helmArgs, err := installPins(helmchart.ShapeNodeMetal)
 	if err != nil {
 		t.Fatalf("installPins with a relative path: %v", err)
 	}

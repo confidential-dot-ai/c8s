@@ -234,16 +234,18 @@ openssl ec -in operator.key -pubout -out operator.pub
 
 # Install the platform (node-as-CVM) and point the bundled TLS load balancer
 # at your workload
-c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
+c8s install --cvm-mode=node-image --hardware-platform=sev-snp --namespace c8s-system \
   --operator-keys operator.pub \
   --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```
 
-`--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
-node-as-CVM shapes, `pod` is pod-as-CVM. `--hardware-platform` is required the
-same way: `sev-snp` or `tdx`. An unstated shape would silently mismatch the
-cluster it lands on, so the install refuses to guess.
+`--cvm-mode` is required and has no default — `node-image`, `node-metal`,
+and `node-cloud` are the node-as-CVM shapes (`node`, `gke`, and `aks` are
+aliases; `aks` pins vTPM evidence), `pod` is pod-as-CVM.
+`--hardware-platform` is required the same way: `sev-snp` or `tdx`. An
+unstated shape would silently mismatch the cluster it lands on, so the
+install refuses to guess.
 
 `--workload-ref` adopts an existing workload as a confidential workload and
 resolves its images into the bootstrap allowlist (see

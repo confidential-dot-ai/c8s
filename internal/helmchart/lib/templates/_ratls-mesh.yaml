@@ -1,0 +1,15 @@
+{{- define "c8s-lib.ratlsMesh" -}}
+{{ include "c8s-lib.ratlsMeshServiceAccount" . }}
+---
+{{ include "c8s-lib.ratlsMeshRBAC" . }}
+---
+{{ include "c8s-lib.ratlsMeshDaemonSet" . }}
+---
+{{ include "c8s-lib.ratlsMeshPDB" . }}
+---
+{{ include "c8s-lib.ratlsMeshEgressPolicy" . }}
+---
+{{ include "c8s-lib.ratlsMeshUIDPolicy" . }}
+---
+{{ include "c8s-lib.ratlsMeshPrometheusRules" . }}
+{{- end }}

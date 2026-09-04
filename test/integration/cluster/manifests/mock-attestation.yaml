@@ -2,7 +2,7 @@
 # hardware. mock-attestation answers /attest with synthetic SNP reports
 # (launch digest all-zero) and /verify by checking the report-data binding —
 # the wire contract of the real api. It must be reachable at the node IP on
-# :8400 (where cvmMode=node consumers dial the node-baked api), so it runs
+# :8400 (where node-image consumers dial the image-baked api), so it runs
 # hostNetwork. attest-proxy is the same sidecar the chart's DaemonSet runs:
 # it publishes the api on the hostPath unix socket the host NRI plugin
 # verifies CDS RA-TLS through.

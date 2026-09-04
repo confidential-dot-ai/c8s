@@ -31,20 +31,20 @@
 #
 # Env (all required unless noted; set by `c8s uninstall` from the release's
 # computed values):
-#   HOST_CONTAINERD_DIR    — host containerd config directory (kata.distro)
+#   HOST_CONTAINERD_DIR    — host containerd config directory (distro)
 #   GUEST_IMAGE_DIR        — dir the kata-image-puller pulled kata-guest-base
-#                            into (kata.guestImage.hostPath)
-#   GUEST_IMAGE_DIR_NVIDIA — GPU guest image dir (kata.gpu.guestImage.hostPath);
+#                            into (kata.guestImage.hostPath, pod chart)
+#   GUEST_IMAGE_DIR_NVIDIA — GPU guest image dir (kata.gpu.guestImage.hostPath, pod chart);
 #                            empty only for a pre-GPU release = skip
 #   RKE2_PREP              — "true" when the install ran the RKE2 containerd-prep
 #                            initContainer whose template/lock this sweep owns
 #   RESTART_COMMAND        — host runtime restart, run detached via systemd-run
 #   NRI_CONTAINERD_DIR     — containerd config dir the NRI installer targeted
-#                            (nriImagePolicy.distro)
+#                            (distro)
 #   NRI_PLUGIN_DIR         — NRI plugin directory (nriImagePolicy.hostPaths.pluginDir)
 #   NRI_PLUGIN_FILENAME    — plugin filename inside it (nriImagePolicy.pluginFilename)
 #   NRI_CONFIG_DIR         — plugin config dir (nriImagePolicy.hostPaths.configDir)
-#   NRI_RUNTIME_DIR        — plugin runtime dir (nriImagePolicy.hostPaths.runtimeDir)
+#   NRI_RUNTIME_DIR        — plugin runtime dir (runtimeDir)
 #   NRI_CACHE_DIR          — plugin cache dir (nriImagePolicy.hostPaths.cacheDir)
 set -eu
 
