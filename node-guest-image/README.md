@@ -100,6 +100,17 @@ namespace-scoped credentials, never cluster-admin, and the launch
 measurement vouches for the floor their pods run under. cluster-admin can
 delete the policy, and RKE2 does not recreate deleted AddOn objects.
 
+Below admission sits AppArmor. The kernel fragment builds it as the
+exclusive LSM (SELinux, a defconfig default in the confos base, is turned
+off to make room), and containerd applies its default profile
+(`cri-containerd.apparmor.d`) to every non-privileged container: no
+mounts, no writes under `/proc/sys` or `/sys`, no ptrace across containers.
+Restricted PodSecurity refuses `Unconfined`, so a tenant cannot opt out,
+and a pod that somehow gains `CAP_SYS_ADMIN` still meets a mandatory policy
+before the read-only root. The `apparmor` package is on the image only for
+`apparmor_parser`; its unit is disabled so the package's stock host
+profiles are never loaded.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via

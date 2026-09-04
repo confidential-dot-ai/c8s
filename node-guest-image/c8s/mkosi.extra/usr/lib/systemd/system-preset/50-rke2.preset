@@ -38,3 +38,8 @@ enable systemd-timesyncd.service
 # ConditionPathExists on the opkeydata disk means it only starts on operator
 # boots — a no-op on nodes launched without --operator-key.
 enable cred-release.service
+# The apparmor package is here for apparmor_parser, which containerd execs
+# to load its per-container profile. Its unit would load the package's stock
+# host profiles from /etc/apparmor.d at boot; none of them are wanted on a
+# node, and one (nvidia_modprobe) sits on the GPU path.
+disable apparmor.service
