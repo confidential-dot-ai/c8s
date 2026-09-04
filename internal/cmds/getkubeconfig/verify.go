@@ -1,11 +1,5 @@
-// Package getkubeconfig implements the operator-side client (B4 client) that
-// obtains a kube credential from a measured CVM: it attests the node,
-// confirms the full measured identity — on TDX the image tuple (MRTD,
-// RTMR[1], RTMR[2]) plus the RTMR[3] chain seeded by the operator's key and
-// extended by the expected workload images; on SEV-SNP the pinned per-SMP
-// launch digest plus the operator-key HOSTDATA binding — then exchanges a CSR
-// for a short-lived kube client cert over the cred-release endpoint and
-// assembles a kubeconfig.
+// Package getkubeconfig obtains a kube credential after verifying the node's
+// image, direct or launchdata operator binding, and expected workload measurements.
 package getkubeconfig
 
 import (
@@ -45,6 +39,8 @@ type measuredPolicy interface {
 type tdxMeasuredPolicy struct {
 	pins  runtimemeasure.ImagePins
 	rtmr3 [runtimemeasure.Size]byte
+	// A non-zero value pins the launchdata commitment in MRCONFIGID.
+	mrconfigID [runtimemeasure.Size]byte
 }
 
 type snpMeasuredPolicy struct {
@@ -55,45 +51,29 @@ type snpMeasuredPolicy struct {
 func (tdxMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformTDX }
 func (snpMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformSNP }
 
-// policyFor builds the trust gate from the operator's inputs: the image
-// manifest (MRTD + RTMR[1] + RTMR[2], loaded atomically), the operator public
-// key PEM (the exact bytes the initrd hashed), and the ordered digest-pinned
-// workload images the node's measurer is expected to have extended, in
-// first-extend order. Tag references are rejected — only a canonical digest
-// identifies an image.
-func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
-	// The manifest's shape names the platform: a TDX build publishes the
-	// mrtd/rtmr1/rtmr2 tuple, an SNP build publishes snp_variants (per-SMP
-	// launch digests). TDX is tried first so a manifest that is neither keeps
-	// the TDX error text.
-	pins, tdxErr := runtimemeasure.LoadImageManifest(manifestPath)
-	if tdxErr == nil {
-		return tdxPolicy(pins, operatorPubPEM, workloadImages)
-	}
-	snpPins, snpErr := runtimemeasure.LoadSNPImageManifest(manifestPath)
-	if snpErr != nil {
-		return nil, fmt.Errorf("--image-manifest: %w", tdxErr)
-	}
-	return snpPolicy(snpPins, operatorPubPEM, workloadImages)
-}
-
 // snpPolicy pins the per-SMP launch-digest set and the HOSTDATA operator-key
 // binding. SNP has no runtime-extend register, so there is no workload chain.
-func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workloadImages []string, seeds *bindingSeeds) (measuredPolicy, error) {
 	// Accepting --workload-image here would claim an enforcement that cannot
 	// exist rather than silently ignoring the flag.
 	if len(workloadImages) > 0 {
 		return nil, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
 	}
+	hostData := runtimemeasure.HostData(operatorPubPEM)
+	if seeds != nil {
+		hostData = seeds.hostData
+	}
 	return snpMeasuredPolicy{
 		snpPins:  pins,
-		hostData: runtimemeasure.HostData(operatorPubPEM),
+		hostData: hostData,
 	}, nil
 }
 
 // tdxPolicy pins the image tuple and the RTMR[3] chain: the operator-key seed
 // extended, in first-extend order, by each digest-pinned workload image.
-func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+// Under --launch-data the binding moves to the launcher-committed MRCONFIGID
+// and the chain seeds from Zero, carrying only the workload extends.
+func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadImages []string, seeds *bindingSeeds) (measuredPolicy, error) {
 	digests := make([]string, 0, len(workloadImages))
 	seen := make(map[string]string, len(workloadImages))
 	for _, ref := range workloadImages {
@@ -113,10 +93,14 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 		seen[d] = ref
 		digests = append(digests, d)
 	}
-	return tdxMeasuredPolicy{
-		pins:  pins,
-		rtmr3: runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(operatorPubPEM), digests),
-	}, nil
+	pol := tdxMeasuredPolicy{pins: pins}
+	seed := runtimemeasure.Seed(operatorPubPEM)
+	if seeds != nil {
+		pol.mrconfigID = seeds.mrconfigID
+		seed = runtimemeasure.Zero
+	}
+	pol.rtmr3 = runtimemeasure.FromDigestsSeeded(seed, digests)
+	return pol, nil
 }
 
 // verifyEvidence verifies an evidence envelope with attestation-go (HW chain +
@@ -176,9 +160,10 @@ func (exp tdxMeasuredPolicy) verifyEvidence(_ teetypes.AttestationEvidence, enve
 
 // checkIdentity asserts the verified claims match the full policy:
 // MRTD against the launch digest, RTMR[1]/[2] against the image tuple,
-// RTMR[3] against the operator-key/workload chain. The compares are over the
-// claims attestation-go extracted from the signature-verified quote body.
-// Absent or malformed claims fail closed.
+// RTMR[3] against the workload chain, and — under --launch-data — MRCONFIGID
+// against the launchdata commitment. The compares are over the claims
+// attestation-go extracted from the signature-verified quote body. Absent or
+// malformed claims fail closed.
 func (exp tdxMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
 	launch := strings.ToLower(strings.TrimSpace(res.Claims.LaunchDigest))
 	if launch == "" {
@@ -202,6 +187,19 @@ func (exp tdxMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) err
 		}
 		if !bytes.Equal(got, reg.want[:]) {
 			return fmt.Errorf("RTMR[%d] mismatch (%s): node reports %x, expected %x", reg.idx, reg.meaning, got, reg.want)
+		}
+	}
+	if exp.mrconfigID != [runtimemeasure.Size]byte{} {
+		got := []byte(res.Claims.InitData)
+		if len(got) == 0 {
+			return fmt.Errorf("quote carries no MRCONFIGID (the launchdata binding)")
+		}
+		if len(got) != runtimemeasure.Size {
+			return fmt.Errorf("MRCONFIGID is %d bytes, want %d", len(got), runtimemeasure.Size)
+		}
+		if !bytes.Equal(got, exp.mrconfigID[:]) {
+			return fmt.Errorf("MRCONFIGID mismatch: node reports %s, launchdata implies %s (the TD was not launched with this bundle)",
+				hex.EncodeToString(got), hex.EncodeToString(exp.mrconfigID[:]))
 		}
 	}
 	return nil

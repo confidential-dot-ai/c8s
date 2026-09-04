@@ -69,7 +69,7 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 			stageOperatorPubkey(t, operatorPub)
 			url := attester(t, tc.platform, tc.binding)
 
-			got, err := LoadMeasuredOperatorKey(context.Background(), url)
+			got, err := LoadMeasuredOperatorKey(context.Background(), url, "")
 			if err != nil {
 				t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 			}
@@ -107,7 +107,7 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stageOperatorPubkey(t, tc.staged)
 			url := attester(t, tc.platform, tc.binding)
-			if _, err := LoadMeasuredOperatorKey(context.Background(), url); err == nil {
+			if _, err := LoadMeasuredOperatorKey(context.Background(), url, ""); err == nil {
 				t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
 			}
 		})
@@ -118,7 +118,7 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 // register: the binding must come from a report whose signature was checked.
 func TestLoadMeasuredOperatorKeyRefusesUnreachableAttester(t *testing.T) {
 	stageOperatorPubkey(t, operatorPub)
-	if _, err := LoadMeasuredOperatorKey(context.Background(), "http://127.0.0.1:1"); err == nil {
+	if _, err := LoadMeasuredOperatorKey(context.Background(), "http://127.0.0.1:1", ""); err == nil {
 		t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
 	}
 }
@@ -127,7 +127,7 @@ func TestLoadMeasuredOperatorKeyRefusesUnreachableAttester(t *testing.T) {
 func TestLoadMeasuredOperatorKeyRefusesUnknownPlatform(t *testing.T) {
 	stageOperatorPubkey(t, operatorPub)
 	url := attester(t, "nonsense", tdxBinding(operatorPub))
-	if _, err := LoadMeasuredOperatorKey(context.Background(), url); err == nil {
+	if _, err := LoadMeasuredOperatorKey(context.Background(), url, ""); err == nil {
 		t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
 	}
 }
@@ -142,7 +142,7 @@ func TestSelfReportBindsAFreshNonce(t *testing.T) {
 	v.Claims.InitData = snpBinding(operatorPub)
 	stub.SetVerdict(v)
 
-	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL); err != nil {
+	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL, ""); err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
 	reqs := stub.VerifyRequests()

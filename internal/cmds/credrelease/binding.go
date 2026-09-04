@@ -1,17 +1,21 @@
 // Package credrelease implements the in-guest credential-release service (B4
 // of the operator-key design). It issues an operator a short-lived kube client
 // certificate, but only to a caller who proves possession of the operator
-// private key whose public half was bound into the CVM's launch identity at
-// launch — giving an external operator
+// private key whose public half was bound into the CVM's launch identity
+// directly or through the launchdata commitment — giving an external operator
 // console-free, non-TOFU admin access with no pre-shared cluster secret and
 // no trust in the untrusted host.
 package credrelease
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"github.com/confidential-dot-ai/c8s/internal/launchdata"
 	"os"
 	"time"
 
@@ -78,24 +82,21 @@ func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetype
 	return &verified.Result, nil
 }
 
-// LoadMeasuredOperatorKey reads the operator pubkey the initrd staged off the
-// opkeydata disk and confirms the guest was launched to trust it. The returned
-// bytes are safe to treat as the authorized operator key.
-//
-// This is the load-bearing anchor check: the pubkey file is NOT itself
-// measured, only its digest, so before trusting the on-disk key the service
-// confirms it is the key the launch bound. A host that swapped the file
-// post-boot produces a mismatch — it can forge neither the register the
-// measured initrd extended nor the field the launcher committed at launch.
-//
-// Which field carries the binding, and how wide it is, is runtimemeasure's
-// problem: this reads the verified report and asks whether it names this key.
-// Workload digests are nil because the node image runs no workload measurer, so
-// the binding must equal the bare seed exactly; any extension beyond it means
-// an unexpected measurer ran, and the comparison fails closed.
-//
-// Called once at service start; the binding is fixed for the life of the guest.
-func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]byte, error) {
+// LoadMeasuredOperatorKey returns the launch-bound operator public key.
+// launchDataDir, when it exists, is the launchdata arm: the key and the
+// binding come from the staged bundle's commitment. Otherwise the opkeydata
+// arm applies: the initrd-staged single key file, verified against the TDX
+// RTMR[3] the initrd extended or the SNP HOSTDATA the launcher committed.
+// Called once at service start; both bindings are fixed for the guest's life.
+// The platform comes from the verified self-report.
+func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL, launchDataDir string) ([]byte, error) {
+	if launchDataDir != "" {
+		if _, err := os.Stat(launchDataDir); err == nil {
+			return loadLaunchDataOperatorKey(ctx, attestationAPIURL, launchDataDir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat %s: %w", launchDataDir, err)
+		}
+	}
 	pub, err := readOperatorPubkey()
 	if err != nil {
 		return nil, err
@@ -109,6 +110,43 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 	}
 	if err := runtimemeasure.VerifyBinding(report, pub, nil); err != nil {
 		return nil, err
+	}
+	return pub, nil
+}
+
+// loadLaunchDataOperatorKey is the launchdata arm: dir holds exactly the
+// launchdata ISO's staged files, and the platform binding covers their
+// combined commitment (LaunchDataManifest) rather than one key file. The
+// operator key is the bundle's operator-pubkey, so the binding fixes the
+// exact key bytes together with every other staged file.
+func loadLaunchDataOperatorKey(ctx context.Context, attestationAPIURL, dir string) ([]byte, error) {
+	manifest, pub, err := launchdata.LoadLaunchData(dir)
+	if err != nil {
+		return nil, err
+	}
+	report, err := verifiedSelfReport(ctx, attestationAPIURL)
+	if err != nil {
+		return nil, err
+	}
+	switch report.Platform {
+	case teetypes.PlatformTDX:
+		own := []byte(report.Claims.InitData)
+		want := launchdata.LaunchDataMRConfigID(manifest)
+		if !bytes.Equal(own, want[:]) {
+			return nil, fmt.Errorf(
+				"launchdata does not match the launch-committed MRCONFIGID: got %s, staged bundle implies %s (were the staged files modified after boot, or the TD launched with a different bundle?)",
+				hex.EncodeToString(own), hex.EncodeToString(want[:]))
+		}
+	case teetypes.PlatformSNP:
+		hostData := []byte(report.Claims.InitData)
+		want := launchdata.LaunchDataHostData(manifest)
+		if !bytes.Equal(hostData, want[:]) {
+			return nil, fmt.Errorf(
+				"launchdata does not match the launch-committed HOSTDATA: got %s, staged bundle implies %s (were the staged files modified after boot, or the VM launched with a different bundle?)",
+				hex.EncodeToString(hostData), hex.EncodeToString(want[:]))
+		}
+	default:
+		return nil, fmt.Errorf("no launchdata binding check for platform %q", report.Platform)
 	}
 	return pub, nil
 }

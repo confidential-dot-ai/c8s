@@ -22,6 +22,9 @@ type Config struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "snp"; no default).
 	Platform string
+	// LaunchDataDir is the staged launchdata bundle dir; see
+	// LoadMeasuredOperatorKey.
+	LaunchDataDir string
 	// ClientCACert / ClientCAKey locate the cluster's client-signing CA
 	// (defaults: the RKE2 paths; kubeadm works via /etc/kubernetes/pki/ca.{crt,key}).
 	ClientCACert string
@@ -43,9 +46,7 @@ type Config struct {
 // RA-TLS-protected /release-credential endpoint. It blocks until ctx is done.
 //
 // Startup order matters for the trust story:
-//  1. LoadMeasuredOperatorKey — read the opkeydata pubkey and CONFIRM it
-//     matches the launch binding (TDX RTMR[3] / SNP HOSTDATA). Fails closed
-//     if the key was substituted after boot.
+//  1. LoadMeasuredOperatorKey — verify the staged key's direct or launchdata binding.
 //  2. loadClusterCA — the cluster client-CA that signs the operator's cert.
 //  3. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
@@ -62,7 +63,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("--platform: %w", err)
 	}
 
-	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.AttestationAPIURL)
+	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.AttestationAPIURL, cfg.LaunchDataDir)
 	if err != nil {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}
