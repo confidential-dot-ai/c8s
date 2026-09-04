@@ -139,12 +139,15 @@ grep -q "== 'restricted'" "$vap" && grep -q 'failurePolicy: Fail' "$vap" \
   && grep -q 'resources: \["namespaces"\]' "$vap" \
   || { echo "::error::$vap must deny namespace labels below restricted and fail closed"; exit 1; }
 
-# AppArmor confines every tenant container, which needs the LSM in both
-# kernel fragments, SELinux out of their way, and apparmor_parser on the root.
-for frag in "$ngi/kernel/c8s.config" "$ngi/kernel/c8s-dev.config"; do
-  for line in 'CONFIG_SECURITY_APPARMOR=y' 'CONFIG_DEFAULT_SECURITY_APPARMOR=y' '# CONFIG_SECURITY_SELINUX is not set'; do
-    grep -qFx "$line" "$frag" || { echo "::error::$frag must contain '$line' (AppArmor for containers)"; exit 1; }
-  done
+# AppArmor confines every tenant container, which needs the LSM in the
+# kernel fragment, the exclusive LSMs ahead of it in CONFIG_LSM off, and
+# apparmor_parser on the root. The dev-superset check above carries these
+# lines into c8s-dev.config.
+for line in 'CONFIG_SECURITY_APPARMOR=y' 'CONFIG_DEFAULT_SECURITY_APPARMOR=y' \
+            '# CONFIG_SECURITY_SELINUX is not set' '# CONFIG_SECURITY_SMACK is not set' \
+            '# CONFIG_SECURITY_TOMOYO is not set'; do
+  grep -qFx "$line" "$ngi/kernel/c8s.config" \
+    || { echo "::error::$ngi/kernel/c8s.config must contain '$line' (AppArmor for containers)"; exit 1; }
 done
 grep -qE '^\s*apparmor\s*$' "$ngi/c8s/mkosi.conf" \
   || { echo "::error::$ngi/c8s/mkosi.conf must ship the apparmor package (apparmor_parser)"; exit 1; }
