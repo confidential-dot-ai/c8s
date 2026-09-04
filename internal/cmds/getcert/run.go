@@ -217,6 +217,15 @@ func run(cfg config) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
+	// Fail fast, never retry: a missing socket directory means the mount was
+	// not injected at container creation and no in-process wait can produce
+	// it, while the retry loop below would idle forever behind
+	// --continue-on-initial-error (see workloadclaims.RequireSidecarSocketDir).
+	if cfg.WorkloadClaims && !cfg.WorkloadClaimsGuest {
+		if err := workloadclaims.RequireSidecarSocketDir(); err != nil {
+			return err
+		}
+	}
 
 	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
 		return err

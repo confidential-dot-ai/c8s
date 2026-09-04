@@ -101,8 +101,8 @@ type Options struct {
 	KataGuestReadyGate bool
 
 	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy inventory
-	// socket directory: the webhook mounts it into c8s-cert and injects the
-	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
+	// socket directory: that plugin NRI-mounts it into c8s-cert and the webhook
+	// injects the get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
 	WorkloadClaimsHostDir string
 
 	// WorkloadClaimsGuest selects the kata shape: the inventory is reached on

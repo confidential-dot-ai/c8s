@@ -1,9 +1,10 @@
 // Package attestproxy implements the node-local front door to the
 // attestation-api. The attestation-api binds pod loopback only; this proxy
-// serves its API on a hostPath Unix socket so exactly the on-node consumers
-// (the host NRI plugin, c8s node components, and pods the webhook mounts the
-// socket directory into) can request evidence, while nothing routable —
-// another pod, or an off-node host — can reach /attest. Socket ownership and
+// serves its API on a hostPath Unix socket so only on-node consumers (the
+// host NRI plugin, c8s node components, and pods with the socket directory
+// mounted in) can request evidence, while nothing routable — another pod, or
+// an off-node host — can reach /attest. Reachability is not authorization:
+// the socket must stay safe against any on-node caller. Socket ownership and
 // mode gate reachability; callers additionally re-check them on every dial
 // (pkg/attestationclient).
 package attestproxy

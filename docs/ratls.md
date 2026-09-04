@@ -547,9 +547,10 @@ the supplied mesh CA"), so an unqualified ID never reads as attested.
 Both shapes are wired.
 
 - **node-CVM.** nri-image-policy — a host process containerd launches, not a pod
-  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which the
-  webhook mounts read-only into the `c8s-cert` sidecar, and `/identity` +
-  `/digests` on `:1019`. The node IP it signs into tokens comes from the
+  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which it
+  bind-mounts read-only into the `c8s-cert` sidecar at container creation (an
+  NRI mount, so the pod spec carries no hostPath and stays admissible under
+  PodSecurity `restricted`), and `/identity` + `/digests` on `:1019`. The node IP it signs into tokens comes from the
   installer DaemonSet's downward API `status.hostIP`, written to a `node-ip`
   file beside the socket; `nriImagePolicy.sandboxDigests.advertiseHost`
   overrides it. Route inference is the last resort and is wrong under the

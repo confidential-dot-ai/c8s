@@ -1103,6 +1103,25 @@ func TestRunValidationError(t *testing.T) {
 	}
 }
 
+// The socket directory is a mount injected at container creation: absent means
+// it cannot appear within this container's lifetime, so run must fail (and the
+// process exit, prompting a restart that replays the mount injection) rather
+// than idle behind --continue-on-initial-error.
+func TestRunFailsFastWithoutClaimsSocketDir(t *testing.T) {
+	if _, err := os.Stat(workloadclaims.SidecarSocketDir); err == nil {
+		t.Skipf("%s exists on this host", workloadclaims.SidecarSocketDir)
+	}
+	err := run(config{
+		CDSURL:            "https://cds:8443",
+		AttestationApiURL: "http://attestation-api:8400",
+		SAN:               "host.example.com",
+		WorkloadClaims:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "inventory socket directory") {
+		t.Fatalf("run() = %v, want the missing socket-directory failure", err)
+	}
+}
+
 func TestRunFailsOnUnwritableOutputPath(t *testing.T) {
 	err := run(config{
 		CDSURL:            "https://cds:8443",

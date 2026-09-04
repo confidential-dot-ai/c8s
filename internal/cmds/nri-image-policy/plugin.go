@@ -16,6 +16,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -724,7 +725,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			return nil, nil, err
 		}
 		p.recordUncheckedForInventory(ctr, imageRef)
-		return nil, nil, nil
+		return p.socketDirAdjustment(pod, ctr), nil, nil
 	}
 
 	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
@@ -733,7 +734,36 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	p.recordForInventory(ctx, ctr, imageRef)
-	return nil, nil, nil
+	return p.socketDirAdjustment(pod, ctr), nil, nil
+}
+
+// socketDirAdjustment bind-mounts the inventory's socket directory, read-only,
+// at workloadclaims.SidecarSocketDir into the webhook-injected sidecars of an
+// injected pod — the OCI-level replacement for a pod-spec hostPath volume,
+// which PodSecurity baseline and restricted would reject. nil for every other
+// container, and whenever the inventory is disabled.
+//
+// The annotation+name gate scopes the mount; it is NOT a security boundary.
+// Both are tenant-forgeable, so every socket in the directory must stay safe
+// against any on-node caller (peer-credential binding, RO mount).
+func (p *plugin) socketDirAdjustment(pod *api.PodSandbox, ctr *api.Container) *api.ContainerAdjustment {
+	if p.inventory == nil {
+		return nil
+	}
+	if pod.GetAnnotations()[workloadclaims.AnnotationInjected] != "true" {
+		return nil
+	}
+	if !workloadclaims.IsSidecarContainer(ctr.GetName()) {
+		return nil
+	}
+	adjust := &api.ContainerAdjustment{}
+	adjust.AddMount(&api.Mount{
+		Destination: workloadclaims.SidecarSocketDir,
+		Type:        "bind",
+		Source:      p.cfg.WorkloadClaims.SocketDir,
+		Options:     []string{"rbind", "ro", "rprivate", "nosuid", "nodev", "noexec"},
+	})
+	return adjust
 }
 
 // extractDigest returns the canonical "sha256:<64hex>" digest from an image

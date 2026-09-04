@@ -1059,8 +1059,8 @@ volumed:
     pullPolicy: IfNotPresent
 
   ## Host paths the daemon works through. The socket lives in the inventory's
-  ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only
-  ## hostPath the deny-host-namespaces VAP admits into a cw pod.
+  ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which
+  ## nri-image-policy NRI-mounts into the cw pod's fetcher sidecars.
   hostPaths:
     ## Kubelet's root dir; override only when the kubelet runs a custom --root-dir.
     kubeletRoot: /var/lib/kubelet

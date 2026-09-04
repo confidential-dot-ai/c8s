@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	psaapi "k8s.io/pod-security-admission/api"
+	psapolicy "k8s.io/pod-security-admission/policy"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -1574,11 +1576,12 @@ func TestCertContainerGetsRebasedAttestationURL(t *testing.T) {
 	}
 }
 
-// Every injected fetcher (cert, secret, volume) must carry the rebased
-// socket URL AND the mount that makes it reachable in the same container —
-// a rebased URL without the c8s-workload-claims mount dials a path nothing
-// serves.
-func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
+// Every injected fetcher (cert, secret, volume) must carry the rebased socket
+// URL, be named so the inventory's NRI plugin mounts the socket directory into
+// it (workloadclaims.IsSidecarContainer), and declare no pod-spec mount of its
+// own at that path — the pod spec stays free of hostPath so PodSecurity
+// restricted admits it.
+func TestFetchersCarryRebasedURLAsNRIMountTargets(t *testing.T) {
 	cfg := secretsConfig()
 	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
 	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
@@ -1589,21 +1592,138 @@ func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
 		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
 	}, cfg)
 
+	// The mount contract is split across components: the webhook emits the
+	// rebased URL, the inventory's NRI plugin mounts the directory into the
+	// containers matching its published predicate. So the set of containers
+	// carrying the rebased URL must equal the predicate's match set exactly,
+	// and the pod must carry the annotation the plugin keys on.
 	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
+	carrying := map[string]bool{}
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if hasArg(c.Args, want) {
+			carrying[c.Name] = true
+		}
+		if workloadclaims.IsSidecarContainer(c.Name) != carrying[c.Name] {
+			t.Errorf("container %q: carries rebased URL %v but IsSidecarContainer %v; the NRI mount would miss or overshoot", c.Name, carrying[c.Name], workloadclaims.IsSidecarContainer(c.Name))
+		}
+		if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.MountPath == workloadclaims.SidecarSocketDir
+		}) {
+			t.Errorf("%s declares a pod-spec mount at %s; the socket directory arrives by NRI mount only, mounts %+v", c.Name, workloadclaims.SidecarSocketDir, c.VolumeMounts)
+		}
+	}
 	for _, name := range []string{reservedCertContainerName, reservedSecretContainerName, reservedVolumeContainerName} {
-		c := containerNamed(pod, name)
-		if c == nil {
-			t.Fatalf("injected pod missing container %q", name)
+		if !carrying[name] {
+			t.Errorf("injected pod missing fetcher %q with the rebased URL", name)
 		}
-		if !hasArg(c.Args, want) {
-			t.Errorf("%s args %v missing rebased %q", name, c.Args, want)
+	}
+	if pod.Annotations[workloadclaims.AnnotationInjected] != "true" {
+		t.Errorf("pod annotation %s = %q; the NRI plugin mounts only under it", workloadclaims.AnnotationInjected, pod.Annotations[workloadclaims.AnnotationInjected])
+	}
+	for _, v := range pod.Spec.Volumes {
+		if v.HostPath != nil {
+			t.Errorf("mutated pod declares hostPath volume %q; PodSecurity baseline and restricted reject it", v.Name)
 		}
-		hasMount := slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == workloadClaimsVolumeName && m.MountPath == workloadclaims.SidecarSocketDir
-		})
-		if !hasMount {
-			t.Errorf("%s carries the rebased socket URL but no %s mount at %s; mounts %+v", name, workloadClaimsVolumeName, workloadclaims.SidecarSocketDir, c.VolumeMounts)
-		}
+	}
+}
+
+// A pod without the cw annotation passes through untouched even when it
+// pre-sets the injected annotation and names a sidecar container itself. This
+// pins the forgeable NRI-mount trigger deliberately: such a pod can obtain the
+// RO socket-directory mount on the node, and the sockets behind it must stay
+// safe against any on-node caller (peer-credential binding) — the annotation
+// is scoping, not a security boundary.
+func TestHandleLeavesNonCWPodWithForgedInjectedAnnotationAlone(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationInjected: "true"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: reservedCertContainerName}}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: secretsConfig()}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "tenant", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if !resp.Allowed {
+		t.Fatalf("non-cw pod denied: %+v", resp.Result)
+	}
+	if len(resp.Patches) != 0 {
+		t.Fatalf("non-cw pod mutated: %+v", resp.Patches)
+	}
+}
+
+// evaluateRestricted runs the same checks the PodSecurity admission plugin
+// enforces at restricted/latest.
+func evaluateRestricted(t *testing.T, pod *corev1.Pod) psapolicy.AggregateCheckResult {
+	t.Helper()
+	evaluator, err := psapolicy.NewEvaluator(psapolicy.DefaultChecks(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return psapolicy.AggregateCheckResults(evaluator.EvaluatePod(
+		psaapi.LevelVersion{Level: psaapi.LevelRestricted, Version: psaapi.LatestVersion()},
+		&pod.ObjectMeta, &pod.Spec))
+}
+
+// The acceptance bar for hardened clusters: a restricted-compliant cw pod must
+// STAY restricted-admissible after the full node-CVM mutation (cert, wait,
+// secret and volume fetchers, nginx reload). The socket directory reaches the
+// sidecars by NRI mount, so nothing the webhook adds may name a hostPath.
+// Default injection shape only: a pod overriding c8s-get-cert-run-as-* to root
+// fails restricted by its own choice.
+func TestMutatePodStaysRestrictedAdmissible(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot:   ptr.To(true),
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			Containers: []corev1.Container{{
+				Name: "app",
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr.To(false),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+			}},
+		},
+	}
+	// Guard against a vacuous pass: the input fixture itself must be
+	// restricted-admissible, and the evaluator must actually reject the old
+	// injected shape (a hostPath claims volume).
+	if agg := evaluateRestricted(t, pod); !agg.Allowed {
+		t.Fatalf("input fixture violates PodSecurity restricted before mutation: %s: %s", agg.ForbiddenReason(), agg.ForbiddenDetail())
+	}
+	legacy := pod.DeepCopy()
+	hpType := corev1.HostPathDirectory
+	legacy.Spec.Volumes = append(legacy.Spec.Volumes, corev1.Volume{
+		Name: "c8s-workload-claims",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/nri-image-policy", Type: &hpType},
+		},
+	})
+	if agg := evaluateRestricted(t, legacy); agg.Allowed {
+		t.Fatal("evaluator admitted a hostPath claims volume; the control proves nothing")
+	}
+
+	cfg := secretsConfig()
+	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
+	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Reload:     reloadSpec{Nginx: true},
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	if agg := evaluateRestricted(t, pod); !agg.Allowed {
+		t.Fatalf("mutated cw pod violates PodSecurity restricted: %s: %s", agg.ForbiddenReason(), agg.ForbiddenDetail())
 	}
 }
 
