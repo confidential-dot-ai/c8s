@@ -1,6 +1,7 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload \
+       test-e2e-static-build-bundle test-e2e-static-workload test-e2e-static-debug-refused test-e2e-static-privileged-copy-denied test-e2e-static-verify test-e2e-static-forge-rtmr3 mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -205,6 +206,50 @@ test-e2e-components-ready:
 # C8S_ALLOWLIST_URL and C8S_MEASUREMENTS. Runs post-merge in both metal lanes.
 test-e2e-cw-workload:
 	./test/e2e/cw-workload.sh
+
+# Builds the policy bundle a static-allowlist node boots with and proves it
+# is the fixed point of `c8s render-values --static-allowlist`. Needs c8s,
+# helm, crane, jq, yq, go and an ISO9660 tool, plus E2E_IMAGE_MANIFEST,
+# E2E_SYSTEM_FLOOR, E2E_IMAGE_TAG and E2E_OUT. Runs post-merge in the
+# tdx-metal-static-e2e lane.
+test-e2e-static-build-bundle:
+	./test/e2e/static/build-bundle.sh
+
+# Live-cluster check that the sealed rules admit the sample workload and
+# refuse its ConfigMap-mount, unlisted-env and other-argv variants. Needs
+# kubectl pointed at a static-allowlist cluster. Runs post-merge in the
+# tdx-metal-static-e2e lane.
+test-e2e-static-workload:
+	./test/e2e/static/workload.sh
+
+# Live-cluster check that kubectl exec and kubectl debug are refused on a
+# sealed node. Needs kubectl pointed at a static-allowlist cluster running
+# demo-nginx (test-e2e-static-workload). Runs post-merge in the
+# tdx-metal-static-e2e lane.
+test-e2e-static-debug-refused:
+	./test/e2e/static/debug-refused.sh
+
+# Live-cluster check that a privileged copy of cilium is refused on a sealed
+# node. Needs kubectl pointed at a static-allowlist cluster. Runs post-merge
+# in the tdx-metal-static-e2e lane.
+test-e2e-static-privileged-copy-denied:
+	./test/e2e/static/privileged-copy-denied.sh
+
+# Verifies a static cluster's front door from outside with
+# `c8s verify --static-allowlist`. Needs c8s, curl and jq, plus E2E_LB_URL,
+# E2E_IMAGE_MANIFEST and E2E_BUNDLE. Runs post-merge in the
+# tdx-metal-static-e2e lane.
+test-e2e-static-verify:
+	./test/e2e/static/verify.sh
+
+# Live check that a dynamic node cannot forge the static register: a
+# privileged pod extends RTMR[3] with the static events and the static
+# verifier still refuses the node. Needs kubectl pointed at a dynamic
+# node-mode TDX cluster with c8s installed, plus E2E_LB_URL,
+# E2E_IMAGE_MANIFEST, E2E_BUNDLE and E2E_OPERATOR_PUB. Runs post-merge in the
+# tdx-metal-static-e2e lane.
+test-e2e-static-forge-rtmr3:
+	./test/e2e/static/forge-rtmr3.sh
 
 # Parse + decision tests for the baked kata-agent policy. The guest evaluates
 # it with regorus, which reads Rego v0 plus the future keywords, so the checks

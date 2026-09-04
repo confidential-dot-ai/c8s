@@ -1,0 +1,514 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# c8s on TDX BARE METAL: the STATIC ALLOWLIST lane (c8s-owned, not vendored)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Boots the published, unmodified c8s node image as Intel TDX CVMs on
+# tdx-gh-runner in both boot modes and asserts docs/static-allowlist.md:
+#
+#   static node   booted with a policydata disk and no operator key. The
+#                 node measures the bundle into RTMR[3]; the sealed NRI plugin
+#                 admits only complete rules; CDS pins every requester on the
+#                 static tuple. Asserted here: `get-kubeconfig
+#                 --static-allowlist` and `install --static-allowlist
+#                 --static-node-attest` work; a
+#                 privileged copy of cilium is refused at start; `kubectl exec`
+#                 and `kubectl debug` are refused; the sample workload with a
+#                 ConfigMap mount, an unlisted env var or another argv is
+#                 refused while the matching one runs and scales to 2;
+#                 `c8s verify --static-allowlist` exits 0.
+#   dynamic node  booted with an opkeydata disk, as tdx-metal-e2e.yml does.
+#                 Asserted here: the dynamic register is the operator-key seed
+#                 extended by the dynamic mode event; the static gate refuses
+#                 the node; a privileged pod on it (admitted by the floor)
+#                 extends RTMR[3] with the static events and the static
+#                 verifier still refuses it.
+#   tampered boot a static VM whose bundle member differs by one byte from
+#                 the reviewed bytes (a trailing newline: same JSON, other
+#                 measurement) powers itself off before RKE2 starts.
+#
+# The bundle is built on the runner from the image's published evidence
+# (manifest.json, system-floor.json) and the fixtures under
+# test/e2e/static/: see build-bundle.sh for the fixed-point check and for
+# what reviews.json, the reviewer's completion of the RKE2 system floor,
+# means for this lane.
+#
+# NOT COVERED, DELIBERATELY. Two assertions in docs/static-allowlist.md
+# (Known gaps) need a fault injector inside the guest: delaying the plugin
+# past its deadline and
+# asserting no entrypoint runs, and a container present when the plugin
+# synchronizes. The locked image has no console, no ssh and, in static mode,
+# no privileged pod, and a dev image variant boots to another measurement;
+# both stay unit-tested (internal/cmds/nri-image-policy). One more is not
+# buildable here: "the same workload on a second, unsealed node of the same
+# image is refused a certificate" needs a two-node cluster, and under
+# KubeVirt masquerade every guest is 10.0.2.2, so two nodes cannot join one
+# cluster. The dynamic node is a separate single-node cluster instead.
+#
+# POWER-OFF ASSERTIONS use runStrategy RerunOnFailure: KubeVirt restarts a
+# guest under Always. Under RerunOnFailure a guest-initiated power-off leaves
+# the VMI Succeeded, the VM controller then deletes the VMI and the VM
+# reports Stopped; cvm.sh wait-stopped accepts either observation. Manual
+# would need the start subresource the namespace-scoped SA does not hold.
+#
+# NODE ATTEST ADDRESS: `c8s install --static-allowlist` attests every node
+# at its InternalIP:8400, and under KubeVirt masquerade a guest's InternalIP
+# is 10.0.2.2, which the runner cannot reach. The install step therefore
+# passes `--static-node-attest c8s-node=$STATIC_IP:8400`, the VMI's pod
+# address every other step reaches the guest through; c8s-node is the baked
+# node name the cidata tripwire asserts.
+#
+# Same host conventions as tdx-metal-e2e.yml: no serial console, the guest
+# signals are attestation-api :8400, kube-apiserver :6443, cred-release :8443
+# and the attested kubeconfig; the outer cluster is renumbered so the guests'
+# 10.42/10.43 do not collide; dispatch-only until it has a green history.
+name: tdx-metal-static-e2e
+
+on:
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: 'c8s ref to test. Defaults to the ref paired with the node image.'
+        required: false
+        type: string
+        default: ''
+      keep_cvm:
+        description: 'leave the CVMs running for debugging instead of tearing them down'
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      c8s_ref:
+        description: 'c8s git ref to install + test. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (the bundle names the component digests at this ref, so a mismatched ref gets its own components denied).'
+        required: false
+        default: ''
+      keep_cvm:
+        description: 'Skip teardown to debug a failure. The reaper still clears the CVMs after 3h.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time: the lane boots CVMs off a shared RWO rootdisk PVC.
+  group: tdx-metal-static-e2e
+  cancel-in-progress: false
+
+env:
+  NS: confai-images
+  REFS_CM: tdx-rke2-image-refs
+  VM_STATIC: c8s-tdx-static-${{ github.run_id }}-${{ github.run_attempt }}
+  VM_DYN: c8s-tdx-dyn-${{ github.run_id }}-${{ github.run_attempt }}
+  VM_TAMPER: c8s-tdx-tamper-${{ github.run_id }}-${{ github.run_attempt }}
+  # Bundle, evidence and per-node outputs; the scripts live in the c8s
+  # checkout at the paired ref.
+  OUT: /tmp/static-e2e
+  E2E: /tmp/c8s-src/test/e2e/static
+
+jobs:
+  e2e:
+    name: cvm (tdx-metal-static/rke2-node)
+    # The host-side launcher runner on tdx-gh-runner; its bm-e2e SA is scoped
+    # to confai-images and kubectl uses the in-cluster token.
+    runs-on: cvm-launcher-tdx
+    # Three boots (tampered ~5m, static ~15m with install and asserts,
+    # dynamic ~12m with install), the CLI build and the bundle render.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: tools (kubectl, go, crane, helm, yq, xorriso)
+        run: |
+          set -euo pipefail
+          # Every fetch here crosses the public internet from an ephemeral ARC
+          # pod, and one hiccup fails the lane before it reaches a CVM.
+          mkdir -p "$PWD/bin"
+          # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
+          # A file, not a function, because each `run:` block is a fresh shell.
+          printf '%s\n' \
+            'retry() {' \
+            '  local i delay=2' \
+            '  for i in 1 2 3 4; do' \
+            '    if eval "$1"; then return 0; fi' \
+            '    [ "$i" -eq 4 ] && break' \
+            '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
+            '    sleep "$delay"' \
+            '    delay=$((delay * 2))' \
+            '  done' \
+            '  echo "::error::gave up after 4 attempts: $1" >&2' \
+            '  return 1' \
+            '}' > bin/retry.sh
+          . bin/retry.sh
+          retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
+          chmod +x bin/kubectl
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+          if ! command -v go >/dev/null; then
+            # `|| true`: under `set -e` a failed substitution exits before the
+            # pinned fallback on the next line can be reached.
+            GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
+            [ -n "$GOVER" ] || GOVER=1.26.3
+            retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
+          fi
+          # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
+          # inside THIS one. The `go install`s below need it here and now.
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          # crane: image-artifacts.sh and `c8s allowlist render` shell out to
+          # it. Pinned rather than fetched through the GitHub releases API,
+          # which rate-limits by IP on a shared self-hosted host.
+          command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
+          # yq: build-bundle.sh merges the static overlay into the values
+          # `c8s render-values` emits.
+          command -v yq >/dev/null || retry 'go install github.com/mikefarah/yq/v4@v4.47.1'
+          # helm: c8s install and `c8s allowlist render` shell out to it.
+          if ! command -v helm >/dev/null; then
+            retry 'curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm'
+          fi
+          # An ISO9660 tool: `c8s policy-disk` writes the policydata image
+          # with the first of xorrisofs, genisoimage, mkisofs on PATH.
+          if ! command -v xorrisofs >/dev/null && ! command -v genisoimage >/dev/null && ! command -v mkisofs >/dev/null; then
+            retry 'sudo apt-get update -qq && sudo apt-get install -y -qq xorriso'
+          fi
+
+      # reap-before-provision: a killed run leaks CVMs (and their scratch
+      # PVCs). Fail SAFE: only reap on a positive "completed", or on age. An
+      # unknown status (403/404/no token) KEEPS the CVM rather than killing a
+      # live run.
+      - name: reap leaked CVMs from finished runs
+        run: |
+          set +e +o pipefail
+          NOW=$(date -u +%s)
+          for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
+            rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
+            standing=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/standing}' 2>/dev/null)
+            [ "$standing" = "true" ] && { echo "keeping $vm (standing runner)"; continue; }
+            [ -z "$rid" ] && continue
+            [ "$rid" = "${{ github.run_id }}" ] && continue
+            ct=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+            age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+            # Ask GitHub whether the owning run is actually finished, rather than
+            # waiting out the 3h age fallback while a CVM squats a finite host.
+            # ANY org repo can invoke this lane, so the owning repo is read from
+            # the annotation (a label value cannot hold the '/' in owner/repo).
+            # NOTE: this needs `actions: read`. Without it the call 403s, $st is
+            # empty, and we degrade to exactly the age-only behaviour this
+            # replaces, which is safe but slow.
+            orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
+            st=$(gh api "repos/${orepo:-${{ github.repository }}}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ]; then
+              echo "reaping $vm (run ${orepo:-${{ github.repository }}}#$rid completed)"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            elif [ -z "$st" ] && [ "$age" -gt 10800 ]; then
+              echo "reaping $vm (status unknown, age ${age}s > 3h -> orphaned)"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
+            fi
+          done
+          exit 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: resolve image refs + the paired c8s ref
+        run: |
+          set -euo pipefail
+          for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef; do
+            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
+            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple the static entry pins)"; exit 1; }
+            echo "$k=$v" >> "$GITHUB_ENV"
+          done
+          # Optional: the oras tag published beside a digest-pinned image.
+          v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.imageTag}' 2>/dev/null || true)
+          [ -z "$v" ] || echo "imageTag=$v" >> "$GITHUB_ENV"
+          # An explicit input overrides the pin, but say so loudly: the bundle
+          # names this ref's digests and the node admits nothing else.
+          if [ -n '${{ inputs.c8s_ref }}' ]; then
+            echo "::warning title=version pairing::testing c8s_ref='${{ inputs.c8s_ref }}' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': the baked CDS floor entry may deny this ref's CDS"
+            echo "c8sRef=${{ inputs.c8s_ref }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: preflight, the pinned ref still matches the pinned image
+        # c8sRef and image are separate CM fields, so they can drift apart with
+        # nothing to notice. The image's own -cdi tags carry the c8s ref its
+        # components were baked from; reproducible builds mean one digest can
+        # hold SEVERAL such tags, so agreement is "c8sRef is among them".
+        # Advisory: an operator may deliberately pair a newer CLI with an
+        # older image, and only the baked floor can say whether that is denied.
+        continue-on-error: true
+        if: inputs.c8s_ref == ''
+        run: |
+          set -euo pipefail
+          repo="${image%%@*}"; repo="${repo%%:*}"
+          case "$image" in
+            *@*) want="${image#*@}" ;;
+            *)   want="$(crane digest "$image" 2>/dev/null || true)" ;;
+          esac
+          [ -n "$want" ] || { echo "could not resolve '$image' to a digest; skipping"; exit 0; }
+          matched=0; tagged=""
+          for t in $(crane ls "$repo" 2>/dev/null | grep -E '^rke2-tdx-cdi-[0-9a-f]{7,}$'); do
+            [ "$(crane digest "$repo:$t" 2>/dev/null)" = "$want" ] || continue
+            r="${t#rke2-tdx-cdi-}"
+            tagged="${tagged:+$tagged }$r"
+            [ "$r" = "$c8sRef" ] && matched=1
+          done
+          [ -n "$tagged" ] || { echo "no sha-suffixed tag points at the pinned image; nothing to compare"; exit 0; }
+          [ "$matched" = 1 ] && { echo "c8sRef '$c8sRef' matches the pinned image's build ref"; exit 0; }
+          echo "::warning title=stale c8sRef::the CM pins c8sRef='$c8sRef' but its image was built from [$tagged]. The CLI under test is not the one shipped in this image; re-seed c8sRef unless the pairing is deliberate"
+
+      - name: preflight, TDX device capacity
+        # KubeVirt's socket device-plugin probes the QGS socket ONLY at
+        # virt-handler startup and never re-checks; after a host reboot it
+        # advertises 0 forever. The remedy needs cluster-scoped rights the
+        # bm-e2e SA deliberately lacks, so this reports rather than fixes.
+        # This lane runs the static and the dynamic CVM side by side at the
+        # end, so it needs two devices, not one.
+        run: |
+          set -uo pipefail
+          if kubectl auth can-i get nodes >/dev/null 2>&1; then
+            N=$(kubectl get node -l kubevirt.io/tdx=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/tdx}' 2>/dev/null)
+            echo "devices.kubevirt.io/tdx = ${N:-unknown}"
+            if [ "${N:-0}" = "0" ]; then
+              echo "::error title=TDX devices exhausted::virt-handler is advertising 0 TDX devices. Fix on the host: kubectl -n kubevirt rollout restart daemonset/virt-handler"
+              exit 1
+            fi
+            if [ "${N:-0}" -lt 2 ]; then
+              echo "::warning title=TDX device capacity::only ${N} TDX device(s) allocatable; the dynamic CVM boots beside the static one and may not schedule"
+            fi
+          else
+            echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
+          fi
+
+      - name: build the c8s CLI at the paired ref
+        run: |
+          set -euo pipefail
+          # Same exposure as the tools step: this clone and the module fetches
+          # behind `go install` cross the public internet under `set -e`.
+          . "$GITHUB_WORKSPACE/bin/retry.sh"
+          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
+          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
+          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
+          c8s --version || true
+          [ -x "$E2E/build-bundle.sh" ] || { echo "::error::c8s ref '$c8sRef' carries no test/e2e/static/: the static lane needs a ref with the static allowlist"; exit 1; }
+
+      - name: resolve the image's manifest and system floor
+        # Both come from the oras artifact published beside the CDI image,
+        # matched on the whole mrtd+rtmr1+rtmr2 tuple; a hand-built stub would
+        # only prove the gate accepts the shape this step chose.
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          E2E_OUT="$OUT" bash "$E2E/image-artifacts.sh"
+
+      - name: build the policy bundle
+        # Rendered from the values `c8s install` computes at the paired ref,
+        # the image's floor and the sample workload; completed by
+        # test/e2e/static/reviews.json; proven to be the fixed point of
+        # `c8s render-values --static-allowlist`; written as the ISO, the
+        # KubeVirt Secret and the expected RTMR[3]. The tampered copy differs
+        # by one trailing newline: identical JSON, another measurement.
+        run: |
+          set -euo pipefail
+          export E2E_IMAGE_MANIFEST="$OUT/image-manifest.json"
+          export E2E_SYSTEM_FLOOR="$OUT/system-floor.json"
+          export E2E_IMAGE_TAG="$c8sRef"
+          export E2E_OUT="$OUT"
+          export E2E_POLICYDATA_SECRET="$VM_STATIC-policydata"
+          bash "$E2E/build-bundle.sh"
+          kubectl -n "$NS" apply -f "$OUT/policydata-secret.yaml"
+          { cat "$OUT/bundle/static-allowlist.json"; echo; } > "$OUT/tampered-static-allowlist.json"
+          kubectl -n "$NS" create secret generic "$VM_TAMPER-policydata" \
+            --from-file=static-allowlist.json="$OUT/tampered-static-allowlist.json" --dry-run=client -o yaml | kubectl apply -f -
+          echo "RTMR3=$(cat "$OUT/rtmr3")" >> "$GITHUB_ENV"
+          echo "INDEX_DIGEST=$(cat "$OUT/index-digest")" >> "$GITHUB_ENV"
+
+      - name: tampered bundle, the node powers itself off
+        # c8s-policy-measure lints the member as sealed before it measures
+        # anything; bytes that are not the canonical form fail the unit and
+        # FailureAction=poweroff-force stops the guest before RKE2 starts.
+        run: |
+          set -euo pipefail
+          export CVM_POLICYDATA_SECRET="$VM_TAMPER-policydata" CVM_RUN_STRATEGY=RerunOnFailure
+          bash "$E2E/cvm.sh" create "$VM_TAMPER"
+          bash "$E2E/cvm.sh" wait-stopped "$VM_TAMPER" 600
+          kubectl -n "$NS" delete vm "$VM_TAMPER" --ignore-not-found --wait=true --timeout=120s
+          kubectl -n "$NS" delete pvc "$VM_TAMPER-scratch" --ignore-not-found --wait=false
+
+      - name: boot the static CVM
+        run: |
+          set -euo pipefail
+          export CVM_POLICYDATA_SECRET="$VM_STATIC-policydata"
+          bash "$E2E/cvm.sh" create "$VM_STATIC"
+          IP=$(bash "$E2E/cvm.sh" wait-running "$VM_STATIC")
+          echo "STATIC_IP=$IP" >> "$GITHUB_ENV"
+          bash "$E2E/cvm.sh" assert-tdx "$VM_STATIC"
+
+      - name: wait for the static guest's services
+        run: |
+          set -euo pipefail
+          bash "$E2E/cvm.sh" wait-services "$STATIC_IP"
+
+      - name: get an attested kubeconfig from the static node (RA-TLS, static gate)
+        # No operator key exists: the gate pins the image tuple plus RTMR[3]
+        # recomputed from the bundle, and cred-release serves any attested
+        # caller in static mode.
+        run: |
+          set -euo pipefail
+          c8s get-kubeconfig --node "$STATIC_IP" --static-allowlist "$OUT/bundle" \
+            --image-manifest "$OUT/image-manifest.json" --out /tmp/guest.kubeconfig --timeout 180s
+          [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
+          WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+          [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
+          echo "OK: attested kubeconfig from the static node, identity=$WHO"
+          KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes -o wide
+
+      - name: assert the host cidata disk is inert
+        run: .github/scripts/cidata-tripwire.sh
+
+      - name: install c8s with the static allowlist
+        # Every component digest and the CDS measurements entry come from the
+        # bundle; the node preflight attests RTMR[3] through the node's
+        # attestation-api at the masquerade address (see the header).
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          c8s install --cvm-mode node --single-node --hardware-platform tdx \
+            --static-allowlist "$OUT/bundle" \
+            --image-manifest "$OUT/image-manifest.json" \
+            --static-node-attest "c8s-node=$STATIC_IP:8400"
+          kubectl -n c8s-system get pods -o wide
+
+      - name: assert components converged (static)
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          bash /tmp/c8s-src/test/e2e/components-ready.sh
+
+      - name: assert the sealed rules around the sample workload
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          bash "$E2E/workload.sh"
+
+      - name: assert kubectl exec and kubectl debug are refused
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          bash "$E2E/debug-refused.sh"
+
+      - name: assert a privileged copy of cilium is refused at start
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          bash "$E2E/privileged-copy-denied.sh"
+
+      - name: assert c8s verify --static-allowlist verifies the front door
+        run: |
+          set -euo pipefail
+          export E2E_LB_URL="https://$STATIC_IP:443"
+          export E2E_IMAGE_MANIFEST="$OUT/image-manifest.json"
+          export E2E_BUNDLE="$OUT/bundle"
+          export E2E_OUT="$OUT/verify-static"
+          bash "$E2E/verify.sh"
+
+      - name: per-run operator key + opkeydata secret (dynamic node)
+        # The initrd hashes the file named `pubkey` off the opkeydata disk into
+        # RTMR[3]; the node then extends the dynamic mode event on top.
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
+          openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+          kubectl -n "$NS" create secret generic "$VM_DYN-opkey" \
+            --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl apply -f -
+          echo "operator key bound (sha384 $(sha384sum < /tmp/op.pub | cut -c1-16)...)"
+
+      - name: boot the dynamic CVM
+        run: |
+          set -euo pipefail
+          export CVM_OPKEY_SECRET="$VM_DYN-opkey"
+          bash "$E2E/cvm.sh" create "$VM_DYN"
+          IP=$(bash "$E2E/cvm.sh" wait-running "$VM_DYN")
+          echo "DYN_IP=$IP" >> "$GITHUB_ENV"
+          bash "$E2E/cvm.sh" assert-tdx "$VM_DYN"
+
+      - name: wait for the dynamic guest's services
+        run: |
+          set -euo pipefail
+          bash "$E2E/cvm.sh" wait-services "$DYN_IP"
+
+      - name: get an attested kubeconfig from the dynamic node; the static gate refuses it
+        run: |
+          set -euo pipefail
+          c8s get-kubeconfig --node "$DYN_IP" --operator-key /tmp/op.key \
+            --image-manifest "$OUT/image-manifest.json" --out /tmp/dyn.kubeconfig --timeout 180s
+          WHO=$(KUBECONFIG=/tmp/dyn.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+          [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
+          echo "OK: operator-key-bound kubeconfig from the dynamic node (dynamic chain intact after the mode event)"
+          if out=$(c8s get-kubeconfig --node "$DYN_IP" --static-allowlist "$OUT/bundle" \
+              --image-manifest "$OUT/image-manifest.json" --out /tmp/never.kubeconfig --timeout 60s 2>&1); then
+            echo "::error title=SECURITY REGRESSION::the static gate released a credential from a dynamic node"; exit 1
+          fi
+          grep -q 'RTMR\[3\] mismatch' <<<"$out" || { echo "::error::the static gate refused the dynamic node, but not on RTMR[3]: $out"; exit 1; }
+          echo "OK: the static gate refuses the dynamic node on RTMR[3]"
+
+      - name: install c8s on the dynamic node (operator key, as tdx-metal-e2e.yml)
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/dyn.kubeconfig
+          c8s install --cvm-mode node --single-node --hardware-platform tdx \
+            --image-tag "$c8sRef" \
+            --operator-keys /tmp/op.pub \
+            --measurements "$mrtd" \
+            --resolve-digests=true
+          bash /tmp/c8s-src/test/e2e/components-ready.sh
+
+      - name: forge the static events on the dynamic node; the static verifier still refuses it
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/dyn.kubeconfig
+          export E2E_LB_URL="https://$DYN_IP:443"
+          export E2E_IMAGE_MANIFEST="$OUT/image-manifest.json"
+          export E2E_BUNDLE="$OUT/bundle"
+          export E2E_OPERATOR_PUB=/tmp/op.pub
+          export E2E_OUT="$OUT/verify-dyn"
+          bash "$E2E/forge-rtmr3.sh"
+          if c8s get-kubeconfig --node "$DYN_IP" --static-allowlist "$OUT/bundle" \
+              --image-manifest "$OUT/image-manifest.json" --out /tmp/never.kubeconfig --timeout 60s; then
+            echo "::error title=SECURITY REGRESSION::the static gate released a credential from a dynamic node carrying the forged register"; exit 1
+          fi
+          echo "OK: the static gate still refuses the dynamic node after the forge"
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### c8s static allowlist on TDX metal"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`${image:-?}\` |"
+            echo "| rootPvc | \`${rootPvc:-?}\` |"
+            echo "| c8s ref | \`${c8sRef:-?}\` |"
+            echo "| MRTD | \`${mrtd:0:32}...\` |"
+            echo "| bundle index | \`${INDEX_DIGEST:-?}\` |"
+            echo "| static RTMR[3] | \`${RTMR3:0:32}...\` |"
+            echo "| static guest | \`${STATIC_IP:-?}\` |"
+            echo "| dynamic guest | \`${DYN_IP:-?}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: teardown
+        if: always() && inputs.keep_cvm != true
+        run: |
+          set +e
+          for vm in "$VM_TAMPER" "$VM_STATIC" "$VM_DYN"; do
+            kubectl -n "$NS" delete vm "$vm" --ignore-not-found --wait=true --timeout=120s
+            kubectl -n "$NS" delete secret "$vm-cloudinit" "$vm-opkey" "$vm-policydata" --ignore-not-found
+            kubectl -n "$NS" delete pvc "$vm-scratch" --ignore-not-found --wait=false
+          done
+          exit 0

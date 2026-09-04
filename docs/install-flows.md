@@ -36,6 +36,7 @@ evidence is read (native device, GKE managed CVM, Azure vTPM).
 |---|---|---|
 | **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. **Single-tenant** — the node is one trust domain. Host-side mesh + attestation + image policy. The dev/baseline shape. |
 | **kata** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
+| **static** (a base variant) | `--cvm-mode=node --hardware-platform=tdx --static-allowlist <bundle> --image-manifest manifest.json` | Base mode on TDX nodes that booted a reviewed policy bundle and measured it into RTMR[3]. No operator keys and no allowlist writes; the node image's sealed NRI plugin enforces the bundle, so the chart's `nriImagePolicy` install is off; every c8s pod dials the node's attestation socket; kata is refused. See [`static-allowlist.md`](static-allowlist.md). |
 
 ```mermaid
 flowchart LR
@@ -116,6 +117,13 @@ any other pod on it can reach. Multi-tenant isolation requires `--cvm-mode=pod`.
  │+webhook │ │ (runc) │ │nri-img-pol │ │   (host DaemonSet) │
  └─────────┘ └────────┘ └────────────┘ └───────────────────┘
 ```
+
+**static** — base mode with a stronger adversary: `cluster-admin` itself.
+The host-side components (kubelet, containerd, the sealed NRI plugin,
+attestation-api, cred-release) are measured node-image content, and RTMR[3]
+commits to the policy bundle, so the control plane can scale, restart, and
+delete allowed pods but cannot run anything the bundle does not describe. The
+node stays single-tenant. See [`static-allowlist.md`](static-allowlist.md).
 
 **kata** — the host is adversarial. Workloads and the c8s CDS run
 inside `kata-qemu-snp` CVMs whose memory is SEV-SNP-encrypted; the security
@@ -198,6 +206,15 @@ Key properties (see `templates/webhook.yaml`, `controller/runner.go`):
 - CDS comes up during the main install and, living in the excluded release
   namespace, is never gated on the webhook — bootstrap services must not be
   gated behind the workloads that depend on them.
+- `--static-allowlist` adds preflights before helm runs: the bundle's
+  `static-allowlist.json` is linted as sealed; `--operator-keys`, an explicit
+  `--resolve-digests=true`, `--measurements`, `--measurements-config` and
+  `--rtmrs` are refused; every component digest is looked up in the bundle;
+  every node is attested at `http://<InternalIP>:8400/attest` (or at the
+  address `--static-node-attest <node>=<host:port>` names) and must report
+  the image tuple plus RTMR[3] derived from the bundle; and every running
+  container must carry a digest the bundle names (`--force` installs past
+  that last check).
 
 ---
 
@@ -366,7 +383,15 @@ c8s install --cvm-mode=pod --hardware-platform=sev-snp --operator-keys operator-
 c8s install --cvm-mode=pod --hardware-platform=sev-snp -f single-node.values.yaml \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
-# Uninstall: helm uninstall + sweep the kata artifacts off every node.
+# Static (base on TDX): the nodes booted the policy bundle; the bundle
+# supplies every component digest and the measurements entry, so no
+# --operator-keys, --measurements or --rtmrs. See docs/static-allowlist.md.
+c8s install --cvm-mode=node --hardware-platform=tdx \
+  --static-allowlist bundle/ --image-manifest manifest.json
+
+# Uninstall: helm uninstall + sweep the kata artifacts off every node. On a
+# static cluster the sealed plugin stays in the node image; only the release
+# goes.
 c8s uninstall
 ```
 

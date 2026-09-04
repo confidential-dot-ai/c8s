@@ -39,6 +39,8 @@ func TestNewCmdDefaults(t *testing.T) {
 		"key":       "/run/c8s/certs/tls.key",
 		"out-dir":   "/run/c8s/secrets",
 		"file-mode": "0640",
+
+		"cds-pins-from-own-quote": "false",
 	} {
 		if got := cmd.Flags().Lookup(flag).DefValue; got != want {
 			t.Fatalf("--%s default = %q, want %q", flag, got, want)

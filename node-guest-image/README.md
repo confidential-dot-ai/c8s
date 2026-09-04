@@ -14,18 +14,20 @@ Layout:
   it must stay `c8s`.
 - Platform: the profile is platform-neutral; `build` requires
   `C8S_PLATFORM` (`tdx`|`snp`, no default) and `c8s/mkosi.sync` renders the
-  **entire** tdx/snp divergence — three files — from it: cred-release's
-  `Environment=CRED_PLATFORM` drop-in, the node's self-label
+  **entire** tdx/snp divergence — four files — from it: cred-release's
+  `Environment=CRED_PLATFORM` drop-in, c8s-policy-measure's
+  `Environment=POLICY_PLATFORM` drop-in, the node's self-label
   (`confidential.ai/tdx` / `confidential.ai/sev-snp`, the k8s vocabulary
   `c8s install --hardware-platform` selects on), and the NRI floor's
   `platform:`. The sync refuses to render a missing/invalid value, so the
-  fail-closed gate is at **build** time; `--platform=${CRED_PLATFORM}` in
-  the unit is boot-time defense in depth (cred-release opens no quote
-  device — quotes come from attestation-api over HTTP, the operator-key
-  RTMR read is sysfs). The guest kernel carries both TEEs' symbols via
-  confos `kernel/required.config`, so the images differ only by those
-  three rendered files — which keeps a one-image-serves-both design
-  (boot-time platform probe, confos `--platform both`) evaluable later.
+  fail-closed gate is at **build** time; `--platform=${CRED_PLATFORM}` and
+  `--platform=${POLICY_PLATFORM}` in the units are boot-time defense in
+  depth (neither opens a quote device — quotes come from attestation-api
+  over HTTP, the RTMR reads and extends are sysfs). The guest kernel
+  carries both TEEs' symbols via confos `kernel/required.config`, so the
+  images differ only by those four rendered files — which keeps a
+  one-image-serves-both design (boot-time platform probe, confos
+  `--platform both`) evaluable later.
   NOTE: the operator credential-release flow itself is TDX-only today
   (RTMR[3] binding; SNP has no runtime-extend equivalent) — an SNP image
   boots and attests, but operator flows fail closed pending an SNP
@@ -76,6 +78,26 @@ The other disks are optional; each is owned by one unit under
   see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
   issued certificate's group to `cluster-admin` through ordinary RBAC;
   identity, TTL and revocation are documented in [operator.md].
+- label `policydata` — an ISO carrying the policy bundle: a flat set of
+  JSON members, `static-allowlist.json` required (`c8s policy-disk` builds
+  it). Its presence makes the boot **static** (`c8s-policy-measure.service`,
+  see [static-allowlist.md]): `opkeydata` must be absent, the bundle is
+  linted sealed, and RTMR[3] commits to the bundle index. KubeVirt attaches
+  it as `secret: {secretName: <name>, volumeLabel: policydata}` on a virtio
+  disk; libvirt as a CD-ROM built with `mkisofs -V policydata`. TDX only:
+  an SNP node with the disk attached powers off.
+
+Every boot runs `c8s-policy-measure.service` before RKE2. It extends the
+mode event into RTMR[3] (`ModeDynamic`, or `ModeStatic` then the policy
+event), publishes the verdict as `/run/confai/policy/mode` (`static` or
+`dynamic`, written last) and, on a static boot, the bundle members and their
+index digest beside it. `c8s-attest-socket.service` fronts the confos
+`attestation-api.service` on `/run/confai/attestation-api.sock`
+(root-owned, group 65532) so the baked NRI plugin config and the static CDS
+pin a verifier the control plane cannot repoint. In static mode
+`cred-release.service` starts without an operator key: RTMR[3] must equal
+the value recomputed from the published bundle, and any attested caller
+receives the operator credential (see [operator.md]).
 
 Migration state (see [#264] for the full plan):
 
@@ -99,3 +121,4 @@ Migration state (see [#264] for the full plan):
 [confidential-os-builder]: https://github.com/confidential-dot-ai/confidential-os-builder
 [#264]: https://github.com/confidential-dot-ai/c8s/issues/264
 [operator.md]: ../docs/operator.md
+[static-allowlist.md]: ../docs/static-allowlist.md

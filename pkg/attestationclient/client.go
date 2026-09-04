@@ -25,6 +25,10 @@ const maxErrorBodyBytes = 8 << 10
 // ever answers.
 const requestTimeout = 60 * time.Second
 
+// unixBaseURL is the placeholder host of a client whose transport dials a
+// Unix socket; the host is never resolved.
+const unixBaseURL = "http://unix"
+
 // Client is an HTTP client for the external attestation-api.
 type Client struct {
 	baseURL    string
@@ -43,7 +47,7 @@ type Client struct {
 func NewClient(baseURL string) Client {
 	if socket, ok := strings.CutPrefix(baseURL, "unix://"); ok {
 		return Client{
-			baseURL:    "http://unix",
+			baseURL:    unixBaseURL,
 			httpClient: &http.Client{Transport: unixSocketTransport(socket), Timeout: requestTimeout},
 		}
 	}
@@ -107,7 +111,7 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 		c := *httpClient
 		c.Transport = unixSocketTransport(socket)
 		return Client{
-			baseURL:    "http://unix",
+			baseURL:    unixBaseURL,
 			httpClient: &c,
 		}
 	}

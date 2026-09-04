@@ -30,6 +30,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -262,7 +263,27 @@ type Config struct {
 	// rather than a mounted socket, so no volume is injected. Mutually
 	// exclusive with WorkloadClaimsHostDir — the chart sets exactly one.
 	WorkloadClaimsGuest bool
+
+	// StaticAllowlist selects the sealed node shape: the injected sidecars
+	// mount AttestationSocketDir read-only at its own path, dial the
+	// verifier there and pin CDS to the tuple of their own quote
+	// (--cds-pins-from-own-quote) instead of CDSMeasurements and CDSRTMRs.
+	// The sidecar argv is a rule in the measured bundle, so it cannot carry
+	// a digest that depends on the bundle; the node's quote carries the
+	// same tuple with RTMR[3], so a CDS on an unsealed node is refused.
+	StaticAllowlist bool
+
+	// AttestationSocketDir is the node directory holding attestation-api.sock
+	// under StaticAllowlist; empty means DefaultAttestationSocketDir.
+	AttestationSocketDir string
 }
+
+// DefaultAttestationSocketDir is where the node image serves the
+// attestation-api socket on a sealed node (c8s-attest-socket.service).
+const DefaultAttestationSocketDir = policybundle.NodeStateDir
+
+// attestationSocketName is the socket file under AttestationSocketDir.
+const attestationSocketName = "attestation-api.sock"
 
 // Register wires the pod mutator onto the manager's webhook server.
 func Register(mgr ctrl.Manager, cfg Config) error {
@@ -676,12 +697,64 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("ephemeral container mounts no reserved c8s volume")
 	}
 
-	if err := validateWorkloadLabel(pod); err != nil {
+	// req.Namespace, not pod.Namespace: template-created pods reach
+	// admission with an empty metadata.namespace.
+	result, err := Mutate(pod, req.Namespace, m.cfg)
+	if err != nil {
+		var internal internalError
+		if errors.As(err, &internal) {
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+	if !result.Mutated() {
+		return admission.Allowed("no c8s annotation — passthrough")
+	}
+	if result.WorkloadID != "" {
+		l.Info("injecting c8s get-cert containers", "workload", result.WorkloadID)
+	}
+	if result.KataClass != "" {
+		l.Info("injecting kata runtimeClassName", "runtimeClass", result.KataClass)
+	}
+
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
+}
+
+// MutationResult says what Mutate changed: the workload whose get-cert
+// containers were injected, and the kata runtime class set, each empty when
+// that mutation did not apply.
+type MutationResult struct {
+	WorkloadID string
+	KataClass  string
+}
+
+// Mutated reports whether the pod changed at all.
+func (r MutationResult) Mutated() bool { return r.WorkloadID != "" || r.KataClass != "" }
+
+// internalError marks a failure that is the operator's, not the pod
+// author's, so Handle answers 500 instead of 400.
+type internalError struct{ err error }
+
+func (e internalError) Error() string { return e.err.Error() }
+func (e internalError) Unwrap() error { return e.err }
+
+// Mutate applies the c8s pod mutation in place, exactly as the admission
+// webhook does for a pod created in namespace: get-cert injection for a pod
+// carrying the confidential.ai/cw annotation and kata class injection under
+// KataEnforce. It is the whole decision, so a tool rendering rules for
+// injected containers sees the same containers a cluster runs. An error
+// means the pod is refused.
+func Mutate(pod *corev1.Pod, namespace string, cfg Config) (MutationResult, error) {
+	if err := validateWorkloadLabel(pod); err != nil {
+		return MutationResult{}, err
 	}
 	inj, err := parseAnnotations(pod)
 	if err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
+		return MutationResult{}, err
 	}
 	// A hostNetwork pod shares the node IP, so it cannot be a mesh endpoint
 	// and the cw inbound guard (which keys on distinct pod IPs) cannot cover
@@ -689,33 +762,31 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// no interception and no drop. Reject the contradictory combination at
 	// admission rather than let it onboard silently unprotected.
 	if inj != nil && pod.Spec.HostNetwork {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
-			errInvalidInjectionAnnotation, AnnotationWorkload))
+			errInvalidInjectionAnnotation, AnnotationWorkload)
 	}
 	// The fetcher redeems a sandbox token from an inventory: the mounted
 	// nri-image-policy socket on node-CVM, or policy-monitor on guest loopback
 	// under kata. An operator with neither has nothing to point it at, so
 	// injecting would produce a Running pod whose fetcher CrashLoops while the
 	// workload blocks forever on a file that never lands. Refuse at admission.
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+	if inj != nil && len(inj.Secrets.Specs) > 0 && cfg.WorkloadClaimsHostDir == "" && !cfg.WorkloadClaimsGuest {
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
-			errInvalidInjectionAnnotation, AnnotationSecrets))
+			errInvalidInjectionAnnotation, AnnotationSecrets)
 	}
 	// Same for volumes: the fetcher hands the key to volumed, over the mounted
 	// socket directory on node-CVM or on guest loopback under kata. An operator
 	// with neither shape has no daemon to hand it to, so the workload would wait
 	// on a mount that can never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+	if inj != nil && len(inj.Volumes.Specs) > 0 && cfg.WorkloadClaimsHostDir == "" && !cfg.WorkloadClaimsGuest {
+		return MutationResult{}, fmt.Errorf(
 			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
-			errInvalidInjectionAnnotation, AnnotationVolumes))
+			errInvalidInjectionAnnotation, AnnotationVolumes)
 	}
 	if inj != nil && inj.SAN == "" {
-		// req.Namespace, not pod.Namespace: template-created pods reach
-		// admission with an empty metadata.namespace.
-		inj.SAN = workloadSAN(inj.WorkloadID, req.Namespace)
+		inj.SAN = workloadSAN(inj.WorkloadID, namespace)
 	}
 
 	// confidential.ai/cw drives both get-cert injection and confidential
@@ -731,20 +802,20 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
 	// every call), so it no longer keys off the confidential.ai/c8s-injected
 	// marker: an author cannot skip injection by pre-setting it.
-	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
-	kataClass := kataRuntimeClassFor(pod, m.cfg)
+	getCertNeeded := inj != nil && cfg.GetCertImage != ""
+	kataClass := kataRuntimeClassFor(pod, cfg)
 
 	// Covers a pod that set its own runtimeClassName too: injection skips it,
 	// but the shim still honors the annotations. Host-namespace pods are
 	// exempt like they are from class injection (kataIncompatible).
-	if m.cfg.KataEnforce && !kataIncompatible(pod) {
+	if cfg.KataEnforce && !kataIncompatible(pod) {
 		if err := rejectKataHypervisorAnnotations(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
 	}
 
 	if inj == nil && kataClass == "" {
-		return admission.Allowed("no c8s annotation — passthrough")
+		return MutationResult{}, nil
 	}
 
 	// Only the webhook may place a container under the reserved c8s-cert name.
@@ -753,41 +824,41 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// integrity is name-based.
 	if inj != nil {
 		if err := rejectReservedCertContainer(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
 	}
 
+	var result MutationResult
 	if getCertNeeded {
 		// ensureVolume keeps a pre-declared same-named volume rather than
 		// overwriting it, so a pod that declares the reserved cert volume as a
 		// hostPath/PVC/disk-backed emptyDir would have its private keys written
 		// to persistent, host-visible storage outside the TEE memory boundary.
 		// Reject anything but the expected memory-backed emptyDir.
-		if err := rejectReservedCertVolume(pod, inj.withDefaults(m.cfg).Cert.Volume); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+		if err := rejectReservedCertVolume(pod, inj.withDefaults(cfg).Cert.Volume); err != nil {
+			return MutationResult{}, err
 		}
 		// Same reasoning for the released secrets: a hostPath here would write
 		// them to host-visible storage.
 		if err := rejectReservedSecretsVolume(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+			return MutationResult{}, err
 		}
-		if err := rejectReservedVolumeVolume(pod, m.cfg.WorkloadClaimsGuest); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
+		if err := rejectReservedVolumeVolume(pod, cfg.WorkloadClaimsGuest); err != nil {
+			return MutationResult{}, err
 		}
-		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
-		mutatePod(pod, inj, m.cfg)
+		mutatePod(pod, inj, cfg)
+		result.WorkloadID = inj.WorkloadID
 	}
 	if kataClass != "" {
-		l.Info("injecting kata runtimeClassName", "runtimeClass", kataClass)
 		pod.Spec.RuntimeClassName = &kataClass
-		if m.cfg.KataGuestReadyGate {
+		if cfg.KataGuestReadyGate {
 			requireGuestReadyNode(pod)
 		}
-		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements, m.cfg.CDSRTMRs); err != nil {
+		if err := stampInitData(pod, kataClass, cfg.CDSMeasurements, cfg.CDSRTMRs); err != nil {
 			if errors.Is(err, errInvalidInjectionAnnotation) {
-				return admission.Errored(http.StatusBadRequest, err)
+				return MutationResult{}, err
 			}
-			return admission.Errored(http.StatusInternalServerError, err)
+			return MutationResult{}, internalError{err}
 		}
 		// Stamp AnnotationInjected here too — mutatePod only runs when
 		// get-cert is needed, but a kata-only mutation is still a mutation
@@ -797,13 +868,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			pod.Annotations = map[string]string{}
 		}
 		pod.Annotations[AnnotationInjected] = "true"
+		result.KataClass = kataClass
 	}
-
-	raw, err := json.Marshal(pod)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
+	return result, nil
 }
 
 // workloadServiceNamePrefix marks the operator-managed headless Service inside
@@ -1008,6 +1075,11 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		// connect fails closed and the pod hangs on its initial cert.
 		ensureSupplementalGroup(pod, workloadclaims.InventorySocketGID)
 	}
+	if vol, ok := attestationSocketVolume(cfg); ok {
+		ensureVolume(pod, vol)
+		// c8s-attest-socket.service serves the socket with the same group.
+		ensureSupplementalGroup(pod, workloadclaims.InventorySocketGID)
+	}
 
 	mountAll(pod, corev1.VolumeMount{
 		Name:      effective.Cert.Volume,
@@ -1101,14 +1173,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// get-cert names this one --cds-measurements and takes it comma-joined,
-	// where the secret and volume fetchers take a repeatable --measurements.
-	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
-		args = append(args, "--cds-measurements="+joined)
-	}
-	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
-		args = append(args, "--cds-rtmrs="+joined)
-	}
+	// get-cert names these --cds-measurements and --cds-rtmrs and takes them
+	// comma-joined, where the secret and volume fetchers repeat --measurements.
+	args = append(args, cfg.cdsPinArgs("--cds-measurements", "--cds-rtmrs", true)...)
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1130,7 +1197,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		RestartPolicy:   &always,
 		Args:            args,
 		Env:             getCertEnv(inj),
-		VolumeMounts:    append(getCertVolumeMounts(inj, true), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    append(getCertVolumeMounts(inj, true), nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 		// The workload is gated on the initial cert by the c8s-cert-wait
 		// init container (certWaitContainer), not a startupProbe here: a
@@ -1304,6 +1371,12 @@ func (cfg Config) withDefaults() Config {
 	if cfg.HardwarePlatform == "" {
 		cfg.HardwarePlatform = HardwarePlatformSNP
 	}
+	if cfg.AttestationSocketDir == "" {
+		cfg.AttestationSocketDir = DefaultAttestationSocketDir
+	}
+	// The dir is written verbatim into the sidecars' mounts and argv, which
+	// the sealed rule names in clean form.
+	cfg.AttestationSocketDir = filepath.Clean(cfg.AttestationSocketDir)
 	return cfg
 }
 
@@ -1531,12 +1604,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Volumes.Specs {
 		args = append(args, "--volume="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cfg.cdsPinArgs("--measurements", "--rtmrs", false)...)
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1553,7 +1621,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		// It reads the leaf and talks to the node agent's socket; the volumes
 		// themselves are mounted into the workload, not into this.
-		VolumeMounts:    append(getCertVolumeMounts(inj, false), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    append(getCertVolumeMounts(inj, false), nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1577,12 +1645,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Secrets.Specs {
 		args = append(args, "--secret="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cfg.cdsPinArgs("--measurements", "--rtmrs", false)...)
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.
 	if cfg.WorkloadClaimsGuest {
@@ -1605,7 +1668,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 				Name:      secretsVolumeName,
 				MountPath: inj.Secrets.Dir,
 			}),
-			workloadClaimsMounts(cfg)...),
+			nodeSocketMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1640,10 +1703,77 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 	}, true
 }
 
-// sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
-// the inventory's host directory onto the sidecar's mount of that directory
-// (workloadClaimsMounts); every other shape passes through verbatim.
+// cdsPinArgs is how a sidecar is told which CDS to trust: the own-quote flag
+// under a static allowlist, else the flat pins under the flag names the
+// command takes, comma-joined or repeated.
+func (cfg Config) cdsPinArgs(measurementsFlag, rtmrsFlag string, joined bool) []string {
+	if cfg.StaticAllowlist {
+		return []string{"--cds-pins-from-own-quote"}
+	}
+	var args []string
+	if joined {
+		if v := strings.Join(cfg.CDSMeasurements, ","); v != "" {
+			args = append(args, measurementsFlag+"="+v)
+		}
+		if v := strings.Join(cfg.CDSRTMRs, ","); v != "" {
+			args = append(args, rtmrsFlag+"="+v)
+		}
+		return args
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, measurementsFlag+"="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, rtmrsFlag+"="+r)
+	}
+	return args
+}
+
+// attestationSocketVolumeName is the injected volume that mounts the sealed
+// node's attestation socket directory into the sidecars.
+const attestationSocketVolumeName = "c8s-attestation-socket"
+
+// attestationSocketVolume is the read-only hostPath over the node's
+// attestation socket directory, under a static allowlist only. Type
+// Directory: the directory is the measured image's own, and a pod must not
+// create it on a node that lacks it.
+func attestationSocketVolume(cfg Config) (corev1.Volume, bool) {
+	if !cfg.StaticAllowlist {
+		return corev1.Volume{}, false
+	}
+	hpType := corev1.HostPathDirectory
+	return corev1.Volume{
+		Name: attestationSocketVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: cfg.AttestationSocketDir, Type: &hpType},
+		},
+	}, true
+}
+
+// nodeSocketMounts are the sidecar mounts of the node's socket directories:
+// the inventory's (node-CVM) and, under a static allowlist, the attestation
+// socket's at its own path, so the URL in the sealed argv is the host path.
+func nodeSocketMounts(cfg Config) []corev1.VolumeMount {
+	mounts := workloadClaimsMounts(cfg)
+	if cfg.StaticAllowlist {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      attestationSocketVolumeName,
+			MountPath: cfg.AttestationSocketDir,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+// sidecarAttestationApiURL is the verifier a sidecar dials: under a static
+// allowlist the node's socket at the path it is mounted on (whatever the
+// operator's own URL); otherwise a unix:// endpoint under the inventory's
+// host directory rebased onto the sidecar's mount of that directory
+// (workloadClaimsMounts), and every other shape verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
+	if cfg.StaticAllowlist {
+		return "unix://" + filepath.Join(cfg.AttestationSocketDir, attestationSocketName)
+	}
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL

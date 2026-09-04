@@ -15,6 +15,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/nri/pkg/api"
 )
 
@@ -35,6 +36,14 @@ func newTestPlugin(cfg *config) *plugin {
 type fakeContainerd struct {
 	resolve func(ctx context.Context, imageRef string) (string, error)
 	stop    func(ctx context.Context, containerID string) error
+	spec    func(ctx context.Context, containerID string) (*oci.Spec, error)
+}
+
+func (f *fakeContainerd) Spec(ctx context.Context, containerID string) (*oci.Spec, error) {
+	if f.spec == nil {
+		panic("unexpected containerd spec load")
+	}
+	return f.spec(ctx, containerID)
 }
 
 func (f *fakeContainerd) Resolve(ctx context.Context, imageRef string) (string, error) {

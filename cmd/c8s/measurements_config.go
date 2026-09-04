@@ -17,6 +17,13 @@ import (
 // flat so the consumers that read a plain digest list — the NRI plugin, the
 // operator's initdata — keep pinning exactly what they pin today.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
+	if installStaticAllowlist != "" {
+		if staticState == nil {
+			return nil, nil, nil, fmt.Errorf("--static-allowlist is set but not loaded: staticInstallPreflight must run first")
+		}
+		digests, rtmrs, helmArgs = staticState.pinArgs()
+		return digests, rtmrs, helmArgs, nil
+	}
 	if installMeasurementsConfig == "" {
 		digests, err = ratls.ParseHexMeasurementsList(installMeasurements)
 		if err != nil {

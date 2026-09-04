@@ -319,6 +319,29 @@ cds:
       cpu: 500m
       memory: 256Mi
 
+## Static allowlist (docs/static-allowlist.md): the node booted a policy
+## bundle and measured it into RTMR[3], so CDS serves that bundle and nothing
+## else. `c8s install --static-allowlist <bundle> --image-manifest <manifest>`
+## sets everything here and computes cds.measurementsConfig: one entry pinning
+## MRTD, RTMR[1], RTMR[2] and RTMR[3] = ForStaticAllowlist(bundle index), which
+## /attest requires of every requester and CDS requires of itself at start.
+## Requires attestationApi.cvmMode=node, a TDX platform, nriImagePolicy.enabled
+## =false (the node image bakes the sealed plugin), no cds.operatorKeys, no
+## cds.persistence and no kata (validations.yaml, kind=static_allowlist_*).
+## Every c8s pod then sets enableServiceLinks: false, so its environment is
+## the one the sealed rules list.
+staticAllowlist:
+  enabled: false
+  ## Where c8s-policy-measure publishes the boot's mode, the bundle digest and
+  ## the members; CDS mounts it read-only and seeds from
+  ## <policyDir>/static-allowlist.json.
+  policyDir: /run/confai/policy
+  ## Directory holding the node's attestation-api unix socket
+  ## (attestation-api.sock, served by c8s-attest-socket.service). Every c8s
+  ## pod that verifies evidence dials it there instead of the node IP, so no
+  ## chart value can point it at another verifier.
+  attestationSocketDir: /run/confai
+
 ## DaemonSet running the attestation-api image from github.com/confidential-dot-ai/attestation-rs.
 attestationApi:
   ## Render the host-side attestation-api DaemonSet. Disable on

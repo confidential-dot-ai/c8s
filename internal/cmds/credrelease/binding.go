@@ -17,38 +17,18 @@ import (
 	"os"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/tdxrtmr"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// operatorPubkeyPath is where the measured initrd stages the operator public
-// key it read off the opkeydata disk (and hashed into RTMR[3]). The service
-// reads this file rather than mounting the ISO itself — mounting fails under
-// the unit's systemd hardening, and the initrd is the single, measured reader
-// of the disk anyway.
-// Var (not const) so tests can point it at a temp file.
-var operatorPubkeyPath = "/etc/confai/operator-pubkey"
-
-// rtmr3SysfsPath is the TDX runtime-measurement register the initrd extended
-// with the operator key digest before switch_root. Reading it back lets the
-// service confirm the on-disk operator pubkey is the one that was measured.
-// Var (not const) so tests can point it at a temp file.
-var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
-
-// readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.
-// Returns the raw 48 bytes.
-func readOwnRTMR3() ([]byte, error) {
-	b, err := os.ReadFile(rtmr3SysfsPath)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w (is this a TDX guest with runtime measurement?)", rtmr3SysfsPath, err)
-	}
-	if len(b) != 48 {
-		return nil, fmt.Errorf("%s: got %d bytes, want 48", rtmr3SysfsPath, len(b))
-	}
-	return b, nil
-}
+// operatorPubkeyPath is the initrd-staged operator key. The service reads
+// the file rather than mounting the ISO itself: mounting fails under the
+// unit's systemd hardening. A var so tests point it at a temp file.
+var operatorPubkeyPath = policybundle.OperatorPubkeyPath
 
 // verifyKeyMeasured is the load-bearing anchor check: the operator pubkey file
 // is NOT itself measured (only its hash, via RTMR[3]), so before trusting the
@@ -60,22 +40,42 @@ func readOwnRTMR3() ([]byte, error) {
 // what the operator's own attestation pins to their key: both directions bind
 // to the same measured key, so neither side trusts the host.
 func verifyKeyMeasured(pubkey []byte) error {
-	own, err := readOwnRTMR3()
+	own, err := tdxrtmr.Read(3)
 	if err != nil {
 		return err
 	}
-	// The bare operator-key seed — no workload extends — is correct HERE, at
-	// service startup, even though remote verifiers compare against the seeded
-	// workload chain: the node image runs no workload measurer, so at this
-	// moment RTMR[3] must equal the seed exactly. Any extension beyond it means
-	// an unexpected measurer ran or the register was tampered with, and the
-	// comparison fails closed.
-	want := runtimemeasure.ForOperatorKey(pubkey)
+	// The register must equal the seed extended by exactly one mode event:
+	// cred-release starts after c8s-policy-measure has extended ModeDynamic,
+	// and the node image runs no workload measurer. A bare seed (no mode
+	// event), a static-mode register, or any extension beyond means the wrong
+	// unit ran or the register was tampered with, and the comparison fails
+	// closed.
+	want := runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pubkey))
 	// Not secret (a public-key hash) — plain compare is fine.
-	if !bytes.Equal(own, want[:]) {
+	if own != want {
 		return fmt.Errorf(
-			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
-			hex.EncodeToString(own), hex.EncodeToString(want[:]))
+			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s = ForDynamic(ForOperatorKey(key)) (was the pubkey file substituted after boot, or the dynamic mode event not extended?)",
+			hex.EncodeToString(own[:]), hex.EncodeToString(want[:]))
+	}
+	return nil
+}
+
+// verifyBundleMeasured is the static-mode anchor check: the published bundle
+// under the policy dir is NOT itself measured (only its index, via RTMR[3]),
+// so before serving the service confirms the register holds exactly
+// ForStaticAllowlist of the index recomputed from those files. A member
+// swapped after c8s-policy-measure ran, or a mode file written by hand on a
+// dynamic node, produces a mismatch here.
+func verifyBundleMeasured(bundle policybundle.Bundle) error {
+	own, err := tdxrtmr.Read(3)
+	if err != nil {
+		return err
+	}
+	want := bundle.RTMR3()
+	if own != want {
+		return fmt.Errorf(
+			"published policy bundle does not match the measured RTMR[3]: got %s, bundle implies %s = ForStaticAllowlist(index) (was a member substituted after boot, or mode=static written on a dynamic node?)",
+			hex.EncodeToString(own[:]), hex.EncodeToString(want[:]))
 	}
 	return nil
 }

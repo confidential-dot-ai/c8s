@@ -38,10 +38,16 @@ type ReleaseResponse struct {
 }
 
 // Handler serves POST /release-credential. It authorizes the caller against
-// the measured operator key, validates the CSR, and issues a short-lived kube
-// client cert signed by the cluster CA.
+// the measured operator key (dynamic mode) or accepts any caller (static
+// mode, where there is no operator key and RA-TLS is the only gate),
+// validates the CSR, and issues a short-lived kube client cert signed by the
+// cluster CA.
 type Handler struct {
-	verifier operatorauth.Verifier
+	// open is set only by NewOpenHandler. It is a separate field, not a nil
+	// verifier, so the zero value of Handler refuses every request instead
+	// of releasing cluster-admin credentials to anyone.
+	open     bool
+	verifier *operatorauth.Verifier
 	ca       *clusterCA
 	certTTL  time.Duration
 	certOrg  string // Kubernetes group (O) for the issued cert
@@ -64,13 +70,29 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 		// guest clock is rejected "used before issued". Bounded (still within
 		// operatorauth's 5-min max validity), so it doesn't widen the replay
 		// window meaningfully.
-		verifier: operatorauth.Verifier{Keys: keys, ClockSkew: 60 * time.Second},
+		verifier: &operatorauth.Verifier{Keys: keys, ClockSkew: 60 * time.Second},
 		ca:       ca,
 		certTTL:  ttl,
 		certOrg:  org,
 		certCN:   cn,
 		now:      time.Now,
 	}, nil
+}
+
+// NewOpenHandler builds the static-mode release handler: no operator key,
+// so no Authorization check. The caller MUST have verified RTMR[3] against
+// the published bundle first (verifyBundleMeasured); on a static node
+// cluster-admin is the adversary the design already assumes, so handing the
+// credential to every caller gives nothing away.
+func NewOpenHandler(ca *clusterCA, org, cn string, ttl time.Duration) *Handler {
+	return &Handler{
+		open:    true,
+		ca:      ca,
+		certTTL: ttl,
+		certOrg: org,
+		certCN:  cn,
+		now:     time.Now,
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,14 +110,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// AUTHORIZE: the caller must hold the operator private key whose public
-	// half is measured into RTMR[3]. operatorauth verifies the Bearer JWT
-	// (ES256/384/512) under the pinned key, enforces <=5min validity, and
-	// binds the token to this method/path/body (pbh) — so a captured token
-	// can't be replayed against a different CSR.
-	if err := h.verifier.Authorize(r, body); err != nil {
-		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+	// AUTHORIZE (dynamic mode): the caller must hold the operator private
+	// key whose public half is measured into RTMR[3]. operatorauth verifies
+	// the Bearer JWT (ES256/384/512) under the pinned key, enforces <=5min
+	// validity, and binds the token to this method/path/body (pbh) — so a
+	// captured token can't be replayed against a different CSR. Static mode
+	// skips the check; a handler that is neither open nor keyed was not
+	// built by a constructor and must not release anything.
+	switch {
+	case h.open:
+	case h.verifier == nil || h.ca == nil:
+		http.Error(w, "release handler is not configured", http.StatusInternalServerError)
 		return
+	default:
+		if err := h.verifier.Authorize(r, body); err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
 	}
 
 	var req ReleaseRequest

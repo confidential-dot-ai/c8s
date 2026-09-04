@@ -15,7 +15,7 @@ import (
 )
 
 func newLintCmd(o *options) *cobra.Command {
-	var online, strict bool
+	var online, strict, sealed bool
 	var cvmMode string
 	cmd := &cobra.Command{
 		Use:   "lint <file|->",
@@ -31,7 +31,13 @@ exists in its registry via crane.
 Two entries declaring the same containers with the same argv policy are an
 error: release requires exactly one entry to match, so both are refused
 forever. Errors exit non-zero on their own; --strict makes warnings do the
-same.`,
+same.
+
+--sealed lints a static-allowlist bundle member: the file must be byte-equal
+to its canonical form, carry no floor digests, and give every container a
+complete rule (exact argv, env values, mount sources, privileged or not; a
+review for every pvc, serviceAccountToken and nodeState mount and every
+privileged entry). Every shortfall is an error.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := readFileOrStdin(cmd, args[0])
@@ -43,7 +49,11 @@ same.`,
 				return err
 			}
 			findings := lintOffline(al)
-			findings = append(findings, unobservedFieldPolicies(al, cvmMode)...)
+			if sealed {
+				findings = append(findings, lintSealed(data)...)
+			} else {
+				findings = append(findings, unobservedFieldPolicies(al, cvmMode)...)
+			}
 			if online {
 				if err := crane.Require(); err != nil {
 					return err
@@ -70,7 +80,22 @@ same.`,
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
 	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode the allowlist targets (pod, node, gke, aks); pod silences the mount/env scope warning")
+	cmd.Flags().BoolVar(&sealed, "sealed", false, "lint as a static-allowlist bundle member: canonical bytes, no floor, a complete rule per container")
 	return cmd
+}
+
+// lintSealed reports every sealed-mode shortfall as an error; a parse or
+// canonicalization failure is one finding.
+func lintSealed(data []byte) []finding {
+	msgs, err := pkgallowlist.SealedFindings(data)
+	if err != nil {
+		return []finding{errorf("%v", err)}
+	}
+	out := make([]finding, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, errorf("%s", m))
+	}
+	return out
 }
 
 func newInspectImageCmd(o *options) *cobra.Command {

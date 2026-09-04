@@ -1,0 +1,20 @@
+# demo-nginx with one env var the rule does not list: an unlisted name under
+# an exact env policy is refused at creation, whatever its value.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-nginx-env
+  namespace: default
+  annotations:
+    confidential.ai/cw: demo-nginx
+spec:
+  enableServiceLinks: false
+  restartPolicy: Never
+  containers:
+    - name: nginx
+      image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
+      env:
+        - name: HTTP_PROXY
+          value: http://steer.example:3128
+      ports:
+        - containerPort: 80

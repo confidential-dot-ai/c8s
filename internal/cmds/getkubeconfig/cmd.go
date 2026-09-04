@@ -24,14 +24,18 @@ func NewCmd() *cobra.Command {
 		Long: "get-kubeconfig attests a measured c8s CVM and enforces its full\n" +
 			"measured identity. The build-artifact manifest selects the platform:\n" +
 			"on TDX the image tuple (MRTD, RTMR[1], RTMR[2]) plus the RTMR[3] chain\n" +
-			"seeded by the operator's key and extended by the expected workload\n" +
-			"images; on SEV-SNP the pinned per-SMP launch digest plus the\n" +
-			"operator-key HOSTDATA binding. It then exchanges a CSR for a\n" +
-			"short-lived kube client cert over the cred-release endpoint and writes\n" +
-			"a kubeconfig. Verification runs in-process (attestation-go).",
+			"seeded by the operator's key, extended by the dynamic mode event and\n" +
+			"then by the expected workload images; on SEV-SNP the pinned per-SMP\n" +
+			"launch digest plus the operator-key HOSTDATA binding. It then exchanges\n" +
+			"a CSR for a short-lived kube client cert over the cred-release endpoint\n" +
+			"and writes a kubeconfig. Verification runs in-process (attestation-go).\n\n" +
+			"With --static-allowlist the node booted a policy bundle instead of an\n" +
+			"operator key: RTMR[3] is pinned to the static register derived from the\n" +
+			"bundle (mode event, then the bundle index), and the credential is\n" +
+			"fetched without an operator token.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if cfg.OperatorKeyPath == "" || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
-				return fmt.Errorf("--operator-key, --image-manifest and --out are required")
+			if (cfg.OperatorKeyPath == "" && cfg.StaticAllowlistPath == "") || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
+				return fmt.Errorf("--operator-key (or --static-allowlist), --image-manifest and --out are required")
 			}
 			// --vmi resolves a KubeVirt guest to the address --node would have
 			// been given; --node <host> is a convenience that fills the three
@@ -70,7 +74,8 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.AttestURL, "attest-url", "", "attestation-api /attest URL (overrides --node)")
 	f.StringVar(&cfg.ReleaseBaseURL, "release-url", "", "cred-release base URL (overrides --node)")
 	f.StringVar(&cfg.APIServerURL, "apiserver-url", "", "apiserver URL for the kubeconfig (overrides --node)")
-	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM (its public half is bound into RTMR[3]) (required)")
+	f.StringVar(&cfg.OperatorKeyPath, "operator-key", "", "operator ECDSA private key PEM (its public half is bound into RTMR[3]); required unless --static-allowlist is given")
+	f.StringVar(&cfg.StaticAllowlistPath, "static-allowlist", "", "policy bundle the node booted with (a directory of members, or the static-allowlist.json alone): pins RTMR[3] to the static register derived from it instead of an operator key, and fetches the credential without an operator token, which a static cred-release does not check. Mutually exclusive with --operator-key and --workload-image")
 	f.StringVar(&cfg.ImageManifestPath, "image-manifest", "", "an explicitly selected, provenanced build-artifact manifest carrying the expected guest image's measured identity — TDX: mrtd/rtmr1/rtmr2; SNP: snp_variants. Its shape selects the platform, and the gate pins every value (required)")
 	f.StringArrayVar(&cfg.WorkloadImages, "workload-image", nil, "digest-pinned image ref (\"sha256:<hex>\" or \"name@sha256:<hex>\"; tags rejected) the node's measurer is expected to have extended into RTMR[3]; repeatable, in first-extend order. Omit if the node runs no measured workloads. TDX only — SNP has no runtime-extend register")
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
@@ -79,5 +84,7 @@ func NewCmd() *cobra.Command {
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
 	f.DurationVar(&cfg.ReleaseWait, "release-wait", 2*time.Minute, "how long to keep retrying while cred-release is not yet listening (it comes up after attest); 0 fails on the first refused dial")
 	cmd.MarkFlagsMutuallyExclusive("node", "vmi")
+	cmd.MarkFlagsMutuallyExclusive("operator-key", "static-allowlist")
+	cmd.MarkFlagsMutuallyExclusive("workload-image", "static-allowlist")
 	return cmd
 }

@@ -30,3 +30,35 @@ func TestValidateOperatorPlatform(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateStaticAllowlist(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		static             bool
+		measurements, rtmr []string
+		measurementsConfig string
+		guest              bool
+		socketDir          string
+		wantErr            string
+	}{
+		{name: "off with flat pins", measurements: []string{"aa"}},
+		{name: "off with a relative socket dir", socketDir: "confai"},
+		{name: "static alone", static: true},
+		{name: "static with a custom socket dir", static: true, socketDir: "/run/node-attest"},
+		{name: "static with measurements", static: true, measurements: []string{"aa"}, wantErr: "cannot be combined with --cds-measurements"},
+		{name: "static with rtmrs", static: true, rtmr: []string{"1=aa"}, wantErr: "cannot be combined with --cds-measurements"},
+		{name: "static with measurements file", static: true, measurementsConfig: "/etc/c8s-measurements/cds.json", wantErr: "cannot be combined with --cds-measurements"},
+		{name: "static in the kata guest shape", static: true, guest: true, wantErr: "--workload-claims-guest"},
+		{name: "static with a trailing slash", static: true, socketDir: "/run/confai/", wantErr: "--attestation-socket-dir"},
+		{name: "static with a relative socket dir", static: true, socketDir: "run/confai", wantErr: "--attestation-socket-dir"},
+		{name: "static with a dotted socket dir", static: true, socketDir: "/run/../run/confai", wantErr: "--attestation-socket-dir"},
+	} {
+		if tc.socketDir == "" {
+			tc.socketDir = webhook.DefaultAttestationSocketDir
+		}
+		err := validateStaticAllowlist(tc.static, tc.measurements, tc.rtmr, tc.measurementsConfig, tc.guest, tc.socketDir)
+		if (tc.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("validateStaticAllowlist(%s) = %v, want error containing %q", tc.name, err, tc.wantErr)
+		}
+	}
+}

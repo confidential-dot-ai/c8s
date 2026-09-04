@@ -27,12 +27,9 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
+	"github.com/confidential-dot-ai/c8s/internal/tdxrtmr"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
-
-// rtmr3Sysfs is the kernel TSM node backing extendSysfs/readRegisterSysfs.
-// A var (not const) only so tests can point it at a temp file.
-var rtmr3Sysfs = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
 const (
 	watchDir = "/run/kata-containers"
@@ -81,8 +78,8 @@ func newMeasurer(logger *slog.Logger) *measurer {
 		logger:             logger,
 		watchDir:           watchDir,
 		statePath:          statePath,
-		extend:             extendSysfs,
-		readRegister:       readRegisterSysfs,
+		extend:             func(event [runtimemeasure.Size]byte) error { return tdxrtmr.Extend(3, event) },
+		readRegister:       func() ([runtimemeasure.Size]byte, error) { return tdxrtmr.Read(3) },
 		seenCids:           map[string]struct{}{},
 		measuredDigests:    map[string]struct{}{},
 		configReadDeadline: 2 * time.Second,
@@ -94,7 +91,7 @@ func newMeasurer(logger *slog.Logger) *measurer {
 func Run(_ []string) error {
 	m := newMeasurer(slog.Default())
 	m.logger.Info("rtmr3-measurer starting",
-		"watch_dir", m.watchDir, "state", m.statePath, "sysfs", rtmr3Sysfs)
+		"watch_dir", m.watchDir, "state", m.statePath, "sysfs", tdxrtmr.Path(3))
 	if err := m.loadState(); err != nil {
 		return err
 	}
@@ -315,27 +312,4 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 		}
 		time.Sleep(m.configReadInterval)
 	}
-}
-
-// extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
-// RTMR3 = SHA384(RTMR3 ‖ event). Needs mainline >= 6.16.
-func extendSysfs(event [runtimemeasure.Size]byte) error {
-	if err := os.WriteFile(rtmr3Sysfs, event[:], 0); err != nil {
-		return fmt.Errorf("write %s: %w", rtmr3Sysfs, err)
-	}
-	return nil
-}
-
-// readRegisterSysfs reads the current RTMR[3] value from the same node.
-func readRegisterSysfs() ([runtimemeasure.Size]byte, error) {
-	var reg [runtimemeasure.Size]byte
-	b, err := os.ReadFile(rtmr3Sysfs)
-	if err != nil {
-		return reg, err
-	}
-	if len(b) != runtimemeasure.Size {
-		return reg, fmt.Errorf("read %s: got %d bytes, want %d", rtmr3Sysfs, len(b), runtimemeasure.Size)
-	}
-	copy(reg[:], b)
-	return reg, nil
 }

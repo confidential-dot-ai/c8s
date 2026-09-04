@@ -37,6 +37,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -49,6 +50,7 @@ type config struct {
 	CDSURL                 string
 	CDSMeasurements        string
 	CDSRTMRs               string
+	CDSPinsFromOwnQuote    bool
 	AttestationApiURL      string
 	OutPath                string
 	CAOutPath              string
@@ -124,6 +126,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
 	flags.StringVar(&cfg.CDSRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> CDS's RA-TLS cert must additionally satisfy; ignored when CDS presents SNP evidence (empty = launch-digest pinning only)")
+	flags.BoolVar(&cfg.CDSPinsFromOwnQuote, "cds-pins-from-own-quote", false, "pin CDS to this node's own image tuple {MRTD, RTMR[1..3]}, taken from a fresh quote of this pod verified over the unix --attestation-api-url at start, instead of --cds-measurements and --cds-rtmrs (static allowlist nodes, where the argv is sealed)")
 	flags.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "URL of the node-local attestation-api (http://localhost:8400, or unix:// plus the on-node socket path the chart wires)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
@@ -165,8 +168,8 @@ func setupLogging(verbose bool) {
 	slog.SetDefault(slog.New(handler))
 }
 
-func newCDSClient(cfg config) (attestclient.Client, error) {
-	httpClient, err := cdsHTTPClient(cfg)
+func newCDSClient(ctx context.Context, cfg config) (attestclient.Client, error) {
+	httpClient, err := cdsHTTPClient(ctx, cfg)
 	if err != nil {
 		var zero attestclient.Client
 		return zero, err
@@ -174,7 +177,9 @@ func newCDSClient(cfg config) (attestclient.Client, error) {
 	return attestclient.NewClientWithHTTP(cfg.CDSURL, httpClient), nil
 }
 
-func cdsHTTPClient(cfg config) (*http.Client, error) {
+// cdsHTTPClient builds the RA-TLS client for CDS; ctx bounds the
+// self-attestation --cds-pins-from-own-quote performs at start.
+func cdsHTTPClient(ctx context.Context, cfg config) (*http.Client, error) {
 	parsed, err := url.Parse(cfg.CDSURL)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-url: %w", err)
@@ -188,24 +193,40 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		return nil, fmt.Errorf("--cds-url must use https (RA-TLS); got scheme %q", parsed.Scheme)
 	}
 
-	measurements, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
+	pins, err := cdsPins(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("--cds-measurements: %w", err)
-	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), cfg.WorkloadClaimsGuest,
-		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
 		return nil, err
 	}
-	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
-	}
-
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}
 	return client, nil
+}
+
+// cdsPins is what get-cert holds CDS's RA-TLS certificate to: the node's own
+// tuple under --cds-pins-from-own-quote, else the flat flags.
+func cdsPins(ctx context.Context, cfg config) (ratls.Pins, error) {
+	if cfg.CDSPinsFromOwnQuote {
+		pins, err := ratls.OwnTuplePins(ctx, attestationclient.NewClient(cfg.AttestationApiURL))
+		if err != nil {
+			return ratls.Pins{}, fmt.Errorf("--cds-pins-from-own-quote: %w", err)
+		}
+		return pins, nil
+	}
+	launch, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-measurements: %w", err)
+	}
+	if err := cmdsutil.CheckCDSPinned(len(launch), cfg.WorkloadClaimsGuest,
+		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
+		return ratls.Pins{}, err
+	}
+	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	return ratls.Pins{Measurements: launch, RTMRs: rtmrs}, nil
 }
 
 // obtainCertFn is a var so renewal-loop tests can observe attempts.
@@ -223,13 +244,15 @@ func run(cfg config) error {
 	}
 	slog.Debug("output paths validated")
 
-	client, err := newCDSClient(cfg)
+	// The signal context is installed before the CDS client is built so a
+	// SIGTERM interrupts the self-attestation the own-quote pins wait on.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	client, err := newCDSClient(ctx, cfg)
 	if err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	haveCert := true
 	leaf, err := obtainCertWithRetry(ctx, cfg, client)
@@ -675,6 +698,14 @@ func validateConfig(cfg config) error {
 	}
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.AttestationApiURL); err != nil {
 		return err
+	}
+	if cfg.CDSPinsFromOwnQuote {
+		if cfg.CDSMeasurements != "" || cfg.CDSRTMRs != "" {
+			return fmt.Errorf("--cds-pins-from-own-quote replaces --cds-measurements and --cds-rtmrs; pass one form of CDS pin")
+		}
+		if !strings.HasPrefix(cfg.AttestationApiURL, "unix://") {
+			return fmt.Errorf("--cds-pins-from-own-quote requires a unix:// --attestation-api-url: the pins come from the node's own verifier, and a network endpoint is one the control plane can substitute")
+		}
 	}
 	if err := validateSAN(cfg.SAN); err != nil {
 		return fmt.Errorf("--san: %w", err)

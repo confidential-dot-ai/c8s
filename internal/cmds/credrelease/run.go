@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -22,6 +23,11 @@ type Config struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "snp"; no default).
 	Platform string
+	// PolicyDir is where c8s-policy-measure published the boot's policy
+	// mode. mode=dynamic gates release on the measured operator key;
+	// mode=static has no operator key and releases to any caller
+	// once RTMR[3] matches the published bundle.
+	PolicyDir string
 	// ClientCACert / ClientCAKey locate the cluster's client-signing CA
 	// (defaults: the RKE2 paths; kubeadm works via /etc/kubernetes/pki/ca.{crt,key}).
 	ClientCACert string
@@ -39,15 +45,19 @@ type Config struct {
 	CertCN  string
 }
 
-// Run loads the measured operator key and cluster CA, then serves the
-// RA-TLS-protected /release-credential endpoint. It blocks until ctx is done.
+// Run reads the policy mode, loads the release authorizer and cluster CA,
+// then serves the RA-TLS-protected /release-credential endpoint. It blocks
+// until ctx is done.
 //
 // Startup order matters for the trust story:
-//  1. LoadMeasuredOperatorKey — read the opkeydata pubkey and CONFIRM it
-//     matches the launch binding (TDX RTMR[3] / SNP HOSTDATA). Fails closed
-//     if the key was substituted after boot.
+//  1. policybundle.ReadDir — the mode c8s-policy-measure committed
+//     to RTMR[3]; missing or inconsistent is fatal, never a default.
 //  2. loadClusterCA — the cluster client-CA that signs the operator's cert.
-//  3. serve over an RA-TLS config so the caller can attest this is the real
+//  3. Dynamic: LoadMeasuredOperatorKey — read the opkeydata pubkey and
+//     CONFIRM it matches the launch binding (TDX RTMR[3] / SNP HOSTDATA).
+//     Static: verifyBundleMeasured — CONFIRM RTMR[3] equals the value the
+//     published bundle implies. Both fail closed on a substituted file.
+//  4. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
 func Run(ctx context.Context, cfg Config) error {
 	// RA-TLS is mandatory here: this endpoint hands out cluster-admin creds,
@@ -62,19 +72,40 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("--platform: %w", err)
 	}
 
-	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.Platform, cfg.AttestationAPIURL)
+	state, err := policybundle.ReadDir(cfg.PolicyDir)
 	if err != nil {
-		return fmt.Errorf("load measured operator key: %w", err)
+		return err
 	}
-
 	ca, err := loadClusterCA(cfg.ClientCACert, cfg.ClientCAKey, cfg.ServerCACert)
 	if err != nil {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}
 
-	handler, err := NewHandler(operatorPub, ca, cfg.CertOrg, cfg.CertCN, cfg.CertTTL)
-	if err != nil {
-		return fmt.Errorf("build handler: %w", err)
+	// The mode decides the authorizer; nothing downstream infers it from a
+	// missing key.
+	var handler *Handler
+	switch state.Mode {
+	case policybundle.StaticMode:
+		// Only TDX has the register the bundle is measured into; the
+		// measurer never writes mode=static elsewhere, so this is tampering.
+		if cfg.Platform != "tdx" {
+			return fmt.Errorf("policy mode is static but platform is %s: static mode is TDX-only", cfg.Platform)
+		}
+		if err := verifyBundleMeasured(state.Bundle); err != nil {
+			return fmt.Errorf("verify static bundle: %w", err)
+		}
+		handler = NewOpenHandler(ca, cfg.CertOrg, cfg.CertCN, cfg.CertTTL)
+	case policybundle.DynamicMode:
+		operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.Platform, cfg.AttestationAPIURL)
+		if err != nil {
+			return fmt.Errorf("load measured operator key: %w", err)
+		}
+		handler, err = NewHandler(operatorPub, ca, cfg.CertOrg, cfg.CertCN, cfg.CertTTL)
+		if err != nil {
+			return fmt.Errorf("build handler: %w", err)
+		}
+	default:
+		return fmt.Errorf("policy mode %q is not static or dynamic", state.Mode)
 	}
 
 	// RA-TLS serving config: the presented cert embeds a fresh TDX quote

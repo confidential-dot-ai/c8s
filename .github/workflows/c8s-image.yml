@@ -410,6 +410,36 @@ jobs:
           # matrix publishes both measured platform variants.
           C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
 
+      - name: Set up Go for systemfloor
+        uses: ./c8s/.github/actions/setup-go-c8s
+        with:
+          go-version-file: c8s/go.mod
+          cache-dependency-path: c8s/go.sum
+
+      - name: Emit the system-floor rule skeleton beside manifest.json
+        # system-floor.json is the reviewer's starting point for
+        # `c8s allowlist render --sealed --system-floor`: one entry per RKE2
+        # floor image with argv from the image config. It lands in
+        # output/$VARIANT, so the gate uploads it with manifest.json and
+        # `confos push` publishes it (the artifact carries every regular file
+        # there). The bundles are the ones mkosi.sync staged into the image,
+        # read from its sha256-verified cache.
+        working-directory: c8s
+        run: |
+          set -euo pipefail
+          cache=../confidential-os-builder/mkosi/base/mkosi.pkgcache/c8s
+          version=$(sed -n 's/^RKE2_VERSION="\(.*\)"$/\1/p' node-guest-image/c8s/mkosi.sync)
+          [ -n "$version" ] || { echo "::error::could not read RKE2_VERSION from mkosi.sync"; exit 1; }
+          cache_ver="${version//+/-}"
+          manifests=node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests
+          go run ./node-guest-image/c8s/systemfloor \
+            -floor "../confidential-os-builder/output/${VARIANT}/system-floor.json" \
+            -bundle "$cache/rke2-images-core-${cache_ver}.tar.zst" \
+            -bundle "$cache/rke2-images-cilium-${cache_ver}.tar.zst" \
+            -manifest "$manifests/local-path-storage.yaml" \
+            -manifest "$manifests/nvidia-device-plugin.yaml" \
+            >/dev/null
+
       - name: Make the tools trees cache-safe
         # The post-job cache tar runs unprivileged; mkosi builds these trees as
         # root, so their saves fail without this. Runs after all use.
@@ -451,6 +481,7 @@ jobs:
           path: |
             confidential-os-builder/output/${{ env.VARIANT }}/manifest.json
             confidential-os-builder/output/${{ env.VARIANT }}/roothash
+            confidential-os-builder/output/${{ env.VARIANT }}/system-floor.json
           if-no-files-found: error
 
       - name: Upload resolved kernel snapshot (gate)

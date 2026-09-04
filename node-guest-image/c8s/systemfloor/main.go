@@ -17,7 +17,10 @@
 //
 // prints the always_allow block. With -template pointing at
 // image-policy.yaml.in, -check reports drift and -write rewrites the block
-// between the BEGIN/END markers in place.
+// between the BEGIN/END markers in place. -floor writes system-floor.json,
+// the rule skeleton `c8s allowlist render --sealed --system-floor` consumes:
+// one image per entry with the argv its config bakes, and empty env, mounts
+// and review for the reviewer to complete.
 package main
 
 import (
@@ -27,24 +30,33 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/platforms"
 	"github.com/klauspost/compress/zstd"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/confidential-dot-ai/c8s/internal/crane"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
-// entry is one floor line: a digest admitted under an image reference.
+// entry is one floor line: a digest admitted under an image reference, with
+// the argv the image config bakes (known for bundle images; fetched for
+// manifest refs only when -floor asks for it).
 type entry struct {
-	digest string
-	ref    string
+	digest     string
+	ref        string
+	entrypoint []string
+	cmd        []string
 }
 
 // bundleEntries imports a docker-archive airgap bundle the way containerd's
@@ -103,9 +115,31 @@ func importEntries(r io.Reader) ([]entry, error) {
 		if name == "" {
 			continue
 		}
-		out = append(out, entry{digest: m.Digest.String(), ref: name})
+		e := entry{digest: m.Digest.String(), ref: name}
+		if e.entrypoint, e.cmd, err = imageArgv(store, m); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, e)
 	}
 	return out, nil
+}
+
+// imageArgv reads the imported image's config blob for its Entrypoint and Cmd.
+func imageArgv(store content.Store, desc ocispec.Descriptor) (entrypoint, cmd []string, err error) {
+	ctx := context.Background()
+	configDesc, err := images.Config(ctx, store, desc, platforms.Default())
+	if err != nil {
+		return nil, nil, fmt.Errorf("config descriptor: %w", err)
+	}
+	blob, err := content.ReadBlob(ctx, store, configDesc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read config: %w", err)
+	}
+	var img ocispec.Image
+	if err := json.Unmarshal(blob, &img); err != nil {
+		return nil, nil, fmt.Errorf("parse config: %w", err)
+	}
+	return img.Config.Entrypoint, img.Config.Cmd, nil
 }
 
 // imageRefRE matches an `image:` value pinned by digest.
@@ -138,17 +172,61 @@ func render(entries []entry) string {
 		seen[e.digest] = true
 		byRef[e.ref] = e.digest
 	}
-	refs := make([]string, 0, len(byRef))
-	for r := range byRef {
-		refs = append(refs, r)
-	}
-	sort.Strings(refs)
-
 	var b strings.Builder
-	for _, r := range refs {
+	for _, r := range slices.Sorted(maps.Keys(byRef)) {
 		fmt.Fprintf(&b, "    %q: %q\n", byRef[r], r)
 	}
 	return b.String()
+}
+
+// floorFile renders the system-floor.json skeleton: one image per entry,
+// sorted by reference and deduped by digest like render, with the config
+// argv and everything the build cannot see left for the reviewer.
+func floorFile(entries []entry) ([]byte, error) {
+	byRef := make(map[string]entry, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if seen[e.digest] {
+			continue
+		}
+		seen[e.digest] = true
+		byRef[e.ref] = e
+	}
+	refs := slices.Sorted(maps.Keys(byRef))
+	floor := allowlist.SystemFloor{Schema: allowlist.SystemFloorSchema, Images: make([]allowlist.SystemFloorImage, 0, len(refs))}
+	for _, r := range refs {
+		e := byRef[r]
+		floor.Images = append(floor.Images, allowlist.SystemFloorImage{
+			Ref:        e.ref,
+			Digest:     e.digest,
+			Entrypoint: e.entrypoint,
+			Cmd:        e.cmd,
+			Env:        map[string]allowlist.EnvValue{},
+			Mounts:     map[string]allowlist.MountRule{},
+			Privileges: &allowlist.Privileges{},
+		})
+	}
+	return json.MarshalIndent(floor, "", "  ")
+}
+
+// resolveManifestArgv fills the config argv of manifest-sourced entries from
+// the registry; bundle entries already carry theirs.
+func resolveManifestArgv(entries []entry) error {
+	if err := crane.Require(); err != nil {
+		return fmt.Errorf("-floor needs the config of manifest-pinned images: %w", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.entrypoint != nil || e.cmd != nil {
+			continue
+		}
+		cfg, err := crane.Config(context.Background(), e.ref)
+		if err != nil {
+			return err
+		}
+		e.entrypoint, e.cmd = cfg.Config.Entrypoint, cfg.Config.Cmd
+	}
+	return nil
 }
 
 const (
@@ -199,13 +277,14 @@ func main() {
 func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("systemfloor", flag.ContinueOnError)
 	var bundles, manifests stringList
-	var templatePath string
+	var templatePath, floorPath string
 	var check, write bool
 	fs.Var(&bundles, "bundle", "RKE2 airgap image bundle (*.tar.zst); repeatable")
 	fs.Var(&manifests, "manifest", "YAML manifest to scan for digest-pinned image refs; repeatable")
 	fs.StringVar(&templatePath, "template", "", "image-policy.yaml.in to splice the block into")
 	fs.BoolVar(&check, "check", false, "exit non-zero when the template block is stale")
 	fs.BoolVar(&write, "write", false, "rewrite the template block in place")
+	fs.StringVar(&floorPath, "floor", "", "write the system-floor.json rule skeleton here (manifest refs are resolved through crane)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -230,6 +309,20 @@ func run(args []string, stdout io.Writer) error {
 	}
 	if len(entries) == 0 {
 		return fmt.Errorf("no images found in the inputs")
+	}
+	if floorPath != "" {
+		if len(manifests) > 0 {
+			if err := resolveManifestArgv(entries); err != nil {
+				return err
+			}
+		}
+		floor, err := floorFile(entries)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(floorPath, append(floor, '\n'), 0o644); err != nil {
+			return err
+		}
 	}
 	block := render(entries)
 

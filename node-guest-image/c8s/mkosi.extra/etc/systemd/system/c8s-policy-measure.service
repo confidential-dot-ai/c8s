@@ -1,0 +1,53 @@
+# Commit the boot's policy mode to RTMR[3] before RKE2 starts containerd.
+# Every boot extends a mode event: ModeDynamic without a policydata disk,
+# ModeStatic plus the bundle's policy event with one. Without that, a
+# dynamic node (where cluster-admin is node root through any privileged pod)
+# could write the static events itself and pass every static check.
+# /run/confai/policy/mode is written last, so a static consumer
+# (cred-release, the NRI plugin, CDS) only ever reads a verdict the register
+# already backs. No ConditionPathExists: the unit always runs.
+[Unit]
+Description=Measure the policy mode (and static allowlist bundle) into RTMR[3]
+# The launch ISOs may still be settling; the ExecStartPre below waits for
+# udev so a late policydata device is not misread as a dynamic boot.
+After=systemd-udevd.service
+Before=rke2-server.service rke2-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/bin/udevadm settle --timeout=10
+# ${POLICY_PLATFORM} comes from a drop-in the c8s sync hook renders from
+# the build's required C8S_PLATFORM (same mechanism as cred-release's
+# CRED_PLATFORM). The `=` form matters: with the variable unset systemd
+# would elide a bare word, but --platform= expands to an empty value, which
+# the command rejects — fail closed, never a default. On snp the command
+# writes mode=dynamic and touches no register; a policydata disk is fatal.
+ExecStart=/usr/local/bin/c8s policy-measure --platform=${POLICY_PLATFORM}
+TimeoutStartSec=60
+# Fail closed: a node whose mode event did not land must not run
+# containers. A powered-off node does not flap.
+FailureAction=poweroff-force
+
+# Mounts the policydata ISO itself (CAP_SYS_ADMIN, /dev/disk/by-label),
+# extends the register through sysfs and writes /run/confai/policy, so it
+# cannot take cred-release's ProtectKernelTunables/PrivateDevices. Everything
+# else stays read-only; the private mount namespace keeps the ISO mount out
+# of the host view. The initrd creates /etc/confai only on an opkeydata
+# boot, so the `-` prefix is what lets a keyless or static boot start at all:
+# without it systemd fails the namespace setup (226/NAMESPACE) and this
+# unit's FailureAction powers the node off before the command runs.
+ProtectSystem=strict
+ReadOnlyPaths=-/etc/confai
+ReadWritePaths=/run/confai
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# vsock fence: only attestation-api may use AF_VSOCK (see kernel/gpu.config).
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
+# Preset creates the .requires links, so rke2 cannot start while this unit
+# is failing or has not run.
+RequiredBy=rke2-server.service rke2-agent.service

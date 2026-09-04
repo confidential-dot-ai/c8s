@@ -44,6 +44,9 @@ spec:
       annotations:
         checksum/config: {{ include "c8s.attestationApiConfig" (dict "root" .) | sha256sum }}
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       serviceAccountName: {{ include "c8s.attestationApiName" . }}
       tolerations:
         - operator: Exists

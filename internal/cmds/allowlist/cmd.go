@@ -5,10 +5,11 @@
 // per-container argv and path policy, looked up by container digest).
 //
 // Reads (list, export, diff, workload list/get, lint, inspect-image) are
-// unauthenticated. Writes (add, remove, upload, workload apply/edit/delete) are
-// authorized by an operator EC private key whose public key CDS pins
-// (cds --operator-keys); the CLI mints a short-lived, body-bound token per write
-// via pkg/operatorauth.
+// unauthenticated. render and lint --sealed produce and check the sealed
+// document a static-allowlist node measures. Writes (add, remove, upload,
+// workload apply/edit/delete) are authorized by an operator EC private key
+// whose public key CDS pins (cds --operator-keys); the CLI mints a
+// short-lived, body-bound token per write via pkg/operatorauth.
 package allowlist
 
 import (
@@ -45,6 +46,10 @@ var defaultRequiredComponents = []string{
 	"attestation-api",
 	"nginx",
 }
+
+// extraCommands are constructors registered from files behind a build tag:
+// render needs the embedded chart, which the node build leaves out.
+var extraCommands []func(o *options) *cobra.Command
 
 // options holds the flags shared by every subcommand.
 type options struct {
@@ -103,6 +108,9 @@ allowlist").`,
 		newLintCmd(o),
 		newInspectImageCmd(o),
 	)
+	for _, extra := range extraCommands {
+		cmd.AddCommand(extra(o))
+	}
 	return cmd
 }
 

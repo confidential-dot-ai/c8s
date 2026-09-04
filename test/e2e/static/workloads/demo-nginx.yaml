@@ -1,0 +1,29 @@
+# The sample confidential workload the static lane admits: the bundle carries
+# its rule, and workload.sh applies this exact manifest. It is
+# samples/nginx-confidential-pod.yaml with enableServiceLinks off, because the
+# kubelet otherwise injects one env var per Service in the namespace and no
+# exact rule can list those. Keep the image line identical across the
+# demo-nginx-*.yaml variants beside it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-nginx
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-nginx
+  template:
+    metadata:
+      labels:
+        app: demo-nginx
+      annotations:
+        confidential.ai/cw: demo-nginx
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: nginx
+          image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
+          ports:
+            - containerPort: 80

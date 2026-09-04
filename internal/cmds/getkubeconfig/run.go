@@ -24,8 +24,15 @@ type Config struct {
 	// (e.g. https://<node>:6443).
 	APIServerURL string
 	// OperatorKeyPath is the operator ECDSA PRIVATE key (PEM). Its public half
-	// was bound into the node's RTMR[3] at launch.
+	// was bound into the node's RTMR[3] at launch. Empty under
+	// StaticAllowlistPath.
 	OperatorKeyPath string
+	// StaticAllowlistPath is the policy bundle a static node booted with (a
+	// directory, or the static-allowlist.json alone). RTMR[3] is then pinned
+	// to ForStaticAllowlist of its index, and the release carries no operator
+	// token: a static cred-release serves any caller, and this client still
+	// attests the node it talks to.
+	StaticAllowlistPath string
 	// ImageManifestPath is the build-artifact manifest carrying the expected
 	// guest image's full TDX tuple (mrtd, rtmr1, rtmr2). Required: without it
 	// the gate would rest on RTMR[3] alone, which the untrusted host can
@@ -33,7 +40,8 @@ type Config struct {
 	ImageManifestPath string
 	// WorkloadImages are the digest-pinned image refs the node's measurer is
 	// expected to have extended into RTMR[3], in first-extend order. Empty
-	// means the register must equal the bare operator-key seed.
+	// means the register must equal the operator-key seed extended by the
+	// dynamic mode event alone.
 	WorkloadImages []string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
@@ -54,23 +62,38 @@ type Config struct {
 // Run executes the client flow: attest + RTMR[3] gate, then CSR -> cred-release
 // -> kubeconfig.
 func Run(ctx context.Context, cfg Config) error {
-	keyPEM, err := os.ReadFile(cfg.OperatorKeyPath)
-	if err != nil {
-		return fmt.Errorf("read operator key: %w", err)
-	}
-	pubPEM, err := publicKeyPEMFromPrivate(keyPEM)
-	if err != nil {
-		return fmt.Errorf("derive operator public key: %w", err)
-	}
-	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages)
-	if err != nil {
-		return err
+	var keyPEM []byte
+	var exp measuredPolicy
+	if cfg.StaticAllowlistPath != "" {
+		if cfg.OperatorKeyPath != "" || len(cfg.WorkloadImages) > 0 {
+			return fmt.Errorf("--static-allowlist cannot be combined with --operator-key or --workload-image: a static node has no operator key and no workload extends")
+		}
+		var err error
+		exp, err = policyForStatic(cfg.ImageManifestPath, cfg.StaticAllowlistPath)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+		keyPEM, err = os.ReadFile(cfg.OperatorKeyPath)
+		if err != nil {
+			return fmt.Errorf("read operator key: %w", err)
+		}
+		pubPEM, err := publicKeyPEMFromPrivate(keyPEM)
+		if err != nil {
+			return fmt.Errorf("derive operator public key: %w", err)
+		}
+		exp, err = policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 1. Trust gate: attest the node and enforce the full measured identity —
 	//    the image tuple (MRTD, RTMR[1], RTMR[2]) from the manifest plus the
-	//    RTMR[3] chain seeded by THIS key and extended by the expected
-	//    workload images — with no host trust and not TOFU. Everything
+	//    RTMR[3] chain seeded by THIS key, extended by the dynamic mode event
+	//    and then by the expected workload images — with no host trust and
+	//    not TOFU. Everything
 	//    downstream depends on it.
 	attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	if err := attestAndVerify(attestCtx, cfg.AttestURL, exp); err != nil {
@@ -123,7 +146,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
+	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: %s\n", cfg.OutPath, cfg.ContextName, exp.attestedSummary())
 	return nil
 }
 

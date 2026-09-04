@@ -27,6 +27,9 @@ spec:
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       hostPID: true
       {{- with .Values.nriImagePolicy.priorityClassName }}
       priorityClassName: {{ . }}

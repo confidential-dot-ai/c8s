@@ -38,6 +38,9 @@ func TestConfig(t *testing.T) {
 	if len(cfg.Config.Cmd) != 2 || cfg.Config.Cmd[0] != "serve" || cfg.Config.Cmd[1] != "--port=1" {
 		t.Fatalf("cmd = %v", cfg.Config.Cmd)
 	}
+	if len(cfg.Config.Env) != 2 || cfg.Config.Env[0] != "PATH=/usr/bin:/bin" {
+		t.Fatalf("env = %v, want the stub's two entries", cfg.Config.Env)
+	}
 	if _, err := Config(context.Background(), "registry.example.com/badjson:v1"); err == nil || !strings.Contains(err.Error(), "parse crane config") {
 		t.Fatalf("expected a config parse error, got %v", err)
 	}

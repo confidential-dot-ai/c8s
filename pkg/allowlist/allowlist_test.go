@@ -160,6 +160,27 @@ func TestSortContainers_StableOnFullTie(t *testing.T) {
 	}
 }
 
+// policyKey covers mounts, env and privileges, so two same-digest containers
+// that tie on argv are ordered by those fields. This pins the order (and the
+// bytes) so a change here is a deliberate canonical-form break.
+func TestSortContainers_TiedArgvOrderedByPolicy(t *testing.T) {
+	envZ := `{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"},"env":{"policy":"exact","names":["Z"]}}`
+	envA := `{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"},"env":{"policy":"exact","names":["A"]}}`
+	want := `{"schema":"c8s.allowlist/v1","digests":null,"workloads":{"w":{"initContainers":null,"containers":[` + envA + `,` + envZ + `]}}}`
+	for _, tc := range []struct{ name, doc string }{
+		{"A first", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[` + envA + `,` + envZ + `]}}}`},
+		{"Z first", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[` + envZ + `,` + envA + `]}}}`},
+	} {
+		got, err := mustParse(t, tc.doc).Canonical()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("Canonical(%s) =\n%s\nwant\n%s", tc.name, got, want)
+		}
+	}
+}
+
 func TestValidWorkloadName(t *testing.T) {
 	for _, tc := range []struct {
 		name string

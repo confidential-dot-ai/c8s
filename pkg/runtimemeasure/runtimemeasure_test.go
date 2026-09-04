@@ -20,9 +20,19 @@ Ln7t8a7OvDkCwGUhGYtOC2MGQ08BTMRqi2Q306MP5Xh9TnKAf0I/5QOglA==
 -----END PUBLIC KEY-----
 `
 
+// testPolicyIndex is a fixed one-member bundle index in the exact bytes
+// pkg/policybundle Bundle.Index emits.
+const testPolicyIndex = `{"static-allowlist.json":"` + digestA + `"}`
+
 // Golden vectors pin the convention. If any of these change, the measurer
 // and every verifier disagree on RTMR[3] — treat a failure here as a
 // breaking change to the attestation contract, not a test to update.
+//
+// The mode and policy vectors (ModeStatic, ModeDynamic, PolicyEvent,
+// ForStaticAllowlist, ForDynamic) are convention-only: they freeze the
+// arithmetic this package defines but have not yet been read back from a TDX
+// register the node image extended. Only the ForOperatorKey vector is
+// hardware-confirmed.
 func TestConventionGoldenVectors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -42,6 +52,21 @@ func TestConventionGoldenVectors(t *testing.T) {
 		{"FromDigestsSeeded(ForOperatorKey(testPEM),[A,B])",
 			FromDigestsSeeded(ForOperatorKey([]byte(testOperatorPubPEM)), []string{digestA, digestB}),
 			"ed90ff0e91dd3dd4304808ca32436d0cd6db768381ca0c7e20b1ff375b3e15d8515f3ca97009d73a253a4266386c6a14"},
+		{"ModeStatic", ModeStatic,
+			"12813c78721a5788b78367c000aa545f1ad0fae5e6e4a395667bc58107650dcb29ef16a5924fe4742e5ffd025f6b3922"},
+		{"ModeDynamic", ModeDynamic,
+			"68e13aefc7235604c7ef71cea8ec756ac8ee7cd51bdc6af94fec37e1630c27c779da2b83f7cccadd844b4a47cef1f0bc"},
+		{"PolicyEvent(index)", PolicyEvent([]byte(testPolicyIndex)),
+			"50b4872872e3582e7a1e3a148ede580becaa38e87c5f1ce6594797dd32897a09d232aabfa653fa9e466d20cbf5359a15"},
+		{"ForStaticAllowlist(index)", ForStaticAllowlist([]byte(testPolicyIndex)),
+			"b30937601377eb061f127d4c3f33bbc90db1deee88944929981351956ba79674257bb2543a4e440a11c0da3497360d2d"},
+		{"ForDynamic(Zero)", ForDynamic(Zero),
+			"1390f0b7af0b4261547cb9d4354a01d55008a388075bc4770be7eeb3826e4d16829c439dfded8a4935842e1c42c2b78e"},
+		{"ForDynamic(ForOperatorKey(testPEM))", ForDynamic(ForOperatorKey([]byte(testOperatorPubPEM))),
+			"8c4bd74149be7c77487beff0a5f503bdf774eefe9430e8a682f8f9ede15874d6fb810f9e0a35da705a7faedf37a4487d"},
+		{"FromDigestsSeeded(ForDynamic(ForOperatorKey(testPEM)),[A,B])",
+			FromDigestsSeeded(ForDynamic(ForOperatorKey([]byte(testOperatorPubPEM))), []string{digestA, digestB}),
+			"4ef4d0fabc6bb99cf309f3a691a34ee2a0a4e79b1f1dec1ae005b760a1a455113691873c3ba487b08f0be5807281ecc4"},
 	} {
 		if got := hex.EncodeToString(tc.got[:]); got != tc.want {
 			t.Errorf("%s = %s, want %s", tc.name, got, tc.want)
@@ -122,6 +147,67 @@ func TestFromDigestsSeededChainsOntoOperatorKey(t *testing.T) {
 	}
 	if got == FromDigests([]string{digestA}) {
 		t.Error("seeded and unseeded results must differ, else the seed is being ignored")
+	}
+}
+
+// The mode events are plain SHA-384 of their labels, not Event() of them:
+// the label namespaces must stay disjoint from image digests.
+func TestModeEventsAreLabelDigests(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		got   [Size]byte
+		label string
+	}{
+		{"ModeStatic", ModeStatic, "c8s/rtmr3/mode/static/v1"},
+		{"ModeDynamic", ModeDynamic, "c8s/rtmr3/mode/dynamic/v1"},
+	} {
+		if want := sha512.Sum384([]byte(tc.label)); tc.got != want {
+			t.Errorf("%s = %x, want SHA384(%q) = %x", tc.name, tc.got, tc.label, want)
+		}
+	}
+	if ModeStatic == ModeDynamic {
+		t.Error("ModeStatic == ModeDynamic; the two shapes would be indistinguishable")
+	}
+}
+
+// ForStaticAllowlist is exactly two extends from Zero over the mode event and
+// the prefixed index digest, so a verifier can recompute it from the bundle.
+func TestForStaticAllowlistComposition(t *testing.T) {
+	index := []byte(testPolicyIndex)
+	policy := sha512.Sum384(append([]byte("c8s/rtmr3/policy/v1:"), index...))
+	if want := Extend(Extend(Zero, ModeStatic), policy); ForStaticAllowlist(index) != want {
+		t.Errorf("ForStaticAllowlist(index) = %x, want %x", ForStaticAllowlist(index), want)
+	}
+	if PolicyEvent(index) != policy {
+		t.Errorf("PolicyEvent(index) = %x, want %x", PolicyEvent(index), policy)
+	}
+
+	changed := append([]byte(nil), index...)
+	changed[len(changed)-3] ^= 0x01
+	if ForStaticAllowlist(changed) == ForStaticAllowlist(index) {
+		t.Error("a one-byte index change must change ForStaticAllowlist")
+	}
+	if ForStaticAllowlist(index) == ForDynamic(Zero) {
+		t.Error("a static register must never equal a dynamic one")
+	}
+}
+
+// ForDynamic is one extend of the mode event onto the seed, so workload
+// extends chain onto it exactly as they chained onto the bare seed before.
+func TestForDynamicComposition(t *testing.T) {
+	seed := ForOperatorKey([]byte(testOperatorPubPEM))
+	if got, want := ForDynamic(seed), Extend(seed, ModeDynamic); got != want {
+		t.Errorf("ForDynamic(seed) = %x, want %x", got, want)
+	}
+	if ForDynamic(seed) == ForDynamic(Zero) {
+		t.Error("ForDynamic must depend on the seed")
+	}
+	if ForDynamic(seed) == seed {
+		t.Error("ForDynamic must not equal the bare seed; the mode event is load-bearing")
+	}
+	got := FromDigestsSeeded(ForDynamic(seed), []string{digestA})
+	if want := Extend(ForDynamic(seed), Event(digestA)); got != want {
+		t.Errorf("FromDigestsSeeded(ForDynamic(seed), [A]) = %x, want %x", got, want)
 	}
 }
 

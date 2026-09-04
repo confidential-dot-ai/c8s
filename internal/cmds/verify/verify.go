@@ -30,6 +30,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/policybundle"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
@@ -113,6 +114,7 @@ type config struct {
 	imageManifest      string
 	expectedRTMR3Hex   string
 	operatorPubkey     string
+	staticAllowlist    string
 	rtmrs              []string
 	operatorKeys       string
 	measurementsConfig string
@@ -205,8 +207,9 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
-	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
-	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the dynamic-mode register of an operator-key boot: the seed SHA-384(0x00*48 ‖ SHA-384(pubkey)) extended by the dynamic mode event SHA-384(\"c8s/rtmr3/mode/dynamic/v1\"), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. That value is what a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.staticAllowlist, "static-allowlist", "", "policy bundle a static-allowlist node booted with (a directory of members, or the static-allowlist.json alone): derives and pins RTMR[3] as the static register Extend(Extend(Zero, SHA-384(\"c8s/rtmr3/mode/static/v1\")), SHA-384(\"c8s/rtmr3/policy/v1:\" + bundle index)), and holds the leaf's matched-workload stamp to the bundle's own document. Requires --image-manifest (the register proves nothing under an unpinned image), --workload and --mesh-ca (the stamp is CA-vouched; the mesh CA carries no evidence of its own yet). Mutually exclusive with --operator-pkey, --expected-rtmr3, --rtmr 3= and --allowlist. TDX evidence only")
+	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/mode/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
@@ -256,6 +259,13 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return exitUsage
+	}
+	if plan.static != nil {
+		held, err = heldFromBundle(plan.static)
+		if err != nil {
+			fmt.Fprintf(errOut, "error: %v\n", err)
+			return exitUsage
+		}
 	}
 
 	if cfg.url == "" && cfg.fromFile == "" {
@@ -496,6 +506,9 @@ type verifyPlan struct {
 	// refValues is the parsed --measurements-config, empty when unset. It
 	// both pins the target and is compared against what the target serves.
 	refValues measurementspkg.ReferenceValues
+	// static is the --static-allowlist bundle, nil when unset. Its member is
+	// the allowlist the leaf's stamp is held to, read once with the pins.
+	static *policybundle.Bundle
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -576,6 +589,15 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, fmt.Errorf("%s requires --image-manifest: RTMR[3] records events extended into a guest whose image the untrusted host selects, so pinning it without pinning the image proves nothing about what is running", rtmr3FlagUsed(cfg))
 	}
 
+	if cfg.staticAllowlist != "" {
+		if cfg.allowlistFile != "" {
+			return nil, fmt.Errorf("--allowlist cannot be combined with --static-allowlist: the bundle's static-allowlist.json is the document the stamp is held to")
+		}
+		if cfg.workload == "" {
+			return nil, fmt.Errorf("--static-allowlist requires --workload: the static register proves the node runs only the bundle; which entry this target is comes from the leaf's stamp, and the stamp is checked only against a named entry")
+		}
+	}
+
 	if _, err := expectedOperatorKeysDigest(cfg); err != nil {
 		return nil, err
 	}
@@ -635,6 +657,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		meshCA:       caPool,
 		initDataHash: initDataHash,
 		refValues:    refValues,
+		static:       pins.static,
 	}, nil
 }
 
@@ -676,6 +699,9 @@ type rtmrPins struct {
 	// localverify.Verify, whose Params carries no registers). Setting the
 	// policy field alone made the flag a silent no-op.
 	manual map[int][]byte
+	// static is the --static-allowlist bundle rtmr3 was derived from, so the
+	// allowlist the stamp is held to is the one that produced the pin.
+	static *policybundle.Bundle
 }
 
 func (p rtmrPins) any() bool {
@@ -699,6 +725,8 @@ func allowlistFlagsUsed(cfg config) string {
 // slot, so the shared rules must be able to blame the right one.
 func rtmr3FlagUsed(cfg config) string {
 	switch {
+	case cfg.staticAllowlist != "":
+		return "--static-allowlist"
 	case cfg.operatorPubkey != "":
 		return "--operator-pkey"
 	case cfg.expectedRTMR3Hex != "":
@@ -729,6 +757,9 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 	}
 	if cfg.operatorPubkey != "" {
 		rtmr3Flags = append(rtmr3Flags, "--operator-pkey")
+	}
+	if cfg.staticAllowlist != "" {
+		rtmr3Flags = append(rtmr3Flags, "--static-allowlist")
 	}
 	if len(rtmr3Flags) > 1 {
 		return rtmrPins{}, fmt.Errorf("%s all pin RTMR[3]: name the register once", strings.Join(rtmr3Flags, " and "))
@@ -761,13 +792,32 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		if err := checkOperatorPublicKeyPEM(pubPEM); err != nil {
 			return rtmrPins{}, fmt.Errorf("--operator-pkey %s: %w", cfg.operatorPubkey, err)
 		}
-		// The seed is derived by the shared convention package, never
-		// recomputed here: the initrd, cred-release and get-kubeconfig all go
-		// through ForOperatorKey, and a second implementation of the same
-		// arithmetic is a second thing to drift. It hashes the file bytes
-		// verbatim — the check above only inspects them.
-		seed := runtimemeasure.ForOperatorKey(pubPEM)
-		pins.rtmr3 = seed[:]
+		// The register is derived by the shared convention package, never
+		// recomputed here: the initrd, the node image, cred-release and
+		// get-kubeconfig all go through ForOperatorKey and ForDynamic, and a
+		// second implementation of the same arithmetic is a second thing to
+		// drift. It hashes the file bytes verbatim — the check above only
+		// inspects them.
+		reg := runtimemeasure.ForDynamic(runtimemeasure.ForOperatorKey(pubPEM))
+		pins.rtmr3 = reg[:]
+	}
+	if cfg.staticAllowlist != "" {
+		bundle, err := policybundle.Load(cfg.staticAllowlist)
+		if err != nil {
+			return rtmrPins{}, fmt.Errorf("--static-allowlist: %w", err)
+		}
+		// A node refuses to boot a member that is not sealed, so a bundle
+		// failing here is the wrong file, reported as such rather than as a
+		// register mismatch no node can explain.
+		if err := pkgallowlist.LintSealed(bundle.Members[policybundle.MemberStaticAllowlist]); err != nil {
+			return rtmrPins{}, fmt.Errorf("--static-allowlist %s: %w", policybundle.MemberStaticAllowlist, err)
+		}
+		// Derived by the shared convention package, like --operator-pkey: the
+		// measurer, cred-release, install and get-kubeconfig all go through
+		// ForStaticAllowlist over the same index.
+		reg := bundle.RTMR3()
+		pins.rtmr3 = reg[:]
+		pins.static = &bundle
 	}
 	if v, ok := manual[3]; ok {
 		pins.rtmr3 = v
@@ -850,12 +900,14 @@ func expectedOperatorKeysDigest(cfg config) ([]byte, error) {
 	return operatorauth.KeySetDigest(keys)
 }
 
-// heldAllowlist is the --allowlist file: the exact bytes (which are what gets
-// hashed — no reserialization, per the canonical-bytes rule) and the parsed
-// document the stamped name resolves against.
+// heldAllowlist is the allowlist a stamp is held to: the exact bytes (which
+// are what gets hashed — no reserialization, per the canonical-bytes rule),
+// the parsed document the stamped name resolves against, and the flag that
+// supplied it, for the mismatch text.
 type heldAllowlist struct {
-	raw []byte
-	doc *pkgallowlist.Allowlist
+	raw  []byte
+	doc  *pkgallowlist.Allowlist
+	flag string
 }
 
 // loadHeldAllowlist reads --allowlist once, or returns nil when the flag is
@@ -873,7 +925,20 @@ func loadHeldAllowlist(path string) (*heldAllowlist, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--allowlist: %w", err)
 	}
-	return &heldAllowlist{raw: data, doc: doc}, nil
+	return &heldAllowlist{raw: data, doc: doc, flag: "--allowlist"}, nil
+}
+
+// heldFromBundle holds the --static-allowlist member the way --allowlist
+// holds a file: the leaf's stamped policy digest must be SHA-256 of these
+// exact bytes, and the node measured the same bytes, so a passing verdict ties
+// the stamp to the register.
+func heldFromBundle(bundle *policybundle.Bundle) (*heldAllowlist, error) {
+	raw := bundle.Members[policybundle.MemberStaticAllowlist]
+	doc, err := pkgallowlist.ParseJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("--static-allowlist %s: %w", policybundle.MemberStaticAllowlist, err)
+	}
+	return &heldAllowlist{raw: raw, doc: doc, flag: "--static-allowlist"}, nil
 }
 
 // meshCAPool loads the mesh CA bundle used to authenticate a leaf's sandbox ID.
@@ -1019,6 +1084,9 @@ type Outcome struct {
 	// rootfs are unverified, and without RTMR[3] the runtime chain is. A
 	// verdict that proves neither must not look like one that proves both.
 	RTMRsPinned []string `json:"rtmrs_pinned,omitempty"`
+	// StaticPolicyDigest is the --static-allowlist bundle's index digest, the
+	// value RTMR[3] was derived from, on a verified static verdict.
+	StaticPolicyDigest string `json:"static_policy_digest,omitempty"`
 
 	// Warnings are policy gaps in an otherwise passing verdict — verified
 	// true, but with named limits a relying party should read.
@@ -1225,7 +1293,7 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 	if held != nil {
 		digest := sha256.Sum256(held.raw)
 		if !bytes.Equal(digest[:], ev.workload.AllowlistDigest) {
-			fail("allowlist_digest_mismatch: stamped policy digest %x does not match SHA-256 %x of the held --allowlist bytes", ev.workload.AllowlistDigest, digest[:])
+			fail("allowlist_digest_mismatch: stamped policy digest %x does not match SHA-256 %x of the held %s bytes", ev.workload.AllowlistDigest, digest[:], held.flag)
 			return
 		}
 		if _, ok := held.doc.Workloads[ev.workload.Name]; !ok {
@@ -1278,7 +1346,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
 	// register mismatch would obscure that the policy was inapplicable.
 	if plan.pins.any() && !isTDX(oc.Platform) {
-		oc.Error = fmt.Sprintf("an RTMR pin (--image-manifest / --expected-rtmr3 / --operator-pkey) is set but the evidence platform is %q: runtime measurement registers exist only on TDX, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
+		oc.Error = fmt.Sprintf("an RTMR pin (--image-manifest / --expected-rtmr3 / --operator-pkey / --static-allowlist / --rtmr) is set but the evidence platform is %q: runtime measurement registers exist only on TDX, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
 		return oc
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
@@ -1315,6 +1383,10 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		return oc
 	}
 	oc.Verified = true
+	if plan.static != nil {
+		digest := plan.static.IndexDigest()
+		oc.StaticPolicyDigest = "sha256:" + hex.EncodeToString(digest[:])
+	}
 
 	// What decides between rejecting an MRTD-only TDX verdict and warning
 	// about it is whether an operator-pinned CA anchor (--mesh-ca) stands next
@@ -1423,7 +1495,7 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 			return false
 		}
 	}
-	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
+	if pins.rtmr3 != nil && !check(3, rtmrMeaning(3), pins.rtmr3) {
 		return false
 	}
 	// Ascending index, so a target missing several pinned registers always
@@ -1446,7 +1518,7 @@ func rtmrMeaning(idx int) string {
 	case 2:
 		return "guest command line / dm-verity root hash"
 	case 3:
-		return "runtime operator-key/workload chain"
+		return "runtime chain: operator-key seed then the dynamic mode event and workloads, or the static mode event then the policy"
 	default:
 		return "runtime measurement register"
 	}
@@ -1551,6 +1623,9 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	for _, p := range oc.RTMRsPinned {
 		idx, hexVal, _ := strings.Cut(p, ":")
 		fmt.Fprintf(out, "  RTMR[%s]:      %s (matched)\n", idx, hexVal)
+	}
+	if oc.StaticPolicyDigest != "" {
+		fmt.Fprintf(out, "  static policy: %s (bundle index digest; RTMR[3] derived from it)\n", oc.StaticPolicyDigest)
 	}
 	if oc.InitDataNote != "" {
 		if oc.InitData != "" {

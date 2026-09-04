@@ -3,7 +3,6 @@
 package rtmr3measurer
 
 import (
-	"bytes"
 	"errors"
 	"log/slog"
 	"os"
@@ -214,37 +213,5 @@ func TestUnrecordLastRewriteFailureIsLoggedNotFatal(t *testing.T) {
 	m.unrecordLast("sha256:" + hexA)
 	if len(m.measuredOrder) != 0 {
 		t.Fatalf("measuredOrder = %v, want empty even when the rewrite fails", m.measuredOrder)
-	}
-}
-
-// The real sysfs helpers, pointed at a temp file standing in for the TSM node.
-func TestSysfsExtendAndReadRegister(t *testing.T) {
-	orig := rtmr3Sysfs
-	t.Cleanup(func() { rtmr3Sysfs = orig })
-
-	node := filepath.Join(t.TempDir(), "rtmr3:sha384")
-	if err := os.WriteFile(node, make([]byte, runtimemeasure.Size), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rtmr3Sysfs = node
-
-	event := runtimemeasure.Event("sha256:" + hexA)
-	if err := extendSysfs(event); err != nil {
-		t.Fatalf("extendSysfs: %v", err)
-	}
-	got, err := readRegisterSysfs()
-	if err != nil {
-		t.Fatalf("readRegisterSysfs: %v", err)
-	}
-	if !bytes.Equal(got[:], event[:]) {
-		t.Fatal("readRegisterSysfs did not return the written event bytes")
-	}
-
-	// Wrong-size node contents are rejected, not silently truncated.
-	if err := os.WriteFile(node, []byte("short"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readRegisterSysfs(); err == nil {
-		t.Fatal("readRegisterSysfs = nil error, want size mismatch error")
 	}
 }

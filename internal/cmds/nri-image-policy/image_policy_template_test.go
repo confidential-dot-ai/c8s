@@ -54,6 +54,21 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		t.Fatalf("the rendered node-image boot config does not load: %v", err)
 	}
 
+	// The sealed-mode keys are rendered unconditionally: the measured config
+	// decides the mode from the policy dir, never from a file's presence.
+	if cfg.Allowlist.PolicyDir != "/run/confai/policy" {
+		t.Errorf("allowlist.policy_dir = %q, want /run/confai/policy", cfg.Allowlist.PolicyDir)
+	}
+	if cfg.Allowlist.Pull.AttestationApiURL != "unix:///run/confai/attestation-api.sock" {
+		t.Errorf("allowlist.pull.attestation_api_url = %q, want the measured unix socket", cfg.Allowlist.Pull.AttestationApiURL)
+	}
+	if cfg.Runtime.RequireFailClosed {
+		t.Error("runtime.require_fail_closed is true, but the image pipeline does not ship the patched containerd yet")
+	}
+	if !strings.Contains(rendered, "require_fail_closed: false") {
+		t.Error("runtime.require_fail_closed must be rendered explicitly so flipping it is a one-line change")
+	}
+
 	// The full RKE2 system floor: every digest systemfloor derives from the
 	// pinned airgap bundles and baked manifests. A regen for an RKE2 pin bump
 	// rewrites these — update the pins with it. Pinning the whole set, not a

@@ -1,0 +1,32 @@
+# demo-nginx with one ConfigMap volume mounted: the sealed rule admits no
+# ConfigMap source, so the nginx container is refused at creation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-nginx-steer
+  namespace: default
+data:
+  default.conf: "server { listen 80; return 200 'steered'; }"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-nginx-configmap
+  namespace: default
+  annotations:
+    confidential.ai/cw: demo-nginx
+spec:
+  enableServiceLinks: false
+  restartPolicy: Never
+  volumes:
+    - name: steer
+      configMap:
+        name: demo-nginx-steer
+  containers:
+    - name: nginx
+      image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
+      ports:
+        - containerPort: 80
+      volumeMounts:
+        - name: steer
+          mountPath: /etc/nginx/conf.d

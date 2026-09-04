@@ -602,3 +602,31 @@ func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
+
+func TestValidate_PolicyDirAndRuntime(t *testing.T) {
+	base := func() *config {
+		return &config{Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "a"}}, Policy: policyConfig{Mode: ModeFailClosed}}
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(c *config)
+		wantErr string
+	}{
+		{"absolute policy dir", func(c *config) { c.Allowlist.PolicyDir = "/run/confai/policy" }, ""},
+		{"relative policy dir", func(c *config) { c.Allowlist.PolicyDir = "policy" }, "must be an absolute path"},
+		{"require_fail_closed needs a policy dir", func(c *config) { c.Runtime.RequireFailClosed = true }, "needs allowlist.policy_dir"},
+		{"require_fail_closed with a policy dir", func(c *config) {
+			c.Allowlist.PolicyDir = "/run/confai/policy"
+			c.Runtime.RequireFailClosed = true
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.mutate(c)
+			err := c.Validate()
+			if (tc.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("Validate(%s) = %v, want error containing %q", tc.name, err, tc.wantErr)
+			}
+		})
+	}
+}

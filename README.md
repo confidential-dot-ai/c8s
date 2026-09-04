@@ -51,6 +51,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js), verify a c8s cluster from a browser
 - [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs), the TEE evidence verification service c8s uses
 - [RA-TLS](docs/ratls.md), how attested TLS works in c8s — the handshake step by step, the guarantees, and which certificate is used where
+- [Static allowlist](docs/static-allowlist.md), sealing a TDX node-as-CVM cluster to one reviewed policy bundle measured into RTMR[3]
 
 ## Features
 
@@ -300,6 +301,13 @@ See [docs/kata.md](docs/kata.md) for the runtime details and
   downstream consumers onto a new root of trust. See
   [Managing the allowlist](#managing-the-image-allowlist).
 
+- **Or seal the cluster to a reviewed bundle.** On TDX node-as-CVM,
+  `c8s install --static-allowlist <bundle> --image-manifest manifest.json`
+  installs onto nodes that measured a policy bundle into RTMR[3]. There are
+  no operator keys and no allowlist writes; the node admits only the pods the
+  bundle describes, and a relying party verifies that from one quote. See
+  [docs/static-allowlist.md](docs/static-allowlist.md).
+
 ### A note on QEMU
 
 - **Pod-as-CVM needs no host QEMU.** kata-deploy ships the kata-static
@@ -328,7 +336,10 @@ cannot forge it. The wire contract is
 [PROTOCOL.md](https://github.com/confidential-dot-ai/c8s-verify-js/blob/main/PROTOCOL.md).
 
 Operators and CLIs can verify directly: `c8s cds verify` checks a CDS's
-attestation and reports the operator keys it pins.
+attestation and reports the operator keys it pins. On a static cluster,
+`c8s verify --static-allowlist <bundle> --image-manifest manifest.json`
+recomputes RTMR[3] from the reviewed bundle and checks that the node runs
+only that bundle ([docs/static-allowlist.md](docs/static-allowlist.md)).
 
 ## Components
 
@@ -338,7 +349,8 @@ attestation and reports the operator keys it pins.
 | [`cmd/c8s`](cmd/c8s/) | Operator and install CLI for CRDs, status mirroring, webhook injection, and the embedded Helm chart | [operator docs](docs/operator.md) |
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
-| [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing the image and argv allowlist on the host; also the node's admission inventory | [allowlist](docs/allowlist-and-capabilities.md) |
+| [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing the image and argv allowlist on the host, or the whole sealed rule on a static-allowlist node; also the node's admission inventory | [allowlist](docs/allowlist-and-capabilities.md), [static allowlist](docs/static-allowlist.md) |
+| `c8s policy-measure`, `c8s policy-disk` | Node-side measurer that commits the boot's policy mode and bundle to RTMR[3] (`internal/cmds/policymeasure`), and the CLI that builds the `policydata` disk (`internal/cmds/policydisk`) | [static allowlist](docs/static-allowlist.md) |
 | [`cmd/policy-monitor`](cmd/policy-monitor/) | The same enforcement and inventory in-guest, baked into the pod-as-CVM image | [image policy](docs/kata-image-policy.md) |
 | [`cmd/volumed`](cmd/volumed/) | Encrypted-volume agent — opens volumes into a pod's mount namespace, as a node DaemonSet or in-guest (`--guest`) under pod-as-CVM | [volumes](docs/volumes.md) |
 
@@ -351,7 +363,8 @@ attestation and reports the operator keys it pins.
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the CDS attestation flow |
 | [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation-api |
 | [`pkg/allowlistclient`](pkg/allowlistclient/) | CRUD client for the CDS allowlist API |
-| [`pkg/allowlist`](pkg/allowlist/) | Allowlist types, argv policy, and secret grants |
+| [`pkg/allowlist`](pkg/allowlist/) | Allowlist types, argv policy, secret grants, and the sealed schema (`Index.Admit`, `LintSealed`) |
+| [`pkg/policybundle`](pkg/policybundle/) | Policy bundle loading, its measured index, and the on-node policy state |
 | [`pkg/workloadclaims`](pkg/workloadclaims/) | Sandbox-token fetch and the admission-inventory socket contract |
 | [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
 | [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
@@ -359,7 +372,7 @@ attestation and reports the operator keys it pins.
 | [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
 | [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
 | [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
-| [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
+| [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests, RTMR[3] mode events, and static-policy and workload measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Repository layout
@@ -371,7 +384,8 @@ cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy,
                    the Dockerfile for the `c8s cds` subcommand,
                    internal/cmds/cds)
 internal/          Operator, webhook, attestation, mesh CA, secret store,
-                   embedded Helm chart
+                   embedded Helm chart, and the c8s subcommands
+                   (internal/cmds: cds, policymeasure, policydisk, ...)
 pkg/               Public Go libraries (see Libraries above)
 kata-guest-base/   Confidential guest image recipe for pod-as-CVM
 node-guest-image/  The node-image definition for node-as-CVM (new home;
@@ -503,6 +517,18 @@ GitOps consumers, `c8s render-values --operator-keys operator.pub` embeds the
 PEM content (the chart value takes content, never a file path); the chart
 wiring is described in [docs/operator.md](docs/operator.md).
 
+### Static allowlist
+
+A static cluster has no operator key and no write path. The nodes boot a
+reviewed policy bundle (`policydata` disk) and measure it into RTMR[3]; the
+node image's sealed NRI plugin admits only the containers the bundle
+describes, and CDS serves the bundle and nothing else. Render the sealed
+document with `c8s allowlist render --sealed`, check it with `c8s allowlist
+lint --sealed`, build the disk with `c8s policy-disk`, and install with
+`c8s install --static-allowlist <bundle> --image-manifest manifest.json`. A
+policy change is a new bundle and a relaunch. See
+[docs/static-allowlist.md](docs/static-allowlist.md).
+
 ## Docker images
 
 All images are published to GHCR on pushes to `main`. Release-worthy merges also
@@ -559,13 +585,17 @@ than let you discover them:
   can bind the node's privileged inventory port can vouch for a sandbox it
   does not run.
 
-- **The image allowlist gates digest and command line, not the rest of the
-  pod spec.** Each container's `command` prefix and `args` remainder are
-  enforced against the effective argv, and bind-mount destinations and env
-  variable names are enforceable in the guest; capabilities and the
+- **The dynamic image allowlist gates digest and command line, not the rest
+  of the pod spec.** Each container's `command` prefix and `args` remainder
+  are enforced against the effective argv, and bind-mount destinations and
+  env variable names are enforceable in the guest; capabilities and the
   remaining pod-spec fields are not. Nothing enforces which images run
   *together* — every running image must be allowlisted, but no gate requires
-  the set in one pod to match a single workload entry.
+  the set in one pod to match a single workload entry. A static allowlist
+  closes the pod-spec half on TDX node-as-CVM: the sealed plugin matches env
+  values, mount sources, privileges, host namespaces, devices, and hooks
+  against a complete rule ([docs/static-allowlist.md](docs/static-allowlist.md));
+  its own open items are listed there.
 
 - **Secrets and encrypted volumes under pod-as-CVM carry weaker guarantees
   than on a node.** Both work — the injected fetchers redeem their sandbox

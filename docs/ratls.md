@@ -332,11 +332,14 @@ What it does **not** guarantee:
   (GAP). Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
   `--measurements` rather than combining with it — and `--rtmr 3=`
-  (or `--operator-pkey`, which derives the same value from the operator public
-  key) pins the runtime register, requiring the image pin because the host
-  chooses the image and the runtime chain alone identifies nothing;
-  `c8s get-kubeconfig` requires the
-  full tuple plus the operator-key/workload RTMR[3] chain. `c8s verify` does
+  (or `--operator-pkey`, which derives the operator-key seed plus the dynamic
+  mode event from the operator public key, or `--static-allowlist`, which
+  derives the static mode event plus the policy event from a reviewed bundle;
+  [`static-allowlist.md`](static-allowlist.md)) pins the runtime register,
+  requiring the image pin because the host chooses the image and the runtime
+  chain alone identifies nothing; `c8s get-kubeconfig` requires the full
+  tuple plus either the operator-key/mode/workload RTMR[3] chain or the static
+  tuple. `c8s verify` does
   not silently drop `--min-tcb-*` on TDX the way the mesh policy does: an
   SNP-shaped floor against TDX evidence is a policy failure naming the
   platform, and on SNP the floor is re-checked against the verified claims.
@@ -858,7 +861,10 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
   [c8s-verify-js](https://github.com/confidential-dot-ai/c8s-verify-js).
 - **Attested RKE2 credential release** (`c8s cred-release`) and the
   operator/allowlist CLIs are RA-TLS *clients* of the surfaces above rather
-  than new certificate types.
+  than new certificate types. On a static-allowlist node cred-release serves
+  any caller, and the injected sidecars pin CDS to the node's own
+  image tuple read from a fresh quote over the node's attestation socket
+  (`--cds-pins-from-own-quote`) instead of flat measurement lists.
 
 ## Reading order for the curious
 

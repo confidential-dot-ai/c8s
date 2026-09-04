@@ -109,6 +109,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: kata-deploy
     spec:
+      {{- with (include "c8s.staticPodSpec" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       serviceAccountName: {{ include "c8s.kataName" . }}
       # hostPID: kata-deploy nsenters into PID 1 to restart the runtime.
       hostPID: true
