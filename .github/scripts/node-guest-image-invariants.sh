@@ -121,4 +121,36 @@ if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratc
   exit 1
 fi
 
+# psa-config.yaml exempts only the platform namespaces that need privileged
+# pods, and the baked policy that stops tenants relabelling their namespaces
+# keeps naming `restricted`, denying, and failing closed.
+psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
+vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
+if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
+  echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
+  exit 1
+fi
+if ! grep -q 'enforce: "restricted"' "$psa"; then
+  echo "::error::$psa must default to enforce: restricted"
+  exit 1
+fi
+if ! grep -q "== 'restricted'" "$vap" || ! grep -q "== 'latest'" "$vap"; then
+  echo "::error::$vap must pin the enforce label to restricted and enforce-version to latest"
+  exit 1
+fi
+if ! grep -q 'failurePolicy: Fail' "$vap"; then
+  echo "::error::$vap must fail closed (failurePolicy: Fail)"
+  exit 1
+fi
+if ! grep -q 'resources: \["namespaces", "namespaces/status", "namespaces/finalize"\]' "$vap" \
+   || ! grep -q 'operations: \["CREATE", "UPDATE"\]' "$vap"; then
+  echo "::error::$vap must match namespace CREATE and UPDATE on the resource and its status/finalize subresources, which also carry labels"
+  exit 1
+fi
+if ! grep -q '^    - Deny$' "$vap"; then
+  echo "::error::$vap binding must deny, not warn or audit"
+  exit 1
+fi
+
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"

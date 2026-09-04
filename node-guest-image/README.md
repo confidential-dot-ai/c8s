@@ -77,6 +77,37 @@ The other disks are optional; each is owned by one unit under
   issued certificate's group to `cluster-admin` through ordinary RBAC;
   identity, TTL and revocation are documented in [operator.md].
 
+## Workload isolation
+
+Tenant pods run on the node's own kernel under runc, so what a pod may ask
+for is what stands between it and the measured host. The image enforces the
+restricted PodSecurity standard by default
+(`etc/rancher/rke2/psa-config.yaml`): no privileged pods, no host
+namespaces, no root user, no added capabilities, no unconfined seccomp or
+AppArmor. Only `kube-system` and `local-path-storage` are exempt; `default`
+is not.
+
+A namespace label can normally lower that level. The baked
+`psa-level-policy.yaml` AddOn denies an `enforce` label other than
+`restricted`, or an `enforce-version` other than `latest`, unless the
+caller is authorized to grant `podsecurityexemptions.confidential.ai` (verb
+`grant`), a virtual resource no default role includes. cluster-admin and
+system:masters pass; a tenant holding `admin` or `edit` in its own
+namespaces does not. The invariant therefore rests on tenancy: hand tenants
+namespace-scoped credentials, never cluster-admin, and the launch
+measurement vouches for the floor their pods run under. cluster-admin can
+delete the policy, and RKE2 does not recreate deleted AddOn objects.
+
+The floor covers namespaces without confidential workloads. In node mode
+the webhook mounts the node's inventory socket into every
+`confidential.ai/cw` pod as a read-only hostPath, which restricted (and
+baseline) forbids, so a namespace hosting confidential workloads is opened
+by the operator with the privileged label, as `c8s install` does for its
+release namespace. Inside such a namespace the chart's own admission
+policies (host namespaces, hostPort, the mesh UID) are the controls, and the
+sample workload in `samples/` is restricted-compliant on its own so it can
+move back under the floor when the socket no longer needs a hostPath.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
