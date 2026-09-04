@@ -96,6 +96,15 @@ printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
+# C8S_DEV=1 builds turn the kubelet debugging handlers back on so `kubectl
+# exec`/`attach`/`logs` work. The base config.yaml pins them off; rke2 passes
+# both flags and the kubelet takes the last one. Rendered only for dev so the
+# locked image has no such drop-in at all.
+if [ "$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)" = 1 ]; then
+    printf '# DEV build: kubectl exec/attach/logs allowed. Never ship.\nkubelet-arg+:\n  - enable-debugging-handlers=true\n' \
+        > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/60-dev-debugging-handlers.yaml"
+fi
+
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.
 # docker.yml publishes images under v* tags, so the tag itself is the ref.

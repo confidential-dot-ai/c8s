@@ -18,16 +18,25 @@ const (
 	identityNonceBytes = 32
 )
 
-// IdentityTranscriptHash commits the hybrid server key, client nonce, exact
-// mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data. Every variable-length field is length-prefixed to make the
+// IdentityTranscriptHash commits the front-door mode and the complete key
+// exchange — the client's X-Wing encapsulation key, the server's ciphertext,
+// the session id, and the client nonce — together with the exact mesh leaf
+// and issuing mesh CA to one SHA-384 value suitable for TEE report_data. The
+// evidence therefore covers both sides of the exchange, not only the server's
+// contribution. Every variable-length field is length-prefixed to make the
 // transcript unambiguous across the Go and browser implementations.
-func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte, error) {
-	if len(pub.X25519) != X25519PubBytes {
-		return nil, fmt.Errorf("overenc: identity transcript X25519 key must be %d bytes, got %d", X25519PubBytes, len(pub.X25519))
+func IdentityTranscriptHash(mode types.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce, leafDER, caDER []byte) ([]byte, error) {
+	if mode == "" {
+		return nil, fmt.Errorf("overenc: identity transcript requires a front-door mode")
 	}
-	if len(pub.MLKEM768) != MLKEM768EKBytes {
-		return nil, fmt.Errorf("overenc: identity transcript ML-KEM key must be %d bytes, got %d", MLKEM768EKBytes, len(pub.MLKEM768))
+	if len(xwingEK) != XWingEKBytes {
+		return nil, fmt.Errorf("overenc: identity transcript X-Wing key must be %d bytes, got %d", XWingEKBytes, len(xwingEK))
+	}
+	if len(xwingCT) != XWingCTBytes {
+		return nil, fmt.Errorf("overenc: identity transcript X-Wing ciphertext must be %d bytes, got %d", XWingCTBytes, len(xwingCT))
+	}
+	if len(sessionID) != SessionIDBytes {
+		return nil, fmt.Errorf("overenc: identity transcript session id must be %d bytes, got %d", SessionIDBytes, len(sessionID))
 	}
 	if len(nonce) != identityNonceBytes {
 		return nil, fmt.Errorf("overenc: identity transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
@@ -42,10 +51,12 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 	// Most-stable fields first so a signer can reuse the hash state across sessions.
 	for _, field := range [][]byte{
 		[]byte(identityTranscriptDomain),
+		[]byte(mode),
 		caHash[:],
 		leafHash[:],
-		pub.X25519,
-		pub.MLKEM768,
+		xwingEK,
+		xwingCT,
+		sessionID,
 		nonce,
 	} {
 		var err error
@@ -57,19 +68,22 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 	return sum[:], nil
 }
 
-// LBTranscriptHash commits the client nonce, exact outer serving leaf,
-// exact mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data — the attest-lb binding for clients that ride ordinary nginx
-// TLS:
+// LBTranscriptHash commits the front-door mode, client nonce, exact outer
+// serving leaf, exact mesh leaf, and issuing mesh CA to one SHA-384 value
+// suitable for TEE report_data — the attest-lb binding for clients that ride
+// ordinary nginx TLS:
 //
-//	SHA-384( LP("c8s/attest-lb/v1") || LP(nonce) ||
+//	SHA-384( LP("c8s/attest-lb/v1") || LP(mode) || LP(nonce) ||
 //	         LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
 //	         LP(SHA-256(mesh_CA_DER)) )
 //
 // A client recomputes it from the exact leaf it observed on the connection
 // being authorized, so a response relayed through a different serving leaf
 // fails even when both leaves share an issuer.
-func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+func LBTranscriptHash(mode types.FrontDoorMode, nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+	if mode == "" {
+		return nil, fmt.Errorf("overenc: lb transcript requires a front-door mode")
+	}
 	if len(nonce) != identityNonceBytes {
 		return nil, fmt.Errorf("overenc: lb transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
 	}
@@ -83,6 +97,7 @@ func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte,
 	var encoded []byte
 	for _, field := range [][]byte{
 		[]byte(lbTranscriptDomain),
+		[]byte(mode),
 		nonce,
 		servingHash[:],
 		meshHash[:],

@@ -2,201 +2,385 @@ package overenc
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"fmt"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+var update = flag.Bool("update", false, "regenerate testdata/attest_pq_channel_vectors.json")
 
 func testTranscriptHash(fill byte) []byte {
 	return bytes.Repeat([]byte{fill}, sha512.Size384)
 }
 
-func TestHybridChannelRoundTrip(t *testing.T) {
-	srv, err := GenerateServerKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub := srv.Public()
-	if len(pub.X25519) != X25519PubBytes || len(pub.MLKEM768) != MLKEM768EKBytes {
-		t.Fatalf("unexpected public key sizes: x25519=%d mlkem=%d", len(pub.X25519), len(pub.MLKEM768))
-	}
-
-	transcriptHash := testTranscriptHash(0xA5)
-	clientCh, hs, err := ClientAgree(pub, transcriptHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hs.MLKEMCiphertext) != MLKEM768CTBytes {
-		t.Fatalf("unexpected ciphertext size %d", len(hs.MLKEMCiphertext))
-	}
-	serverCh, err := srv.Agree(hs, transcriptHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	aad := RequestAAD()
-	rec, err := clientCh.Seal([]byte("hello pq"), aad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := serverCh.Open(rec, aad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "hello pq" {
-		t.Fatalf("got %q", got)
-	}
-
-	// Reverse direction (server -> client).
-	rec2, _ := serverCh.Seal([]byte("pong"), ResponseAAD())
-	got2, err := clientCh.Open(rec2, ResponseAAD())
-	if err != nil || string(got2) != "pong" {
-		t.Fatalf("reverse round-trip failed: %v %q", err, got2)
-	}
+func testSessionID(fill byte) []byte {
+	return bytes.Repeat([]byte{fill}, SessionIDBytes)
 }
 
-// channelPair returns an agreed (server, client) channel pair for tests.
+// channelPair returns an agreed (server, client) channel pair.
 func channelPair(t *testing.T) (server, client *Channel) {
 	t.Helper()
-	srv, err := GenerateServerKey()
+	ck, err := GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientCh, hs, err := ClientAgree(srv.Public(), testTranscriptHash(0xA5))
+	ct, serverSS, err := Encapsulate(ck.EncapsulationKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverCh, err := srv.Agree(hs, testTranscriptHash(0xA5))
+	clientSS, err := ck.Decapsulate(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th, id := testTranscriptHash(0xA5), testSessionID(0x0F)
+	serverCh, err := NewServerChannel(serverSS, th, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCh, err := NewClientChannel(clientSS, th, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return serverCh, clientCh
 }
 
-func TestChannelRejectsMismatchedTranscript(t *testing.T) {
-	srv, err := GenerateServerKey()
+func TestXWingChannelRoundTrip(t *testing.T) {
+	server, client := channelPair(t)
+
+	rec, err := client.SealRequest([]byte("hello pq"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientCh, hs, err := ClientAgree(srv.Public(), testTranscriptHash(0xA5))
+	if rec.Seq != 1 {
+		t.Fatalf("first request Seq = %d, want 1", rec.Seq)
+	}
+	got, err := server.OpenRequest(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverCh, err := srv.Agree(hs, testTranscriptHash(0x5A))
+	if string(got) != "hello pq" {
+		t.Fatalf("OpenRequest = %q, want %q", got, "hello pq")
+	}
+
+	resp, err := server.SealResponse([]byte("pong"), rec.Seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := clientCh.Seal([]byte("secret"), RequestAAD())
-	if err != nil {
-		t.Fatal(err)
+	got2, err := client.OpenResponse(resp, rec.Seq)
+	if err != nil || string(got2) != "pong" {
+		t.Fatalf("OpenResponse = %q, %v", got2, err)
 	}
-	if _, err := serverCh.Open(rec, RequestAAD()); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("Open with mismatched transcript = %v, want %v", err, ErrAuthenticationFailed)
+
+	if !bytes.Equal(server.Exporter(), client.Exporter()) {
+		t.Fatal("exporters differ between the two ends")
+	}
+	if len(server.Exporter()) != ExporterBytes {
+		t.Fatalf("exporter = %d bytes, want %d", len(server.Exporter()), ExporterBytes)
 	}
 }
 
-func TestOpenRejectsReplayedRecord(t *testing.T) {
-	serverCh, clientCh := channelPair(t)
-
-	rec, err := clientCh.Seal([]byte("transfer $100"), RequestAAD())
+func TestChannelRejectsMismatchedTranscript(t *testing.T) {
+	ck, err := GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverCh.Open(rec, RequestAAD()); err != nil {
+	ct, serverSS, err := Encapsulate(ck.EncapsulationKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSS, err := ck.Decapsulate(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := testSessionID(0x0F)
+	serverCh, err := NewServerChannel(serverSS, testTranscriptHash(0x5A), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCh, err := NewClientChannel(clientSS, testTranscriptHash(0xA5), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := clientCh.SealRequest([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverCh.OpenRequest(rec); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("OpenRequest with mismatched transcript = %v, want %v", err, ErrAuthenticationFailed)
+	}
+}
+
+func TestDecapsulateWrongCiphertextFailsChannel(t *testing.T) {
+	ck, err := GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, serverSS, err := Encapsulate(ck.EncapsulationKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tamper one ciphertext byte: implicit rejection yields a different secret,
+	// never an error, so the divergence must surface as AEAD failure.
+	tampered := bytes.Clone(ct)
+	tampered[0] ^= 0xff
+	clientSS, err := ck.Decapsulate(tampered)
+	if err != nil {
+		t.Fatalf("Decapsulate(tampered) = %v, want implicit rejection", err)
+	}
+	if bytes.Equal(clientSS, serverSS) {
+		t.Fatal("tampered ciphertext decapsulated to the server's secret")
+	}
+	th, id := testTranscriptHash(0xA5), testSessionID(0x0F)
+	serverCh, _ := NewServerChannel(serverSS, th, id)
+	clientCh, _ := NewClientChannel(clientSS, th, id)
+	rec, err := clientCh.SealRequest([]byte("m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverCh.OpenRequest(rec); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("OpenRequest = %v, want %v", err, ErrAuthenticationFailed)
+	}
+}
+
+func TestOpenRequestRejectsReplayedRecord(t *testing.T) {
+	server, client := channelPair(t)
+
+	rec, err := client.SealRequest([]byte("transfer $100"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.OpenRequest(rec); err != nil {
 		t.Fatalf("first open failed: %v", err)
 	}
 	// Resubmitting the exact same authenticated record must not decrypt to a
 	// second backend action.
-	if _, err := serverCh.Open(rec, RequestAAD()); !errors.Is(err, ErrReplayedRecord) {
-		t.Fatalf("replayed record: Open = %v, want %v", err, ErrReplayedRecord)
+	if _, err := server.OpenRequest(rec); !errors.Is(err, ErrReplayedRecord) {
+		t.Fatalf("replayed record: OpenRequest = %v, want %v", err, ErrReplayedRecord)
 	}
 	// A fresh, distinct record from the same channel still opens.
-	rec2, err := clientCh.Seal([]byte("transfer $200"), RequestAAD())
+	rec2, err := client.SealRequest([]byte("transfer $200"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := serverCh.Open(rec2, RequestAAD()); err != nil {
+	if _, err := server.OpenRequest(rec2); err != nil {
 		t.Fatalf("distinct record rejected: %v", err)
 	}
 }
 
-func TestOpenRejectsTamperedAAD(t *testing.T) {
-	srv, _ := GenerateServerKey()
-	clientCh, _, err := ClientAgree(srv.Public(), testTranscriptHash(0xA5))
-	if err != nil {
-		t.Fatal(err)
+func TestReplayWindow(t *testing.T) {
+	server, client := channelPair(t)
+
+	// Seal replayWindow+2 requests, deliver the newest first, then the rest in
+	// reverse order: everything inside the window opens, the two oldest fall
+	// out of it.
+	total := replayWindow + 2
+	recs := make([]Record, total)
+	for i := range recs {
+		rec, err := client.SealRequest([]byte("m"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs[i] = rec
 	}
-	rec, _ := clientCh.Seal([]byte("x"), RequestAAD())
-	if _, err := clientCh.Open(rec, ResponseAAD()); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("AAD mismatch: Open = %v, want %v", err, ErrAuthenticationFailed)
+	if _, err := server.OpenRequest(recs[total-1]); err != nil {
+		t.Fatalf("newest record: %v", err)
+	}
+	for i := total - 2; i >= 2; i-- {
+		if _, err := server.OpenRequest(recs[i]); err != nil {
+			t.Fatalf("in-window record seq %d: %v", recs[i].Seq, err)
+		}
+	}
+	for _, old := range recs[:2] {
+		if _, err := server.OpenRequest(old); !errors.Is(err, ErrReplayedRecord) {
+			t.Fatalf("out-of-window record seq %d: OpenRequest = %v, want %v", old.Seq, err, ErrReplayedRecord)
+		}
 	}
 }
 
-func TestAgreeRejectsWrongSizes(t *testing.T) {
-	srv, _ := GenerateServerKey()
-	transcriptHash := testTranscriptHash(0xA5)
+func TestResponseMustEchoRequestSequence(t *testing.T) {
+	server, client := channelPair(t)
+
+	// Two concurrent requests; the terminator crosses the responses.
+	recA, err := client.SealRequest([]byte("request A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recB, err := client.SealRequest([]byte("request B"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.OpenRequest(recA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.OpenRequest(recB); err != nil {
+		t.Fatal(err)
+	}
+	respA, err := server.SealResponse([]byte("response A"), recA.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respB, err := server.SealResponse([]byte("response B"), recB.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Swapped wholesale: the echoed sequence exposes it before decryption.
+	if _, err := client.OpenResponse(respB, recA.Seq); !errors.Is(err, ErrSequenceInvalid) {
+		t.Fatalf("swapped response: OpenResponse = %v, want %v", err, ErrSequenceInvalid)
+	}
+	// Swapped with the seq field forged to match: the AAD kills it.
+	forged := Record{Seq: recA.Seq, CT: respB.CT}
+	if _, err := client.OpenResponse(forged, recA.Seq); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("forged-seq response: OpenResponse = %v, want %v", err, ErrAuthenticationFailed)
+	}
+	// The honest pairing still opens.
+	if got, err := client.OpenResponse(respA, recA.Seq); err != nil || string(got) != "response A" {
+		t.Fatalf("honest response: %q, %v", got, err)
+	}
+	if got, err := client.OpenResponse(respB, recB.Seq); err != nil || string(got) != "response B" {
+		t.Fatalf("honest response: %q, %v", got, err)
+	}
+}
+
+func TestDirectionSeparation(t *testing.T) {
+	_, client := channelPair(t)
+	rec, err := client.SealRequest([]byte("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A request record reflected back to the client must not open as a
+	// response: the directions use distinct keys and AAD tags.
+	if _, err := client.OpenResponse(rec, rec.Seq); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("reflected request: OpenResponse = %v, want %v", err, ErrAuthenticationFailed)
+	}
+}
+
+func TestSequenceZeroRejected(t *testing.T) {
+	server, client := channelPair(t)
+	if _, err := server.SealResponse([]byte("m"), 0); !errors.Is(err, ErrSequenceInvalid) {
+		t.Fatalf("SealResponse(seq 0) = %v, want %v", err, ErrSequenceInvalid)
+	}
+	rec, err := client.SealRequest([]byte("m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Seq = 0
+	if _, err := server.OpenRequest(rec); !errors.Is(err, ErrSequenceInvalid) {
+		t.Fatalf("OpenRequest(seq 0) = %v, want %v", err, ErrSequenceInvalid)
+	}
+}
+
+func TestOpenRequestRejectsTamperedRecord(t *testing.T) {
+	server, client := channelPair(t)
+	valid, err := client.SealRequest([]byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		rec  Record
+	}{
+		{name: "ciphertext nil", rec: Record{Seq: valid.Seq, CT: nil}},
+		{name: "ciphertext 1 byte", rec: Record{Seq: valid.Seq, CT: []byte{0x00}}},
+		{name: "ciphertext truncated", rec: Record{Seq: valid.Seq, CT: valid.CT[:len(valid.CT)-1]}},
+		{name: "sequence shifted", rec: Record{Seq: valid.Seq + 1, CT: valid.CT}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := server.OpenRequest(tt.rec); !errors.Is(err, ErrAuthenticationFailed) {
+				t.Fatalf("OpenRequest = %v, want %v", err, ErrAuthenticationFailed)
+			}
+		})
+	}
+
+	// A forgery must not disturb the replay window: the genuine record still opens.
+	forged := Record{Seq: valid.Seq, CT: bytes.Clone(valid.CT)}
+	forged.CT[0] ^= 0xff
+	if _, err := server.OpenRequest(forged); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("OpenRequest(forged) = %v, want %v", err, ErrAuthenticationFailed)
+	}
+	if _, err := server.OpenRequest(valid); err != nil {
+		t.Fatalf("genuine record rejected after a forgery reused its sequence: %v", err)
+	}
+}
+
+func TestKeyAgreementRejectsWrongSizes(t *testing.T) {
+	ck, err := GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, ss, err := Encapsulate(ck.EncapsulationKey())
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name    string
-		agree   func() error
+		run     func() error
 		wantErr string
 	}{
 		{
-			name: "server ML-KEM ciphertext short",
-			agree: func() error {
-				_, err := srv.Agree(Handshake{ClientX25519: make([]byte, 32), MLKEMCiphertext: make([]byte, 10)}, transcriptHash)
+			name: "encapsulation key short",
+			run: func() error {
+				_, _, err := Encapsulate(make([]byte, 10))
 				return err
 			},
-			wantErr: "ML-KEM ciphertext must be 1088 bytes, got 10",
+			wantErr: "encapsulation key must be 1216 bytes, got 10",
 		},
 		{
-			name: "server client X25519 key short",
-			agree: func() error {
-				_, err := srv.Agree(Handshake{ClientX25519: make([]byte, 10), MLKEMCiphertext: make([]byte, MLKEM768CTBytes)}, transcriptHash)
+			name: "ciphertext short",
+			run: func() error {
+				_, err := ck.Decapsulate(make([]byte, 10))
 				return err
 			},
-			wantErr: "client X25519 key must be 32 bytes, got 10",
+			wantErr: "ciphertext must be 1120 bytes, got 10",
 		},
 		{
-			name: "client ML-KEM key short",
-			agree: func() error {
-				_, _, err := ClientAgree(PublicKey{X25519: make([]byte, 32), MLKEM768: make([]byte, 10)}, transcriptHash)
+			name: "seed short",
+			run: func() error {
+				_, err := NewClientKeyFromSeed(make([]byte, 16))
 				return err
 			},
-			wantErr: "ML-KEM key must be 1184 bytes, got 10",
+			wantErr: "seed",
 		},
 		{
-			name: "client X25519 key short",
-			agree: func() error {
-				_, _, err := ClientAgree(PublicKey{X25519: make([]byte, 10), MLKEM768: make([]byte, MLKEM768EKBytes)}, transcriptHash)
-				return err
-			},
-			wantErr: "X25519 key must be 32 bytes, got 10",
-		},
-		{
-			name: "server transcript hash missing",
-			agree: func() error {
-				_, err := srv.Agree(Handshake{ClientX25519: make([]byte, 32), MLKEMCiphertext: make([]byte, MLKEM768CTBytes)}, nil)
-				return err
-			},
-			wantErr: "identity transcript hash must be 48 bytes, got 0",
-		},
-		{
-			name: "client transcript hash short",
-			agree: func() error {
-				_, _, err := ClientAgree(srv.Public(), make([]byte, 32))
+			name: "transcript hash short",
+			run: func() error {
+				_, err := NewServerChannel(ss, make([]byte, 32), testSessionID(0x0F))
 				return err
 			},
 			wantErr: "identity transcript hash must be 48 bytes, got 32",
 		},
+		{
+			name: "shared secret short",
+			run: func() error {
+				_, err := NewClientChannel(make([]byte, 16), testTranscriptHash(0xA5), testSessionID(0x0F))
+				return err
+			},
+			wantErr: "shared secret must be 32 bytes, got 16",
+		},
+		{
+			name: "session id short",
+			run: func() error {
+				_, err := NewServerChannel(ss, testTranscriptHash(0xA5), make([]byte, 8))
+				return err
+			},
+			wantErr: "session id must be 16 bytes, got 8",
+		},
 	}
+	_ = ct
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.agree()
+			err := tt.run()
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tt.wantErr)
 			}
@@ -204,27 +388,205 @@ func TestAgreeRejectsWrongSizes(t *testing.T) {
 	}
 }
 
-// The anti-replay set is bounded: once maxTrackedNonces records have been
-// opened, further records are refused so a hostile client cannot grow the set
-// without re-establishing the session.
-func TestOpenFailsClosedAtRecordLimit(t *testing.T) {
-	server, client := channelPair(t)
-	aad := RequestAAD()
-	for i := 0; i < maxTrackedNonces; i++ {
-		rec, err := client.Seal([]byte("m"), aad)
-		if err != nil {
-			t.Fatalf("seal %d: %v", i, err)
-		}
-		if _, err := server.Open(rec, aad); err != nil {
-			t.Fatalf("open %d: %v", i, err)
-		}
+// channelVectors is the cross-language golden vector for the complete channel
+// derivation: X-Wing decapsulation from a fixed seed and recorded ciphertext,
+// the identity transcript, the HKDF key schedule, and one sealed record per
+// direction. c8s-verify-js/test/vectors.test.ts consumes the identical file.
+type channelVectors struct {
+	Description       string              `json:"description"`
+	FrontDoorMode     types.FrontDoorMode `json:"front_door_mode"`
+	XWingSeed         string              `json:"xwing_seed_hex"`
+	XWingEK           string              `json:"xwing_ek_hex"`
+	XWingCT           string              `json:"xwing_ct_hex"`
+	SharedSecret      string              `json:"shared_secret_hex"`
+	LeafDER           string              `json:"leaf_der_hex"`
+	CADER             string              `json:"ca_der_hex"`
+	Nonce             string              `json:"nonce_hex"`
+	SessionID         string              `json:"session_id_hex"`
+	TranscriptHash    string              `json:"transcript_hash_hex"`
+	C2SKey            string              `json:"c2s_key_hex"`
+	S2CKey            string              `json:"s2c_key_hex"`
+	C2SIV             string              `json:"c2s_iv_hex"`
+	S2CIV             string              `json:"s2c_iv_hex"`
+	Exporter          string              `json:"exporter_hex"`
+	RequestSeq        uint64              `json:"request_seq"`
+	RequestPlaintext  string              `json:"request_plaintext_hex"`
+	RequestCT         string              `json:"request_ct_hex"`
+	ResponseSeq       uint64              `json:"response_seq"`
+	ResponsePlaintext string              `json:"response_plaintext_hex"`
+	ResponseCT        string              `json:"response_ct_hex"`
+}
+
+const channelVectorsPath = "testdata/attest_pq_channel_vectors.json"
+
+// TestChannelGoldenVectors pins the canonical contract: everything downstream
+// of the recorded X-Wing ciphertext is deterministic, so the whole pipeline is
+// reproduced from the vector file and compared byte for byte. Run with
+// -update after a deliberate contract change to regenerate the file (and
+// update the copy consumed by c8s-verify-js).
+func TestChannelGoldenVectors(t *testing.T) {
+	if *update {
+		writeChannelVectors(t)
 	}
-	rec, err := client.Seal([]byte("m"), aad)
+	raw, err := os.ReadFile(filepath.Clean(channelVectorsPath))
+	if err != nil {
+		t.Fatalf("read %s (generate with -update): %v", channelVectorsPath, err)
+	}
+	var v channelVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+
+	ck, err := NewClientKeyFromSeed(mustHex(t, v.XWingSeed))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.Open(rec, aad); !errors.Is(err, ErrRecordLimit) {
-		t.Fatalf("Open after %d records = %v, want %v", maxTrackedNonces, err, ErrRecordLimit)
+	if got := hex.EncodeToString(ck.EncapsulationKey()); got != v.XWingEK {
+		t.Fatalf("encapsulation key from seed = %s, want %s", got, v.XWingEK)
+	}
+	ss, err := ck.Decapsulate(mustHex(t, v.XWingCT))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(ss); got != v.SharedSecret {
+		t.Fatalf("shared secret = %s, want %s", got, v.SharedSecret)
+	}
+
+	th, err := IdentityTranscriptHash(v.FrontDoorMode, ck.EncapsulationKey(), mustHex(t, v.XWingCT),
+		mustHex(t, v.SessionID), mustHex(t, v.Nonce), mustHex(t, v.LeafDER), mustHex(t, v.CADER))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(th); got != v.TranscriptHash {
+		t.Fatalf("transcript hash = %s, want %s", got, v.TranscriptHash)
+	}
+
+	keys, err := deriveKeys(ss, th)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name string
+		got  []byte
+		want string
+	}{
+		{"c2s key", keys.c2sKey, v.C2SKey},
+		{"s2c key", keys.s2cKey, v.S2CKey},
+		{"c2s iv", keys.c2sIV, v.C2SIV},
+		{"s2c iv", keys.s2cIV, v.S2CIV},
+		{"exporter", keys.exporter, v.Exporter},
+	} {
+		if got := hex.EncodeToString(check.got); got != check.want {
+			t.Fatalf("%s = %s, want %s", check.name, got, check.want)
+		}
+	}
+
+	client, err := NewClientChannel(ss, th, mustHex(t, v.SessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerChannel(ss, th, mustHex(t, v.SessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := client.SealRequest(mustHex(t, v.RequestPlaintext))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Seq != v.RequestSeq || hex.EncodeToString(req.CT) != v.RequestCT {
+		t.Fatalf("request record = seq %d ct %s, want seq %d ct %s",
+			req.Seq, hex.EncodeToString(req.CT), v.RequestSeq, v.RequestCT)
+	}
+	if _, err := server.OpenRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.SealResponse(mustHex(t, v.ResponsePlaintext), req.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Seq != v.ResponseSeq || hex.EncodeToString(resp.CT) != v.ResponseCT {
+		t.Fatalf("response record = seq %d ct %s, want seq %d ct %s",
+			resp.Seq, hex.EncodeToString(resp.CT), v.ResponseSeq, v.ResponseCT)
+	}
+	if _, err := client.OpenResponse(resp, req.Seq); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeChannelVectors regenerates the vector file. Only the server-side
+// encapsulation draws randomness; everything else is derived.
+func writeChannelVectors(t *testing.T) {
+	t.Helper()
+	seed := make([]byte, 32)
+	if _, err := rand.Read(seed); err != nil {
+		t.Fatal(err)
+	}
+	ck, err := NewClientKeyFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, ss, err := Encapsulate(ck.EncapsulationKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafDER, caDER := []byte("leaf-der"), []byte("ca-der")
+	nonce := bytes.Repeat([]byte{0x33}, 32)
+	sessionID := bytes.Repeat([]byte{0x44}, SessionIDBytes)
+	th, err := IdentityTranscriptHash("cds", ck.EncapsulationKey(), ct, sessionID, nonce, leafDER, caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := deriveKeys(ss, th)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClientChannel(ss, th, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerChannel(ss, th, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqPT, respPT := []byte("golden request"), []byte("golden response")
+	req, err := client.SealRequest(reqPT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.SealResponse(respPT, req.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := channelVectors{
+		Description:       "c8s attest-pq v1 channel golden vector: X-Wing decapsulation from seed, identity transcript, HKDF schedule, one record per direction. Shared verbatim with c8s-verify-js.",
+		FrontDoorMode:     "cds",
+		XWingSeed:         hex.EncodeToString(seed),
+		XWingEK:           hex.EncodeToString(ck.EncapsulationKey()),
+		XWingCT:           hex.EncodeToString(ct),
+		SharedSecret:      hex.EncodeToString(ss),
+		LeafDER:           hex.EncodeToString(leafDER),
+		CADER:             hex.EncodeToString(caDER),
+		Nonce:             hex.EncodeToString(nonce),
+		SessionID:         hex.EncodeToString(sessionID),
+		TranscriptHash:    hex.EncodeToString(th),
+		C2SKey:            hex.EncodeToString(keys.c2sKey),
+		S2CKey:            hex.EncodeToString(keys.s2cKey),
+		C2SIV:             hex.EncodeToString(keys.c2sIV),
+		S2CIV:             hex.EncodeToString(keys.s2cIV),
+		Exporter:          hex.EncodeToString(keys.exporter),
+		RequestSeq:        req.Seq,
+		RequestPlaintext:  hex.EncodeToString(reqPT),
+		RequestCT:         hex.EncodeToString(req.CT),
+		ResponseSeq:       resp.Seq,
+		ResponsePlaintext: hex.EncodeToString(respPT),
+		ResponseCT:        hex.EncodeToString(resp.CT),
+	}
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(channelVectorsPath, append(out, '\n'), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -235,155 +597,4 @@ func mustHex(t *testing.T, s string) []byte {
 		t.Fatal(err)
 	}
 	return b
-}
-
-// TestChannelKeyGoldenVector pins the canonical key schedule against fixed
-// shared secrets and a fixed salt so the Go derivation cannot drift.
-// Cross-language contract: c8s-verify-js/test/keyagreement.test.ts must
-// reproduce this vector.
-func TestChannelKeyGoldenVector(t *testing.T) {
-	mlkemSS := mustHex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-	x25519SS := mustHex(t, "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
-	salt := mustHex(t, "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f")
-	const wantKey = "f631405a5e117f1ff53e36c527782a3a1b97186007f277bd494db5d825dc08ab"
-
-	t.Run("info string", func(t *testing.T) {
-		if hkdfInfo != "c8s-verify/v1/over-encryption" {
-			t.Fatalf("hkdfInfo = %q, want %q", hkdfInfo, "c8s-verify/v1/over-encryption")
-		}
-	})
-
-	t.Run("salt is transcript-hash-shaped and load-bearing", func(t *testing.T) {
-		if len(salt) != sha512.Size384 {
-			t.Fatalf("vector salt = %d bytes, want the %d-byte identity transcript hash", len(salt), sha512.Size384)
-		}
-		// A nonce-shaped salt derives a different key: the salt is load-bearing.
-		withTranscript, err := deriveKey(mlkemSS, x25519SS, salt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		withNonce, err := deriveKey(mlkemSS, x25519SS, bytes.Repeat([]byte{0x42}, identityNonceBytes))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(withTranscript, withNonce) {
-			t.Fatal("derived key ignored the salt")
-		}
-	})
-
-	t.Run("key", func(t *testing.T) {
-		key, err := deriveKey(mlkemSS, x25519SS, salt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := hex.EncodeToString(key); got != wantKey {
-			t.Fatalf("channel key = %s, want %s", got, wantKey)
-		}
-	})
-
-	// The vector must hold through the production funnel, not only deriveKey.
-	t.Run("key through deriveChannel", func(t *testing.T) {
-		ch, err := deriveChannel(mlkemSS, x25519SS, salt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		aad := RequestAAD()
-		rec, err := ch.Seal([]byte("m"), aad)
-		if err != nil {
-			t.Fatal(err)
-		}
-		block, err := aes.NewCipher(mustHex(t, wantKey))
-		if err != nil {
-			t.Fatal(err)
-		}
-		aead, err := cipher.NewGCM(block)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := aead.Open(nil, rec.IV, rec.CT, aad); err != nil {
-			t.Fatalf("golden key cannot open a record sealed through deriveChannel: %v", err)
-		}
-	})
-}
-
-// openNoPanic converts an Open panic into an error so a missing IV guard fails the subtest.
-func openNoPanic(ch *Channel, rec Record, aad []byte) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("overenc test: Open panicked: %v", r)
-		}
-	}()
-	_, err = ch.Open(rec, aad)
-	return err
-}
-
-func TestOpenRejectsMalformedRecord(t *testing.T) {
-	server, client := channelPair(t)
-	aad := RequestAAD()
-	valid, err := client.Seal([]byte("payload"), aad)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name string
-		rec  Record
-		want error
-	}{
-		{name: "IV length 0", rec: Record{IV: []byte{}, CT: valid.CT}, want: ErrInvalidIV},
-		{name: "IV length 11", rec: Record{IV: make([]byte, 11), CT: valid.CT}, want: ErrInvalidIV},
-		{name: "IV length 13", rec: Record{IV: make([]byte, 13), CT: valid.CT}, want: ErrInvalidIV},
-		{name: "IV length 16", rec: Record{IV: make([]byte, 16), CT: valid.CT}, want: ErrInvalidIV},
-		{name: "ciphertext nil", rec: Record{IV: valid.IV, CT: nil}, want: ErrAuthenticationFailed},
-		{name: "ciphertext 1 byte", rec: Record{IV: valid.IV, CT: []byte{0x00}}, want: ErrAuthenticationFailed},
-		{name: "ciphertext truncated", rec: Record{IV: valid.IV, CT: valid.CT[:len(valid.CT)-1]}, want: ErrAuthenticationFailed},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := openNoPanic(server, tt.rec, aad); !errors.Is(err, tt.want) {
-				t.Fatalf("Open = %v, want %v", err, tt.want)
-			}
-		})
-	}
-
-	// A forgery reusing the genuine record's IV must not poison the anti-replay
-	// set: the genuine record still opens.
-	forged := Record{IV: valid.IV, CT: bytes.Clone(valid.CT)}
-	forged.CT[0] ^= 0xff
-	if _, err := server.Open(forged, aad); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("Open(forged) = %v, want %v", err, ErrAuthenticationFailed)
-	}
-	if _, err := server.Open(valid, aad); err != nil {
-		t.Fatalf("genuine record rejected after a forgery reused its IV: %v", err)
-	}
-}
-
-func TestSealUsesAFreshIV(t *testing.T) {
-	server, client := channelPair(t)
-	// Both ends share one key, so IVs must be unique across the union of both
-	// ends' records.
-	ends := []struct {
-		name string
-		ch   *Channel
-	}{
-		{"server", server},
-		{"client", client},
-	}
-	const seals = 1024
-	seen := make(map[string]struct{}, 2*seals)
-	for i := 0; i < seals; i++ {
-		for _, end := range ends {
-			rec, err := end.ch.Seal([]byte("m"), RequestAAD())
-			if err != nil {
-				t.Fatalf("%s seal %d: %v", end.name, i, err)
-			}
-			if len(rec.IV) != ivBytes {
-				t.Fatalf("%s seal %d: IV = %d bytes, want %d", end.name, i, len(rec.IV), ivBytes)
-			}
-			if _, dup := seen[string(rec.IV)]; dup {
-				t.Fatalf("%s seal %d reused an IV", end.name, i)
-			}
-			seen[string(rec.IV)] = struct{}{}
-		}
-	}
 }

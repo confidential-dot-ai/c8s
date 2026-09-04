@@ -27,23 +27,6 @@
 {{- printf "%s-volumed" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{/*
-  c8s.volumedKubeletRoot — the kubelet's root dir on the host. An explicit
-  volumed.hostPaths.kubeletRoot wins; empty derives from the host distro
-  (kata.distro / nriImagePolicy.distro, same source as c8s.tlsLb.resolver).
-  RKE2 runs its kubelet with --root-dir under the agent dir; anything else
-  takes the upstream default.
-*/}}
-{{- define "c8s.volumedKubeletRoot" -}}
-{{- if .Values.volumed.hostPaths.kubeletRoot -}}
-{{- .Values.volumed.hostPaths.kubeletRoot -}}
-{{- else if or (eq .Values.kata.distro "rke2") (eq .Values.nriImagePolicy.distro "rke2") -}}
-/var/lib/rancher/rke2/agent/kubelet
-{{- else -}}
-/var/lib/kubelet
-{{- end -}}
-{{- end -}}
-
 {{/* volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
    which the distroless operator image cannot. Same repository/tag/digest
    contract as the other per-role images. */}}

@@ -519,6 +519,36 @@ and again on the RA-TLS credential-release connection:
   none) and, being self-signed, verify its own signature with its attested
   key.
 
+The released kubeconfig's client certificate is
+`CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
+node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
+that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC,
+and `cred-release.service` does not start serving until that binding exists,
+so a released credential is authorized the moment it is issued.
+`system:masters` is deliberately avoided because it bypasses authorization
+and admission webhooks and cannot be revoked through RBAC. The default group
+is only meaningful where such a binding exists: on a cluster that is not the
+c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
+for a group that cluster already authorizes.
+
+Do not read the binding as a privilege boundary. On this single-node cluster
+`cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
+PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
+`kubectl` away. RBAC is used for revocability and policy, not containment; the
+credential's blast radius is bounded by who can obtain it (the attestation gate
+above), by the one-hour TTL, and by the verity root and per-boot ephemeral
+writable state of the guest.
+
+Revocation is a launch-time decision. Deleting or editing the live
+ClusterRoleBinding cuts access immediately, but only until the next boot: the
+manifest is baked into the read-only root and everything RKE2 writes, the
+cluster state included, lives on the scratch disk, which is re-encrypted with
+a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
+are lost with it, so there is no in-guest switch that survives a restart, by
+design. To revoke durably, relaunch without `opkeydata`, or with a rotated
+operator key, so the old key can no longer obtain a certificate. A certificate
+already issued stays usable for the remainder of its one-hour TTL.
+
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,
 and (on TDX) ran exactly the expected measured workloads. What it does not prove: anything about images or keys the
@@ -621,6 +651,35 @@ webhook rejects incomplete reload-watch or discovery annotation sets during pod
 admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.
 
+## tls-lb public TLS modes
+
+`tlsLb.publicTLS.mode` selects which credential terminates public TLS at the
+front door:
+
+- `cds` (default) — get-cert provisions a mesh-CA-issued serving leaf into a
+  pod-local volume; the key stays inside the pod's TEE.
+- `webpki` — nginx serves an operator-supplied `publicTLS` Secret; the key is
+  host-visible.
+- `acme` — the `c8s acme` sidecar keeps one multi-SAN WebPKI certificate for
+  the validated tls-lb SAN list via ACME HTTP-01: nginx's :80 server proxies
+  `/.well-known/acme-challenge/` to the sidecar's loopback challenge listener
+  and 301s everything else to https. The CA's validation fetch arrives on that
+  port, so the mode needs :80 reachable from the internet, not just from the
+  cluster. Key, chain, and ACME account state live
+  in a Memory-medium emptyDir — TEE-held under a confidential runtime (which
+  this mode requires), lost with the pod and re-issued on recreation (point
+  the sidecar at an ACME staging directory in tests to stay clear of the CA's
+  duplicate-certificate limits). Renewal fires at 2/3 lifetime; each install
+  SIGHUPs nginx. On start the sidecar writes a self-signed placeholder so
+  nginx, whose config names the cert files, can start before the first
+  issuance.
+
+The mode is a trust statement, not plumbing: the attestation sidecar commits
+it into the attest-pq and attest-lb report_data transcripts and echoes it as
+`front_door_mode`, and attest-lb — the transport binding to the exact serving
+leaf — is served only for the TEE-held-key modes, `cds` and `acme`; `webpki`
+is attest-pq-only.
+
 ## tls-lb upstream
 
 ### Built-in allowlist route
@@ -656,14 +715,13 @@ so nginx receives the public source address their per-client keys need;
 through nodes that run the tls-lb pod).
 
 The attestation sidecar bounds what one client may hold as well as how fast it
-may ask: 512 concurrent sessions and 512 handshakes in flight per client
-address (an IPv6 client is one /64), inside pools of 8192 each. A pool that is
-full gives up an entry only from a client above the share the pool divides
-between its holders and the caller, and never below 8 entries, so a client
-holding a handful is not drained by one holding thousands. Once every holder is
-down to that floor — which takes 1024 client addresses holding sessions — a new
-session is refused with 503 until one expires; established sessions are never
-taken to admit a new one.
+may ask: 512 concurrent sessions per client address (an IPv6 client is one
+/64), inside a pool of 8192. A pool that is full gives up the idlest session,
+and only from a client above the share the pool divides between its holders
+and the caller, never below 8 entries, so a client holding a handful is not
+drained by one holding thousands. Once every holder is down to that floor —
+which takes 1024 client addresses holding sessions — a new session is refused
+with 503 until one expires.
 
 The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still
@@ -671,11 +729,10 @@ require the short-lived, body-bound operator token generated by
 `c8s allowlist --operator-key`; the operator private key is never mounted in
 tls-lb or CDS.
 Use the tls-lb URL with `c8s allowlist --url` and pin tls-lb's launch digest
-with `--measurements` only when `tlsLb.publicTLS.secretName` is empty
-(`public_tls.mode=cds`). With a configured WebPKI secret, the public certificate
-is not yet bound to the discovery attestation and the CLI refuses that front
-door. Use a direct CDS RA-TLS URL (or a CDS port-forward) and pin the CDS launch
-digest instead.
+with `--measurements` only when `tlsLb.publicTLS.mode` is `cds`. In the other
+modes the public certificate is not yet bound to the discovery attestation and
+the CLI refuses that front door. Use a direct CDS RA-TLS URL (or a CDS
+port-forward) and pin the CDS launch digest instead.
 
 Set `tlsLb.allowlist.enabled=false` to remove this route. For compatibility,
 an explicit `tlsLb.routes` entry whose path is `/allowlist` or `/allowlist/`
@@ -801,7 +858,7 @@ it:
 | `c8s-cds-ingress` | cds | `cds.port` (RA-TLS; also the NodePort route) |
 | `c8s-operator-ingress` | operator | 9443 webhook, 8081 probes, 8080 metrics |
 | `c8s-volumed-ingress` | volumed | nothing (it serves a node-local Unix socket) |
-| `c8s-tls-lb-ingress` | tls-lb | `tlsLb.nginx.httpsPort` |
+| `c8s-tls-lb-ingress` | tls-lb | `tlsLb.nginx.httpsPort`, plus the :80 HTTP-01/redirect server in `publicTLS.mode=acme` |
 
 They are ingress-only. `ratls-mesh-tcp-only-egress` already selects every pod in
 the namespace and allows all TCP, and NetworkPolicies union, so an egress rule

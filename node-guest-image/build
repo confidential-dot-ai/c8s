@@ -35,9 +35,11 @@
 #                      both TEEs' symbols via confos kernel/required.config.
 #   C8S_DEV=1          demo/debug build: kernel/c8s-dev.config fragment
 #                      (8250 serial re-enabled) + the dev profile
-#                      (console=ttyS0, passwordless serial autologin).
-#                      Different measurement, root shell on the host-visible
-#                      serial socket — never ship. Default name: c8s-dev.
+#                      (console=ttyS0, passwordless serial autologin) +
+#                      kubelet debugging handlers back on (kubectl
+#                      exec/attach/logs work). Different measurement, root
+#                      shell on the host-visible serial socket — never ship.
+#                      Default name: c8s-dev.
 #   C8S_NAME=...       output name (default c8s → output/c8s/)
 #   C8S_MEMORY=...     default-memory recorded in the manifest / used by
 #                      `confos run` (default 16G — etcd OOMs at the 4G default)
@@ -145,6 +147,7 @@ bin/confos build "${C8S_NAME:-c8s}" \
     --sync-input "platform=${C8S_PLATFORM}" \
     --sync-input "c8s-ref=${C8S_REF:-}" \
     --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
+    --sync-input "dev=${C8S_DEV:-0}" \
     --kernel-config-fragment "$FRAGMENT" \
     --kernel-builder-package "$KB_PKGS" \
     --platform "$C8S_PLATFORM" \

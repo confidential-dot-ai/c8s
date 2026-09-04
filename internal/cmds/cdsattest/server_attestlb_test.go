@@ -64,7 +64,7 @@ func newAttestLBServer(t *testing.T, identity testMeshIdentity, servingCertFile 
 	prov := &capturingProvider{}
 	srv := NewServer(Config{
 		Evidence:             prov,
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      servingCertFile,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -101,8 +101,8 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	if b.Version != types.BindingAttestLB {
 		t.Errorf("version = %q, want %q", b.Version, types.BindingAttestLB)
 	}
-	if b.SessionPubKey != nil {
-		t.Errorf("attest-lb must mint no session key, got %+v", b.SessionPubKey)
+	if b.XWingCT != "" || b.SessionID != "" {
+		t.Errorf("attest-lb must mint no session, got ct %q id %q", b.XWingCT, b.SessionID)
 	}
 	if b.Nonce != b64url(nonce) {
 		t.Errorf("nonce not echoed: got %q", b.Nonce)
@@ -115,7 +115,10 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	// Recompute the transcript the way a client does — from the leaf observed
 	// on the connection plus the served mesh chain — and require the hardware
 	// report_data and the ECDSA proof to verify against it.
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	if b.FrontDoorMode != types.FrontDoorModeCDS {
+		t.Errorf("front_door_mode = %q, want %q", b.FrontDoorMode, types.FrontDoorModeCDS)
+	}
+	want, err := overenc.LBTranscriptHash(b.FrontDoorMode, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,15 +152,13 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	_, servingDER := writeTestServingLeaf(t)
 	nonce := make([]byte, 32)
-	pub := overenc.PublicKey{
-		X25519:   make([]byte, overenc.X25519PubBytes),
-		MLKEM768: make([]byte, overenc.MLKEM768EKBytes),
-	}
-	pq, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	pq, err := overenc.IdentityTranscriptHash(types.FrontDoorModeCDS,
+		make([]byte, overenc.XWingEKBytes), make([]byte, overenc.XWingCTBytes),
+		make([]byte, overenc.SessionIDBytes), nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	lb, err := overenc.LBTranscriptHash(types.FrontDoorModeCDS, nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +172,7 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
-		FrontDoorMode:        FrontDoorModeWebPKI,
+		FrontDoorMode:        types.FrontDoorModeWebPKI,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -188,15 +189,23 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeUnsupportedFrontDoor {
-		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeUnsupportedFrontDoor)
+	if e := decodeErr(t, resp); e.Error != types.ErrorCodeExternalTLS {
+		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeExternalTLS)
 	}
 
 	// attest-pq stays available on the same front door.
-	pqResp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
+	ck, err := overenc.GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   b64url(make([]byte, 32)),
+		XWingEK: b64url(ck.EncapsulationKey()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pqResp := postAttestPQ(t, ts.URL, body)
 	pqResp.Body.Close()
 	if pqResp.StatusCode != http.StatusOK {
 		t.Fatalf("attest-pq on a webpki front door: status = %d, want 200", pqResp.StatusCode)

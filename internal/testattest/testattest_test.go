@@ -125,7 +125,7 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 		t.Fatalf("VerifyEnforced against a passing verdict: %v", err)
 	}
 	// The response platform echoes the request's.
-	if resp.Result.Platform != req.Platform {
+	if string(resp.Result.Platform) != req.Platform {
 		t.Fatalf("response platform = %q, want the request's %q", resp.Result.Platform, req.Platform)
 	}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha512"
 	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -245,11 +244,7 @@ func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %w", classifyVerifyError(err), err)
 	}
 
-	hostData, err := hex.DecodeString(verified.Result.Claims.InitData)
-	if err != nil {
-		return nil, fmt.Errorf("%w: not hex: %w", errNoHostDataAnchor, err)
-	}
-	return initDataAnchor(hostData)
+	return initDataAnchor(verified.Result.Claims.InitData)
 }
 
 // initDataAnchor extracts the 32-byte sha256(document) anchor from the

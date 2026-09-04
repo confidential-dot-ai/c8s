@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
@@ -82,6 +83,14 @@ func run(cfg config) error {
 		return err
 	}
 
+	// A done ctx is the pod terminating — mid-pass or after idling — and any
+	// volume opened by then must be released before kubelet's cleanup runs.
+	defer func() {
+		if ctx.Err() != nil {
+			closeVolumes(cfg)
+		}
+	}()
+
 	if err := sidecar.Retry(ctx, cfg.Config, "volume", func(ctx context.Context) error {
 		return openAll(ctx, cfg, pins)
 	}); err != nil {
@@ -94,6 +103,42 @@ func run(cfg config) error {
 	// is torn down leaves its status reflecting the workload rather than this
 	// sidecar.
 	<-ctx.Done()
+	return nil
+}
+
+// closeTimeout bounds the termination-time release, inside the pod's remaining
+// grace.
+const closeTimeout = 10 * time.Second
+
+// closeVolumes releases this pod's volumes at termination, before kubelet's
+// volume cleanup runs (see volumed.ClosePath). Failure is logged, not fatal:
+// the node's reaper collects whatever this misses.
+func closeVolumes(cfg config) {
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	daemon, base := daemonClient(cfg)
+	if err := closeWith(ctx, daemon, base); err != nil {
+		slog.Warn("volumes not released; the node reaper will collect them", "error", err)
+		return
+	}
+	slog.Info("volumes released")
+}
+
+// closeWith is closeVolumes once the client exists.
+func closeWith(ctx context.Context, daemon *http.Client, base string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+volumed.ClosePath, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := daemon.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("close volumes: %s: %s", resp.Status, strings.TrimSpace(string(detail)))
+	}
 	return nil
 }
 

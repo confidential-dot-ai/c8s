@@ -39,6 +39,10 @@ Layout:
   contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
+  The locked image runs the kubelet with `enable-debugging-handlers=false`,
+  so `kubectl exec`, `attach`, `port-forward`, and `logs` fail for every
+  kubeconfig holder; `C8S_DEV=1` turns them back on (with the serial
+  autologin), at a different measurement.
 
 ## Build it
 
@@ -91,7 +95,9 @@ The other disks are optional; each is owned by one unit under
   cluster; absent means single-node server (`rke2-role.service`).
 - label `opkeydata` — an ISO carrying the operator public key; its
   presence turns on attested credential release (`cred-release.service`,
-  see [operator.md]).
+  see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
+  issued certificate's group to `cluster-admin` through ordinary RBAC;
+  identity, TTL and revocation are documented in [operator.md].
 
 Migration state (see [#264] for the full plan):
 
@@ -101,7 +107,8 @@ Migration state (see [#264] for the full plan):
    `c8s-ref`/`c8s-registry` sync inputs explicitly. The
    `node-guest-image lint` workflow is permanent: it carries the
    invariants that moved here from confos `bin/lint` (fragment supersets
-   vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
+   vs confos's gpu/dev fragments at the `node-image` confos pin in
+   `.github/build-pins.json`, the NRI
    floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
    pod-CIDR match), plus the cloud-init disable gate.
 2. The switch was gated on building the same c8s ref both ways (confos

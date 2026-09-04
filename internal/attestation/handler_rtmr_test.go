@@ -63,15 +63,9 @@ func TestAttestKeyTDXWrongRTMRMintsNoEAR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	platformData, err := json.Marshal(map[string]string{
-		"rtmr_1": strings.Repeat("ab", 48),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict(strings.Repeat("aa", 48))
-	verdict.Claims.PlatformData = platformData
+	verdict.Claims.PlatformData = map[string]any{"rtmr_1": strings.Repeat("ab", 48)}
 	stub.SetVerdict(verdict)
 
 	app := httptest.NewServer(testAppWithRTMRs(t, stub.URL, map[int][]byte{1: pinned}))
@@ -91,13 +85,9 @@ func TestAttestKeyTDXMatchingRTMRMints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	platformData, err := json.Marshal(map[string]string{"rtmr_1": rtmr1})
-	if err != nil {
-		t.Fatal(err)
-	}
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict(strings.Repeat("aa", 48))
-	verdict.Claims.PlatformData = platformData
+	verdict.Claims.PlatformData = map[string]any{"rtmr_1": rtmr1}
 	stub.SetVerdict(verdict)
 
 	app := httptest.NewServer(testAppWithRTMRs(t, stub.URL, map[int][]byte{1: pinned}))

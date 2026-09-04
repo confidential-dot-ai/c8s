@@ -36,7 +36,7 @@ jobs:
             image=true  # manual dispatch: always run the full gate
           elif gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate \
                  --jq '.[].filename' \
-               | grep -qE "^(node-guest-image/|\.github/workflows/(c8s-image(-publish)?|image-repro-gate)\.yml)"; then
+               | grep -qE "^(node-guest-image/|\.github/build-pins\.json|\.github/scripts/pin-manifest\.sh|\.github/actions/setup-mkosi/action\.yml|\.github/workflows/(c8s-image(-publish)?|image-repro-gate)\.yml)"; then
             image=true
           else
             image=false

@@ -173,7 +173,8 @@ func dispatch(ctx context.Context, platform string, evidence json.RawMessage, pa
 // always ships the VCEK inside its HCL-report envelope, and TDX has no VCEK —
 // both verify through the envelope path (teeverify.Verify) directly.
 func mayMissVCEK(platform string) bool {
-	return platform == "snp" || platform == "gcp-snp"
+	p := teetypes.NormalizePlatform(platform)
+	return p == teetypes.PlatformSNP || p == teetypes.PlatformGcpSNP
 }
 
 // CertEnvelope extracts the RA-TLS attestation from a certificate and returns
@@ -207,9 +208,9 @@ func EnvelopeFromAttestation(att *ratls.Attestation) (string, json.RawMessage, e
 	}
 	switch att.TEEType {
 	case ratls.TEETypeSEVSNP:
-		inner := map[string]any{"attestation_report": base64.StdEncoding.EncodeToString(att.Report)}
+		inner := snp.SnpEvidence{AttestationReport: base64.StdEncoding.EncodeToString(att.Report)}
 		if len(att.CertChain) > 0 {
-			inner["cert_chain"] = map[string]any{"vcek": base64.StdEncoding.EncodeToString(att.CertChain)}
+			inner.CertChain = &snp.SnpCertChain{Vcek: base64.StdEncoding.EncodeToString(att.CertChain)}
 		}
 		raw, err := json.Marshal(inner)
 		if err != nil {

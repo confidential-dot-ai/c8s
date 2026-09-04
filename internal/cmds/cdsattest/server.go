@@ -2,19 +2,18 @@
 // the *dynamic* client-facing endpoints of the c8s-verify protocol. The
 // tls-lb nginx front-end terminates public TLS, serves the static CDS/mesh-CA
 // certs, and reverse-proxies the two explicit attestation endpoints
-// (attest-pq, attest-lb), the handshake, and the over-encrypted application
-// paths to this sidecar on loopback. attest-pq lets an out-of-cluster
-// JavaScript client verify that the LB is a genuine, CDS-issued, TEE-attested
-// endpoint and then talk to it over a post-quantum over-encrypted channel that
-// terminates inside the LB's enclave — independent of whatever TLS terminator
-// sits in front of it. attest-lb binds fresh evidence to the exact serving
-// leaf for native clients that ride ordinary nginx TLS instead. See
+// (attest-pq, attest-lb) and the over-encrypted application paths to this
+// sidecar on loopback. attest-pq lets an out-of-cluster JavaScript client
+// verify that the LB is a genuine, CDS-issued, TEE-attested endpoint and —
+// in the same round trip — establish a post-quantum over-encrypted channel
+// that terminates inside the LB's enclave, independent of whatever TLS
+// terminator sits in front of it. attest-lb binds fresh evidence to the exact
+// serving leaf for native clients that ride ordinary nginx TLS instead. See
 // c8s-verify-js/PROTOCOL.md.
 package cdsattest
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -27,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,8 +55,8 @@ const sessionHeader = "X-C8s-Session"
 // Bounds on the unauthenticated endpoints: what one client may hold, and what
 // the process holds across all of them.
 const (
-	// Session establishment: one attestation report and one ML-KEM keypair per
-	// request, and a client needs two requests to open a session.
+	// Session establishment: one attestation report, one X-Wing encapsulation
+	// and one session per request.
 	establishRateLimit = 10 // requests per second per client
 	establishRateBurst = 20
 	// One established session's application traffic, charged to the session.
@@ -77,11 +77,9 @@ const (
 	limiterEvictInterval = time.Minute
 	limiterIdleTimeout   = 5 * time.Minute
 
-	// One client may hold a sixteenth of each store: a public address fronts
+	// One client may hold a sixteenth of the store: a public address fronts
 	// a whole CGNAT or corporate egress, so the per-client tier is sized for
 	// the crowd behind one address. The global tier is the memory ceiling.
-	maxPendingPerClient  = 512
-	maxPendingSessions   = 8192
 	maxSessionsPerClient = 512
 	maxSessions          = 8192
 	// minShare is the floor under a client's fair share of either store. It is
@@ -90,14 +88,19 @@ const (
 	// clients hold the rest.
 	minShare = 8
 
-	// sweepInterval paces the background eviction of expired pending
-	// handshakes and idle sessions. Both are also checked on use.
+	// sweepInterval paces the background eviction of idle and over-age
+	// sessions. Both conditions are also checked on use.
 	sweepInterval = 10 * time.Second
 	// shutdownGrace bounds the wait for in-flight requests at shutdown.
 	shutdownGrace = 5 * time.Second
-	// defaultNonceTTL bounds the wait between attest-pq and the handshake: a
-	// client verifies the report in between, and nothing else.
-	defaultNonceTTL = 30 * time.Second
+	// defaultSessionMaxAge is the absolute session lifetime: however busy a
+	// session is, its keys retire after this long and the client re-attests.
+	// The idle TTL alone would let whoever keeps records flowing keep one key
+	// alive indefinitely.
+	defaultSessionMaxAge = 5 * time.Hour
+	// attestBodyLimit bounds the attest-pq request body: a nonce and an X-Wing
+	// encapsulation key in JSON is well under 8 KiB.
+	attestBodyLimit = 8 << 10
 	// readyzCacheTTL bounds how stale a readiness answer may be. The check
 	// reads and parses the whole mesh identity, and the conditions it reports
 	// change on the scale of a certificate renewal.
@@ -105,20 +108,16 @@ const (
 )
 
 var (
-	errNonceInUse   = errors.New("a handshake is already pending for this nonce")
 	errSessionInUse = errors.New("a session already holds this id")
 	errSessionsFull = errors.New("too many sessions are open for this client")
 	errStoreFull    = errors.New("the server is at capacity; retry shortly")
 )
 
-// Front-door modes: which credential terminates the public TLS in front of
-// this sidecar. attest-lb transport trust rests on the serving key being
-// TEE-held, so it is served only in cds mode; a WebPKI Secret's key is
-// host-visible and that deployment shape is attest-pq-only.
-const (
-	FrontDoorModeCDS    = "cds"
-	FrontDoorModeWebPKI = "webpki"
-)
+// exporterHeader carries the channel-binding exporter to the backend on every
+// forwarded tunnel request. The sidecar strips any client-supplied value
+// first, so the backend can trust the header names the channel the request
+// arrived on.
+const exporterHeader = "X-C8s-Exporter"
 
 // Backend handles a decrypted application request and returns the response. The
 // sidecar seals the response back to the client. Implementations forward the
@@ -132,11 +131,11 @@ type Config struct {
 	Logger   *slog.Logger
 	Evidence EvidenceProvider
 	// FrontDoorMode says which credential terminates public TLS in front of
-	// this sidecar (FrontDoorModeCDS or FrontDoorModeWebPKI). Anything but
-	// cds — including an unset mode — refuses attest-lb, so a
-	// misconfiguration can never serve a transport binding for a
-	// host-visible key.
-	FrontDoorMode string
+	// this sidecar. Both endpoints commit it into their report_data
+	// transcripts; anything but cds or acme — including an unset mode —
+	// refuses attest-lb, so a misconfiguration can never serve a transport
+	// binding for a host-visible key.
+	FrontDoorMode types.FrontDoorMode
 	// ServingCertFile is the path to the LB serving-leaf PEM (the cert nginx
 	// presents on the wire). In cds front-door mode, GET .../attest-lb binds
 	// report_data to this exact leaf DER plus the mesh identity. Re-read per
@@ -156,24 +155,18 @@ type Config struct {
 	// /readyz unconditionally 200.
 	ExpectedWorkload string
 	Backend          Backend // over-encrypted application backend (nil => EchoBackend)
-	SessionTTL       time.Duration
-	// NonceTTL bounds how long a pending handshake nonce stays valid between
-	// the attestation fetch and the handshake POST. Defaults to
-	// defaultNonceTTL.
-	NonceTTL time.Duration
-}
-
-type pendingSession struct {
-	key        *overenc.ServerKey
-	transcript []byte // identity transcript hash, the channel's HKDF salt
-	createdAt  time.Time
-	client     string // rate-limit bucket the entry is accounted to
+	// SessionTTL is the idle TTL: a session unused for this long is dropped.
+	SessionTTL time.Duration
+	// SessionMaxAge is the absolute session lifetime from establishment,
+	// enforced regardless of activity. Defaults to defaultSessionMaxAge.
+	SessionMaxAge time.Duration
 }
 
 type establishedSession struct {
-	channel  *overenc.Channel
-	lastUsed time.Time
-	client   string
+	channel   *overenc.Channel
+	createdAt time.Time
+	lastUsed  time.Time
+	client    string
 }
 
 // Server serves the c8s-verify endpoints.
@@ -181,17 +174,15 @@ type Server struct {
 	cfg     Config
 	log     *slog.Logger
 	backend Backend
-	// establishLimiter meters attest-pq, attest-lb and the handshake per
-	// client; sessionLimiter meters one session's tunnel traffic; and
-	// clientLimiter is the per-client aggregate over every session a client
-	// holds, plus readiness.
+	// establishLimiter meters attest-pq and attest-lb per client;
+	// sessionLimiter meters one session's tunnel traffic; and clientLimiter
+	// is the per-client aggregate over every session a client holds, plus
+	// readiness.
 	establishLimiter *issuer.IPRateLimiter
 	sessionLimiter   *issuer.IPRateLimiter
 	clientLimiter    *issuer.IPRateLimiter
 
 	mu         sync.Mutex
-	pending    map[string]pendingSession     // nonce(b64url) -> server key
-	pendingBy  *holders                      // client -> its nonces
 	sessions   map[string]establishedSession // session id -> channel
 	sessionsBy *holders                      // client -> its session ids
 
@@ -213,8 +204,8 @@ func NewServer(cfg Config) *Server {
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 5 * time.Minute
 	}
-	if cfg.NonceTTL <= 0 {
-		cfg.NonceTTL = defaultNonceTTL
+	if cfg.SessionMaxAge <= 0 {
+		cfg.SessionMaxAge = defaultSessionMaxAge
 	}
 	backend := cfg.Backend
 	if backend == nil {
@@ -230,8 +221,6 @@ func NewServer(cfg Config) *Server {
 		sweepEvery:       sweepInterval,
 		evictEvery:       limiterEvictInterval,
 		idleAfter:        limiterIdleTimeout,
-		pending:          make(map[string]pendingSession),
-		pendingBy:        newHolders(),
 		sessions:         make(map[string]establishedSession),
 		sessionsBy:       newHolders(),
 	}
@@ -256,7 +245,7 @@ func (s *Server) Serve(ctx context.Context, httpSrv *http.Server) error {
 	return nil
 }
 
-// maintain evicts expired pending handshakes, idle sessions and quiet
+// maintain evicts expired sessions and quiet
 // rate-limiter entries. It blocks until ctx is cancelled.
 func (s *Server) maintain(ctx context.Context) {
 	for _, limiter := range []*issuer.IPRateLimiter{s.establishLimiter, s.sessionLimiter, s.clientLimiter} {
@@ -285,7 +274,14 @@ func (s *Server) Handler() http.Handler {
 	// throttle the probe under externalTrafficPolicy: Cluster, which SNATs
 	// every client onto the node. The cache below is what bounds a flood.
 	r.Get("/readyz", s.handleReadyz)
-	r.Method(http.MethodGet, wellKnownPrefix+"/attest-pq", s.establishing(http.HandlerFunc(s.handleAttestPQ)))
+	r.Method(http.MethodPost, wellKnownPrefix+"/attest-pq", s.establishing(http.HandlerFunc(s.handleAttestPQ)))
+	// The pre-client-first shape. Kept registered so a stale client gets the
+	// explicit 400 — never a 404 it might treat as transient, and never an
+	// alias or downgrade.
+	r.Get(wellKnownPrefix+"/attest-pq", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
+			"attest-pq is client-first: POST a JSON body with nonce and xwing_ek")
+	})
 	r.Method(http.MethodGet, wellKnownPrefix+"/attest-lb", s.establishing(http.HandlerFunc(s.handleAttestLB)))
 	// The pre-split endpoint. Kept registered so a stale client gets the
 	// explicit versioned 400 — never a 404 it might treat as transient, and
@@ -294,7 +290,12 @@ func (s *Server) Handler() http.Handler {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
 			"the /.well-known/c8s/attestation endpoint is gone: use attest-pq (encrypted session) or attest-lb (ordinary TLS)")
 	})
-	r.Method(http.MethodPost, wellKnownPrefix+"/handshake", s.establishing(http.HandlerFunc(s.handleHandshake)))
+	// The retired two-step handshake. attest-pq completes the key exchange in
+	// one round trip; the explicit 400 tells a stale client so.
+	r.Post(wellKnownPrefix+"/handshake", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
+			"the handshake endpoint is gone: attest-pq establishes the session in one POST")
+	})
 	// Over-encrypted application traffic: a single tunnel endpoint. The real
 	// method/path/headers/body are sealed inside the request envelope, so nginx
 	// only needs to route this one fixed path to the sidecar.
@@ -359,11 +360,43 @@ func clientBucket(r *http.Request) string {
 	return issuer.SourceAddrKey(r)
 }
 
-// attestNonce validates the shared request shape of both attestation
-// endpoints and returns the decoded nonce, or writes the 400 and returns nil.
-// The endpoints take no binding or pq parameter: each serves exactly one
-// binding, so there is nothing to negotiate, and a stale query-selecting
-// client must get a loud 400, never something else than it expects.
+// parseAttestPQRequest validates the attest-pq POST body and returns the
+// decoded nonce and X-Wing encapsulation key, or writes the 400 and returns
+// nil. There is no version, binding, or suite parameter: the endpoint serves
+// exactly one construction, so there is nothing to negotiate.
+func parseAttestPQRequest(w http.ResponseWriter, r *http.Request) (req types.AttestPQRequest, nonce, xwingEK []byte) {
+	if err := json.NewDecoder(io.LimitReader(r.Body, attestBodyLimit)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid JSON")
+		return types.AttestPQRequest{}, nil, nil
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(req.Nonce)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce must be base64url")
+		return types.AttestPQRequest{}, nil, nil
+	}
+	// The transcript frames an exact 32-byte client nonce; refuse anything
+	// else rather than truncate or pad the freshness binding.
+	if len(nonce) != nonceBytes {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, fmt.Sprintf("nonce must be %d bytes, got %d", nonceBytes, len(nonce)))
+		return types.AttestPQRequest{}, nil, nil
+	}
+	xwingEK, err = base64.RawURLEncoding.DecodeString(req.XWingEK)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "xwing_ek must be base64url")
+		return types.AttestPQRequest{}, nil, nil
+	}
+	if len(xwingEK) != overenc.XWingEKBytes {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, fmt.Sprintf("xwing_ek must be %d bytes, got %d", overenc.XWingEKBytes, len(xwingEK)))
+		return types.AttestPQRequest{}, nil, nil
+	}
+	return req, nonce, xwingEK
+}
+
+// attestNonce validates the attest-lb request shape and returns the decoded
+// nonce, or writes the 400 and returns nil. The endpoint takes no binding or
+// pq parameter: it serves exactly one binding, so there is nothing to
+// negotiate, and a stale query-selecting client must get a loud 400, never
+// something else than it expects.
 func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce []byte) {
 	q := r.URL.Query()
 	// Presence, not value: `?pq=` is still a client that thinks it selects a
@@ -395,42 +428,54 @@ func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce
 	return nonceB64, decoded
 }
 
-// handleAttestPQ serves the identity-bound over-encryption binding:
-// report_data commits the hybrid session key, nonce, exact mesh leaf, and
-// issuing mesh CA to one domain-separated transcript, and the leaf signs that
-// transcript to prove possession of its private key.
+// handleAttestPQ serves the identity-bound over-encryption binding, client
+// first: the client POSTs its nonce and X-Wing encapsulation key, the server
+// encapsulates once, and report_data commits the front-door mode and the
+// complete key exchange — the client's key, the server's ciphertext, the
+// session id, and the nonce — plus the exact mesh leaf and issuing mesh CA to
+// one domain-separated transcript. The leaf signs that transcript to prove
+// possession of its private key, and the session is live when the response
+// leaves; there is no second round trip.
 func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
-	nonceB64, nonce := attestNonce(w, r)
+	req, nonce, xwingEK := parseAttestPQRequest(w, r)
 	if nonce == nil {
 		return
 	}
 	// Ahead of the report this request would mint: a request the store will
 	// not take costs no attestation.
 	client := clientBucket(r)
-	if err := s.pendingRoom(client, nonceB64); err != nil {
-		s.refusePending(w, err)
+	if err := s.sessionRoom(client); err != nil {
+		s.refuseSession(w, err)
+		return
+	}
+	if s.cfg.FrontDoorMode == "" {
+		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable, "no front-door mode is configured on this LB")
 		return
 	}
 	if s.cfg.MeshIdentityCertFile == "" || s.cfg.MeshIdentityKeyFile == "" || s.cfg.MeshIdentityCAFile == "" {
 		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable, "identity-bound PQ is not configured on this LB")
 		return
 	}
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		s.log.Error("mesh identity binding unavailable", "error", err)
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "identity-bound PQ credentials are temporarily unavailable")
 		return
 	}
 
-	key, err := overenc.GenerateServerKey()
+	xwingCT, sharedSecret, err := overenc.Encapsulate(xwingEK)
 	if err != nil {
-		s.log.Error("generate session key", "error", err)
-		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "key generation failed")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid X-Wing encapsulation key")
 		return
 	}
-	pub := key.Public()
+	sessionID, err := overenc.GenerateSessionID()
+	if err != nil {
+		s.log.Error("generate session id", "error", err)
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "session id generation failed")
+		return
+	}
 
-	reportData, proof, err := identity.bind(pub, nonce)
+	reportData, proof, err := identity.bind(s.cfg.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce)
 	if err != nil {
 		s.log.Error("bind mesh identity", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "mesh identity binding failed")
@@ -444,34 +489,39 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.addPending(client, nonceB64, pendingSession{
-		key:        key,
-		transcript: append([]byte(nil), reportData...),
-		createdAt:  time.Now(),
-	}); err != nil {
-		s.refusePending(w, err)
+	channel, err := overenc.NewServerChannel(sharedSecret, reportData, sessionID)
+	if err != nil {
+		s.log.Error("derive channel", "error", err)
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "channel derivation failed")
+		return
+	}
+	id := base64.RawURLEncoding.EncodeToString(sessionID)
+	now := time.Now()
+	if err := s.addSession(client, id, establishedSession{channel: channel, createdAt: now, lastUsed: now}); err != nil {
+		s.refuseSession(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:    types.BindingAttestPQ,
-		Platform:   platform,
-		Generation: generation,
-		Nonce:      nonceB64,
-		Evidence:   evidence,
-		CDSCertPEM: string(identity.bundlePEM),
-		SessionPubKey: &types.SessionPublicKey{
-			X25519:   base64.RawURLEncoding.EncodeToString(pub.X25519),
-			MLKEM768: base64.RawURLEncoding.EncodeToString(pub.MLKEM768),
-		},
+		Version:       types.BindingAttestPQ,
+		Platform:      platform,
+		Generation:    generation,
+		Nonce:         req.Nonce,
+		Evidence:      evidence,
+		CDSCertPEM:    string(identity.bundlePEM),
+		FrontDoorMode: s.cfg.FrontDoorMode,
+		XWingEK:       req.XWingEK,
+		XWingCT:       base64.RawURLEncoding.EncodeToString(xwingCT),
+		SessionID:     id,
 		IdentityProof: proof,
 	})
 }
 
 // handleAttestLB serves the ordinary-TLS binding: report_data commits the
-// nonce, the exact serving leaf nginx presents, the exact mesh leaf, and the
-// issuing mesh CA (overenc.LBTranscriptHash), and the mesh leaf signs that
-// transcript. No over-encryption keypair is minted and no pending session is
+// front-door mode, nonce, the exact serving leaf nginx presents, the exact
+// mesh leaf, and the issuing mesh CA (overenc.LBTranscriptHash), and the mesh
+// leaf signs that transcript. No over-encryption key exchange happens and no
+// session is
 // stored — the client recomputes the transcript from the leaf it observed on
 // its own TLS connection and then rides that TLS.
 func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
@@ -482,10 +532,10 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	// The exact-DER binding detects leaf substitution, not key sharing: a
 	// WebPKI Secret's serving key is host-visible, so the host could terminate
 	// the client's TLS with the same leaf and proxy this request. Only a
-	// TEE-held (cds-mode) serving key supports transport binding.
-	if s.cfg.FrontDoorMode != FrontDoorModeCDS {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeUnsupportedFrontDoor,
-			"attest-lb requires a TEE-held serving key (public_tls.mode=cds); this front door is attest-pq-only")
+	// TEE-held (cds or acme) serving key supports transport binding.
+	if s.cfg.FrontDoorMode != types.FrontDoorModeCDS && s.cfg.FrontDoorMode != types.FrontDoorModeACME {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeExternalTLS,
+			"attest-lb requires a TEE-held serving key (public_tls.mode=cds or acme); this front door is attest-pq-only")
 		return
 	}
 	servingLeafDER, err := s.servingLeafDER()
@@ -495,14 +545,14 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 			"the serving certificate is unavailable; attest-lb cannot bind this connection")
 		return
 	}
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		s.log.Error("mesh identity binding unavailable", "error", err)
 		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "mesh identity credentials are temporarily unavailable")
 		return
 	}
 
-	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce)
+	reportData, proof, err := identity.bindServingLeaf(s.cfg.FrontDoorMode, servingLeafDER, nonce)
 	if err != nil {
 		s.log.Error("bind serving leaf", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "serving-leaf binding failed")
@@ -524,9 +574,15 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		Nonce:             nonceB64,
 		Evidence:          evidence,
 		CDSCertPEM:        string(identity.bundlePEM),
+		FrontDoorMode:     s.cfg.FrontDoorMode,
 		IdentityProof:     proof,
 		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
 	})
+}
+
+// meshIdentity loads the mesh credential set from the three files.
+func (s *Server) meshIdentity() (*meshIdentity, error) {
+	return loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
 }
 
 // servingLeafDER reads the LB serving-leaf PEM and returns the whole leaf DER.
@@ -600,7 +656,7 @@ func (s *Server) computeReadiness() (int, string) {
 	// alone would report ready on a credential those endpoints refuse — an
 	// expired leaf above all, which is what this gate exists to catch, since
 	// stamped leaves carry a short TTL (issuer.MaxNamedLeafTTL).
-	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	identity, err := s.meshIdentity()
 	if err != nil {
 		return notReady("mesh identity credentials unusable", "error", err)
 	}
@@ -617,60 +673,6 @@ func (s *Server) computeReadiness() (int, string) {
 			"stamped", workload.Name, "expected", s.cfg.ExpectedWorkload)
 	}
 	return http.StatusOK, ""
-}
-
-func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {
-	var req types.HandshakeRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid JSON")
-		return
-	}
-
-	now := time.Now()
-	entry, ok := s.takePending(req.Nonce)
-	if !ok || now.Sub(entry.createdAt) > s.cfg.NonceTTL {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "unknown or expired nonce")
-		return
-	}
-
-	clientX, err1 := base64.RawURLEncoding.DecodeString(req.ClientX25519)
-	ct, err2 := base64.RawURLEncoding.DecodeString(req.MLKEMCt)
-	if err1 != nil || err2 != nil {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "handshake fields must be base64url")
-		return
-	}
-
-	handshake := overenc.Handshake{ClientX25519: clientX, MLKEMCiphertext: ct}
-	channel, err := entry.key.Agree(handshake, entry.transcript)
-	if err != nil {
-		s.log.Warn("handshake agree failed", "error", err)
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "key agreement failed")
-		return
-	}
-
-	idRaw := make([]byte, 16)
-	if _, err := rand.Read(idRaw); err != nil {
-		s.log.Error("generate session id", "error", err)
-		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "session id generation failed")
-		return
-	}
-	id := base64.RawURLEncoding.EncodeToString(idRaw)
-	if err := s.addSession(clientBucket(r), id, establishedSession{channel: channel, lastUsed: time.Now()}); err != nil {
-		s.refuseSession(w, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, types.HandshakeResponse{SessionID: id})
-}
-
-// refusePending maps a refused handshake onto the wire: a nonce collision is
-// the client's to fix, a full store is one to retry.
-func (s *Server) refusePending(w http.ResponseWriter, err error) {
-	if errors.Is(err, errStoreFull) {
-		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeAttestationUnavailable, err.Error())
-		return
-	}
-	writeErr(w, http.StatusConflict, types.ErrorCodeInvalidRequest, err.Error())
 }
 
 // refuseSession maps a refused session onto the wire. A colliding id is a
@@ -707,7 +709,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "invalid record")
 		return
 	}
-	plaintext, err := channel.Open(rec, overenc.RequestAAD())
+	plaintext, err := channel.OpenRequest(rec)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "decrypt failed")
 		return
@@ -718,6 +720,10 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "invalid request envelope")
 		return
 	}
+	// The backend trusts this header to name the channel the request arrived
+	// on, so a client-supplied value is dropped, never forwarded.
+	env.Headers = setHeaderField(env.Headers, exporterHeader,
+		base64.RawURLEncoding.EncodeToString(channel.Exporter()))
 
 	resp, err := s.backend.Forward(r.Context(), env)
 	if err != nil {
@@ -730,7 +736,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "marshal response envelope")
 		return
 	}
-	out, err := channel.Seal(respCBOR, overenc.ResponseAAD())
+	out, err := channel.SealResponse(respCBOR, rec.Seq)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "seal failed")
 		return
@@ -738,93 +744,45 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	writeCBOR(w, http.StatusOK, out)
 }
 
-// sweep evicts expired pending handshakes and idle established sessions.
+// setHeaderField replaces every field named name (case-insensitively) with one
+// field carrying value.
+func setHeaderField(fields []types.HeaderField, name, value string) []types.HeaderField {
+	kept := fields[:0]
+	for _, f := range fields {
+		if !strings.EqualFold(f.Name, name) {
+			kept = append(kept, f)
+		}
+	}
+	return append(kept, types.HeaderField{Name: name, Value: value})
+}
+
+// sweep evicts idle and over-age established sessions.
 func (s *Server) sweep() {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, v := range s.pending {
-		if now.Sub(v.createdAt) > s.cfg.NonceTTL {
-			s.dropPending(k)
-		}
-	}
 	for k, v := range s.sessions {
-		if now.Sub(v.lastUsed) > s.cfg.SessionTTL {
+		if now.Sub(v.lastUsed) > s.cfg.SessionTTL || now.Sub(v.createdAt) > s.cfg.SessionMaxAge {
 			s.dropSession(k)
 		}
 	}
 }
 
-// pendingRoom reports why a handshake for client may not be parked under
-// nonce. handleAttestPQ asks before it mints anything, and addPending asks
-// again under the lock that inserts.
-func (s *Server) pendingRoom(client, nonce string) error {
+// sessionRoom reports why a session for client may not be admitted.
+// handleAttestPQ asks before it mints anything, and addSession decides again
+// under the lock that inserts.
+func (s *Server) sessionRoom(client string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pendingRoomLocked(client, nonce)
-}
-
-func (s *Server) pendingRoomLocked(client, nonce string) error {
-	if _, taken := s.pending[nonce]; taken {
-		return errNonceInUse
+	if s.sessionsBy.count(client) >= maxSessionsPerClient {
+		return errSessionsFull
 	}
-	// A client at its own bound makes room from its own entries, so the store
-	// cannot grow and the global bound does not apply.
-	if s.pendingBy.count(client) >= maxPendingPerClient {
-		return nil
-	}
-	if len(s.pending) >= maxPendingSessions {
-		if _, ok := s.pendingBy.admit(maxPendingSessions, client); !ok {
+	if len(s.sessions) >= maxSessions {
+		if _, ok := s.sessionsBy.admit(maxSessions, client); !ok {
 			return errStoreFull
 		}
 	}
 	return nil
-}
-
-// addPending parks entry under nonce. A client past its own bound drops its
-// oldest pending handshake; a full store drops from a client over its share
-// (holders.admit).
-func (s *Server) addPending(client, nonce string, entry pendingSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.pendingRoomLocked(client, nonce); err != nil {
-		return err
-	}
-	switch {
-	case s.pendingBy.count(client) >= maxPendingPerClient:
-		s.dropPending(oldestPendingOf(s.pending, s.pendingBy.keys(client)))
-	case len(s.pending) >= maxPendingSessions:
-		over, ok := s.pendingBy.admit(maxPendingSessions, client)
-		if !ok {
-			return errStoreFull
-		}
-		s.dropPending(oldestPendingOf(s.pending, s.pendingBy.keys(over)))
-	}
-	entry.client = client
-	s.pending[nonce] = entry
-	s.pendingBy.add(client, nonce)
-	return nil
-}
-
-// takePending removes and returns the handshake parked under nonce.
-func (s *Server) takePending(nonce string) (pendingSession, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.pending[nonce]
-	if !ok {
-		return pendingSession{}, false
-	}
-	s.dropPending(nonce)
-	return entry, true
-}
-
-func (s *Server) dropPending(nonce string) {
-	entry, ok := s.pending[nonce]
-	if !ok {
-		return
-	}
-	delete(s.pending, nonce)
-	s.pendingBy.remove(entry.client, nonce)
 }
 
 // addSession stores an established channel under id. An established session is
@@ -852,7 +810,9 @@ func (s *Server) addSession(client, id string, entry establishedSession) error {
 }
 
 // useSession returns the channel id names, refreshing its idle deadline. An
-// expired session is dropped and reported as absent.
+// idle-expired or over-age session is dropped and reported as absent: use
+// refreshes the idle deadline but never the absolute one, so no amount of
+// traffic keeps one key schedule alive past SessionMaxAge.
 func (s *Server) useSession(id string) *overenc.Channel {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -861,7 +821,7 @@ func (s *Server) useSession(id string) *overenc.Channel {
 		return nil
 	}
 	now := time.Now()
-	if now.Sub(entry.lastUsed) > s.cfg.SessionTTL {
+	if now.Sub(entry.lastUsed) > s.cfg.SessionTTL || now.Sub(entry.createdAt) > s.cfg.SessionMaxAge {
 		s.dropSession(id)
 		return nil
 	}
@@ -877,21 +837,6 @@ func (s *Server) dropSession(id string) {
 	}
 	delete(s.sessions, id)
 	s.sessionsBy.remove(entry.client, id)
-}
-
-func oldestPendingOf(pending map[string]pendingSession, held map[string]struct{}) string {
-	var chosen string
-	var at time.Time
-	for nonce := range held {
-		entry, ok := pending[nonce]
-		if !ok {
-			continue
-		}
-		if at.IsZero() || entry.createdAt.Before(at) {
-			chosen, at = nonce, entry.createdAt
-		}
-	}
-	return chosen
 }
 
 func idlestSessionOf(sessions map[string]establishedSession, held map[string]struct{}) string {

@@ -317,9 +317,14 @@ The key must already be in the store. Unlike a secret — where the first pod to
 ask is the one that defines the value — `get-volume` only ever reads, so a pod
 scheduled before `c8s volume create` has run retries and then fails.
 
-Teardown follows the pod's cgroup, not its kubelet directory: kubelet cannot
-remove that directory while a volume is mounted under it, so it survives exactly
-as long as the mount that would be torn down.
+Teardown is the sidecar's last act. Kubelet terminates sidecars only after the
+workload's containers have exited, so the close it posts lands while nothing
+holds the mount — and before kubelet's own emptyDir cleanup reaches the
+directory, which would otherwise delete every file straight through a live
+read-write mount. The cgroup reaper backstops pods that die without that
+graceful stop — a crashed sidecar, a force delete, a hard eviction — but it
+collects the mappings, not the data: only a graceful termination closes the
+volume before kubelet's cleanup can reach it.
 
 ### Possession of the blob is the authorization
 

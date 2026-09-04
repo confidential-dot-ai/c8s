@@ -304,6 +304,17 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "acme": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "directoryURL": {},
+            "email": {}
+          }
+        },
         "allowlist": {
           "type": [
             "object",
@@ -462,6 +473,7 @@
           "properties": {
             "certKey": {},
             "keyKey": {},
+            "mode": {},
             "mountPath": {},
             "secretName": {}
           }

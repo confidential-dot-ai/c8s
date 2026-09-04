@@ -56,6 +56,13 @@ pod-security-admission-config-file: /etc/rancher/rke2/psa-config.yaml
 # platform-neutral.
 kubelet-arg:
   - max-pods=200
+  # Closes the kubelet's exec/attach/port-forward/logs endpoints: the
+  # kubeconfig cred-release hands out is cluster-admin, and without this any
+  # holder can run commands in every allowlisted pod. Probes are unaffected
+  # (they go over CRI). `kubectl logs` stops working too. The C8S_DEV=1 build
+  # re-enables the handlers via a config.yaml.d drop-in (rendered by
+  # mkosi.sync), which changes the measurement.
+  - enable-debugging-handlers=false
 kube-apiserver-arg:
   - audit-log-path=/var/log/kube-audit/audit.log
   - audit-log-maxage=30

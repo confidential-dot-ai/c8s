@@ -27,7 +27,7 @@ c8sComponents:
     cdsExempt: false
     ## Released by attestation-rs. Bump with:
     ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:main
-    pinnedDigest: sha256:b81b6bd4304c1e66da1970990ebf6c7611d2a1fc211c3432e68dec5b7702c660
+    pinnedDigest: sha256:53a1bbe33746de94841cfd69e977b2f70db9ea2862be911be9d7af00f7ab7229
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
     cdsExempt: false
@@ -1081,11 +1081,8 @@ volumed:
   ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only
   ## hostPath the deny-host-namespaces VAP admits into a cw pod.
   hostPaths:
-    ## The kubelet's root dir, holding per-pod volume directories. Empty
-    ## derives it from the host distro (kata.distro / nriImagePolicy.distro,
-    ## set by `c8s install` and required from GitOps installs for the
-    ## containerd layout anyway): rke2 keeps it under its agent dir.
-    kubeletRoot: ""
+    ## Kubelet's root dir; override only when the kubelet runs a custom --root-dir.
+    kubeletRoot: /var/lib/kubelet
     cgroupRoot: /sys/fs/cgroup
 
   ## Volumes open on one node at once. Each costs two device-mapper devices and
@@ -1306,14 +1303,33 @@ tlsLb:
     # -- Seconds browsers may cache the preflight response.
     maxAge: 600
 
-  # -- Public TLS certificate presented to internet clients. When secretName is
-  # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
-  # compatibility.
+  # -- Public TLS credential presented to internet clients. mode selects it:
+  # cds (default) serves the CDS-issued mesh leaf at tlsMountPath; webpki
+  # serves the operator Secret named by secretName (host-visible key, so the
+  # front door is attest-pq only); acme has the in-pod `c8s acme` sidecar
+  # issue a multi-SAN leaf for the san list (TEE-held key — requires
+  # attestationApi.cvmMode=node; refused under kata, whose guest exempts only
+  # tcp:8443 from the inbound mesh redirect, leaving :80 unreachable).
+  # secretName/certKey/keyKey/mountPath apply to webpki only.
   publicTLS:
+    mode: cds
     secretName: ""
     certKey: tls.crt
     keyKey: tls.key
     mountPath: "/public-tls"
+
+  # -- ACME issuance (publicTLS.mode=acme). The sidecar answers HTTP-01 behind
+  # nginx's :80 server and SIGHUPs nginx on install. Empty directoryURL is
+  # Let's Encrypt production; point it at the staging URL for tests — key and
+  # state live on a Memory emptyDir, so every pod recreation re-issues and
+  # counts against LE duplicate-certificate limits.
+  # Reachability: the CA must reach :80/:443 at the sanList names, so DNS
+  # points at either service.type=LoadBalancer (any implementation: cloud
+  # controller, MetalLB, kube-vip, ...) or, without one, the node via
+  # hostPort. ClusterIP-only fails render.
+  acme:
+    email: ""
+    directoryURL: ""
 
   # -- Discovery/preflight metadata (the issued cert + attestation evidence
   # with the VCEK chain) served by nginx at `path`. The chart-rendered get-cert
@@ -1356,8 +1372,8 @@ tlsLb:
 
   # -- Attestation + over-encryption sidecar (the c8s-verify protocol). When
   # enabled, an in-pod `c8s cds-attest` container serves the *dynamic*
-  # client-facing endpoints (the explicit attest-pq and attest-lb per-session
-  # challenges and the post-quantum over-encryption handshake) and nginx
+  # client-facing endpoints (the attest-pq attestation + X-Wing key exchange,
+  # the attest-lb per-session challenge, and the over-encrypted tunnel) and nginx
   # reverse-proxies `/.well-known/c8s/` to it on loopback. The static CDS/mesh-CA certs are still served by nginx via
   # `discovery`. The browser client is lunal-dev/c8s-verify-js (wire contract:
   # c8s-verify-js/PROTOCOL.md).
@@ -1378,8 +1394,8 @@ tlsLb:
     # WASM verifier.
     platform: snp
     generation: genoa
-    # -- Attestation-api URL the sidecar binds session keys against. Empty
-    # defaults to this chart's attestation-api.
+    # -- Attestation-api URL the sidecar binds each session's key exchange
+    # against. Empty defaults to this chart's attestation-api.
     attestationApiURL: ""
     # -- Workload-verified ingress gate: when set to an allowlist entry name,
     # the sidecar serves /readyz as 200 only while the installed mesh identity

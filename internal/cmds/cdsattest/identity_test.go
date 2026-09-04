@@ -129,6 +129,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	provider := &capturingProvider{}
 	srv := NewServer(Config{
 		Evidence:             provider,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -140,36 +141,27 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if _, err := rand.Read(nonce); err != nil {
 		t.Fatal(err)
 	}
-	endpoint := ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(nonce)
-	resp, err := http.Get(endpoint)
+	ck, err := overenc.GenerateClientKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("attestation status = %d, want 200", resp.StatusCode)
-	}
-	var bundle types.AttestationBundle
-	if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
-		t.Fatal(err)
-	}
+	bundle := fetchBundle(t, ts.URL, ck, nonce)
 	if bundle.Version != types.BindingAttestPQ {
 		t.Fatalf("unexpected bundle header: %+v", bundle)
 	}
-	if bundle.IdentityProof == nil || bundle.SessionPubKey == nil {
-		t.Fatalf("bundle missing identity proof or session key: %+v", bundle)
+	if bundle.IdentityProof == nil || bundle.XWingCT == "" || bundle.SessionID == "" {
+		t.Fatalf("bundle missing identity proof, ciphertext, or session id: %+v", bundle)
 	}
 
-	x25519, err := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.X25519)
+	ct, err := base64.RawURLEncoding.DecodeString(bundle.XWingCT)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mlkem, err := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.MLKEM768)
+	sessionIDRaw, err := base64.RawURLEncoding.DecodeString(bundle.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub := overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}
-	wantReportData, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	wantReportData, err := overenc.IdentityTranscriptHash(bundle.FrontDoorMode, ck.EncapsulationKey(), ct, sessionIDRaw, nonce, identity.leaf.Raw, identity.ca.Raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,53 +183,36 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 		t.Fatal("mesh identity proof signature did not verify")
 	}
 
-	clientChannel, handshake, err := overenc.ClientAgree(pub, wantReportData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sessionID := postHandshake(t, ts.URL, nonce, handshake)
+	clientChannel, sessionID := clientChannelFromBundle(t, bundle, ck, nonce)
 	got := tunnel(t, ts.URL, clientChannel, sessionID, types.TunnelRequest{Method: "GET", Path: "/identity"})
 	if got.Status != http.StatusOK {
 		t.Fatalf("identity-bound tunnel response status = %d", got.Status)
 	}
 }
 
-func postHandshake(t *testing.T, base string, nonce []byte, hs overenc.Handshake) string {
+// validAttestPQBody returns a well-formed attest-pq request body with a fresh
+// key and nonce.
+func validAttestPQBody(t *testing.T) []byte {
 	t.Helper()
-	body, err := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(hs.ClientX25519),
-		MLKEMCt:      b64url(hs.MLKEMCiphertext),
+	ck, err := overenc.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   b64url(make([]byte, 32)),
+		XWingEK: b64url(ck.EncapsulationKey()),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(base+"/.well-known/c8s/handshake", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("handshake status = %d, want 200", resp.StatusCode)
-	}
-	var result types.HandshakeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if result.SessionID == "" {
-		t.Fatal("identity-bound handshake returned no session id")
-	}
-	return result.SessionID
+	return body
 }
 
 func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
-	srv := NewServer(Config{Evidence: &capturingProvider{}})
+	srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: types.FrontDoorModeCDS})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := postAttestPQ(t, ts.URL, validAttestPQBody(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", resp.StatusCode)
@@ -247,16 +222,14 @@ func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
 func TestIdentityBoundAttestationFailsClosedOnInvalidConfiguredIdentity(t *testing.T) {
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: "/does/not/exist/cert.pem",
 		MeshIdentityKeyFile:  "/does/not/exist/key.pem",
 		MeshIdentityCAFile:   "/does/not/exist/ca.pem",
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := postAttestPQ(t, ts.URL, validAttestPQBody(t))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
@@ -466,7 +439,7 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -521,26 +494,30 @@ func TestRetiredAttestationEndpointReturns400(t *testing.T) {
 	}
 }
 
-func TestIdentityBoundAttestationRejectsWrongSizeNonce(t *testing.T) {
+// All-zero X-Wing key material is well-formed in size but degenerate: the
+// X25519 half is a low-order point, so encapsulation must refuse it rather
+// than mint evidence for a key nobody can hold.
+func TestIdentityBoundAttestationRejectsDegenerateKey(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             &capturingProvider{},
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	// The transcript frames an exact 32-byte nonce; both shorter and longer
-	// values are refused rather than truncated or padded.
-	for _, size := range []int{16, 31, 33} {
-		resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, size)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("%d-byte nonce status = %d, want 400", size, resp.StatusCode)
-		}
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   b64url(make([]byte, 32)),
+		XWingEK: b64url(make([]byte, overenc.XWingEKBytes)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := postAttestPQ(t, ts.URL, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }

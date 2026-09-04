@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -719,9 +718,9 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := parseRTMRPins(cfg.rtmrs)
+	manual, err := ratls.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
-		return rtmrPins{}, err
+		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
 	// RTMR[3] has three spellings — --rtmr 3=, --expected-rtmr3, and
 	// --operator-pkey (which derives the value) — and they write one slot, so
@@ -838,55 +837,6 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 		return fmt.Errorf("PEM block is not a parseable PKIX public key: %w", err)
 	}
 	return nil
-}
-
-// parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
-//
-// Index 0 is refused rather than accepted-and-ignored: RTMR[0] carries the TD
-// HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin would
-// deny half the fleet.
-//
-// 1, 2 and 3 are all accepted here, but they are not interchangeable and
-// resolveRTMRPins applies opposite rules to them. RTMR[1] and [2] ARE the
-// image, so pinning them by hand conflicts with --image-manifest. RTMR[3]
-// records events extended inside whatever image the untrusted host chose, so
-// pinning it REQUIRES --image-manifest — alone it would read as proof of
-// identity while proving none, since the host can boot any image and
-// reproduce the chain.
-func parseRTMRPins(pins []string) (map[int][]byte, error) {
-	if len(pins) == 0 {
-		return nil, nil
-	}
-	out := make(map[int][]byte, len(pins))
-	for _, p := range pins {
-		idxStr, hexStr, ok := strings.Cut(strings.TrimSpace(p), "=")
-		if !ok {
-			return nil, fmt.Errorf("--rtmr %q: want <index>=<sha384-hex>", p)
-		}
-		idx, err := strconv.Atoi(idxStr)
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
-		}
-		switch idx {
-		case 1, 2, 3:
-		case 0:
-			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
-		default:
-			return nil, fmt.Errorf("--rtmr %q: index must be 1, 2 or 3", p)
-		}
-		if _, dup := out[idx]; dup {
-			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
-		}
-		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %d: value is not hex: %w", idx, err)
-		}
-		if len(v) != sha512.Size384 {
-			return nil, fmt.Errorf("--rtmr %d: value is %d bytes, want %d", idx, len(v), sha512.Size384)
-		}
-		out[idx] = v
-	}
-	return out, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
@@ -1344,7 +1294,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	oc.Measurement = result.Claims.LaunchDigest
 	oc.CurrentTCB = formatTCB(result.Claims.TCB)
 	oc.ReportData = hex.EncodeToString(result.Claims.ReportData)
-	oc.Debug, oc.SMT = reportFlags(oc.Platform, result.Claims.PlatformData)
+	oc.Debug, oc.SMT = reportFlags(result.Claims)
 
 	// The TDX-only gate runs before any register is compared: on non-TDX
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
@@ -1464,7 +1414,7 @@ func enforceMinTCB(oc *Outcome, cfg config, result *teetypes.VerificationResult)
 // pick "gcp-tdx" to slip past a TDX-only rule, or "tdx" to trip a TDX-only
 // rejection, so every platform decision here normalizes first.
 func isTDX(platform string) bool {
-	return ratls.NormalizePlatform(platform) == ratls.NormalizePlatform(string(teetypes.PlatformTDX))
+	return teetypes.NormalizePlatform(platform).IsTDX()
 }
 
 // applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and the RTMR[3] pin
@@ -1478,20 +1428,13 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	}
 
 	check := func(idx int, meaning string, want []byte) bool {
-		key := fmt.Sprintf("rtmr_%d", idx)
-		got, _ := result.Claims.PlatformData[key].(string)
-		got = strings.ToLower(strings.TrimSpace(got))
-		if got == "" {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: the verified claims carry no %s", idx, key)
+		got, err := result.Claims.RTMR(idx)
+		if err != nil {
+			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: register claim absent or malformed: %v", idx, err)
 			return false
 		}
-		gb, err := hex.DecodeString(got)
-		if err != nil || len(gb) != runtimemeasure.Size {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: %s claim is malformed (%q)", idx, key, got)
-			return false
-		}
-		if !bytes.Equal(gb, want) {
-			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %s, expected %s", idx, meaning, got, hex.EncodeToString(want))
+		if !bytes.Equal(got, want) {
+			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %x, expected %x", idx, meaning, got, want)
 			return false
 		}
 		oc.RTMRsPinned = append(oc.RTMRsPinned, fmt.Sprintf("%d:%s", idx, hex.EncodeToString(want)))
@@ -1515,8 +1458,8 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
-// rtmrMeaning labels a register in operator-facing output. parseRTMRPins
-// admits only 1 and 2; the default keeps this total rather than printing an
+// rtmrMeaning labels a register in operator-facing output. ratls.ParseRTMRPins
+// admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {
 	switch idx {
@@ -1567,21 +1510,12 @@ func minTCBFromCfg(cfg config) *teetypes.SnpTcb {
 }
 
 // reportFlags reads the debug and SMT state the verifier extracted into the
-// platform-specific claims: SNP carries them under policy/platform_info, TDX
-// attests debug under td_attributes_parsed and carries no SMT state (smt:false
-// means unattested, not off). attestation-go routes all six supported platforms
-// through one of these two claim layouts, so the non-TDX branch is SNP-shaped
-// by exhaustion.
-func reportFlags(platform string, pd map[string]any) (debug, smt bool) {
-	nested := func(section, key string) bool {
-		m, _ := pd[section].(map[string]any)
-		v, _ := m[key].(bool)
-		return v
-	}
-	if isTDX(platform) {
-		return nested("td_attributes_parsed", "debug"), false
-	}
-	return nested("policy", "debug_allowed"), nested("platform_info", "smt_enabled")
+// claims, for display. A flag the platform does not carry (SMT on TDX) renders
+// as false; the verdict never depends on either.
+func reportFlags(claims teetypes.Claims) (debug, smt bool) {
+	debug, _ = claims.DebugEnabled()
+	smt, _ = claims.SMTEnabled()
+	return debug, smt
 }
 
 // formatTCB renders the verified TCB for display: SNP shows its components, TDX

@@ -1,0 +1,126 @@
+package acme
+
+import (
+	"net"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+)
+
+// freePort reserves a loopback port and releases it for the listener under
+// test.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// TestRunIssuesAndReloads drives the real run(): bootstrap placeholder, the
+// challenge listener, ACME issuance against the fake directory, nginx SIGHUP
+// on install, and shutdown on SIGTERM.
+func TestRunIssuesAndReloads(t *testing.T) {
+	ca := newTestCA(t)
+	port := freePort(t)
+	fake := newFakeACME(t, ca, "http://127.0.0.1:"+strconv.Itoa(port))
+
+	// Stub nginx :80 server: proxies to the challenge listener run() starts,
+	// so the front-door probe exercises the production topology.
+	frontDoor := httptest.NewServer(httputil.NewSingleHostReverseProxy(&url.URL{
+		Scheme: "http",
+		Host:   "127.0.0.1:" + strconv.Itoa(port),
+	}))
+	t.Cleanup(frontDoor.Close)
+
+	hup := catchSIGHUP(t)
+	procs := t.TempDir()
+	presentAsNginxMaster(t, procs)
+	overrideProcRoot(t, procs)
+
+	certDir := filepath.Join(t.TempDir(), "tls")
+	cfg := config{
+		domains:       []string{"lb.example.com", "infer.lb.example.com"},
+		directoryURL:  fake.directoryURL(),
+		email:         "ops@example.com",
+		challengePort: port,
+		httpPort:      serverPort(t, frontDoor.URL),
+		certDir:       certDir,
+		reloadNginx:   true,
+		logLevel:      "debug",
+	}
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+
+	// The install lands a CA-issued (non-self-issued) leaf and SIGHUPs nginx.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("no CA-issued certificate installed")
+		}
+		data, err := os.ReadFile(filepath.Join(certDir, certFile))
+		if err == nil {
+			leaf, err := certutil.ParseCertificatePEM(data)
+			if err == nil && leaf.Issuer.CommonName == "Fake ACME CA" {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case <-hup:
+	case <-time.After(10 * time.Second):
+		t.Fatal("install did not SIGHUP nginx")
+	}
+	info, err := os.Stat(filepath.Join(certDir, keyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not stop on SIGTERM")
+	}
+}
+
+func TestRunValidatesConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.logLevel = "info"
+	cfg.domains = []string{"-bad-"}
+	if err := run(cfg); err == nil {
+		t.Fatal("run accepted an invalid domain")
+	}
+}
+
+func TestRunFailsOnUncreatableCertDir(t *testing.T) {
+	ro := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(ro, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	cfg := validTestConfig()
+	cfg.logLevel = "info"
+	cfg.certDir = filepath.Join(ro, "tls")
+	if err := run(cfg); err == nil {
+		t.Fatal("run accepted an un-creatable cert dir")
+	}
+}

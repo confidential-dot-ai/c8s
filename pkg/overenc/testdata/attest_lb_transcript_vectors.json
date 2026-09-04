@@ -1,26 +1,29 @@
 [
   {
     "description": "repeated single-byte fields",
+    "front_door_mode": "cds",
     "nonce_b64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
     "serving_leaf_der_b64": "oKCgoKCgoKA=",
     "mesh_leaf_der_b64": "sbGxsbGxsbE=",
     "mesh_ca_der_b64": "wsLCwsLCwsI=",
-    "report_data_b64": "c7jCsDEm+eu6BEGEm7GMIkzfG2K1e68kjEuhiXDZQDcKfQ8dgjlBZj+qn+OhhLIe"
+    "report_data_b64": "tjEfitWK7hKeY6baTNVYhuJewfmJeQQ+ojixCeXzskoohHjjdmVaKEc6C5wTcYzk"
   },
   {
-    "description": "ascii DER placeholders, distinct lengths",
+    "description": "ascii DER placeholders, distinct lengths, acme mode",
+    "front_door_mode": "acme",
     "nonce_b64": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
     "serving_leaf_der_b64": "c2VydmluZy1sZWFmLWRlcg==",
     "mesh_leaf_der_b64": "bWVzaC1sZWFmLWRlcg==",
     "mesh_ca_der_b64": "bWVzaC1jYS1kZXI=",
-    "report_data_b64": "LTuGpmM9qbEUCqWy1qGCYcMof8Yu+iI2ISbyspGrtRVOmP5fr8J4wFQmI3uAUnhF"
+    "report_data_b64": "Xfm5JNaZwEoJwbaSXXt5q5jEB0R8KNLu1XU79ZH7xF7mOm8NzKU2dj8fPs+AoiX7"
   },
   {
     "description": "duplicate serving and mesh leaf bytes are hashed twice, not deduplicated",
+    "front_door_mode": "cds",
     "nonce_b64": "//////////////////////////////////////////8=",
     "serving_leaf_der_b64": "c2FtZS1kZXI=",
     "mesh_leaf_der_b64": "c2FtZS1kZXI=",
     "mesh_ca_der_b64": "aXNzdWVyLWRlcg==",
-    "report_data_b64": "ef1AXTZcVYVpvHcr92+B03bYfPQ/Y1tsdcGQ59repycHoeY3zNVIAch0BK3yIZQz"
+    "report_data_b64": "k0R8DgYjhwabubDBVr9CgOc9nwx7v6xhv7EvPdd49nBDfR0Jttei16wtHNJ1YA06"
   }
 ]

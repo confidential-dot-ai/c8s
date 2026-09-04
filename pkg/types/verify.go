@@ -5,16 +5,17 @@ import "encoding/json"
 // Browser-facing attestation + over-encryption wire types for the c8s-verify
 // protocol served by the Load Balancer. These mirror c8s-verify-js/PROTOCOL.md
 // and are consumed by the JavaScript client (c8s-verify-js) and any other
-// out-of-cluster verifier. All *_pubkey / handshake byte fields are base64url
+// out-of-cluster verifier. All key-exchange byte fields are base64url
 // (unpadded); the evidence sub-fields follow the platform's attestation-rs
 // evidence shape (SnpEvidence uses standard base64; see PROTOCOL.md for the
 // per-platform encodings).
 
-// SessionPublicKey is the LB's per-session hybrid (X25519 + ML-KEM-768) public
-// key, committed by the report_data transcript.
-type SessionPublicKey struct {
-	X25519   string `json:"x25519"`   // base64url, 32 bytes
-	MLKEM768 string `json:"mlkem768"` // base64url, 1184 bytes
+// AttestPQRequest is the body of POST /.well-known/c8s/attest-pq: the client's
+// fresh challenge and its X-Wing encapsulation key. The server encapsulates to
+// the key, so the hardware report can commit both sides of the key exchange.
+type AttestPQRequest struct {
+	Nonce   string `json:"nonce"`    // base64url, 32 bytes
+	XWingEK string `json:"xwing_ek"` // base64url, 1216 bytes
 }
 
 const (
@@ -48,10 +49,23 @@ type MeshIdentityProof struct {
 	Signature    string `json:"signature"`      // base64url ASN.1 DER ECDSA signature
 }
 
+// FrontDoorMode names the credential model terminating public TLS in front of
+// an attestation endpoint: cds (TEE-held mesh-issued serving key), acme
+// (TEE-held in-guest ACME serving key), or webpki (host-visible Secret).
+// attest-lb's transport binding rests on the serving key being TEE-held, so
+// it is served only in the cds and acme shapes.
+type FrontDoorMode string
+
+const (
+	FrontDoorModeCDS    FrontDoorMode = "cds"
+	FrontDoorModeWebPKI FrontDoorMode = "webpki"
+	FrontDoorModeACME   FrontDoorMode = "acme"
+)
+
 // AttestationBundle is the response body of the two explicit attestation
-// endpoints, GET /.well-known/c8s/attest-pq?nonce=<b64url> and
+// endpoints, POST /.well-known/c8s/attest-pq and
 // GET /.well-known/c8s/attest-lb?nonce=<b64url>. attest-pq binds report_data
-// to the per-session hybrid key and the mesh identity
+// to the complete X-Wing key exchange, the session id, and the mesh identity
 // (overenc.IdentityTranscriptHash); attest-lb binds it to the exact outer
 // serving leaf plus the mesh identity (overenc.LBTranscriptHash) for native
 // clients that ride ordinary nginx TLS. Version carries the endpoint's
@@ -64,9 +78,20 @@ type AttestationBundle struct {
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
 	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
 	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
-	// SessionPubKey is the per-session over-encryption key, present only for
-	// the attest-pq response; attest-lb creates no session.
-	SessionPubKey *SessionPublicKey `json:"session_pubkey,omitempty"`
+	// FrontDoorMode is the credential model terminating public TLS in front
+	// of the responder, committed by the endpoint's report_data transcript.
+	FrontDoorMode FrontDoorMode `json:"front_door_mode"`
+	// XWingEK (attest-pq only) echoes the client's encapsulation key, so a
+	// saved bundle stays verifiable offline. A live client MUST compare it to
+	// the key it sent, exactly like the nonce echo.
+	XWingEK string `json:"xwing_ek,omitempty"`
+	// XWingCT (attest-pq only) is the server's X-Wing ciphertext, committed by
+	// report_data alongside the encapsulation key.
+	XWingCT string `json:"xwing_ct,omitempty"`
+	// SessionID (attest-pq only) is the 16-byte session identifier, committed
+	// by report_data and framed into every tunnel record's AAD; attest-lb
+	// creates no session.
+	SessionID string `json:"session_id,omitempty"`
 	// IdentityProof proves possession of the mesh leaf committed by
 	// report_data, over the endpoint's transcript.
 	IdentityProof *MeshIdentityProof `json:"identity_proof,omitempty"`
@@ -76,20 +101,6 @@ type AttestationBundle struct {
 	// observed on its own TLS connection and verify the transcript with that
 	// value — trusting the served field would let a relay substitute the leaf.
 	ServingLeafSHA256 string `json:"serving_leaf_sha256,omitempty"`
-}
-
-// HandshakeRequest is the body of POST /.well-known/c8s/handshake: the client
-// commits to a nonce (selecting the LB's stored session key) and supplies its
-// hybrid handshake material.
-type HandshakeRequest struct {
-	Nonce        string `json:"nonce"`         // b64url, selects the pending session
-	ClientX25519 string `json:"client_x25519"` // b64url, 32 bytes
-	MLKEMCt      string `json:"mlkem_ct"`      // b64url, 1088 bytes
-}
-
-// HandshakeResponse returns the established session identifier.
-type HandshakeResponse struct {
-	SessionID string `json:"session_id"`
 }
 
 // HeaderField is one HTTP header field in a tunnel envelope, on the wire a
