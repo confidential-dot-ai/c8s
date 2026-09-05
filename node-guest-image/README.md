@@ -156,7 +156,10 @@ immutable evidence: the source SHA, CDI and ORAS digests, and the published
 manifest. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must match the fresh
 build; a differing nonmeasured build timestamp is not a mismatch. The
 published manifest is passed unchanged to `get-kubeconfig` for attestation.
-Tests are checked out at the build SHA.
+Tests are checked out at the build SHA. Before allocating the launcher,
+the reusable workflow independently requires a successful same-repository
+`main` push and rejects a c8s-ref override in exact-image mode. Its guarded
+build checkout is separate from the staged/manual checkout.
 
 That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
 A restricted scheduling pod selects a TDX node before CDI import starts;
