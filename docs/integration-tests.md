@@ -31,6 +31,15 @@ survives. The install-time allowlist floor is generated from the node
 containerd's image store, because `policy.enforceExisting` checks
 already-running containers against it.
 
+Tenant fixtures satisfy the Restricted controls: workload and adoption
+Deployments use digest-pinned `nginxinc/nginx-unprivileged` on port 8080;
+curl Pods run as UID 1000. All use non-root execution, RuntimeDefault seccomp,
+no privilege escalation, and dropped ALL capabilities. `pod-fixture.py` is the
+shared JSON renderer used by the shell harness and Go admission regression tests,
+so negative fixtures violate only their intended label or host-network rule.
+Workload pre-pulls, the allowlist floor, mesh probes, Service target ports, and
+adoption routing use the same image and backend-port settings.
+
 Two operator-facing commands verify evidence **in-process** with real hardware
 cryptography, which synthetic evidence cannot pass: `c8s verify` and the `c8s
 allowlist` CLI. Those stay on the metal lanes. The harness still exercises the

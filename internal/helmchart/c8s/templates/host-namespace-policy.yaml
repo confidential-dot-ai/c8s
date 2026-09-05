@@ -9,6 +9,23 @@ The release namespace, kube-system, local-path-storage, and configured
 exemptions host trusted platform components that legitimately need privileges
 which tenant workloads must never receive.
 */}}
+{{- /* Share the prior-admission guard between both sidecar image gates. */}}
+{{- $priorClaimsIdentity := printf `request.operation == 'UPDATE' &&
+oldObject != null &&
+has(oldObject.metadata.annotations) &&
+'confidential.ai/c8s-injected' in oldObject.metadata.annotations &&
+oldObject.metadata.annotations['confidential.ai/c8s-injected'] == 'true' &&
+'confidential.ai/cw' in oldObject.metadata.annotations &&
+oldObject.metadata.annotations['confidential.ai/cw'] == object.metadata.annotations['confidential.ai/cw'] &&
+has(oldObject.metadata.labels) &&
+'confidential.ai/cw' in oldObject.metadata.labels &&
+oldObject.metadata.labels['confidential.ai/cw'] == object.metadata.annotations['confidential.ai/cw'] &&
+has(oldObject.spec.volumes) &&
+oldObject.spec.volumes.filter(v, has(v.hostPath)).size() == 1 &&
+oldObject.spec.volumes.exists(v,
+  v.name == 'c8s-workload-claims' && has(v.hostPath) &&
+  v.hostPath.path == %s &&
+  has(v.hostPath.type) && v.hostPath.type == 'Directory')` (.Values.nriImagePolicy.hostPaths.runtimeDir | quote) }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -138,7 +155,10 @@ spec:
             object.metadata.annotations['confidential.ai/cw'] &&
           has(object.spec.initContainers) &&
           object.spec.initContainers.exists(c,
-            c.image == {{ include "c8s.image" . | quote }} &&
+            (c.image == {{ include "c8s.image" . | quote }} ||
+             (({{ $priorClaimsIdentity | nindent 15 }}) &&
+              has(oldObject.spec.initContainers) &&
+              oldObject.spec.initContainers.exists(prior, prior == c))) &&
             has(c.restartPolicy) && c.restartPolicy == 'Always' &&
             (!has(c.command) || c.command.size() == 0) &&
             !has(c.lifecycle) && !has(c.livenessProbe) &&
@@ -162,7 +182,10 @@ spec:
           object.spec.initContainers.all(c,
             !has(c.volumeMounts) || c.volumeMounts.all(m,
               m.name != 'c8s-workload-claims' ||
-              (c.image == {{ include "c8s.image" . | quote }} &&
+              ((c.image == {{ include "c8s.image" . | quote }} ||
+                (({{ $priorClaimsIdentity | nindent 18 }}) &&
+                 has(oldObject.spec.initContainers) &&
+                 oldObject.spec.initContainers.exists(prior, prior == c))) &&
                has(c.restartPolicy) && c.restartPolicy == 'Always' &&
                (!has(c.command) || c.command.size() == 0) &&
                !has(c.lifecycle) && !has(c.livenessProbe) &&
@@ -187,7 +210,7 @@ spec:
          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
            !has(c.volumeMounts) ||
            c.volumeMounts.all(m, m.name != 'c8s-workload-claims'))))
-      message: "The c8s-workload-claims hostPath is allowed only on an injected confidential workload, mounted read-only at /run/c8s/workload-claims without subPath or propagation, by the chart's c8s image in the matching credential-sidecar mode."
+      message: "The c8s-workload-claims hostPath is allowed only on an injected confidential workload, mounted read-only at /run/c8s/workload-claims without subPath or propagation, by the chart's c8s image or an unchanged previously injected sidecar on UPDATE, in the matching credential-sidecar mode."
     - expression: >-
         (!has(object.spec.securityContext) ||
          !has(object.spec.securityContext.windowsOptions) ||
@@ -403,9 +426,9 @@ spec:
   validationActions:
     - Deny
 ---
-# pods/ephemeralcontainers is validated separately: its admission object only
-# exposes spec.ephemeralContainers, so pod-only fields would fail type checking
-# and failurePolicy: Fail would deny every kubectl debug request.
+# pods/ephemeralcontainers is validated separately, but its admission object is
+# the full Pod. Honor pod-level defaults while validating ephemeral containers;
+# the subresource update preserves the other containers and pod security context.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -467,9 +490,12 @@ spec:
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
-          has(c.securityContext) && has(c.securityContext.runAsNonRoot) &&
-          c.securityContext.runAsNonRoot == true)
-      message: "Every ephemeral container must explicitly set runAsNonRoot: true because the ephemeralcontainers subresource does not expose the pod-level default."
+          (has(c.securityContext) && has(c.securityContext.runAsNonRoot)) ?
+            c.securityContext.runAsNonRoot == true :
+            (has(object.spec.securityContext) &&
+             has(object.spec.securityContext.runAsNonRoot) &&
+             object.spec.securityContext.runAsNonRoot == true))
+      message: "Every ephemeral container must run as non-root, either explicitly or by inheriting pod-level runAsNonRoot: true."
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
@@ -488,9 +514,12 @@ spec:
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
-          has(c.securityContext) && has(c.securityContext.seccompProfile) &&
-          c.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'])
-      message: "Every ephemeral container must explicitly use RuntimeDefault or Localhost seccomp because the ephemeralcontainers subresource does not expose the pod-level default."
+          (has(c.securityContext) && has(c.securityContext.seccompProfile)) ?
+            c.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'] :
+            (has(object.spec.securityContext) &&
+             has(object.spec.securityContext.seccompProfile) &&
+             object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost']))
+      message: "Every ephemeral container must use RuntimeDefault or Localhost seccomp, either explicitly or by inheriting the pod-level profile."
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,

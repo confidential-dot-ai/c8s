@@ -48,7 +48,14 @@ MOCK_MEASUREMENT="00000000000000000000000000000000000000000000000000000000000000
 # floor; the test-client image stays out of it so the admission test can
 # drive a deny-then-allow transition through the signed CDS API.
 CURL_IMAGE=curlimages/curl:8.10.1
-WORKLOAD_IMAGE=nginx:1.27-alpine
+WORKLOAD_IMAGE=nginxinc/nginx-unprivileged@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
+
+# Keep live client Pods and the admission regression tests on the same renderer.
+pod_fixture() {
+    local mode="$1" name="$2" ns="$3"
+    shift 3
+    python3 "$SCRIPT_DIR/pod-fixture.py" "$mode" "$name" "$ns" "$CURL_IMAGE" -- "$@"
+}
 
 WORKDIR="$(mktemp -d)"
 PF_PID=""
@@ -150,7 +157,7 @@ done
 # denial is deterministic instead of racing the plugin's pull interval.
 node_exec ctr -n k8s.io images pull "docker.io/$CURL_IMAGE" >/dev/null \
     || fail "could not pull $CURL_IMAGE into the node (registry rate limit?)"
-node_exec ctr -n k8s.io images pull "docker.io/library/$WORKLOAD_IMAGE" >/dev/null \
+node_exec ctr -n k8s.io images pull "docker.io/$WORKLOAD_IMAGE" >/dev/null \
     || fail "could not pull $WORKLOAD_IMAGE into the node (registry rate limit?)"
 # tls-lb's nginx is pulled at install time — after the floor scan — so its
 # chart-pinned digest is pulled by reference and seeded up front; otherwise
@@ -173,7 +180,7 @@ log "Writing the allowlist floor"
 # served allowlist at startup, so anything missing is killed.
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
-grep -q "docker.io/library/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
+grep -Fq "docker.io/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
 python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
 import sys, yaml
 floor = {}
@@ -383,48 +390,18 @@ echo "$SAN" | grep -q "DNS:c8s-vllm.demo.svc" || fail "leaf SAN is not the workl
 pass "issued leaf carries SAN c8s-vllm.demo.svc"
 
 log "Admission rejections"
-cat > "$WORKDIR/bad-label.yaml" <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: bad-label
-  namespace: demo
-  labels:
-    confidential.ai/cw: rogue
-spec:
-  containers:
-    - { name: app, image: nginx:1.27-alpine }
-EOF
+pod_fixture bad-label bad-label demo sleep 3600 > "$WORKDIR/bad-label.yaml"
 OUT="$(kubectl apply -f "$WORKDIR/bad-label.yaml" 2>&1 || true)"
 echo "$OUT" | grep -q "must match" || fail "cw label/annotation mismatch not rejected: $OUT"
 pass "pod with an unmatching cw label rejected at admission"
 
-cat > "$WORKDIR/bad-hostnet.yaml" <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: bad-hostnet
-  namespace: demo
-spec:
-  hostNetwork: true
-  containers:
-    - { name: app, image: nginx:1.27-alpine }
-EOF
+pod_fixture bad-hostnet bad-hostnet demo sleep 3600 > "$WORKDIR/bad-hostnet.yaml"
 OUT="$(kubectl apply -f "$WORKDIR/bad-hostnet.yaml" 2>&1 || true)"
 echo "$OUT" | grep -q "c8s-deny-host-namespaces" || fail "hostNetwork tenant pod not rejected: $OUT"
 pass "hostNetwork tenant pod rejected by the host-namespace policy"
 
 log "Image admission (NRI fail-closed)"
-cat > "$WORKDIR/denied.yaml" <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: denied
-  namespace: demo
-spec:
-  containers:
-    - { name: app, image: curlimages/curl:8.10.1, command: ["sleep", "3600"] }
-EOF
+pod_fixture client denied demo sleep 3600 > "$WORKDIR/denied.yaml"
 # The curl image was never seeded into the floor, so the plugin denies it
 # from the start — no delete, no pull-interval race.
 CURL_DIGEST="$(awk -F'\t' -v ref="docker.io/$CURL_IMAGE" '$2 == ref {print $1; exit}' "$WORKDIR/floor.tsv")"
@@ -459,7 +436,7 @@ pass "signed allowlist write flips a denied pod to Running (plugin pulled the up
 run_pod() {
     local ns="$1" name="$2" cmd="$3" phase
     kubectl delete pod "$name" -n "$ns" --ignore-not-found >/dev/null 2>&1 || true
-    kubectl run "$name" -n "$ns" --restart=Never --image="$CURL_IMAGE" --command -- sh -c "$cmd" >/dev/null
+    pod_fixture client "$name" "$ns" sh -c "$cmd" | kubectl apply -f - >/dev/null
     for _ in $(seq 1 60); do
         phase="$(kubectl get pod "$name" -n "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
         case "$phase" in Succeeded|Failed) break ;; esac
@@ -515,7 +492,7 @@ NODE_IP="$(kubectl get node "$NODE" -o jsonpath='{.status.addresses[?(@.type=="I
 POD_IP="$(kubectl -n demo get pod "$POD" -o jsonpath='{.status.podIP}')"
 [ -n "$NODE_IP" ] && [ -n "$POD_IP" ] || fail "could not resolve node or workload pod IP"
 
-kubectl run it-mesh-client --restart=Never --image="$CURL_IMAGE" --command -- sleep 1200 >/dev/null
+pod_fixture client it-mesh-client default sleep 1200 | kubectl apply -f - >/dev/null
 kubectl wait --for=condition=Ready pod/it-mesh-client --timeout=120s || fail "mesh client pod not Ready"
 CLIENT_IP="$(kubectl get pod it-mesh-client -o jsonpath='{.status.podIP}')"
 await_ipset RATLS-MESH-LOCAL-PODS "$CLIENT_IP"
@@ -545,7 +522,7 @@ pass "cw pod cannot reach an unnamed resolver on UDP/53"
 
 inbound='^ratls_mesh_connections_total.*direction="inbound"'
 base_inbound="$(mesh_metric "$inbound")"
-code="$(kubectl exec it-mesh-client -- curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://$POD_IP:80/" || true)"
+code="$(kubectl exec it-mesh-client -- curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://$POD_IP:8080/" || true)"
 [ "$code" = "200" ] || fail "pod-IP request to the cw workload failed (got $code); the mesh-wrapped path must work"
 await_metric_above "$inbound" "${base_inbound:-0}" "mesh inbound connection counter"
 pass "pod-IP dial to the cw workload is mesh-wrapped (inbound counter moved)"
@@ -563,7 +540,7 @@ spec:
   selector:
     confidential.ai/cw: vllm
   ports:
-    - { port: 80, targetPort: 80 }
+    - { port: 80, targetPort: 8080 }
 EOF
 kubectl apply -f "$WORKDIR/vip-svc.yaml"
 VIP="$(kubectl -n demo get svc it-cw-vip -o jsonpath='{.spec.clusterIP}')"
@@ -600,7 +577,7 @@ esac
 
 # A mesh-excluded namespace (kube-system) is not intercepted on egress; its
 # direct dial to the cw pod IP is left to the node's inbound chains.
-kubectl run it-mesh-excl -n kube-system --restart=Never --image="$CURL_IMAGE" --command -- sleep 600 >/dev/null
+pod_fixture client it-mesh-excl kube-system sleep 600 | kubectl apply -f - >/dev/null
 kubectl wait --for=condition=Ready pod/it-mesh-excl -n kube-system --timeout=120s \
     || fail "excluded-namespace client pod not Ready"
 # This dial crosses the same nat PREROUTING chains as the VIP case, so it has
@@ -611,7 +588,7 @@ kubectl wait --for=condition=Ready pod/it-mesh-excl -n kube-system --timeout=120
 # matching counter instead.
 base_drops_excl="$(mesh_metric "$drops")"
 base_inbound_excl="$(mesh_metric "$inbound")"
-out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://$POD_IP:80/; echo rc=\$?" || true)"
+out="$(kubectl exec -n kube-system it-mesh-excl -- sh -c "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://$POD_IP:8080/; echo rc=\$?" || true)"
 rc="$(echo "$out" | grep -o 'rc=[0-9]*' | cut -d= -f2)"
 case "$rc" in
     28)
@@ -633,23 +610,8 @@ log "tls-lb front door"
 kubectl -n "$NS" exec deploy/c8s-tls-lb -c nginx -- cat /tls/ca.pem > "$WORKDIR/mesh-ca.pem" \
     || fail "could not read the mesh CA from tls-lb"
 kubectl create configmap it-mesh-ca --from-file=ca.pem="$WORKDIR/mesh-ca.pem"
-cat > "$WORKDIR/curl-lb.yaml" <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: it-curl-lb
-spec:
-  restartPolicy: Never
-  containers:
-    - name: curl
-      image: $CURL_IMAGE
-      command: ["curl", "-sS", "--cacert", "/ca/ca.pem", "https://c8s-tls-lb.$NS.svc/healthz"]
-      volumeMounts:
-        - { name: ca, mountPath: /ca }
-  volumes:
-    - name: ca
-      configMap: { name: it-mesh-ca }
-EOF
+pod_fixture front-door it-curl-lb default curl -sS --cacert /ca/ca.pem \
+    "https://c8s-tls-lb.$NS.svc/healthz" > "$WORKDIR/curl-lb.yaml"
 kubectl apply -f "$WORKDIR/curl-lb.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/it-curl-lb --timeout=120s \
     || fail "front-door healthz request failed"
@@ -664,7 +626,7 @@ kubectl -n adopted wait --for=condition=Available deploy/web --timeout=120s \
     --single-node --resolve-digests=false --image-tag="$IMAGE_TAG" \
     --operator-keys "$WORKDIR/operator-pub.pem" \
     --measurements "$MOCK_MEASUREMENT" \
-    --workload-ref web=adopted/deployment/web:80 --upstream web \
+    --workload-ref web=adopted/deployment/web:8080 --upstream web \
     -f "$WORKDIR/values.yaml" --wait || fail "c8s install --workload-ref failed"
 TMPL_ANNOTATION="$(kubectl -n adopted get deploy web -o jsonpath='{.spec.template.metadata.annotations.confidential\.ai/cw}')"
 [ "$TMPL_ANNOTATION" = "web" ] || fail "adopted workload template not stamped (got: $TMPL_ANNOTATION)"
@@ -696,23 +658,8 @@ pass "status mirror reports the adopted workload (attestationSummary 1/1)"
 
 # tls-lb now routes its catch-all to the adopted workload over the mesh.
 kubectl delete pod it-curl-lb 2>/dev/null || true
-cat > "$WORKDIR/curl-lb.yaml" <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: it-curl-lb
-spec:
-  restartPolicy: Never
-  containers:
-    - name: curl
-      image: $CURL_IMAGE
-      command: ["curl", "-sS", "--cacert", "/ca/ca.pem", "https://c8s-tls-lb.$NS.svc/"]
-      volumeMounts:
-        - { name: ca, mountPath: /ca }
-  volumes:
-    - name: ca
-      configMap: { name: it-mesh-ca }
-EOF
+pod_fixture front-door it-curl-lb default curl -sS --cacert /ca/ca.pem \
+    "https://c8s-tls-lb.$NS.svc/" > "$WORKDIR/curl-lb.yaml"
 kubectl apply -f "$WORKDIR/curl-lb.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/it-curl-lb --timeout=120s \
     || fail "front-door request to the adopted workload failed"

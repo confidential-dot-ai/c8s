@@ -575,6 +575,11 @@ splits cleanly:
   volumes are denied. The residual opens only if that policy is disabled without
   an equivalent replacement, or an untrusted workload is placed in one of its
   trusted namespace exemptions.
+  On Pod UPDATE after a chart image upgrade, the image check also accepts an
+  unchanged whole sidecar from the prior Pod, provided that Pod already had the
+  exact configured claims volume and matching injected/CW identity. This permits
+  metadata and finalizer updates without accepting newly supplied old-image
+  sidecars; every other admission control still applies.
   (One nuance: the mount *source*
   `WorkloadClaimsHostDir` is operator-supplied, so a malicious operator could
   point it at a rogue dir — but the operator/webhook runs inside the node-CVM

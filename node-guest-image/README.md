@@ -117,6 +117,13 @@ the webhook-owned c8s sidecars. Application and ephemeral containers cannot
 mount it. Restricted warning and audit labels remain enabled, so the expected
 hostPath exception and any drift stay visible.
 
+After chart image upgrades, unchanged existing sidecars remain eligible for
+the mount exception on Pod UPDATE only when the prior Pod already had the exact
+configured claims volume and matching injected/CW identity. All other controls
+still apply. Ephemeral containers may inherit pod-level `runAsNonRoot` and
+seccomp settings when their own settings are absent; explicit unsafe overrides
+are denied.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via

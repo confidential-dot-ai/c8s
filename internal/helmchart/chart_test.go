@@ -633,9 +633,8 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 
 // Tenant namespaces need the Restricted Pod Security contract with one narrow
 // exception for the webhook-owned inventory socket hostPath. Pod creation and
-// pods/ephemeralcontainers use different schemas, so each shape needs its own
-// policy and binding. In particular, the ephemeral policy must not mention
-// pod-only fields or failurePolicy: Fail would reject every kubectl debug.
+// pods/ephemeralcontainers both admit full Pods, but the ephemeral policy checks
+// only the debugger containers and their inherited pod security defaults.
 func TestChartHostSecurityPoliciesSplitPodAndEphemeral(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "hostNamespacePolicy.exemptNamespaces={tenant-platform}")
 	if err != nil {
@@ -660,7 +659,7 @@ func TestChartHostSecurityPoliciesSplitPodAndEphemeral(t *testing.T) {
 	if got := resources(podPolicy); !slices.Contains(got, "pods") {
 		t.Errorf("pod security policy resources = %v, want pods", got)
 	} else if slices.Contains(got, "pods/ephemeralcontainers") {
-		t.Errorf("pod security policy must not match the differently shaped ephemeral subresource: %v", got)
+		t.Errorf("pod security policy must not match the separately validated ephemeral subresource: %v", got)
 	}
 	if got := resources(ephemeralPolicy); !slices.Contains(got, "pods/ephemeralcontainers") {
 		t.Errorf("ephemeral security policy resources = %v, want pods/ephemeralcontainers", got)
@@ -686,17 +685,16 @@ func TestChartHostSecurityPoliciesSplitPodAndEphemeral(t *testing.T) {
 		if !strings.Contains(v.Expression, "object.spec.ephemeralContainers") {
 			t.Errorf("ephemeral security expression does not inspect ephemeralContainers: %s", v.Expression)
 		}
-		for _, podOnly := range []string{
+		for _, preservedField := range []string{
 			"object.spec.containers",
 			"object.spec.initContainers",
 			"object.spec.volumes",
-			"object.spec.securityContext",
 			"object.spec.hostNetwork",
 			"object.spec.hostPID",
 			"object.spec.hostIPC",
 		} {
-			if strings.Contains(v.Expression, podOnly) {
-				t.Errorf("ephemeral security expression references pod-only field %s: %s", podOnly, v.Expression)
+			if strings.Contains(v.Expression, preservedField) {
+				t.Errorf("ephemeral security expression revalidates unrelated preserved field %s: %s", preservedField, v.Expression)
 			}
 		}
 	}
