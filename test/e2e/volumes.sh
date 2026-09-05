@@ -68,8 +68,10 @@ writer_script="until mountpoint -q /run/c8s/volumes/$MUT; do sleep 1; done; prin
 PF_PODS=""
 cleanup() {
   for p in $PF_PODS ${PF_CDS:-}; do kill "$p" 2>/dev/null || true; done
-  kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  al workload delete "$READER" "$WRITER" >/dev/null 2>&1 || true
+  if cw_namespace_owned "$ns"; then
+    kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    al workload delete "$READER" "$WRITER" >/dev/null 2>&1 || true
+  fi
   return 0
 }
 trap cleanup EXIT

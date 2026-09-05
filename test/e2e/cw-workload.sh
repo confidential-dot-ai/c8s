@@ -19,7 +19,9 @@ deploy=demo-nginx
 cleanup() {
   local rc=$?
   [ "$rc" -eq 0 ] || return 0
-  kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if cw_namespace_owned "$ns"; then
+    kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 cw_namespace "$ns"

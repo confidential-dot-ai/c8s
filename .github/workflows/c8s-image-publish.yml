@@ -121,6 +121,21 @@ jobs:
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
 
+  # Exact-image acceptance consumes this run's immutable publication evidence,
+  # never the independently maintained staged-image ConfigMap or root PVC.
+  verify-tdx-image:
+    name: Verify the published TDX image
+    needs: [release-context, build-and-push]
+    if: >-
+      needs.release-context.result == 'success' &&
+      needs.build-and-push.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/tdx-metal-e2e.yml
+    with:
+      image_acceptance_artifact: node-image-acceptance-rke2-tdx-${{ github.run_attempt }}
+
   # Wait for both TDX/SNP matrix legs, then preflight every exact alias before
   # creating any of them. Registry publication is not transactional, so a
   # network failure may leave a subset; a rerun repairs missing aliases and

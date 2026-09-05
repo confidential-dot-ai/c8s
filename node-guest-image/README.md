@@ -108,6 +108,84 @@ policies (host namespaces, hostPort, the mesh UID) are the controls, and the
 sample workload in `samples/` is restricted-compliant on its own so it can
 move back under the floor when the socket no longer needs a hostPath.
 
+Below admission sits AppArmor, the only enabled major LSM. Both kernel
+fragments pin the complete `CONFIG_LSM` order; the invariant gate checks
+them and the committed snapshot, and `build` checks the actual resolved
+kernel `.config`, including cache hits. Before either RKE2 role starts,
+`apparmor-enforce.service` requires an active AppArmor LSM, an executable
+parser, and a disabled, inactive `apparmor.service`. It loads a temporary
+profile, verifies its enforce-mode label and a denied read against a
+successful unconfined control, then removes the profile. Failure blocks
+RKE2. The package's stock host profiles are not loaded.
+
+Containerd selects `cri-containerd.apparmor.d` for non-privileged containers
+with omitted or explicit RuntimeDefault AppArmor settings. It denies mounts
+and selected `/proc` and `/sys` writes, but permits shared-memory sysctls
+under `/proc/sys/kernel/shm*` and access to `/sys/fs/cgroup/**`. It also
+permits ptrace between processes using the same profile, which all
+RuntimeDefault containers share. PID namespaces, capabilities, DAC, Yama,
+seccomp and read-only mounts remain necessary isolation layers. Restricted
+PodSecurity rejects `Unconfined` but allows `Localhost`, which names an
+already loaded profile; no stock host profiles or boot probe profile remain
+available for tenants to select.
+
+From the repository root, run the configuration and boot regression tests
+with Docker available, then the real parser/kernel probe on a Docker host
+with AppArmor. Set `CONFOS_RELEASE` to the pinned confos base release
+(currently Resolute); CI reads it from that checkout:
+
+```sh
+CONFOS_RELEASE=resolute make test-node-guest-image-apparmor
+CONFOS_RELEASE=resolute bash node-guest-image/tests/apparmor-kernel-test.sh
+```
+
+The fault-injection harness copies the production script and `/bin/sh`
+byte-for-byte into a private chroot, placing fixtures at their actual
+absolute paths. It does not rewrite the script or mount host filesystems.
+The separate real-kernel probe uses Resolute userspace and the Docker host's
+kernel; neither test boots the node image. To verify containerd labels, mount
+denial/control and Unconfined admission rejection on the actual image,
+point `KUBECONFIG` at the operator credentials for a disposable single-node
+c8s cluster and run `make test-node-guest-image-apparmor-runtime` (requires
+`kubectl` and `jq`). This creates and cleans up a test namespace and a
+`kube-system` pod with `SYS_ADMIN`.
+
+Automatic main-push image publication runs a separate `verify-tdx-image`
+job after the build finishes. It consumes the same run and attempt's
+immutable evidence: the source SHA, CDI and ORAS digests, and the published
+manifest. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must match the fresh
+build; a differing nonmeasured build timestamp is not a mismatch. The
+published manifest is passed unchanged to `get-kubeconfig` for attestation.
+Tests are checked out at the build SHA. Before allocating the launcher,
+the reusable workflow independently requires a successful same-repository
+`main` push and rejects a c8s-ref override in exact-image mode. A read-only
+hosted preflight fetches trusted `main` history and verifies that the full
+build SHA is an ancestor before handing it to the launcher. It executes no
+code from the requested build. Its guarded build checkout is separate from
+the staged/manual checkout. Run the real-Git provenance regression tests
+with `go test ./test/workflows`.
+
+That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
+A restricted scheduling pod selects a TDX node before CDI import starts;
+the pod has no service-account token or disk mount. Import has a 20-minute
+deadline, and cleanup checks ownership of the temporary pod and PVC. This
+requires working CDI, enough local disk space, and the launcher's existing
+namespace-scoped Pod/PVC permissions; no shared image ConfigMap, root PVC,
+or cluster-wide RBAC is changed. The hardware path must still be exercised
+on the TDX runner; the local evidence/lifecycle fixtures are run with:
+
+```sh
+bash .github/scripts/tests/test-tdx-image-acceptance.sh
+```
+
+The ordinary `confidential-e2e` TDX lane continues testing the pre-staged
+stack; it does not claim to validate the newly built image and does not run
+the new-image AppArmor gate. Exact-image acceptance is post-publication
+validation, not a gate on stable-alias promotion. Manual, development and
+PR reproducibility builds do not invoke it. Attempt-bound evidence means
+rerunning the full publication workflow, including the builder, if the
+current attempt has no artifact; there is no fallback to older evidence.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via

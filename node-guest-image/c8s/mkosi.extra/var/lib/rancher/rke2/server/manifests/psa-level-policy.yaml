@@ -1,7 +1,7 @@
 # Keeps the restricted PodSecurity floor from psa-config.yaml an invariant:
 # PodSecurity admission reads its level from namespace labels, so whoever can
 # label a namespace could hand its pods `privileged`, or pin `enforce-version`
-# to an old standard that lacks the seccomp, capability and non-root checks.
+# to an older, weaker standard (for example, without required seccomp).
 # A namespace may carry an `enforce` label other than `restricted`, or an
 # `enforce-version` other than `latest`, only when the caller passes an RBAC
 # check for a virtual resource (`podsecurityexemptions.confidential.ai`, verb

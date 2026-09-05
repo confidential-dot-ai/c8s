@@ -578,6 +578,64 @@ jobs:
             test "$(oras resolve "$IMAGE:$commit_tag")" = "$source_digest"
           done
 
+      - name: Capture exact TDX image acceptance evidence
+        if: >-
+          inputs.gate != true && inputs.dev != true && inputs.c8s_ref == '' &&
+          matrix.platform == 'tdx' && github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C c8s rev-parse HEAD)" = "$HEAD_SHA"
+          short="${HEAD_SHA:0:7}"
+          cdi_digest=$(oras resolve "$IMAGE:$VARIANT-cdi-$short")
+          artifact_digest=$(oras resolve "$IMAGE:$VARIANT-$short")
+          evidence="$RUNNER_TEMP/tdx-image-acceptance"
+          mkdir -p "$evidence"
+          # An unchanged rootfs is not enough: compare the complete disk, UKI
+          # and TDX tuple. BuildConfig.timestamp is not measured and changes
+          # on rebuilds, so retain the actual published manifest as evidence.
+          published_sha=$(oras manifest fetch "$IMAGE@$artifact_digest" | jq -er '
+            [.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json")]
+            | if length == 1 then .[0].digest else error("expected one manifest.json layer") end')
+          [[ "$published_sha" =~ ^sha256:[0-9a-f]{64}$ ]]
+          oras blob fetch "$IMAGE@$published_sha" --output "$evidence/manifest.json"
+          jq -e -s '
+            map({disk: .outputs.disk_image.sha256, uki: .outputs.uki.sha256,
+              mrtd: .tdx.mrtd, rtmr1: .tdx.rtmr1, rtmr2: .tdx.rtmr2}) |
+            .[0] == .[1] and
+            (.[0] | [.disk, .uki] | all(.[]; type == "string" and test("^[0-9a-f]{64}$"))) and
+            (.[0] | [.mrtd, .rtmr1, .rtmr2] | all(.[]; type == "string" and test("^[0-9a-f]{96}$")))
+          ' "confidential-os-builder/output/$VARIANT/manifest.json" "$evidence/manifest.json" >/dev/null
+          manifest_sha=$(sha256sum "$evidence/manifest.json" | cut -d ' ' -f1)
+          test "$published_sha" = "sha256:$manifest_sha"
+          jq -n --arg source "$HEAD_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg c8s_ref "$short" --arg image "$IMAGE@$cdi_digest" \
+            --arg artifact "$IMAGE@$artifact_digest" --arg manifest "$manifest_sha" \
+            '{schema: 1, source_sha: $source, run_id: $run, build_attempt: $attempt, c8s_ref: $c8s_ref,
+              variant: "rke2-tdx", image: $image, artifact: $artifact,
+              manifest_sha256: $manifest}' > "$evidence/acceptance.json"
+          bash c8s/.github/scripts/tdx-image-acceptance.sh validate \
+            "$evidence" "$HEAD_SHA" "$GITHUB_RUN_ID" >/dev/null
+
+      - name: Upload exact TDX image acceptance evidence
+        if: >-
+          inputs.gate != true && inputs.dev != true && inputs.c8s_ref == '' &&
+          matrix.platform == 'tdx' && github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-image-acceptance-rke2-tdx-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tdx-image-acceptance/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Summary
         env:
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}

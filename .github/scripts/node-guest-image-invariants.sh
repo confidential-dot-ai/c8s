@@ -95,11 +95,17 @@ if grep -q -- '--cloud-init' "$ngi/build"; then
   echo "::error::$ngi/build bakes a cloud-init seed; the node image disables cloud-init instead"
   exit 1
 fi
-# tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
-# tripwire are a c8s-local patch until the source takes the same
-# edit — a re-vendor would silently delete them.
+# tdx-metal-e2e.yml is vendored from confidential-ci; the cidata bait/tripwire
+# and exact-image AppArmor acceptance are c8s-local patches until the source
+# takes the same edits. Preserve evidence validation and private import too:
+# a staged-image run is not acceptance coverage for the just-published build.
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
-for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch'; do
+for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
+              'bash node-guest-image/tests/apparmor-runtime-test.sh' \
+              'image_acceptance_artifact:' \
+              'import the exact published image into a private root PVC' \
+              'bash .github/scripts/tdx-image-acceptance.sh validate' \
+              'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
   if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
     echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
     exit 1
@@ -152,5 +158,16 @@ if ! grep -q '^    - Deny$' "$vap"; then
   echo "::error::$vap binding must deny, not warn or audit"
   exit 1
 fi
+
+# Check requested and resolved settings, including CONFIG_LSM and duplicates.
+# The build uses the same checker on its .config; apparmor-enforce.service
+# separately gates RKE2 on the booted LSM/parser.
+for config in c8s.config c8s-dev.config config-x86_64-c8s.snapshot; do
+  bash "$ngi/check-apparmor-config.sh" "$ngi/kernel/$config"
+done
+grep -qE '^\s*apparmor\s*$' "$ngi/c8s/mkosi.conf" \
+  || { echo "::error::$ngi/c8s/mkosi.conf must ship the apparmor package (apparmor_parser)"; exit 1; }
+grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset" \
+  || { echo "::error::50-rke2.preset must disable apparmor.service (only the parser is wanted)"; exit 1; }
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"

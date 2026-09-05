@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
+# VENDORED FILE: preserve the c8s-local exceptions documented below.
 # ═══════════════════════════════════════════════════════════════════════════
 # SOURCE OF TRUTH:
 #   confidential-dot-ai/confidential-ci  .github/workflows/tdx-metal-e2e.yml
@@ -15,11 +15,11 @@
 # fell 121 lines behind its confidential-ci original and lost an entire platform
 # arm. Nothing detected it, because neither copy referenced the other.
 #
-# THE RULE: edit the source of truth, then copy the WHOLE file across unchanged.
-# Both copies carry both triggers (workflow_call and workflow_dispatch) precisely
-# so that no per-repo edit is ever needed and a plain checksum can prove they
-# match. If you find yourself wanting to change only one copy, that is the signal
-# to stop vendoring and solve it properly instead.
+# Normally edit the source of truth, then copy the whole file across. This copy
+# carries c8s-local cidata bait/tripwire, scratch-disk wiring and AppArmor runtime
+# checks until the source adopts them. Preserve those exceptions on re-vendor;
+# node-guest-image-invariants.sh guards their markers. Both copies carry
+# workflow_call and workflow_dispatch triggers.
 #
 # ═══════════════════════════════════════════════════════════════════════════
 # c8s on TDX BARE METAL: the product lane
@@ -44,15 +44,23 @@
 # init. Consequence worth keeping: no secret ever transits a loggable channel
 # here, so this lane is free of the console PEM-leak gap the SNP lane carries.
 #
-# DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+# Called after merge via confidential-e2e/e2e-c8s, or dispatched manually, for
+# staged-stack regression. c8s-image-publish also calls exact-image acceptance
+# after publication, with same-run digest evidence and a private root PVC.
+# Neither mode provides PR-image boot coverage.
 name: tdx-metal-e2e
 
 on:
   # workflow_call so the vendored copy can be invoked as a job by c8s's
   # e2e-c8s.yml. workflow_dispatch so either copy stays runnable by hand.
-  # Both copies carry both, so the two files remain byte-identical.
+  # Preserve both triggers when carrying the c8s-local exceptions above.
   workflow_call:
     inputs:
+      image_acceptance_artifact:
+        description: 'Same-run production TDX evidence artifact. Empty retains staged-stack regression mode.'
+        required: false
+        type: string
+        default: ''
       c8s_ref:
         description: 'c8s ref to test. Defaults to the ref paired with the node image.'
         required: false
@@ -77,6 +85,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # Same-run acceptance artifact and safe orphan-run status checks.
 
 concurrency:
   # One at a time: the lane boots a CVM off a shared RWO rootdisk PVC.
@@ -89,7 +98,57 @@ env:
   VM: c8s-tdx-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+  source:
+    # Exact-image mode executes the publisher's source commit on a launcher
+    # with cluster access. Enforce the trust boundary here, not just in the
+    # current caller, before allocating that runner. Staged mode is unchanged.
+    # A hosted preflight proves Git ancestry without executing build-source code.
+    if: >-
+      inputs.image_acceptance_artifact == '' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       inputs.c8s_ref == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Fetch trusted main history
+        if: inputs.image_acceptance_artifact != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - name: Verify source provenance
+        id: source
+        env:
+          EXACT_IMAGE: ${{ inputs.image_acceptance_artifact != '' }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EXACT_IMAGE" in
+            true) ;;
+            false) SOURCE_SHA=$WORKFLOW_SHA ;;
+            *) exit 1 ;;
+          esac
+          [ "${#SOURCE_SHA}" -eq 40 ]
+          case "$SOURCE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+          if [ "$EXACT_IMAGE" = true ]; then
+            git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          fi
+          printf 'sha=%s\n' "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
   e2e:
+    # Default success gating prevents runner allocation if provenance fails.
+    needs: source
     # Named to match the SNP primitive's leaf, `cvm (<platform>/<flavor>)`,
     # so both lanes read the same way in the run tree.
     name: cvm (tdx-metal/rke2-node)
@@ -97,11 +156,50 @@ jobs:
     # confai-images (baremetal/kubevirt-rbac.yaml); kubectl uses the in-cluster
     # token, so there is no kubeconfig to manage for the OUTER cluster.
     runs-on: cvm-launcher-tdx
-    # CDI import is pre-staged, so: boot ~1m + guest first boot ~3m + c8s CLI
-    # build ~3m + install/converge ~3m + asserts. Headroom for a cold go cache.
-    timeout-minutes: 45
+    # Exact-image mode also imports a fresh private root disk (bounded to 20m).
+    timeout-minutes: 65
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out staged-regression workflow code
+        if: inputs.image_acceptance_artifact == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Check out the trusted published build
+        if: >-
+          inputs.image_acceptance_artifact != '' &&
+          inputs.c8s_ref == '' &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Download this publication's image acceptance evidence
+        if: inputs.image_acceptance_artifact != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.image_acceptance_artifact }}
+          path: ${{ runner.temp }}/tdx-image-acceptance
+
+      - name: Validate the exact image build and workflow identity
+        if: inputs.image_acceptance_artifact != ''
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          C8S_REF_OVERRIDE: ${{ inputs.c8s_ref }}
+        run: |
+          set -euo pipefail
+          test -z "$C8S_REF_OVERRIDE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          bash .github/scripts/tdx-image-acceptance.sh validate \
+            "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          cp "$RUNNER_TEMP/tdx-image-acceptance/manifest.json" /tmp/image-manifest.json
+          echo "rootPvc=$VM-root" >> "$GITHUB_ENV"
 
       - name: tools (kubectl, go, crane, helm)
         run: |
@@ -192,7 +290,51 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: reap abandoned exact-image imports
+        if: inputs.image_acceptance_artifact != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/tdx-image-acceptance.sh reap "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+
+      - name: import the exact published image into a private root PVC
+        if: inputs.image_acceptance_artifact != ''
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # Preflight namespace-scoped existing authority; no RBAC mutation.
+          for resource in persistentvolumeclaims pods; do
+            for verb in get create delete; do
+              test "$(kubectl auth can-i "$verb" "$resource" -n "$NS")" = yes
+            done
+          done
+          test "$(kubectl auth can-i patch persistentvolumeclaims -n "$NS")" = yes
+          # Verify the evidence still names the published manifest by digest.
+          artifact=$(jq -r .artifact "$RUNNER_TEMP/tdx-image-acceptance/acceptance.json")
+          expected=$(jq -r .manifest_sha256 "$RUNNER_TEMP/tdx-image-acceptance/acceptance.json")
+          published=$(crane manifest "$artifact" | jq -er '
+            [.layers[] | select(.annotations["org.opencontainers.image.title"] == "manifest.json")]
+            | if length == 1 then .[0].digest else error("expected one manifest.json layer") end')
+          test "$published" = "sha256:$expected"
+          # Create, not apply: never adopt an existing disk with the same name.
+          bash .github/scripts/tdx-image-acceptance.sh pvc \
+            "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" \
+            "$VM" "$NS" "$GITHUB_REPOSITORY" | kubectl create -f -
+          # A namespace-scoped, restricted consumer selects a TDX node for
+          # local-path storage. It has no volumeMount and cannot read the disk.
+          # Only start CDI after binding, so its importer cannot select a
+          # different node. No cluster-scoped node-list authority is needed.
+          bash .github/scripts/tdx-image-acceptance.sh binder \
+            "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" | kubectl create -f -
+          kubectl --request-timeout=130s -n "$NS" wait --for=condition=PodScheduled "pod/$VM-binder" --timeout=120s
+          kubectl --request-timeout=130s -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$VM-root" --timeout=120s
+          bash .github/scripts/tdx-image-acceptance.sh start-import \
+            "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$VM" "$NS" "$GITHUB_REPOSITORY"
+          bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+          bash .github/scripts/tdx-image-acceptance.sh cleanup-binder "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+
       - name: resolve image refs + the paired c8s ref
+        if: inputs.image_acceptance_artifact == ''
         run: |
           set -euo pipefail
           for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef; do
@@ -221,7 +363,7 @@ jobs:
         # Advisory: an operator may deliberately pair a newer CLI with an older
         # image, and only the baked floor can say whether that is denied.
         continue-on-error: true
-        if: inputs.c8s_ref == ''
+        if: inputs.image_acceptance_artifact == '' && inputs.c8s_ref == ''
         run: |
           set -euo pipefail
           repo="${image%%@*}"; repo="${repo%%:*}"
@@ -447,7 +589,8 @@ jobs:
           # is passed explicitly at install rather than trusting build metadata.
           c8s --version || true
 
-      - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
+      - name: resolve the staged image's published manifest
+        if: inputs.image_acceptance_artifact == ''
         run: |
           set -euo pipefail
           # Pull the manifest the image build published rather than writing
@@ -504,6 +647,10 @@ jobs:
           # nothing to pin the gate to.
           [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the oras tag published beside the pinned image"; exit 1; }
           echo "manifest from $oras_ref (MRTD $got_mrtd)"
+
+      - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
+        run: |
+          set -euo pipefail
           c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
@@ -513,6 +660,14 @@ jobs:
 
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
+
+      - name: assert AppArmor runtime confinement and admission
+        if: inputs.image_acceptance_artifact != ''
+        # c8s-local image invariant, alongside the cidata tripwire above.
+        # Keep on re-vendor; the source workflow does not ship this script.
+        env:
+          KUBECONFIG: /tmp/guest.kubeconfig
+        run: bash node-guest-image/tests/apparmor-runtime-test.sh
 
       - name: install the c8s bundle under test
         run: |
@@ -560,6 +715,7 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| image | \`${image:-?}\` |"
+            echo "| coverage | ${{ inputs.image_acceptance_artifact != '' && 'exact published image' || 'staged stack regression' }} |"
             echo "| rootPvc | \`${rootPvc:-?}\` |"
             echo "| c8s ref | \`${c8sRef:-?}\` |"
             echo "| MRTD | \`${mrtd:0:32}...\` |"
@@ -568,9 +724,20 @@ jobs:
 
       - name: teardown
         if: always() && inputs.keep_cvm != true
+        env:
+          EXACT_IMAGE: ${{ inputs.image_acceptance_artifact != '' }}
         run: |
           set +e
-          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s
-          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found
-          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false
-          exit 0
+          cleanup_failed=0
+          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s || cleanup_failed=1
+          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found || cleanup_failed=1
+          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false || cleanup_failed=1
+          # The helper ignores absent disks and refuses anything not owned by
+          # this run, including the shared staged root PVC.
+          if [ "$EXACT_IMAGE" = true ]; then
+            bash .github/scripts/tdx-image-acceptance.sh cleanup "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" || cleanup_failed=1
+          fi
+          if [ "$cleanup_failed" != 0 ]; then
+            echo "::error::TDX cleanup incomplete; owned resources may need orphan reaping"
+          fi
+          exit "$cleanup_failed"

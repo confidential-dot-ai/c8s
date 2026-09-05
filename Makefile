@@ -152,6 +152,18 @@ test-node-guest-image-gpu-cc:
 test-node-guest-image-scratch:
 	./node-guest-image/tests/scratch-enforce-test.sh
 
+# AppArmor configuration and byte-exact boot-gate regression tests.
+# Needs Docker and CONFOS_RELEASE from the pinned confos base configuration.
+.PHONY: test-node-guest-image-apparmor test-node-guest-image-apparmor-runtime
+test-node-guest-image-apparmor:
+	bash test/e2e/lib-test.sh
+	bash node-guest-image/tests/apparmor-config-test.sh
+	bash node-guest-image/tests/apparmor-enforce-test.sh
+
+# Disposable single-node c8s image and its operator kubeconfig.
+test-node-guest-image-apparmor-runtime:
+	bash node-guest-image/tests/apparmor-runtime-test.sh
+
 # Role-gated unit wiring under real systemd in a privileged container.
 # Needs only docker.
 test-node-guest-image-role-systemd:
