@@ -4220,7 +4220,7 @@ CONFIG_INTEGRITY_AUDIT=y
 # CONFIG_EVM is not set
 CONFIG_DEFAULT_SECURITY_APPARMOR=y
 # CONFIG_DEFAULT_SECURITY_DAC is not set
-CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf"
+CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,apparmor,ipe,bpf"
 
 #
 # Kernel hardening options

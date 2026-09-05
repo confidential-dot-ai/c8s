@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
+# VENDORED FILE: preserve the c8s-local exceptions documented below.
 # ═══════════════════════════════════════════════════════════════════════════
 # SOURCE OF TRUTH:
 #   confidential-dot-ai/confidential-ci  .github/workflows/tdx-metal-e2e.yml
@@ -15,11 +15,11 @@
 # fell 121 lines behind its confidential-ci original and lost an entire platform
 # arm. Nothing detected it, because neither copy referenced the other.
 #
-# THE RULE: edit the source of truth, then copy the WHOLE file across unchanged.
-# Both copies carry both triggers (workflow_call and workflow_dispatch) precisely
-# so that no per-repo edit is ever needed and a plain checksum can prove they
-# match. If you find yourself wanting to change only one copy, that is the signal
-# to stop vendoring and solve it properly instead.
+# Normally edit the source of truth, then copy the whole file across. This copy
+# carries c8s-local cidata bait/tripwire, scratch-disk wiring and AppArmor runtime
+# checks until the source adopts them. Preserve those exceptions on re-vendor;
+# node-guest-image-invariants.sh guards their markers. Both copies carry
+# workflow_call and workflow_dispatch triggers.
 #
 # ═══════════════════════════════════════════════════════════════════════════
 # c8s on TDX BARE METAL: the product lane
@@ -44,13 +44,14 @@
 # init. Consequence worth keeping: no secret ever transits a loggable channel
 # here, so this lane is free of the console PEM-leak gap the SNP lane carries.
 #
-# DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+# Called after merge via confidential-e2e/e2e-c8s, or dispatched manually.
+# The booted image is published already; this is not PR-image boot coverage.
 name: tdx-metal-e2e
 
 on:
   # workflow_call so the vendored copy can be invoked as a job by c8s's
   # e2e-c8s.yml. workflow_dispatch so either copy stays runnable by hand.
-  # Both copies carry both, so the two files remain byte-identical.
+  # Preserve both triggers when carrying the c8s-local exceptions above.
   workflow_call:
     inputs:
       c8s_ref:
@@ -513,6 +514,13 @@ jobs:
 
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
+
+      - name: assert AppArmor runtime confinement and admission
+        # c8s-local image invariant, alongside the cidata tripwire above.
+        # Keep on re-vendor; the source workflow does not ship this script.
+        env:
+          KUBECONFIG: /tmp/guest.kubeconfig
+        run: bash node-guest-image/tests/apparmor-runtime-test.sh
 
       - name: install the c8s bundle under test
         run: |

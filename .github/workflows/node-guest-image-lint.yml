@@ -162,6 +162,27 @@ jobs:
       - name: Run the scratch-enforce unit test
         run: make test-node-guest-image-scratch
 
+  apparmor:
+    name: AppArmor config and boot gate
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run AppArmor regression tests
+        run: make test-node-guest-image-apparmor
+
+      - name: Check AppArmor scripts
+        run: |
+          shellcheck -x -P SCRIPTDIR node-guest-image/check-apparmor-config.sh \
+            node-guest-image/c8s/mkosi.extra/usr/local/bin/apparmor-enforce.sh \
+            node-guest-image/tests/apparmor-{config,enforce,kernel,runtime}-test.sh
+
+      - name: Exercise the real AppArmor kernel and parser
+        env:
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: bash node-guest-image/tests/apparmor-kernel-test.sh
+
   rke2-role:
     name: rke2-role dispatch (script)
     runs-on: ubuntu-latest

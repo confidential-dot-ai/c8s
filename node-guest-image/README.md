@@ -100,16 +100,43 @@ namespace-scoped credentials, never cluster-admin, and the launch
 measurement vouches for the floor their pods run under. cluster-admin can
 delete the policy, and RKE2 does not recreate deleted AddOn objects.
 
-Below admission sits AppArmor. The kernel fragment builds it as the
-exclusive LSM (SELinux, a defconfig default in the confos base, is turned
-off to make room), and containerd applies its default profile
-(`cri-containerd.apparmor.d`) to every non-privileged container: no
-mounts, no writes under `/proc/sys` or `/sys`, no ptrace across containers.
-Restricted PodSecurity refuses `Unconfined`, so a tenant cannot opt out,
-and a pod that somehow gains `CAP_SYS_ADMIN` still meets a mandatory policy
-before the read-only root. The `apparmor` package is on the image only for
-`apparmor_parser`; its unit is disabled so the package's stock host
-profiles are never loaded.
+Below admission sits AppArmor, the only enabled major LSM. Both kernel
+fragments pin the complete `CONFIG_LSM` order; the invariant gate checks
+them and the committed snapshot, and `build` checks the actual resolved
+kernel `.config`, including cache hits. Before either RKE2 role starts,
+`apparmor-enforce.service` requires an active AppArmor LSM, an executable
+parser, and a disabled, inactive `apparmor.service`. It loads a temporary
+profile, verifies its enforce-mode label and a denied read against a
+successful unconfined control, then removes the profile. Failure blocks
+RKE2. The package's stock host profiles are not loaded.
+
+Containerd selects `cri-containerd.apparmor.d` for non-privileged containers
+with omitted or explicit RuntimeDefault AppArmor settings. It denies mounts
+and selected `/proc` and `/sys` writes, but permits shared-memory sysctls
+under `/proc/sys/kernel/shm*` and access to `/sys/fs/cgroup/**`. It also
+permits ptrace between processes using the same profile, which all
+RuntimeDefault containers share. PID namespaces, capabilities, DAC, Yama,
+seccomp and read-only mounts remain necessary isolation layers. Restricted
+PodSecurity rejects `Unconfined` but allows `Localhost`, which names an
+already loaded profile; no stock host profiles or boot probe profile remain
+available for tenants to select.
+
+From the repository root, run the root-free configuration/boot regression
+tests, then the real parser/kernel probe on a Docker host with AppArmor:
+
+```sh
+make test-node-guest-image-apparmor
+CONFOS_RELEASE=resolute bash node-guest-image/tests/apparmor-kernel-test.sh
+```
+
+The Docker probe uses Resolute userspace and the Docker host's kernel; it
+does not boot the node image. To verify containerd labels, mount
+denial/control and Unconfined admission rejection on the actual image,
+point `KUBECONFIG` at the operator credentials for a disposable single-node
+c8s cluster and run `make test-node-guest-image-apparmor-runtime` (requires
+`kubectl` and `jq`). This creates and cleans up a test namespace and a
+`kube-system` pod with `SYS_ADMIN`. The TDX E2E lane runs that check against
+the published image after merge or on dispatch; it does not boot PR images.
 
 Migration state (see [#264] for the full plan):
 
