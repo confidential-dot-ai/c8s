@@ -18,7 +18,9 @@ spec:
       # namespace, `default` included. nginx-unprivileged runs non-root and
       # listens on 8080. In node mode the injected sidecar still mounts the
       # node's inventory socket as a hostPath, so deploy into a namespace the
-      # operator has labelled privileged (docs/DEMO.md).
+      # operator has labelled privileged. The chart's tenant-security VAP
+      # restores Restricted semantics there and admits only that exact
+      # read-only sidecar mount (docs/DEMO.md).
       securityContext:
         runAsNonRoot: true
         seccompProfile:

@@ -245,8 +245,10 @@ sync):
   would map into the guest) plus `kube-system`, `kube-public`,
   `kube-node-lease`, and `webhook.extraExcluded`.
 - **host-namespace pods** (`hostNetwork`/`hostPID`/`hostIPC`) — a VM cannot
-  share the host's namespaces. This is how `kata-deploy` (which sets
-  `hostPID`+`hostNetwork`) is left as runc.
+  share the host's namespaces, so the Kata layer leaves them as runc. The
+  separate tenant-security VAP rejects this shape outside trusted platform
+  namespaces; this exemption is what lets `kata-deploy` (which sets
+  `hostPID`+`hostNetwork`) run in the excluded release namespace.
 
 > **Why CDS doesn't use `cw` for its runtimeClass.** It must be a
 > CVM, but it must *not* get a get-cert sidecar: that sidecar dials CDS,

@@ -7,8 +7,11 @@
 # other namespace, `default` included, inherits restricted. The baked
 # ../../../var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml stops
 # a namespace label from lowering that level unless the caller may grant
-# PodSecurity exemptions. Namespaces hosting confidential workloads need
-# that grant in node mode (the injected sidecar mounts a hostPath); see
+# PodSecurity exemptions. Namespaces hosting confidential workloads need that
+# grant in node mode because the injected sidecar mounts a hostPath. The chart
+# then restores Restricted semantics with a fail-closed VAP whose sole volume
+# exception is that exact read-only mount on webhook-owned sidecars; the
+# privileged label is compatibility plumbing, not workload privilege. See
 # node-guest-image/README.md, "Workload isolation".
 apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration

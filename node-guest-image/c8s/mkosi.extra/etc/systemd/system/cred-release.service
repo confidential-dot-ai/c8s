@@ -33,11 +33,12 @@ Type=simple
 # Waits bounded (10 min) rather than failing fast: on a slow first boot the
 # CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart
 # would exhaust StartLimitBurst in under a minute and give up until reboot.
-# Also waits for the c8s-node-operators ClusterRoleBinding (the baked
-# cred-release-rbac AddOn): the issued group has no authority until RKE2's
-# deploy controller has applied it, and nothing on the operator side retries
-# a 403, so do not release a credential the cluster would still refuse.
-ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -r /var/lib/rancher/rke2/server/tls/client-ca.key ] && /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml --cache-dir /run/cred-release/kubecache get clusterrolebinding c8s-node-operators >/dev/null 2>&1 && exit 0; sleep 5; done; exit 1'
+# Also waits for the c8s-node-operators ClusterRoleBinding and for the baked
+# PodSecurity AddOn, then proves the latter's allow and deny paths with
+# server-side dry-runs. RKE2 reconciles AddOns after kube-apiserver is ready;
+# cred-release is the external credential choke point, so keeping :8443 closed
+# until this gate passes prevents that reconciliation window reaching a tenant.
+ExecStartPre=/usr/local/bin/psa-ready.sh
 TimeoutStartSec=630
 # ${CRED_PLATFORM} comes from a drop-in the c8s sync hook renders from the
 # build's required C8S_PLATFORM. The `=` form matters: with the variable

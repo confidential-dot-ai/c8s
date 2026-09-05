@@ -398,8 +398,12 @@ the node bound" is not.
 
 Two things this rests on that attestation does not enforce:
 
-- the ValidatingAdmissionPolicy (or an equivalent PodSecurity floor) holds. It
-  is a values flag, and it exempts the release namespace and `kube-system`.
+- the default tenant-security ValidatingAdmissionPolicy (or an equivalent
+  control) holds. It denies host namespaces, host ports, privilege, and every
+  non-Restricted pod shape; its only volume exception is the exact read-only
+  inventory-socket mount on webhook-owned c8s sidecars. It exempts the release
+  namespace, `kube-system`, `local-path-storage`, and explicitly configured
+  `hostNamespacePolicy.exemptNamespaces`.
 - privileged node DaemonSets — CNI, CSI, the NVIDIA GPU operator — *can* bind
   the port. They are already root inside the node CVM and can read another
   pod's memory directly, so they are effectively part of the node's TCB;

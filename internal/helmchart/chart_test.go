@@ -560,8 +560,8 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 //   - native sidecars (SidecarContainers default-on from 1.29): with the
 //     gate off, iptables-cleanup is invalid as a native sidecar, its preStop
 //     cannot run, and the host leaks managed chains/ipsets across restarts;
-//   - ValidatingAdmissionPolicy v1 (GA from 1.30): the chart ships two
-//     default-on policies (deny-ratls-mesh-uid, cw-label-integrity), so a
+//   - ValidatingAdmissionPolicy v1 (GA from 1.30): the chart ships default-on
+//     UID, workload-integrity, and Restricted pod-security policies, so a
 //     pre-1.30 apply fails mid-install on unknown kinds anyway — the
 //     kubeVersion constraint makes helm fail early and clearly instead.
 func TestChartRATLSKubeVersionPinned(t *testing.T) {
@@ -631,51 +631,109 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 	}
 }
 
-// workloadclaims.DigestsPort (1019) is the admission inventory's identity: CDS
-// resolves the inventory's signing key by dialling it at the node's address, so
-// anything that can answer there can have its own key accepted as the
-// inventory's and mint tokens naming any sandbox. hostNetwork is not the only
-// way to get there — a hostPort publishes a pod on the node's address with no
-// host namespace at all — so the VAP must deny both. PodSecurity baseline also
-// denies hostPort, but a namespace hosting CW pods cannot run at baseline (the
-// injected hostPath forces privileged), so this policy is the only control.
-func TestChartHostNamespacePolicyDeniesHostPort(t *testing.T) {
-	out, err := helmTemplate(t)
+// Tenant namespaces need the Restricted Pod Security contract with one narrow
+// exception for the webhook-owned inventory socket hostPath. Pod creation and
+// pods/ephemeralcontainers use different schemas, so each shape needs its own
+// policy and binding. In particular, the ephemeral policy must not mention
+// pod-only fields or failurePolicy: Fail would reject every kubectl debug.
+func TestChartHostSecurityPoliciesSplitPodAndEphemeral(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "hostNamespacePolicy.exemptNamespaces={tenant-platform}")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	var vap admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+	var podPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &podPolicy) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var expr string
-	for _, v := range vap.Spec.Validations {
+	var ephemeralPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces-ephemeral", &ephemeralPolicy) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces-ephemeral not rendered")
+	}
+
+	resources := func(p admissionregv1.ValidatingAdmissionPolicy) []string {
+		var got []string
+		for _, rule := range p.Spec.MatchConstraints.ResourceRules {
+			got = append(got, rule.Resources...)
+		}
+		return got
+	}
+	if got := resources(podPolicy); !slices.Contains(got, "pods") {
+		t.Errorf("pod security policy resources = %v, want pods", got)
+	} else if slices.Contains(got, "pods/ephemeralcontainers") {
+		t.Errorf("pod security policy must not match the differently shaped ephemeral subresource: %v", got)
+	}
+	if got := resources(ephemeralPolicy); !slices.Contains(got, "pods/ephemeralcontainers") {
+		t.Errorf("ephemeral security policy resources = %v, want pods/ephemeralcontainers", got)
+	} else if slices.Contains(got, "pods") {
+		t.Errorf("ephemeral security policy must not match pods: %v", got)
+	}
+
+	var hostPortExpr string
+	for _, v := range podPolicy.Spec.Validations {
 		if strings.Contains(v.Expression, "hostPort") {
-			expr = v.Expression
+			hostPortExpr = v.Expression
 		}
 	}
-	if expr == "" {
+	if hostPortExpr == "" {
 		t.Fatal("no hostPort validation in c8s-deny-host-namespaces: a tenant pod with hostPort 1019 impersonates the admission inventory")
 	}
-	// Every container list, or the check is bypassed by putting the port on an
-	// init or ephemeral container.
 	for _, want := range []string{"spec.containers", "spec.initContainers", "spec.ephemeralContainers"} {
-		if !strings.Contains(expr, want) {
-			t.Errorf("hostPort validation does not cover %s; expression=%q", want, expr)
+		if !strings.Contains(hostPortExpr, want) {
+			t.Errorf("hostPort validation does not cover %s; expression=%q", want, hostPortExpr)
 		}
 	}
-	// An ephemeral container is an UPDATE on the subresource; "pods" alone
-	// leaves it unevaluated by this policy entirely.
-	var subresource bool
-	for _, r := range vap.Spec.MatchConstraints.ResourceRules {
-		for _, res := range r.Resources {
-			if res == "pods/ephemeralcontainers" {
-				subresource = true
+	for _, v := range ephemeralPolicy.Spec.Validations {
+		if !strings.Contains(v.Expression, "object.spec.ephemeralContainers") {
+			t.Errorf("ephemeral security expression does not inspect ephemeralContainers: %s", v.Expression)
+		}
+		for _, podOnly := range []string{
+			"object.spec.containers",
+			"object.spec.initContainers",
+			"object.spec.volumes",
+			"object.spec.securityContext",
+			"object.spec.hostNetwork",
+			"object.spec.hostPID",
+			"object.spec.hostIPC",
+		} {
+			if strings.Contains(v.Expression, podOnly) {
+				t.Errorf("ephemeral security expression references pod-only field %s: %s", podOnly, v.Expression)
 			}
 		}
 	}
-	if !subresource {
-		t.Error("matchConstraints does not name pods/ephemeralcontainers, so ephemeral containers bypass this policy")
+
+	for _, policy := range []admissionregv1.ValidatingAdmissionPolicy{podPolicy, ephemeralPolicy} {
+		selector := policy.Spec.MatchConstraints.NamespaceSelector
+		if selector == nil {
+			t.Errorf("%s has no namespaceSelector", policy.Name)
+			continue
+		}
+		var excluded []string
+		for _, requirement := range selector.MatchExpressions {
+			if requirement.Key == "kubernetes.io/metadata.name" &&
+				requirement.Operator == metav1.LabelSelectorOpNotIn {
+				excluded = append(excluded, requirement.Values...)
+			}
+		}
+		for _, want := range []string{"c8s-system", "kube-system", "local-path-storage", "tenant-platform"} {
+			if !slices.Contains(excluded, want) {
+				t.Errorf("%s namespace exclusions = %v, missing %q", policy.Name, excluded, want)
+			}
+		}
+	}
+
+	for _, name := range []string{"c8s-deny-host-namespaces", "c8s-deny-host-namespaces-ephemeral"} {
+		var binding admissionregv1.ValidatingAdmissionPolicyBinding
+		if !findDoc(t, out, "ValidatingAdmissionPolicyBinding", name, &binding) {
+			t.Errorf("ValidatingAdmissionPolicyBinding %s not rendered", name)
+			continue
+		}
+		if binding.Spec.PolicyName != name {
+			t.Errorf("%s binding policyName = %q, want %q", name, binding.Spec.PolicyName, name)
+		}
+		if len(binding.Spec.ValidationActions) != 1 ||
+			binding.Spec.ValidationActions[0] != admissionregv1.Deny {
+			t.Errorf("%s binding actions = %v, want [Deny]", name, binding.Spec.ValidationActions)
+		}
 	}
 }
 
@@ -799,15 +857,16 @@ func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
 	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var hostPathExpr string
+	var hostPathExprs []string
 	for _, v := range vap.Spec.Validations {
 		if strings.Contains(v.Expression, "hostPath") {
-			hostPathExpr = v.Expression
+			hostPathExprs = append(hostPathExprs, v.Expression)
 		}
 	}
-	if hostPathExpr == "" {
+	if len(hostPathExprs) == 0 {
 		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
 	}
+	hostPathExpr := strings.Join(hostPathExprs, "\n")
 	for _, want := range []string{
 		`"/var/run/nri-image-policy"`, // the claims dir, and nothing wider
 		`'Directory'`,                 // the exact type the webhook injects

@@ -162,6 +162,15 @@ jobs:
       - name: Run the scratch-enforce unit test
         run: make test-node-guest-image-scratch
 
+  psa-ready:
+    name: PodSecurity credential-release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the exact production-script harness
+        run: make test-node-guest-image-psa-ready
+
   rke2-role:
     name: rke2-role dispatch (script)
     runs-on: ubuntu-latest

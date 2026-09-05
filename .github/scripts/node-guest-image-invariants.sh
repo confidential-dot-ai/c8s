@@ -126,6 +126,8 @@ fi
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
 vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
+cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
 if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
   echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
@@ -152,5 +154,24 @@ if ! grep -q '^    - Deny$' "$vap"; then
   echo "::error::$vap binding must deny, not warn or audit"
   exit 1
 fi
+if [ ! -x "$psa_gate" ]; then
+  echo "::error::$psa_gate must be executable"
+  exit 1
+fi
+if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
+  echo "::error::$cred_release must keep credential release behind the measured PodSecurity readiness gate"
+  exit 1
+fi
+for required in \
+  'get validatingadmissionpolicy "$policy"' \
+  'get validatingadmissionpolicybinding "$policy"' \
+  '--as="$probe_user" create --dry-run=server' \
+  'probe_namespace restricted' \
+  'probe_namespace privileged'; do
+  if ! grep -qF -- "$required" "$psa_gate"; then
+    echo "::error::$psa_gate is missing required live admission probe: $required"
+    exit 1
+  fi
+done
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"

@@ -38,11 +38,17 @@ The node image enforces the restricted PodSecurity standard in every tenant
 namespace. In node mode the injected sidecar mounts the node's inventory
 socket as a hostPath, which restricted forbids, so a namespace that hosts
 confidential workloads is opened by the operator. Only a credential allowed
-to grant PodSecurity exemptions can set this label; tenants cannot.
+to grant PodSecurity exemptions can set this label; tenants cannot. The chart
+still enforces Restricted-equivalent pod security there and permits only the
+webhook's exact read-only socket mount on its own sidecars. `warn` and `audit`
+stay Restricted so the expected exception and any drift remain observable.
 
 ```sh
 kubectl create namespace demo
-kubectl label namespace demo pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace demo \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
 kubectl -n demo apply -f samples/nginx-confidential-pod.yaml
 ```
 
