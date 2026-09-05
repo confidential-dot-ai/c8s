@@ -96,11 +96,16 @@ if grep -q -- '--cloud-init' "$ngi/build"; then
   exit 1
 fi
 # tdx-metal-e2e.yml is vendored from confidential-ci; the cidata bait/tripwire
-# and AppArmor runtime check are c8s-local patches until the source takes the
-# same edits. Preserve them on re-vendor.
+# and exact-image AppArmor acceptance are c8s-local patches until the source
+# takes the same edits. Preserve evidence validation and private import too:
+# a staged-image run is not acceptance coverage for the just-published build.
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
-              'bash node-guest-image/tests/apparmor-runtime-test.sh'; do
+              'bash node-guest-image/tests/apparmor-runtime-test.sh' \
+              'image_acceptance_artifact:' \
+              'import the exact published image into a private root PVC' \
+              'bash .github/scripts/tdx-image-acceptance.sh validate' \
+              'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
   if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
     echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
     exit 1
@@ -122,23 +127,37 @@ if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratc
   exit 1
 fi
 
-# The restricted PodSecurity floor is an invariant: the admission config may
-# exempt only the platform namespaces that need privileged pods, and the
-# baked policy that stops tenants relabelling their namespaces must keep
-# naming `restricted` and failing closed.
+# psa-config.yaml exempts only the platform namespaces that need privileged
+# pods, and the baked policy that stops tenants relabelling their namespaces
+# keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
 vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
-exempt=$(sed -n '/^ *namespaces:/,$p' "$psa" | grep -E '^ *- ' | sed 's/^ *- //' | sort)
-if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage\n')" ]; then
-  echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got:"
-  echo "$exempt"
+exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
+if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
+  echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
   exit 1
 fi
-grep -q 'enforce: "restricted"' "$psa" \
-  || { echo "::error::$psa must default to enforce: restricted"; exit 1; }
-grep -q "== 'restricted'" "$vap" && grep -q 'failurePolicy: Fail' "$vap" \
-  && grep -q 'resources: \["namespaces"\]' "$vap" \
-  || { echo "::error::$vap must deny namespace labels below restricted and fail closed"; exit 1; }
+if ! grep -q 'enforce: "restricted"' "$psa"; then
+  echo "::error::$psa must default to enforce: restricted"
+  exit 1
+fi
+if ! grep -q "== 'restricted'" "$vap" || ! grep -q "== 'latest'" "$vap"; then
+  echo "::error::$vap must pin the enforce label to restricted and enforce-version to latest"
+  exit 1
+fi
+if ! grep -q 'failurePolicy: Fail' "$vap"; then
+  echo "::error::$vap must fail closed (failurePolicy: Fail)"
+  exit 1
+fi
+if ! grep -q 'resources: \["namespaces", "namespaces/status", "namespaces/finalize"\]' "$vap" \
+   || ! grep -q 'operations: \["CREATE", "UPDATE"\]' "$vap"; then
+  echo "::error::$vap must match namespace CREATE and UPDATE on the resource and its status/finalize subresources, which also carry labels"
+  exit 1
+fi
+if ! grep -q '^    - Deny$' "$vap"; then
+  echo "::error::$vap binding must deny, not warn or audit"
+  exit 1
+fi
 
 # Check requested and resolved settings, including CONFIG_LSM and duplicates.
 # The build uses the same checker on its .config; apparmor-enforce.service

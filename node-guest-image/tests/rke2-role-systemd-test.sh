@@ -68,7 +68,7 @@ install -D -m755 "$EXTRA/usr/local/bin/rke2-role.sh" /usr/local/bin/rke2-role.sh
 
 # Exercise the production dependency/preset wiring without changing the
 # test host's AppArmor policy or letting FailureAction power it off. The
-# root-free apparmor-enforce-test.sh separately executes the exact probe.
+# isolated apparmor-enforce-test.sh separately executes the unchanged probe.
 install -D -m644 /dev/stdin /etc/systemd/system/apparmor-enforce.service.d/test.conf <<'EOF'
 [Unit]
 FailureAction=none

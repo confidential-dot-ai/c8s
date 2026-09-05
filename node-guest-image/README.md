@@ -84,21 +84,29 @@ for is what stands between it and the measured host. The image enforces the
 restricted PodSecurity standard by default
 (`etc/rancher/rke2/psa-config.yaml`): no privileged pods, no host
 namespaces, no root user, no added capabilities, no unconfined seccomp or
-AppArmor. Only `kube-system` and `local-path-storage` are exempt. `default`
-is not: the sample workload in `samples/` is restricted-compliant, and so is
-the sidecar the webhook injects.
+AppArmor. Only `kube-system` and `local-path-storage` are exempt; `default`
+is not.
 
 A namespace label can normally lower that level. The baked
 `psa-level-policy.yaml` AddOn denies an `enforce` label other than
-`restricted` unless the caller is authorized to grant
-`podsecurityexemptions.confidential.ai` (verb `grant`), a virtual resource
-no default role includes. cluster-admin and system:masters pass, which is
-how `c8s install` labels its release namespace privileged for the
-node-level components; a tenant holding `admin` or `edit` in its own
+`restricted`, or an `enforce-version` other than `latest`, unless the
+caller is authorized to grant `podsecurityexemptions.confidential.ai` (verb
+`grant`), a virtual resource no default role includes. cluster-admin and
+system:masters pass; a tenant holding `admin` or `edit` in its own
 namespaces does not. The invariant therefore rests on tenancy: hand tenants
 namespace-scoped credentials, never cluster-admin, and the launch
 measurement vouches for the floor their pods run under. cluster-admin can
 delete the policy, and RKE2 does not recreate deleted AddOn objects.
+
+The floor covers namespaces without confidential workloads. In node mode
+the webhook mounts the node's inventory socket into every
+`confidential.ai/cw` pod as a read-only hostPath, which restricted (and
+baseline) forbids, so a namespace hosting confidential workloads is opened
+by the operator with the privileged label, as `c8s install` does for its
+release namespace. Inside such a namespace the chart's own admission
+policies (host namespaces, hostPort, the mesh UID) are the controls, and the
+sample workload in `samples/` is restricted-compliant on its own so it can
+move back under the floor when the socket no longer needs a hostPath.
 
 Below admission sits AppArmor, the only enabled major LSM. Both kernel
 fragments pin the complete `CONFIG_LSM` order; the invariant gate checks
@@ -121,22 +129,55 @@ PodSecurity rejects `Unconfined` but allows `Localhost`, which names an
 already loaded profile; no stock host profiles or boot probe profile remain
 available for tenants to select.
 
-From the repository root, run the root-free configuration/boot regression
-tests, then the real parser/kernel probe on a Docker host with AppArmor:
+From the repository root, run the configuration and boot regression tests
+with Docker available, then the real parser/kernel probe on a Docker host
+with AppArmor. Set `CONFOS_RELEASE` to the pinned confos base release
+(currently Resolute); CI reads it from that checkout:
 
 ```sh
-make test-node-guest-image-apparmor
+CONFOS_RELEASE=resolute make test-node-guest-image-apparmor
 CONFOS_RELEASE=resolute bash node-guest-image/tests/apparmor-kernel-test.sh
 ```
 
-The Docker probe uses Resolute userspace and the Docker host's kernel; it
-does not boot the node image. To verify containerd labels, mount
+The fault-injection harness copies the production script and `/bin/sh`
+byte-for-byte into a private chroot, placing fixtures at their actual
+absolute paths. It does not rewrite the script or mount host filesystems.
+The separate real-kernel probe uses Resolute userspace and the Docker host's
+kernel; neither test boots the node image. To verify containerd labels, mount
 denial/control and Unconfined admission rejection on the actual image,
 point `KUBECONFIG` at the operator credentials for a disposable single-node
 c8s cluster and run `make test-node-guest-image-apparmor-runtime` (requires
 `kubectl` and `jq`). This creates and cleans up a test namespace and a
-`kube-system` pod with `SYS_ADMIN`. The TDX E2E lane runs that check against
-the published image after merge or on dispatch; it does not boot PR images.
+`kube-system` pod with `SYS_ADMIN`.
+
+Automatic main-push image publication runs a separate `verify-tdx-image`
+job after the build finishes. It consumes the same run and attempt's
+immutable evidence: the source SHA, CDI and ORAS digests, and the published
+manifest. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must match the fresh
+build; a differing nonmeasured build timestamp is not a mismatch. The
+published manifest is passed unchanged to `get-kubeconfig` for attestation.
+Tests are checked out at the build SHA.
+
+That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
+A restricted scheduling pod selects a TDX node before CDI import starts;
+the pod has no service-account token or disk mount. Import has a 20-minute
+deadline, and cleanup checks ownership of the temporary pod and PVC. This
+requires working CDI, enough local disk space, and the launcher's existing
+namespace-scoped Pod/PVC permissions; no shared image ConfigMap, root PVC,
+or cluster-wide RBAC is changed. The hardware path must still be exercised
+on the TDX runner; the local evidence/lifecycle fixtures are run with:
+
+```sh
+bash .github/scripts/tests/test-tdx-image-acceptance.sh
+```
+
+The ordinary `confidential-e2e` TDX lane continues testing the pre-staged
+stack; it does not claim to validate the newly built image and does not run
+the new-image AppArmor gate. Exact-image acceptance is post-publication
+validation, not a gate on stable-alias promotion. Manual, development and
+PR reproducibility builds do not invoke it. Attempt-bound evidence means
+rerunning the full publication workflow, including the builder, if the
+current attempt has no artifact; there is no fallback to older evidence.
 
 Migration state (see [#264] for the full plan):
 

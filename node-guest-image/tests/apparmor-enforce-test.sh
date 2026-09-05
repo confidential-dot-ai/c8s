@@ -1,45 +1,90 @@
 #!/bin/bash
-# Root-free tests of the production AppArmor boot gate. Only absolute system
-# paths are rebased; parser, aa-exec and systemctl behavior comes from fixtures.
+# Fault-injection tests of the unchanged production AppArmor boot gate.
+# Driver mode needs Docker and CONFOS_RELEASE; --inside uses a private chroot
+# with fixtures at the real absolute paths, without mounting host filesystems.
 set -u
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+cleanup_container() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$container" ]]; then
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+}
+
+if [[ "${1:-}" != --inside ]]; then
+    command -v docker >/dev/null 2>&1 || { echo "docker required"; exit 2; }
+    : "${CONFOS_RELEASE:?set CONFOS_RELEASE to the pinned confos Ubuntu release}"
+    container=""
+    trap 'cleanup_container' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    container=$(docker create --network none --cap-drop ALL --cap-add SYS_CHROOT --cap-add MKNOD \
+        "ubuntu:$CONFOS_RELEASE" sleep infinity) || exit 2
+    docker cp "$TESTS_DIR/.." "$container":/ngi >/dev/null || exit 2
+    docker start "$container" >/dev/null || exit 2
+    docker exec "$container" bash /ngi/tests/apparmor-enforce-test.sh --inside
+    exit $?
+fi
+
+[[ -f /.dockerenv && $(id -u) == 0 ]] || {
+    echo "--inside requires the disposable root-owned Docker container"; exit 2;
+}
 . "$TESTS_DIR/lib.sh"
 SCRIPT=$TESTS_DIR/../c8s/mkosi.extra/usr/local/bin/apparmor-enforce.sh
 [[ -f "$SCRIPT" ]] || { echo "script not found: $SCRIPT"; exit 2; }
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-export PROBE_ROOT=$WORK PROBE_CASE=good
-mkdir -p "$WORK/bin" "$WORK/sys/kernel/security/apparmor" \
-    "$WORK/sys/module/apparmor/parameters" "$WORK/proc/self/attr"
-export PATH="$WORK/bin:$PATH"
+export PROBE_CASE=good
+mkdir -p "$WORK/bin" "$WORK/sbin" "$WORK/usr/bin" "$WORK/usr/local/bin" "$WORK/dev" \
+    "$WORK/sys/kernel/security/apparmor" \
+    "$WORK/sys/module/apparmor/parameters" "$WORK/proc/self/attr" || exit 2
+mknod -m 666 "$WORK/dev/null" c 1 3 || exit 2
 
-cat >"$WORK/bin/apparmor_parser" <<'EOF'
+# Use the image's real /bin/sh and commands, not a substitute interpreter.
+# Copy dependencies rather than bind mounting anything from the host.
+for binary in /bin/sh /bin/cat /bin/grep /bin/touch /bin/rm; do
+    cp -L --parents "$binary" "$WORK" || exit 2
+done
+libraries=$(ldd /bin/sh /bin/cat /bin/grep /bin/touch /bin/rm) || exit 2
+while IFS= read -r library; do
+    cp -L --parents "$library" "$WORK" || exit 2
+done < <(printf '%s\n' "$libraries" | awk '
+    $2 == "=>" && $3 ~ /^\// { print $3 }
+    $1 ~ /^\// && $2 ~ /^\(/ { print $1 }
+' | sort -u)
+cp "$SCRIPT" "$WORK/usr/local/bin/apparmor-enforce.sh" || exit 2
+
+cat >"$WORK/sbin/apparmor_parser" <<'EOF'
 #!/bin/sh
-cat > "$PROBE_ROOT/policy"
-printf '%s\n' "$*" >> "$PROBE_ROOT/parser-calls"
+cat > /policy
+grep -qxF '  deny /proc/version r,' /policy || exit 2
+printf '%s\n' "$*" >> /parser-calls
 case "$1" in
     --replace)
         [ "$PROBE_CASE" != load-fails ] || exit 1
         mode=enforce
         [ "$PROBE_CASE" != complain ] || mode=complain
-        printf 'c8s-apparmor-boot-probe (%s)\n' "$mode" > "$PROBE_ROOT/sys/kernel/security/apparmor/profiles"
-        touch "$PROBE_ROOT/loaded"
+        printf 'c8s-apparmor-boot-probe (%s)\n' "$mode" > /sys/kernel/security/apparmor/profiles
+        touch /loaded
         ;;
     --remove)
         [ "$PROBE_CASE" != cleanup-fails ] || exit 1
-        rm -f "$PROBE_ROOT/loaded"
+        rm -f /loaded
         ;;
     *) exit 1 ;;
 esac
 EOF
-cat >"$WORK/bin/aa-exec" <<'EOF'
+cat >"$WORK/usr/bin/aa-exec" <<'EOF'
 #!/bin/sh
 [ "$1" = -p ] && [ "$2" = c8s-apparmor-boot-probe ] && [ "$3" = -- ] || exit 2
 shift 3
 [ "$1" = /bin/cat ] || exit 2
 case "$2" in
-    "$PROBE_ROOT/proc/self/attr/current")
+    /proc/self/attr/current)
         case "$PROBE_CASE" in
             bad-label) echo unconfined ;;
             empty-label) : ;;
@@ -47,7 +92,7 @@ case "$2" in
             *) echo 'c8s-apparmor-boot-probe (enforce)' ;;
         esac
         ;;
-    "$PROBE_ROOT/proc/version")
+    /proc/version)
         case "$PROBE_CASE" in
             denial-ignored) exit 0 ;;
             wrong-error) echo 'cat: unexpected failure' >&2; exit 1 ;;
@@ -74,7 +119,7 @@ EOF
 
 reset_probe() {
     PROBE_CASE=good
-    chmod +x "$WORK/bin/apparmor_parser" "$WORK/bin/aa-exec" "$WORK/bin/systemctl"
+    chmod +x "$WORK/sbin/apparmor_parser" "$WORK/usr/bin/aa-exec" "$WORK/bin/systemctl"
     printf '%s\n' 'lockdown,yama,apparmor,bpf' > "$WORK/sys/kernel/security/lsm"
     printf 'Y\n' > "$WORK/sys/module/apparmor/parameters/enabled"
     printf 'Linux test kernel\n' > "$WORK/proc/version"
@@ -84,16 +129,18 @@ reset_probe() {
 }
 
 run_enforce() {
-    sed -e "s|/sys/|$WORK/sys/|g" \
-        -e "s|/proc/|$WORK/proc/|g" \
-        -e "s|/sbin/apparmor_parser|$WORK/bin/apparmor_parser|g" \
-        -e "s|/usr/bin/aa-exec|$WORK/bin/aa-exec|g" \
-        "$SCRIPT" | sh >"$WORK/stdout" 2>"$WORK/stderr"
+    cmp "$SCRIPT" "$WORK/usr/local/bin/apparmor-enforce.sh" || return
+    PATH=/bin:/usr/bin:/sbin chroot "$WORK" /bin/sh /usr/local/bin/apparmor-enforce.sh \
+        >"$WORK/stdout" 2>"$WORK/stderr"
 }
 
 CASE="working enforcement"
 reset_probe
+ok "production script is byte-identical" cmp "$SCRIPT" "$WORK/usr/local/bin/apparmor-enforce.sh"
+ok "production shell is byte-identical" cmp /bin/sh "$WORK/bin/sh"
 ok "passes" run_enforce
+ok "policy keeps the production absolute path" grep -qxF '  deny /proc/version r,' "$WORK/policy"
+ok "policy contains no fixture root" not grep -qF "$WORK" "$WORK/policy"
 ok "loads uncached profile" grep -qx -- '--replace --skip-cache' "$WORK/parser-calls"
 ok "removes uncached profile" grep -qx -- '--remove --skip-cache' "$WORK/parser-calls"
 ok "probe profile removed" test ! -e "$WORK/loaded"
@@ -116,12 +163,12 @@ printf 'N\n' > "$WORK/sys/module/apparmor/parameters/enabled"
 ok "fails closed" not run_enforce
 ok "names disabled module" stderr_has 'AppArmor is disabled'
 
-for binary in apparmor_parser aa-exec; do
-    CASE="missing $binary"
+for binary in sbin/apparmor_parser usr/bin/aa-exec; do
+    CASE="missing ${binary##*/}"
     reset_probe
-    chmod -x "$WORK/bin/$binary"
+    chmod -x "$WORK/$binary"
     ok "fails closed" not run_enforce
-    ok "names missing binary" stderr_has "$binary is missing"
+    ok "names missing binary" stderr_has "${binary##*/} is missing"
 done
 
 for state in service-enabled service-active service-unknown service-state-unknown; do

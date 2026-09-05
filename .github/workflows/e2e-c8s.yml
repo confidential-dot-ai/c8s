@@ -87,6 +87,8 @@ jobs:
       aa_ref: ${{ inputs.aa_ref }}
 
   tdx-metal:
+    # Staged-stack regression only. Exact-image AppArmor acceptance is called
+    # by c8s-image-publish.yml after publishing digest/measurement evidence.
     permissions:
       contents: read
       actions: read
