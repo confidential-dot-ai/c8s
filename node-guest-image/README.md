@@ -158,8 +158,12 @@ build; a differing nonmeasured build timestamp is not a mismatch. The
 published manifest is passed unchanged to `get-kubeconfig` for attestation.
 Tests are checked out at the build SHA. Before allocating the launcher,
 the reusable workflow independently requires a successful same-repository
-`main` push and rejects a c8s-ref override in exact-image mode. Its guarded
-build checkout is separate from the staged/manual checkout.
+`main` push and rejects a c8s-ref override in exact-image mode. A read-only
+hosted preflight fetches trusted `main` history and verifies that the full
+build SHA is an ancestor before handing it to the launcher. It executes no
+code from the requested build. Its guarded build checkout is separate from
+the staged/manual checkout. Run the real-Git provenance regression tests
+with `go test ./test/workflows`.
 
 That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
 A restricted scheduling pod selects a TDX node before CDI import starts;

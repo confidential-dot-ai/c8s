@@ -98,10 +98,11 @@ env:
   VM: c8s-tdx-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
-  e2e:
+  source:
     # Exact-image mode executes the publisher's source commit on a launcher
     # with cluster access. Enforce the trust boundary here, not just in the
     # current caller, before allocating that runner. Staged mode is unchanged.
+    # A hosted preflight proves Git ancestry without executing build-source code.
     if: >-
       inputs.image_acceptance_artifact == '' ||
       (github.event_name == 'workflow_run' &&
@@ -110,6 +111,44 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        inputs.c8s_ref == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Fetch trusted main history
+        if: inputs.image_acceptance_artifact != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - name: Verify source provenance
+        id: source
+        env:
+          EXACT_IMAGE: ${{ inputs.image_acceptance_artifact != '' }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EXACT_IMAGE" in
+            true) ;;
+            false) SOURCE_SHA=$WORKFLOW_SHA ;;
+            *) exit 1 ;;
+          esac
+          [ "${#SOURCE_SHA}" -eq 40 ]
+          case "$SOURCE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+          if [ "$EXACT_IMAGE" = true ]; then
+            git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          fi
+          printf 'sha=%s\n' "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    # Default success gating prevents runner allocation if provenance fails.
+    needs: source
     # Named to match the SNP primitive's leaf, `cvm (<platform>/<flavor>)`,
     # so both lanes read the same way in the run tree.
     name: cvm (tdx-metal/rke2-node)
@@ -139,7 +178,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ needs.source.outputs.sha }}
 
       - name: Download this publication's image acceptance evidence
         if: inputs.image_acceptance_artifact != ''
