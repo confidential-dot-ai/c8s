@@ -98,15 +98,31 @@ namespace-scoped credentials, never cluster-admin, and the launch
 measurement vouches for the floor their pods run under. cluster-admin can
 delete the policy, and RKE2 does not recreate deleted AddOn objects.
 
+RKE2 reconciles AddOns after kube-apiserver starts. The attested credential
+endpoint therefore remains closed until `psa-ready.sh` sees the policy and
+binding and proves, through server-side dry-runs as a synthetic non-granter,
+that a restricted namespace is admitted and a privileged one is denied by
+`confos-psa-level`. No externally released operator credential can enter the
+first-boot reconciliation window.
+
 The floor covers namespaces without confidential workloads. In node mode
 the webhook mounts the node's inventory socket into every
 `confidential.ai/cw` pod as a read-only hostPath, which restricted (and
 baseline) forbids, so a namespace hosting confidential workloads is opened
 by the operator with the privileged label, as `c8s install` does for its
-release namespace. Inside such a namespace the chart's own admission
-policies (host namespaces, hostPort, the mesh UID) are the controls, and the
-sample workload in `samples/` is restricted-compliant on its own so it can
-move back under the floor when the socket no longer needs a hostPath.
+release namespace. This does not grant workloads privileged semantics: the
+chart's fail-closed tenant-pod policies reproduce the Restricted controls and
+carve out only the exact inventory directory, read-only and mounted only into
+the webhook-owned c8s sidecars. Application and ephemeral containers cannot
+mount it. Restricted warning and audit labels remain enabled, so the expected
+hostPath exception and any drift stay visible.
+
+After chart image upgrades, unchanged existing sidecars remain eligible for
+the mount exception on Pod UPDATE only when the prior Pod already had the exact
+configured claims volume and matching injected/CW identity. All other controls
+still apply. Ephemeral containers may inherit pod-level `runAsNonRoot` and
+seccomp settings when their own settings are absent; explicit unsafe overrides
+are denied.
 
 Migration state (see [#264] for the full plan):
 

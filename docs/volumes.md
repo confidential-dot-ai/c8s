@@ -127,6 +127,15 @@ c8s volume create --mutable \
   --operator-key ./operator.key
 ```
 
+Tenant workloads, including volume consumers, run under the non-root policy.
+Choose an explicit numeric `runAsUser`/`runAsGroup` and make the source tree's
+top-level directory readable (immutable) or writable (mutable) by that
+identity before building; `--source` preserves its ownership and modes. A
+source-less mutable image has a root-owned filesystem root, so use a preloaded
+source directory when the workload must create files at the mount root. Do not
+make the pod privileged or root to compensate for incompatible volume
+permissions—the tenant admission policy rejects that escape hatch.
+
 `--size` takes a byte count or a quantity like `50Gi`. Omitted with a
 `--source`, it is inferred — the tree's bytes plus a block per entry, grown by
 half — and printed, so you can see what was chosen and pin it on the next run.

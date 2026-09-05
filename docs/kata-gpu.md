@@ -55,11 +55,12 @@ un-mutated as plain runc.
 | requests `nvidia.com/*` | platform GPU class (`kata-qemu-snp-nvidia` / `kata-qemu-tdx-nvidia`) |
 | requests `nvidia.com/*` **and** annotated | platform GPU class (GPU wins) |
 
-The two exceptions: host-namespace pods (`hostNetwork/hostPID/hostIPC`) are
-left alone (kata cannot run them — they stay runc, exempted by the
-enforcement policy), and a pod that sets `runtimeClassName` explicitly keeps
-it — honored if it names one of the kata classes, rejected at admission
-otherwise.
+The Kata layer has two exceptions: it leaves host-namespace pods alone because
+Kata cannot run them, and it honors an explicitly selected Kata
+`runtimeClassName`. The chart's separate default tenant-security VAP rejects
+host-namespace pods outside trusted platform namespaces, so the first exception
+does not provide a tenant path back to runc. An explicit runtime class is
+honored only when it names one of the Kata classes and rejected otherwise.
 
 ## Using it
 
@@ -317,17 +318,14 @@ reach.
   attestation surfaced to the relying party. (The graft carries upstream's
   `libnvat` NVIDIA-attestation library, so the in-guest plumbing for this is
   staged.)
-- **Host-namespace GPU pods bypass the confidential path.** A pod with
-  `hostNetwork/hostPID/hostIPC: true` is exempt from kata enforcement (a VM
-  cannot share host namespaces), so the webhook leaves it as an ordinary host
-  container and the ValidatingAdmissionPolicy allows it. If such a pod also
-  requests `nvidia.com/*`, it runs *outside* a confidential VM. This is a
-  pre-existing property of kata enforcement (true for every class), but GPU
-  passthrough raises the stakes because the exempted resource is now a GPU.
-  Follow-up to consider: reject host-namespace pods that request `nvidia.com/*`
-  rather than exempting them. (Mitigating factor today: the sandbox device
-  plugin hands out *VFIO* devices via CDI, not driver-backed `/dev/nvidia*`, so
-  a plain container would get an unusable VFIO handle, not a working GPU.)
+- **Host-namespace GPU pods are rejected for tenants.** The Kata-specific
+  webhook and runtime-class policy skip `hostNetwork`/`hostPID`/`hostIPC` (a VM
+  cannot share host namespaces), but the separate default tenant-security VAP
+  denies those fields. A host-namespace GPU pod can run outside a confidential
+  VM only in a trusted/exempt namespace or when that VAP is deliberately
+  disabled without an equivalent replacement. The sandbox device plugin also
+  hands out *VFIO* devices via CDI, not driver-backed `/dev/nvidia*`, so a plain
+  container receives an unusable VFIO handle rather than a working GPU.
 
 - **Node-as-CVM GPU is separate.** For the node-as-CVM shape, GPU drivers are
   baked into the node guest OS image and measured into the node's launch

@@ -246,14 +246,17 @@ to external clients. The baked guest env exempts the front-door port
 tls-lb, and `kubectl port-forward` / the host-side CLI reach CDS's RA-TLS
 listener. The trade-off is that 8443 is unmeshed inbound in every guest.
 
-### Host-namespace pods are exempt
+### Host-namespace pods cannot run under Kata
 
 A Kata pod is a VM and cannot join the host's network, PID, or IPC namespace.
-A pod that sets `hostNetwork`, `hostPID`, or `hostIPC` is therefore exempt
-from both halves of enforcement: the webhook injects no class, and the policy
-does not reject it. Such a pod runs as an ordinary container. This is not an
-escape hatch for confidentiality — a host-namespace pod is self-evidently not
-seeking isolation from the host.
+A pod that sets `hostNetwork`, `hostPID`, or `hostIPC` is therefore skipped by
+the Kata-specific webhook and runtime-class policy. The chart's separate,
+default-on tenant-security policy rejects that pod in tenant namespaces, even
+when the namespace carries the PSA `privileged` label needed for the injected
+inventory socket. Only trusted platform namespaces (or explicit
+`hostNamespacePolicy.exemptNamespaces`) may run the pod as an ordinary
+container. Disabling that policy without an equivalent control reopens the
+host-namespace escape from Kata.
 
 ### What enforcement does *not* touch
 
@@ -560,17 +563,17 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   refuses to render `kata.enabled=true` with `webhook.failurePolicy` set to
   anything other than `Fail` — the two halves must move together.
 
-- **Enforcement assumes a cluster-wide PodSecurityAdmission floor on
-  workload namespaces.** The webhook and the policy both exempt pods that
-  use a host namespace (`hostNetwork`, `hostPID`, `hostIPC`) because Kata
-  cannot launch them as VMs. The chart enforces `pod-security=privileged`
-  only on its own namespace (`c8s-system`); it does **not** label tenant
-  namespaces. If your cluster has no PSA floor (or sets `privileged` as the
-  default), any namespace user with create-pod RBAC can opt out of kata
-  enforcement by setting `hostNetwork: true`. Treat `--cvm-mode=pod` as a
-  cluster-operator gate that must be paired with PSA `restricted` or
-  `baseline` on workload namespaces — without it, the host-namespace
-  exemption is a tenant-accessible bypass, not just an operator carve-out.
+- **Tenant host-namespace escape is denied by default.** The Kata webhook and
+  runtime-class policy must skip `hostNetwork`/`hostPID`/`hostIPC` because a VM
+  cannot share those namespaces. The separate `hostNamespacePolicy` VAP closes
+  that gap and enforces Restricted-equivalent security in every non-exempt
+  namespace, including a confidential-workload namespace labelled PSA
+  `privileged` for the inventory socket. Its only volume exception is the exact
+  read-only socket mount on webhook-owned c8s sidecars. If you disable it, first
+  install an equivalent admission control; otherwise a namespace user can opt
+  out of Kata or run a privileged root container. Admission is prospective: an
+  upgrade does not evict already-running violating pods, so audit and replace
+  those pods before treating the new policy as the active boundary.
 
 
 

@@ -100,15 +100,16 @@ serviceAccount:
 statusMirror:
   enabled: true
 
-## Denies tenant pods the host-namespace and hostPath privileges that would let
-## them impersonate a node-level c8s component from inside the node's TCB. The
-## sandbox-identity flow's inventory authentication rests on this — see the
-## template and docs/getcert-workload-binding.md, Corner 7. Disable only if
-## another admission policy already enforces the equivalent.
+## Enforces Restricted-equivalent security for tenant pods, including denial
+## of host namespaces and host privilege. The sole deviation is the exact
+## read-only inventory hostPath mounted only into webhook-owned c8s sidecars.
+## The sandbox-identity flow rests on this — see the template and
+## docs/getcert-workload-binding.md, Corner 7. Disable only if another
+## admission policy already enforces the equivalent narrow exception.
 hostNamespacePolicy:
   enabled: true
-  ## Namespaces exempt in addition to the release namespace and kube-system,
-  ## for node-level components installed outside them.
+  ## Namespaces exempt in addition to the release namespace, kube-system, and
+  ## the node image's trusted local-path-storage platform namespace.
   exemptNamespaces: []
 
 ## Mutating admission webhook that injects get-cert containers into pods

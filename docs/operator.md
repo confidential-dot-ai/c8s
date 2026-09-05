@@ -190,8 +190,10 @@ layout) is detected from the cluster's kubelet versions.
 - the host-side ratls-mesh, attestation-api, and nri-image-policy are
   disabled — their function runs inside the kata-guest-base VM image.
 
-Host-namespace pods and system namespaces are exempt. The Kata stack is off
-by default — a plain `c8s install` is unchanged.
+The Kata layer skips host-namespace pods and system namespaces. The separate
+default tenant-security policy still rejects host namespaces outside trusted
+platform namespaces. The Kata stack is off by default — a plain `c8s install`
+is unchanged.
 
 See [`docs/kata.md`](kata.md) for the design (why it wraps upstream
 kata-deploy), the threat model, distro support, the one-shot bootstrap-window
@@ -522,9 +524,15 @@ and again on the RA-TLS credential-release connection:
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
 node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
-that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC,
-and `cred-release.service` does not start serving until that binding exists,
-so a released credential is authorized the moment it is issued.
+that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC.
+RKE2 reconciles AddOns asynchronously, so `cred-release.service` keeps its
+listener closed until `psa-ready.sh` sees that binding plus the baked
+`confos-psa-level` policy and binding. The gate then uses a temporary,
+namespace-create-only synthetic principal for two server-side dry-runs: a
+Restricted namespace must be admitted and a privileged namespace must be
+denied by that exact policy and validation. A released credential is therefore
+both authorized and behind a live Restricted namespace floor the moment it is
+issued.
 `system:masters` is deliberately avoided because it bypasses authorization
 and admission webhooks and cannot be revoked through RBAC. The default group
 is only meaningful where such a binding exists: on a cluster that is not the

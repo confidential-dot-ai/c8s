@@ -16,7 +16,9 @@
 # Env:
 #   CW_NS / CW_ID   pick a specific workload (default: first Running cw pod)
 #   CW_PORT         port to probe (default: the pod's first containerPort)
-#   CLIENT_IMAGE    curl-capable client image (default curlimages/curl:8.8.0)
+#   CLIENT_IMAGE    curl-capable client image (default curl 8.8.0, digest-pinned)
+#   CLIENT_UID      numeric non-root UID declared by that image (default 100,
+#                   the verified curl_user UID in the pinned default)
 #   EXCLUDED_NS     mesh-excluded source namespace (default kube-system)
 #   MESH_HEALTH_PORT     ratls-mesh health/metrics port (chart
 #                        ratlsMesh.ports.health; default 15021)
@@ -30,11 +32,15 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-client_image="${CLIENT_IMAGE:-curlimages/curl:8.8.0}"
+client_image="${CLIENT_IMAGE:-curlimages/curl:8.8.0@sha256:73e4d532ea62d7505c5865b517d3704966ffe916609bedc22af6833dc9969bcd}"
+client_uid="${CLIENT_UID:-100}"
 excluded_ns="${EXCLUDED_NS:-kube-system}"
 health_port="${MESH_HEALTH_PORT:-15021}"
 mesh_ns="${MESH_NS:-c8s-system}"
 metric_wait="${METRIC_WAIT_SECONDS:-75}"
+
+[[ "$client_uid" =~ ^[1-9][0-9]*$ ]] \
+  || fail "CLIENT_UID must be a positive numeric UID (got '$client_uid')"
 
 ns="mesh-cw-check-$$"
 client=client
@@ -76,7 +82,7 @@ kubectl create namespace "$ns" >/dev/null
 # A plain client pod: restricted-compliant, since the fresh namespace inherits
 # the node image's restricted PodSecurity default.
 kubectl run "$client" -n "$ns" --image="$client_image" --restart=Never \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$client"'","image":"'"$client_image"'","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":'"$client_uid"',"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$client"'","image":"'"$client_image"'","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
   >/dev/null
 kubectl wait --for=condition=Ready pod/"$client" -n "$ns" --timeout=120s >/dev/null
 

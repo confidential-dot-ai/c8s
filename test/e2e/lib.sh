@@ -8,17 +8,15 @@
 # the convention CI greps for, so keep both scripts on this one definition.
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# cw_namespace creates <ns> if missing and labels it privileged. The node
-# image enforces the restricted PodSecurity standard outside its platform
-# namespaces, and in node mode the webhook mounts the inventory socket into
-# every confidential-workload pod as a hostPath, which restricted forbids. A
-# namespace hosting CW pods is therefore opened by the operator, whose
-# credential may grant PodSecurity exemptions (node-guest-image/README.md,
-# "Workload isolation"); the e2e scripts run under that credential.
+# cw_namespace creates <ns> if missing and opens only PSA enforcement for the
+# webhook-injected inventory hostPath. The chart's tenant-pod VAP restores the
+# Restricted controls and admits that one read-only sidecar mount; Restricted
+# warning and audit stay enabled so drift remains visible. Only the operator's
+# PodSecurity-exemption credential may apply the enforce label.
 cw_namespace() {
   kubectl create namespace "$1" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl label namespace "$1" --overwrite \
     pod-security.kubernetes.io/enforce=privileged \
-    pod-security.kubernetes.io/warn=privileged \
-    pod-security.kubernetes.io/audit=privileged >/dev/null
+    pod-security.kubernetes.io/warn=restricted \
+    pod-security.kubernetes.io/audit=restricted >/dev/null
 }

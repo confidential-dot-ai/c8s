@@ -12,6 +12,15 @@ set -euo pipefail
 
 ns="cw-label-policy-check-$$"
 pod=probe
+pause_image=registry.k8s.io/pause:3.9
+
+# kubectl run's generated pod is otherwise root/default-seccomp, which the
+# tenant security VAP correctly rejects in the privileged-labelled CW
+# namespace. Keep every probe compliant so only the intended guard decides it.
+restricted_overrides() {
+  local name=$1 image=$2
+  printf '{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"%s","image":"%s","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' "$name" "$image"
+}
 
 cleanup() { kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -40,15 +49,15 @@ kubectl create namespace "$ns" >/dev/null
 # denies them before the policy under test is ever consulted.
 kubectl label namespace "$ns" \
   pod-security.kubernetes.io/enforce=privileged \
-  pod-security.kubernetes.io/warn=privileged \
-  pod-security.kubernetes.io/audit=privileged >/dev/null
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted >/dev/null
 
 # Ordinary pod admission must be unaffected. This is also the canary for a
 # broken CEL expression: failurePolicy=Fail turns one into a deny-all.
 # Report the admission error verbatim: this control cannot tell which admitter
 # refused, and guessing sent one investigation after a healthy CEL.
-if ! err=$(kubectl run "$pod" --namespace "$ns" --image=registry.k8s.io/pause:3.9 \
-  --restart=Never 2>&1); then
+if ! err=$(kubectl run "$pod" --namespace "$ns" --image="$pause_image" \
+  --restart=Never --overrides="$(restricted_overrides "$pod" "$pause_image")" 2>&1); then
   fail "plain pod creation was denied: ${err}"
 fi
 echo "ok: plain pod admitted"
@@ -69,8 +78,9 @@ expect_deny "post-create cw annotation" "cw-label-integrity" -- \
 # admission.
 expect_deny "pod created with cw label but no annotation" \
   "cw-label-integrity\|must match the confidential.ai/cw annotation" -- \
-  kubectl run spoof --namespace "$ns" --image=registry.k8s.io/pause:3.9 \
-    --restart=Never --labels=confidential.ai/cw=spoof --dry-run=server
+  kubectl run spoof --namespace "$ns" --image="$pause_image" \
+    --restart=Never --labels=confidential.ai/cw=spoof --dry-run=server \
+    --overrides="$(restricted_overrides spoof "$pause_image")"
 
 # An opted-in pod that smuggles its own container under the reserved c8s-cert
 # name to shadow the injected sidecar is denied by the webhook's reserved-name
@@ -86,11 +96,24 @@ metadata:
   annotations:
     confidential.ai/cw: spoof
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: app
-      image: registry.k8s.io/pause:3.9
+      image: $pause_image
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
     - name: c8s-cert
-      image: registry.k8s.io/pause:3.9
+      image: $pause_image
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
 YAML
 expect_deny "cw pod smuggling a reserved c8s-cert container" \
   "reserved" -- \
@@ -101,8 +124,9 @@ rm -f "$reserved_manifest"
 # webhook injects the c8s-cert sidecar and the matching label, satisfying the
 # sidecar-presence VAP rule. A broken hasCertSidecar CEL would deny every cw
 # pod, so this proves the new rule does not over-deny.
-kubectl run cw-ok --namespace "$ns" --image=registry.k8s.io/pause:3.9 \
-  --restart=Never --annotations=confidential.ai/cw=cwok --dry-run=server >/dev/null \
+kubectl run cw-ok --namespace "$ns" --image="$pause_image" \
+  --restart=Never --annotations=confidential.ai/cw=cwok --dry-run=server \
+  --overrides="$(restricted_overrides cw-ok "$pause_image")" >/dev/null \
   || fail "a webhook-injected cw pod was denied; the sidecar-presence VAP or webhook is misfiring"
 echo "ok: webhook-injected cw pod admitted"
 
