@@ -47,8 +47,9 @@ on:
         description: "Production module-signing key; omitted by repro-gate callers."
         required: false
 
-# The caller owns token permissions: c8s-image-publish.yml grants package write
-# to trusted release builds; image-repro-gate.yml grants read only to PR code.
+# The caller owns token permissions: c8s-image-publish.yml and
+# c8s-image-manual.yml grant package write to trusted production/manual builds;
+# image-repro-gate.yml grants read only to PR code.
 
 concurrency:
   # Per triggering commit, not per ref (workflow_run's ref is always main).

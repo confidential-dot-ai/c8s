@@ -13,7 +13,7 @@ import (
 // Exercise the unchanged inline preflight against real Git history. The
 // privileged launcher must receive only a SHA proven to belong to main.
 func TestTDXSourceProvenance(t *testing.T) {
-	raw, err := os.ReadFile("../../.github/workflows/tdx-metal-e2e.yml")
+	raw, err := os.ReadFile("../../.github/workflows/tdx-image-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,29 +67,24 @@ func TestTDXSourceProvenance(t *testing.T) {
 	git("update-ref", "refs/remotes/origin/main", head)
 
 	for _, tc := range []struct {
-		name, exact, source, workflow, want string
+		name, source, want string
 	}{
-		{"main tip", "true", head, parent, head},
-		{"older main build", "true", parent, head, parent},
-		{"unmerged branch", "true", untrusted, head, ""},
-		{"missing commit", "true", strings.Repeat("a", 40), head, ""},
-		{"symbolic ref", "true", "refs/remotes/origin/main", head, ""},
-		{"empty source", "true", "", head, ""},
-		{"option injection", "true", "--help", head, ""},
-		{"output injection", "true", head + "\nsha=" + untrusted, head, ""},
-		{"manual staged", "false", "", head, head},
-		{"staged ignores event source", "false", untrusted, head, head},
-		{"invalid staged SHA", "false", "", "main", ""},
-		{"invalid mode", "invalid", head, head, ""},
-		{"nonhex SHA", "true", strings.Repeat("g", 40), head, ""},
+		{"main tip", head, head},
+		{"older main build", parent, parent},
+		{"unmerged branch", untrusted, ""},
+		{"missing commit", strings.Repeat("a", 40), ""},
+		{"symbolic ref", "refs/remotes/origin/main", ""},
+		{"empty source", "", ""},
+		{"option injection", "--help", ""},
+		{"output injection", head + "\nsha=" + untrusted, ""},
+		{"nonhex SHA", strings.Repeat("g", 40), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "output")
 			cmd := exec.Command("bash", "-c", script)
 			cmd.Dir = repo
 			cmd.Env = append(os.Environ(),
-				"EXACT_IMAGE="+tc.exact, "SOURCE_SHA="+tc.source,
-				"WORKFLOW_SHA="+tc.workflow, "GITHUB_OUTPUT="+output)
+				"SOURCE_SHA="+tc.source, "GITHUB_OUTPUT="+output)
 			log, err := cmd.CombinedOutput()
 			got, readErr := os.ReadFile(output)
 			if tc.want == "" {

@@ -95,19 +95,24 @@ if grep -q -- '--cloud-init' "$ngi/build"; then
   echo "::error::$ngi/build bakes a cloud-init seed; the node image disables cloud-init instead"
   exit 1
 fi
-# tdx-metal-e2e.yml is vendored from confidential-ci; the cidata bait/tripwire
-# and exact-image AppArmor acceptance are c8s-local patches until the source
-# takes the same edits. Preserve evidence validation and private import too:
-# a staged-image run is not acceptance coverage for the just-published build.
+# The shared TDX lifecycle originated in confidential-ci, with c8s-local
+# cidata, AppArmor and private-import checks. Preserve them on re-vendor.
+# Exact-source checkout/evidence stay in the automatic-only wrapper:
+# staged testing must not gain a path to that privileged checkout boundary.
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
+tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
               'bash node-guest-image/tests/apparmor-runtime-test.sh' \
-              'image_acceptance_artifact:' \
               'import the exact published image into a private root PVC' \
-              'bash .github/scripts/tdx-image-acceptance.sh validate' \
               'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
-  if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
-    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
+  if ! grep -qF "$marker" "$tdx_runtime"; then
+    echo "::error::$tdx_runtime lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
+    exit 1
+  fi
+done
+for marker in 'image_acceptance_artifact:' 'bash .github/scripts/tdx-image-acceptance.sh validate'; do
+  if ! grep -qF "$marker" .github/workflows/tdx-image-acceptance.yml; then
+    echo "::error::tdx-image-acceptance.yml lost '$marker': exact-image evidence is required"
     exit 1
   fi
 done

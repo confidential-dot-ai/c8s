@@ -150,20 +150,24 @@ c8s cluster and run `make test-node-guest-image-apparmor-runtime` (requires
 `kubectl` and `jq`). This creates and cleans up a test namespace and a
 `kube-system` pod with `SYS_ADMIN`.
 
-Automatic main-push image publication runs a separate `verify-tdx-image`
-job after the build finishes. It consumes the same run and attempt's
+Automatic main-push publication in `c8s-image-publish.yml` calls the separate
+`tdx-image-acceptance.yml` workflow after the build finishes. Only this
+automatic publisher can call exact-image acceptance; neither workflow has a
+manual-dispatch trigger. It consumes the same run and attempt's
 immutable evidence: the source SHA, CDI and ORAS digests, and the published
 manifest. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must match the fresh
 build; a differing nonmeasured build timestamp is not a mismatch. The
 published manifest is passed unchanged to `get-kubeconfig` for attestation.
 Tests are checked out at the build SHA. Before allocating the launcher,
 the reusable workflow independently requires a successful same-repository
-`main` push and rejects a c8s-ref override in exact-image mode. A read-only
+`main` push and exposes no c8s-ref override in exact-image mode. A read-only
 hosted preflight fetches trusted `main` history and verifies that the full
 build SHA is an ancestor before handing it to the launcher. It executes no
-code from the requested build. Its guarded build checkout is separate from
-the staged/manual checkout. Run the real-Git provenance regression tests
-with `go test ./test/workflows`.
+code from the requested build. The staged `tdx-metal-e2e.yml` wrapper checks
+out its workflow revision independently. Both wrappers share the lifecycle
+in `.github/actions/tdx-metal-e2e/action.yml` and the same concurrency group;
+checkout and evidence acquisition stay outside that shared action. Run the
+real-Git provenance and caller-isolation tests with `go test ./test/workflows`.
 
 That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
 A restricted scheduling pod selects a TDX node before CDI import starts;
@@ -185,6 +189,11 @@ validation, not a gate on stable-alias promotion. Manual, development and
 PR reproducibility builds do not invoke it. Attempt-bound evidence means
 rerunning the full publication workflow, including the builder, if the
 current attempt has no artifact; there is no fallback to older evidence.
+For manual image builds, dispatch `c8s-image-manual.yml` (Actions name:
+`c8s-image manual`), with the existing `dev`, `c8s_ref`, `confos_ref` and
+`gate` inputs. It builds through the same reusable builder but cannot call
+exact acceptance or promote stable aliases. `tdx-metal-e2e.yml` remains
+manually dispatchable for staged-stack regression and `keep_cvm` debugging.
 
 Migration state (see [#264] for the full plan):
 

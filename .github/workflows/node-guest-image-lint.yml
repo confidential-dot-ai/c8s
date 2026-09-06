@@ -22,12 +22,15 @@ on:
       # The lint guards this vendored file's c8s-local bait/tripwire markers;
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
+      - ".github/workflows/tdx-image-acceptance.yml"
+      - ".github/actions/tdx-metal-e2e/**"
       # The invariants gate body; a script-only change must run the gate.
       - ".github/scripts/node-guest-image-invariants.sh"
       - ".github/scripts/tdx-image-acceptance.sh"
       - ".github/scripts/tests/test-tdx-image-acceptance.sh"
       - ".github/workflows/c8s-image.yml"
       - ".github/workflows/c8s-image-publish.yml"
+      - ".github/workflows/c8s-image-manual.yml"
   workflow_dispatch:
 
 permissions:
