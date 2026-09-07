@@ -113,6 +113,53 @@ func TestPreflightCDSNodeExec(t *testing.T) {
 	})
 }
 
+func TestPreflightNotBakedNodeExec(t *testing.T) {
+	t.Run("baked HelmChart present refuses", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo helmchart.helm.cattle.io/c8s`)
+		err := preflightNotBakedNode(context.Background())
+		if err == nil {
+			t.Fatal("want error when the cluster carries the baked HelmChart c8s")
+		}
+		if !strings.Contains(err.Error(), "confidential.ai/baked=true") {
+			t.Errorf("error %q should name the label", err)
+		}
+		mustContainLine(t, f.calls(t), "kubectl get helmchart c8s -n kube-system -l confidential.ai/baked=true -o name")
+	})
+
+	t.Run("no HelmChart carries the label passes (NotFound)", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo 'Error from server (NotFound): helmcharts.helm.cattle.io "c8s" not found' >&2; exit 1`)
+		if err := preflightNotBakedNode(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty match (label selector filters out an unrelated c8s HelmChart) passes", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `true`)
+		if err := preflightNotBakedNode(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("cluster has no HelmChart CRD passes", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo 'error: the server doesn'"'"'t have a resource type "helmchart"' >&2; exit 1`)
+		if err := preflightNotBakedNode(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("other kubectl failure surfaces", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo 'Error from server (Forbidden): helmcharts.helm.cattle.io is forbidden' >&2; exit 1`)
+		if err := preflightNotBakedNode(context.Background()); err == nil {
+			t.Fatal("want error surfaced for a non-NotFound kubectl failure")
+		}
+	})
+}
+
 // podListFile writes a typed PodList as the JSON `kubectl get pods -A -o json`
 // would emit and returns its path.
 func podListFile(t *testing.T, pods ...corev1.Pod) string {

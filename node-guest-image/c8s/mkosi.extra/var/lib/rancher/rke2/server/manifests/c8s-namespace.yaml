@@ -1,0 +1,17 @@
+# Baked into server/manifests so RKE2 auto-applies it at boot, the same
+# local-path-storage.yaml precedent: createNamespace: false on the baked
+# HelmChart c8s (c8s-chart.yaml, rendered from c8s-chart.yaml.in) means the
+# namespace must already exist before the deploy controller's helm-install-c8s
+# job runs, and it must carry the privileged PodSecurity labels before the
+# chart's own privileged pods (nri-image-policy's baked installer pins,
+# attestation-api, ratls-mesh) land in it — the same reasoning
+# node-guest-image/README.md "Workload isolation" gives for the release
+# namespace `c8s install` labels on the hosted lanes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: c8s-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

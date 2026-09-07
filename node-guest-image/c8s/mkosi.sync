@@ -66,6 +66,8 @@ C8S_REGISTRY=$(cat "$SYNC_INPUTS/c8s-registry" 2>/dev/null || true)
 C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
+OPERATOR_REPO="${C8S_REGISTRY}/c8s-operator"
+RATLS_MESH_REPO="${C8S_REGISTRY}/ratls-mesh"
 # The image's TEE platform, from build's --sync-input. Required: the NRI
 # floor types the RA-TLS identity CDS checks against attestation evidence,
 # so a wrong or defaulted value denies every adopted workload a certificate.
@@ -90,9 +92,15 @@ case "$PLATFORM" in
     *)   LABEL_PLATFORM=$PLATFORM ;;
 esac
 mkdir -p "$STAGE_DIR/etc/systemd/system/cred-release.service.d" \
+         "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d" \
          "$STAGE_DIR/etc/rancher/rke2/config.yaml.d"
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/cred-release.service.d/10-platform.conf"
+# Same platform value, same drop-in shape, for c8s-chart-values.service: it
+# reads its own launch measurement the platform-appropriate way (TDX sysfs vs
+# SNP self-attestation) and needs to know which.
+printf '[Service]\nEnvironment=C8S_CHART_VALUES_PLATFORM=%s\n' "$PLATFORM" \
+    > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/10-platform.conf"
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
@@ -120,8 +128,16 @@ resolve_digest() {  # <repo> <ref> -> prints sha256:... or FATALs
 }
 NRI_DIGEST=$(resolve_digest "$NRI_REPO" "$C8S_REF")
 CDS_DIGEST=$(resolve_digest "$CDS_REPO" "$C8S_REF")
+# The baked HelmChart (below) pins these two the same way: node mode renders
+# the operator and ratls-mesh alongside nri-image-policy (cvmMode=node turns
+# off attestationApi and volumed stays off by default — see
+# appendCvmModeInstallArgs/appendResolvedDigestArgs in cmd/c8s/install.go,
+# which this sync mirrors so a baked boot resolves the identical component
+# set a live `c8s install --cvm-mode=node` would).
+OPERATOR_DIGEST=$(resolve_digest "$OPERATOR_REPO" "$C8S_REF")
+RATLS_MESH_DIGEST=$(resolve_digest "$RATLS_MESH_REPO" "$C8S_REF")
 NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
-echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}"
+echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}, operator ${OPERATOR_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}"
 
 # Render the NRI floor template into the stage tree, substituting the resolved
 # nri + cds digests into always_allow. The template lives outside mkosi.extra
@@ -141,6 +157,60 @@ render_nri_floor() {
         -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
     echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
+}
+
+# Deterministic chart-tree tarball: reproducible byte-for-byte across builds
+# of the same chart tree (so the launch measurement depends on chart
+# CONTENT, not the extraction filesystem's mtimes/ownership/order). Same
+# flags confidential-os-builder's own layer packing uses for the same reason.
+pack_chart_tarball() {  # <chart dir> <out tar.gz>
+    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+        -C "$(dirname "$1")" -cf - "$(basename "$1")" \
+    | gzip -n > "$2"
+}
+
+# Render the baked HelmChart AddOn into the stage tree: the packed chart tree
+# (base64) plus every node-mode component digest, mirroring
+# appendCvmModeInstallArgs/appendResolvedDigestArgs (cmd/c8s/install.go). The
+# template lives outside mkosi.extra (c8s-chart.yaml.in) for the same reason
+# as the NRI floor template above.
+render_chart_helmchart() {  # <chart tarball path>
+    local tmpl="$SRCDIR/mkosi.profiles/c8s/c8s-chart.yaml.in"
+    local dst="$STAGE_DIR/var/lib/rancher/rke2/server/manifests/c8s-chart.yaml"
+    [ -f "$tmpl" ] || { echo "c8s sync: FATAL chart template $tmpl missing" >&2; exit 1; }
+    local content
+    content=$(base64 -w0 "$1")
+    # cds.ratlsPlatform / ratlsMesh.platform follow appendCvmModeInstallArgs:
+    # only set (to tdx) on a TDX build; the chart's own defaults (snp /
+    # sev-snp) stand on SNP, so the token is dropped there entirely rather
+    # than emitting a value the chart already defaults to.
+    local ratls_platform="snp" ratls_mesh_platform="sev-snp"
+    local tee_sev_guest=true tee_tdx_guest=false
+    local tlslb_attest_platform=snp tlslb_attest_generation=genoa
+    if [ "$PLATFORM" = tdx ]; then
+        ratls_platform=tdx
+        ratls_mesh_platform=tdx
+        tee_sev_guest=false
+        tee_tdx_guest=true
+        tlslb_attest_platform=tdx
+        tlslb_attest_generation=""
+    fi
+    mkdir -p "$(dirname "$dst")"
+    sed \
+        -e "s|@CHART_CONTENT@|${content}|g" \
+        -e "s|@IMAGE_DIGEST@|${OPERATOR_DIGEST}|g" \
+        -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
+        -e "s|@RATLS_MESH_DIGEST@|${RATLS_MESH_DIGEST}|g" \
+        -e "s|@NRI_IMAGE_POLICY_DIGEST@|${NRI_DIGEST}|g" \
+        -e "s|@RATLS_PLATFORM@|${ratls_platform}|g" \
+        -e "s|@RATLS_MESH_PLATFORM@|${ratls_mesh_platform}|g" \
+        -e "s|@TEE_SEV_GUEST@|${tee_sev_guest}|g" \
+        -e "s|@TEE_TDX_GUEST@|${tee_tdx_guest}|g" \
+        -e "s|@TLS_LB_ATTEST_PLATFORM@|${tlslb_attest_platform}|g" \
+        -e "s|@TLS_LB_ATTEST_GENERATION@|${tlslb_attest_generation}|g" \
+        -e "s|@PLATFORM@|${PLATFORM}|g" \
+        "$tmpl" > "$dst"
+    echo "c8s sync: chart HelmChart rendered (image ${OPERATOR_DIGEST}, cds ${CDS_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}, nri-image-policy ${NRI_DIGEST})"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
@@ -221,12 +291,19 @@ C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
 # Content-addressed by the image digest: a cached copy skips the GHCR pull
 # entirely (oras digest-verifies the blobs on the pull that populates it).
 PLUGIN_CACHE="$CACHE_DIR/nri-image-policy-${NRI_IMAGE##*@sha256:}"
-if [ -f "$PLUGIN_CACHE" ]; then
-    echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
+# The chart tree (/usr/share/c8s/chart, see cmd/nri-image-policy/Dockerfile),
+# packed deterministically and cached alongside the plugin binary — same
+# image, same digest key. Both caches gate the early exit below: an image
+# built before the Dockerfile started shipping the chart would otherwise
+# leave a stale boot with a cached binary and no chart tarball ever fetched.
+CHART_CACHE="$CACHE_DIR/c8s-chart-${NRI_IMAGE##*@sha256:}.tar.gz"
+if [ -f "$PLUGIN_CACHE" ] && [ -f "$CHART_CACHE" ]; then
+    echo "c8s sync: cached nri-image-policy + chart (${NRI_IMAGE##*@})"
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
     render_nri_floor
-    echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
+    render_chart_helmchart "$CHART_CACHE"
+    echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s + chart"
     exit 0
 fi
 
@@ -292,6 +369,20 @@ install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
 install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
 install -D -m 0755 "$BIN" "$C8S_TARGET"
 
-render_nri_floor
+# The c8s Helm chart, baked into this same image at /usr/share/c8s/chart
+# (cmd/nri-image-policy/Dockerfile) alongside the plugin binary above. Fail
+# loudly, not silently, when it's missing: a stale image built before the
+# Dockerfile started shipping the chart would otherwise boot with no
+# c8s-chart.yaml AddOn at all, and the failure would surface much later as
+# "no HelmChart c8s" rather than here, where the cause is obvious.
+CHART_SRC="$EXTRACT/usr/share/c8s/chart"
+if [ ! -d "$CHART_SRC" ] || [ ! -f "$CHART_SRC/Chart.yaml" ]; then
+    echo "c8s sync: FATAL $NRI_IMAGE has no chart at usr/share/c8s/chart (Chart.yaml missing) — was it built before the Dockerfile started COPYing internal/helmchart/c8s?" >&2
+    exit 1
+fi
+pack_chart_tarball "$CHART_SRC" "$CHART_CACHE"
 
-echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
+render_nri_floor
+render_chart_helmchart "$CHART_CACHE"
+
+echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s + chart"

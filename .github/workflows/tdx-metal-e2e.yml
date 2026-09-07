@@ -514,15 +514,30 @@ jobs:
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
 
-      - name: install the c8s bundle under test
+      # c8s-local patch (see node-guest-image-invariants.sh's tdx-metal-e2e.yml
+      # marker check): the node image now bakes the c8s chart install itself
+      # (HelmChart c8s in kube-system, node-guest-image/c8s/c8s-chart.yaml.in) —
+      # `c8s install` refuses to run against a cluster carrying it
+      # (preflightNotBakedNode, cmd/c8s/install.go). RKE2's helm-controller
+      # reconciles that HelmChart into a Job named helm-install-c8s in
+      # kube-system; wait for it instead of running the install ourselves. The
+      # operator key and this node's own measurement (matching $mrtd asserted
+      # above) come from c8s-chart-values.service at boot (opkeydata +
+      # attestation), not from this workflow.
+      - name: wait for the baked chart install (helm-install-c8s)
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          c8s install --cvm-mode node --single-node --hardware-platform tdx \
-            --image-tag "$c8sRef" \
-            --operator-keys /tmp/op.pub \
-            --measurements "$mrtd" \
-            --resolve-digests=true
+          if ! kubectl -n kube-system wait --for=condition=complete job/helm-install-c8s --timeout=8m; then
+            echo "::error::helm-install-c8s did not complete"
+            echo "--- helmchart c8s status ---"
+            kubectl -n kube-system get helmchart c8s -o yaml || true
+            echo "--- helm-install-c8s job ---"
+            kubectl -n kube-system get job/helm-install-c8s -o yaml || true
+            echo "--- helm-install-c8s pod logs ---"
+            kubectl -n kube-system logs job/helm-install-c8s --all-containers --tail=-1 || true
+            exit 1
+          fi
           kubectl -n c8s-system get pods -o wide
 
       - name: assert components converged

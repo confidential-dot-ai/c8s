@@ -83,6 +83,46 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
+`c8s install` (including `--cvm-mode=node`) is for clusters that are **not**
+the c8s node image. The node image (`node-guest-image/`) bakes the chart
+install itself as a `HelmChart` AddOn applied at boot, targeting the same
+node-mode values `--cvm-mode=node --single-node` computes; `c8s install`
+detects that baked release (by its `confidential.ai/baked=true` label on
+`HelmChart c8s` in `kube-system`) and refuses, since a live install would
+fight the AddOn controller's own reconciliation and cannot supply the
+boot-only inputs (the operator key, the node's own measurement) that come
+from `opkeydata` and the node's attestation instead — see
+`node-guest-image/README.md`, "Chart install".
+
+### Launch-time values
+
+Deployment configuration that `c8s install --values` would otherwise carry
+(tls-lb hostnames and CORS, `cds.dnsSanPatterns`, rate limits,
+image-policy exempt namespaces and bootstrap digests, `volumed.enabled`, ...)
+can be supplied to the node image without a rebuild, via a `values.yaml`
+fragment on the `opkeydata` ISO next to the operator public key. Sign it with
+the operator private key before attaching the disk:
+
+```
+c8s keys sign-values --key operator.key values.yaml
+```
+
+writing `values.yaml.sig` next to it (ECDSA P-256 over SHA-256 of the file's
+exact bytes, ASN.1 DER, base64). The fragment itself carries exactly two
+top-level keys: `measurement` (the launch measurement of the image the
+fragment is signed for) and `values` (the subtree to merge in). At boot,
+`c8s launch-values render` verifies the signature under the operator key
+the guest already trusts (the one measured into its launch identity),
+requires `measurement` to equal this guest's own measurement — a fragment
+signed for one image cannot be replayed onto another — and rejects any path
+under `values` that is not on an explicit allowlist. The allowlist exists
+precisely because this disk is host-attached and otherwise untrusted: it
+covers configuration, never anything that could widen trust (an image,
+digest, or platform toggle) or override the boot-derived measurement pins
+and operator key. See `internal/cmds/launchvalues` for the exact list.
+A `values.yaml` present without a matching `values.yaml.sig` fails the boot
+rather than installing unsigned configuration.
+
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
 - CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one

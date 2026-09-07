@@ -270,6 +270,44 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	return nil
 }
 
+// bakedHelmChartLabel marks the HelmChart the node image's
+// c8s-chart.yaml.in template bakes into server/manifests, so `c8s install`
+// can tell that release apart from any other HelmChart named c8s an operator
+// might have created by hand.
+const bakedHelmChartLabel = "confidential.ai/baked=true"
+
+// preflightNotBakedNode refuses to install onto a cluster whose kube-system
+// already carries the node image's baked HelmChart c8s (see
+// node-guest-image/c8s/c8s-chart.yaml.in): on that node the chart installs
+// itself at boot from server/manifests, and c8s-chart-values.service supplies
+// the per-launch inputs (the operator key, this node's own measurement) that
+// this CLI has no way to reach from outside the guest. Running `c8s install`
+// there too would fight the baked release over the same HelmChart object.
+// Read-only and first in RunE (before any other cluster read), so a node
+// operator sees this instead of a confusing helm error deep into the run.
+func preflightNotBakedNode(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "helmchart", "c8s",
+		"-n", "kube-system", "-l", bakedHelmChartLabel, "-o", "name").Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr := string(ee.Stderr)
+			switch {
+			case strings.Contains(stderr, "NotFound"):
+				return nil // no HelmChart named c8s carries the label
+			case strings.Contains(stderr, "doesn't have a resource type"), strings.Contains(stderr, "no matches for kind"):
+				return nil // cluster has no HelmChart CRD at all (not RKE2/k3s) — cannot be a baked node
+			}
+			return fmt.Errorf("kubectl get helmchart c8s -n kube-system: %w: %s", err, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("kubectl get helmchart c8s -n kube-system: %w", err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+	return fmt.Errorf("this cluster already carries the node image's baked HelmChart c8s in kube-system (label %s): the c8s node image installs the chart itself at boot, and per-launch inputs (the operator key, this node's own measurement) come from opkeydata and the node's own attestation, not from this CLI. `c8s install` would fight the baked release over the same HelmChart object — nothing to do here", bakedHelmChartLabel)
+}
+
 // preflightTLSLBHostPort fails fast when tls-lb's host port is already bound on
 // every node, so the tls-lb pod would sit Pending and `--wait` would time out
 // with an opaque scheduler error. The classic collision is a bundled ingress
@@ -1151,6 +1189,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		if _, err := exec.LookPath("kubectl"); err != nil {
 			return fmt.Errorf("kubectl CLI not found on PATH: %w", err)
+		}
+		if err := preflightNotBakedNode(cmd.Context()); err != nil {
+			return err
 		}
 		// Always read the adopted workloads, even when --resolve-digests=false
 		// discards workloadImages: this is the only pre-install existence check,
