@@ -2,11 +2,11 @@ package launchvalues
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 // NewCmd returns the `c8s launch-values` command group.
@@ -19,12 +19,10 @@ func NewCmd() *cobra.Command {
 	return cmd
 }
 
-// helmChartConfig is the wire shape c8s-chart-values.sh (now a thin wrapper,
-// see node-guest-image/c8s/mkosi.extra/usr/local/bin/c8s-chart-values.sh)
-// used to build by hand with shell indentation. RKE2's supervisor merges
-// this into the matching baked HelmChart c8s's spec (see
-// node-guest-image/c8s/c8s-chart.<platform>.yaml.in); the mechanism is
-// documented there and in docs/operator.md, "Launch-time values".
+// helmChartConfig is the helm.cattle.io/v1 HelmChartConfig RKE2's deploy
+// controller merges into the baked HelmChart c8s's spec (see
+// node-guest-image/c8s/c8s-chart.<platform>.yaml.in and docs/operator.md,
+// "Launch-time values").
 type helmChartConfig struct {
 	APIVersion string              `yaml:"apiVersion"`
 	Kind       string              `yaml:"kind"`
@@ -38,11 +36,11 @@ type helmChartConfigMeta struct {
 }
 
 type helmChartConfigSpec struct {
-	// ValuesContent carries Render's own output verbatim: it is already
-	// valid YAML, and re-decoding it into `any` here would risk a
-	// round-trip that reorders or retypes a value Render deliberately chose
-	// (e.g. a hex measurement string that happens to parse as a number).
-	ValuesContent yaml.Node `yaml:"valuesContent"`
+	// ValuesContent is a string in the CRD, not a mapping: Render's YAML
+	// output is carried verbatim as a block scalar and parsed by
+	// helm-controller. Embedding it as a nested mapping is rejected by the
+	// apiserver, which would leave the baked chart installed unpinned.
+	ValuesContent string `yaml:"valuesContent"`
 }
 
 func newRenderCmd() *cobra.Command {
@@ -71,7 +69,9 @@ allowlist.`,
 			if err != nil {
 				return err
 			}
-			if err := writeAtomic(out, manifest, 0o644); err != nil {
+			// Atomic: RKE2's deploy controller watches this directory and
+			// must never observe a partial manifest.
+			if err := fileutil.WriteAtomic(out, manifest, 0o644); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", out)
@@ -89,27 +89,13 @@ allowlist.`,
 }
 
 // renderHelmChartConfigManifest wraps valuesContent (Render's output) in the
-// fixed HelmChartConfig header and marshals the whole object in one shot —
-// no hand-built indentation, unlike the shell heredoc this command replaces.
+// fixed HelmChartConfig header.
 func renderHelmChartConfigManifest(valuesContent string) ([]byte, error) {
-	var node yaml.Node
-	if err := yaml.Unmarshal([]byte(valuesContent), &node); err != nil {
-		return nil, fmt.Errorf("parse rendered values: %w", err)
-	}
-	// yaml.Unmarshal into a yaml.Node produces a DocumentNode wrapping the
-	// real root; helmChartConfigSpec.ValuesContent wants that root, block-
-	// styled so it renders as a literal block scalar's contents, i.e. an
-	// ordinary nested mapping under valuesContent: rather than a folded flow
-	// scalar.
-	root := &node
-	if node.Kind == yaml.DocumentNode && len(node.Content) == 1 {
-		root = node.Content[0]
-	}
 	cfg := helmChartConfig{
 		APIVersion: "helm.cattle.io/v1",
 		Kind:       "HelmChartConfig",
 		Metadata:   helmChartConfigMeta{Name: "c8s", Namespace: "kube-system"},
-		Spec:       helmChartConfigSpec{ValuesContent: *root},
+		Spec:       helmChartConfigSpec{ValuesContent: valuesContent},
 	}
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -121,33 +107,4 @@ func renderHelmChartConfigManifest(valuesContent string) ([]byte, error) {
 		"# node-guest-image/c8s/mkosi.extra/usr/local/bin/c8s-chart-values.sh and\n" +
 		"# internal/cmds/launchvalues.\n"
 	return append([]byte(header), out...), nil
-}
-
-// writeAtomic writes data to path via a same-directory temp file + rename,
-// so a reader (RKE2's deploy controller watching this manifest) never
-// observes a partial write — the same atomicity c8s-chart-values.sh's own
-// TMP-then-mv gave when it built this file by hand.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".launch-values-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file in %s: %w", dir, err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op once the rename below succeeds
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write %s: %w", tmpPath, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod %s: %w", tmpPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename %s to %s: %w", tmpPath, path, err)
-	}
-	return nil
 }

@@ -1,23 +1,25 @@
 package launchvalues
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
-	"io/fs"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // genOperatorKey generates a P-256 key and its PKIX "PUBLIC KEY" PEM — the
@@ -52,17 +54,9 @@ func fakeOwnMeasurementBytes() []byte {
 
 func fakeRTMRs() map[int][]byte {
 	return map[int][]byte{
-		1: bytesRepeat(0x11, 48),
-		2: bytesRepeat(0x22, 48),
+		1: bytes.Repeat([]byte{0x11}, 48),
+		2: bytes.Repeat([]byte{0x22}, 48),
 	}
-}
-
-func bytesRepeat(b byte, n int) []byte {
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = b
-	}
-	return out
 }
 
 // fakeCombinedLoader returns a loadMeasuredOperatorKeyAndOwnMeasurementFunc
@@ -76,14 +70,21 @@ func fakeCombinedLoader(pubPEM []byte) loadMeasuredOperatorKeyAndOwnMeasurementF
 }
 
 // noOperatorKeyLoader stands in for the combined loader on a boot with no
-// opkeydata pubkey staged: the real credrelease.ReadOperatorPubkey wraps
-// os.ReadFile's *PathError, so errors.Is(pubErr, fs.ErrNotExist) is what
-// Render actually branches on — this fake preserves that same chain rather
-// than a bespoke sentinel. The own measurement still resolves: a
+// opkeydata pubkey staged: pubErr wraps credrelease.ErrNoOperatorKey, which
+// is what Render branches on. The own measurement still resolves: a
 // non-operator boot needs it too.
 func noOperatorKeyLoader(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
-	_, err := os.Open(filepath.Join(os.TempDir(), "c8s-launchvalues-test-does-not-exist"))
+	err := fmt.Errorf("%w: /etc/confai/operator-pubkey (test fixture)", credrelease.ErrNoOperatorKey)
 	return nil, err, fakeOwnMeasurementBytes(), fakeRTMRs(), nil
+}
+
+// missingRegisterLoader simulates a staged operator key whose TDX binding
+// check failed because RTMR[3] could not be read: an ENOENT, but from the
+// sysfs, not the pubkey. Render must fail closed, not treat it as a
+// non-operator boot.
+func missingRegisterLoader(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
+	_, err := os.Open(filepath.Join(os.TempDir(), "c8s-launchvalues-test-rtmr3-does-not-exist"))
+	return nil, fmt.Errorf("read rtmr3: %w", err), fakeOwnMeasurementBytes(), fakeRTMRs(), nil
 }
 
 var errSubstitutedKey = errors.New("operator pubkey does not match the measured RTMR[3]")
@@ -114,16 +115,15 @@ func withLoader(t *testing.T, fn loadMeasuredOperatorKeyAndOwnMeasurementFunc) {
 	t.Cleanup(func() { loadMeasuredOperatorKeyAndOwnMeasurement = orig })
 }
 
-// signFragment signs sha256(fragmentYAML) with priv, ASN.1 DER, base64,
-// single line — the exact shape `c8s keys sign-values` writes.
+// signFragment signs data the way `c8s keys sign-values` does, as a single
+// line.
 func signFragment(t *testing.T, priv *ecdsa.PrivateKey, data []byte) string {
 	t.Helper()
-	digest := sha256.Sum256(data)
-	der, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	sig, err := operatorauth.SignDetached(priv, data)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	return base64.StdEncoding.EncodeToString(der) + "\n"
+	return sig + "\n"
 }
 
 func writeFragment(t *testing.T, dir string, data []byte, sigLine string) (fragPath, sigPath string) {
@@ -363,8 +363,24 @@ func TestRenderFailsClosedWhenLoaderFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error when LoadMeasuredOperatorKey fails (substituted key)")
 	}
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, credrelease.ErrNoOperatorKey) {
 		t.Errorf("error = %v, want it NOT classified as a non-operator boot (a substituted key must fail closed, not be treated as absent)", err)
+	}
+}
+
+// TestRenderFailsClosedOnMissingRegister covers a staged operator key whose
+// binding check hit ENOENT on the sysfs register: that is not an absent
+// pubkey and must not silently drop cds.operatorKeys.
+func TestRenderFailsClosedOnMissingRegister(t *testing.T) {
+	withLoader(t, missingRegisterLoader)
+	cfg := baseConfig()
+
+	_, err := Render(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("want an error when the register read fails")
+	}
+	if !strings.Contains(err.Error(), "load measured operator key") {
+		t.Errorf("error = %v, want the load-failure path, not the non-operator branch", err)
 	}
 }
 
@@ -433,7 +449,7 @@ func TestRenderFailsClosedWhenOwnMeasurementUnresolvable(t *testing.T) {
 // opkeydata pubkey at all: Render must still succeed (this guest's own
 // measurement is independent of the operator key), must not call
 // operatorauth.ParsePublicKeysPEM (nothing to parse), and must classify the
-// loader's fs.ErrNotExist as "non-operator boot" rather than a hard failure —
+// loader's ErrNoOperatorKey as "non-operator boot" rather than a hard failure —
 // the original c8s-chart-values.sh behavior this replaces just omitted
 // cds.operatorKeys entirely rather than failing the boot.
 func TestRenderNonOperatorBootOmitsOperatorKeys(t *testing.T) {
@@ -475,5 +491,48 @@ func TestRenderNonOperatorBootRejectsFragment(t *testing.T) {
 	_, err := Render(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("want an error: a fragment with no operator key to verify it against must fail closed")
+	}
+}
+
+// TestRenderRejectsMeasurementsConfig: the chart renders measurementsConfig
+// INSTEAD of the boot-derived pins, so a fragment must not be able to set it.
+func TestRenderRejectsMeasurementsConfig(t *testing.T) {
+	for _, path := range []string{"cds.measurementsConfig", "ratlsMesh.measurementsConfig"} {
+		t.Run(path, func(t *testing.T) {
+			if allowedPath(path) {
+				t.Fatalf("%s must not be on the launch-time allowlist", path)
+			}
+		})
+	}
+}
+
+// TestRenderHelmChartConfigManifestValuesContentIsString pins the wire
+// shape: spec.valuesContent is a string block scalar (what the
+// helm.cattle.io/v1 CRD declares), not a nested mapping.
+func TestRenderHelmChartConfigManifestValuesContentIsString(t *testing.T) {
+	values := "cds:\n  operatorKeys: |\n    -----BEGIN PUBLIC KEY-----\n  measurements:\n    - \"" + ownMeasurement + "\"\n"
+	manifest, err := renderHelmChartConfigManifest(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+		Spec       struct {
+			ValuesContent any `yaml:"valuesContent"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(manifest, &doc); err != nil {
+		t.Fatalf("parse manifest: %v\n%s", err, manifest)
+	}
+	if doc.APIVersion != "helm.cattle.io/v1" || doc.Kind != "HelmChartConfig" {
+		t.Errorf("header = %s/%s", doc.APIVersion, doc.Kind)
+	}
+	got, ok := doc.Spec.ValuesContent.(string)
+	if !ok {
+		t.Fatalf("spec.valuesContent is %T, want string\n%s", doc.Spec.ValuesContent, manifest)
+	}
+	if got != values {
+		t.Errorf("spec.valuesContent round-trip mismatch:\n got %q\nwant %q", got, values)
 	}
 }

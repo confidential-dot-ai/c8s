@@ -152,8 +152,8 @@ test-node-guest-image-gpu-cc:
 test-node-guest-image-scratch:
 	./node-guest-image/tests/scratch-enforce-test.sh
 
-# c8s-chart-values.sh logic (root-free unit test; fakes tdx_guest sysfs and
-# the attestation-api via a stub curl).
+# c8s-chart-values.sh logic (root-free unit test; a stub c8s records the
+# argv the script hands it, and a fake opkeydata mount carries the fragment).
 test-node-guest-image-chart-values:
 	./node-guest-image/tests/chart-values-test.sh
 

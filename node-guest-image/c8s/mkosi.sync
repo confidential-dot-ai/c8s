@@ -101,11 +101,14 @@ printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
 # self-attestation) and needs to know which.
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/10-platform.conf"
-# SNP only: c8s-chart-values.sh self-attests against the local
+# SNP only: c8s launch-values render self-attests against the local
 # attestation-api to read its own launch digest; TDX reads its own sysfs and
-# never dials it, so the ordering dependency only belongs on an SNP build.
+# never dials it, so the dependency only belongs on an SNP build. Requires=,
+# not Wants=: without the attester the render cannot pin and the boot must
+# fail closed. Readiness (the port binds after the unit starts) is waited for
+# in the binary.
 if [ "$PLATFORM" = snp ]; then
-    printf '[Unit]\nAfter=attestation-api.service\n' \
+    printf '[Unit]\nRequires=attestation-api.service\nAfter=attestation-api.service\n' \
         > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/20-snp-attestation-api.conf"
 fi
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \

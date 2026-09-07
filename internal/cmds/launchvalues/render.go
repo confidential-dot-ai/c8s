@@ -23,7 +23,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"strings"
 
@@ -91,27 +90,21 @@ func Render(ctx context.Context, cfg Config) (string, error) {
 	}
 
 	// This guest's own launch measurement, (TDX only) RTMR pins, and the
-	// operator pubkey — no longer flags an operator or an outer script
-	// resolves and passes in; c8s-chart-values.sh now hands this command
-	// only --platform and lets it read its own measured state directly (TDX:
-	// tdx_guest sysfs; SNP: one verified self-report, shared between the
-	// operator-key HOSTDATA check and the launch-digest read so an SNP
-	// operator boot attests itself once, not twice).
+	// operator pubkey, read directly from measured state (TDX: tdx_guest
+	// sysfs; SNP: one verified self-report shared between the operator-key
+	// HOSTDATA check and the launch-digest read).
 	operatorPub, pubErr, measurement, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, platform, attestationAPIURL)
 	if err != nil {
 		return "", fmt.Errorf("resolve this guest's own launch measurement: %w", err)
 	}
 	ownHex := strings.ToLower(hex.EncodeToString(measurement))
 
-	// pubErr is nil, fs.ErrNotExist (an absent pubkey means this VM was
-	// launched without an operator key — no opkeydata disk — same as the
-	// shell script's prior behavior of omitting cds.operatorKeys entirely),
-	// or some other load/verify failure (a substituted key, an unreachable
-	// attestation-api), told apart from the "absent" case by the sentinel
-	// rather than a pre-check race against the same file the loader itself
-	// reads. A fragment cannot be trusted without a key to verify it
-	// against, so one present in the non-operator case fails closed below
-	// rather than being silently skipped.
+	// pubErr is nil, ErrNoOperatorKey (this VM was launched without an
+	// opkeydata disk, so cds.operatorKeys is omitted), or some other
+	// load/verify failure (a substituted key, an unreadable register, an
+	// unreachable attestation-api), which fails closed. A fragment cannot be
+	// trusted without a key to verify it against, so one present on a
+	// non-operator boot fails closed too rather than being silently skipped.
 	var operatorKeys []*ecdsa.PublicKey
 	switch {
 	case pubErr == nil:
@@ -119,18 +112,17 @@ func Render(ctx context.Context, cfg Config) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("operator pubkey: %w", err)
 		}
-	case errors.Is(pubErr, fs.ErrNotExist):
+	case errors.Is(pubErr, credrelease.ErrNoOperatorKey):
 		if cfg.FragmentPath != "" {
 			return "", fmt.Errorf("--fragment %s given but no operator pubkey is staged — a fragment cannot be trusted without a key to verify it against: %w", cfg.FragmentPath, pubErr)
 		}
 		fmt.Fprintln(os.Stderr, "launch-values render: no operator pubkey staged — non-operator boot, cds.operatorKeys omitted")
-		operatorPub = nil
 	default:
 		return "", fmt.Errorf("load measured operator key: %w", pubErr)
 	}
 
 	values := bootDerivedValues(operatorPub, ownHex, rtmrs)
-	if operatorPub != nil && cfg.FragmentPath != "" {
+	if cfg.FragmentPath != "" {
 		if cfg.SignaturePath == "" {
 			return "", fmt.Errorf("--fragment %s requires --signature (a fragment without a signature fails the boot)", cfg.FragmentPath)
 		}

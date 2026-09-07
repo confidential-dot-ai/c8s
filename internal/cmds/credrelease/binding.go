@@ -13,7 +13,9 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -95,17 +97,24 @@ func verifyKeyMeasured(pubkey []byte) error {
 	return nil
 }
 
+// ErrNoOperatorKey is returned (wrapped) by ReadOperatorPubkey and the
+// Load* functions when no operator pubkey is staged at all: the VM was
+// launched without an opkeydata disk. It is deliberately distinct from
+// fs.ErrNotExist so that a missing sysfs register in the binding check
+// (which also surfaces as ENOENT) is never mistaken for a non-operator boot.
+var ErrNoOperatorKey = errors.New("no operator pubkey staged")
+
 // ReadOperatorPubkey reads the operator public key the initrd staged from the
 // opkeydata disk. The bytes are exactly what the initrd hashed into RTMR[3],
-// so verifyKeyMeasured can re-derive the same digest. Absence means the VM was
-// launched without an operator key (no opkeydata disk) — errors.Is(err,
-// fs.ErrNotExist) distinguishes that from every other read failure; os.
-// ReadFile's *PathError wraps the underlying fs error, and %w below preserves
-// that chain, so callers can rely on errors.Is rather than string matching.
+// so verifyKeyMeasured can re-derive the same digest. Absence is reported as
+// ErrNoOperatorKey; every other read failure is a hard error.
 func ReadOperatorPubkey() ([]byte, error) {
 	pub, err := os.ReadFile(operatorPubkeyPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s — was the VM launched with an operator key?", ErrNoOperatorKey, operatorPubkeyPath)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w — was the VM launched with an operator key?", operatorPubkeyPath, err)
+		return nil, fmt.Errorf("read %s: %w", operatorPubkeyPath, err)
 	}
 	if len(pub) == 0 {
 		return nil, fmt.Errorf("%s is empty", operatorPubkeyPath)
@@ -117,6 +126,43 @@ func ReadOperatorPubkey() ([]byte, error) {
 // local attestation-api; on expiry the service fails start and systemd
 // retries, same as a failed RTMR read on TDX.
 const selfReportTimeout = 15 * time.Second
+
+// attestationReadyTimeout bounds waitForAttestationAPI. attestation-api is a
+// Type=simple unit that fetches the AMD certificate chains over the network
+// before it binds its port, so an After= ordering alone lets a caller start
+// while the socket is still refusing connections. Package vars so tests can
+// shorten them.
+var (
+	attestationReadyTimeout  = 90 * time.Second
+	attestationReadyInterval = 2 * time.Second
+)
+
+// waitForAttestationAPI polls GET /health until the local attestation-api
+// answers or attestationReadyTimeout expires. A bounded wait in the binary
+// rather than a unit-level Restart=: c8s-chart-values.service is a oneshot
+// rke2-server Requires, and a failed first attempt fails rke2-server's start
+// job for good regardless of how many times systemd restarts the oneshot.
+func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error {
+	client := attestationclient.NewClient(attestationAPIURL)
+	deadline := time.Now().Add(attestationReadyTimeout)
+	var lastErr error
+	for {
+		hctx, cancel := context.WithTimeout(ctx, attestationReadyInterval)
+		_, lastErr = client.Health(hctx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("attestation-api at %s not ready after %s: %w", attestationAPIURL, attestationReadyTimeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(attestationReadyInterval):
+		}
+	}
+}
 
 // selfReport attests this guest against the local attestation-api and
 // returns the verified claims — reading a field off an unverified self-report
@@ -130,6 +176,9 @@ const selfReportTimeout = 15 * time.Second
 // launch digest for OwnLaunchMeasurement) so an SNP boot attests itself only
 // once, not once per caller.
 func selfReport(ctx context.Context, attestationAPIURL string) (types.Claims, error) {
+	if err := waitForAttestationAPI(ctx, attestationAPIURL); err != nil {
+		return types.Claims{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
 	defer cancel()
 
@@ -263,11 +312,11 @@ func OwnLaunchMeasurement(ctx context.Context, platform, attestationAPIURL strin
 // calling both functions in sequence.
 //
 // The own measurement is always resolved, operator key present or not — a
-// non-operator boot (no opkeydata pubkey, ReadOperatorPubkey's
-// errors.Is(err, fs.ErrNotExist)) still needs it for cds/ratlsMesh
-// measurements, so pub/pubErr come back alongside measurement/rtmrs rather
-// than short-circuiting the whole call. The caller (launchvalues.Render)
-// distinguishes "no key staged" from every other pubErr via errors.Is.
+// non-operator boot (pubErr wrapping ErrNoOperatorKey) still needs it for
+// cds/ratlsMesh measurements, so pub/pubErr come back alongside
+// measurement/rtmrs rather than short-circuiting the whole call. The caller
+// (launchvalues.Render) distinguishes "no key staged" from every other
+// pubErr via errors.Is(pubErr, ErrNoOperatorKey).
 //
 // This is the entry point launchvalues.Render uses; LoadMeasuredOperatorKey
 // and OwnLaunchMeasurement remain exported for callers (tests, other

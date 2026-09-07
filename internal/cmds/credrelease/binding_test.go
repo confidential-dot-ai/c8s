@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
@@ -395,7 +395,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementSNPAttestsOnce(t *testing.T) {
 // TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot covers a launch
 // with no opkeydata pubkey at all: the own measurement must still resolve
 // (bootDerivedValues needs it regardless of the operator key), and pubErr
-// must carry the fs.ErrNotExist chain rather than failing the whole call.
+// must wrap ErrNoOperatorKey rather than failing the whole call.
 func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 	t.Run("tdx", func(t *testing.T) {
 		overrideBindingPaths(t) // pubkey path left unwritten
@@ -411,8 +411,8 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 		if pubErr == nil {
 			t.Fatal("want pubErr set (no pubkey staged)")
 		}
-		if !errors.Is(pubErr, fs.ErrNotExist) {
-			t.Errorf("pubErr = %v, want errors.Is(..., fs.ErrNotExist)", pubErr)
+		if !errors.Is(pubErr, ErrNoOperatorKey) {
+			t.Errorf("pubErr = %v, want errors.Is(..., ErrNoOperatorKey)", pubErr)
 		}
 		if pub != nil {
 			t.Errorf("pub = %v, want nil", pub)
@@ -431,8 +431,8 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected hard error: %v", err)
 		}
-		if !errors.Is(pubErr, fs.ErrNotExist) {
-			t.Errorf("pubErr = %v, want errors.Is(..., fs.ErrNotExist)", pubErr)
+		if !errors.Is(pubErr, ErrNoOperatorKey) {
+			t.Errorf("pubErr = %v, want errors.Is(..., ErrNoOperatorKey)", pubErr)
 		}
 		if pub != nil {
 			t.Errorf("pub = %v, want nil", pub)
@@ -445,7 +445,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 
 // TestLoadMeasuredOperatorKeyAndOwnMeasurementSNPSubstitutedKey covers a
 // staged pubkey that does not match launch-committed HOSTDATA: pubErr must
-// carry the mismatch (not fs.ErrNotExist), while the own measurement still
+// carry the mismatch (not ErrNoOperatorKey), while the own measurement still
 // resolves from the one self-report already made.
 func TestLoadMeasuredOperatorKeyAndOwnMeasurementSNPSubstitutedKey(t *testing.T) {
 	pubPath, _ := overrideBindingPaths(t)
@@ -465,7 +465,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementSNPSubstitutedKey(t *testing.T)
 	if pubErr == nil {
 		t.Fatal("want pubErr set for a HOSTDATA mismatch")
 	}
-	if errors.Is(pubErr, fs.ErrNotExist) {
+	if errors.Is(pubErr, ErrNoOperatorKey) {
 		t.Errorf("pubErr = %v, must NOT be classified as absent (a substituted key must fail closed)", pubErr)
 	}
 	if gotPub != nil {
@@ -502,4 +502,47 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementFailsClosedOnUnresolvableMeasur
 			t.Fatal("want an error when the attestation-api is unreachable")
 		}
 	})
+}
+
+// TestMain shortens the attestation-api readiness wait so the unreachable-URL
+// cases fail in milliseconds rather than the 90s a real boot allows.
+func TestMain(m *testing.M) {
+	attestationReadyTimeout = 300 * time.Millisecond
+	attestationReadyInterval = 20 * time.Millisecond
+	os.Exit(m.Run())
+}
+
+// TestSelfReportWaitsForAttestationAPI covers the boot-order race on SNP:
+// attestation-api is ordered before c8s-chart-values but binds its port
+// only after fetching the AMD cert chains, so the first /health calls fail.
+// selfReport must wait for readiness and then attest exactly once.
+func TestSelfReportWaitsForAttestationAPI(t *testing.T) {
+	launchDigest := bytes.Repeat([]byte{0x5a}, 48)
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(launchDigest)))
+	stub.SetHealthFailures(3)
+
+	measurement, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", stub.URL)
+	if err != nil {
+		t.Fatalf("OwnLaunchMeasurement: %v", err)
+	}
+	if !bytes.Equal(measurement, launchDigest) {
+		t.Errorf("measurement = %x, want %x", measurement, launchDigest)
+	}
+	if n := stub.HealthRequests(); n < 4 {
+		t.Errorf("/health called %d times, want at least 4 (3 failures then success)", n)
+	}
+	if n := len(stub.AttestRequests()); n != 1 {
+		t.Errorf("/attest called %d times, want exactly 1", n)
+	}
+}
+
+func TestSelfReportFailsWhenAttestationAPINeverReady(t *testing.T) {
+	_, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", "http://127.0.0.1:1")
+	if err == nil {
+		t.Fatal("want an error when the attestation-api never answers /health")
+	}
+	if !strings.Contains(err.Error(), "not ready after") {
+		t.Errorf("error = %v, want the readiness wait to report the timeout", err)
+	}
 }

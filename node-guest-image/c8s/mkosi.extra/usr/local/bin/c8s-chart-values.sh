@@ -1,15 +1,14 @@
 #!/bin/sh
 # Thin wrapper around `c8s launch-values render --out` (internal/cmds/
-# launchvalues), which now owns everything this script used to do by hand:
-# resolving this guest's own launch measurement (TDX sysfs / SNP
-# self-attestation), loading and verifying the operator key, verifying and
-# merging an optional opkeydata values.yaml fragment, and writing the
-# HelmChartConfig atomically. See internal/cmds/launchvalues's package doc
-# for the trust chain and docs/operator.md, "Launch-time values", for the
+# launchvalues), which resolves this guest's own launch measurement (TDX
+# sysfs / SNP self-attestation), loads and verifies the operator key,
+# verifies and merges an optional opkeydata values.yaml fragment, and writes
+# the HelmChartConfig atomically. See internal/cmds/launchvalues's package
+# doc for the trust chain and docs/operator.md, "Launch-time values", for the
 # fragment shape and allowlist.
 #
-# This script's own job is only what only a shell running IN the guest's
-# mount namespace can do:
+# This script's own job is only what a shell running in the guest's mount
+# namespace can do:
 #
 #   - parse --platform.
 #   - mount the opkeydata ISO (if present) and locate values.yaml /
@@ -45,7 +44,7 @@ OPKEYDATA_MNT="/run/confos/opkeydata"
 # --- mount. A values.yaml present without its .sig is a hard failure below
 # --- — an unsigned fragment must never reach the render.
 cleanup() {
-    if [ -n "$FRAGMENT" ] || mountpoint -q "$OPKEYDATA_MNT" 2>/dev/null; then
+    if mountpoint -q "$OPKEYDATA_MNT" 2>/dev/null; then
         umount "$OPKEYDATA_MNT" 2>/dev/null || true
     fi
 }
@@ -78,8 +77,3 @@ if [ -n "$FRAGMENT" ]; then
 fi
 
 /usr/local/bin/c8s "$@"
-
-# Unmount as soon as the fragment (if any) has been read and rendered.
-if [ -n "$FRAGMENT" ] || mountpoint -q "$OPKEYDATA_MNT" 2>/dev/null; then
-    umount "$OPKEYDATA_MNT" 2>/dev/null || true
-fi

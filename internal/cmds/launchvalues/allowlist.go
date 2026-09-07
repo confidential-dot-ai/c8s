@@ -20,22 +20,24 @@ import (
 // webhook.enabled, kata.*, operator.*, and nriImagePolicy.{enabled,baked,
 // image,distro} — none of them are on the list below, so the leaf walk in
 // checkAllowlist rejects them the same way it rejects a typo.
+//
+// cds.measurementsConfig and ratlsMesh.measurementsConfig are deliberately
+// absent: the chart renders them INSTEAD of the boot-derived
+// measurements/rtmrs pins (templates/cds.yaml, ratls-mesh-daemonset.yaml),
+// so allowing them would let a fragment replace this node's own pins.
 var allowedPrefixes = []string{
 	"tlsLb.san",
 	"tlsLb.cors",
 	"cds.dnsSanPatterns",
-	"cds.measurementsConfig",
 	"cds.rateLimit",
 	"cds.rateBurst",
-	"ratlsMesh.measurementsConfig",
 	"volumed.enabled",
 	"nriImagePolicy.policy.exemptNamespaces",
 	"nriImagePolicy.bootstrapAllowlist.digests",
 }
 
 // checkAllowlist walks every leaf of values and fails closed on the first
-// path that is not exactly one of allowedPrefixes or under one ending in
-// ".". cds.operatorKeys and the measurement/rtmr keys are never reachable
+// path that is not one of allowedPrefixes or under one. cds.operatorKeys and the measurement/rtmr keys are never reachable
 // through the fragment at all — they are not on the list, so a fragment that
 // tries to set them is rejected here, before the merge that would otherwise
 // let a map-shaped attempt shadow them.
