@@ -26,7 +26,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -410,7 +410,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bare.rtmr3 != runtimemeasure.ForOperatorKey(pub) {
+	if bare.rtmr3 != runtimemeasure.Seed(pub) {
 		t.Error("with no workload images the expected register must equal the bare operator-key seed")
 	}
 
@@ -418,7 +418,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub),
+	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub),
 		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
 	if chained.rtmr3 != want {
 		t.Error("workload images must chain onto the operator-key seed via the shared convention")
@@ -469,7 +469,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig}) {
+	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub), []string{dig}) {
 		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
 	}
 }

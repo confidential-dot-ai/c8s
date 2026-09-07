@@ -62,7 +62,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("--platform: %w", err)
 	}
 
-	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.Platform, cfg.AttestationAPIURL)
+	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.AttestationAPIURL)
 	if err != nil {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}

@@ -31,7 +31,7 @@ import (
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -766,7 +766,7 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		// through ForOperatorKey, and a second implementation of the same
 		// arithmetic is a second thing to drift. It hashes the file bytes
 		// verbatim — the check above only inspects them.
-		seed := runtimemeasure.ForOperatorKey(pubPEM)
+		seed := runtimemeasure.Seed(pubPEM)
 		pins.rtmr3 = seed[:]
 	}
 	if v, ok := manual[3]; ok {

@@ -25,7 +25,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 // verifyEnvelope verifies a self-describing evidence envelope in-process with
@@ -92,7 +92,7 @@ func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workload
 	return measuredPolicy{
 		platform: teetypes.PlatformSNP,
 		snpPins:  pins,
-		hostData: runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
+		hostData: runtimemeasure.HostData(operatorPubPEM),
 	}, nil
 }
 
@@ -121,7 +121,7 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 	return measuredPolicy{
 		platform: teetypes.PlatformTDX,
 		pins:     pins,
-		rtmr3:    runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(operatorPubPEM), digests),
+		rtmr3:    runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(operatorPubPEM), digests),
 	}, nil
 }
 

@@ -6,25 +6,22 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 )
 
-// stageMeasuredOperatorKey writes pubPEM to the (test-overridden) staging path
-// and a matching fake RTMR[3], as the measured initrd would have.
+// stageMeasuredOperatorKey writes pubPEM to the (test-overridden) staging path.
+// The binding itself comes from the verified self-report, so a caller that
+// needs Run to get past the anchor check also needs an attester serving
+// tdxBinding(pubPEM); tests that expect a refusal do not.
 func stageMeasuredOperatorKey(t *testing.T, pubPEM []byte) {
 	t.Helper()
-	pubPath, rtmrPath := overrideBindingPaths(t)
-	writeFileT(t, pubPath, pubPEM)
-	writeFileT(t, rtmrPath, expectedRTMR3ForKey(pubPEM))
+	stageOperatorPubkey(t, pubPEM)
 }
 
 // freshOperatorPubPEM generates a fresh ECDSA keypair and returns the PKIX
@@ -42,37 +39,20 @@ func freshOperatorPubPEM(t *testing.T) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
 
-// fakeAttestationAPI is a stand-in for the local attestation-api: POST /attest
-// returns a syntactically valid TDX evidence envelope (no real quote — the
-// RA-TLS serving cert only embeds it, nothing verifies it in these tests).
-func fakeAttestationAPI(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/attest" || r.Method != http.MethodPost {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{
-			Platform: string(types.PlatformTdx),
-			Evidence: json.RawMessage(`{"quote":"ZmFrZS1xdW90ZQ=="}`),
-		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
 // runnableConfig stages a measured operator key, on-disk CAs, and a fake
 // attestation-api, returning a Config Run can fully start from.
 func runnableConfig(t *testing.T) Config {
 	t.Helper()
-	stageMeasuredOperatorKey(t, freshOperatorPubPEM(t))
+	pub := freshOperatorPubPEM(t)
+	stageMeasuredOperatorKey(t, pub)
 	dir := t.TempDir()
 	clientCert, clientKey, _ := namedCA(t, dir, "client-ca")
 	serverCert, _, _ := namedCA(t, dir, "server-ca")
+	// The anchor check reads the binding from a verified self-report, so the
+	// attester must serve the register this key implies.
 	return Config{
 		ListenAddr:        "127.0.0.1:0",
-		AttestationAPIURL: fakeAttestationAPI(t).URL,
+		AttestationAPIURL: attester(t, teetypes.PlatformTDX, tdxBinding(pub)),
 		Platform:          "tdx",
 		ClientCACert:      clientCert,
 		ClientCAKey:       clientKey,
@@ -106,7 +86,7 @@ func TestRunStartupErrors(t *testing.T) {
 		{
 			name: "operator key not staged",
 			cfg: func(t *testing.T) Config {
-				overrideBindingPaths(t) // paths exist, files do not
+				stageOperatorPubkey(t, nil) // staging path exists, file does not
 				return Config{Platform: "tdx"}
 			},
 		},
