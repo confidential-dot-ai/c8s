@@ -345,6 +345,11 @@ func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (
 	if workload.Secrets == nil {
 		return grant{}, deny("workload %q holds no secret grant", name)
 	}
+	// The write path refuses this shape; the store may still hold one written
+	// before it did.
+	if !workload.ArgvPinned() {
+		return grant{}, deny("workload %q holds a secret grant but leaves a container's argv unconstrained", name)
+	}
 	return grant{workload: name, secrets: workload.Secrets}, nil
 }
 

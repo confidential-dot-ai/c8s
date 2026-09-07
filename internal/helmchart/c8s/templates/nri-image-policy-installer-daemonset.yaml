@@ -1,6 +1,6 @@
 {{/*
 One pull-mode installer DaemonSet on every node. Each plugin polls the CDS it
-can reach (node-local NodePort), so operator `c8s allowlist` writes reach
+can reach (node-local NodePort), so operator `c8s allowlist add` writes reach
 admission. CDS itself is pinned separately (cds.node.selector, in cds.yaml).
 The name keeps the historical `-worker` suffix to preserve DaemonSet identity
 across upgrade; there is no longer a `-cds` counterpart.

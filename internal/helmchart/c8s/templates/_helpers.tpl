@@ -618,19 +618,18 @@ cache_max_entries = 1024
 {{- end -}}
 
 {{/*
-  c8s.imageAllowlist returns the merged image-digest allowlist as a dict
-  (sha256 -> image reference). It is the single source the NRI allowlist is
-  built from — both CDS's served seed (c8s.allowlistSeedJSON) and each plugin's
-  always_allow (nri-image-policy.bootConfig) render from it.
+  c8s.imageAllowlist returns the chart's own image digests as a dict (sha256 ->
+  image reference): what CDS's served seed (c8s.allowlistSeedJSON) derives its
+  component entries from and what every plugin's always_allow
+  (c8s.alwaysAllow) starts from.
 
-  Contents, lowest precedence first:
+  Contents:
     1. derived c8s component images (from c8s.components) whose image.digest is
        set — only when bootstrapAllowlist.deriveComponents is true, so a
        digest-pinned `c8s install` self-allows the c8s components it deploys;
     2. the CDS image self-entry (cds.image) — always present (independent of
        deriveComponents) so CDS is admitted on whichever node it lands;
-    3. operator-supplied nriImagePolicy.bootstrapAllowlist.digests, which
-       override a derived entry for the same sha256 (fleet values win).
+    3. the tls-lb nginx and containerd-prep images the chart deploys.
 */}}
 {{- define "c8s.imageAllowlist" -}}
 {{- $digests := dict -}}
@@ -652,8 +651,7 @@ cache_max_entries = 1024
        nginx:<c8s-tag>`). Seed it from its pinned digest whenever tls-lb is
        enabled — like the CDS self-entry above, independent of deriveComponents
        — so a default install admits the nginx it ships without the operator
-       hand-pinning it in bootstrapAllowlist.digests. Operator-supplied digests
-       below still override. */}}
+       hand-writing an entry for it. */}}
 {{- if .Values.tlsLb.enabled -}}
 {{- $lbImg := .Values.tlsLb.nginx.image -}}
 {{- if $lbImg.digest -}}
@@ -679,17 +677,40 @@ cache_max_entries = 1024
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- range $digest, $image := .Values.nriImagePolicy.bootstrapAllowlist.digests -}}
-{{- $_ := set $digests $digest $image -}}
+{{ $digests | toJson }}
+{{- end -}}
+
+{{/*
+  c8s.anyArgvDigests returns the digests bootstrapAllowlist.workloads admits
+  under any command and args, as a dict (sha256 -> image label). An entry that
+  pins a command line is seed-only.
+*/}}
+{{- define "c8s.anyArgvDigests" -}}
+{{- $digests := dict -}}
+{{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
+{{- range $c := concat (default list $entry.initContainers) (default list $entry.containers) -}}
+{{- if and (eq (dig "command" "policy" "" $c) "any") (eq (dig "args" "policy" "" $c) "any") -}}
+{{- $_ := set $digests $c.digest (default $entry.label $c.image | default "") -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{ $digests | toJson }}
+{{- end -}}
+
+{{/*
+  c8s.alwaysAllow is what every host plugin admits by digest alone before CDS
+  is reachable: the chart's own images (c8s.imageAllowlist) plus every
+  bootstrapAllowlist.workloads digest admitted under any command and args.
+*/}}
+{{- define "c8s.alwaysAllow" -}}
+{{ merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson) | toJson }}
 {{- end -}}
 
 {{/*
   c8s.digestWorkloadName names the entry a c8s.imageAllowlist digest is seeded
   as: the image reference's last path segment with any tag or digest stripped
   ("image" when that is not a legal entry name), then the first 12 hex digits
-  of the digest. Must match internal/allowlist floorEntryName.
+  of the digest. Must match pkg/allowlist DigestEntryName.
   Call with (dict "digest" <sha256:...> "image" <reference>).
 */}}
 {{- define "c8s.digestWorkloadName" -}}
@@ -731,7 +752,7 @@ cache_max_entries = 1024
       the live allowlist from CDS like the chart-installed one, so the seed
       must be served or CDS starts empty and every un-baked component
       (operator, ratls-mesh, tls-lb's nginx, adopted workloads) is denied
-      until an operator hand-applies a workload entry. The cvmMode arm also
+      until an operator hand-runs `c8s allowlist add`. The cvmMode arm also
       covers a node install that leaves the installer off entirely.
   Gating on nriImagePolicy.enabled alone dropped the seed under both pod and
   node mode.

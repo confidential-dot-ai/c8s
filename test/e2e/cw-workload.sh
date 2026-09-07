@@ -30,10 +30,8 @@ image=$(grep -oE '[[:graph:]]+@sha256:[0-9a-f]{64}' "$manifest" | head -1)
 if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
   : "${C8S_ALLOWLIST_URL:?needed alongside C8S_OPERATOR_KEY}"
   : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
-  printf '{"%s":{"label":"%s","initContainers":[],"containers":[{"digest":"%s","image":"%s","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
-    "$deploy" "$image" "${image#*@}" "$image" \
-    | c8s allowlist workload apply - \
-      --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
+  c8s allowlist add "${image#*@}" "$image" \
+    --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
     || fail "signed allowlist write rejected for the workload digest"
   echo "ok: workload digest admitted"
 fi

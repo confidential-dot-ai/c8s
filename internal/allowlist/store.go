@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -443,8 +442,9 @@ func normalizeEntry(name string, w pkgallowlist.Workload) (pkgallowlist.Workload
 
 // migrateFloorTable folds the pre-unification `allowlist(digest, image)` floor
 // table into workload entries and drops it. Each row becomes the entry the
-// chart now seeds for that digest — see floorEntryName — so a re-seed after the
-// migration adds nothing; a name already taken is left alone.
+// chart now seeds for that digest (pkgallowlist.DigestEntry under
+// DigestEntryName), so a re-seed after the migration adds nothing; a name
+// already taken is left alone.
 func migrateFloorTable(db *sql.DB) error {
 	var one int
 	err := db.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'allowlist'").Scan(&one)
@@ -477,12 +477,12 @@ func migrateFloorTable(db *sql.DB) error {
 			rows.Close()
 			return fmt.Errorf("floor digest %q: %w", digestStr, err)
 		}
-		name := floorEntryName(digest, image)
+		name := pkgallowlist.DigestEntryName(digest, image)
 		if _, dup := entries[name]; dup {
 			rows.Close()
 			return fmt.Errorf("floor digests %s and %s both map to entry %q", entries[name].Containers[0].Digest, digest, name)
 		}
-		entry, err := normalizeEntry(name, floorEntry(digest, image))
+		entry, err := normalizeEntry(name, pkgallowlist.DigestEntry(digest, image))
 		if err != nil {
 			rows.Close()
 			return err
@@ -529,36 +529,4 @@ func migrateFloorTable(db *sql.DB) error {
 	}
 	slog.Info("migrated floor digests into workload entries", "floor_rows", len(entries), "entries_added", added)
 	return nil
-}
-
-// floorEntry is the workload entry a floor digest becomes: one container
-// admitted under any argv, labelled with the image reference.
-func floorEntry(digest types.Digest, image string) pkgallowlist.Workload {
-	return pkgallowlist.Workload{
-		Label:          image,
-		InitContainers: []pkgallowlist.Container{},
-		Containers: []pkgallowlist.Container{{
-			Digest:  digest,
-			Image:   image,
-			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
-			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
-		}},
-	}
-}
-
-// floorEntryName names the entry a floor digest becomes: the image reference's
-// last path segment with any tag or digest stripped ("image" when that is not
-// a legal name), then the first 12 hex digits of the digest. Must match the
-// chart's c8s.digestWorkloadName.
-func floorEntryName(digest types.Digest, image string) string {
-	base, _, _ := strings.Cut(image, "@")
-	base = base[strings.LastIndex(base, "/")+1:]
-	base, _, _ = strings.Cut(base, ":")
-	if len(base) > 50 {
-		base = base[:50]
-	}
-	if !pkgallowlist.ValidWorkloadName(base) {
-		base = "image"
-	}
-	return base + "-" + digest.Hex()[:12]
 }

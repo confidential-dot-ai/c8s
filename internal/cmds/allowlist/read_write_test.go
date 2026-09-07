@@ -282,6 +282,73 @@ func TestDiffRejectsBadFile(t *testing.T) {
 	}
 }
 
+// --- add ---
+
+func TestAddWritesDerivedEntry(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeOperatorKey(t, dir)
+	url, methods := recordingCDS(t)
+
+	out, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if !contains(*methods, http.MethodPut) {
+		t.Fatalf("expected a PUT, saw %v", *methods)
+	}
+	if want := "added app-" + digA[7:19]; !strings.Contains(out, want) {
+		t.Fatalf("missing %q:\n%s", want, out)
+	}
+}
+
+func TestAddDryRunMakesNoCall(t *testing.T) {
+	url, methods := recordingCDS(t)
+	out, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--dry-run")
+	if err != nil {
+		t.Fatalf("add --dry-run: %v", err)
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("dry-run must not call CDS, saw %v", *methods)
+	}
+	if !strings.Contains(out, "would add app-"+digA[7:19]) {
+		t.Fatalf("missing dry-run line:\n%s", out)
+	}
+}
+
+func TestAddRejectsInvalidDigestAndWildcardImage(t *testing.T) {
+	url, methods := recordingCDS(t)
+	if _, _, err := runCmd("add", "sha256:short", "registry/app", "--url", url, "--insecure"); err == nil {
+		t.Fatal("expected an invalid digest to be rejected")
+	}
+	if _, _, err := runCmd("add", digA, "*", "--url", url, "--insecure", "--dry-run"); err == nil {
+		t.Fatal("expected a bare-wildcard image to be rejected")
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("must not call CDS with invalid arguments, saw %v", *methods)
+	}
+}
+
+// An any-argv entry for a digest a narrower served entry already declares
+// would shadow it, so add refuses like apply does.
+func TestAddRefusesShadowingLiveEntry(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeOperatorKey(t, dir)
+	live := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"api":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
+	url, methods := servingAllowlistCDS(t, live)
+
+	_, stderr, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	if err == nil || !strings.Contains(err.Error(), "lint error") {
+		t.Fatalf("expected a refusal, got %v", err)
+	}
+	if !strings.Contains(stderr, `workload "api" can never be the unique match`) {
+		t.Fatalf("shadow finding missing:\n%s", stderr)
+	}
+	if contains(*methods, http.MethodPut) {
+		t.Fatal("must not write a shadowing entry")
+	}
+}
+
 // --- upload ---
 
 func TestUploadProceedsWhenListFailsForDiff(t *testing.T) {

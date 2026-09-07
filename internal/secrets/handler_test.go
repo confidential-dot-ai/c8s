@@ -608,6 +608,44 @@ func TestEntryWithoutGrantRefused(t *testing.T) {
 	}
 }
 
+// A grant on an entry that leaves a container's argv unconstrained is refused
+// at release, whatever the write path let through: the value would go to
+// whatever command line the host chose.
+func TestGrantOnUnpinnedEntryRefused(t *testing.T) {
+	hn := newHarness(t)
+	var log bytes.Buffer
+	hn.h.Logger = slog.New(slog.NewTextHandler(&log, nil))
+	hn.h.Policy = fakePolicy{al: &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{
+		"c8s": anyEntry(t, testInjected, "ghcr.io/confidential-dot-ai/c8s@"+testInjected),
+		"api": {
+			Containers: []pkgallowlist.Container{
+				{
+					Digest:  mustDigest(t, testAppImg),
+					Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/serve"}},
+					Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+				},
+				{
+					Digest:  mustDigest(t, testAppImg2),
+					Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/metrics"}},
+					Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+				},
+			},
+			Secrets: &pkgallowlist.SecretsPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/api/**"}},
+		},
+	}}}
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
+
+	w := do(hn.h, hn.request(t, http.MethodGet, "/api/db"))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unpinned entry with a grant = %d, want 403", w.Code)
+	}
+	assertNoRelease(t, w, stored)
+	if !strings.Contains(log.String(), "unconstrained") {
+		t.Fatalf("refusal did not name the unpinned argv:\n%s", log.String())
+	}
+}
+
 // Release is gated on the whole container set: until every main the entry
 // declares is running, the sandbox matches nothing and is refused.
 func TestReleaseRefusedUntilEveryMainIsRunning(t *testing.T) {

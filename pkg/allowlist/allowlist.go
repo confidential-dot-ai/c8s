@@ -146,26 +146,10 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
 	}
-	if !strict {
-		warnLegacyDigests(data)
-	}
 	if err := a.normalize(strict); err != nil {
 		return nil, err
 	}
 	return &a, nil
-}
-
-// warnLegacyDigests names a served document that still carries a
-// pre-unification top-level digests map — an older CDS mid-upgrade. Those
-// digests are not admitted by this consumer until the next pull from an
-// upgraded CDS.
-func warnLegacyDigests(data []byte) {
-	var probe struct {
-		Digests map[string]string `json:"digests"`
-	}
-	if json.Unmarshal(data, &probe) == nil && len(probe.Digests) > 0 {
-		slog.Warn("allowlist: served document carries a pre-unification digests map; those digests are not admitted until CDS is upgraded", "digests", len(probe.Digests))
-	}
 }
 
 // ParseWorkloadJSON decodes and validates a single workload entry — the body of
@@ -187,10 +171,18 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	if err := normalizeSecrets(&w.Secrets); err != nil {
 		return nil, fmt.Errorf("entry secrets: %w", err)
 	}
+	if w.Secrets != nil && !w.ArgvPinned() {
+		return nil, fmt.Errorf("entry: %w", errGrantUnpinned)
+	}
 	sortContainers(w.InitContainers)
 	sortContainers(w.Containers)
 	return &w, nil
 }
+
+// errGrantUnpinned refuses a secrets grant on an entry that leaves any
+// container's argv to the host: the value would be released to whatever
+// command line the host chose.
+var errGrantUnpinned = fmt.Errorf("a secrets grant requires every container's command and args policy to be exact or deny")
 
 // Digests returns every container digest in the workload (init and main), for
 // building a digest index.
@@ -211,6 +203,23 @@ func (c Container) AnyArgv() bool {
 	return c.Command.Policy == PolicyAny && c.Args.Policy == PolicyAny
 }
 
+// ArgvPinned reports whether every container's command and args policy is
+// exact or deny, so nothing about the entry's argv is left to the host. A
+// secrets grant requires it (docs/secrets.md).
+func (w Workload) ArgvPinned() bool {
+	for _, c := range w.containers() {
+		if c.Command.Policy == PolicyAny || c.Args.Policy == PolicyAny {
+			return false
+		}
+	}
+	return true
+}
+
+// containers is the init containers followed by the main containers.
+func (w Workload) containers() []Container {
+	return append(append(make([]Container, 0, len(w.InitContainers)+len(w.Containers)), w.InitContainers...), w.Containers...)
+}
+
 // AdmitsAnyArgv reports whether some entry admits the digest under an
 // unconstrained argv policy. The injected-container drop set (internal/secrets)
 // keys on it: c8s's own images run with per-pod arguments, so they are only
@@ -221,13 +230,46 @@ func (a *Allowlist) AdmitsAnyArgv(digest string) bool {
 		return false
 	}
 	for _, w := range a.Workloads {
-		for _, c := range append(append([]Container{}, w.InitContainers...), w.Containers...) {
+		for _, c := range w.containers() {
 			if c.Digest == d && c.AnyArgv() {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// DigestEntry is the entry that admits an image under any command line: one
+// container at digest, labelled with the image reference. The chart seeds one
+// per bootstrap digest and `c8s allowlist add` writes one.
+func DigestEntry(digest types.Digest, image string) Workload {
+	return Workload{
+		Label:          image,
+		InitContainers: []Container{},
+		Containers: []Container{{
+			Digest:  digest,
+			Image:   image,
+			Command: ArgvPolicy{Policy: PolicyAny},
+			Args:    ArgvPolicy{Policy: PolicyAny},
+		}},
+	}
+}
+
+// DigestEntryName names a DigestEntry: the image reference's last path segment
+// with any tag or digest stripped ("image" when that is not a legal name), then
+// the first 12 hex digits of the digest. Must match the chart's
+// c8s.digestWorkloadName.
+func DigestEntryName(digest types.Digest, image string) string {
+	base, _, _ := strings.Cut(image, "@")
+	base = base[strings.LastIndex(base, "/")+1:]
+	base, _, _ = strings.Cut(base, ":")
+	if len(base) > 50 {
+		base = base[:50]
+	}
+	if !ValidWorkloadName(base) {
+		base = "image"
+	}
+	return base + "-" + digest.Hex()[:12]
 }
 
 // Canonical returns the canonical byte serialization: json.Marshal of the
@@ -285,6 +327,9 @@ func (a *Allowlist) normalize(strict bool) error {
 		}
 		if err := normalizeSecrets(&w.Secrets); err != nil {
 			return fmt.Errorf("workload %q secrets: %w", name, err)
+		}
+		if strict && w.Secrets != nil && !w.ArgvPinned() {
+			return fmt.Errorf("workload %q: %w", name, errGrantUnpinned)
 		}
 		sortContainers(w.InitContainers)
 		sortContainers(w.Containers)

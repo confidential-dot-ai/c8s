@@ -280,7 +280,7 @@ func TestHTTPRefusedWithoutInsecure(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
 
-	_, _, err := runCmd("workload", "delete", "app", "--url", url, "--operator-key", keyPath)
+	_, _, err := runCmd("delete", "app", "--url", url, "--operator-key", keyPath)
 	if err == nil {
 		t.Fatal("expected a plaintext http:// CDS URL to be refused without --insecure")
 	}
@@ -318,7 +318,7 @@ func TestWriteRequiresOperatorCredential(t *testing.T) {
 	url, _ := recordingCDS(t)
 	// No key and no env: a write must fail before reaching CDS.
 	t.Setenv(cdsconn.EnvOperatorKey, "")
-	_, _, err := runCmd("workload", "delete", "app", "--url", url, "--insecure")
+	_, _, err := runCmd("delete", "app", "--url", url, "--insecure")
 	if err == nil {
 		t.Fatal("expected a write without an operator key to fail")
 	}
@@ -344,14 +344,6 @@ func TestSignerFallsBackToEnv(t *testing.T) {
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("env fallback should work, got %v", err)
 	}
-}
-
-func repeat(s string, n int) string {
-	out := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, s[0])
-	}
-	return string(out)
 }
 
 // stubVerify approves everything; the paths under test never reach it.
@@ -441,7 +433,7 @@ func TestCtxPrefersCommandContext(t *testing.T) {
 // guard against accidental duplicate flag registration panics.
 func TestNewCmdWiring(t *testing.T) {
 	cmd := NewCmd()
-	want := []string{"list", "export", "diff", "upload", "workload", "lint", "inspect-image"}
+	want := []string{"list", "get", "export", "diff", "add", "apply", "derive", "edit", "delete", "upload", "lint", "inspect-image"}
 	for _, name := range want {
 		found := false
 		for _, c := range cmd.Commands() {
@@ -460,14 +452,14 @@ func TestNewCmdWiring(t *testing.T) {
 func TestHelpDistinguishesCDSIssuedAndWebPKITLSLB(t *testing.T) {
 	cmd := NewCmd()
 	wantLong := `Read and mutate the image allowlist that CDS serves and nri-image-policy
-enforces on every node: named workload entries under 'allowlist workload', each
-pinning an init/main container set with per-container argv and path policy. An
-image that may run with any command line is an entry whose command and args
-policy are both "any".
+enforces on every node: named workload entries, each pinning an init/main
+container set with per-container argv and path policy. An image that may run
+with any command line is an entry whose command and args policy are both "any";
+'add' writes one.
 
-Reads (list, export, diff, workload list/get, lint, inspect-image) are
-unauthenticated. Writes (upload, workload apply/edit/delete) are signed with an
-operator EC private key you supply to THIS CLI via --operator-key
+Reads (list, get, export, diff, lint, inspect-image) are unauthenticated. Writes
+(add, apply, edit, delete, upload) are signed with an operator EC private key
+you supply to THIS CLI via --operator-key
 (or C8S_OPERATOR_KEY). The private key never leaves the CLI — it signs a
 short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
@@ -498,29 +490,4 @@ allowlist").`
 			t.Errorf("--%s help = %q, want %q", name, flag.Usage, want)
 		}
 	}
-}
-
-// TestWorkloadCmdWiring pins the workload subcommand tree.
-func TestWorkloadCmdWiring(t *testing.T) {
-	cmd := NewCmd()
-	for _, c := range cmd.Commands() {
-		if c.Name() != "workload" {
-			continue
-		}
-		want := []string{"list", "get", "apply", "edit", "delete"}
-		for _, name := range want {
-			found := false
-			for _, sc := range c.Commands() {
-				if sc.Name() == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Errorf("workload subcommand %q not registered", name)
-			}
-		}
-		return
-	}
-	t.Fatal("workload command not registered")
 }

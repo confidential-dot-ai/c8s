@@ -145,6 +145,25 @@ func TestExplainDoesNotDropAnAnyArgvImageRunningAShell(t *testing.T) {
 	}
 }
 
+// A matching entry whose grant is refused for an unconstrained argv names that
+// as the refusal, with no grant in the answer.
+func TestExplainNamesUnpinnedGrant(t *testing.T) {
+	eh := newExplainHarness(t)
+	al, _ := eh.h.Policy.Allowlist()
+	api := al.Workloads["api"]
+	api.Containers[0].Args = pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}
+	al.Workloads["api"] = api
+	eh.h.Policy = fakePolicy{al: al}
+
+	_, resp := eh.serve(testSandbox)
+	if resp.Match != "api" {
+		t.Fatalf("match = %q, want api", resp.Match)
+	}
+	if resp.Grant != nil || !strings.Contains(resp.Refusal, "unconstrained") {
+		t.Fatalf("refusal = %q, grant = %v; want the unpinned argv named and no grant", resp.Refusal, resp.Grant)
+	}
+}
+
 // Declared mains that are not running are the other half of the diff.
 func TestExplainNamesAMissingMain(t *testing.T) {
 	eh := newExplainHarness(t)

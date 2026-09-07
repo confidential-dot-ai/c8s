@@ -426,12 +426,11 @@ c8s allowlist export --url "$TLS_LB" \
 c8s allowlist diff allowlist.json --url "$TLS_LB" \
   --measurements <tls-lb-launch-digest>
 
-# Writes are signed with the operator key. An entry whose command and args
-# policy are both "any" admits the image regardless of its command line.
-printf '{"app":{"containers":[{"digest":"sha256:<digest>","image":"registry.example.com/app@sha256:<digest>","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
-  | c8s allowlist workload apply - \
-    --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
-    --operator-key operator.key
+# Writes are signed with the operator key. 'add' admits an image under any
+# command line; 'apply' or 'derive' pins one or grants secrets.
+c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
+  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+  --operator-key operator.key
 c8s allowlist upload allowlist.json \
   --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
   --operator-key operator.key

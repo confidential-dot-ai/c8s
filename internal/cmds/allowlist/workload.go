@@ -19,49 +19,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 )
 
-func newWorkloadCmd(o *options) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "workload",
-		Short: "Manage named workload policy entries",
-		Long: `Workload entries pin an init/main container set; each container carries a
-command/args (argv) and path policy that is enforced by container digest, not
-by name or image ref. A container whose command and args policy are both "any"
-is admitted whatever it runs.`,
-	}
-	cmd.AddCommand(
-		newWorkloadListCmd(o),
-		newWorkloadGetCmd(o),
-		newWorkloadApplyCmd(o),
-		newWorkloadDeriveCmd(o),
-		newWorkloadEditCmd(o),
-		newWorkloadDeleteCmd(o),
-	)
-	return cmd
-}
-
-func newWorkloadListCmd(o *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List workload entries",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			al, _, err := o.fetch(ctx(cmd))
-			if err != nil {
-				return err
-			}
-			if o.output == "json" {
-				return writeJSON(cmd.OutOrStdout(), al.Workloads)
-			}
-			printWorkloadTable(cmd.OutOrStdout(), al.Workloads)
-			return nil
-		},
-	}
-}
-
-func newWorkloadGetCmd(o *options) *cobra.Command {
+func newGetCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <name>",
-		Short: "Print one workload entry as canonical JSON",
+		Short: "Print one entry as canonical JSON",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			al, _, err := o.fetch(ctx(cmd))
@@ -77,14 +38,14 @@ func newWorkloadGetCmd(o *options) *cobra.Command {
 	}
 }
 
-func newWorkloadApplyCmd(o *options) *cobra.Command {
+func newApplyCmd(o *options) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "apply <file|->",
-		Short: "Upsert workload entries from a file (whole-entry replace)",
-		Long: `Upsert each workload entry in <file> (or stdin with '-'). The file is either a
-full/partial allowlist document or a name-keyed map of workload entries. Each
-entry is replaced whole — this never field-merges into a live entry.`,
+		Short: "Upsert entries from a file (whole-entry replace)",
+		Long: `Upsert each entry in <file> (or stdin with '-'). The file is either a full or
+partial allowlist document or a name-keyed map of entries. Each entry is
+replaced whole — this never field-merges into a live entry.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -161,10 +122,10 @@ entry is replaced whole — this never field-merges into a live entry.`,
 	return cmd
 }
 
-func newWorkloadEditCmd(o *options) *cobra.Command {
+func newEditCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit <name>",
-		Short: "Fetch a workload entry, edit it in $EDITOR, and apply the result",
+		Short: "Fetch an entry, edit it in $EDITOR, and apply the result",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -212,10 +173,10 @@ func newWorkloadEditCmd(o *options) *cobra.Command {
 	}
 }
 
-func newWorkloadDeleteCmd(o *options) *cobra.Command {
+func newDeleteCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name> [<name>...]",
-		Short: "Delete one or more workload entries",
+		Short: "Delete one or more entries",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {

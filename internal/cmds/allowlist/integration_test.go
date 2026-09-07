@@ -233,7 +233,7 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := runCmd("workload", "apply", file, "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
+	if _, _, err := runCmd("apply", file, "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
 		t.Fatalf("workload apply failed: %v", err)
 	}
 
@@ -248,7 +248,7 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 		t.Fatalf("command policy = %q, want exact", wl.Containers[0].Command.Policy)
 	}
 
-	out, _, err := runCmd("workload", "get", "api", "--url", srv.URL, "--insecure", "-o", "json")
+	out, _, err := runCmd("get", "api", "--url", srv.URL, "--insecure", "-o", "json")
 	if err != nil {
 		t.Fatalf("workload get failed: %v", err)
 	}
@@ -268,13 +268,13 @@ func TestWorkloadDeleteRoundTrip(t *testing.T) {
 		Containers: []pkgallowlist.Container{{Digest: mustDigest(t, digA)}},
 	})
 
-	if _, _, err := runCmd("workload", "delete", "api", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
+	if _, _, err := runCmd("delete", "api", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	if _, ok := cds.workload("api"); ok {
 		t.Fatal("workload 'api' still present after delete")
 	}
-	if _, _, err := runCmd("workload", "delete", "missing", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err == nil {
+	if _, _, err := runCmd("delete", "missing", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err == nil {
 		t.Fatal("expected delete of an absent workload to fail (404)")
 	}
 }

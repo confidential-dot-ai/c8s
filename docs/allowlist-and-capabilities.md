@@ -90,8 +90,8 @@ a leaf in the first place.
 
 **Migration.** An over-long entry created before the bound is still served by
 CDS and still counts toward the document's canonical digest, but no pod can be
-named for it and every consumer ignores it. Rename it — `c8s allowlist workload
-put <new-name>` followed by a delete of the old one — and pods matching it start
+named for it and every consumer ignores it. Rename it — `c8s allowlist apply`
+under a new name followed by a delete of the old one — and pods matching it start
 getting named leaves. The lenient served parse is a compatibility measure for
 one release; do not rely on it.
 
@@ -164,7 +164,7 @@ guarantee is recovered at [cert issuance](#where-its-enforced) — for an entry
 that is distinguishable. An entry whose every container another entry admits
 under any argv, and which that entry needs nothing more running for, is
 **shadowed**: every pod it describes matches both, so it is never the unique
-match and `lint` and `workload apply` refuse it. To tighten a seeded any-argv
+match and `lint`, `apply` and `add` refuse it. To tighten a seeded any-argv
 entry, edit it; do not add a narrower entry for the same image beside it.
 
 ## Mount and environment policy (`mounts`, `env`)
@@ -345,8 +345,9 @@ tracked follow-on.
 
 Each enforcer also carries a **local seed** that admits by digest alone ahead of
 the served document and is never touched by a pull: the host NRI plugin's
-`always_allow` (chart-rendered from `bootstrapAllowlist.digests`), and in-guest
-the baked `sha256_digests` list measured into the launch digest. That is what
+`always_allow` (chart-rendered from the chart's own component digests plus every
+`bootstrapAllowlist.workloads` container admitted under any command and args),
+and in-guest the baked `sha256_digests` list measured into the launch digest. That is what
 lets a node or guest enforce at t=0 offline and bring the platform's own images
 up before CDS is reachable.
 
@@ -354,9 +355,12 @@ up before CDS is reachable.
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
 digests (`c8s.imageAllowlist`) plus any `bootstrapAllowlist.workloads`. Each
-digest becomes one entry named `<image basename>-<first 12 hex of digest>` with
-a single container under `command: any, args: any`; an operator-authored
-`workloads` entry of the same name replaces it whole in the rendered seed. The
+component digest becomes one entry named `<image basename>-<first 12 hex of
+digest>` with a single container under `command: any, args: any`; an
+operator-authored `workloads` entry of the same name replaces it whole in the
+rendered seed. Operator entries admitting a digest under any command and args
+also feed the host plugin's `always_allow`; an entry that pins a command line
+is seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
 running the old image keep matching while they recycle. The seed never
@@ -368,9 +372,7 @@ before CDS restarts admits only workload containers until its next pull.
 
 CDS folds a pre-unification `digests` floor table into entries of the same shape
 and name the first time it opens an existing database (`internal/allowlist`,
-`migrateFloorTable`), so a re-seed after the upgrade adds nothing. A file still
-carrying a top-level `digests` map is rejected by `ParseJSON`; rewrite each
-digest as an entry as above.
+`migrateFloorTable`), so a re-seed after the upgrade adds nothing.
 
 The guest-baked seed remains a flat `sha256_digests` list — it is measured into
 the SNP launch digest, and keeping it digest-only means a policy change never
@@ -386,27 +388,23 @@ supply via `--operator-key` (or `C8S_OPERATOR_KEY`). Persistent flags: `--url`,
 
 ```
 c8s allowlist
-  list                              workload summary table
+  list                              entry summary table
+  get <name>                        one entry as canonical JSON
   export [file]                     write the full canonical document
   diff <file> [--exit-code]         entry/field diff vs the live allowlist
+  add <digest> <image>              entry admitting the image under any command line
+  derive <name> <file|->            entry from a live Pod/Deployment (pipe to apply)
+  apply <file|-> [--dry-run]        upsert entries (whole-entry replace)
+  edit <name>                       fetch, $EDITOR, diff, confirm, apply
+  delete <name>...
   upload <file>                     replace the whole allowlist (diff-first, required-components guard)
   lint <file|-> [--online] [--strict]
   inspect-image <ref>               show an image's digest + baked entrypoint/cmd
-
-  workload list | get <name>
-  workload derive <name> <file|->   entry from a live Pod/Deployment (pipe to apply)
-  workload apply <file|-> [--dry-run]
-  workload edit <name>
-  workload delete <name>...
 ```
 
-To admit an image regardless of its command line, apply an entry whose
-container `command` and `args` are both `any`:
-
-```sh
-printf '{"app":{"containers":[{"digest":"sha256:<digest>","image":"registry.example.com/app@sha256:<digest>","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
-  | c8s allowlist workload apply -
-```
+`add` writes the same entry the chart seeds for a bootstrap digest, under the
+same name (`<image basename>-<first 12 hex of digest>`), so a later chart bump
+that derives the digest adds nothing.
 
 Deleting a chart-seeded component entry does not lock its image out: the NRI
 plugin's `always_allow` and the in-guest baked seed still admit it. To block a
@@ -450,7 +448,7 @@ is an error for the same reason. The shape compared is digests and argv policies
 container list — the image label and the secret grant are excluded, since two
 entries alike but for their grants are exactly the case worth catching.
 
-`workload apply` runs that check against the served allowlist as well as the
+`apply` and `add` run that check against the served allowlist as well as the
 file, because the entry a new one collides with is usually one already there.
 
 ## Operator credentials
@@ -459,4 +457,4 @@ Generating an operator key and pinning its public half is unchanged; see the
 README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
 a verifier detects a changed write policy by comparing the served
 `/operator-keys` list against its own bundle. Secret grants (`secrets`) are
-managed with the same `workload edit`/`apply` flow.
+managed with the same `edit`/`apply` flow.

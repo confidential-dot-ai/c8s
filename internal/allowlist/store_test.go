@@ -502,7 +502,7 @@ func TestOpenStoreMigratesFloorTable(t *testing.T) {
 
 	// The chart seeds the same entry under the same name, so a re-seed after
 	// the migration adds nothing and does not bump the version.
-	entry, err := normalizeEntry("cds-"+digestA[7:19], floorEntry(mustParseDigest(t, digestA), "ghcr.io/confidential-dot-ai/cds@"+digestA))
+	entry, err := normalizeEntry("cds-"+digestA[7:19], pkgallowlist.DigestEntry(mustParseDigest(t, digestA), "ghcr.io/confidential-dot-ai/cds@"+digestA))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,29 +551,6 @@ func TestOpenStoreRefusesFloorNameCollision(t *testing.T) {
 
 	if _, err := OpenStore(path); err == nil || !strings.Contains(err.Error(), "coredns-abcdef000000") {
 		t.Fatalf("OpenStore = %v, want a collision error naming the entry", err)
-	}
-}
-
-// floorEntryName must agree with the chart's c8s.digestWorkloadName for the
-// same inputs; the chart test pins the same literal for the same digest.
-func TestFloorEntryName(t *testing.T) {
-	// Hex is canonical lowercase whatever case the digest was written in.
-	d := mustParseDigest(t, "sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000")
-	for image, want := range map[string]string{
-		"ghcr.io/x/coredns:v1":                          "coredns-abcdef000000",
-		"ghcr.io/confidential-dot-ai/cds@" + d.String(): "cds-abcdef000000",
-		"registry:5000/team/app":                        "app-abcdef000000",
-		"busybox":                                       "busybox-abcdef000000",
-		"":                                              "image-abcdef000000",
-		"ghcr.io/x/not a name!":                         "image-abcdef000000",
-		"ghcr.io/x/" + strings.Repeat("y", 60):          strings.Repeat("y", 50) + "-abcdef000000",
-	} {
-		if got := floorEntryName(d, image); got != want {
-			t.Errorf("floorEntryName(%q) = %q, want %q", image, got, want)
-		}
-		if !pkgallowlist.ValidWorkloadName(want) {
-			t.Errorf("%q is not a valid entry name", want)
-		}
 	}
 }
 

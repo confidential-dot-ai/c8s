@@ -175,13 +175,28 @@ store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -q "docker.io/library/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
 python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
-import sys, yaml
+import re, sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
     digest, ref = line.rstrip("\n").split("\t")
     floor.setdefault(digest, ref)
 # Kept out of the floor on purpose: the admission test's unseen digest.
 floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
+
+def entry_name(digest, ref):
+    # Mirrors pkg/allowlist DigestEntryName.
+    base = ref.split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0][:50]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", base):
+        base = "image"
+    return base + "-" + digest[len("sha256:"):][:12]
+
+workloads = {
+    entry_name(d, r): {
+        "label": r,
+        "containers": [{"digest": d, "image": r, "command": {"policy": "any"}, "args": {"policy": "any"}}],
+    }
+    for d, r in floor.items()
+}
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
         "nriImagePolicy": {
@@ -189,10 +204,10 @@ with open(sys.argv[2], "w") as f:
             # installer stays off: its baked form would find no config to
             # patch. The full installer is applied out-of-band below.
             "enabled": False,
-            "bootstrapAllowlist": {"digests": floor},
+            "bootstrapAllowlist": {"workloads": workloads},
         },
     }, f)
-print(f"floor: {len(floor)} digests")
+print(f"floor: {len(workloads)} any-argv entries")
 PYEOF
 
 # Digest-alias the loaded c8s images: the NRI installer renders its pod image

@@ -321,7 +321,7 @@ beside the old one ([`allowlist-and-capabilities.md`](allowlist-and-capabilities
 What this rests on, in both directions: no image admitted under an unconstrained
 argv other than c8s's has an executable at one of those entrypoints, and the
 injected image's own entry stays unconstrained — an operator who narrows it
-(`bootstrapAllowlist.workloads` or `workload edit`) turns every injected sidecar
+(`bootstrapAllowlist.workloads` or `c8s allowlist edit`) turns every injected sidecar
 into a foreign container and every release in the cluster is refused. Allowlist
 contents are operator-controlled and auditable, but that is a property of the
 deployment rather than something enforced here.
@@ -343,6 +343,11 @@ actually released.
 
 - `policy` is `allow` or `deny`. There is deliberately **no `any`**: an unbounded
   secret grant is never what an operator means.
+- A grant requires every container in the entry — init and main — to pin its
+  argv: `command` and `args` both `exact` or `deny`. A container under `any`
+  runs whatever command line the host chose, and the value would be released
+  to it. The write path refuses the entry, and release refuses an entry stored
+  before it did.
 - Paths are absolute, clean, and the only wildcard is a trailing `/**`, which
   matches strictly beneath its base — `/a/**` does not grant `/a`.
 - `write` requires `read`. The only client creates with `POST`, then re-reads;

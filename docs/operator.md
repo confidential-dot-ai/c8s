@@ -162,9 +162,9 @@ webhook, and the workload-service reconciler creates the `c8s-<id>` headless
 Services. `--upstream vllm-router` points tls-lb at
 `c8s-vllm-router.vllm.svc.cluster.local:8000` (its `<cw-id>` must be one of the
 adopted refs, carrying a `:<port>`). With `--resolve-digests=true`, install resolves adopted workload
-images into `nriImagePolicy.bootstrapAllowlist.digests` so image admission (the
-host NRI plugin, or the in-guest policy-monitor under `--cvm-mode=pod`) allows those
-rollouts.
+images into `nriImagePolicy.bootstrapAllowlist.workloads` entries admitting them
+under any command and args, so image admission (the host NRI plugin, or the
+in-guest policy-monitor under `--cvm-mode=pod`) allows those rollouts.
 
 `c8s install --install-crds=false` passes Helm's `--skip-crds`; CRDs are
 advisory and not required for pod injection. That path also disables the
@@ -326,7 +326,7 @@ With CDS a singleton:
 
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator applies with `c8s allowlist workload apply`. With
+whatever an operator writes with `c8s allowlist add` or `apply`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
 restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
 the install seed — workloads pulling those images are denied roughly one worker

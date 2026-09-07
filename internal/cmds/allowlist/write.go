@@ -4,7 +4,69 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+func newAddCmd(o *options) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "add <digest> <image>",
+		Short: "Add an entry admitting an image under any command line",
+		Long: `Write the entry "<image basename>-<first 12 hex of digest>": one container at
+<digest> whose command and args policy are both "any", the entry the chart seeds
+for a bootstrap digest. To pin a command line or grant secrets, write the entry
+with 'apply' or 'derive' instead.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := o.validate(); err != nil {
+				return err
+			}
+			digest, err := types.ParseDigest(args[0])
+			if err != nil {
+				return err
+			}
+			image, err := requireLabel(args[1], "image")
+			if err != nil {
+				return err
+			}
+			name := pkgallowlist.DigestEntryName(digest, image)
+			entry := pkgallowlist.DigestEntry(digest, image)
+
+			if dryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "would add %s (%s)\n", name, digest)
+				return nil
+			}
+			c, err := o.client(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			live, _, err := c.List(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			findings := collisionsWithLive(map[string]pkgallowlist.Workload{name: entry}, live)
+			for _, f := range findings {
+				fmt.Fprintf(cmd.ErrOrStderr(), "lint: %s\n", f)
+			}
+			if errs := countErrors(findings); errs > 0 {
+				return fmt.Errorf("refusing to add: %d lint error(s)", errs)
+			}
+			signer, err := o.signer()
+			if err != nil {
+				return err
+			}
+			if err := c.PutWorkload(ctx(cmd), name, entry, signer); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "added %s\n", name)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the intended entry without calling CDS")
+	return cmd
+}
 
 func newUploadCmd(o *options) *cobra.Command {
 	var (

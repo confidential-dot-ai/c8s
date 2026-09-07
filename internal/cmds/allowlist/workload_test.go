@@ -83,7 +83,7 @@ func TestWorkloadListJSON(t *testing.T) {
 		"web":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
 	url, _ := servingAllowlistCDS(t, al)
 
-	out, _, err := runCmd("workload", "list", "--url", url, "--insecure", "-o", "json")
+	out, _, err := runCmd("list", "--url", url, "--insecure", "-o", "json")
 	if err != nil {
 		t.Fatalf("workload list -o json: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestWorkloadGet(t *testing.T) {
 		"web":{"label":"registry/app","containers":[`+ctrJSON(digA, "/app")+`]}}}`)
 	url, _ := servingAllowlistCDS(t, al)
 
-	out, _, err := runCmd("workload", "get", "web", "--url", url, "--insecure")
+	out, _, err := runCmd("get", "web", "--url", url, "--insecure")
 	if err != nil {
 		t.Fatalf("workload get: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestWorkloadGet(t *testing.T) {
 		t.Fatalf("unexpected get output:\n%s", out)
 	}
 
-	_, _, err = runCmd("workload", "get", "nope", "--url", url, "--insecure")
+	_, _, err = runCmd("get", "nope", "--url", url, "--insecure")
 	if err == nil || !strings.Contains(err.Error(), `no workload entry named "nope"`) {
 		t.Fatalf("expected a not-found error, got %v", err)
 	}
@@ -125,7 +125,7 @@ func TestWorkloadApplyDryRunDiff(t *testing.T) {
 			"web":{"containers":[`+ctrJSON(digB, "/new")+`]},
 			"new":{"containers":[`+ctrJSON(digC, "/fresh")+`]}}}`)
 
-	out, _, err := runCmd("workload", "apply", file, "--url", url, "--insecure", "--dry-run")
+	out, _, err := runCmd("apply", file, "--url", url, "--insecure", "--dry-run")
 	if err != nil {
 		t.Fatalf("workload apply --dry-run: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestWorkloadApplyWrites(t *testing.T) {
 	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1","workloads":{
 		"web":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
 
-	_, _, err := runCmd("workload", "apply", file, "--url", url, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("apply", file, "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("workload apply: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestWorkloadApplyFromStdinBareMap(t *testing.T) {
 
 	// A bare name-keyed map (not an allowlist document) read from stdin.
 	stdin := `{"w1":{"containers":[` + ctrJSON(digA, "/app") + `]}}`
-	out, _, err := runCmdIn(stdin, "workload", "apply", "-", "--url", url, "--insecure", "--dry-run")
+	out, _, err := runCmdIn(stdin, "apply", "-", "--url", url, "--insecure", "--dry-run")
 	if err != nil {
 		t.Fatalf("workload apply -: %v", err)
 	}
@@ -178,19 +178,19 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 	url, _ := servingCDS(t, nil)
 
 	empty := writeFile(t, "empty.json", `{"schema":"c8s.allowlist/v1"}`)
-	if _, _, err := runCmd("workload", "apply", empty, "--url", url, "--insecure"); err == nil ||
+	if _, _, err := runCmd("apply", empty, "--url", url, "--insecure"); err == nil ||
 		!strings.Contains(err.Error(), "no workload entries") {
 		t.Fatalf("expected a no-entries error, got %v", err)
 	}
 
 	missing := filepath.Join(t.TempDir(), "nope.json")
-	if _, _, err := runCmd("workload", "apply", missing, "--url", url, "--insecure"); err == nil ||
+	if _, _, err := runCmd("apply", missing, "--url", url, "--insecure"); err == nil ||
 		!strings.Contains(err.Error(), "read") {
 		t.Fatalf("expected a read error, got %v", err)
 	}
 
 	garbage := writeFile(t, "bad.json", `not json at all`)
-	if _, _, err := runCmd("workload", "apply", garbage, "--url", url, "--insecure"); err == nil ||
+	if _, _, err := runCmd("apply", garbage, "--url", url, "--insecure"); err == nil ||
 		!strings.Contains(err.Error(), "parse workload entries") {
 		t.Fatalf("expected a parse error, got %v", err)
 	}
@@ -206,7 +206,7 @@ func TestWorkloadApplyRefusesEntryShadowedByLive(t *testing.T) {
 
 	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1","workloads":{
 		"api":{"containers":[`+ctrJSON(digA, "/app")+`],"secrets":{"policy":"allow","read":["/api/**"]}}}}`)
-	_, stderr, err := runCmd("workload", "apply", file, "--url", url, "--insecure", "--dry-run")
+	_, stderr, err := runCmd("apply", file, "--url", url, "--insecure", "--dry-run")
 	if err == nil || !strings.Contains(err.Error(), "lint error") {
 		t.Fatalf("expected a refusal, got %v", err)
 	}
@@ -252,7 +252,7 @@ func TestWorkloadEditApplies(t *testing.T) {
 	keyPath := writeOperatorKey(t, t.TempDir())
 	setEditor(t, `{"label":"v2","containers":[`+ctrJSON(digA, "/app")+`]}`)
 
-	out, _, err := runCmdIn("y\n", "workload", "edit", "web", "--url", url, "--insecure", "--operator-key", keyPath)
+	out, _, err := runCmdIn("y\n", "edit", "web", "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("workload edit: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestWorkloadEditNoChanges(t *testing.T) {
 	url, methods := editFixtureCDS(t)
 	t.Setenv("EDITOR", "true") // leaves the file untouched
 
-	_, _, err := runCmd("workload", "edit", "web", "--url", url, "--insecure")
+	_, _, err := runCmd("edit", "web", "--url", url, "--insecure")
 	if err != nil {
 		t.Fatalf("workload edit (no changes): %v", err)
 	}
@@ -285,7 +285,7 @@ func TestWorkloadEditAborted(t *testing.T) {
 	url, methods := editFixtureCDS(t)
 	setEditor(t, `{"label":"v2","containers":[`+ctrJSON(digA, "/app")+`]}`)
 
-	_, _, err := runCmdIn("n\n", "workload", "edit", "web", "--url", url, "--insecure")
+	_, _, err := runCmdIn("n\n", "edit", "web", "--url", url, "--insecure")
 	if err != nil {
 		t.Fatalf("workload edit (aborted): %v", err)
 	}
@@ -298,7 +298,7 @@ func TestWorkloadEditEditorFails(t *testing.T) {
 	url, _ := editFixtureCDS(t)
 	t.Setenv("EDITOR", "false") // exits non-zero
 
-	_, _, err := runCmd("workload", "edit", "web", "--url", url, "--insecure")
+	_, _, err := runCmd("edit", "web", "--url", url, "--insecure")
 	if err == nil || !strings.Contains(err.Error(), "editor") {
 		t.Fatalf("expected an editor error, got %v", err)
 	}
@@ -310,7 +310,7 @@ func TestWorkloadDelete(t *testing.T) {
 	url, methods := servingCDS(t, nil)
 	keyPath := writeOperatorKey(t, t.TempDir())
 
-	_, _, err := runCmd("workload", "delete", "web", "old", "--url", url, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("delete", "web", "old", "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("workload delete: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestWorkloadDeleteNotFound(t *testing.T) {
 	t.Cleanup(srv.Close)
 	keyPath := writeOperatorKey(t, t.TempDir())
 
-	_, _, err := runCmd("workload", "delete", "ghost", "--url", srv.URL, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("delete", "ghost", "--url", srv.URL, "--insecure", "--operator-key", keyPath)
 	if err == nil || !strings.Contains(err.Error(), `no workload entry named "ghost"`) {
 		t.Fatalf("expected a mapped 404 error, got %v", err)
 	}
