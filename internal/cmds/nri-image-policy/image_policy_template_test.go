@@ -23,8 +23,6 @@ func renderNodeImagePolicy(t *testing.T) string {
 	}
 	digest := func(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
 	repl := map[string]string{
-		"@NRI_DIGEST@": digest('a'),
-		"@NRI_IMAGE@":  "ghcr.io/confidential-dot-ai/nri-image-policy@" + digest('a'),
 		"@CDS_DIGEST@": digest('b'),
 		"@CDS_IMAGE@":  "ghcr.io/confidential-dot-ai/cds@" + digest('b'),
 		"@PLATFORM@":   "snp",
@@ -58,9 +56,9 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 	// pinned airgap bundles and baked manifests. A regen for an RKE2 pin bump
 	// rewrites these — update the pins with it. Pinning the whole set, not a
 	// boot-critical subset, makes a dropped or corrupted entry fail here
-	// instead of at node boot.
+	// instead of at node boot. The local-path helper's busybox is NOT here:
+	// systemfloor drops it (-exclude-ref) and the chart seeds it argv-pinned.
 	floor := map[string]string{
-		"sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d": "busybox:1.38.0@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d",
 		"sha256:2c0491ce30c82a6b480741f209f12f7c7e6de872c02385946c4a9ec875e679dc": "docker.io/rancher/hardened-addon-resizer:1.8.23-build20260206",
 		"sha256:12160ac4f0c2b72fe56933e387669aacba1d060184f90bd63b91b7fddc745e02": "docker.io/rancher/hardened-cluster-autoscaler:v1.10.3-build20260206",
 		"sha256:35d7cef6c1b8f8ddeec45213cc6ecfa5815f08859df9438e245675674d077294": "docker.io/rancher/hardened-cni-plugins:v1.9.0-build20260206",
@@ -96,12 +94,18 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		}
 	}
 
-	// always_allow is the generated floor plus the two rendered tokens (the
-	// nri plugin self-allow and cds), so the exact count catches an entry a
-	// regen adds or drops.
-	if want := len(floor) + 2; len(cfg.Allowlist.AlwaysAllow) != want {
-		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + nri + cds)",
+	// always_allow is the generated floor plus the rendered CDS token, so the
+	// exact count catches an entry a regen adds or drops. The installer image
+	// is not self-allowed: it runs shell scripts, so it is admitted
+	// argv-pinned by the served document, never by digest alone.
+	if want := len(floor) + 1; len(cfg.Allowlist.AlwaysAllow) != want {
+		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + cds)",
 			len(cfg.Allowlist.AlwaysAllow), want, len(floor))
+	}
+	for digest := range cfg.Allowlist.AlwaysAllow {
+		if strings.Contains(cfg.Allowlist.AlwaysAllow[digest], "busybox") {
+			t.Errorf("busybox %s must not return to the digest-only floor; it is seeded argv-pinned", digest)
+		}
 	}
 
 	// Every floor key must be a digest the store admits as-is.

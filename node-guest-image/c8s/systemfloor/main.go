@@ -127,12 +127,25 @@ func manifestEntries(path string) ([]entry, error) {
 }
 
 // render formats the entries as always_allow YAML lines at the template's
-// indent, one line per digest, sorted by image reference.
-func render(entries []entry) string {
+// indent, one line per digest, sorted by image reference. References matching
+// an exclude substring are dropped: the floor admits by digest alone, so an
+// interpreter-class image (busybox) belongs in an argv-pinned workload entry,
+// never here.
+func render(entries []entry, excludes []string) string {
 	byRef := make(map[string]string, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if seen[e.digest] {
+			continue
+		}
+		excluded := false
+		for _, x := range excludes {
+			if strings.Contains(e.ref, x) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
 		seen[e.digest] = true
@@ -198,11 +211,12 @@ func main() {
 
 func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("systemfloor", flag.ContinueOnError)
-	var bundles, manifests stringList
+	var bundles, manifests, excludes stringList
 	var templatePath string
 	var check, write bool
 	fs.Var(&bundles, "bundle", "RKE2 airgap image bundle (*.tar.zst); repeatable")
 	fs.Var(&manifests, "manifest", "YAML manifest to scan for digest-pinned image refs; repeatable")
+	fs.Var(&excludes, "exclude-ref", "drop entries whose image reference contains this substring (repeatable); use for interpreter-class images admitted argv-pinned elsewhere, e.g. busybox")
 	fs.StringVar(&templatePath, "template", "", "image-policy.yaml.in to splice the block into")
 	fs.BoolVar(&check, "check", false, "exit non-zero when the template block is stale")
 	fs.BoolVar(&write, "write", false, "rewrite the template block in place")
@@ -231,7 +245,7 @@ func run(args []string, stdout io.Writer) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("no images found in the inputs")
 	}
-	block := render(entries)
+	block := render(entries, excludes)
 
 	if templatePath == "" {
 		_, err := io.WriteString(stdout, block)
