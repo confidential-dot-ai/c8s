@@ -296,8 +296,8 @@ has to enumerate c8s's own sidecars.
 A container is dropped when its digest is admitted by some entry under an
 **unconstrained argv policy** (`command` and `args` both `any`) *and* its
 entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
-Both halves are load-bearing. Admission alone would let a pod add busybox
-running a shell — admitted the same way — and have it ignored.
+Both halves are load-bearing. Admission alone would let a pod add any
+any-argv component image with its entrypoint overridden — and have it ignored.
 
 The seeded component entries are the source: the injected image is among them,
 since it could not run otherwise, and an image bump seeds the new digest's entry

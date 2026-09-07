@@ -568,6 +568,35 @@
     "podSecurityContext": {},
     "teeProxy": {
       "$comment": "Removed component, listed only so validations.yaml can answer with the migration message rather than a generic unknown-key refusal."
+    },
+    "rke2": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "localPathHelper": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "digest": {},
+                "repository": {}
+              }
+            }
+          }
+        }
+      }
     }
   },
   "additionalProperties": false

@@ -28,7 +28,7 @@ workload_claims:
 
 allowlist:
   always_allow:
-    "sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d": "busybox:1.38.0"
+    "sha256:7d4e658ad73aca6a80ab26d392395e9958f03105df5541d7552f70451ac0267d": "docker.io/rancher/hardened-kubernetes:v1.34.5-rke2r1-build20260227"
     "sha256:4f502170a33ec2b687e1b703abe31b1e290ff17cd45fba45b138c73689d3b02c": "docker.io/rancher/rke2-runtime:v1.34.5-rke2r1"
   pull:
     url: "https://127.0.0.1:30808"
