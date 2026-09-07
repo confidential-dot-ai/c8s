@@ -181,6 +181,7 @@ jobs:
           name: config-x86_64.snapshot
           path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
           if-no-files-found: error
+          overwrite: true
 
       # --- bank the caches (shared keys + the completeness guard) ------------
       - name: Pack kernel-builder tools tree

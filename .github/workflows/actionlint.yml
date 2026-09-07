@@ -18,6 +18,9 @@ jobs:
       - name: Test pin manifest utility
         run: bash .github/scripts/tests/test-pin-manifest.sh
 
+      - name: Test repro-gate change classification
+        run: bash .github/scripts/tests/test-repro-gate-changes.sh
+
       - name: Install actionlint (checksum-pinned)
         env:
           # SHA256 from the v1.7.12 release's checksums.txt (linux_amd64).
@@ -51,5 +54,7 @@ jobs:
           shellcheck \
             .github/scripts/calculate-release-version.sh \
             .github/scripts/pin-manifest.sh \
+            .github/scripts/repro-gate-changes \
             .github/scripts/tests/test-pin-manifest.sh \
+            .github/scripts/tests/test-repro-gate-changes.sh \
             kata-guest-base/scripts/ci/publish-release-aliases.sh
