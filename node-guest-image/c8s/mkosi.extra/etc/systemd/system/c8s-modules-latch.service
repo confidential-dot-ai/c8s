@@ -30,7 +30,7 @@ RemainAfterExit=yes
 # One-way: 1 cannot go back to 0 without a reboot.
 ExecStart=/sbin/sysctl -w kernel.modules_disabled=1
 
-# vsock fence: only attestation-api may use AF_VSOCK (see kernel/c8s.config).
+# vsock fence: only attestation-api may use AF_VSOCK (see kernel/gpu.config).
 RestrictAddressFamilies=AF_UNIX
 
 [Install]
