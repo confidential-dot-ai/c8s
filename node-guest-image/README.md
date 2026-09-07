@@ -74,13 +74,21 @@ The other disks are optional; each is owned by one unit under
 - label `opkeydata` — an ISO carrying, at its root:
   - `pubkey` — the operator public key. Its presence turns on attested
     credential release (`cred-release.service`, see [operator.md]). The
-    baked `cred-release-rbac` RKE2 AddOn binds the issued certificate's
-    group to `cluster-admin` through ordinary RBAC; identity, TTL and
-    revocation are documented in [operator.md].
+    measured initrd is the one reader of the disk for this file: it stages
+    the bytes to `/etc/confai/operator-pubkey` and extends RTMR[3] (TDX) with
+    their digest before `switch_root`, and every later consumer
+    (`cred-release.service`, `c8s-chart-values.service`) reads that staged
+    file rather than mounting the ISO itself. The baked `cred-release-rbac`
+    RKE2 AddOn binds the issued certificate's group to `cluster-admin`
+    through ordinary RBAC; identity, TTL and revocation are documented in
+    [operator.md].
   - `values.yaml` (optional) — a signed launch-time values fragment (see
     "Chart install" below): deployment configuration that used to need a
     `c8s install --values` on a live cluster. Present without a matching
-    `values.yaml.sig` next to it, boot fails closed.
+    `values.yaml.sig` next to it, boot fails closed. Unlike `pubkey`, the
+    initrd does not stage this file yet, so `c8s-chart-values.sh` mounts
+    the ISO itself at boot to read it — an interim step until it is staged
+    next to the pubkey the same way.
   - `values.yaml.sig` (required with `values.yaml`) — its detached
     signature: ECDSA (P-256) over SHA-256 of the file's exact bytes, ASN.1
     DER, base64, one line. Produced with:
@@ -93,10 +101,11 @@ The other disks are optional; each is owned by one unit under
 The image installs the c8s chart itself at boot — no `c8s install` step is
 needed (and `c8s install` refuses to run against a cluster that already
 carries the baked release). `c8s/mkosi.sync` packs `internal/helmchart/c8s`
-(shipped into the `nri-image-policy` image build, see its Dockerfile) into a
-`HelmChart c8s` AddOn (`c8s/c8s-chart.yaml.in` -> `server/manifests/c8s-chart.yaml`),
-with the node-mode component digests resolved at the same `C8S_REF` as the
-rest of the build. `c8s-chart-values.service` runs once at boot, before
+into `server/static/charts/c8s.tgz` and renders the platform's
+`c8s/c8s-chart.<platform>.yaml.in` into a `HelmChart c8s` AddOn
+(`server/manifests/c8s-chart.yaml`) that points `spec.chart` at that static
+tarball, with the node-mode component digests resolved at the same `C8S_REF`
+as the rest of the build. `c8s-chart-values.service` runs once at boot, before
 `rke2-server`, and writes the two inputs only a running boot knows into a
 `HelmChartConfig` RKE2 merges into that release:
 

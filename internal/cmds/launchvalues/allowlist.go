@@ -9,9 +9,10 @@ import (
 // the credential-release design): deployment configuration that
 // `c8s install --values` used to carry and that must not need an image
 // rebuild, but that must also not be trusted from the host-attached
-// opkeydata disk unauthenticated beyond this set. Every entry is a path or a
-// path prefix ending in "." (covering a whole subtree, e.g. every CORS
-// knob). Checked against every internal/helmchart/c8s/values.yaml).
+// opkeydata disk unauthenticated beyond this set. Every entry covers both
+// itself and every path under it (e.g. "tlsLb.cors" also allows
+// "tlsLb.cors.allowOrigins"), checked against
+// internal/helmchart/c8s/values.yaml.
 //
 // Anything not covered here is denied by construction, in particular every
 // image/digest/tag, attestationApi.*, hostNamespacePolicy, cds.image,
@@ -21,7 +22,7 @@ import (
 // checkAllowlist rejects them the same way it rejects a typo.
 var allowedPrefixes = []string{
 	"tlsLb.san",
-	"tlsLb.cors.",
+	"tlsLb.cors",
 	"cds.dnsSanPatterns",
 	"cds.measurementsConfig",
 	"cds.rateLimit",
@@ -29,7 +30,7 @@ var allowedPrefixes = []string{
 	"ratlsMesh.measurementsConfig",
 	"volumed.enabled",
 	"nriImagePolicy.policy.exemptNamespaces",
-	"nriImagePolicy.bootstrapAllowlist.digests.",
+	"nriImagePolicy.bootstrapAllowlist.digests",
 }
 
 // checkAllowlist walks every leaf of values and fails closed on the first
@@ -48,16 +49,10 @@ func checkAllowlist(values map[string]any) error {
 }
 
 // allowedPath reports whether path is covered by allowedPrefixes: an exact
-// match, or under a prefix entry ending in "." (e.g. "tlsLb.cors." covers
+// match, or under one as a subtree (e.g. "tlsLb.cors" covers
 // "tlsLb.cors.enabled").
 func allowedPath(path string) bool {
 	for _, p := range allowedPrefixes {
-		if strings.HasSuffix(p, ".") {
-			if strings.HasPrefix(path, p) {
-				return true
-			}
-			continue
-		}
 		if path == p || strings.HasPrefix(path, p+".") {
 			return true
 		}

@@ -33,20 +33,40 @@ func writeOperatorKey(t *testing.T) (path string, key *ecdsa.PrivateKey) {
 	return path, key
 }
 
-func TestSignValuesWritesVerifiableSignature(t *testing.T) {
-	keyPath, key := writeOperatorKey(t)
-	dir := t.TempDir()
-	valuesPath := filepath.Join(dir, "values.yaml")
-	content := []byte("measurement: deadbeef\nvalues:\n  tlsLb:\n    san: [\"a\"]\n")
-	if err := os.WriteFile(valuesPath, content, 0o644); err != nil {
+// writeValues writes content to <dir>/values.yaml and returns its path — the
+// fragment every sign-values test signs.
+func writeValues(t *testing.T, dir string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, "values.yaml")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
 
+// runSign runs `c8s keys sign-values --key <keyPath> <valuesPath>` through
+// the real cobra command, the shape every test below exercises.
+func runSign(keyPath, valuesPath string, args ...string) error {
 	cmd := NewCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"sign-values", "--key", keyPath, valuesPath})
-	if err := cmd.Execute(); err != nil {
+	argv := []string{"sign-values"}
+	if keyPath != "" {
+		argv = append(argv, "--key", keyPath)
+	}
+	argv = append(argv, args...)
+	argv = append(argv, valuesPath)
+	cmd.SetArgs(argv)
+	return cmd.Execute()
+}
+
+func TestSignValuesWritesVerifiableSignature(t *testing.T) {
+	keyPath, key := writeOperatorKey(t)
+	dir := t.TempDir()
+	content := []byte("measurement: deadbeef\nvalues:\n  tlsLb:\n    san: [\"a\"]\n")
+	valuesPath := writeValues(t, dir, content)
+
+	if err := runSign(keyPath, valuesPath); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -72,18 +92,11 @@ func TestSignValuesWritesVerifiableSignature(t *testing.T) {
 func TestSignValuesRefusesToOverwrite(t *testing.T) {
 	keyPath, _ := writeOperatorKey(t)
 	dir := t.TempDir()
-	valuesPath := filepath.Join(dir, "values.yaml")
-	if err := os.WriteFile(valuesPath, []byte("measurement: aa\nvalues: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
 	if err := os.WriteFile(valuesPath+".sig", []byte("existing"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := NewCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"sign-values", "--key", keyPath, valuesPath})
-	err := cmd.Execute()
+	err := runSign(keyPath, valuesPath)
 	if err == nil || !strings.Contains(err.Error(), "values.yaml.sig") {
 		t.Fatalf("want refusal naming the existing sig file, got %v", err)
 	}
@@ -91,15 +104,8 @@ func TestSignValuesRefusesToOverwrite(t *testing.T) {
 
 func TestSignValuesRequiresKey(t *testing.T) {
 	dir := t.TempDir()
-	valuesPath := filepath.Join(dir, "values.yaml")
-	if err := os.WriteFile(valuesPath, []byte("measurement: aa\nvalues: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := NewCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"sign-values", valuesPath})
-	if err := cmd.Execute(); err == nil {
+	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
+	if err := runSign("", valuesPath); err == nil {
 		t.Fatal("want an error when --key is missing")
 	}
 }
@@ -107,15 +113,8 @@ func TestSignValuesRequiresKey(t *testing.T) {
 func TestSignValuesDetectsTamperedContent(t *testing.T) {
 	keyPath, key := writeOperatorKey(t)
 	dir := t.TempDir()
-	valuesPath := filepath.Join(dir, "values.yaml")
-	if err := os.WriteFile(valuesPath, []byte("measurement: aa\nvalues: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := NewCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"sign-values", "--key", keyPath, valuesPath})
-	if err := cmd.Execute(); err != nil {
+	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
+	if err := runSign(keyPath, valuesPath); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	sigLine, err := os.ReadFile(valuesPath + ".sig")

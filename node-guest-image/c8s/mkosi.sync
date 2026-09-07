@@ -96,11 +96,18 @@ mkdir -p "$STAGE_DIR/etc/systemd/system/cred-release.service.d" \
          "$STAGE_DIR/etc/rancher/rke2/config.yaml.d"
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/cred-release.service.d/10-platform.conf"
-# Same platform value, same drop-in shape, for c8s-chart-values.service: it
-# reads its own launch measurement the platform-appropriate way (TDX sysfs vs
-# SNP self-attestation) and needs to know which.
-printf '[Service]\nEnvironment=C8S_CHART_VALUES_PLATFORM=%s\n' "$PLATFORM" \
+# Same env var name and drop-in shape for c8s-chart-values.service: it reads
+# its own launch measurement the platform-appropriate way (TDX sysfs vs SNP
+# self-attestation) and needs to know which.
+printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/10-platform.conf"
+# SNP only: c8s-chart-values.sh self-attests against the local
+# attestation-api to read its own launch digest; TDX reads its own sysfs and
+# never dials it, so the ordering dependency only belongs on an SNP build.
+if [ "$PLATFORM" = snp ]; then
+    printf '[Unit]\nAfter=attestation-api.service\n' \
+        > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/20-snp-attestation-api.conf"
+fi
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
@@ -117,25 +124,61 @@ C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.
 # docker.yml publishes images under v* tags, so the tag itself is the ref.
 C8S_REF="${C8S_REF:-v0.1.0-rc2}"
-echo "c8s sync: resolving nri-image-policy + cds at c8s ref ${C8S_REF}"
-resolve_digest() {  # <repo> <ref> -> prints sha256:... or FATALs
+echo "c8s sync: resolving nri-image-policy + cds + operator + ratls-mesh at c8s ref ${C8S_REF}"
+# The baked HelmChart (below) pins all four the same way node mode does live:
+# node mode renders the operator and ratls-mesh alongside nri-image-policy
+# (cvmMode=node turns off attestationApi and volumed stays off by default —
+# see appendCvmModeInstallArgs/appendResolvedDigestArgs in
+# cmd/c8s/install.go, which this sync mirrors so a baked boot resolves the
+# identical component set a live `c8s install --cvm-mode=node` would).
+#
+# Resolved concurrently: four independent oras/jq round trips have no
+# ordering dependency on each other, only on C8S_REF being known first.
+# resolve_digest_bg writes its result to a temp file rather than printing to
+# stdout, since a background job's stdout cannot be captured with $(...) the
+# way the old sequential calls did.
+DIGEST_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$DIGEST_TMPDIR"' EXIT
+resolve_digest_bg() {  # <repo> <ref> <out-file> -> writes sha256:... or FATALs
     local d
     d=$(oras manifest fetch --descriptor "$1:$2" 2>/dev/null | jq -r '.digest')
     case "$d" in
-        sha256:*) printf '%s' "$d" ;;
+        sha256:*) printf '%s' "$d" > "$3" ;;
         *) echo "c8s sync: FATAL cannot resolve $1:$2 (is the image published? run c8s docker.yml for the branch)" >&2; exit 1 ;;
     esac
 }
-NRI_DIGEST=$(resolve_digest "$NRI_REPO" "$C8S_REF")
-CDS_DIGEST=$(resolve_digest "$CDS_REPO" "$C8S_REF")
-# The baked HelmChart (below) pins these two the same way: node mode renders
-# the operator and ratls-mesh alongside nri-image-policy (cvmMode=node turns
-# off attestationApi and volumed stays off by default — see
-# appendCvmModeInstallArgs/appendResolvedDigestArgs in cmd/c8s/install.go,
-# which this sync mirrors so a baked boot resolves the identical component
-# set a live `c8s install --cvm-mode=node` would).
-OPERATOR_DIGEST=$(resolve_digest "$OPERATOR_REPO" "$C8S_REF")
-RATLS_MESH_DIGEST=$(resolve_digest "$RATLS_MESH_REPO" "$C8S_REF")
+resolve_digest_bg "$NRI_REPO" "$C8S_REF" "$DIGEST_TMPDIR/nri" &
+nri_pid=$!
+resolve_digest_bg "$CDS_REPO" "$C8S_REF" "$DIGEST_TMPDIR/cds" &
+cds_pid=$!
+resolve_digest_bg "$OPERATOR_REPO" "$C8S_REF" "$DIGEST_TMPDIR/operator" &
+operator_pid=$!
+resolve_digest_bg "$RATLS_MESH_REPO" "$C8S_REF" "$DIGEST_TMPDIR/ratls-mesh" &
+ratls_mesh_pid=$!
+# Wait on every job regardless of individual exit status (a bare `wait $pid`
+# chain under set -e would abort on the first failure and leave the rest
+# running as orphans) — resolve_digest_bg already printed a FATAL for
+# whichever repo failed; read_digest below re-checks each result file's
+# shape and is what actually fails the build closed.
+wait "$nri_pid" || true
+wait "$cds_pid" || true
+wait "$operator_pid" || true
+wait "$ratls_mesh_pid" || true
+
+read_digest() {  # <name> <out-file> -> prints sha256:... or FATALs on a bad/missing result
+    local d
+    d=$(cat "$2" 2>/dev/null || true)
+    case "$d" in
+        sha256:*) printf '%s' "$d" ;;
+        *) echo "c8s sync: FATAL $1 digest resolution produced '$d', want sha256:..." >&2; exit 1 ;;
+    esac
+}
+NRI_DIGEST=$(read_digest nri "$DIGEST_TMPDIR/nri")
+CDS_DIGEST=$(read_digest cds "$DIGEST_TMPDIR/cds")
+OPERATOR_DIGEST=$(read_digest operator "$DIGEST_TMPDIR/operator")
+RATLS_MESH_DIGEST=$(read_digest ratls-mesh "$DIGEST_TMPDIR/ratls-mesh")
+rm -rf "$DIGEST_TMPDIR"
+trap - EXIT
 NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
 echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}, operator ${OPERATOR_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}"
 
@@ -169,46 +212,29 @@ pack_chart_tarball() {  # <chart dir> <out tar.gz>
     | gzip -n > "$2"
 }
 
-# Render the baked HelmChart AddOn into the stage tree: the packed chart tree
-# (base64) plus every node-mode component digest, mirroring
-# appendCvmModeInstallArgs/appendResolvedDigestArgs (cmd/c8s/install.go). The
-# template lives outside mkosi.extra (c8s-chart.yaml.in) for the same reason
-# as the NRI floor template above.
+# Render the baked HelmChart AddOn into the stage tree: RKE2 serves this
+# platform's chart tarball from its own static file server
+# (server/static/charts/, the same mechanism its bundled AddOns like
+# rke2-coredns use — see spec.chart in the template), so the manifest itself
+# carries only a URL, not the chart bytes. Which template: cmd/c8s's
+# TestNodeChartGoldenFiles generates one golden file per hardware platform
+# (c8s-chart.tdx.yaml.in / c8s-chart.snp.yaml.in) with every static
+# platform-dependent value (cds.ratlsPlatform, teeDevices, tlsLb.attest, ...)
+# already baked in as a literal — only the four component digests are left as
+# @*_DIGEST@ tokens, since those alone depend on C8S_REF, not on PLATFORM.
 render_chart_helmchart() {  # <chart tarball path>
-    local tmpl="$SRCDIR/mkosi.profiles/c8s/c8s-chart.yaml.in"
+    local tmpl="$SRCDIR/mkosi.profiles/c8s/c8s-chart.${PLATFORM}.yaml.in"
     local dst="$STAGE_DIR/var/lib/rancher/rke2/server/manifests/c8s-chart.yaml"
+    local static_dst="$STAGE_DIR/var/lib/rancher/rke2/server/static/charts/c8s.tgz"
     [ -f "$tmpl" ] || { echo "c8s sync: FATAL chart template $tmpl missing" >&2; exit 1; }
-    local content
-    content=$(base64 -w0 "$1")
-    # cds.ratlsPlatform / ratlsMesh.platform follow appendCvmModeInstallArgs:
-    # only set (to tdx) on a TDX build; the chart's own defaults (snp /
-    # sev-snp) stand on SNP, so the token is dropped there entirely rather
-    # than emitting a value the chart already defaults to.
-    local ratls_platform="snp" ratls_mesh_platform="sev-snp"
-    local tee_sev_guest=true tee_tdx_guest=false
-    local tlslb_attest_platform=snp tlslb_attest_generation=genoa
-    if [ "$PLATFORM" = tdx ]; then
-        ratls_platform=tdx
-        ratls_mesh_platform=tdx
-        tee_sev_guest=false
-        tee_tdx_guest=true
-        tlslb_attest_platform=tdx
-        tlslb_attest_generation=""
-    fi
+    mkdir -p "$(dirname "$static_dst")"
+    install -D -m 0644 "$1" "$static_dst"
     mkdir -p "$(dirname "$dst")"
     sed \
-        -e "s|@CHART_CONTENT@|${content}|g" \
         -e "s|@IMAGE_DIGEST@|${OPERATOR_DIGEST}|g" \
         -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
         -e "s|@RATLS_MESH_DIGEST@|${RATLS_MESH_DIGEST}|g" \
         -e "s|@NRI_IMAGE_POLICY_DIGEST@|${NRI_DIGEST}|g" \
-        -e "s|@RATLS_PLATFORM@|${ratls_platform}|g" \
-        -e "s|@RATLS_MESH_PLATFORM@|${ratls_mesh_platform}|g" \
-        -e "s|@TEE_SEV_GUEST@|${tee_sev_guest}|g" \
-        -e "s|@TEE_TDX_GUEST@|${tee_tdx_guest}|g" \
-        -e "s|@TLS_LB_ATTEST_PLATFORM@|${tlslb_attest_platform}|g" \
-        -e "s|@TLS_LB_ATTEST_GENERATION@|${tlslb_attest_generation}|g" \
-        -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
     echo "c8s sync: chart HelmChart rendered (image ${OPERATOR_DIGEST}, cds ${CDS_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}, nri-image-policy ${NRI_DIGEST})"
 }

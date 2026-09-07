@@ -516,7 +516,7 @@ jobs:
 
       # c8s-local patch (see node-guest-image-invariants.sh's tdx-metal-e2e.yml
       # marker check): the node image now bakes the c8s chart install itself
-      # (HelmChart c8s in kube-system, node-guest-image/c8s/c8s-chart.yaml.in) —
+      # (HelmChart c8s in kube-system, node-guest-image/c8s/c8s-chart.<platform>.yaml.in) —
       # `c8s install` refuses to run against a cluster carrying it
       # (preflightNotBakedNode, cmd/c8s/install.go). RKE2's helm-controller
       # reconciles that HelmChart into a Job named helm-install-c8s in

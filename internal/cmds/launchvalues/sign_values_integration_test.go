@@ -57,10 +57,10 @@ func TestSignValuesRoundTripsWithRender(t *testing.T) {
 	}
 
 	// Render should accept the fragment: the pubkey `c8s keys new` wrote is
-	// what LoadMeasuredOperatorKey (faked here) hands back, and the sig
-	// verifies under the matching private key.
-	withLoader(t, fakeLoader(pubPEM))
-	cfg := baseConfig(t, writeOperatorPubkeyFile(t, pubPEM))
+	// what the combined loader (faked here) hands back, and the sig verifies
+	// under the matching private key.
+	withLoader(t, fakeCombinedLoader(pubPEM))
+	cfg := baseConfig()
 	cfg.FragmentPath = fragPath
 	cfg.SignaturePath = sigPath
 

@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -124,4 +125,25 @@ func ParseRTMRPinsString(raw string) (map[int][]byte, error) {
 		return nil, nil
 	}
 	return ParseRTMRPins(strings.Split(raw, ","))
+}
+
+// FormatRTMRPins is ParseRTMRPins' inverse: it formats rtmrs as
+// "<index>=<hex>" strings in index order — the shape cds.rtmrs/
+// ratlsMesh.rtmrs take in a helm --set fan-out (cmd/c8s/install.go) and in
+// launch-time values (internal/cmds/launchvalues). Empty/nil input returns
+// nil.
+func FormatRTMRPins(rtmrs map[int][]byte) []string {
+	if len(rtmrs) == 0 {
+		return nil
+	}
+	idxs := make([]int, 0, len(rtmrs))
+	for idx := range rtmrs {
+		idxs = append(idxs, idx)
+	}
+	sort.Ints(idxs)
+	out := make([]string, 0, len(idxs))
+	for _, idx := range idxs {
+		out = append(out, fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx])))
+	}
+	return out
 }

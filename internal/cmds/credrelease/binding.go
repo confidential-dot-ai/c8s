@@ -15,10 +15,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -37,15 +39,28 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 // Var (not const) so tests can point it at a temp file.
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
+// tdxGuestSysfsDir is the tdx_guest sysfs directory OwnLaunchMeasurement reads
+// mrtd/rtmr1/rtmr2 from — a plain read of this guest's own measured state, no
+// attestation round trip. Var (not const) so tests can point it at a fake
+// tree.
+var tdxGuestSysfsDir = "/sys/devices/virtual/misc/tdx_guest/measurements"
+
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.
 // Returns the raw 48 bytes.
 func readOwnRTMR3() ([]byte, error) {
-	b, err := os.ReadFile(rtmr3SysfsPath)
+	return readRegister(rtmr3SysfsPath)
+}
+
+// readRegister reads a 48-byte (SHA-384) binary TDX measurement register
+// file at path, failing closed on anything but exactly 48 bytes — a short or
+// missing read must never be silently zero-padded into a register compare.
+func readRegister(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w (is this a TDX guest with runtime measurement?)", rtmr3SysfsPath, err)
+		return nil, fmt.Errorf("read %s: %w (is this a TDX guest with runtime measurement?)", path, err)
 	}
 	if len(b) != 48 {
-		return nil, fmt.Errorf("%s: got %d bytes, want 48", rtmr3SysfsPath, len(b))
+		return nil, fmt.Errorf("%s: got %d bytes, want 48", path, len(b))
 	}
 	return b, nil
 }
@@ -80,11 +95,14 @@ func verifyKeyMeasured(pubkey []byte) error {
 	return nil
 }
 
-// readOperatorPubkey reads the operator public key the initrd staged from the
+// ReadOperatorPubkey reads the operator public key the initrd staged from the
 // opkeydata disk. The bytes are exactly what the initrd hashed into RTMR[3],
 // so verifyKeyMeasured can re-derive the same digest. Absence means the VM was
-// launched without an operator key (no opkeydata disk).
-func readOperatorPubkey() ([]byte, error) {
+// launched without an operator key (no opkeydata disk) — errors.Is(err,
+// fs.ErrNotExist) distinguishes that from every other read failure; os.
+// ReadFile's *PathError wraps the underlying fs error, and %w below preserves
+// that chain, so callers can rely on errors.Is rather than string matching.
+func ReadOperatorPubkey() ([]byte, error) {
 	pub, err := os.ReadFile(operatorPubkeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w — was the VM launched with an operator key?", operatorPubkeyPath, err)
@@ -100,13 +118,18 @@ func readOperatorPubkey() ([]byte, error) {
 // retries, same as a failed RTMR read on TDX.
 const selfReportTimeout = 15 * time.Second
 
-// verifiedSelfHostData returns this guest's HOSTDATA as the attestation-api
-// reports it, from the claims of a report that api verified — reading it off
-// an unverified self-report would take the anchor from an unauthenticated
-// field. Mirrors policymonitor's verifiedSelfHostData, with a random anchor:
-// nothing here needs the zero-anchor convention, and a fresh nonce makes the
-// self-report non-replayable for free.
-func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte, error) {
+// selfReport attests this guest against the local attestation-api and
+// returns the verified claims — reading a field off an unverified self-report
+// would take the anchor from an unauthenticated value. Mirrors
+// policymonitor's verifiedSelfHostData, with a random anchor: nothing here
+// needs the zero-anchor convention, and a fresh nonce makes the self-report
+// non-replayable for free.
+//
+// Called once per SNP operator boot and shared by both binding checks that
+// need it (the HOSTDATA anchor for the operator key, and this guest's own
+// launch digest for OwnLaunchMeasurement) so an SNP boot attests itself only
+// once, not once per caller.
+func selfReport(ctx context.Context, attestationAPIURL string) (types.Claims, error) {
 	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
 	defer cancel()
 
@@ -114,25 +137,18 @@ func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte
 	// the 64-byte REPORTDATA the verifier must find.
 	var reportData [64]byte
 	if _, err := rand.Read(reportData[:sha512.Size384]); err != nil {
-		return nil, fmt.Errorf("self-report nonce: %w", err)
+		return types.Claims{}, fmt.Errorf("self-report nonce: %w", err)
 	}
 	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, attestationAPIURL, reportData[:sha512.Size384])
 	if err != nil {
-		return nil, fmt.Errorf("attest self: %w", err)
+		return types.Claims{}, fmt.Errorf("attest self: %w", err)
 	}
 	verified, err := attestationclient.NewClient(attestationAPIURL).VerifyEvidence(ctx,
 		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
 	if err != nil {
-		return nil, fmt.Errorf("verify self-report: %w", err)
+		return types.Claims{}, fmt.Errorf("verify self-report: %w", err)
 	}
-
-	hostData := []byte(verified.Result.Claims.InitData)
-	// A TDX report leaking into this arm carries a 48-byte MRCONFIGID here
-	// and is refused by length, not silently truncated.
-	if len(hostData) != runtimemeasure.HostDataSize {
-		return nil, fmt.Errorf("HOSTDATA claim is %d bytes, want %d", len(hostData), runtimemeasure.HostDataSize)
-	}
-	return hostData, nil
+	return verified.Result.Claims, nil
 }
 
 // verifyKeyLaunchBound is the SNP analog of verifyKeyMeasured: before trusting
@@ -142,10 +158,15 @@ func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte
 // produces a mismatch here — it cannot alter HOSTDATA any more than it can
 // rewind RTMR[3]. A VM launched without an operator key carries all-zero
 // HOSTDATA, which no SHA-256 output equals, so that fails closed too.
-func verifyKeyLaunchBound(ctx context.Context, attestationAPIURL string, pubkey []byte) error {
-	hostData, err := verifiedSelfHostData(ctx, attestationAPIURL)
-	if err != nil {
-		return err
+//
+// claims comes from one selfReport call the caller makes; see
+// LoadMeasuredOperatorKey.
+func verifyKeyLaunchBound(claims types.Claims, pubkey []byte) error {
+	hostData := []byte(claims.InitData)
+	// A TDX report leaking into this arm carries a 48-byte MRCONFIGID here
+	// and is refused by length, not silently truncated.
+	if len(hostData) != runtimemeasure.HostDataSize {
+		return fmt.Errorf("HOSTDATA claim is %d bytes, want %d", len(hostData), runtimemeasure.HostDataSize)
 	}
 	want := runtimemeasure.HostDataForOperatorKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
@@ -163,8 +184,14 @@ func verifyKeyLaunchBound(ctx context.Context, attestationAPIURL string, pubkey 
 // The returned bytes are safe to trust as the authorized operator key. Called
 // once at service start; both bindings are fixed for the life of the guest.
 // platform is the ratls-normalized platform ("tdx" or "sev-snp").
+//
+// On SNP this makes its own selfReport call. A caller that ALSO needs this
+// guest's own launch measurement on the same boot (launchvalues.Render does,
+// on an SNP operator boot with a fragment) should call
+// LoadMeasuredOperatorKeyAndOwnMeasurement instead, so the guest self-attests
+// once rather than once per check.
 func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL string) ([]byte, error) {
-	pub, err := readOperatorPubkey()
+	pub, err := ReadOperatorPubkey()
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +199,11 @@ func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL st
 	case "tdx":
 		err = verifyKeyMeasured(pub)
 	case "sev-snp":
-		err = verifyKeyLaunchBound(ctx, attestationAPIURL, pub)
+		var claims types.Claims
+		claims, err = selfReport(ctx, attestationAPIURL)
+		if err == nil {
+			err = verifyKeyLaunchBound(claims, pub)
+		}
 	default:
 		// Fail closed: an unknown platform has no binding to check.
 		err = fmt.Errorf("no operator-key binding check for platform %q", platform)
@@ -181,4 +212,102 @@ func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL st
 		return nil, err
 	}
 	return pub, nil
+}
+
+// OwnLaunchMeasurement returns this guest's own launch measurement and (TDX
+// only) its runtime measurement register pins — the values c8s-chart-values
+// needs to pin cds.measurements/rtmrs and ratlsMesh.measurements/rtmrs to the
+// exact image that is running. platform is the ratls-normalized platform
+// ("tdx" or "sev-snp").
+//
+// TDX reads mrtd/rtmr1/rtmr2 straight from the tdx_guest sysfs — a plain
+// read, no attestation round trip; the kernel TSM node is this guest's own
+// measured state, not a claim a peer could forge. SNP has no such sysfs: its
+// launch measurement is only visible in an attestation report, so this reads
+// it off one verified selfReport call. A caller that also needs the operator
+// key on the same SNP boot should use LoadMeasuredOperatorKeyAndOwnMeasurement
+// instead of calling this and LoadMeasuredOperatorKey separately, to avoid
+// attesting twice. RTMRs are TDX-only; rtmrs is nil on SNP.
+func OwnLaunchMeasurement(ctx context.Context, platform, attestationAPIURL string) (measurement []byte, rtmrs map[int][]byte, err error) {
+	switch platform {
+	case "tdx":
+		mrtd, err := readRegister(filepath.Join(tdxGuestSysfsDir, "mrtd:sha384"))
+		if err != nil {
+			return nil, nil, err
+		}
+		rtmr1, err := readRegister(filepath.Join(tdxGuestSysfsDir, "rtmr1:sha384"))
+		if err != nil {
+			return nil, nil, err
+		}
+		rtmr2, err := readRegister(filepath.Join(tdxGuestSysfsDir, "rtmr2:sha384"))
+		if err != nil {
+			return nil, nil, err
+		}
+		return mrtd, map[int][]byte{1: rtmr1, 2: rtmr2}, nil
+	case "sev-snp":
+		claims, err := selfReport(ctx, attestationAPIURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		return launchDigestFromClaims(claims)
+	default:
+		return nil, nil, fmt.Errorf("no launch-measurement read for platform %q", platform)
+	}
+}
+
+// LoadMeasuredOperatorKeyAndOwnMeasurement does what LoadMeasuredOperatorKey
+// and OwnLaunchMeasurement do together, but on SNP shares one selfReport call
+// between the HOSTDATA check and the launch-digest read instead of attesting
+// twice. On TDX the two checks read disjoint sysfs state (RTMR[3] vs
+// mrtd/rtmr1/rtmr2) and there is nothing to share, so this is equivalent to
+// calling both functions in sequence.
+//
+// The own measurement is always resolved, operator key present or not — a
+// non-operator boot (no opkeydata pubkey, ReadOperatorPubkey's
+// errors.Is(err, fs.ErrNotExist)) still needs it for cds/ratlsMesh
+// measurements, so pub/pubErr come back alongside measurement/rtmrs rather
+// than short-circuiting the whole call. The caller (launchvalues.Render)
+// distinguishes "no key staged" from every other pubErr via errors.Is.
+//
+// This is the entry point launchvalues.Render uses; LoadMeasuredOperatorKey
+// and OwnLaunchMeasurement remain exported for callers (tests, other
+// services) that only need one half.
+func LoadMeasuredOperatorKeyAndOwnMeasurement(ctx context.Context, platform, attestationAPIURL string) (pub []byte, pubErr error, measurement []byte, rtmrs map[int][]byte, err error) {
+	if platform != "sev-snp" {
+		pub, pubErr = LoadMeasuredOperatorKey(ctx, platform, attestationAPIURL)
+		measurement, rtmrs, err = OwnLaunchMeasurement(ctx, platform, attestationAPIURL)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		return pub, pubErr, measurement, rtmrs, nil
+	}
+
+	pub, pubErr = ReadOperatorPubkey()
+	claims, err := selfReport(ctx, attestationAPIURL)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if pubErr == nil {
+		if verr := verifyKeyLaunchBound(claims, pub); verr != nil {
+			pub, pubErr = nil, verr
+		}
+	}
+	measurement, rtmrs, err = launchDigestFromClaims(claims)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return pub, pubErr, measurement, rtmrs, nil
+}
+
+// launchDigestFromClaims decodes claims.LaunchDigest (hex) into raw bytes,
+// failing closed on anything but exactly SNPMeasurementSize (48) bytes.
+func launchDigestFromClaims(claims types.Claims) ([]byte, map[int][]byte, error) {
+	digest, err := hex.DecodeString(claims.LaunchDigest)
+	if err != nil {
+		return nil, nil, fmt.Errorf("launch_digest claim is not hex: %w", err)
+	}
+	if len(digest) != ratls.SNPMeasurementSize {
+		return nil, nil, fmt.Errorf("launch_digest claim is %d bytes, want %d", len(digest), ratls.SNPMeasurementSize)
+	}
+	return digest, nil, nil
 }

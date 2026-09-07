@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +31,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -278,34 +278,51 @@ const bakedHelmChartLabel = "confidential.ai/baked=true"
 
 // preflightNotBakedNode refuses to install onto a cluster whose kube-system
 // already carries the node image's baked HelmChart c8s (see
-// node-guest-image/c8s/c8s-chart.yaml.in): on that node the chart installs
-// itself at boot from server/manifests, and c8s-chart-values.service supplies
-// the per-launch inputs (the operator key, this node's own measurement) that
-// this CLI has no way to reach from outside the guest. Running `c8s install`
-// there too would fight the baked release over the same HelmChart object.
-// Read-only and first in RunE (before any other cluster read), so a node
-// operator sees this instead of a confusing helm error deep into the run.
+// node-guest-image/c8s/c8s-chart.<platform>.yaml.in): on that node the chart
+// installs itself at boot from server/manifests, and
+// c8s-chart-values.service supplies the per-launch inputs (the operator key,
+// this node's own measurement) that this CLI has no way to reach from
+// outside the guest. Running `c8s install` there too would fight the baked
+// release over the same HelmChart object. Read-only and first in RunE
+// (before any other cluster read), so a node operator sees this instead of a
+// confusing helm error deep into the run.
+//
+// Both kubectl reads use --ignore-not-found (empty stdout, exit 0) rather
+// than stderr string matching (a locale- and version-fragile pattern like
+// "NotFound"/"doesn't have a resource type"): a missing CRD or a missing
+// object both come back as an ordinary empty result, and any OTHER kubectl
+// error (RBAC, connectivity, ...) surfaces verbatim rather than being
+// silently treated as "not baked".
 func preflightNotBakedNode(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "kubectl", "get", "helmchart", "c8s",
-		"-n", "kube-system", "-l", bakedHelmChartLabel, "-o", "name").Output()
+	crd, err := exec.CommandContext(ctx, "kubectl", "get", "crd", "helmcharts.helm.cattle.io",
+		"-o", "name", "--ignore-not-found").Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			stderr := string(ee.Stderr)
-			switch {
-			case strings.Contains(stderr, "NotFound"):
-				return nil // no HelmChart named c8s carries the label
-			case strings.Contains(stderr, "doesn't have a resource type"), strings.Contains(stderr, "no matches for kind"):
-				return nil // cluster has no HelmChart CRD at all (not RKE2/k3s) — cannot be a baked node
-			}
-			return fmt.Errorf("kubectl get helmchart c8s -n kube-system: %w: %s", err, strings.TrimSpace(stderr))
-		}
-		return fmt.Errorf("kubectl get helmchart c8s -n kube-system: %w", err)
+		return fmt.Errorf("kubectl get crd helmcharts.helm.cattle.io: %w", execErrOutput(err))
+	}
+	if strings.TrimSpace(string(crd)) == "" {
+		return nil // cluster has no HelmChart CRD at all (not RKE2/k3s) — cannot be a baked node
+	}
+
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "helmchart",
+		"-n", "kube-system", "-l", bakedHelmChartLabel, "-o", "name", "--ignore-not-found").Output()
+	if err != nil {
+		return fmt.Errorf("kubectl get helmchart -n kube-system -l %s: %w", bakedHelmChartLabel, execErrOutput(err))
 	}
 	if strings.TrimSpace(string(out)) == "" {
 		return nil
 	}
 	return fmt.Errorf("this cluster already carries the node image's baked HelmChart c8s in kube-system (label %s): the c8s node image installs the chart itself at boot, and per-launch inputs (the operator key, this node's own measurement) come from opkeydata and the node's own attestation, not from this CLI. `c8s install` would fight the baked release over the same HelmChart object — nothing to do here", bakedHelmChartLabel)
+}
+
+// execErrOutput enriches err with the command's stderr, if it carried one
+// (an *exec.ExitError does; other exec errors, e.g. "executable not found",
+// do not), so a kubectl failure surfaces the server's own reason.
+func execErrOutput(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return err
 }
 
 // preflightTLSLBHostPort fails fast when tls-lb's host port is already bound on
@@ -1768,8 +1785,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
-		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
+	for i, pin := range ratls.FormatRTMRPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
@@ -2406,27 +2422,12 @@ func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (m
 		if err := yaml.Unmarshal(raw, &overlay); err != nil {
 			return nil, fmt.Errorf("parse values file %q: %w", vf, err)
 		}
-		mergeValues(tree, overlay)
+		helmchart.MergeValues(tree, overlay)
 	}
 	if err := overlaySetArgs(tree, setArgs); err != nil {
 		return nil, err
 	}
 	return tree, nil
-}
-
-// mergeValues deep-merges src onto dst the way helm coalesces a -f file: a map
-// value merges recursively, anything else (scalar, list) replaces. dst is
-// mutated in place.
-func mergeValues(dst, src map[string]any) {
-	for k, sv := range src {
-		if sm, ok := sv.(map[string]any); ok {
-			if dm, ok := dst[k].(map[string]any); ok {
-				mergeValues(dm, sm)
-				continue
-			}
-		}
-		dst[k] = sv
-	}
 }
 
 // overlaySetArgs applies the scalar --set/--set-string overrides in setArgs onto

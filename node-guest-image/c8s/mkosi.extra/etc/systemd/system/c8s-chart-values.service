@@ -11,52 +11,32 @@ Description=Write the c8s HelmChartConfig from this boot's launch-time inputs
 Documentation=https://github.com/confidential-dot-ai/c8s
 ConditionPathExists=/run/confos/role-server
 Requires=rke2-role.service
-# attestation-api: SNP self-measurement dials it (127.0.0.1:8400); TDX reads
-# its own sysfs and does not need it, but the ordering is unconditional so a
-# platform switch never silently changes it. rke2-server.service: the write
-# must land before RKE2's deploy controller applies server/manifests/, or the
-# baked HelmChart installs once with unpinned cds.operatorKeys/measurements
-# and only self-heals on the controller's next reconcile.
-After=rke2-role.service attestation-api.service
+# rke2-server.service: the write must land before RKE2's deploy controller
+# applies server/manifests/, or the baked HelmChart installs once with
+# unpinned cds.operatorKeys/measurements and only self-heals on the
+# controller's next reconcile. attestation-api (SNP self-measurement) is
+# ordered by a platform drop-in (20-snp-attestation-api.conf, rendered only
+# on an SNP build) rather than unconditionally here — TDX reads its own
+# sysfs and never dials it.
+After=rke2-role.service
 Before=rke2-server.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# ${C8S_CHART_VALUES_PLATFORM} comes from the drop-in the c8s sync hook
-# renders from the build's required C8S_PLATFORM (same mechanism as
-# cred-release.service.d/10-platform.conf). The `=` form matters: with the
-# variable unset systemd elides a bare word, but --platform= expands to an
-# empty value, which the script's platform validation rejects — fail closed,
-# never a default.
-ExecStart=/usr/local/bin/c8s-chart-values.sh --platform=${C8S_CHART_VALUES_PLATFORM}
+# ${CRED_PLATFORM} comes from the drop-in the c8s sync hook renders from the
+# build's required C8S_PLATFORM — the same variable and drop-in shape
+# cred-release.service.d/10-platform.conf uses. The `=` form matters: with
+# the variable unset systemd elides a bare word, but --platform= expands to
+# an empty value, which the script's platform validation rejects — fail
+# closed, never a default.
+ExecStart=/usr/local/bin/c8s-chart-values.sh --platform=${CRED_PLATFORM}
 Restart=on-failure
 RestartSec=10
-# Reads the initrd-staged operator pubkey (read-only) and, on TDX, the
-# tdx_guest sysfs (also read-only); writes only the rendered manifest under
-# RKE2's manifests dir, plus (Phase 0b) mounts the optional opkeydata ISO
-# under /run/confos/opkeydata to read its values.yaml/values.yaml.sig, the
-# same way rke2-role.sh mounts joindata. Keep the rest of the FS read-only.
-# Not ProtectSystem=strict + ReadWritePaths=/var/lib/rancher/rke2/server/
-# manifests: that dir is rke2-server's own state tree and must stay writable
-# by this unit's uid (root) even though the rest of /var is protected.
-#
-# ProtectSystem=/ReadOnlyPaths=/ReadWritePaths= all sandbox this unit's own
-# mount NAMESPACE (what paths it can see as writable, and what it may bind
-# over) — they do not touch its capabilities. mount(8)/umount(8) for
-# opkeydata still work: the unit is root with the default (unrestricted)
-# CapabilityBoundingSet, so it still holds CAP_SYS_ADMIN, and
-# NoNewPrivileges=yes only blocks GAINING privilege beyond what the process
-# already has (e.g. via a setuid exec), not the mount(2) syscall a root
-# process can already make. /dev is one of the subtrees ProtectSystem=strict
-# leaves alone (with /proc and /sys), so /dev/disk/by-label/opkeydata needs
-# no separate grant; /run/confos, the mountpoint, is covered by the existing
-# ReadWritePaths=/run below. rke2-role.service (which mounts joindata) and
-# containerd-data-disk.service (which mounts its own backing disk) both run
-# with NO systemd sandboxing at all rather than work around this; this unit
-# keeps its hardening instead, since — unlike those — mount(2) here is not
-# on rke2-server's fail-safe path (a mount failure here fails this unit,
-# which RequiredBy=rke2-server.service already turns into a blocked boot).
+# Reads /etc/confai and (on TDX) the tdx_guest sysfs read-only, and writes
+# only the rendered manifest and /run/confos/opkeydata. mount(8) still works
+# here: the unit stays root with CAP_SYS_ADMIN, and NoNewPrivileges=yes only
+# blocks gaining privilege beyond that, not the mount(2) syscall itself.
 ProtectSystem=strict
 ReadOnlyPaths=/etc/confai
 ReadWritePaths=/var/lib/rancher/rke2/server/manifests /run
