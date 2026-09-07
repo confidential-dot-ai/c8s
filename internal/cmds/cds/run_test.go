@@ -303,7 +303,7 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 
 	seedPath := filepath.Join(t.TempDir(), "seed.json")
-	seedJSON := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`
+	seedJSON := anySeed(map[string]string{"cds": digestA})
 	if err := os.WriteFile(seedPath, []byte(seedJSON), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
@@ -354,15 +354,15 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	}
 	body := resp.Body
 	var listing struct {
-		Digests map[string]string `json:"digests"`
+		Workloads map[string]json.RawMessage `json:"workloads"`
 	}
 	decodeErr := json.NewDecoder(body).Decode(&listing)
 	_ = body.Close()
 	if decodeErr != nil {
 		t.Fatalf("decode /allowlist: %v", decodeErr)
 	}
-	if _, ok := listing.Digests[digestA]; !ok {
-		t.Errorf("seeded digest missing from /allowlist: %v", listing.Digests)
+	if _, ok := listing.Workloads["cds"]; !ok {
+		t.Errorf("seeded entry missing from /allowlist: %v", listing.Workloads)
 	}
 
 	// Operator keys are pinned, so /operator-keys must serve the bundle.
@@ -496,7 +496,7 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	cfg.operatorKeys = keysPath
 	base := startRunServer(t, cfg)
 
-	body := []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`)
+	body := []byte(anySeed(map[string]string{"cds": digestA}))
 	sum := sha256.Sum256(body)
 	issued := time.Now().Add(10 * time.Second) // inside the 30s leeway
 	token, err := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{

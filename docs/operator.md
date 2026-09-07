@@ -326,15 +326,20 @@ With CDS a singleton:
 
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator adds with `c8s allowlist add`. With
+whatever an operator applies with `c8s allowlist workload apply`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
+restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
 the install seed — workloads pulling those images are denied roughly one worker
 poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
-Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
-entries, are also enforced from the baked floor.
+(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
+chart-seeded component entries are unaffected — they are re-seeded and, unlike
+dynamic entries, are also admitted from the plugin's `always_allow` and the
+guest's baked seed. The restart also resets the allowlist version counter, and
+every enforcer ignores a served version at or below the one it last applied
+(`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
+or guest that had applied version N stays on that policy until the restarted
+CDS counts past N again, or the plugin or guest itself restarts.
 
 ## Attestation-api
 

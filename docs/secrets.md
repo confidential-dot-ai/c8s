@@ -308,19 +308,23 @@ c8s injects its own containers into every confidential pod. They are not part of
 a workload's declared set, so they are removed before matching — an entry never
 has to enumerate c8s's own sidecars.
 
-A container is dropped when its digest is an allowlist **floor** entry *and* its
+A container is dropped when its digest is admitted by some entry under an
+**unconstrained argv policy** (`command` and `args` both `any`) *and* its
 entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
-Both halves are load-bearing. Floor membership alone would let a pod add busybox running a
-shell — also a floor entry — and have it ignored.
+Both halves are load-bearing. Admission alone would let a pod add busybox
+running a shell — admitted the same way — and have it ignored.
 
-The floor is the source. It already carries the injected image, since it could
-not run otherwise, and it is **additive**: a digest once served is never
-dropped. So an image bump leaves the previous digest in place alongside the new
-one, and pods still running the old image keep matching while they recycle.
+The seeded component entries are the source: the injected image is among them,
+since it could not run otherwise, and an image bump seeds the new digest's entry
+beside the old one ([`allowlist-and-capabilities.md`](allowlist-and-capabilities.md#bootstrap)).
 
-What this rests on: no floor image other than c8s's has an executable at one of
-those entrypoints. Floor contents are operator-controlled and auditable, but
-that is a property of the deployment rather than something enforced here.
+What this rests on, in both directions: no image admitted under an unconstrained
+argv other than c8s's has an executable at one of those entrypoints, and the
+injected image's own entry stays unconstrained — an operator who narrows it
+(`bootstrapAllowlist.workloads` or `workload edit`) turns every injected sidecar
+into a foreign container and every release in the cluster is refused. Allowlist
+contents are operator-controlled and auditable, but that is a property of the
+deployment rather than something enforced here.
 
 ## The grant
 

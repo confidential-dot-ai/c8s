@@ -1,15 +1,15 @@
 // Package allowlist defines the CDS-served image allowlist and its deterministic
 // canonical serialization.
 //
-// The allowlist has two layers. Digests is the floor: a digest -> image-label
-// map whose images are admitted by digest alone. The measured guest seed and
-// standalone/injected component images live here. Workloads carries policy:
-// each named entry pins an init/main container set, every container carries
-// entrypoint/cmd (argv) policy, and the entry as a whole carries a secret-store
-// grant. Policy is always looked up by container digest — the entry name and
-// image labels are informational, never a trust-bearing key, because the image
-// reference a pod presents is chosen by the untrusted host while the digest is
-// bound to the bytes that run.
+// The allowlist is a map of named workload entries. Each entry pins an
+// init/main container set; every container binds a digest to the process
+// (argv), bind-mount and environment policy permitted for those bytes, and the
+// entry as a whole carries a secret-store grant. An image that may run however
+// it is invoked — a standalone or injected c8s component, whose argv is
+// per-pod — is an entry whose container policy is any. Policy is always looked
+// up by container digest — the entry name and image labels are informational,
+// never a trust-bearing key, because the image reference a pod presents is
+// chosen by the untrusted host while the digest is bound to the bytes that run.
 //
 // Canonical is Go's json.Marshal of the normalized struct: fixed field order,
 // map keys sorted by encoding/json, container and path lists sorted by
@@ -47,7 +47,6 @@ const (
 // Allowlist is the complete image allowlist.
 type Allowlist struct {
 	Schema    string              `json:"schema"`
-	Digests   map[string]string   `json:"digests"`
 	Workloads map[string]Workload `json:"workloads"`
 }
 
@@ -147,10 +146,26 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
 	}
+	if !strict {
+		warnLegacyDigests(data)
+	}
 	if err := a.normalize(strict); err != nil {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// warnLegacyDigests names a served document that still carries a
+// pre-unification top-level digests map — an older CDS mid-upgrade. Those
+// digests are not admitted by this consumer until the next pull from an
+// upgraded CDS.
+func warnLegacyDigests(data []byte) {
+	var probe struct {
+		Digests map[string]string `json:"digests"`
+	}
+	if json.Unmarshal(data, &probe) == nil && len(probe.Digests) > 0 {
+		slog.Warn("allowlist: served document carries a pre-unification digests map; those digests are not admitted until CDS is upgraded", "digests", len(probe.Digests))
+	}
 }
 
 // ParseWorkloadJSON decodes and validates a single workload entry — the body of
@@ -190,6 +205,31 @@ func (w Workload) Digests() []types.Digest {
 	return out
 }
 
+// AnyArgv reports whether the container is admitted whatever it runs: command
+// and args both any.
+func (c Container) AnyArgv() bool {
+	return c.Command.Policy == PolicyAny && c.Args.Policy == PolicyAny
+}
+
+// AdmitsAnyArgv reports whether some entry admits the digest under an
+// unconstrained argv policy. The injected-container drop set (internal/secrets)
+// keys on it: c8s's own images run with per-pod arguments, so they are only
+// ever admitted this way.
+func (a *Allowlist) AdmitsAnyArgv(digest string) bool {
+	d, err := types.ParseDigest(digest)
+	if err != nil {
+		return false
+	}
+	for _, w := range a.Workloads {
+		for _, c := range append(append([]Container{}, w.InitContainers...), w.Containers...) {
+			if c.Digest == d && c.AnyArgv() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Canonical returns the canonical byte serialization: json.Marshal of the
 // normalized struct.
 func (a *Allowlist) Canonical() ([]byte, error) {
@@ -217,20 +257,6 @@ func (a *Allowlist) CanonicalDigest() ([]byte, error) {
 func (a *Allowlist) normalize(strict bool) error {
 	if a.Schema != Schema {
 		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
-	}
-	if a.Digests != nil {
-		canon := make(map[string]string, len(a.Digests))
-		for d, img := range a.Digests {
-			pd, err := types.ParseDigest(d)
-			if err != nil {
-				return fmt.Errorf("floor digest %q: %w", d, err)
-			}
-			if _, dup := canon[pd.String()]; dup {
-				return fmt.Errorf("duplicate floor digest %s", pd.String())
-			}
-			canon[pd.String()] = img
-		}
-		a.Digests = canon
 	}
 	for name, w := range a.Workloads {
 		// The grammar is not negotiable on either path: the name is used

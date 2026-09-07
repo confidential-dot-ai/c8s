@@ -5916,11 +5916,29 @@ func podVolume(spec corev1.PodSpec, name string) (corev1.Volume, bool) {
 	return corev1.Volume{}, false
 }
 
-// TestChartSeedsCDSAllowlistFromFloor proves the single authoritative floor
+// seedEntry finds the seed entry whose single container carries digest.
+func seedEntry(seed *pkgallowlist.Allowlist, digest string) (pkgallowlist.Workload, bool) {
+	for _, w := range seed.Workloads {
+		for _, c := range w.Containers {
+			if c.Digest.String() == digest {
+				return w, true
+			}
+		}
+	}
+	return pkgallowlist.Workload{}, false
+}
+
+// seedLabel is the label of the entry admitting digest, or "" when none does.
+func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
+	w, _ := seedEntry(seed, digest)
+	return w.Label
+}
+
+// TestChartSeedsCDSAllowlistFromFloor proves the bootstrap digests
 // (nriImagePolicy.bootstrapAllowlist.digests) plus the CDS image self-entry are
-// rendered into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
-// non-empty on the first worker pull. Decoded with the same typed Allowlist
-// shape CDS parses, not substring-matched.
+// rendered into CDS's --allowlist-seed ConfigMap as any-argv entries, so CDS's
+// served /allowlist is non-empty on the first worker pull. Decoded with the
+// same typed Allowlist shape CDS parses, not substring-matched.
 func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 	const floorDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
 	out, err := helmTemplate(t,
@@ -5941,16 +5959,112 @@ func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 		t.Fatalf("seed JSON does not parse as a Allowlist (CDS would fail closed): %v\n%s", err, raw)
 	}
 
-	// The floor digest the operator supplied.
-	if got := seed.Digests[floorDigest]; got != "ghcr.io/x/coredns:v1" {
-		t.Errorf("seed floor digest = %q, want ghcr.io/x/coredns:v1\nseed: %v", got, seed.Digests)
+	// The digest the operator supplied, under the name CDS's floor-table
+	// migration derives for the same inputs (internal/allowlist
+	// TestFloorEntryName pins the same literal), admitted under any argv.
+	w, ok := seed.Workloads["coredns-abcdef000000"]
+	if !ok {
+		t.Fatalf("seed entry coredns-abcdef000000 missing\nseed: %v", seed.Workloads)
+	}
+	if w.Label != "ghcr.io/x/coredns:v1" || len(w.InitContainers) != 0 || len(w.Containers) != 1 {
+		t.Errorf("seed entry = %#v, want label ghcr.io/x/coredns:v1 with one main container", w)
+	}
+	if c := w.Containers[0]; c.Digest.String() != floorDigest || c.Image != "ghcr.io/x/coredns:v1" || !c.AnyArgv() {
+		t.Errorf("seed container = %#v, want %s under any command and args", c, floorDigest)
 	}
 	// The CDS self-entry, derived from cds.image (set by the test harness to
 	// digest ...0001); the reference is repository@digest.
 	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
-	if got := seed.Digests[cdsDigest]; got != cdsRef {
-		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Digests)
+	if got := seedLabel(seed, cdsDigest); got != cdsRef {
+		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+}
+
+// The derived name lowercases the digest whatever case the values key used, so
+// the chart and CDS's floor-table migration agree on it.
+func TestChartSeedEntryNameIsCaseInsensitive(t *testing.T) {
+	const d = "sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+d+"=ghcr.io/x/coredns:v1",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if _, ok := seed.Workloads["coredns-abcdef000000"]; !ok {
+		t.Fatalf("seed entry coredns-abcdef000000 missing\nseed: %v", seed.Workloads)
+	}
+}
+
+// The chart derives entry names with the rule internal/allowlist pins for
+// CDS's floor-table migration (TestFloorEntryName): the same table of inputs
+// must yield the same names, tag and digest stripping, the "image" fallback and
+// the 50-byte truncation included.
+func TestChartSeedEntryNamesMatchMigration(t *testing.T) {
+	cases := []struct{ image, want string }{
+		{"ghcr.io/x/coredns:v1", "coredns"},
+		{"ghcr.io/confidential-dot-ai/cds@sha256:" + strings.Repeat("0", 64), "cds"},
+		{"registry:5000/team/app", "app"},
+		{"busybox", "busybox"},
+		{"", "image"},
+		{"ghcr.io/x/not a name!", "image"},
+		{"ghcr.io/x/" + strings.Repeat("y", 60), strings.Repeat("y", 50)},
+	}
+	var args []string
+	for i, tc := range cases {
+		digest := "sha256:" + strings.Repeat("0", 11) + strconv.Itoa(i) + strings.Repeat("0", 52)
+		args = append(args, "--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+digest+"="+tc.image)
+	}
+	out, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	for i, tc := range cases {
+		want := tc.want + "-" + strings.Repeat("0", 11) + strconv.Itoa(i)
+		if _, ok := seed.Workloads[want]; !ok {
+			t.Errorf("image %q: entry %q missing\nseed: %v", tc.image, want, seed.Workloads)
+		}
+	}
+}
+
+// A bootstrapAllowlist.workloads entry sharing a derived entry's name replaces
+// it whole, so an operator can narrow a component's policy without the chart
+// re-widening it.
+func TestChartSeedWorkloadsOverrideDerivedEntry(t *testing.T) {
+	const d = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+d+"=ghcr.io/x/coredns:v1",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.coredns-abcdef000000.containers[0].digest="+d,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.coredns-abcdef000000.containers[0].command.policy=exact",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.coredns-abcdef000000.containers[0].command.argv[0]=/coredns",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	w, ok := seed.Workloads["coredns-abcdef000000"]
+	if !ok || len(w.Containers) != 1 {
+		t.Fatalf("seed entry = %#v, want one container", w)
+	}
+	if c := w.Containers[0]; c.Command.Policy != pkgallowlist.PolicyExact || c.Digest.String() != d {
+		t.Errorf("operator entry did not win over the derived one: %#v", c)
+	}
+	if w.Label != "" {
+		t.Errorf("derived label leaked into the operator's entry: %q", w.Label)
 	}
 }
 
@@ -5994,8 +6108,8 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
 	}
 	for digest, ref := range want {
-		if got := seed.Digests[digest]; got != ref {
-			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Digests)
+		if got := seedLabel(seed, digest); got != ref {
+			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Workloads)
 		}
 	}
 
@@ -6033,8 +6147,8 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got, want := seed.Digests[nxDigest], nxRepo+"@"+nxDigest; got != want {
-			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Digests)
+		if got, want := seedLabel(seed, nxDigest), nxRepo+"@"+nxDigest; got != want {
+			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Workloads)
 		}
 	})
 
@@ -6052,8 +6166,8 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[nxDigest]; ok {
-			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, nxDigest); ok {
+			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6080,8 +6194,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; !ok {
-			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Workloads)
 		}
 	})
 
@@ -6098,8 +6212,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; ok {
-			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6200,7 +6314,7 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
-	if got := seed.Digests[pinsImageDigest]; got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
+	if got := seedLabel(seed, pinsImageDigest); got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
 		t.Errorf("seed[%s] = %q, want the pins installer image; the baked plugin would deny it", pinsImageDigest, got)
 	}
 }
@@ -6210,7 +6324,7 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 // the plugin) and kata is off, yet the baked plugin still pulls the live
 // allowlist from CDS. If the seed is not served, CDS starts empty and every
 // un-baked component (operator, ratls-mesh, tls-lb's nginx) is denied until an
-// operator hand-runs `c8s allowlist add`. Regression for that deadlock: the seed
+// operator hand-applies an entry. Regression for that deadlock: the seed
 // ConfigMap must render, be mounted, and carry the deployed digests.
 func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	const (
@@ -6236,15 +6350,15 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	}
 	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
 	// and tls-lb's nginx (default digest from values.yaml).
-	if got := seed.Digests[opD]; got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
-		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Digests)
+	if got := seedLabel(seed, opD); got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
+		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
-		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
+	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
+		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
 	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
-	if _, ok := seed.Digests[nginxD]; !ok {
-		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
+	if _, ok := seedEntry(seed, nginxD); !ok {
+		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Workloads)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
@@ -6280,8 +6394,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got := seed.Digests[prepDigest]; got != wantRef {
-			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Digests)
+		if got := seedLabel(seed, prepDigest); got != wantRef {
+			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Workloads)
 		}
 
 		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
@@ -6304,8 +6418,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[prepDigest]; ok {
-			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Digests)
+		if _, ok := seedEntry(seed, prepDigest); ok {
+			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Workloads)
 		}
 	})
 }
@@ -6444,8 +6558,8 @@ func TestChartFleetAllowlistOverridesDerived(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed JSON does not parse: %v", err)
 	}
-	if got := seed.Digests[cdsD]; got != "mirror.local/cds@"+cdsD {
-		t.Errorf("fleet override lost: %s = %q, want mirror.local/cds@%s\nseed: %v", cdsD, got, cdsD, seed.Digests)
+	if got := seedLabel(seed, cdsD); got != "mirror.local/cds@"+cdsD {
+		t.Errorf("fleet override lost: %s = %q, want mirror.local/cds@%s\nseed: %v", cdsD, got, cdsD, seed.Workloads)
 	}
 }
 
@@ -6475,12 +6589,12 @@ func TestChartDeriveComponentsDefaultsOff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seed JSON does not parse: %v", err)
 			}
-			if _, ok := seed.Digests[opD]; ok {
-				t.Errorf("operator digest derived without deriveComponents: %v", seed.Digests)
+			if _, ok := seedEntry(seed, opD); ok {
+				t.Errorf("operator digest derived without deriveComponents: %v", seed.Workloads)
 			}
 			// The CDS floor self-entry is always present, independent of derivation.
-			if _, ok := seed.Digests[cdsDigest]; !ok {
-				t.Errorf("CDS floor self-entry missing: %v", seed.Digests)
+			if _, ok := seedEntry(seed, cdsDigest); !ok {
+				t.Errorf("CDS floor self-entry missing: %v", seed.Workloads)
 			}
 		})
 	}
@@ -6539,8 +6653,8 @@ func TestChartRendersCDSSeedUnderKata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
-	if got, want := seed.Digests[wlDigest], wlRepo+"@"+wlDigest; got != want {
-		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Digests)
+	if got, want := seedLabel(seed, wlDigest), wlRepo+"@"+wlDigest; got != want {
+		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Workloads)
 	}
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {

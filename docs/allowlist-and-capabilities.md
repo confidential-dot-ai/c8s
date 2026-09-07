@@ -16,24 +16,20 @@ attestation).
 
 ## The model
 
-The allowlist has two layers.
+The allowlist is a map of named **workload entries**. Each entry pins an
+init/main container set. Every container binds a **digest** to the process
+policy (`command`, `args`) permitted for those bytes, optionally to the
+bind-mount destinations and environment names it may run with (`mounts`,
+`env`), and the entry as a whole may carry a secret-store grant (`secrets`).
+The entry name is operator-chosen; the entry `label` and per-container `image`
+are informational. Policy is always resolved by container digest.
 
-- **Floor** — `digests`: a `digest -> image-label` map. An image whose digest is
-  in the floor may run, **by digest alone**, regardless of its command line. The
-  measured guest seed and the standalone/injected c8s components (cds, get-cert,
-  the operator, ratls-mesh, nri-image-policy, the tls-lb, the containerd-prep
-  helper) live here. Floor entries carry no process or path policy.
-
-- **Workloads** — `workloads`: named entries, each pinning an init/main
-  container set. Every container binds a **digest** to the process policy
-  (`command`, `args`) permitted for those bytes, and the entry as a whole may
-  carry a secret-store grant (`secrets`). The
-  entry name is operator-chosen; the entry `label` and per-container `image` are
-  informational. Policy is always resolved by container digest.
-
-The floor answers "may these bytes run at all"; the workload layer answers "and
-with what command line, and what filesystem access". A digest may appear in the
-floor, in one workload entry, or in several — see [union
+An image that may run **however it is invoked** — the standalone and injected
+c8s components (cds, get-cert, the operator, ratls-mesh, nri-image-policy, the
+tls-lb, the containerd-prep helper), whose argv is per-pod — is an entry whose
+container `command` and `args` are both `any`. Nothing distinguishes such an
+entry from any other: it is matched, stamped and diffed like the rest, and the
+same digest may also appear elsewhere under a narrower policy — see [union
 semantics](#a-digest-may-run-many-ways).
 
 ### Document shape
@@ -41,11 +37,19 @@ semantics](#a-digest-may-run-many-ways).
 ```json
 {
   "schema": "c8s.allowlist/v1",
-  "digests": {
-    "sha256:<cds>":       "ghcr.io/confidential-dot-ai/cds",
-    "sha256:<get-cert>":  "ghcr.io/confidential-dot-ai/get-cert"
-  },
   "workloads": {
+    "cds-3f2a9c8b1e2f": {
+      "label": "ghcr.io/confidential-dot-ai/cds@sha256:<cds>",
+      "initContainers": [],
+      "containers": [
+        {
+          "digest":  "sha256:<cds>",
+          "image":   "ghcr.io/confidential-dot-ai/cds@sha256:<cds>",
+          "command": { "policy": "any" },
+          "args":    { "policy": "any" }
+        }
+      ]
+    },
     "vllm-llama": {
       "label": "docker.io/vllm/vllm-openai:v0.6.3",
       "initContainers": [],
@@ -156,7 +160,12 @@ for a digest is the union of every entry that lists it, because the host control
 which pod pairs a digest with which argv. `lint` surfaces this — it warns when one
 entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
-guarantee is recovered at [cert issuance](#where-its-enforced).
+guarantee is recovered at [cert issuance](#where-its-enforced) — for an entry
+that is distinguishable. An entry whose every container another entry admits
+under any argv, and which that entry needs nothing more running for, is
+**shadowed**: every pod it describes matches both, so it is never the unique
+match and `lint` and `workload apply` refuse it. To tighten a seeded any-argv
+entry, edit it; do not add a narrower entry for the same image beside it.
 
 ## Mount and environment policy (`mounts`, `env`)
 
@@ -199,11 +208,9 @@ a `deny` default would refuse every real pod and adopting the field would mean
 adopting an outage. That makes these opt-in: a digest with no policy is
 constrained exactly as much as it was before.
 
-Two limits worth stating. They bind only digests a `workloads` entry names —
-floor digests are admitted on the digest alone, so `c8s allowlist add` does not
-produce a mount-gated image. And **the in-guest `policy-monitor` is the enforcer
-that honours them**: it reads the guest's own OCI spec, so it sees both the
-mount table and the environment. The host NRI plugin sees the CRI container and
+One limit worth stating: **the in-guest `policy-monitor` is the enforcer that
+honours them**. It reads the guest's own OCI spec, so it sees both the mount
+table and the environment. The host NRI plugin sees the CRI container and
 reports neither, and an unobserved field is treated as nothing-to-refuse rather
 than as a violation — so under `--cvm-mode=node`, where that plugin is the only
 enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
@@ -258,7 +265,7 @@ Three independent points enforce, at different strengths:
 3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
-   allowlisted (floor or workload), checked against one atomic allowlist
+   allowlisted as some entry's container, checked against one atomic allowlist
    snapshot. Membership only: issuance lands mid-lifecycle, where the running
    set is a strict subset of the declared one, so requiring a whole entry would
    deny ordinary states
@@ -293,11 +300,13 @@ is not implemented and is out of scope here.
 
 c8s injects two init containers into every confidential pod — `c8s-cert`
 (get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: injected component images are allowlist floor entries, so a workload
-entry never has to enumerate c8s's own sidecars. Nothing rests on the container
+by name: the injected image is seeded as its own entry, so a workload entry
+never has to enumerate c8s's own sidecars. Nothing rests on the container
 *name*, which the host writes. get-cert runs with per-pod dynamic arguments,
-which is exactly why standalone/injected images are digest-only floor entries:
-their argv is not fixed and must not be argv-policed.
+which is exactly why the seeded component entries carry `command: any, args:
+any`: their argv is not fixed and must not be argv-policed. Before matching, a
+container admitted that way and running an injected entrypoint is dropped from
+the candidate set ([`secrets.md`](secrets.md#the-injected-drop-set)).
 
 ## Distribution and trust
 
@@ -315,46 +324,57 @@ reproduces the same bytes.
 Writes are authorized by an operator EC key. The `c8s allowlist` CLI mints a
 short-lived token bound to the exact method, path, and body (so a captured token
 cannot be replayed against a different payload) and CDS verifies it against the
-operator public keys it pins. The same operator keys authorize floor and workload
-writes alike.
+operator public keys it pins.
 
-### Refresh, floor, and anti-rollback
+### Refresh and anti-rollback
 
 Consumers poll `GET /allowlist` and refresh on a changed version (the ETag
-counter). The two layers refresh differently, because they have different
-failure modes:
+counter). The served document **swaps wholesale, gated by a monotonic epoch**
+(the version counter): a consumer applies a pulled document only if its version
+is greater than the last applied, and ignores a regression. This matters because
+policy can *tighten* (narrow `args`, revoke a `secrets` grant, remove an entry);
+a plain additive merge would let a host that withholds an update keep a laxer
+policy live forever. Epoch-gated replacement makes a withheld or rolled-back
+update fail toward the last-known-good policy, not toward the laxest one; a CDS
+outage degrades to "stale", never to "open". The high-water-mark is
+process-local, so this rejects rollback only within a consumer's lifetime: after
+a restart (a fresh CVM, for the in-guest monitor) the first version seen is
+trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
+attested freshness / monotonic-counter mechanism the host cannot reset — a
+tracked follow-on.
 
-- The **floor is additive**. A digest, once served, is never dropped by a
-  consumer; a CDS outage or a stale read degrades to "the same set or larger,
-  never smaller", never to "open". In-guest this floor is anchored by the
-  measured baked seed, so enforcement starts at t=0 offline.
-
-- The **workload policy overlay swaps wholesale, gated by a monotonic epoch**
-  (the version counter). A consumer applies a pulled overlay only if its version
-  is greater than the last applied, and ignores a regression. This matters
-  because workload policy can *tighten* (narrow `args`, revoke a `secrets` grant);
-  a plain additive merge would let a host that withholds an update keep a laxer
-  policy live forever. Epoch-gated replacement makes a withheld or rolled-back
-  update fail toward the last-known-good policy, not toward the laxest one. The
-  high-water-mark is process-local, so this rejects rollback only within a
-  consumer's lifetime: after a restart (a fresh CVM, for the in-guest monitor)
-  the first version seen is trusted and state re-syncs from CDS. A reboot-durable
-  guarantee needs an attested freshness / monotonic-counter mechanism the host
-  cannot reset — a tracked follow-on.
+Each enforcer also carries a **local seed** that admits by digest alone ahead of
+the served document and is never touched by a pull: the host NRI plugin's
+`always_allow` (chart-rendered from `bootstrapAllowlist.digests`), and in-guest
+the baked `sha256_digests` list measured into the launch digest. That is what
+lets a node or guest enforce at t=0 offline and bring the platform's own images
+up before CDS is reachable.
 
 ## Bootstrap
 
-The floor is rendered by the chart from resolved component digests and handed to
-CDS as the seed (`--allowlist-seed`). Standalone/injected components are
-digest-only floor entries — the default bootstrap has an empty `workloads` map.
-This is correct precisely because those components have no fixed argv to pin
-(get-cert's arguments are per-pod; cds runs with its own flag set), and forcing
-them into workload entries would invite a policy that denies them their own
-command line and bricks the platform on its first boot.
+The chart renders the seed (`--allowlist-seed`) from the resolved component
+digests (`c8s.imageAllowlist`) plus any `bootstrapAllowlist.workloads`. Each
+digest becomes one entry named `<image basename>-<first 12 hex of digest>` with
+a single container under `command: any, args: any`; an operator-authored
+`workloads` entry of the same name replaces it whole in the rendered seed. The
+name is a function of the digest because CDS seeds **additively by name**: an
+image bump adds the new digest's entry beside the old one, which pods still
+running the old image keep matching while they recycle. The seed never
+overwrites an entry the store already holds, so an edit made with `workload
+apply` survives a restart, while a deleted entry returns on the next CDS start
+for as long as the chart still renders it — to remove an image, roll the chart
+with it gone. During an upgrade an enforcer that pulls the old document shape
+before CDS restarts admits only workload containers until its next pull.
 
-The guest-baked seed remains a flat `sha256_digests` list — it is the floor,
-measured into the SNP launch digest, and keeping it digest-only means a policy
-change never requires a guest-image rebuild.
+CDS folds a pre-unification `digests` floor table into entries of the same shape
+and name the first time it opens an existing database (`internal/allowlist`,
+`migrateFloorTable`), so a re-seed after the upgrade adds nothing. A file still
+carrying a top-level `digests` map is rejected by `ParseJSON`; rewrite each
+digest as an entry as above.
+
+The guest-baked seed remains a flat `sha256_digests` list — it is measured into
+the SNP launch digest, and keeping it digest-only means a policy change never
+requires a guest-image rebuild.
 
 ## CLI
 
@@ -366,20 +386,31 @@ supply via `--operator-key` (or `C8S_OPERATOR_KEY`). Persistent flags: `--url`,
 
 ```
 c8s allowlist
-  list                              floor table + workload summary
+  list                              workload summary table
   export [file]                     write the full canonical document
   diff <file> [--exit-code]         entry/field diff vs the live allowlist
-  add <digest> <image>              add a floor digest
-  remove <digest>...                remove floor digests (warns on component-floor images)
   upload <file>                     replace the whole allowlist (diff-first, required-components guard)
   lint <file|-> [--online] [--strict]
   inspect-image <ref>               show an image's digest + baked entrypoint/cmd
 
   workload list | get <name>
+  workload derive <name> <file|->   entry from a live Pod/Deployment (pipe to apply)
   workload apply <file|-> [--dry-run]
   workload edit <name>
   workload delete <name>...
 ```
+
+To admit an image regardless of its command line, apply an entry whose
+container `command` and `args` are both `any`:
+
+```sh
+printf '{"app":{"containers":[{"digest":"sha256:<digest>","image":"registry.example.com/app@sha256:<digest>","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
+  | c8s allowlist workload apply -
+```
+
+Deleting a chart-seeded component entry does not lock its image out: the NRI
+plugin's `always_allow` and the in-guest baked seed still admit it. To block a
+compromised component image, roll the chart with the bad digest replaced.
 
 ### Editing and applying
 
@@ -393,9 +424,8 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 - **No raw `""`/`"*"` on the command line.** Policies are keywords (`deny`,
   `any`) or an argv captured verbatim after `--`; the tri-state sentinels live
   only inside files. Nothing can be shell-globbed or silently emptied.
-- **The wrong shape errors, never half-works.** `workload delete` takes names;
-  `remove` takes `sha256:` digests; a mixup fails validation instead of partially
-  applying.
+- **The wrong shape errors, never half-works.** A malformed entry or name fails
+  validation instead of partially applying.
 - **Signed writes are diff-first and lint-first.** `upload`/`apply` run the
   offline lint and print the diff before the write. A lint error blocks the
   write; `--strict` makes warnings block it too.
@@ -404,19 +434,19 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 
 `lint` catches the semantic traps before a write: an entry that admits nothing
 (both lists empty), a `command: deny` container that can never start, a
-shared digest whose union is widened to `any` by some entry, a digest that is
-floor-listed while also carrying a workload policy — the floor admits it by
-digest alone, so the argv policy is silently not enforced — tag-form labels
-(which can move under the operator), a `mounts` or `env` policy no host-path
-enforcer can observe (pass `--cvm-mode=pod` when the allowlist targets kata),
-and a summary of how many `any` policies a document carries. `--online` cross-checks digests against the registry with
+shared digest whose union is widened to `any` by some entry — an `any`-policy
+entry for a digest silently makes every narrower entry for it unenforced at the
+per-container gate — tag-form labels (which can move under the operator), a
+`mounts` or `env` policy no host-path enforcer can observe (pass
+`--cvm-mode=pod` when the allowlist targets kata). `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an
 **error**, not a warning: release requires exactly one entry to describe a
 sandbox, so entries of the same shape either both match or neither does, and
 every pod resolving to them is refused whichever grant was meant. Nothing a
-workload can do resolves it. The shape compared is digests and argv policies per
+workload can do resolves it. A [shadowed](#a-digest-may-run-many-ways) entry
+is an error for the same reason. The shape compared is digests and argv policies per
 container list — the image label and the secret grant are excluded, since two
 entries alike but for their grants are exactly the case worth catching.
 

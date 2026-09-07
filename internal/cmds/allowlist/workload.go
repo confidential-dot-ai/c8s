@@ -25,7 +25,8 @@ func newWorkloadCmd(o *options) *cobra.Command {
 		Short: "Manage named workload policy entries",
 		Long: `Workload entries pin an init/main container set; each container carries a
 command/args (argv) and path policy that is enforced by container digest, not
-by name or image ref.`,
+by name or image ref. A container whose command and args policy are both "any"
+is admitted whatever it runs.`,
 	}
 	cmd.AddCommand(
 		newWorkloadListCmd(o),
@@ -83,8 +84,7 @@ func newWorkloadApplyCmd(o *options) *cobra.Command {
 		Short: "Upsert workload entries from a file (whole-entry replace)",
 		Long: `Upsert each workload entry in <file> (or stdin with '-'). The file is either a
 full/partial allowlist document or a name-keyed map of workload entries. Each
-entry is replaced whole — this never field-merges into a live entry. Floor
-digests in the file are ignored; use 'upload' or 'add'.`,
+entry is replaced whole — this never field-merges into a live entry.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -94,15 +94,12 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 			if err != nil {
 				return err
 			}
-			entries, ignoredFloor, err := parseWorkloadEntries(data)
+			entries, err := parseWorkloadEntries(data)
 			if err != nil {
 				return err
 			}
 			if len(entries) == 0 {
 				return fmt.Errorf("no workload entries in %q", args[0])
-			}
-			if ignoredFloor > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "note: %d floor digest(s) in the file are ignored by 'workload apply'; use 'upload' or 'add'\n", ignoredFloor)
 			}
 
 			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
@@ -277,37 +274,43 @@ func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallow
 			out = append(out, ambiguousGroupFinding(names))
 		}
 	}
+	for _, pair := range shadowPairs(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: merged}) {
+		_, wideApplied := entries[pair[0]]
+		_, narrowApplied := entries[pair[1]]
+		if wideApplied != narrowApplied {
+			out = append(out, shadowFinding(pair[0], pair[1]))
+		}
+	}
 	return out
 }
 
 // --- shared helpers ---
 
 // parseWorkloadEntries accepts either a full/partial allowlist document or a
-// bare name-keyed map of workload entries, returning the entries and the count
-// of floor digests it ignored (nonzero only for an allowlist document).
-func parseWorkloadEntries(data []byte) (entries map[string]pkgallowlist.Workload, ignoredFloor int, err error) {
+// bare name-keyed map of workload entries.
+func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error) {
 	if al, perr := pkgallowlist.ParseJSON(data); perr == nil {
 		if al.Workloads == nil {
 			al.Workloads = map[string]pkgallowlist.Workload{}
 		}
-		return al.Workloads, len(al.Digests), nil
+		return al.Workloads, nil
 	}
 
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if derr := dec.Decode(&raw); derr != nil {
-		return nil, 0, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
+		return nil, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
 	}
 	out := make(map[string]pkgallowlist.Workload, len(raw))
 	for name, body := range raw {
 		w, werr := pkgallowlist.ParseWorkloadJSON(body)
 		if werr != nil {
-			return nil, 0, fmt.Errorf("workload %q: %w", name, werr)
+			return nil, fmt.Errorf("workload %q: %w", name, werr)
 		}
 		out[name] = *w
 	}
-	return out, 0, nil
+	return out, nil
 }
 
 func readFileOrStdin(cmd *cobra.Command, path string) ([]byte, error) {

@@ -74,11 +74,10 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   entire in-guest security stack.
 
 - **Container image and command-line allowlisting.** Every container is
-  enforced against a CDS-served allowlist with two layers: a floor of image
-  digests admitted by digest alone, and named workload entries that
-  additionally pin the command line each image may run with — and, in the
-  guest, the bind-mount destinations and environment variable names.
-  Enforced by an
+  enforced against a CDS-served allowlist of named workload entries, each
+  pinning the image digests a workload runs and the command line each may run
+  with — and, in the guest, the bind-mount destinations and environment
+  variable names. Enforced by an
   NRI plugin on the host under node-as-CVM, and by an in-guest
   `policy-monitor` under pod-as-CVM, where the host cannot tamper with it.
 
@@ -427,10 +426,12 @@ c8s allowlist export --url "$TLS_LB" \
 c8s allowlist diff allowlist.json --url "$TLS_LB" \
   --measurements <tls-lb-launch-digest>
 
-# Writes are signed with the operator key
-c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
-  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
-  --operator-key operator.key
+# Writes are signed with the operator key. An entry whose command and args
+# policy are both "any" admits the image regardless of its command line.
+printf '{"app":{"containers":[{"digest":"sha256:<digest>","image":"registry.example.com/app@sha256:<digest>","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
+  | c8s allowlist workload apply - \
+    --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+    --operator-key operator.key
 c8s allowlist upload allowlist.json \
   --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
   --operator-key operator.key

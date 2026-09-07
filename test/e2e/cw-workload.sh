@@ -2,10 +2,10 @@
 # Live-cluster check that a confidential workload runs bound to CDS: the sample
 # cw deployment reaches Ready and carries the injected c8s-cert sidecar.
 #
-# Needs kubectl pointed at a cluster with c8s installed. Under a fail-closed
-# image floor the workload digest must be admitted first: set C8S_OPERATOR_KEY
-# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this adds it. An audit-mode
-# floor admits it without them.
+# Needs kubectl pointed at a cluster with c8s installed. Under fail-closed image
+# admission the workload digest must be allowlisted first: set C8S_OPERATOR_KEY
+# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this applies an entry for it.
+# Audit mode admits it without them.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -30,9 +30,11 @@ image=$(grep -oE '[[:graph:]]+@sha256:[0-9a-f]{64}' "$manifest" | head -1)
 if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
   : "${C8S_ALLOWLIST_URL:?needed alongside C8S_OPERATOR_KEY}"
   : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
-  c8s allowlist add "${image#*@}" "$image" \
-    --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
-    || fail "signed floor write rejected for the workload digest"
+  printf '{"%s":{"label":"%s","initContainers":[],"containers":[{"digest":"%s","image":"%s","command":{"policy":"any"},"args":{"policy":"any"}}]}}' \
+    "$deploy" "$image" "${image#*@}" "$image" \
+    | c8s allowlist workload apply - \
+      --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
+    || fail "signed allowlist write rejected for the workload digest"
   echo "ok: workload digest admitted"
 fi
 

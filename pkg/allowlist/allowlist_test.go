@@ -11,14 +11,16 @@ const digestB = "sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const digestC = "sha256:" + "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 func TestParseJSON_Minimal(t *testing.T) {
-	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"}}`)
-	if al.Digests[digestA] != "cds" {
-		t.Fatalf("floor digest not parsed: %#v", al.Digests)
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"cds":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+	c := al.Workloads["cds"].Containers[0]
+	if c.Digest.String() != digestA || !c.AnyArgv() {
+		t.Fatalf("entry not parsed: %#v", al.Workloads)
 	}
 }
 
 func TestParseJSON_RejectsUnknownSchema(t *testing.T) {
-	_, err := ParseJSON([]byte(`{"schema":"other","digests":{}}`))
+	_, err := ParseJSON([]byte(`{"schema":"other","workloads":{}}`))
 	if err == nil || !strings.Contains(err.Error(), "unknown schema") {
 		t.Fatalf("expected unknown schema error, got %v", err)
 	}
@@ -30,9 +32,48 @@ func TestParseJSON_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
-func TestParseJSON_RejectsBadFloorDigest(t *testing.T) {
-	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","digests":{"sha256:zz":"x"}}`)); err == nil {
+// The write path refuses a pre-unification digests map; the served path
+// parses past it and admits nothing from it.
+func TestParseJSON_LegacyDigestsField(t *testing.T) {
+	doc := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"cds"},"workloads":{}}`
+	if _, err := ParseJSON([]byte(doc)); err == nil {
+		t.Fatal("expected the legacy digests field to be rejected")
+	}
+	al, err := ParseServedJSON([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseServedJSON: %v", err)
+	}
+	if al.BuildIndex().AdmitsDigest(digestA) || al.AdmitsAnyArgv(digestA) {
+		t.Fatal("a legacy digests map must not admit anything")
+	}
+}
+
+func TestParseJSON_RejectsBadDigest(t *testing.T) {
+	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"sha256:zz"}]}}}`)); err == nil {
 		t.Fatal("expected invalid digest error")
+	}
+}
+
+func TestAdmitsAnyArgv(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"open":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]},
+		"pinned":{"containers":[
+			{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
+			{"digest":"`+digestB+`","command":{"policy":"any"},"args":{"policy":"exact","argv":["x"]}}]}}}`)
+	if !al.AdmitsAnyArgv(digestA) {
+		t.Fatal("a digest with an any/any entry must report AdmitsAnyArgv")
+	}
+	if al.AdmitsAnyArgv(digestB) {
+		t.Fatal("command any with args exact is not unconstrained")
+	}
+	if al.AdmitsAnyArgv(digestC) {
+		t.Fatal("an unlisted digest must not report AdmitsAnyArgv")
+	}
+	if !al.AdmitsAnyArgv(digestA[:7] + strings.ToUpper(digestA[7:])) {
+		t.Fatal("digests are compared canonically")
+	}
+	if al.AdmitsAnyArgv("not-a-digest") {
+		t.Fatal("a malformed digest must not report AdmitsAnyArgv")
 	}
 }
 
@@ -98,8 +139,8 @@ func TestCanonical_OrderIndependent(t *testing.T) {
 }
 
 func TestCanonical_FormattingIndependent(t *testing.T) {
-	compact := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"x"}}`)
-	spaced := mustParse(t, "{\n  \"schema\": \"c8s.allowlist/v1\",\n  \"digests\": {\""+digestA+"\": \"x\"}\n}")
+	compact := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"`+digestA+`"}]}}}`)
+	spaced := mustParse(t, "{\n  \"schema\": \"c8s.allowlist/v1\",\n  \"workloads\": {\"w\": {\"containers\": [{\"digest\": \""+digestA+"\"}]}}\n}")
 	dc, _ := compact.Canonical()
 	ds, _ := spaced.Canonical()
 	if !bytes.Equal(dc, ds) {
@@ -108,7 +149,7 @@ func TestCanonical_FormattingIndependent(t *testing.T) {
 }
 
 func TestRoundTripCanonical(t *testing.T) {
-	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"},
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1",
 		"workloads":{"w":{"label":"img","containers":[
 		{"digest":"`+digestB+`","command":{"policy":"exact","argv":["/app"]},
 		 "args":{"policy":"any"}}],"secrets":{"policy":"allow","read":["/s/**"]}}}}`)

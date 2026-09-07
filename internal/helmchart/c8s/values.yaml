@@ -959,46 +959,48 @@ nriImagePolicy:
     # container start.
     interval: 5s
 
-  # --- Bootstrap allowlist (the authoritative floor) ---
-  # The single source of truth for the image-digest floor. Used two ways:
-  #   1. Rendered into every plugin's always_allow (both installer DaemonSets,
-  #      via nri-image-policy.bootConfig), so the cluster can bring itself up
-  #      before CDS is reachable.
-  #   2. Rendered into CDS's --allowlist-seed (templates/cds.yaml), so CDS's
-  #      served /allowlist is non-empty on the first worker pull.
-  # `digests` is the floor: everything needed to reach a Ready CDS on the CDS
-  # node and a working kubelet on every node — the c8s component images plus
-  # kube-proxy, coredns, pause/sandbox, CNI — supplied via values or `-f`
-  # (resolve digests with crane/skopeo). In production you pin the full set
-  # here; deriveComponents below is a demo convenience for the c8s images only.
+  # --- Bootstrap allowlist ---
+  # The single source of truth for the images the cluster needs before an
+  # operator writes anything. Used two ways:
+  #   1. `digests` is rendered into every plugin's always_allow (both installer
+  #      DaemonSets, via nri-image-policy.bootConfig), so the cluster can bring
+  #      itself up before CDS is reachable.
+  #   2. Both `digests` and `workloads` are rendered into CDS's --allowlist-seed
+  #      (templates/cds.yaml), so CDS's served /allowlist is non-empty on the
+  #      first worker pull. Each digest is seeded as a workload entry named
+  #      "<image basename>-<first 12 hex of digest>" whose command and args
+  #      policy are both "any"; a `workloads` entry of the same name replaces
+  #      it. CDS seeds additively by name, so a rendered entry never overwrites
+  #      one its store already holds.
+  # `digests` is everything needed to reach a Ready CDS on the CDS node and a
+  # working kubelet on every node — the c8s component images plus kube-proxy,
+  # coredns, pause/sandbox, CNI — supplied via values or `-f` (resolve digests
+  # with crane/skopeo). In production you pin the full set here;
+  # deriveComponents below is a demo convenience for the c8s images only.
   #
   # Format: map of "sha256:<hex>" -> "<image reference>"
   bootstrapAllowlist:
     # deriveComponents: a demo convenience (off by default, like
     # `c8s install --resolve-digests`, which turns it on). When true, the c8s
     # component images this chart installs (operator, cds, attestation-api,
-    # ratls-mesh, nri-image-policy) are auto-added to the floor
-    # whenever their image.digest is set, so a digest-pinned install self-allows
-    # the c8s images without listing them in `digests`. It never covers the
-    # non-c8s system images, so production installs pin the full floor in
-    # `digests` instead. Entries in `digests` override a derived entry for the
-    # same sha256.
+    # ratls-mesh, nri-image-policy) are auto-added to `digests` whenever their
+    # image.digest is set, so a digest-pinned install self-allows the c8s
+    # images without listing them. It never covers the non-c8s system images,
+    # so production installs pin the full set in `digests` instead. Entries in
+    # `digests` override a derived entry for the same sha256.
     deriveComponents: false
     digests: {}
     # sha256:abc123...: "ghcr.io/confidential-dot-ai/cds:v0.1.0"
-    # workloads: named workload entries folded into the served seed alongside
-    # the floor. Each entry pins an init/main container set with per-container
-    # argv (command/args) and paths policy; policy is matched by container
-    # digest. Standalone/injected component images stay digest-only in `digests`
-    # above. Keys are the pkg/allowlist Workload JSON fields (initContainers,
-    # containers, digest, command, args, paths). Default empty.
+    # workloads: named workload entries folded into the served seed. Each entry
+    # pins an init/main container set with per-container argv (command/args),
+    # mounts and env policy; policy is matched by container digest. Keys are the
+    # pkg/allowlist Workload JSON fields. Default empty.
     workloads: {}
     #   infer:
     #     containers:
     #       - digest: sha256:...
     #         command: {policy: exact, argv: ["/bin/vllm"]}
     #         args: {policy: any}
-    #         paths: {policy: deny}
 
   # --- Uninstall hook ---
   # Pre-delete DaemonSet that reverts the containerd config patch and removes

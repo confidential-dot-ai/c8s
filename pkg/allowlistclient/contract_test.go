@@ -99,7 +99,7 @@ func TestListNonOKYieldsStatusError(t *testing.T) {
 func TestListRejectsNonJSONContentType(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		io.WriteString(w, `{"schema":"c8s.allowlist/v1","digests":{}}`)
+		io.WriteString(w, `{"schema":"c8s.allowlist/v1","workloads":{}}`)
 	}))
 	defer srv.Close()
 

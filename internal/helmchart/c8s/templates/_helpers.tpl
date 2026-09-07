@@ -686,14 +686,38 @@ cache_max_entries = 1024
 {{- end -}}
 
 {{/*
+  c8s.digestWorkloadName names the entry a c8s.imageAllowlist digest is seeded
+  as: the image reference's last path segment with any tag or digest stripped
+  ("image" when that is not a legal entry name), then the first 12 hex digits
+  of the digest. Must match internal/allowlist floorEntryName.
+  Call with (dict "digest" <sha256:...> "image" <reference>).
+*/}}
+{{- define "c8s.digestWorkloadName" -}}
+{{- $base := .image | splitList "@" | first | splitList "/" | last | splitList ":" | first | trunc 50 -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]*$" $base) -}}{{- $base = "image" -}}{{- end -}}
+{{- printf "%s-%s" $base (.digest | trimPrefix "sha256:" | lower | trunc 12) -}}
+{{- end -}}
+
+{{/*
   c8s.allowlistSeedJSON renders the allowlist document CDS's --allowlist-seed
-  expects: the c8s.imageAllowlist floor under "digests", plus any
-  bootstrapAllowlist.workloads under "workloads" ({} by default). CDS seeds its
-  served /allowlist from it so the first worker pull returns a real list rather
-  than an empty set. The document validates against pkg/allowlist.ParseJSON.
+  expects: one workload entry per c8s.imageAllowlist digest, admitted under any
+  command and args (the component's argv is per-pod), plus any
+  bootstrapAllowlist.workloads ({} by default), each of which replaces a
+  derived entry of the same name whole. CDS seeds its served /allowlist from it
+  so the first worker pull returns a real list rather than an empty set. The
+  document validates against pkg/allowlist.ParseJSON.
 */}}
 {{- define "c8s.allowlistSeedJSON" -}}
-{{ dict "schema" "c8s.allowlist/v1" "digests" (include "c8s.imageAllowlist" . | fromJson) "workloads" (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) | toJson }}
+{{- $workloads := dict -}}
+{{- range $digest, $image := (include "c8s.imageAllowlist" . | fromJson) -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
+{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+{{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
+{{- end -}}
+{{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
+{{- $_ := set $workloads $name $entry -}}
+{{- end -}}
+{{ dict "schema" "c8s.allowlist/v1" "workloads" $workloads | toJson }}
 {{- end -}}
 
 {{/*
@@ -707,7 +731,7 @@ cache_max_entries = 1024
       the live allowlist from CDS like the chart-installed one, so the seed
       must be served or CDS starts empty and every un-baked component
       (operator, ratls-mesh, tls-lb's nginx, adopted workloads) is denied
-      until an operator hand-runs `c8s allowlist add`. The cvmMode arm also
+      until an operator hand-applies a workload entry. The cvmMode arm also
       covers a node install that leaves the installer off entirely.
   Gating on nriImagePolicy.enabled alone dropped the seed under both pod and
   node mode.

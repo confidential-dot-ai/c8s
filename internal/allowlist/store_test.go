@@ -1,9 +1,11 @@
 package allowlist
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -31,42 +33,37 @@ func mustParseDigest(t *testing.T, s string) types.Digest {
 	return d
 }
 
-func TestReplaceSwapsSetAndBumpsVersion(t *testing.T) {
+func TestReplaceAllBumpsVersionByOne(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer store.Close()
 
-	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
-		t.Fatalf("add: %v", err)
+	if err := store.PutWorkload("a", oneContainerWorkload(mustParseDigest(t, digestA))); err != nil {
+		t.Fatalf("put: %v", err)
 	}
-	beforeVersion, _, err := store.ListAll()
+	_, beforeVersion, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 
-	if err := store.Replace(map[types.Digest]string{
-		mustParseDigest(t, digestB): "image-b",
+	if err := store.ReplaceAll(&pkgallowlist.Allowlist{
+		Schema:    pkgallowlist.Schema,
+		Workloads: map[string]pkgallowlist.Workload{"b": oneContainerWorkload(mustParseDigest(t, digestB))},
 	}); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 
-	version, digests, err := store.ListAll()
+	doc, version, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(digests) != 1 {
-		t.Fatalf("expected 1 digest after replace, got %d", len(digests))
-	}
-	if digests[mustParseDigest(t, digestB)] != "image-b" {
-		t.Fatalf("replacement entry missing: %#v", digests)
-	}
-	if _, ok := digests[mustParseDigest(t, digestA)]; ok {
-		t.Fatal("pre-replace entry survived a full replace")
+	if _, ok := doc.Workloads["b"]; !ok || len(doc.Workloads) != 1 {
+		t.Fatalf("workloads after replace = %#v", doc.Workloads)
 	}
 	// Replace must *increment* the version, not clear or reset it: the version
-	// lives in its own table, so DELETE FROM allowlist leaves it untouched and
+	// lives in its own table, so the DELETEs leave it untouched and
 	// bumpVersionTx increments it. Assert monotonic +1 (a reset-to-default bug
 	// would still satisfy version != beforeVersion, so check the value).
 	before, err := strconv.Atoi(beforeVersion)
@@ -82,25 +79,25 @@ func TestReplaceSwapsSetAndBumpsVersion(t *testing.T) {
 	}
 }
 
-func TestReplaceEmptyClears(t *testing.T) {
+func TestReplaceAllEmptyClears(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer store.Close()
 
-	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
-		t.Fatalf("add: %v", err)
+	if err := store.PutWorkload("a", oneContainerWorkload(mustParseDigest(t, digestA))); err != nil {
+		t.Fatalf("put: %v", err)
 	}
-	if err := store.Replace(map[types.Digest]string{}); err != nil {
+	if err := store.ReplaceAll(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}); err != nil {
 		t.Fatalf("replace empty: %v", err)
 	}
-	_, digests, err := store.ListAll()
+	doc, _, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(digests) != 0 {
-		t.Fatalf("expected empty allowlist after replace with empty set, got %d", len(digests))
+	if len(doc.Workloads) != 0 {
+		t.Fatalf("expected empty allowlist after replace with empty document, got %d", len(doc.Workloads))
 	}
 }
 
@@ -114,19 +111,19 @@ func TestInitialVersionIsOne(t *testing.T) {
 	}
 	defer store.Close()
 
-	version, digests, err := store.ListAll()
+	doc, version, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	if version != "1" {
 		t.Fatalf("version: got %q, want %q", version, "1")
 	}
-	if len(digests) != 0 {
-		t.Fatalf("expected empty digests, got %d", len(digests))
+	if len(doc.Workloads) != 0 {
+		t.Fatalf("expected empty workloads, got %d", len(doc.Workloads))
 	}
 }
 
-func TestVersionMatchesListAllWithoutLoadingRows(t *testing.T) {
+func TestVersionMatchesLoadAllWithoutLoadingRows(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -142,20 +139,20 @@ func TestVersionMatchesListAllWithoutLoadingRows(t *testing.T) {
 	}
 
 	// Version is the ETag the worker pull carries, so it must move in lockstep
-	// with the counter ListAll reports after a write.
-	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
-		t.Fatalf("add: %v", err)
+	// with the counter LoadAll reports after a write.
+	if err := store.PutWorkload("a", oneContainerWorkload(mustParseDigest(t, digestA))); err != nil {
+		t.Fatalf("put: %v", err)
 	}
-	listVersion, _, err := store.ListAll()
+	_, loadVersion, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	version, err = store.Version()
 	if err != nil {
-		t.Fatalf("version after add: %v", err)
+		t.Fatalf("version after put: %v", err)
 	}
-	if version != listVersion {
-		t.Fatalf("Version() = %q, ListAll version = %q; the cheap read must match", version, listVersion)
+	if version != loadVersion {
+		t.Fatalf("Version() = %q, LoadAll version = %q; the cheap read must match", version, loadVersion)
 	}
 
 	if err := store.Close(); err != nil {
@@ -163,271 +160,6 @@ func TestVersionMatchesListAllWithoutLoadingRows(t *testing.T) {
 	}
 	if _, err := store.Version(); err == nil {
 		t.Fatal("Version on a closed store should fail, not report a stale counter")
-	}
-}
-
-func TestAddAndListRoundtrip(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dA := mustParseDigest(t, digestA)
-	if err := store.Add(dA, "nginx:latest"); err != nil {
-		t.Fatalf("add: %v", err)
-	}
-
-	version, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if version != "2" {
-		t.Fatalf("version: got %q, want %q", version, "2")
-	}
-	if len(digests) != 1 {
-		t.Fatalf("expected 1 digest, got %d", len(digests))
-	}
-	if digests[dA] != "nginx:latest" {
-		t.Fatalf("image: got %q, want %q", digests[dA], "nginx:latest")
-	}
-}
-
-func TestAddSameDigestReplacesImage(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dA := mustParseDigest(t, digestA)
-
-	if err := store.Add(dA, "nginx:1.0"); err != nil {
-		t.Fatalf("add first: %v", err)
-	}
-	if err := store.Add(dA, "nginx:2.0"); err != nil {
-		t.Fatalf("add second: %v", err)
-	}
-
-	version, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	// Two adds = version 3
-	if version != "3" {
-		t.Fatalf("version: got %q, want %q", version, "3")
-	}
-	if len(digests) != 1 {
-		t.Fatalf("expected 1 digest, got %d", len(digests))
-	}
-	if digests[dA] != "nginx:2.0" {
-		t.Fatalf("image: got %q, want %q", digests[dA], "nginx:2.0")
-	}
-}
-
-func TestDeleteExistingDigests(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dA := mustParseDigest(t, digestA)
-	dB := mustParseDigest(t, digestB)
-
-	if err := store.Add(dA, "nginx:latest"); err != nil {
-		t.Fatalf("add A: %v", err)
-	}
-	if err := store.Add(dB, "redis:latest"); err != nil {
-		t.Fatalf("add B: %v", err)
-	}
-
-	ok, err := store.Delete([]types.Digest{dA, dB})
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected delete to return true")
-	}
-
-	version, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	// 2 adds + 1 delete = version 4
-	if version != "4" {
-		t.Fatalf("version: got %q, want %q", version, "4")
-	}
-	if len(digests) != 0 {
-		t.Fatalf("expected 0 digests, got %d", len(digests))
-	}
-}
-
-func TestDeleteNonexistentReturnsFalse(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dA := mustParseDigest(t, digestA)
-
-	ok, err := store.Delete([]types.Digest{dA})
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if ok {
-		t.Fatal("expected delete to return false for nonexistent digest")
-	}
-
-	// Version should not change
-	version, _, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if version != "1" {
-		t.Fatalf("version: got %q, want %q", version, "1")
-	}
-}
-
-func TestDeleteEmptyListIsOK(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	ok, err := store.Delete([]types.Digest{})
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected delete of empty list to return true")
-	}
-}
-
-func TestSeedDigestsAddsNewEntries(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dA, dB := mustParseDigest(t, digestA), mustParseDigest(t, digestB)
-	added, err := store.SeedDigests(map[types.Digest]string{dA: "cds:v1", dB: "as:v1"})
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if added != 2 {
-		t.Fatalf("added: got %d, want 2", added)
-	}
-
-	version, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(digests) != 2 {
-		t.Fatalf("expected 2 digests, got %d", len(digests))
-	}
-	if digests[dA] != "cds:v1" {
-		t.Errorf("digestA image: got %q, want %q", digests[dA], "cds:v1")
-	}
-	// Seeding two new entries bumps the version exactly once (2 -> 1+1), not per entry.
-	if version != "2" {
-		t.Fatalf("version: got %q, want %q (one bump for the whole seed)", version, "2")
-	}
-}
-
-// Re-seeding the same set must not bump the version: it is the worker pull
-// ETag, so a no-op re-seed on restart would otherwise force every worker to
-// re-pull.
-func TestSeedDigestsIdempotentDoesNotBumpVersion(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	seed := map[types.Digest]string{mustParseDigest(t, digestA): "cds:v1"}
-	if _, err := store.SeedDigests(seed); err != nil {
-		t.Fatalf("first seed: %v", err)
-	}
-	v1, _, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-
-	added, err := store.SeedDigests(seed)
-	if err != nil {
-		t.Fatalf("second seed: %v", err)
-	}
-	if added != 0 {
-		t.Fatalf("re-seed added: got %d, want 0", added)
-	}
-	v2, _, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if v1 != v2 {
-		t.Fatalf("version bumped on no-op re-seed: %q -> %q", v1, v2)
-	}
-}
-
-// A seed mixing new and existing digests adds only the new ones and bumps the
-// version once; entries added at runtime (here, pre-added) survive untouched.
-func TestSeedDigestsPreservesExistingEntries(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	dB := mustParseDigest(t, digestB)
-	if err := store.Add(dB, "runtime:v1"); err != nil {
-		t.Fatalf("pre-add: %v", err)
-	}
-
-	dA := mustParseDigest(t, digestA)
-	added, err := store.SeedDigests(map[types.Digest]string{dA: "cds:v1", dB: "cds-overwrite:v1"})
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if added != 1 {
-		t.Fatalf("added: got %d, want 1 (only digestA is new)", added)
-	}
-
-	_, digests, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if digests[dB] != "runtime:v1" {
-		t.Errorf("existing digestB image overwritten: got %q, want %q", digests[dB], "runtime:v1")
-	}
-	if _, ok := digests[dA]; !ok {
-		t.Errorf("new digestA missing after seed: %v", digests)
-	}
-}
-
-func TestSeedDigestsEmptyIsNoop(t *testing.T) {
-	store, err := OpenInMemory()
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	added, err := store.SeedDigests(nil)
-	if err != nil {
-		t.Fatalf("seed nil: %v", err)
-	}
-	if added != 0 {
-		t.Fatalf("added: got %d, want 0", added)
-	}
-	version, _, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if version != "1" {
-		t.Fatalf("version: got %q, want %q (empty seed must not bump)", version, "1")
 	}
 }
 
@@ -510,7 +242,7 @@ func TestSeedWorkloadsIsAdditiveAndIdempotent(t *testing.T) {
 	if added != 2 {
 		t.Fatalf("added: got %d, want 2", added)
 	}
-	v1, _, _ := store.ListAll()
+	_, v1, _ := store.LoadAll()
 	if v1 != "2" {
 		t.Fatalf("version after seed: got %q, want 2 (one bump)", v1)
 	}
@@ -523,29 +255,35 @@ func TestSeedWorkloadsIsAdditiveAndIdempotent(t *testing.T) {
 	if added != 0 {
 		t.Fatalf("re-seed added: got %d, want 0", added)
 	}
-	v2, _, _ := store.ListAll()
+	_, v2, _ := store.LoadAll()
 	if v1 != v2 {
 		t.Fatalf("version bumped on no-op re-seed: %q -> %q", v1, v2)
 	}
+
+	// An entry an operator already wrote under a seeded name is left alone.
+	edited := map[string]pkgallowlist.Workload{"web": oneContainerWorkload(mustParseDigest(t, digestC))}
+	if added, err := store.SeedWorkloads(edited); err != nil || added != 0 {
+		t.Fatalf("seed over an existing name: added=%d err=%v; want 0, nil", added, err)
+	}
+	doc, _, _ := store.LoadAll()
+	if got := doc.Workloads["web"].Containers[0].Digest.String(); got != digestA {
+		t.Fatalf("seed overwrote an existing entry: digest = %s, want %s", got, digestA)
+	}
 }
 
-func TestReplaceAllSwapsFloorAndWorkloads(t *testing.T) {
+func TestReplaceAllSwapsWorkloads(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer store.Close()
 
-	if err := store.Add(mustParseDigest(t, digestA), "old"); err != nil {
-		t.Fatalf("add: %v", err)
-	}
 	if err := store.PutWorkload("old-wl", oneContainerWorkload(mustParseDigest(t, digestB))); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
 	replacement := &pkgallowlist.Allowlist{
-		Schema:  pkgallowlist.Schema,
-		Digests: map[string]string{digestC: "floor-c"},
+		Schema: pkgallowlist.Schema,
 		Workloads: map[string]pkgallowlist.Workload{
 			"new-wl": oneContainerWorkload(mustParseDigest(t, digestA)),
 		},
@@ -557,9 +295,6 @@ func TestReplaceAllSwapsFloorAndWorkloads(t *testing.T) {
 	doc, _, err := store.LoadAll()
 	if err != nil {
 		t.Fatalf("load: %v", err)
-	}
-	if len(doc.Digests) != 1 || doc.Digests[digestC] != "floor-c" {
-		t.Fatalf("floor after replace = %#v", doc.Digests)
 	}
 	if _, ok := doc.Workloads["old-wl"]; ok {
 		t.Fatal("pre-replace workload survived ReplaceAll")
@@ -646,7 +381,7 @@ func TestContains(t *testing.T) {
 
 	present := mustParseDigest(t, digestA)
 	absent := mustParseDigest(t, digestB)
-	if err := store.Add(present, "ghcr.io/x/a:v1"); err != nil {
+	if err := store.PutWorkload("a", oneContainerWorkload(present)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -666,10 +401,9 @@ func TestOpenStoreCreatesAndReopens(t *testing.T) {
 		t.Fatalf("open new store: %v", err)
 	}
 	dA := mustParseDigest(t, digestA)
-	if err := store.Add(dA, "nginx:latest"); err != nil {
-		t.Fatalf("add: %v", err)
+	if err := store.PutWorkload("nginx", oneContainerWorkload(dA)); err != nil {
+		t.Fatalf("put: %v", err)
 	}
-	// The on-disk schema must include the workload tables too.
 	dB := mustParseDigest(t, digestB)
 	if err := store.PutWorkload("web", oneContainerWorkload(dB)); err != nil {
 		t.Fatalf("put workload: %v", err)
@@ -685,51 +419,161 @@ func TestOpenStoreCreatesAndReopens(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	version, digests, err := reopened.ListAll()
+	doc, version, err := reopened.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	if version != "3" {
 		t.Fatalf("version: got %q, want %q", version, "3")
 	}
-	if digests[dA] != "nginx:latest" {
-		t.Fatalf("digest missing after reopen: %#v", digests)
+	if _, ok := doc.Workloads["nginx"]; !ok {
+		t.Fatalf("entry missing after reopen: %#v", doc.Workloads)
 	}
 	if ok, err := reopened.Contains(dB); err != nil || !ok {
 		t.Fatalf("Contains(workload digest) after reopen = %t, %v; want true, nil", ok, err)
 	}
 }
 
-// TestListAllSkipsCorruptRows pins the defensive skip: a row whose digest no
-// longer parses (only reachable by out-of-band DB tampering) is dropped from
-// ListAll instead of failing the whole listing.
-func TestListAllSkipsCorruptRows(t *testing.T) {
-	store, err := OpenInMemory()
+// legacyFloorSQL is the pre-unification schema: the floor table beside the
+// version counter, with the workload tables absent.
+const legacyFloorSQL = `
+CREATE TABLE allowlist (digest TEXT PRIMARY KEY, image TEXT NOT NULL);
+CREATE TABLE allowlist_version (version TEXT NOT NULL DEFAULT '1');
+INSERT INTO allowlist_version (version) VALUES ('4');
+`
+
+// A database written before the unification carries its floor in a table of
+// its own. Opening it folds every row into an any-argv entry named the way the
+// chart seeds the same digest, drops the table, and bumps the version once so
+// pullers see the new shape.
+func TestOpenStoreMigratesFloorTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.db")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(legacyFloorSQL); err != nil {
+		t.Fatalf("legacy schema: %v", err)
+	}
+	for _, row := range [][2]string{
+		{digestA, "ghcr.io/confidential-dot-ai/cds@" + digestA},
+		{digestB, "registry.k8s.io/coredns/coredns:v1.11.1"},
+	} {
+		if _, err := db.Exec("INSERT INTO allowlist (digest, image) VALUES (?, ?)", row[0], row[1]); err != nil {
+			t.Fatalf("legacy row: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("open legacy store: %v", err)
+	}
 	defer store.Close()
 
-	dA := mustParseDigest(t, digestA)
-	if err := store.Add(dA, "good:v1"); err != nil {
-		t.Fatalf("add: %v", err)
+	doc, version, err := store.LoadAll()
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-	// Bypass the validating API and plant a corrupt row directly.
-	if _, err := store.db.Exec(
-		"INSERT INTO allowlist (digest, image) VALUES (?, ?)", "not-a-digest", "bad:v1",
-	); err != nil {
-		t.Fatalf("plant corrupt row: %v", err)
+	if version != "5" {
+		t.Fatalf("version after migration = %q, want 5 (one bump)", version)
+	}
+	for name, want := range map[string]string{
+		"cds-" + digestA[7:19]:     digestA,
+		"coredns-" + digestB[7:19]: digestB,
+	} {
+		w, ok := doc.Workloads[name]
+		if !ok {
+			t.Fatalf("migrated entry %q missing: %#v", name, doc.Workloads)
+		}
+		if len(w.Containers) != 1 || w.Containers[0].Digest.String() != want || !w.Containers[0].AnyArgv() {
+			t.Fatalf("migrated entry %q = %#v, want one any/any container at %s", name, w, want)
+		}
+	}
+	if ok, err := store.Contains(mustParseDigest(t, digestA)); err != nil || !ok {
+		t.Fatalf("Contains(migrated digest) = %t, %v; want true, nil", ok, err)
+	}
+	var one int
+	if err := store.db.QueryRow("SELECT 1 FROM sqlite_master WHERE name = 'allowlist'").Scan(&one); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("legacy floor table still present after migration (err=%v)", err)
 	}
 
-	_, digests, err := store.ListAll()
+	// The chart seeds the same entry under the same name, so a re-seed after
+	// the migration adds nothing and does not bump the version.
+	entry, err := normalizeEntry("cds-"+digestA[7:19], floorEntry(mustParseDigest(t, digestA), "ghcr.io/confidential-dot-ai/cds@"+digestA))
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatal(err)
 	}
-	if len(digests) != 1 {
-		t.Fatalf("expected corrupt row to be skipped, got %d entries: %#v", len(digests), digests)
+	if added, err := store.SeedWorkloads(map[string]pkgallowlist.Workload{"cds-" + digestA[7:19]: entry}); err != nil || added != 0 {
+		t.Fatalf("re-seed of a migrated entry: added=%d err=%v; want 0, nil", added, err)
 	}
-	if digests[dA] != "good:v1" {
-		t.Fatalf("valid row lost: %#v", digests)
+	if _, v, _ := store.LoadAll(); v != "5" {
+		t.Fatalf("re-seed bumped the version to %q", v)
+	}
+
+	// Reopening finds no floor table and changes nothing.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("reopen after migration: %v", err)
+	}
+	defer reopened.Close()
+	if doc, v, _ := reopened.LoadAll(); v != "5" || len(doc.Workloads) != 2 {
+		t.Fatalf("reopen re-migrated: version %q, %d entries", v, len(doc.Workloads))
+	}
+}
+
+// Two floor rows that derive the same entry name would silently lose one
+// digest; the migration refuses instead, and the legacy table stays for the
+// operator to resolve.
+func TestOpenStoreRefusesFloorNameCollision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(legacyFloorSQL); err != nil {
+		t.Fatalf("legacy schema: %v", err)
+	}
+	prefix := "sha256:abcdef000000"
+	for _, d := range []string{prefix + strings.Repeat("1", 52), prefix + strings.Repeat("2", 52)} {
+		if _, err := db.Exec("INSERT INTO allowlist (digest, image) VALUES (?, ?)", d, "ghcr.io/x/coredns:v1"); err != nil {
+			t.Fatalf("legacy row: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenStore(path); err == nil || !strings.Contains(err.Error(), "coredns-abcdef000000") {
+		t.Fatalf("OpenStore = %v, want a collision error naming the entry", err)
+	}
+}
+
+// floorEntryName must agree with the chart's c8s.digestWorkloadName for the
+// same inputs; the chart test pins the same literal for the same digest.
+func TestFloorEntryName(t *testing.T) {
+	// Hex is canonical lowercase whatever case the digest was written in.
+	d := mustParseDigest(t, "sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000")
+	for image, want := range map[string]string{
+		"ghcr.io/x/coredns:v1":                          "coredns-abcdef000000",
+		"ghcr.io/confidential-dot-ai/cds@" + d.String(): "cds-abcdef000000",
+		"registry:5000/team/app":                        "app-abcdef000000",
+		"busybox":                                       "busybox-abcdef000000",
+		"":                                              "image-abcdef000000",
+		"ghcr.io/x/not a name!":                         "image-abcdef000000",
+		"ghcr.io/x/" + strings.Repeat("y", 60):          strings.Repeat("y", 50) + "-abcdef000000",
+	} {
+		if got := floorEntryName(d, image); got != want {
+			t.Errorf("floorEntryName(%q) = %q, want %q", image, got, want)
+		}
+		if !pkgallowlist.ValidWorkloadName(want) {
+			t.Errorf("%q is not a valid entry name", want)
+		}
 	}
 }
 
@@ -755,7 +599,6 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 		gen = next
 	}
 
-	step("Add", func() error { return store.Add(mustParseDigest(t, digestA), "img-a") })
 	step("PutWorkload", func() error {
 		return store.PutWorkload("w", oneContainerWorkload(mustParseDigest(t, digestB)))
 	})
@@ -763,12 +606,8 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 	step("ReplaceAll", func() error {
 		return store.ReplaceAll(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema})
 	})
-	step("Delete", func() error {
-		if err := store.Add(mustParseDigest(t, digestC), "img-c"); err != nil {
-			return err
-		}
-		gen = store.Generation()
-		_, err := store.Delete([]types.Digest{mustParseDigest(t, digestC)})
+	step("SeedWorkloads", func() error {
+		_, err := store.SeedWorkloads(map[string]pkgallowlist.Workload{"s": oneContainerWorkload(mustParseDigest(t, digestC))})
 		return err
 	})
 	// Reads never move it.
@@ -776,7 +615,7 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 	if _, _, err := store.LoadAll(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Contains(mustParseDigest(t, digestA)); err != nil {
+	if _, err := store.Contains(mustParseDigest(t, digestC)); err != nil {
 		t.Fatal(err)
 	}
 	if store.Generation() != steady {

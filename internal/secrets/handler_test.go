@@ -126,6 +126,17 @@ func mustDigest(t *testing.T, s string) types.Digest {
 	return d
 }
 
+// anyEntry is a one-container entry admitting digest under any argv.
+func anyEntry(t *testing.T, digest, image string) pkgallowlist.Workload {
+	t.Helper()
+	return pkgallowlist.Workload{Label: image, Containers: []pkgallowlist.Container{{
+		Digest:  mustDigest(t, digest),
+		Image:   image,
+		Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+		Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+	}}}
+}
+
 // leafFor mints a client certificate carrying sandboxID, as CDS stamps it.
 func leafFor(t *testing.T, sandboxID string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
@@ -177,11 +188,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: map[string]string{
-		testInjected:    "ghcr.io/confidential-dot-ai/c8s@" + testInjected,
-		testInjectedOld: "ghcr.io/confidential-dot-ai/c8s@" + testInjectedOld,
-		testOther:       "docker.io/library/busybox@" + testOther,
-	}, Workloads: map[string]pkgallowlist.Workload{
+	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{
+		"c8s":     anyEntry(t, testInjected, "ghcr.io/confidential-dot-ai/c8s@"+testInjected),
+		"c8s-old": anyEntry(t, testInjectedOld, "ghcr.io/confidential-dot-ai/c8s@"+testInjectedOld),
+		"busybox": anyEntry(t, testOther, "docker.io/library/busybox@"+testOther),
 		// Two mains: release is gated on every main container running, so the
 		// gate is only exercisable with more than one.
 		"api": {
@@ -545,10 +555,10 @@ func TestTokenForAnotherChallengeRefused(t *testing.T) {
 	assertNoRelease(t, w, stored)
 }
 
-// A floor image the entry does not declare is still foreign: floor membership
-// alone must not drop a container, or a pod could add busybox running a shell
-// and have it ignored.
-func TestForeignFloorContainerRefused(t *testing.T) {
+// An any-argv image the entry does not declare is still foreign: unconstrained
+// admission alone must not drop a container, or a pod could add busybox running
+// a shell and have it ignored.
+func TestForeignAnyArgvContainerRefused(t *testing.T) {
 	hn := newHarness(t)
 	hn.inv.containers = append(hn.inv.containers,
 		workloadclaims.SandboxContainer{Digest: testOther, Argv: []string{"/bin/sh"}})
@@ -557,8 +567,8 @@ func TestForeignFloorContainerRefused(t *testing.T) {
 	}
 }
 
-// The injected image is an argv-unconstrained floor entry, so it is dropped
-// only when running an injected entrypoint. A pod that adds it running a shell
+// The injected image is an argv-unconstrained entry, so it is dropped only
+// when running an injected entrypoint. A pod that adds it running a shell
 // must not have that container ignored.
 func TestInjectedImageWithForeignArgvIsNotDropped(t *testing.T) {
 	hn := newHarness(t)
@@ -582,11 +592,10 @@ func TestInventoryWithoutContainerDetailRefused(t *testing.T) {
 
 func TestEntryWithoutGrantRefused(t *testing.T) {
 	hn := newHarness(t)
-	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: map[string]string{
-		testInjected:    "ghcr.io/confidential-dot-ai/c8s@" + testInjected,
-		testInjectedOld: "ghcr.io/confidential-dot-ai/c8s@" + testInjectedOld,
-		testOther:       "docker.io/library/busybox@" + testOther,
-	}, Workloads: map[string]pkgallowlist.Workload{
+	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{
+		"c8s":     anyEntry(t, testInjected, "ghcr.io/confidential-dot-ai/c8s@"+testInjected),
+		"c8s-old": anyEntry(t, testInjectedOld, "ghcr.io/confidential-dot-ai/c8s@"+testInjectedOld),
+		"busybox": anyEntry(t, testOther, "docker.io/library/busybox@"+testOther),
 		"api": {Containers: []pkgallowlist.Container{{
 			Digest:  mustDigest(t, testAppImg),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/serve"}},
@@ -827,10 +836,10 @@ func TestSecretErrorCodeWireValues(t *testing.T) {
 	}
 }
 
-// A floor with no c8s image in it drops nothing, so the injected sidecar looks
-// like a container the entry does not declare and release is refused. (It also
-// has no workloads, so there is nothing to match either.)
-func TestEmptyFloorRefuses(t *testing.T) {
+// An allowlist with no c8s image in it drops nothing, so the injected sidecar
+// looks like a container the entry does not declare and release is refused.
+// (It also has no workloads, so there is nothing to match either.)
+func TestEmptyAllowlistRefuses(t *testing.T) {
 	hn := newHarness(t)
 	hn.h.Policy = fakePolicy{al: &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}}
 	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {

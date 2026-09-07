@@ -127,9 +127,9 @@ func TestExplainNamesTheForeignContainer(t *testing.T) {
 	}
 }
 
-// A floor image running a shell is not an injected container, so it must land
+// An any-argv image running a shell is not an injected container, so it must land
 // in candidates rather than being silently dropped.
-func TestExplainDoesNotDropAFloorImageRunningAShell(t *testing.T) {
+func TestExplainDoesNotDropAnAnyArgvImageRunningAShell(t *testing.T) {
 	eh := newExplainHarness(t)
 	eh.inv.containers = append(eh.inv.containers,
 		workloadclaims.SandboxContainer{Digest: testInjected, Argv: []string{"sh", "-c", "cat /run/c8s/secrets/DB"}})
@@ -137,7 +137,7 @@ func TestExplainDoesNotDropAFloorImageRunningAShell(t *testing.T) {
 	_, resp := eh.serve(testSandbox)
 	for _, c := range resp.Reported {
 		if c.Digest == testInjected && len(c.Argv) > 0 && c.Argv[0] == "sh" && c.Injected {
-			t.Fatal("a floor image running a shell was dropped as injected")
+			t.Fatal("an any-argv image running a shell was dropped as injected")
 		}
 	}
 	if resp.Match != "" {

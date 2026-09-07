@@ -44,7 +44,7 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 
 // record notes an admitted container, injected sidecars included: /digests is
 // an inventory of what was admitted in the sandbox, and the injected images are
-// allowlist floor entries, so CDS drops them from workload matching itself.
+// admitted under any argv, so CDS drops them from workload matching itself.
 // argv is the effective OCI process.args the container runs.
 func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string) {
 	if containerID == "" || sandboxID == "" {

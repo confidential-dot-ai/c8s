@@ -120,7 +120,6 @@ func TestWorkloadApplyDryRunDiff(t *testing.T) {
 	url, methods := servingAllowlistCDS(t, live)
 
 	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1",
-		"digests":{"`+digD+`":"floor-img"},
 		"workloads":{
 			"same":{"containers":[`+ctrJSON(digA, "/app")+`]},
 			"web":{"containers":[`+ctrJSON(digB, "/new")+`]},
@@ -197,36 +196,31 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 	}
 }
 
-// The ignored-floor note must appear exactly when the applied file carries
-// floor digests.
-func TestWorkloadApplyFloorNote(t *testing.T) {
-	url, _ := servingCDS(t, nil)
+// The entry a new one is shadowed by is usually one already served — a seeded
+// any-argv entry for the same image — so apply checks against the live
+// document too.
+func TestWorkloadApplyRefusesEntryShadowedByLive(t *testing.T) {
+	live := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"app-aaaaaaaaaaaa":{"containers":[{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+	url, methods := servingAllowlistCDS(t, live)
 
-	withFloor := writeFile(t, "with-floor.json", `{"schema":"c8s.allowlist/v1",
-		"digests":{"`+digD+`":"floor-img"},
-		"workloads":{"w":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
-	_, stderr, err := runCmd("workload", "apply", withFloor, "--url", url, "--insecure", "--dry-run")
-	if err != nil {
-		t.Fatalf("workload apply: %v", err)
+	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1","workloads":{
+		"api":{"containers":[`+ctrJSON(digA, "/app")+`],"secrets":{"policy":"allow","read":["/api/**"]}}}}`)
+	_, stderr, err := runCmd("workload", "apply", file, "--url", url, "--insecure", "--dry-run")
+	if err == nil || !strings.Contains(err.Error(), "lint error") {
+		t.Fatalf("expected a refusal, got %v", err)
 	}
-	if !strings.Contains(stderr, "note: 1 floor digest(s)") {
-		t.Fatalf("missing floor note:\n%s", stderr)
+	if !strings.Contains(stderr, `workload "api" can never be the unique match: "app-aaaaaaaaaaaa"`) {
+		t.Fatalf("shadow finding missing:\n%s", stderr)
 	}
-
-	noFloor := writeFile(t, "no-floor.json", `{"schema":"c8s.allowlist/v1",
-		"workloads":{"w":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
-	_, stderr, err = runCmd("workload", "apply", noFloor, "--url", url, "--insecure", "--dry-run")
-	if err != nil {
-		t.Fatalf("workload apply: %v", err)
-	}
-	if strings.Contains(stderr, "floor digest(s) in the file are ignored") {
-		t.Fatalf("unexpected floor note:\n%s", stderr)
+	if contains(*methods, http.MethodPut) {
+		t.Fatal("must not write a shadowed entry")
 	}
 }
 
 func TestParseWorkloadEntriesBadEntry(t *testing.T) {
 	// Valid JSON map, but the entry body fails workload validation (no digest).
-	_, _, err := parseWorkloadEntries([]byte(`{"w1":{"containers":[{"command":{"policy":"any"},"args":{"policy":"any"}}]}}`))
+	_, err := parseWorkloadEntries([]byte(`{"w1":{"containers":[{"command":{"policy":"any"},"args":{"policy":"any"}}]}}`))
 	if err == nil || !strings.Contains(err.Error(), `workload "w1"`) {
 		t.Fatalf("expected an entry validation error, got %v", err)
 	}
