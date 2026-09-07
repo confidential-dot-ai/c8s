@@ -716,6 +716,9 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 // CreateContainer is called when a container is being created.
 // Returning an error will reject the container creation.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	if err := p.enforceLoaderEnv(pod, ctr); err != nil {
+		return nil, nil, err
+	}
 	cfg := p.cfg
 	imageRef := ctr.GetAnnotations()[annotationImageName]
 

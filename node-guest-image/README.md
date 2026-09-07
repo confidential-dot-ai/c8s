@@ -79,6 +79,11 @@ The other disks are optional; each is owned by one unit under
 
 ## Workload isolation
 
+The measured NRI plugin blocks loader-control environment variables on every
+container creation: all names beginning with `LD_`, `GLIBC_TUNABLES`, or `GCONV_PATH`. The
+[loader environment policy](../docs/loader-environment-policy.md) defines the
+reserved names, admission behavior, and rollout scope.
+
 Tenant pods run on the node's own kernel under runc, so what a pod may ask
 for is what stands between it and the measured host. The image enforces the
 restricted PodSecurity standard by default
