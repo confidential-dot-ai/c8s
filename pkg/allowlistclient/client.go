@@ -9,6 +9,7 @@ package allowlistclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -197,12 +199,12 @@ func isJSONContentType(ct string) bool {
 }
 
 func readCapped(r io.Reader, maxBytes int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	body, err := readutil.ReadAll(r, maxBytes)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return nil, errAllowlistResponseTooLarge
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	if int64(len(body)) > maxBytes {
-		return nil, errAllowlistResponseTooLarge
 	}
 	return body, nil
 }

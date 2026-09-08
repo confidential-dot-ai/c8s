@@ -2,11 +2,12 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
@@ -38,12 +39,12 @@ func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA2
 	if resp.StatusCode != http.StatusOK {
 		return measurements.ReferenceValues{}, fmt.Errorf("/measurements returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxServedMeasurements+1))
+	body, err := readutil.ReadAll(resp.Body, maxServedMeasurements)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return measurements.ReferenceValues{}, fmt.Errorf("/measurements body exceeds %d bytes", maxServedMeasurements)
+	}
 	if err != nil {
 		return measurements.ReferenceValues{}, fmt.Errorf("read /measurements: %w", err)
-	}
-	if len(body) > maxServedMeasurements {
-		return measurements.ReferenceValues{}, fmt.Errorf("/measurements body exceeds %d bytes", maxServedMeasurements)
 	}
 	return measurements.ParseServed(body)
 }
