@@ -5,11 +5,12 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -46,12 +47,12 @@ func fetchOperatorKeyFingerprints(ctx context.Context, base, serverName, wantCer
 		return nil, nil, "", fmt.Errorf("/operator-keys returned %d", resp.StatusCode)
 	}
 
-	pemBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxOperatorKeysBytes+1))
+	pemBytes, err := readutil.ReadAll(resp.Body, maxOperatorKeysBytes)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return nil, nil, "", fmt.Errorf("/operator-keys response exceeds %d bytes", maxOperatorKeysBytes)
+	}
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("read /operator-keys: %w", err)
-	}
-	if len(pemBytes) > maxOperatorKeysBytes {
-		return nil, nil, "", fmt.Errorf("/operator-keys response exceeds %d bytes", maxOperatorKeysBytes)
 	}
 
 	keys, err := operatorauth.ParsePublicKeysPEM(pemBytes)

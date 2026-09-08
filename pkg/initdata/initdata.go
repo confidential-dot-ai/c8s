@@ -22,11 +22,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 )
 
 const (
@@ -280,12 +281,12 @@ func Decode(annotation string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: gzip: %w", ErrMalformed, err)
 	}
 	defer zr.Close()
-	raw, err := io.ReadAll(io.LimitReader(zr, maxDecodedSize+1))
+	raw, err := readutil.ReadAll(zr, maxDecodedSize)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return nil, fmt.Errorf("%w: document exceeds %d bytes", ErrMalformed, maxDecodedSize)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: gzip: %w", ErrMalformed, err)
-	}
-	if len(raw) > maxDecodedSize {
-		return nil, fmt.Errorf("%w: document exceeds %d bytes", ErrMalformed, maxDecodedSize)
 	}
 	return raw, nil
 }
