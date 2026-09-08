@@ -269,9 +269,9 @@ skips it (it is measured via the rootfs, not allowlisted). Unknown sandbox ⇒
   containers it *can* describe — a subset passed off as the whole set — it fails
   the whole request, which CDS treats as fail-closed.
 - **CDS checks membership, not composition.** Every image the inventory reports
-  must be allowlisted (floor or any workload container). Injected c8s containers
-  are floor entries, so they pass by digest, not by name. CDS does not require
-  the set to match a whole workload entry — see Corner 4.
+  must be allowlisted as some workload container. Injected c8s containers are
+  seeded as their own entries, so they pass by digest, not by name. CDS does not
+  require the set to match a whole workload entry — see Corner 4.
 
 **Matching is set-based over init and main together.** The inventory tracks
 admission, not pod-spec roles, so two workload entries differing only in which

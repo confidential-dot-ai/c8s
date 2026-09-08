@@ -19,48 +19,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 )
 
-func newWorkloadCmd(o *options) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "workload",
-		Short: "Manage named workload policy entries",
-		Long: `Workload entries pin an init/main container set; each container carries a
-command/args (argv) and path policy that is enforced by container digest, not
-by name or image ref.`,
-	}
-	cmd.AddCommand(
-		newWorkloadListCmd(o),
-		newWorkloadGetCmd(o),
-		newWorkloadApplyCmd(o),
-		newWorkloadDeriveCmd(o),
-		newWorkloadEditCmd(o),
-		newWorkloadDeleteCmd(o),
-	)
-	return cmd
-}
-
-func newWorkloadListCmd(o *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List workload entries",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			al, _, err := o.fetch(ctx(cmd))
-			if err != nil {
-				return err
-			}
-			if o.output == "json" {
-				return writeJSON(cmd.OutOrStdout(), al.Workloads)
-			}
-			printWorkloadTable(cmd.OutOrStdout(), al.Workloads)
-			return nil
-		},
-	}
-}
-
-func newWorkloadGetCmd(o *options) *cobra.Command {
+func newGetCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <name>",
-		Short: "Print one workload entry as canonical JSON",
+		Short: "Print one entry as canonical JSON",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			al, _, err := o.fetch(ctx(cmd))
@@ -76,15 +38,14 @@ func newWorkloadGetCmd(o *options) *cobra.Command {
 	}
 }
 
-func newWorkloadApplyCmd(o *options) *cobra.Command {
+func newApplyCmd(o *options) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "apply <file|->",
-		Short: "Upsert workload entries from a file (whole-entry replace)",
-		Long: `Upsert each workload entry in <file> (or stdin with '-'). The file is either a
-full/partial allowlist document or a name-keyed map of workload entries. Each
-entry is replaced whole — this never field-merges into a live entry. Floor
-digests in the file are ignored; use 'upload' or 'add'.`,
+		Short: "Upsert entries from a file (whole-entry replace)",
+		Long: `Upsert each entry in <file> (or stdin with '-'). The file is either a full or
+partial allowlist document or a name-keyed map of entries. Each entry is
+replaced whole — this never field-merges into a live entry.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -94,15 +55,12 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 			if err != nil {
 				return err
 			}
-			entries, ignoredFloor, err := parseWorkloadEntries(data)
+			entries, err := parseWorkloadEntries(data)
 			if err != nil {
 				return err
 			}
 			if len(entries) == 0 {
 				return fmt.Errorf("no workload entries in %q", args[0])
-			}
-			if ignoredFloor > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "note: %d floor digest(s) in the file are ignored by 'workload apply'; use 'upload' or 'add'\n", ignoredFloor)
 			}
 
 			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
@@ -164,10 +122,10 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 	return cmd
 }
 
-func newWorkloadEditCmd(o *options) *cobra.Command {
+func newEditCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit <name>",
-		Short: "Fetch a workload entry, edit it in $EDITOR, and apply the result",
+		Short: "Fetch an entry, edit it in $EDITOR, and apply the result",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -215,10 +173,10 @@ func newWorkloadEditCmd(o *options) *cobra.Command {
 	}
 }
 
-func newWorkloadDeleteCmd(o *options) *cobra.Command {
+func newDeleteCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name> [<name>...]",
-		Short: "Delete one or more workload entries",
+		Short: "Delete one or more entries",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := o.validate(); err != nil {
@@ -277,37 +235,43 @@ func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallow
 			out = append(out, ambiguousGroupFinding(names))
 		}
 	}
+	for _, pair := range shadowPairs(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: merged}) {
+		_, wideApplied := entries[pair[0]]
+		_, narrowApplied := entries[pair[1]]
+		if wideApplied != narrowApplied {
+			out = append(out, shadowFinding(pair[0], pair[1]))
+		}
+	}
 	return out
 }
 
 // --- shared helpers ---
 
 // parseWorkloadEntries accepts either a full/partial allowlist document or a
-// bare name-keyed map of workload entries, returning the entries and the count
-// of floor digests it ignored (nonzero only for an allowlist document).
-func parseWorkloadEntries(data []byte) (entries map[string]pkgallowlist.Workload, ignoredFloor int, err error) {
+// bare name-keyed map of workload entries.
+func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error) {
 	if al, perr := pkgallowlist.ParseJSON(data); perr == nil {
 		if al.Workloads == nil {
 			al.Workloads = map[string]pkgallowlist.Workload{}
 		}
-		return al.Workloads, len(al.Digests), nil
+		return al.Workloads, nil
 	}
 
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if derr := dec.Decode(&raw); derr != nil {
-		return nil, 0, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
+		return nil, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
 	}
 	out := make(map[string]pkgallowlist.Workload, len(raw))
 	for name, body := range raw {
 		w, werr := pkgallowlist.ParseWorkloadJSON(body)
 		if werr != nil {
-			return nil, 0, fmt.Errorf("workload %q: %w", name, werr)
+			return nil, fmt.Errorf("workload %q: %w", name, werr)
 		}
 		out[name] = *w
 	}
-	return out, 0, nil
+	return out, nil
 }
 
 func readFileOrStdin(cmd *cobra.Command, path string) ([]byte, error) {

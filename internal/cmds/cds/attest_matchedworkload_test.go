@@ -74,7 +74,7 @@ func leafFromInventory(t *testing.T, store policyStore, digests []string, contai
 // digest — a complete pod reporting it matches uniquely.
 func completeAPIStore(t *testing.T) fakeStore {
 	return fakeStore{
-		floor:     map[string]bool{wlDigestC: true},
+		anyArgv:   map[string]bool{wlDigestC: true},
 		workloads: map[string]pkgallowlist.Workload{"api": namedEntry(t, wlDigestA)},
 	}
 }
@@ -104,7 +104,7 @@ func TestAttest_MatchedWorkload_StampsUniqueMatch(t *testing.T) {
 	}
 }
 
-// The platform's injected sidecar (floor digest + injected entrypoint) is
+// The platform's injected sidecar (any-argv entry + injected entrypoint) is
 // dropped before matching — the same drop set secrets release uses — so a pod
 // running its workload plus the cert sidecar still matches its entry.
 func TestAttest_MatchedWorkload_DropsInjectedContainers(t *testing.T) {
@@ -143,7 +143,7 @@ func TestAttest_MatchedWorkload_UnnamedCases(t *testing.T) {
 		},
 		"incomplete pod (missing main)": {
 			store: fakeStore{
-				floor:     map[string]bool{wlDigestC: true},
+				anyArgv:   map[string]bool{wlDigestC: true},
 				workloads: map[string]pkgallowlist.Workload{"api": namedEntry(t, wlDigestA, wlDigestB)},
 			},
 			digests:    []string{wlDigestA},

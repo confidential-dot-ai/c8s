@@ -21,7 +21,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // requestTimeout bounds one CDS call; the peer decides whether it ever answers.
@@ -106,26 +105,8 @@ func (c Client) fetch(ctx context.Context, ifNoneMatch string) (*allowlist.Allow
 	return al, resp.Header.Get("ETag"), false, nil
 }
 
-// AddDigest adds a floor digest.
-func (c Client) AddDigest(ctx context.Context, digest types.Digest, image string, auth Authorizer) error {
-	data, err := json.Marshal(types.DigestAddRequest{Digest: digest, Image: image})
-	if err != nil {
-		return err
-	}
-	return c.mutate(ctx, http.MethodPost, "/allowlist/digests", data, auth)
-}
-
-// DeleteDigests removes floor digests. Returns a 404 StatusError if any is absent.
-func (c Client) DeleteDigests(ctx context.Context, digests []types.Digest, auth Authorizer) error {
-	data, err := json.Marshal(types.DigestDeleteRequest{Digests: digests})
-	if err != nil {
-		return err
-	}
-	return c.mutate(ctx, http.MethodDelete, "/allowlist/digests", data, auth)
-}
-
-// ReplaceAll atomically replaces the entire allowlist (floor and workloads).
-// CDS assigns the new version.
+// ReplaceAll atomically replaces the entire allowlist. CDS assigns the new
+// version.
 func (c Client) ReplaceAll(ctx context.Context, al *allowlist.Allowlist, auth Authorizer) error {
 	data, err := al.Canonical()
 	if err != nil {

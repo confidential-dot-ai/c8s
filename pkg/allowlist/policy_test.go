@@ -2,13 +2,14 @@ package allowlist
 
 import "testing"
 
-func TestIndex_FloorAdmitsAnyArgv(t *testing.T) {
-	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"}}`).BuildIndex()
+func TestIndex_AnyArgvEntryAdmitsAnyArgv(t *testing.T) {
+	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"cds":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsDigest(digestA) {
-		t.Fatal("floor digest not admitted")
+		t.Fatal("digest not admitted")
 	}
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: []string{"/anything", "--dynamic"}}) {
-		t.Fatal("floor digest must be admitted regardless of argv")
+		t.Fatal("an any/any entry must admit the digest regardless of argv")
 	}
 }
 
@@ -84,7 +85,8 @@ func TestIndex_SharedDigestUnion(t *testing.T) {
 }
 
 func TestIndex_UnknownDigestDenied(t *testing.T) {
-	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"x"}}`).BuildIndex()
+	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if idx.AdmitsDigest(digestB) || idx.AdmitsContainer(RunningContainer{Digest: digestB, Argv: nil}) {
 		t.Fatal("unknown digest must be denied")
 	}

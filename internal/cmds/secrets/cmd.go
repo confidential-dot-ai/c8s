@@ -39,7 +39,7 @@ database password, a wrapped key: anything CDS cannot generate for itself.
 
 A value is released to a pod when the images running in that pod's sandbox match
 an allowlist entry whose 'secrets' grant covers the path. Write the grant with
-'c8s allowlist workload apply'; this command supplies the value.
+'c8s allowlist apply'; this command supplies the value.
 
 Writes are signed with an operator EC private key you supply via --operator-key
 (or C8S_OPERATOR_KEY), whose public half CDS pins separately via

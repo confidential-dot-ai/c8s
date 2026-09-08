@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -17,10 +16,10 @@ import (
 
 // Store provides persistent storage for the CDS allowlist using SQLite.
 //
-// Two layers share the version counter (the worker pull ETag): the floor table
-// `allowlist(digest, image)` admits by digest alone, and `workload_entry` holds
-// one canonical allowlist.Workload JSON per named entry, with
-// `workload_entry_digest` indexing each container digest for membership.
+// `workload_entry` holds one canonical allowlist.Workload JSON per named entry,
+// `workload_entry_digest` indexes each container digest for membership, and
+// `allowlist_version` is the counter every mutation bumps (the worker pull
+// ETag).
 type Store struct {
 	mu sync.Mutex
 	db *sql.DB
@@ -40,7 +39,12 @@ const (
 // malformed name or container), so the handler answers 422 rather than 500.
 var ErrInvalidWorkload = errors.New("invalid workload entry")
 
-const workloadTablesSQL = `
+const initSQL = `
+CREATE TABLE IF NOT EXISTS allowlist_version (
+	version TEXT NOT NULL DEFAULT '1'
+);
+INSERT INTO allowlist_version (version)
+	SELECT '1' WHERE NOT EXISTS (SELECT 1 FROM allowlist_version);
 CREATE TABLE IF NOT EXISTS workload_entry (
 	name       TEXT PRIMARY KEY,
 	entry_json TEXT NOT NULL
@@ -52,18 +56,6 @@ CREATE TABLE IF NOT EXISTS workload_entry_digest (
 	PRIMARY KEY (digest, entry_name, role)
 );
 `
-
-const initSQL = `
-CREATE TABLE IF NOT EXISTS allowlist (
-	digest TEXT PRIMARY KEY,
-	image  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS allowlist_version (
-	version TEXT NOT NULL DEFAULT '1'
-);
-INSERT INTO allowlist_version (version)
-	SELECT '1' WHERE NOT EXISTS (SELECT 1 FROM allowlist_version);
-` + workloadTablesSQL
 
 // OpenStore opens (or creates) a SQLite-backed allowlist store at the given path.
 func OpenStore(path string) (Store, error) {
@@ -93,22 +85,10 @@ func OpenInMemory() (Store, error) {
 	if err != nil {
 		return Store{}, err
 	}
-
-	initMemSQL := `
-CREATE TABLE allowlist (
-	digest TEXT PRIMARY KEY,
-	image  TEXT NOT NULL
-);
-CREATE TABLE allowlist_version (
-	version TEXT NOT NULL DEFAULT '1'
-);
-INSERT INTO allowlist_version (version) VALUES ('1');
-` + workloadTablesSQL
-	if _, err := db.Exec(initMemSQL); err != nil {
+	if _, err := db.Exec(initSQL); err != nil {
 		db.Close()
 		return Store{}, err
 	}
-
 	return Store{db: db}, nil
 }
 
@@ -120,42 +100,8 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// row holds a single row from the floor allowlist query.
-type row struct {
-	version   string
-	digestStr sql.NullString
-	image     sql.NullString
-}
-
-// ListAll returns the current version string and the floor digests. It reports
-// only the floor layer; use LoadAll for the full document including workloads.
-func (s *Store) ListAll() (string, map[types.Digest]string, error) {
-	rawRows, err := s.queryAll()
-	if err != nil {
-		return "", nil, err
-	}
-
-	version := "1"
-	digests := make(map[types.Digest]string, len(rawRows))
-	for _, r := range rawRows {
-		version = r.version
-		if r.digestStr.Valid && r.image.Valid {
-			d, err := types.ParseDigest(r.digestStr.String)
-			if err != nil {
-				// Data was validated on insert; skip corrupt rows
-				slog.Warn("allowlist: skipping corrupt row",
-					"digest", r.digestStr.String, "image", r.image.String, "err", err)
-				continue
-			}
-			digests[d] = r.image.String
-		}
-	}
-
-	return version, digests, nil
-}
-
-// LoadAll builds the full allowlist document — floor plus every workload entry —
-// and returns it with the version string (the ETag). It backs GET /allowlist.
+// LoadAll builds the full allowlist document and returns it with the version
+// string (the ETag). It backs GET /allowlist.
 func (s *Store) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,10 +114,6 @@ func (s *Store) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 		version = "1"
 	}
 
-	digests, err := s.loadFloorTx()
-	if err != nil {
-		return nil, "", err
-	}
 	workloads, err := s.loadWorkloadsTx()
 	if err != nil {
 		return nil, "", err
@@ -179,26 +121,8 @@ func (s *Store) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 
 	return &pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   digests,
 		Workloads: workloads,
 	}, version, nil
-}
-
-func (s *Store) loadFloorTx() (map[string]string, error) {
-	rows, err := s.db.Query("SELECT digest, image FROM allowlist")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	digests := map[string]string{}
-	for rows.Next() {
-		var digest, image string
-		if err := rows.Scan(&digest, &image); err != nil {
-			return nil, err
-		}
-		digests[digest] = image
-	}
-	return digests, rows.Err()
 }
 
 func (s *Store) loadWorkloadsTx() (map[string]pkgallowlist.Workload, error) {
@@ -222,20 +146,16 @@ func (s *Store) loadWorkloadsTx() (map[string]pkgallowlist.Workload, error) {
 	return workloads, rows.Err()
 }
 
-// Contains reports whether digest is admitted: present in the floor OR indexed
-// as a workload container. It is the coarse per-digest gate the /attest handler
-// applies to every claimed container image (docs/ratls.md).
+// Contains reports whether digest is indexed as a workload container. It is
+// the coarse per-digest gate the /attest handler applies to every claimed
+// container image (docs/ratls.md).
 func (s *Store) Contains(digest types.Digest) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var one int
 	err := s.db.QueryRow(
-		`SELECT 1 FROM allowlist WHERE digest = ?
-		 UNION ALL
-		 SELECT 1 FROM workload_entry_digest WHERE digest = ?
-		 LIMIT 1`,
-		digest.String(), digest.String(),
+		"SELECT 1 FROM workload_entry_digest WHERE digest = ? LIMIT 1", digest.String(),
 	).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -246,7 +166,6 @@ func (s *Store) Contains(digest types.Digest) (bool, error) {
 	return true, nil
 }
 
-// queryAll reads all floor rows under the lock and returns them as a slice.
 // Version returns the current allowlist version counter — the same value the
 // worker pull ETag carries. It is a single-row read, so a caller that must not
 // pay for LoadAll on every request can use it to decide whether a cached
@@ -260,32 +179,6 @@ func (s *Store) Version() (string, error) {
 		return "", fmt.Errorf("read allowlist version: %w", err)
 	}
 	return version, nil
-}
-
-func (s *Store) queryAll() ([]row, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.db.Query(`
-		SELECT wv.version, w.digest, w.image
-		FROM allowlist_version wv
-		LEFT JOIN allowlist w ON 1=1
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.version, &r.digestStr, &r.image); err != nil {
-			return nil, err
-		}
-		result = append(result, r)
-	}
-
-	return result, rows.Err()
 }
 
 // commitTx commits a mutating transaction and records the mutation for
@@ -317,78 +210,11 @@ func bumpVersionTx(tx *sql.Tx) error {
 	return err
 }
 
-// Add inserts or replaces a floor digest and increments the version.
-func (s *Store) Add(digest types.Digest, image string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(
-		"INSERT OR REPLACE INTO allowlist (digest, image) VALUES (?, ?)",
-		digest.String(), image,
-	); err != nil {
-		return err
-	}
-	if err := bumpVersionTx(tx); err != nil {
-		return err
-	}
-
-	return s.commitTx(tx)
-}
-
-// SeedDigests adds every floor digest not already present, in a single
-// transaction, and returns the number added. It is additive and idempotent:
-// existing entries are left untouched and the version is bumped at most once —
-// and only when at least one digest was new, so a re-seed that adds nothing does
-// not force every worker to re-pull.
-func (s *Store) SeedDigests(digests map[types.Digest]string) (int, error) {
-	if len(digests) == 0 {
-		return 0, nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	var added int64
-	for digest, image := range digests {
-		res, err := tx.Exec(
-			"INSERT OR IGNORE INTO allowlist (digest, image) VALUES (?, ?)",
-			digest.String(), image,
-		)
-		if err != nil {
-			return 0, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		added += n
-	}
-
-	if added > 0 {
-		if err := bumpVersionTx(tx); err != nil {
-			return 0, err
-		}
-	}
-
-	return int(added), s.commitTx(tx)
-}
-
 // SeedWorkloads adds every workload entry whose name is not already present, in
-// a single transaction, and returns the number added. Additive and idempotent
-// like SeedDigests: an existing entry is left untouched and the version is
-// bumped at most once, only when at least one entry was new.
+// a single transaction, and returns the number added. Additive and idempotent:
+// an existing entry is left untouched and the version is bumped at most once,
+// only when at least one entry was new, so a re-seed that adds nothing does not
+// force every worker to re-pull.
 func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, error) {
 	if len(workloads) == 0 {
 		return 0, nil
@@ -403,6 +229,21 @@ func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, 
 	}
 	defer tx.Rollback()
 
+	added, err := seedWorkloadsTx(tx, workloads)
+	if err != nil {
+		return 0, err
+	}
+	if added > 0 {
+		if err := bumpVersionTx(tx); err != nil {
+			return 0, err
+		}
+	}
+	return added, s.commitTx(tx)
+}
+
+// seedWorkloadsTx inserts every entry whose name is free and returns how many
+// it inserted.
+func seedWorkloadsTx(tx *sql.Tx, workloads map[string]pkgallowlist.Workload) (int, error) {
 	var added int
 	for name, w := range workloads {
 		entryJSON, err := json.Marshal(w)
@@ -428,14 +269,7 @@ func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, 
 		}
 		added++
 	}
-
-	if added > 0 {
-		if err := bumpVersionTx(tx); err != nil {
-			return 0, err
-		}
-	}
-
-	return added, s.commitTx(tx)
+	return added, nil
 }
 
 // PutWorkload upserts one named workload entry and rebuilds its digest index in
@@ -498,8 +332,8 @@ func (s *Store) DeleteWorkload(name string) (bool, error) {
 	return true, s.commitTx(tx)
 }
 
-// ReplaceAll atomically swaps the entire allowlist — floor and workloads — for
-// the given document and bumps the version. An empty document clears everything.
+// ReplaceAll atomically swaps the entire allowlist for the given document and
+// bumps the version. An empty document clears everything.
 func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 	if al == nil {
 		return fmt.Errorf("allowlist is required")
@@ -523,96 +357,14 @@ func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 	return s.commitTx(tx)
 }
 
-// Replace atomically swaps the floor layer for digests and bumps the version,
-// leaving workload entries intact. An empty map clears the floor.
-func (s *Store) Replace(digests map[types.Digest]string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM allowlist"); err != nil {
-		return err
-	}
-	for digest, image := range digests {
-		if _, err := tx.Exec(
-			"INSERT INTO allowlist (digest, image) VALUES (?, ?)",
-			digest.String(), image,
-		); err != nil {
-			return err
-		}
-	}
-	if err := bumpVersionTx(tx); err != nil {
-		return err
-	}
-
-	return s.commitTx(tx)
-}
-
-// Delete removes all given floor digests atomically. Returns false (and deletes
-// nothing) if any digest is not present.
-func (s *Store) Delete(digests []types.Digest) (bool, error) {
-	if len(digests) == 0 {
-		return true, nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-
-	placeholders := make([]string, len(digests))
-	args := make([]any, len(digests))
-	for i, d := range digests {
-		placeholders[i] = "?"
-		args[i] = d.String()
-	}
-	inClause := strings.Join(placeholders, ", ")
-
-	var count int
-	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM allowlist WHERE digest IN (%s)", inClause)
-	if err := tx.QueryRow(countSQL, args...).Scan(&count); err != nil {
-		return false, err
-	}
-
-	if count != len(digests) {
-		return false, nil
-	}
-
-	deleteSQL := fmt.Sprintf("DELETE FROM allowlist WHERE digest IN (%s)", inClause)
-	if _, err := tx.Exec(deleteSQL, args...); err != nil {
-		return false, err
-	}
-
-	if err := bumpVersionTx(tx); err != nil {
-		return false, err
-	}
-
-	return true, s.commitTx(tx)
-}
-
-// replaceContentsTx clears both layers and reloads them from al, without
+// replaceContentsTx clears every entry and reloads them from al, without
 // touching the version. Callers set the version (bump or restore).
 func replaceContentsTx(tx *sql.Tx, al *pkgallowlist.Allowlist) error {
 	for _, stmt := range []string{
-		"DELETE FROM allowlist",
 		"DELETE FROM workload_entry",
 		"DELETE FROM workload_entry_digest",
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	for digest, image := range al.Digests {
-		if _, err := tx.Exec("INSERT INTO allowlist (digest, image) VALUES (?, ?)", digest, image); err != nil {
 			return err
 		}
 	}

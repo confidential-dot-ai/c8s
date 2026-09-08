@@ -5,19 +5,12 @@ import "github.com/confidential-dot-ai/c8s/pkg/types"
 // Index answers admission queries for enforcers in O(1). Build it once from a
 // normalized Allowlist.
 type Index struct {
-	floor    map[string]bool
 	byDigest map[string][]Container
 }
 
 // BuildIndex projects an Allowlist into an admission index.
 func (a *Allowlist) BuildIndex() *Index {
-	idx := &Index{
-		floor:    make(map[string]bool, len(a.Digests)),
-		byDigest: map[string][]Container{},
-	}
-	for d := range a.Digests {
-		idx.floor[d] = true
-	}
+	idx := &Index{byDigest: map[string][]Container{}}
 	for _, w := range a.Workloads {
 		for _, c := range w.InitContainers {
 			idx.byDigest[c.Digest.String()] = append(idx.byDigest[c.Digest.String()], c)
@@ -29,32 +22,25 @@ func (a *Allowlist) BuildIndex() *Index {
 	return idx
 }
 
-// AdmitsDigest reports whether an image with this digest may run at all — as a
-// floor digest, or as any workload container. It ignores argv, so it answers the
-// coarse "are these bytes allowlisted" question the CDS issuance gate asks.
+// AdmitsDigest reports whether an image with this digest may run at all — as
+// any workload container. It ignores argv, so it answers the coarse "are these
+// bytes allowlisted" question the CDS issuance gate asks.
 func (i *Index) AdmitsDigest(digest string) bool {
 	d, err := types.ParseDigest(digest)
 	if err != nil {
 		return false
 	}
-	if i.floor[d.String()] {
-		return true
-	}
 	_, ok := i.byDigest[d.String()]
 	return ok
 }
 
-// AdmitsContainer reports whether an observed container may run. Floor digests
-// are admitted on the digest alone. For a workload digest, admission is the
-// union across every entry that lists it: the observation must satisfy some
-// declared container's argv, mount and env policy together.
+// AdmitsContainer reports whether an observed container may run. Admission is
+// the union across every entry that lists the digest: the observation must
+// satisfy some declared container's argv, mount and env policy together.
 func (i *Index) AdmitsContainer(r RunningContainer) bool {
 	d, err := types.ParseDigest(r.Digest)
 	if err != nil {
 		return false
-	}
-	if i.floor[d.String()] {
-		return true
 	}
 	r.Digest = d.String()
 	for _, c := range i.byDigest[d.String()] {

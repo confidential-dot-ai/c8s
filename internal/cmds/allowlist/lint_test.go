@@ -9,34 +9,6 @@ import (
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
-// A digest on the floor is admitted by digest alone, so any argv policy an
-// operator also wrote for it in a workload is silently not enforced. lint must
-// surface that overlap — and only for the overlapping digest.
-func TestLintFloorWorkloadOverlap(t *testing.T) {
-	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1",
-		"digests":{"` + digA + `":"base"},
-		"workloads":{"w":{"containers":[
-			{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
-			{"digest":"` + digC + `","command":{"policy":"exact","argv":["/x"]},"args":{"policy":"deny"}}]}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var overlap []string
-	for _, w := range lintOffline(al) {
-		if strings.Contains(w.msg, "floor-listed") {
-			overlap = append(overlap, w.msg)
-		}
-	}
-	joined := strings.Join(overlap, "\n")
-	if !strings.Contains(joined, digA) {
-		t.Fatalf("expected a floor-overlap warning naming %s, got:\n%s", digA, joined)
-	}
-	if strings.Contains(joined, digC) {
-		t.Fatalf("digC is workload-only and must not be flagged as floor-listed:\n%s", joined)
-	}
-}
-
 // A fully constrained allowlist must lint clean: exactly the ok line, nothing
 // else, and --strict must still exit zero.
 func TestLintCleanAllowlistReportsOK(t *testing.T) {
@@ -53,40 +25,6 @@ func TestLintCleanAllowlistReportsOK(t *testing.T) {
 
 	if _, _, err := runCmd("lint", "--strict", f); err != nil {
 		t.Fatalf("--strict with no warnings must succeed, got %v", err)
-	}
-}
-
-// The any-count warning tallies each unconstrained segment (command, args,
-// per container; a fully-any container in a single entry produces no
-// other warning, so the output is pinned exactly.
-func TestLintAnyCountWarning(t *testing.T) {
-	cases := []struct {
-		name string
-		ctr  string
-		want string
-	}{
-		{
-			name: "fully unconstrained counts both argv segments",
-			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}`,
-			want: "warning: 2 'any' (unconstrained) policy value(s) across all entries\n",
-		},
-		{
-			name: "single any segment counts once",
-			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"exact","argv":["/x"]}}`,
-			want: "warning: 1 'any' (unconstrained) policy value(s) across all entries\n",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+tc.ctr+`]}}}`)
-			out, _, err := runCmd("lint", f)
-			if err != nil {
-				t.Fatalf("lint: %v", err)
-			}
-			if out != tc.want {
-				t.Fatalf("lint output = %q, want %q", out, tc.want)
-			}
-		})
 	}
 }
 
@@ -166,18 +104,52 @@ func TestInspectImageJSON(t *testing.T) {
 	}
 }
 
-func TestLintNoFloorOverlap(t *testing.T) {
-	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1",
-		"digests":{"` + digB + `":"infra"},
-		"workloads":{"w":{"containers":[
-			{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, w := range lintOffline(al) {
-		if strings.Contains(w.msg, "floor-listed") {
-			t.Fatalf("disjoint floor and workloads must not warn, got: %s", w)
+// --- shadowed entries ---
+
+// An any-argv entry for a digest shadows a narrower entry declaring only that
+// digest: every pod the narrow entry describes matches both, so the narrow
+// entry can never be released to.
+func TestLintShadowedEntry(t *testing.T) {
+	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}]}`
+	narrow := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
+
+	errs := func(doc string) []string {
+		t.Helper()
+		al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{` + doc + `}}`))
+		if err != nil {
+			t.Fatal(err)
 		}
+		var out []string
+		for _, f := range lintOffline(al) {
+			if f.err {
+				out = append(out, f.msg)
+			}
+		}
+		return out
+	}
+
+	got := errs(`"seeded":` + wide + `,"api":` + narrow)
+	if len(got) != 1 || !strings.Contains(got[0], `workload "api" can never be the unique match: "seeded"`) {
+		t.Fatalf("shadowed entry not reported as an error: %v", got)
+	}
+
+	// A narrow entry with a main the wide one does not declare is foreign to
+	// it, so it is distinguishable.
+	twoMains := `{"containers":[` + ctrJSON(digA, "/app") + `,` + ctrJSON(digB, "/db") + `]}`
+	if got := errs(`"seeded":` + wide + `,"api":` + twoMains); len(got) != 0 {
+		t.Fatalf("a distinguishable entry was reported: %v", got)
+	}
+
+	// A wide entry that pins mounts does not admit everything, so it shadows nothing.
+	mounted := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"exact","destinations":["/etc/hosts"]}}]}`
+	if got := errs(`"seeded":` + mounted + `,"api":` + narrow); len(got) != 0 {
+		t.Fatalf("a mount-pinned entry was reported as shadowing: %v", got)
+	}
+
+	// Two any-argv entries of the same shape are the indistinguishable case,
+	// reported once, not as a shadow in each direction as well.
+	if got := errs(`"a":` + wide + `,"b":` + wide); len(got) != 1 || !strings.Contains(got[0], "declare the same containers") {
+		t.Fatalf("identical entries should yield one indistinguishable error, got %v", got)
 	}
 }
 

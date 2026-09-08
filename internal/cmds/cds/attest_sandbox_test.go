@@ -73,7 +73,7 @@ func newSandboxTestEnv(t *testing.T, stubURL string) (AttestHandler, *workloadcl
 	// A token triggers the digests callback, so every sandbox test needs an
 	// inventory to answer, an allowlist admitting what it reports, and node
 	// CIDRs the callback host falls inside.
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{
 		digests: map[string][]string{testSandboxID: {wlDigestA}},
 		key:     signer.PublicKey(),

@@ -15,14 +15,13 @@ import (
 )
 
 // servingCDS is an httptest server that serves the given digests on GET (as a
-// canonical allowlist document) and accepts writes with 204, recording the
-// HTTP methods it saw.
+// canonical allowlist document of any-argv entries) and accepts writes with
+// 204, recording the HTTP methods it saw.
 func servingCDS(t *testing.T, digests map[string]string) (url string, methods *[]string) {
 	t.Helper()
 	doc := pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   digests,
-		Workloads: map[string]pkgallowlist.Workload{},
+		Workloads: anyWorkloads(t, digests),
 	}
 	body, err := doc.Canonical()
 	if err != nil {
@@ -123,7 +122,7 @@ func TestListJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}
-	if len(resp.Digests) != 1 || resp.Digests[digA] == "" {
+	if len(resp.Workloads) != 1 || resp.Workloads["w-"+digA[7:19]].Containers[0].Digest.String() != digA {
 		t.Fatalf("unexpected response round-trip: %+v", resp)
 	}
 }
@@ -133,6 +132,7 @@ func TestListJSONOutput(t *testing.T) {
 // entry-level secret grant tallies.
 func TestListTextWorkloadTable(t *testing.T) {
 	web := pkgallowlist.Workload{
+		Label: "web-img",
 		Containers: []pkgallowlist.Container{
 			{
 				Digest:  mustDigest(t, digA),
@@ -159,7 +159,6 @@ func TestListTextWorkloadTable(t *testing.T) {
 	}
 	al := &pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   map[string]string{digD: "floor-img"},
 		Workloads: map[string]pkgallowlist.Workload{"web": web, "plain": plain},
 	}
 	url, _ := servingAllowlistCDS(t, al)
@@ -168,7 +167,7 @@ func TestListTextWorkloadTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if !strings.Contains(out, "1 floor digest(s), 2 workload(s)") {
+	if !strings.Contains(out, "2 workload(s)") {
 		t.Fatalf("missing summary line:\n%s", out)
 	}
 
@@ -183,7 +182,7 @@ func TestListTextWorkloadTable(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"web":   {"web", "0", "2", "command=any,exact", "args=any,deny", "allow(r=2,w=1)"},
+		"web":   {"web", "web-img", "0", "2", "command=any,exact", "args=any,deny", "allow(r=2,w=1)"},
 		"plain": {"plain", "0", "1", "command=exact", "args=deny", "allow(r=1,w=0)"},
 	}
 	for name, wantRow := range want {
@@ -232,8 +231,8 @@ func TestExportToFileRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-load exported file: %v", err)
 	}
-	if wl.Digests[digA] != "registry/app@"+digA {
-		t.Fatalf("round-trip lost the entry: %#v", wl.Digests)
+	if got := wl.Workloads["w-"+digA[7:19]].Label; got != "registry/app@"+digA {
+		t.Fatalf("round-trip lost the entry: %#v", wl.Workloads)
 	}
 }
 
@@ -261,7 +260,8 @@ func TestDiffJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &d); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}
-	if d.Floor.Added[digB] != "img-b" || d.Floor.Removed[digA] != "img-a" {
+	if len(d.WorkloadsAdded) != 1 || d.WorkloadsAdded[0] != "w-"+digB[7:19] ||
+		len(d.WorkloadsRemoved) != 1 || d.WorkloadsRemoved[0] != "w-"+digA[7:19] {
 		t.Fatalf("unexpected diff: %#v", d)
 	}
 }
@@ -282,20 +282,9 @@ func TestDiffRejectsBadFile(t *testing.T) {
 	}
 }
 
-// --- add / remove ---
+// --- add ---
 
-func TestAddRejectsInvalidDigest(t *testing.T) {
-	url, methods := recordingCDS(t)
-	_, _, err := runCmd("add", "sha256:short", "registry/app", "--url", url, "--insecure")
-	if err == nil {
-		t.Fatal("expected an invalid digest to be rejected")
-	}
-	if contains(*methods, http.MethodPost) {
-		t.Fatal("must not call CDS with an invalid digest")
-	}
-}
-
-func TestAddWrites(t *testing.T) {
+func TestAddWritesDerivedEntry(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
 	url, methods := recordingCDS(t)
@@ -304,43 +293,59 @@ func TestAddWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if !contains(*methods, http.MethodPost) {
-		t.Fatalf("expected a POST, saw %v", *methods)
+	if !contains(*methods, http.MethodPut) {
+		t.Fatalf("expected a PUT, saw %v", *methods)
 	}
-	if !strings.Contains(out, "added "+digA) {
-		t.Fatalf("missing confirmation line:\n%s", out)
+	if want := "added app-" + digA[7:19]; !strings.Contains(out, want) {
+		t.Fatalf("missing %q:\n%s", want, out)
 	}
 }
 
-func TestRemoveDryRunMakesNoCall(t *testing.T) {
+func TestAddDryRunMakesNoCall(t *testing.T) {
 	url, methods := recordingCDS(t)
-	_, _, err := runCmd("remove", digA, digB, "--url", url, "--insecure", "--dry-run")
+	out, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--dry-run")
 	if err != nil {
-		t.Fatalf("remove --dry-run: %v", err)
+		t.Fatalf("add --dry-run: %v", err)
 	}
 	if len(*methods) != 0 {
 		t.Fatalf("dry-run must not call CDS, saw %v", *methods)
 	}
+	if !strings.Contains(out, "would add app-"+digA[7:19]) {
+		t.Fatalf("missing dry-run line:\n%s", out)
+	}
 }
 
-func TestRemoveRejectsInvalidDigest(t *testing.T) {
-	url, _ := recordingCDS(t)
-	if _, _, err := runCmd("remove", "sha256:oops", "--url", url, "--insecure"); err == nil {
+func TestAddRejectsInvalidDigestAndWildcardImage(t *testing.T) {
+	url, methods := recordingCDS(t)
+	if _, _, err := runCmd("add", "sha256:short", "registry/app", "--url", url, "--insecure"); err == nil {
 		t.Fatal("expected an invalid digest to be rejected")
 	}
+	if _, _, err := runCmd("add", digA, "*", "--url", url, "--insecure", "--dry-run"); err == nil {
+		t.Fatal("expected a bare-wildcard image to be rejected")
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("must not call CDS with invalid arguments, saw %v", *methods)
+	}
 }
 
-func TestRemoveProceedsWhenListFails(t *testing.T) {
+// An any-argv entry for a digest a narrower served entry already declares
+// would shadow it, so add refuses like apply does.
+func TestAddRefusesShadowingLiveEntry(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	url, methods := listFailingCDS(t)
+	live := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"api":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
+	url, methods := servingAllowlistCDS(t, live)
 
-	_, _, err := runCmd("remove", digA, "--url", url, "--insecure", "--operator-key", keyPath)
-	if err != nil {
-		t.Fatalf("remove should still delete when the pre-check list fails: %v", err)
+	_, stderr, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	if err == nil || !strings.Contains(err.Error(), "lint error") {
+		t.Fatalf("expected a refusal, got %v", err)
 	}
-	if !contains(*methods, http.MethodDelete) {
-		t.Fatalf("expected a DELETE despite the failing pre-check list, saw %v", *methods)
+	if !strings.Contains(stderr, `workload "api" can never be the unique match`) {
+		t.Fatalf("shadow finding missing:\n%s", stderr)
+	}
+	if contains(*methods, http.MethodPut) {
+		t.Fatal("must not write a shadowing entry")
 	}
 }
 
@@ -389,8 +394,8 @@ func TestUploadStrictLint(t *testing.T) {
 		t.Fatal("dry-run must not PUT")
 	}
 
-	warny := writeFile(t, "warny.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+	warny := writeFile(t, "warny.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"label":"docker.io/library/busybox:latest","containers":[
+		{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`)
 	_, _, err := runCmd("upload", warny, "--url", url, "--insecure", "--strict")
 	if err == nil || !strings.Contains(err.Error(), "lint warning(s) with --strict") {
 		t.Fatalf("expected a strict lint refusal, got %v", err)
@@ -437,7 +442,6 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		"the container can never start",
 		`grants the root secret subtree "/**"`,
 		"appears in 2 entries and one grants 'any'",
-		"'any' (unconstrained) policy value(s) across all entries",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("lint output missing %q:\n%s", want, out)
@@ -457,17 +461,5 @@ func TestLintRejectsMissingAndInvalidFile(t *testing.T) {
 	bad := writeFile(t, "bad.json", `{"schema":"wrong/schema"}`)
 	if _, _, err := runCmd("lint", bad); err == nil || !strings.Contains(err.Error(), "schema") {
 		t.Fatalf("expected a schema error, got %v", err)
-	}
-}
-
-// --- small helpers ---
-
-func TestMatchedComponents(t *testing.T) {
-	hits := matchedComponents("ghcr.io/confidential-dot-ai/CDS@sha256:1", defaultRequiredComponents)
-	if len(hits) != 1 || hits[0] != "cds" {
-		t.Fatalf("expected a case-insensitive [cds] match, got %v", hits)
-	}
-	if hits := matchedComponents("registry/team/app@sha256:2", defaultRequiredComponents); len(hits) != 0 {
-		t.Fatalf("expected no match for a workload image, got %v", hits)
 	}
 }
