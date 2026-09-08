@@ -1,4 +1,4 @@
-package acme
+package cmdsutil
 
 import (
 	"fmt"
@@ -9,16 +9,10 @@ import (
 	"syscall"
 )
 
-// procRoot is the procfs mount findNginxMasterPID scans. It is a package
-// variable only so tests can substitute a fake /proc tree.
-var procRoot = "/proc"
-
-// reloadNginx sends SIGHUP to the nginx master process so it picks up the
-// installed certificate. Requires shareProcessNamespace: true in the pod
-// spec. Walks /proc directly instead of shelling out to pgrep so this works
-// in distroless images (same mechanism as get-cert's --reload-nginx).
-func reloadNginx(log *slog.Logger) error {
-	pid, err := findNginxMasterPID()
+// ReloadNginx finds the nginx master in procRoot and sends SIGHUP.
+// The caller must share its process namespace with nginx.
+func ReloadNginx(procRoot string, log *slog.Logger) error {
+	pid, err := findNginxMasterPID(procRoot)
 	if err != nil {
 		return err
 	}
@@ -35,7 +29,7 @@ func reloadNginx(log *slog.Logger) error {
 
 // findNginxMasterPID scans /proc for the nginx master process.
 // Match: /proc/<pid>/comm == "nginx" AND cmdline contains "master".
-func findNginxMasterPID() (int, error) {
+func findNginxMasterPID(procRoot string) (int, error) {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", procRoot, err)
