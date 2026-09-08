@@ -7,7 +7,6 @@
 package allowlistclient
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -44,9 +44,7 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 // Authorizer produces the HTTP Authorization header value for a mutation,
 // binding it to the exact method, URL path, and body the client will send.
 // Implemented by operatorauth.Signer.
-type Authorizer interface {
-	Authorization(method, path string, body []byte) (string, error)
-}
+type Authorizer = operatorauth.Authorizer
 
 // List returns the current allowlist and its version (the ETag counter).
 func (c Client) List(ctx context.Context) (*allowlist.Allowlist, string, error) {
@@ -155,22 +153,13 @@ func (c Client) mutate(ctx context.Context, method, path string, body []byte, au
 	if auth == nil {
 		return fmt.Errorf("allowlistclient: nil Authorizer")
 	}
-	var reader io.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := operatorauth.NewRequest(ctx, method, c.baseURL+path, body, auth)
 	if err != nil {
 		return err
-	}
-	authz, err := auth.Authorization(method, req.URL.Path, body)
-	if err != nil {
-		return fmt.Errorf("authorize request: %w", err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", authz)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
