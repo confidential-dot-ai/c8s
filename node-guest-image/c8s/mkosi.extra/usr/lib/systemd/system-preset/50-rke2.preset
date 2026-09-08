@@ -32,6 +32,11 @@ enable scratch-enforce.service
 # it; RequiredBy rke2-server (below) means rke2-server cannot start while it
 # is failing or has not yet run.
 enable c8s-chart-values.service
+
+# Latch kernel.modules_disabled before rke2 starts. The gpu profile enables its
+# own latch; this one also covers the GPU-less composition, where that unit is
+# absent.
+enable c8s-modules-latch.service
 # Role dispatch + the role-gated rke2 pair.
 enable rke2-role.service
 enable rke2-server.service

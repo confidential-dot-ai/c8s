@@ -35,6 +35,27 @@ for src in "$ngi/kernel/c8s.config" confos/kernel/dev.config; do
   fi
 done
 
+# CONFIG_MODULES=y is a c8s-only widening (the base kernel compiles modules
+# out, which is why confos's 99-kspp-hardening.conf omits the key). The
+# profile must therefore latch kernel.modules_disabled itself: the gpu
+# profile's latch is absent from the GPU-less composition.
+latch="$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-modules-latch.service"
+preset="$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset"
+if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
+  if ! grep -qF 'kernel.modules_disabled=1' "$latch"; then
+    echo "::error::$ngi/kernel/c8s.config sets CONFIG_MODULES=y, so $latch must set kernel.modules_disabled=1"
+    exit 1
+  fi
+  if ! grep -qx 'enable c8s-modules-latch.service' "$preset"; then
+    echo "::error::$preset must enable c8s-modules-latch.service; an unenabled latch never runs"
+    exit 1
+  fi
+  if ! grep -qx 'RequiredBy=rke2-server.service rke2-agent.service' "$latch"; then
+    echo "::error::$latch must be RequiredBy the rke2 pair so rke2 cannot start with modules still loadable"
+    exit 1
+  fi
+fi
+
 # The baked NRI floor is a template whose always_allow entries are
 # @-tokens the sync fills with ref-resolved digests; a hardcoded
 # sha256 would bake a stale digest the fail-closed floor can't

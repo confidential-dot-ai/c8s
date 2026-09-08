@@ -54,10 +54,11 @@ The allowlist is a **baked seed plus a CDS refresh** (see
 seed — `/etc/c8s/bootstrap-allowlist.json`, on the verity root and part
 of the launch measurement — lets the guest enforce from t=0 with no
 network. At runtime policy-monitor polls CDS's `/allowlist` over RA-TLS
-(pinned to `cds.measurements`) and merges what CDS serves on top, so
-operator additions land without a guest rebuild. The merge only ever
-*grows* the set, so a compromised or unreachable CDS degrades to "stale
-but no smaller" — never "open".
+(pinned to `cds.measurements`) and installs what CDS serves beside the
+seed as an epoch-gated overlay, so operator writes land without a guest
+rebuild. The seed is never touched and a pull replaces the overlay only
+when its version advances, so a compromised or unreachable CDS degrades
+to "stale" — never "open".
 
 A previous design (`guest-policy-agent`) also fetched a allowlist from
 CDS over RA-TLS, but only *rendered* it informationally — it enforced
@@ -128,14 +129,14 @@ Key invariants:
   kata-agent crashes after start, the VM shuts down rather than
   entering an ambiguous half-running state. kata-runtime sees the
   VM gone, surfaces `CreateContainerError` to kubelet.
-- **The seed is read-only; the in-memory set only grows.**
+- **The seed is read-only.**
   policy-monitor loads `/etc/c8s/bootstrap-allowlist.json` once at boot
   — the file is on the verity root, so neither the guest nor the host
   can rewrite it, and CVM memory encryption covers the in-memory
-  copy. The runtime CDS refresh only ever *adds* digests to the
-  in-memory set (see [Allowlist sourcing](#allowlist-sourcing-baked-seed--cds-refresh));
-  it cannot remove the seed or shrink the set, so a compromised or
-  unreachable CDS can never reduce enforcement below the measured seed.
+  copy. The runtime CDS refresh lives beside it as a separate overlay
+  (see [Allowlist sourcing](#allowlist-sourcing-baked-seed--cds-refresh));
+  it cannot touch the seed, so a compromised or unreachable CDS can
+  never reduce enforcement below the measured seed.
 
 ## Post-start kill window
 
@@ -256,7 +257,7 @@ policy-monitor's allowlist has two sources, unioned in memory:
    default baked into the rootfs, not per-pod host-injected, so a
    non-default-namespace install needs the real injection),
    policy-monitor polls CDS's `GET /allowlist` on
-   an interval and merges the result on top of the seed. The pull uses
+   an interval and installs the result as the overlay beside the seed. The pull uses
    the **same mechanism the host nri-image-policy worker uses**:
    `pkg/allowlistclient` over an RA-TLS transport (`pkg/ratls`) whose
    peer cert is pinned to `cds.measurements`. So the in-guest enforcer
@@ -264,8 +265,9 @@ policy-monitor's allowlist has two sources, unioned in memory:
    the in-guest one is the strictly-stronger check (the TEE re-deciding
    for itself rather than trusting the host's NRI verdict).
 
-The merge is **grow-only**: it adds digests, never removes them, and
-never touches the seed. Consequences:
+The overlay **swaps wholesale, gated by the CDS version counter**: a pull
+replaces it only when the version advances, and never touches the seed.
+Consequences:
 
 - A CDS outage, a slow CDS, or a CDS the RA-TLS handshake rejects
   (measurement mismatch) leaves the current set intact — at minimum the
@@ -287,8 +289,8 @@ the asymmetry is intentional. For the mesh, an unpinned peer still has
 to be *some* attested TEE; for the refresh, "any attested TEE" is not
 enough, because the host can boot its own CVM from this same guest
 image, run a CDS in it serving an attacker-chosen allowlist, and pass
-"attested" — and grow-only merging is no defence when *additions* are
-the attack. With the refresh disabled the guest enforces the measured
+"attested" — and the epoch gate is no defence when *additions* under a
+higher version are the attack. With the refresh disabled the guest enforces the measured
 seed alone, which is fail-closed.
 
 Baking the pin is structurally impossible — under kata, CDS runs from
@@ -542,11 +544,11 @@ It cannot, for two independent reasons:
   points it at an attacker-run service presents evidence that doesn't
   match the pinned CDS launch digest, the handshake fails, and the pull
   is rejected — policy-monitor keeps its current set.
-- **Grow-only merge over a measured seed.** Even if a fetch returned
-  bogus data, the merge only *adds* digests on top of the verity-measured
-  seed; it can't remove the seed or shrink enforcement. And a host that
-  simply *blocks* the refresh achieves nothing beyond freezing the set
-  at its current (≥ seed) contents.
+- **Epoch-gated overlay over a measured seed.** Even if a fetch returned
+  bogus data it lands beside the verity-measured seed, never in it, and
+  only when its version advances the epoch. A host that replays an older
+  document or simply *blocks* the refresh achieves nothing beyond
+  freezing the overlay at its last-known-good contents.
 
 So the host can, at most, prevent *new* legitimate additions from
 reaching a guest (a liveness nuisance, surfaced as denied workloads the

@@ -148,7 +148,6 @@
           "additionalProperties": false,
           "properties": {
             "deriveComponents": {},
-            "digests": {},
             "workloads": {}
           }
         },

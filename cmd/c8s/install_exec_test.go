@@ -720,8 +720,13 @@ func TestAppendResolvedWorkloadImageArgsExec(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		p := "nriImagePolicy.bootstrapAllowlist.workloads.vllm-" + testDigest[7:19] + "."
 		assertArgsEqual(t, got, []string{
-			"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + testDigest + "=ghcr.io/acme/vllm@" + testDigest,
+			"--set-string", p + "label=ghcr.io/acme/vllm@" + testDigest,
+			"--set-string", p + "containers[0].digest=" + testDigest,
+			"--set-string", p + "containers[0].image=ghcr.io/acme/vllm@" + testDigest,
+			"--set-string", p + "containers[0].command.policy=any",
+			"--set-string", p + "containers[0].args.policy=any",
 		})
 		mustContainLine(t, f.calls(t), "crane digest ghcr.io/acme/vllm:v1")
 	})
@@ -1444,7 +1449,7 @@ func TestInstallRefusesPolicyDenyingPlatformPods(t *testing.T) {
 		"kube-system/etcd-node-a",
 		"docker.io/rancher/hardened-etcd@" + etcdDigest,
 		"nriImagePolicy.policy.exemptNamespaces",
-		"nriImagePolicy.bootstrapAllowlist.digests",
+		"nriImagePolicy.bootstrapAllowlist.workloads",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q is missing %q", err, want)
@@ -1513,7 +1518,7 @@ func TestInstallReportsWhatTheExemptionAdmits(t *testing.T) {
 	for _, want := range []string{
 		"kube-system/etcd-node-a",
 		"docker.io/rancher/hardened-etcd@" + etcdDigest,
-		"nriImagePolicy.bootstrapAllowlist.digests",
+		"nriImagePolicy.bootstrapAllowlist.workloads",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("install output does not report %q:\n%s", want, stdout)

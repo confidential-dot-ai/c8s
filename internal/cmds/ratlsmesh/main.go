@@ -5,7 +5,6 @@ package ratlsmesh
 import (
 	"context"
 	"crypto/sha512"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
@@ -298,7 +297,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	// hardware attestation, not by SAN/hostname (NewServerTLSConfig sets
 	// InsecureSkipVerify and verifies the RA-TLS extension). The CDS-issued
 	// upgrade cert does carry a DNS SAN (see cdsclient.Config.DNSSAN).
-	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+	runtime, err := newMeshRuntime(&ratls.ServerConfig{
 		Platform:        c.platform,
 		AttestFunc:      attestFunc,
 		CertTTL:         c.certTTL,
@@ -307,79 +306,54 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		DynamicCACert:   effectiveCAURL != "",
 		RotationTimeout: c.rotationTimeout,
 		Logger:          logger,
-	})
+	}, logger, c.sessionCacheSize)
 	if err != nil {
-		return fmt.Errorf("create server TLS config: %w", err)
+		return err
 	}
-
-	clientTLS, clientCertMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:          meshPolicy,
-		Platform:        c.platform,
-		AttestFunc:      attestFunc,
-		CACert:          caCerts,
-		DynamicCACert:   effectiveCAURL != "",
-		CertTTL:         c.certTTL,
-		RotationTimeout: c.rotationTimeout,
-		Logger:          logger,
-	})
-	if err != nil {
-		return fmt.Errorf("create client TLS config: %w", err)
+	cdsCfg := &cdsclient.Config{
+		CDSURL:            c.cdsURL,
+		AttestationApiURL: c.attestationApiURL,
+		CDSCAURL:          c.cdsURL,
+		CACertURL:         effectiveCAURL,
+		NodeIP:            c.nodeIP,
+		DNSSAN:            c.certDNSSAN,
+		TEEType:           teeType,
+		CDSMeasurements:   cdsMeasurements,
+		CDSRTMRs:          cdsRTMRs,
+		CDSEntries:        pins.Entries,
 	}
-
-	if c.sessionCacheSize > 0 {
-		clientTLS.ClientSessionCache = tls.NewLRUClientSessionCache(c.sessionCacheSize)
+	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
+		return fmt.Errorf("proxy: %w", err)
 	}
+	return nil
+}
 
-	m := newMetrics()
+type hostMesh struct {
+	c        *proxyConfig
+	resolver *k8sResolver
+	cds      *cdsclient.Config
+}
+
+func (e hostMesh) configure(r *meshRuntime) *Proxy {
+	c, resolver := e.c, e.resolver
 	if c.certMode == "cds" {
-		m.certModeConfigured.Store(1)
+		r.metrics.certModeConfigured.Store(1)
 	}
-	if len(meshPolicy.Measurements) > 0 {
-		m.measurementPinning.Set(1)
-	}
-
-	// Wire attestation failure counter into TLS peer verification callbacks.
-	wrapVerify := func(orig func([][]byte, [][]*x509.Certificate) error) func([][]byte, [][]*x509.Certificate) error {
-		if orig == nil {
-			return nil
-		}
-		return func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
-			err := orig(rawCerts, chains)
-			if err != nil {
-				m.attestationFailures.Inc()
-			}
-			return err
-		}
-	}
-	serverTLS.VerifyPeerCertificate = wrapVerify(serverTLS.VerifyPeerCertificate)
-	clientTLS.VerifyPeerCertificate = wrapVerify(clientTLS.VerifyPeerCertificate)
-
-	// Wire rotation failure metrics.
-	serverCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	if clientCertMgr != nil {
-		clientCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	}
-
-	health := newHealthServer(m, serverCertMgr, clientCertMgr, c.acceptErrThreshold, c.healthReadTimeout, c.healthWriteTimeout)
-
+	r.health = newHealthServer(r.metrics, r.serverCertMgr, r.clientCertMgr, c.acceptErrThreshold, c.healthReadTimeout, c.healthWriteTimeout)
+	r.healthPort, r.healthListener = c.healthPort, c.listeners.health
 	var connSem chan struct{}
 	if c.maxConns > 0 {
 		connSem = make(chan struct{}, c.maxConns)
 	}
 
-	proxy := &Proxy{
+	return &Proxy{
 		outboundAddr:      fmt.Sprintf(":%d", c.outboundPort),
 		inboundAddr:       fmt.Sprintf(":%d", c.inboundPort),
 		outboundLn:        c.listeners.outbound,
 		inboundLn:         c.listeners.inbound,
-		serverTLS:         serverTLS,
-		clientTLS:         clientTLS,
 		nodeIP:            c.nodeIP,
 		inboundPort:       c.inboundPort,
 		resolver:          resolver,
-		origDstFunc:       defaultOrigDstFunc,
-		logger:            logger,
-		metrics:           m,
 		accessLog:         c.accessLog,
 		dialTimeout:       c.dialTimeout,
 		tlsDialTimeout:    c.tlsDialTimeout,
@@ -389,37 +363,15 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		idleTimeout:       c.idleTimeout,
 		maxDestHeaderSize: c.maxDestHeaderSize,
 		pipeBufferSize:    c.pipeBufferSize,
-		bufPool:           newBufPool(c.pipeBufferSize),
 		connSem:           connSem,
 		maxConnsPerSrc:    c.maxConnsPerSource,
-		onReady: func() {
-			// Eagerly provision certificates before marking ready.
-			// Bound the warm-up so a hanging attestation binary (missing
-			// /dev/sev, TPM not loaded) doesn't block readiness forever.
-			warmupTimeout := 2 * c.rotationTimeout
-			warmupCtx, warmupCancel := context.WithTimeout(ctx, warmupTimeout)
-			defer warmupCancel()
-
-			if err := serverCertMgr.WarmUp(warmupCtx); err != nil {
-				logger.Error("server certificate warm-up failed", "error", err)
-			}
-			if clientCertMgr != nil {
-				if err := clientCertMgr.WarmUp(warmupCtx); err != nil {
-					logger.Error("client certificate warm-up failed", "error", err)
-				}
-			}
-			health.ready.Store(true)
-		},
-		onShutdown: func() { health.ready.Store(false) },
 	}
+}
 
-	// Start health/metrics server.
-	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort), c.listeners.health); err != nil {
-			logger.Error("health server error", "error", err)
-		}
-	}()
-
+func (e hostMesh) start(ctx context.Context, r *meshRuntime) {
+	c, resolver := e.c, e.resolver
+	logger, m, proxy := r.logger, r.metrics, r.proxy
+	serverCertMgr, clientCertMgr := r.serverCertMgr, r.clientCertMgr
 	// Periodically update resolver cache and cert expiry metrics.
 	go func() {
 		t := time.NewTicker(c.metricsUpdateInterval)
@@ -458,51 +410,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		}
 	}()
 
-	// CDS certificate upgrade: after self-signed RA-TLS boot, a background
-	// goroutine contacts CDS, gets CA-signed certs, and hot-swaps them via
-	// CertManager.SwapProvider. cds serves both attestation and CA bundle on
-	// one URL, so CDSURL and CDSCAURL both take --cds-url.
-	if c.certMode == "cds" {
-		cdsCfg := &cdsclient.Config{
-			CDSURL:            c.cdsURL,
-			AttestationApiURL: c.attestationApiURL,
-			CDSCAURL:          c.cdsURL,
-			CACertURL:         effectiveCAURL,
-			NodeIP:            c.nodeIP,
-			DNSSAN:            c.certDNSSAN,
-			TEEType:           teeType,
-			CDSMeasurements:   cdsMeasurements,
-			CDSRTMRs:          cdsRTMRs,
-			CDSEntries:        pins.Entries,
-		}
-		// A provider-construction failure (config validation) is logged and
-		// the mesh keeps serving self-signed certs; it never blocks startup.
-		if provider, err := cdsclient.NewProvider(cdsCfg, logger); err != nil {
-			logger.Error("cds provider creation failed", "error", err)
-		} else {
-			go cdsUpgrade{
-				logger:          logger,
-				logPrefix:       "cds",
-				provider:        provider,
-				retryBackoff:    c.cdsRetryBackoff,
-				retryMaxBackoff: c.cdsRetryMaxBackoff,
-				opTimeout:       c.cdsOpTimeout,
-				serverCertMgr:   serverCertMgr,
-				clientCertMgr:   clientCertMgr,
-				metrics:         m,
-			}.run(ctx)
-
-			go caBundleRefresh{
-				logger:        logger,
-				logPrefix:     "cds",
-				provider:      provider,
-				interval:      c.caPollInterval,
-				opTimeout:     c.cdsOpTimeout,
-				serverCertMgr: serverCertMgr,
-				clientCertMgr: clientCertMgr,
-			}.run(ctx)
-			logger.Info("CA bundle refresh enabled", "url", effectiveCAURL, "interval", c.caPollInterval)
-		}
+	if c.certMode == "cds" && r.startCDS(ctx, e.cds, cdsUpgrade{
+		logPrefix: "cds", retryBackoff: c.cdsRetryBackoff,
+		retryMaxBackoff: c.cdsRetryMaxBackoff, opTimeout: c.cdsOpTimeout,
+	}, c.caPollInterval) {
+		logger.Info("CA bundle refresh enabled", "url", e.cds.CACertURL, "interval", c.caPollInterval)
 	}
 
 	// Cert pipeline health probe: periodically check CDS /readyz.
@@ -567,11 +479,6 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		"keepalive", c.keepAlive,
 		"session_cache_size", c.sessionCacheSize,
 	)
-
-	if err := proxy.Run(ctx); err != nil {
-		return fmt.Errorf("proxy: %w", err)
-	}
-	return nil
 }
 
 type iptablesSyncConfig struct {

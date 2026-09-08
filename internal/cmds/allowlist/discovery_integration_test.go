@@ -81,14 +81,13 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 	return srv
 }
 
-// seededAllowlistHandler serves a canonical allowlist (floor seeded with digA)
-// as CDS's read endpoint would.
+// seededAllowlistHandler serves a canonical allowlist (one entry admitting
+// digA) as CDS's read endpoint would.
 func seededAllowlistHandler(t *testing.T) http.HandlerFunc {
 	t.Helper()
 	al := pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   map[string]string{digA: "registry/c8s/cds@" + digA},
-		Workloads: map[string]pkgallowlist.Workload{},
+		Workloads: anyWorkloads(t, map[string]string{digA: "registry/c8s/cds@" + digA}),
 	}
 	body, err := al.Canonical()
 	if err != nil {
