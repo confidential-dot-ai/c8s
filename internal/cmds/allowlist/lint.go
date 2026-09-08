@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -158,7 +160,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	entriesByDigest := map[string]map[string]bool{}
 	fullyAny := map[string]bool{}
 
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		w := al.Workloads[name]
 		if len(w.InitContainers) == 0 && len(w.Containers) == 0 {
 			warnings = append(warnings, warnf("workload %q has no init or main containers", name))
@@ -197,7 +199,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 		}
 	}
 
-	for _, d := range sortedKeysBool(fullyAny) {
+	for _, d := range slices.Sorted(maps.Keys(fullyAny)) {
 		if len(entriesByDigest[d]) > 1 {
 			warnings = append(warnings, warnf("digest %s appears in %d entries and one grants 'any'; the effective admission for that digest is 'any' (union across entries)", d, len(entriesByDigest[d])))
 		}
@@ -207,9 +209,9 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	// policy an operator also wrote for the same digest in a workload — and for
 	// a secrets-bearing entry it also makes the entry unmatchable, since the
 	// digest is dropped from the candidate set.
-	for _, d := range sortedKeys(al.Digests) {
+	for _, d := range slices.Sorted(maps.Keys(al.Digests)) {
 		if names := entriesByDigest[d]; len(names) > 0 {
-			warnings = append(warnings, warnf("digest %s is floor-listed and also in workload entr(ies) [%s]; the floor admits it by digest alone, so those argv policies are not enforced (remove it from the floor to enforce them)", d, strings.Join(sortedKeysBool(names), ", ")))
+			warnings = append(warnings, warnf("digest %s is floor-listed and also in workload entr(ies) [%s]; the floor admits it by digest alone, so those argv policies are not enforced (remove it from the floor to enforce them)", d, strings.Join(slices.Sorted(maps.Keys(names)), ", ")))
 		}
 	}
 
@@ -231,7 +233,7 @@ func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []findi
 		return nil
 	}
 	var warnings []finding
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		for _, c := range allContainers(al.Workloads[name]) {
 			var fields []string
 			if c.Mounts.Policy == pkgallowlist.PolicyExact {
@@ -271,7 +273,7 @@ func indistinguishableEntries(al *pkgallowlist.Allowlist) []finding {
 // shape, in a stable order.
 func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 	byShape := map[string][]string{}
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		shape, err := entryShape(al.Workloads[name])
 		if err != nil {
 			// A shape that will not marshal cannot be compared; say so rather
@@ -281,7 +283,7 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 		byShape[shape] = append(byShape[shape], name)
 	}
 	var out [][]string
-	for _, shape := range sortedKeysStrings(byShape) {
+	for _, shape := range slices.Sorted(maps.Keys(byShape)) {
 		if names := byShape[shape]; len(names) > 1 {
 			out = append(out, names)
 		}
@@ -332,21 +334,12 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 	return string(b), err
 }
 
-func sortedKeysStrings(m map[string][]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 // lintOnline checks each workload container digest is resolvable in its
 // registry via crane. It needs the container image label to know the repo.
 func lintOnline(ctx context.Context, al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
 	checked := map[string]bool{}
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		w := al.Workloads[name]
 		for _, c := range allContainers(w) {
 			if c.Image == "" {
@@ -380,13 +373,4 @@ func isTagForm(image string) bool {
 	}
 	_, digested := named.(reference.Digested)
 	return !digested
-}
-
-func sortedKeysBool(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

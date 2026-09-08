@@ -172,6 +172,10 @@ func TestListTextWorkloadTable(t *testing.T) {
 		t.Fatalf("missing summary line:\n%s", out)
 	}
 
+	if strings.Index(out, "\nplain ") > strings.Index(out, "\nweb ") {
+		t.Fatalf("workload rows are not sorted:\n%s", out)
+	}
+
 	rows := map[string][]string{}
 	for _, line := range strings.Split(out, "\n") {
 		if f := strings.Fields(line); len(f) > 0 {

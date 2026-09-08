@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -148,7 +150,7 @@ func printFloorTable(w io.Writer, digests map[string]string) {
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "DIGEST\tIMAGE")
-	for _, d := range sortedKeys(digests) {
+	for _, d := range slices.Sorted(maps.Keys(digests)) {
 		fmt.Fprintf(tw, "%s\t%s\n", d, digests[d])
 	}
 	tw.Flush()
@@ -159,11 +161,7 @@ func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload)
 	if len(workloads) == 0 {
 		return
 	}
-	names := make([]string, 0, len(workloads))
-	for name := range workloads {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(workloads))
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tINIT\tCTRS\tCOMMAND/ARGS\tPATHS")
@@ -203,19 +201,7 @@ func argvPolicyName(p pkgallowlist.ArgvPolicy) string {
 }
 
 func joinSet(set map[string]bool) string {
-	keys := make([]string, 0, len(set))
-	for k := range set {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := ""
-	for i, k := range keys {
-		if i > 0 {
-			out += ","
-		}
-		out += k
-	}
-	return out
+	return strings.Join(slices.Sorted(maps.Keys(set)), ",")
 }
 
 // argvSummary renders one argv policy for diff output.

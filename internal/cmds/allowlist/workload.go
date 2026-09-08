@@ -7,9 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -127,7 +128,7 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 				return fmt.Errorf("refusing to apply: %d lint error(s)", errs)
 			}
 
-			names := sortedWorkloadNames(entries)
+			names := slices.Sorted(maps.Keys(entries))
 			for _, name := range names {
 				if lw, ok := live.Workloads[name]; ok {
 					ed := diffEntry(lw, entries[name])
@@ -307,15 +308,6 @@ func parseWorkloadEntries(data []byte) (entries map[string]pkgallowlist.Workload
 		out[name] = *w
 	}
 	return out, 0, nil
-}
-
-func sortedWorkloadNames(m map[string]pkgallowlist.Workload) []string {
-	names := make([]string, 0, len(m))
-	for name := range m {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 func readFileOrStdin(cmd *cobra.Command, path string) ([]byte, error) {
