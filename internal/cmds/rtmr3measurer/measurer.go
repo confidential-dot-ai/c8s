@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
@@ -282,13 +283,7 @@ func (m *measurer) unrecordLast(digest string) {
 		sb.WriteString(d)
 		sb.WriteByte('\n')
 	}
-	tmp := m.statePath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sb.String()), 0o600); err == nil {
-		err = os.Rename(tmp, m.statePath)
-		if err != nil {
-			m.logger.Error("rewrite measured-digest log failed", "error", err)
-		}
-	} else {
+	if err := fileutil.WriteAtomic(m.statePath, []byte(sb.String()), 0o600); err != nil {
 		m.logger.Error("rewrite measured-digest log failed", "error", err)
 	}
 }
