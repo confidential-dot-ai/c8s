@@ -129,3 +129,28 @@ func TestPrintDiffTextSectionPlaceholders(t *testing.T) {
 		}
 	})
 }
+
+func TestPrintDiffOrdersMapEntries(t *testing.T) {
+	d := allowlistDiff{
+		Floor: floorDiff{
+			Added:   map[string]string{"b": "B", "a": "A"},
+			Removed: map[string]string{"d": "D", "c": "C"},
+			Changed: map[string]changedEntry{"f": {From: "old", To: "F"}, "e": {From: "old", To: "E"}},
+		},
+		WorkloadsChanged: map[string]entryDiff{
+			"z": {Label: &changedEntry{From: "old", To: "Z"}},
+			"y": {Label: &changedEntry{From: "old", To: "Y"}},
+		},
+	}
+	want := "floor:\n+ a  A\n+ b  B\n- c  C\n- d  D\n~ e  old -> E\n~ f  old -> F\n" +
+		"workloads:\n~ y\n    label: \"old\" -> \"Y\"\n~ z\n    label: \"old\" -> \"Z\"\n"
+	for range 20 {
+		var out bytes.Buffer
+		if err := printDiff(&out, "text", d); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != want {
+			t.Fatalf("diff output = %q, want %q", out.String(), want)
+		}
+	}
+}

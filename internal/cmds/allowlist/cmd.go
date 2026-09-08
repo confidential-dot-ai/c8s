@@ -14,7 +14,6 @@ package allowlist
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -188,16 +187,6 @@ func missingComponents(images map[string]string, required []string) []string {
 		}
 	}
 	return missing
-}
-
-// sortedKeys returns the map keys sorted, for stable output.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // ctx returns the command context or a background context as a fallback.

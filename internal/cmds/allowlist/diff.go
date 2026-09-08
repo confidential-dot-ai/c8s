@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -138,11 +140,7 @@ func diffContainers(kind string, live, desired []pkgallowlist.Container) (added,
 	for d := range desiredByDigest {
 		digests[d] = true
 	}
-	ordered := make([]string, 0, len(digests))
-	for d := range digests {
-		ordered = append(ordered, d)
-	}
-	sort.Strings(ordered)
+	ordered := slices.Sorted(maps.Keys(digests))
 
 	for _, digest := range ordered {
 		onlyDesired := multisetSub(desiredByDigest[digest], liveByDigest[digest])
@@ -200,13 +198,13 @@ func printDiff(w io.Writer, format string, d allowlistDiff) error {
 	}
 
 	fmt.Fprintln(w, "floor:")
-	for _, digest := range sortedKeys(d.Floor.Added) {
+	for _, digest := range slices.Sorted(maps.Keys(d.Floor.Added)) {
 		fmt.Fprintf(w, "+ %s  %s\n", digest, d.Floor.Added[digest])
 	}
-	for _, digest := range sortedKeys(d.Floor.Removed) {
+	for _, digest := range slices.Sorted(maps.Keys(d.Floor.Removed)) {
 		fmt.Fprintf(w, "- %s  %s\n", digest, d.Floor.Removed[digest])
 	}
-	for _, digest := range sortedChangedKeys(d.Floor.Changed) {
+	for _, digest := range slices.Sorted(maps.Keys(d.Floor.Changed)) {
 		fmt.Fprintf(w, "~ %s  %s -> %s\n", digest, d.Floor.Changed[digest].From, d.Floor.Changed[digest].To)
 	}
 	if d.Floor.empty() {
@@ -220,11 +218,7 @@ func printDiff(w io.Writer, format string, d allowlistDiff) error {
 	for _, name := range d.WorkloadsRemoved {
 		fmt.Fprintf(w, "- %s\n", name)
 	}
-	changedNames := make([]string, 0, len(d.WorkloadsChanged))
-	for name := range d.WorkloadsChanged {
-		changedNames = append(changedNames, name)
-	}
-	sort.Strings(changedNames)
+	changedNames := slices.Sorted(maps.Keys(d.WorkloadsChanged))
 	for _, name := range changedNames {
 		fmt.Fprintf(w, "~ %s\n", name)
 		printEntryDiff(w, d.WorkloadsChanged[name])
@@ -248,13 +242,4 @@ func printEntryDiff(w io.Writer, e entryDiff) {
 	for _, c := range e.Changed {
 		fmt.Fprintf(w, "    ~ %s %s  %s -> %s\n", c.Kind, c.Digest, c.From, c.To)
 	}
-}
-
-func sortedChangedKeys(m map[string]changedEntry) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
