@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -41,7 +42,12 @@ func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key [
 	return nil
 }
 
-func (o *recordingOps) CryptClose(context.Context, string) error { return nil }
+func (o *recordingOps) CryptClose(context.Context, string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, "CryptClose")
+	return nil
+}
 
 func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.Verity) error {
 	o.mu.Lock()
@@ -51,7 +57,12 @@ func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.
 	return nil
 }
 
-func (o *recordingOps) VerityClose(context.Context, string) error { return nil }
+func (o *recordingOps) VerityClose(context.Context, string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, "VerityClose")
+	return nil
+}
 
 func (o *recordingOps) MountRO(_ context.Context, _ string, target *os.File, fsType string) error {
 	return o.recordMount("MountRO", target, fsType, true)
@@ -70,7 +81,12 @@ func (o *recordingOps) recordMount(op string, target *os.File, fsType string, re
 	return nil
 }
 
-func (o *recordingOps) Unmount(context.Context, string) error { return nil }
+func (o *recordingOps) Unmount(context.Context, string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, "Unmount")
+	return nil
+}
 
 // This path never sweeps: the daemon under test is already serving.
 func (o *recordingOps) ListMappings(context.Context) ([]string, error) { return nil, nil }
@@ -357,5 +373,39 @@ func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
 	}
 	if string(ops.key) != string(stored) {
 		t.Error("the key handed to dm-crypt is not the one CDS released")
+	}
+}
+
+// At termination the sidecar posts a close — with the run context already gone,
+// as SIGTERM leaves it — and the daemon unwinds the pod's whole stack.
+func TestSidecarClosesItsVolumesAtTermination(t *testing.T) {
+	endpoint := startInventory(t)
+	_, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
+	})
+
+	socketDir := t.TempDir()
+	ops := startDaemon(t, socketDir)
+
+	cfg := flowConfig(t, url)
+	cfg.SocketDir = socketDir
+	daemon, daemonBase := daemonClient(cfg)
+	runCtx, cancel := context.WithCancel(context.Background())
+	if err := openAllWith(runCtx, cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	cancel()
+
+	closeCtx, done := context.WithTimeout(context.Background(), closeTimeout)
+	defer done()
+	if err := closeWith(closeCtx, daemon, daemonBase); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+	got := strings.Join(ops.calls, ",")
+	if !strings.HasSuffix(got, "Unmount,VerityClose,CryptClose") {
+		t.Fatalf("calls = %q, want the close to unwind mount, verity, then crypt", got)
 	}
 }

@@ -30,9 +30,78 @@ jobs:
           DELETIONS: ${{ github.event.pull_request.deletions }}
         run: echo "large=$(( ADDITIONS + DELETIONS > 700 ))" >> "$GITHUB_OUTPUT"
 
+  # meat is the costliest advisory check, so it waits for the cheap ones to
+  # pass first: no point abridging a diff whose build is already red. `needs`
+  # can't cross workflow files, so this polls the Actions API for the sibling
+  # runs on the same head sha instead.
+  gate:
+    name: Wait for basic checks
+    needs: size
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && needs.size.outputs.large == '1'
+    steps:
+      - name: Wait for CI, actionlint, signed-commits, image repro gate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const WANTED = ['CI', 'actionlint', 'signed-commits', 'image repro gate'];
+            const sha = context.payload.pull_request.head.sha;
+
+            // Latest run per workflow name for this sha (a name can have
+            // several runs after a rerun).
+            const latestRuns = async () => {
+              const {data} = await github.rest.actions.listWorkflowRunsForRepo({
+                ...context.repo, head_sha: sha, event: 'pull_request', per_page: 100,
+              });
+              const byName = new Map();
+              for (const run of data.workflow_runs) {
+                const prev = byName.get(run.name);
+                if (!prev || run.run_number > prev.run_number) byName.set(run.name, run);
+              }
+              return byName;
+            };
+
+            // All of WANTED trigger on the same pull_request event as this
+            // workflow, so their runs are already registered (queued, at
+            // worst) by the time this first poll fires a few seconds in. A
+            // name still absent here never ran for this PR (e.g. CI's Go
+            // paths filter didn't match) — don't wait on it.
+            const firstRuns = await latestRuns();
+            const names = WANTED.filter(name => firstRuns.has(name));
+            if (names.length === 0) {
+              core.info('none of the basic checks run on this PR; nothing to wait for');
+              return;
+            }
+            core.info(`waiting for: ${names.join(', ')}`);
+
+            const deadline = Date.now() + 40 * 60_000;
+            let runs;
+            for (;;) {
+              runs = await latestRuns();
+              const pending = names.filter(n => runs.get(n).status !== 'completed');
+              if (pending.length === 0) break;
+              if (Date.now() > deadline) {
+                core.setFailed(`timed out waiting for: ${pending.join(', ')}`);
+                return;
+              }
+              await new Promise(r => setTimeout(r, 20_000));
+            }
+
+            const failed = names
+              .map(n => runs.get(n))
+              .filter(r => !['success', 'neutral', 'skipped'].includes(r.conclusion));
+            if (failed.length) {
+              core.setFailed(failed.map(r => `${r.name}: ${r.conclusion}`).join(', '));
+            }
+
   meat:
     name: Reading diff (advisory)
-    needs: size
+    needs: [size, gate]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: meat-review
@@ -40,6 +109,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && needs.size.outputs.large == '1'
+      && needs.gate.result == 'success'
     # Advisory: a flaky LLM run never blocks the PR.
     continue-on-error: true
     steps:

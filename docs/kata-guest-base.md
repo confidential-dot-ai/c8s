@@ -372,6 +372,13 @@ Every external input is pinned by immutable reference. Moving any pin
 moves `root_hash` and the launch measurement — bump deliberately, in a
 reviewed commit.
 
+`.github/build-pins.json` is the canonical source for the measured workflows'
+confos, attestation-rs, and mkosi pins. They validate and export the selected
+domain through `.github/scripts/pin-manifest.sh`; automated pin-watch PRs
+therefore change the manifest rather than workflow files. `node-image` moves
+independently. A `kata-guest` update also advances `kernel-snapshot`'s
+confos/mkosi tuple so subsequent snapshots use the guest build's toolchain.
+
 | Pin | Where | Covers |
 |---|---|---|
 | `KATA_VERSION` / `KATA_SRC_COMMIT` | `build.sh` (`KATA_VERSION` also workflow env) | osbuilder source (tag pinned to its commit) |
@@ -379,8 +386,9 @@ reviewed commit.
 | `PAUSE_IMAGE_DIGEST` + `PAUSE_PINNED_VERSION` | `build.sh` | `/pause_bundle` |
 | `UBUNTU_BASE_DIGEST` | `build.sh` | osbuilder's rootfs-builder toolchain image |
 | `UBUNTU_REPO_URL` (snapshot timestamp) | `build.sh` | guest apt packages |
-| `CONFOS_REF` | workflow env | guest kernel |
-| `ATTESTATION_RS_REF` | workflow env | baked `attestation-api` binary |
+| `CONFOS_REF` | `.github/build-pins.json` (`kata-guest`) | guest kernel |
+| `ATTESTATION_RS_REF` | `.github/build-pins.json` (`kata-guest`) | baked `attestation-api` binary |
+| mkosi SHA / version | `.github/build-pins.json` (`kata-guest`, kept in lockstep with `kernel-snapshot`) | confos kernel-builder toolchain |
 | `REPRO_E2FSPROGS_VERSION` / `REPRO_CRYPTSETUP_VERSION` | workflow env | re-lay toolchain |
 | cds / get-cert / c8s-operator digests | resolved per build by `fetch.sh` | bootstrap allowlist |
 
@@ -392,6 +400,10 @@ Bump procedure:
 - **periodic refresh** (security updates): re-resolve
   `UBUNTU_BASE_DIGEST` and bump the `UBUNTU_REPO_URL` snapshot
   timestamp.
+- **confos / attestation-rs refresh**: the pin-watch workflow proposes the
+  domain-scoped manifest update. A `node-image` bump is isolated; a
+  `kata-guest` bump also updates kernel-snapshot's confos/mkosi tuple. Review
+  the measurement and committed kernel snapshot changes before merging.
 - **runner upgrade**: update the `REPRO_*` versions with it.
 
 The `build.sh` pins carry a re-resolve command in a comment beside each.

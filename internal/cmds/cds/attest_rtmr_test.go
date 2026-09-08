@@ -23,17 +23,13 @@ const (
 // attestation-api reports in platform_data.
 func tdxVerdict(t *testing.T, mrtd, rtmr1, rtmr2 string) testattest.Verdict {
 	t.Helper()
-	platformData, err := json.Marshal(map[string]string{
+	v := testattest.PassingVerdict(mrtd)
+	v.Claims.PlatformData = map[string]any{
 		"rtmr_0": strings.Repeat("00", 48),
 		"rtmr_1": rtmr1,
 		"rtmr_2": rtmr2,
 		"rtmr_3": strings.Repeat("33", 48),
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	v := testattest.PassingVerdict(mrtd)
-	v.Claims.PlatformData = platformData
 	return v
 }
 

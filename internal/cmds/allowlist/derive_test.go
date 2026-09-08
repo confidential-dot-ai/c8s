@@ -33,7 +33,7 @@ func deployJSON() string {
 
 func runDerive(t *testing.T, stdin string, args ...string) (map[string]pkgallowlist.Workload, error) {
 	t.Helper()
-	cmd := newWorkloadDeriveCmd(&options{})
+	cmd := newDeriveCmd(&options{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

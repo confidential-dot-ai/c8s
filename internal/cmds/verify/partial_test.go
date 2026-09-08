@@ -18,7 +18,6 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
-	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -419,16 +418,15 @@ func TestAttestPQChainAnchorHonesty(t *testing.T) {
 func TestEndpointEvidenceMarksChainDerived(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
-	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	sess := fakeSession(0x02)
 	id := mintEndpointIdentity(t)
-	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m)
+	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), sess)
 
 	for _, tc := range []struct {
 		name string
 		get  func() (*evidence, error)
 	}{
-		{"live fetch", func() (*evidence, error) { return evidenceFromEndpointJSON(data, nonce, "test") }},
+		{"live fetch", func() (*evidence, error) { return evidenceFromEndpointJSON(data, nonce, sess.ek, "test") }},
 		{"saved bundle", func() (*evidence, error) { return gatherFromFile(data, nil, "file", leafTrust{}) }},
 	} {
 		ev, err := tc.get()

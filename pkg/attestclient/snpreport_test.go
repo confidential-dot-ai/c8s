@@ -13,11 +13,18 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// hclEnvelope builds an AKS HCL envelope wrapping the given hardware report.
+// hclEnvelope builds an AKS HCL envelope wrapping the given hardware report:
+// header(32) + report + var_data header(20) + var_data content, with trailing
+// null padding bytes after the content.
 func hclEnvelope(report []byte, trailing int) []byte {
-	env := make([]byte, 32+len(report)+trailing)
+	varData := []byte(`{"keys":[]}`)
+	env := make([]byte, 32+len(report)+20+len(varData)+trailing)
 	copy(env[:4], "HCLA")
 	copy(env[32:], report)
+	hdr := env[32+len(report):]
+	binary.LittleEndian.PutUint32(hdr[8:12], 2) // report_type: SNP
+	binary.LittleEndian.PutUint32(hdr[16:20], uint32(len(varData)+trailing))
+	copy(hdr[20:], varData)
 	return env
 }
 
@@ -171,8 +178,11 @@ func TestExtractSNPReport_HCLMissingSignature(t *testing.T) {
 }
 
 // TestExtractSNPReport_RealAKSEnvelope anchors the HCL parser to a captured
-// AKS az-snp evidence dump. Regenerate testdata/aks_hcl_envelope.bin by
-// piping a live `hcl_report` (base64.RawURLEncoding) through `base64 -d`.
+// AKS az-snp evidence dump. Regenerate testdata/aks_hcl_envelope.bin from a
+// live `hcl_report` with a URL-safe base64 decoder, for example
+// `python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.urlsafe_b64decode(sys.stdin.read().strip()+"=="))'`
+// — NOT `base64 -d`, whose standard alphabet silently drops the `-`/`_`
+// characters and corrupts the report (that mangled an earlier fixture).
 func TestExtractSNPReport_RealAKSEnvelope(t *testing.T) {
 	envelope, err := os.ReadFile("testdata/aks_hcl_envelope.bin")
 	if err != nil {

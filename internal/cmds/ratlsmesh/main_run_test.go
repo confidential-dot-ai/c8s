@@ -50,7 +50,7 @@ func defaultTestProxyConfig(t *testing.T) *proxyConfig {
 func stubKubeClientset(t *testing.T, cs kubernetes.Interface, err error) {
 	t.Helper()
 	old := newKubeClientset
-	newKubeClientset = func() (kubernetes.Interface, error) { return cs, err }
+	newKubeClientset = func(string) (kubernetes.Interface, error) { return cs, err }
 	t.Cleanup(func() { newKubeClientset = old })
 }
 
@@ -232,14 +232,14 @@ func TestNewKubeClientsetConfigOutcomes(t *testing.T) {
 			AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "azure"},
 		}, nil
 	}
-	if cs, err := newKubeClientset(); err == nil || !strings.Contains(err.Error(), "k8s clientset") {
+	if cs, err := newKubeClientset(""); err == nil || !strings.Contains(err.Error(), "k8s clientset") {
 		t.Fatalf("newKubeClientset() = %v, %v, want wrapped clientset error", cs, err)
 	}
 
 	inClusterConfig = func() (*rest.Config, error) {
 		return &rest.Config{Host: "https://127.0.0.1:1"}, nil
 	}
-	cs, err := newKubeClientset()
+	cs, err := newKubeClientset("")
 	if err != nil || cs == nil {
 		t.Fatalf("newKubeClientset() = %v, %v, want a clientset from a valid config", cs, err)
 	}
@@ -248,12 +248,49 @@ func TestNewKubeClientsetConfigOutcomes(t *testing.T) {
 func TestNewKubeClientsetDefaultOutsideCluster(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")
-	cs, err := newKubeClientset()
+	cs, err := newKubeClientset("")
 	if err == nil || !strings.Contains(err.Error(), "k8s in-cluster config") {
 		t.Fatalf("newKubeClientset() error = %v, want in-cluster config error", err)
 	}
 	if cs != nil {
 		t.Fatalf("newKubeClientset() clientset = %v, want nil on error", cs)
+	}
+}
+
+// A kubeconfig path must be honored without consulting the in-cluster config,
+// and a bad path must fail rather than fall back to it.
+func TestNewKubeClientsetKubeconfigPath(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(path, []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:1
+  name: c
+contexts:
+- context:
+    cluster: c
+    user: u
+  name: ctx
+current-context: ctx
+users:
+- name: u
+  user: {}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := newKubeClientset(path)
+	if err != nil || cs == nil {
+		t.Fatalf("newKubeClientset(%q) = %v, %v, want a clientset", path, cs, err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent")
+	cs, err = newKubeClientset(missing)
+	if err == nil || !strings.Contains(err.Error(), "--kubeconfig") {
+		t.Fatalf("newKubeClientset(%q) = %v, %v, want --kubeconfig error", missing, cs, err)
 	}
 }
 

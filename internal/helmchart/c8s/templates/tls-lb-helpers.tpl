@@ -407,7 +407,7 @@ because sprig's default treats an explicit false as unset.
 
 {{/*
 Render wide-open CORS directives for a c8s protocol-owned location (the
-attestation/handshake/tunnel namespace, the discovery document and
+attestation/tunnel namespace, the discovery document and
 certificate endpoints, the built-in allowlist route). These endpoints exist
 to be verified by any browser anywhere: every response is either
 self-authenticating (hardware evidence, CDS-signed certificates, sealed
@@ -446,21 +446,72 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Path to the public-TLS certificate nginx serves. Resolves to the
-operator-provided publicTLS secret when set, otherwise the CDS-issued
-cert under tlsMountPath.
+The validated public front-door mode: cds | webpki | acme. Fails the render on
+a mode/values mismatch: webpki needs the Secret and is the only mode that may
+carry one; acme needs a TEE-held key (kata or node-CVM), a reachable :80
+challenge (the kata guest exempts only tcp:8443 from the inbound mesh
+redirect, so no acme under kata), and HTTP-01-issuable sanList entries.
+*/}}
+{{- define "tls-lb.publicTLSMode" -}}
+{{- $mode := printf "%v" .Values.tlsLb.publicTLS.mode -}}
+{{- if not (has $mode (list "cds" "webpki" "acme")) -}}
+{{- fail (printf "tlsLb.publicTLS.mode must be cds, webpki, or acme, got: %s" $mode) -}}
+{{- end -}}
+{{- if and (eq $mode "webpki") (not .Values.tlsLb.publicTLS.secretName) -}}
+{{- fail "tlsLb.publicTLS.mode=webpki requires tlsLb.publicTLS.secretName" -}}
+{{- end -}}
+{{- if and (ne $mode "webpki") .Values.tlsLb.publicTLS.secretName -}}
+{{- fail (printf "tlsLb.publicTLS.secretName is set but tlsLb.publicTLS.mode is %q; set mode=webpki to serve the Secret, or clear secretName" $mode) -}}
+{{- end -}}
+{{- if eq $mode "acme" -}}
+{{- if not (or .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+{{- fail "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (kata.enabled=true or attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
+{{- end -}}
+{{- if .Values.kata.enabled -}}
+{{- fail "VALIDATION_ERROR kind=tlslb_acme_kata_port: tlsLb.publicTLS.mode=acme cannot render under kata.enabled: the guest exempts only tcp:8443 from the inbound mesh redirect (C8S_MESH_INBOUND_PASSTHROUGH), so the HTTP-01 challenge on :80 never reaches nginx. Use the node-CVM shape (attestationApi.cvmMode=node)" -}}
+{{- end -}}
+{{- range $s := (include "tls-lb.sanList" . | fromJsonArray) -}}
+{{- if contains "*" $s -}}
+{{- fail (printf "tlsLb.publicTLS.mode=acme cannot issue for wildcard san %q: HTTP-01 forbids wildcards" $s) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (not .Values.tlsLb.hostPort.enabled) (eq .Values.tlsLb.service.type "ClusterIP") -}}
+{{- fail "VALIDATION_ERROR kind=tlslb_acme_front_door: tlsLb.publicTLS.mode=acme needs an internet-reachable front door for the HTTP-01 challenge: set tlsLb.service.type=LoadBalancer (any LB implementation: cloud controller, MetalLB, kube-vip, ...) or tlsLb.hostPort.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{/*
+ACME constants shared by the acme sidecar args, the deployment mounts, the
+nginx :80 server, and the cert-path helpers below.
+*/}}
+{{- define "tls-lb.acmeCertDir" -}}/etc/c8s-acme-tls{{- end -}}
+{{- define "tls-lb.acmeChallengePort" -}}8402{{- end -}}
+{{- define "tls-lb.acmeHTTPPort" -}}8080{{- end -}}
+
+{{/*
+Path to the public-TLS certificate nginx serves: the publicTLS Secret
+(webpki), the sidecar-issued ACME leaf (acme), or the CDS-issued cert under
+tlsMountPath (cds).
 */}}
 {{- define "tls-lb.publicCertPath" -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- $mode := include "tls-lb.publicTLSMode" . -}}
+{{- if eq $mode "webpki" -}}
 {{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.certKey -}}
+{{- else if eq $mode "acme" -}}
+{{- printf "%s/cert.pem" (include "tls-lb.acmeCertDir" .) -}}
 {{- else -}}
 {{- printf "%s/cert.pem" .Values.tlsLb.tlsMountPath -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "tls-lb.publicKeyPath" -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- $mode := include "tls-lb.publicTLSMode" . -}}
+{{- if eq $mode "webpki" -}}
 {{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.keyKey -}}
+{{- else if eq $mode "acme" -}}
+{{- printf "%s/key.pem" (include "tls-lb.acmeCertDir" .) -}}
 {{- else -}}
 {{- printf "%s/key.pem" .Values.tlsLb.tlsMountPath -}}
 {{- end -}}
@@ -479,7 +530,7 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 {{- if .Values.tlsLb.discovery.enabled }}
 - --discovery-out={{ include "tls-lb.discoveryFilePath" . }}
 - --discovery-cds-cert-url={{ .Values.tlsLb.discovery.cdsCertPath }}
-- --discovery-public-tls-mode={{ ternary "webpki" "cds" (ne .Values.tlsLb.publicTLS.secretName "") }}
+- --discovery-public-tls-mode={{ include "tls-lb.publicTLSMode" . }}
 {{- if .Values.tlsLb.meshCA.expose }}
 - --discovery-mesh-ca-url={{ .Values.tlsLb.discovery.meshCAPath }}
 {{- end }}
@@ -545,7 +596,7 @@ list.
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}
+{{- if eq (include "tls-lb.publicTLSMode" .) "webpki" -}}
 {{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath) -}}
 {{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) -}}
 {{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicKeyPath" .)) -}}

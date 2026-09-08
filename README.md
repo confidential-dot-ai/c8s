@@ -74,11 +74,10 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   entire in-guest security stack.
 
 - **Container image and command-line allowlisting.** Every container is
-  enforced against a CDS-served allowlist with two layers: a floor of image
-  digests admitted by digest alone, and named workload entries that
-  additionally pin the command line each image may run with — and, in the
-  guest, the bind-mount destinations and environment variable names.
-  Enforced by an
+  enforced against a CDS-served allowlist of named workload entries, each
+  pinning the image digests a workload runs and the command line each may run
+  with — and, in the guest, the bind-mount destinations and environment
+  variable names. Enforced by an
   NRI plugin on the host under node-as-CVM, and by an in-guest
   `policy-monitor` under pod-as-CVM, where the host cannot tamper with it.
 
@@ -319,9 +318,10 @@ hardware, without trusting the operator's word for it.
 Browsers cannot inspect TLS certificates mid-handshake, so RA-TLS alone is
 not browser-verifiable. The [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js)
 npm package instead runs a challenge-response protocol: the client
-sends a fresh nonce, the TEE returns a hardware-signed attestation report
-binding that nonce and an ephemeral public key, and all further traffic flows
-over a post-quantum over-encrypted channel (ML-KEM) inside the regular TLS
+sends a fresh nonce and an X-Wing encapsulation key, the TEE returns a
+hardware-signed attestation report binding the complete key exchange in one
+round trip, and all further traffic flows over a post-quantum over-encrypted
+channel (X-Wing: X25519 + ML-KEM-768) inside the regular TLS
 session. A malicious TLS-terminating proxy in front of the real endpoint
 cannot forge it. The wire contract is
 [PROTOCOL.md](https://github.com/confidential-dot-ai/c8s-verify-js/blob/main/PROTOCOL.md).
@@ -426,7 +426,8 @@ c8s allowlist export --url "$TLS_LB" \
 c8s allowlist diff allowlist.json --url "$TLS_LB" \
   --measurements <tls-lb-launch-digest>
 
-# Writes are signed with the operator key
+# Writes are signed with the operator key. 'add' admits an image under any
+# command line; 'apply' or 'derive' pins one or grants secrets.
 c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
   --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
   --operator-key operator.key

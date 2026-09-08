@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -107,6 +108,17 @@ func runDaemon(ctx context.Context, cfg config) error {
 }
 
 func runNode(ctx context.Context, cfg config) error {
+	// A running kubelet creates <root>/pods before it starts any pod, so its
+	// absence means the flag does not name this node's kubelet root dir.
+	podsDir := filepath.Join(cfg.kubeletRoot, "pods")
+	fi, err := os.Stat(podsDir)
+	if err == nil && !fi.IsDir() {
+		err = fmt.Errorf("%s is not a directory", podsDir)
+	}
+	if err != nil {
+		return fmt.Errorf("--kubelet-root %q is not the kubelet's root dir on this node: %v", cfg.kubeletRoot, err)
+	}
+
 	opener := &Opener{Ops: SystemOps{}, Targets: KubeletTargets{Root: cfg.kubeletRoot}, MaxMounts: cfg.maxMounts}
 	srv := &Server{
 		Identity: PeerIdentity{},

@@ -15,7 +15,8 @@ set -euo pipefail
 : "${C8S_MEASUREMENTS:?pins the launch measurement of that endpoint}"
 : "${C8S_OPERATOR_KEY:?path to the operator EC key PEM}"
 
-# `default` is exempt from the node image's restricted PSA default, so a denial
+# The node image enforces the restricted PodSecurity standard in `default`,
+# so the probe declares a restricted-compliant securityContext and a denial
 # here is the image floor and not PodSecurity.
 ns=default
 pod=allowlist-probe
@@ -24,7 +25,9 @@ image=busybox:1.36
 al() { c8s allowlist "$@" --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS"; }
 
 probe() {
-  kubectl -n "$ns" run "$pod" --image="$image" --restart=Never --command -- sleep 300 >/dev/null
+  kubectl -n "$ns" run "$pod" --image="$image" --restart=Never \
+    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$pod"'","image":"'"$image"'","command":["sleep","300"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+    >/dev/null
 }
 
 digest=""

@@ -190,7 +190,7 @@ func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, types.VerifyResponse{
 		Result: types.VerificationResult{
-			Platform:        req.Platform,
+			Platform:        types.Platform(req.Platform),
 			SignatureValid:  verdict.SignatureValid,
 			ReportDataMatch: verdict.ReportDataMatch,
 			Claims:          verdict.Claims,

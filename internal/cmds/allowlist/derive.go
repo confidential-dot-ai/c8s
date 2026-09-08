@@ -88,15 +88,15 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 	return out, nil
 }
 
-func newWorkloadDeriveCmd(_ *options) *cobra.Command {
+func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
 	cmd := &cobra.Command{
 		Use:   "derive <name> <file|->",
-		Short: "Build a workload entry from a live Kubernetes object",
-		Long: `Emit a workload entry for <name> from a Pod, Deployment, StatefulSet or
-DaemonSet given as JSON in <file> (or stdin with '-'). Nothing is sent; pipe the
-result to 'workload apply'.
+		Short: "Build an entry from a live Kubernetes object",
+		Long: `Emit an entry for <name> from a Pod, Deployment, StatefulSet or DaemonSet
+given as JSON in <file> (or stdin with '-'). Nothing is sent; pipe the result to
+'apply'.
 
 Deriving from the live object keeps the entry from drifting away from what is
 actually running, and handles two things a hand-written entry usually gets

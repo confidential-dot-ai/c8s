@@ -62,12 +62,31 @@ func coreImages() map[string]string {
 	return m
 }
 
-// writeAllowlistFile writes a valid canonical allowlist document (schema + a
-// floor digest map) and returns its path.
+// anyWorkloads renders a digest -> image map as one any-argv entry per digest,
+// named "w-" plus the first 12 hex digits of the digest.
+func anyWorkloads(t *testing.T, digests map[string]string) map[string]pkgallowlist.Workload {
+	t.Helper()
+	out := make(map[string]pkgallowlist.Workload, len(digests))
+	for d, image := range digests {
+		out["w-"+d[len("sha256:"):][:12]] = pkgallowlist.Workload{
+			Label: image,
+			Containers: []pkgallowlist.Container{{
+				Digest:  mustDigest(t, d),
+				Image:   image,
+				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+			}},
+		}
+	}
+	return out
+}
+
+// writeAllowlistFile writes a valid allowlist document holding one any-argv
+// entry per digest and returns its path.
 func writeAllowlistFile(t *testing.T, dir string, digests map[string]string) string {
 	t.Helper()
 	path := filepath.Join(dir, "allowlist.json")
-	data, err := json.Marshal(map[string]any{"schema": pkgallowlist.Schema, "digests": digests})
+	data, err := json.Marshal(map[string]any{"schema": pkgallowlist.Schema, "workloads": anyWorkloads(t, digests)})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -98,7 +117,6 @@ func recordingCDS(t *testing.T) (url string, methods *[]string) {
 	t.Helper()
 	empty := pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   map[string]string{},
 		Workloads: map[string]pkgallowlist.Workload{},
 	}
 	body, err := empty.Canonical()
@@ -188,9 +206,8 @@ func TestMissingComponentsMatchesRealChartImages(t *testing.T) {
 }
 
 // TestUploadImageLabelsScansWorkloads proves the upload component guard scans
-// workload container images, not just the floor: an allowlist with an empty
-// floor but component images on its workload containers satisfies every
-// required component.
+// workload container images: component images on an entry's containers
+// satisfy every required component.
 func TestUploadImageLabelsScansWorkloads(t *testing.T) {
 	digits := "0123456789abcdef"
 	var ctrs []pkgallowlist.Container
@@ -203,33 +220,16 @@ func TestUploadImageLabelsScansWorkloads(t *testing.T) {
 	}
 	al := &pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   map[string]string{},
 		Workloads: map[string]pkgallowlist.Workload{"core": {Containers: ctrs}},
 	}
 	if got := missingComponents(uploadImageLabels(al), defaultRequiredComponents); len(got) != 0 {
 		t.Fatalf("workload container images should satisfy the guard, missing: %v", got)
 	}
 
-	// An allowlist with neither floor nor workload component images reports all.
+	// An allowlist with no component images reports all.
 	empty := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}
 	if got := missingComponents(uploadImageLabels(empty), defaultRequiredComponents); len(got) != len(defaultRequiredComponents) {
 		t.Fatalf("empty allowlist should be missing every component, got %v", got)
-	}
-}
-
-func TestComputeDiff(t *testing.T) {
-	current := map[string]string{digA: "img-a", digB: "img-b-old"}
-	desired := map[string]string{digB: "img-b-new", "sha256:" + repeat("c", 64): "img-c"}
-
-	d := computeDiff(current, desired)
-	if len(d.Added) != 1 || d.Added["sha256:"+repeat("c", 64)] != "img-c" {
-		t.Fatalf("added wrong: %#v", d.Added)
-	}
-	if len(d.Removed) != 1 || d.Removed[digA] != "img-a" {
-		t.Fatalf("removed wrong: %#v", d.Removed)
-	}
-	if len(d.Changed) != 1 || d.Changed[digB].From != "img-b-old" || d.Changed[digB].To != "img-b-new" {
-		t.Fatalf("changed wrong: %#v", d.Changed)
 	}
 }
 
@@ -280,11 +280,11 @@ func TestHTTPRefusedWithoutInsecure(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
 
-	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--operator-key", keyPath)
+	_, _, err := runCmd("delete", "app", "--url", url, "--operator-key", keyPath)
 	if err == nil {
 		t.Fatal("expected a plaintext http:// CDS URL to be refused without --insecure")
 	}
-	if contains(*methods, http.MethodPost) {
+	if contains(*methods, http.MethodDelete) {
 		t.Fatal("must not connect to a plaintext endpoint when --insecure is absent")
 	}
 }
@@ -314,31 +314,13 @@ func TestDiffNoChanges(t *testing.T) {
 	}
 }
 
-func TestAddDryRunMakesNoCall(t *testing.T) {
-	url, methods := recordingCDS(t)
-	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--dry-run")
-	if err != nil {
-		t.Fatalf("add --dry-run failed: %v", err)
-	}
-	if contains(*methods, http.MethodPost) {
-		t.Fatal("dry-run must not issue a POST")
-	}
-}
-
-func TestAddRejectsWildcardImage(t *testing.T) {
-	url, _ := recordingCDS(t)
-	if _, _, err := runCmd("add", digA, "*", "--url", url, "--insecure", "--dry-run"); err == nil {
-		t.Fatal("expected a bare-wildcard image to be rejected")
-	}
-}
-
 func TestWriteRequiresOperatorCredential(t *testing.T) {
 	url, _ := recordingCDS(t)
-	// No key and no env: a real (non-dry-run) add must fail before writing.
+	// No key and no env: a write must fail before reaching CDS.
 	t.Setenv(cdsconn.EnvOperatorKey, "")
-	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure")
+	_, _, err := runCmd("delete", "app", "--url", url, "--insecure")
 	if err == nil {
-		t.Fatal("expected add without an operator key to fail")
+		t.Fatal("expected a write without an operator key to fail")
 	}
 }
 
@@ -362,14 +344,6 @@ func TestSignerFallsBackToEnv(t *testing.T) {
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("env fallback should work, got %v", err)
 	}
-}
-
-func repeat(s string, n int) string {
-	out := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, s[0])
-	}
-	return string(out)
 }
 
 // stubVerify approves everything; the paths under test never reach it.
@@ -430,15 +404,14 @@ func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 // uploadImageLabels keys every gathered image under sequential synthetic keys.
 func TestUploadImageLabelsSequentialKeys(t *testing.T) {
 	al := &pkgallowlist.Allowlist{
-		Schema:  pkgallowlist.Schema,
-		Digests: map[string]string{digA: "floor-img"},
+		Schema: pkgallowlist.Schema,
 		Workloads: map[string]pkgallowlist.Workload{"web": {
 			Label:          "label-img",
 			InitContainers: []pkgallowlist.Container{{Digest: mustDigest(t, digB), Image: "init-img"}},
 			Containers:     []pkgallowlist.Container{{Digest: mustDigest(t, digC), Image: "main-img"}},
 		}},
 	}
-	want := map[string]string{"0": "floor-img", "1": "label-img", "2": "init-img", "3": "main-img"}
+	want := map[string]string{"0": "label-img", "1": "init-img", "2": "main-img"}
 	if got := uploadImageLabels(al); !maps.Equal(got, want) {
 		t.Fatalf("uploadImageLabels = %#v, want %#v", got, want)
 	}
@@ -460,7 +433,7 @@ func TestCtxPrefersCommandContext(t *testing.T) {
 // guard against accidental duplicate flag registration panics.
 func TestNewCmdWiring(t *testing.T) {
 	cmd := NewCmd()
-	want := []string{"list", "export", "diff", "add", "remove", "upload", "workload", "lint", "inspect-image"}
+	want := []string{"list", "get", "export", "diff", "add", "apply", "derive", "edit", "delete", "upload", "lint", "inspect-image"}
 	for _, name := range want {
 		found := false
 		for _, c := range cmd.Commands() {
@@ -479,13 +452,14 @@ func TestNewCmdWiring(t *testing.T) {
 func TestHelpDistinguishesCDSIssuedAndWebPKITLSLB(t *testing.T) {
 	cmd := NewCmd()
 	wantLong := `Read and mutate the image allowlist that CDS serves and nri-image-policy
-enforces on every node. The allowlist has two layers: a digest floor (images
-admitted by digest alone) and named workload entries under 'allowlist workload'
-(each pins an init/main container set with per-container argv and path policy).
+enforces on every node: named workload entries, each pinning an init/main
+container set with per-container argv and path policy. An image that may run
+with any command line is an entry whose command and args policy are both "any";
+'add' writes one.
 
-Reads (list, export, diff, workload list/get, lint, inspect-image) are
-unauthenticated. Writes (add, remove, upload, workload apply/edit/delete) are
-signed with an operator EC private key you supply to THIS CLI via --operator-key
+Reads (list, get, export, diff, lint, inspect-image) are unauthenticated. Writes
+(add, apply, edit, delete, upload) are signed with an operator EC private key
+you supply to THIS CLI via --operator-key
 (or C8S_OPERATOR_KEY). The private key never leaves the CLI — it signs a
 short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
@@ -516,29 +490,4 @@ allowlist").`
 			t.Errorf("--%s help = %q, want %q", name, flag.Usage, want)
 		}
 	}
-}
-
-// TestWorkloadCmdWiring pins the workload subcommand tree.
-func TestWorkloadCmdWiring(t *testing.T) {
-	cmd := NewCmd()
-	for _, c := range cmd.Commands() {
-		if c.Name() != "workload" {
-			continue
-		}
-		want := []string{"list", "get", "apply", "edit", "delete"}
-		for _, name := range want {
-			found := false
-			for _, sc := range c.Commands() {
-				if sc.Name() == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Errorf("workload subcommand %q not registered", name)
-			}
-		}
-		return
-	}
-	t.Fatal("workload command not registered")
 }

@@ -333,3 +333,97 @@ func TestAcquireIsRaceFree(t *testing.T) {
 		t.Fatalf("in-flight table leaked %d entries", len(s.inFlight))
 	}
 }
+
+// postClose posts the bodiless termination close.
+func (f *serverFixture) postClose(t *testing.T) *http.Response {
+	t.Helper()
+	resp, err := f.client.Post("http://volumed"+ClosePath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("post close: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestServerClosesTheCallingPodsVolumes(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d, want %d", got, http.StatusNoContent)
+	}
+	if f.opener.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", f.opener.Len())
+	}
+	if c, v, m := f.ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Fatalf("close left crypt=%d verity=%d mounts=%d behind", c, v, m)
+	}
+}
+
+// Closing with nothing open is success: teardown races pod deletion by design.
+func TestServerCloseWithNothingOpenIsANoOp(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
+	}
+}
+
+func TestServerRefusesUnresolvableCloseCaller(t *testing.T) {
+	f := newServerFixture(t, fakeIdentity{err: errors.New("no pod cgroup")})
+	if got := f.postClose(t).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+// switchIdentity is an Identity whose answer the test changes between requests.
+type switchIdentity struct {
+	mu  sync.Mutex
+	pod PodCgroup
+}
+
+func (s *switchIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pod, nil
+}
+
+func (s *switchIdentity) set(pod PodCgroup) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pod = pod
+}
+
+// A close releases the caller's own volumes and nobody else's: the pod comes
+// from peer credentials, and the request has no say.
+func TestServerCloseIsScopedToTheCallingPod(t *testing.T) {
+	ident := &switchIdentity{pod: testPod(testPodUID)}
+	f := newServerFixture(t, ident)
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	ident.set(testPod("00000000-0000-4000-8000-000000000000"))
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d", got)
+	}
+	if f.opener.Len() != 1 {
+		t.Fatalf("another pod's close took the mount: %d mounts, want 1", f.opener.Len())
+	}
+}
+
+// A restarted sidecar whose close already ran re-opens and mounts afresh.
+func TestServerReopensAfterClose(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d", got)
+	}
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("re-open: status %d", got)
+	}
+	if f.opener.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want 1", f.opener.Len())
+	}
+}

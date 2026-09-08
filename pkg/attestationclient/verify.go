@@ -5,11 +5,11 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -135,7 +135,7 @@ func (c Client) VerifyEvidence(ctx context.Context, evidence types.AttestationEv
 	switch evidence.Platform {
 	case string(types.PlatformSnp), string(types.PlatformAzSnp), string(types.PlatformGcpSnp):
 		return c.verifySNPEvidence(ctx, evidence, policy)
-	case string(types.PlatformTdx), string(types.PlatformAzTdx):
+	case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
 		return c.verifyTDXEvidence(ctx, evidence, policy)
 	default:
 		return types.VerifyResponse{}, fmt.Errorf("%w: %q", ErrUnsupportedPlatform, evidence.Platform)
@@ -203,9 +203,11 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 }
 
 // TDXPlatform reports whether platform names TDX-shaped evidence, i.e. carries
-// runtime measurement registers an RTMR pin can be enforced against.
+// runtime measurement registers an RTMR pin can be enforced against. The
+// family mapping is teetypes.Family, so a new TDX tag there (gcp-tdx today)
+// gets its RTMRs enforced instead of silently skipping the pin.
 func TDXPlatform(platform string) bool {
-	return platform == string(types.PlatformTdx) || platform == string(types.PlatformAzTdx)
+	return teetypes.NormalizePlatform(platform).IsTDX()
 }
 
 // EnforceRTMRs requires each pinned register to byte-equal the value the
@@ -219,28 +221,19 @@ func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
 	if len(pinned) == 0 {
 		return nil
 	}
-	reported, err := reportedRTMRs(resp)
-	if err != nil {
-		return err
-	}
-	return enforceRTMRsAgainst(reported, pinned)
+	return enforceRTMRsAgainst(reportedRTMRs(resp), pinned)
 }
 
 // reportedRTMRs reads the registers the verifier reported. Shared with the
-// entry matcher so the two cannot disagree about what evidence carries.
-func reportedRTMRs(resp types.VerifyResponse) ([4]string, error) {
-	var platform struct {
-		RTMR0 string `json:"rtmr_0"`
-		RTMR1 string `json:"rtmr_1"`
-		RTMR2 string `json:"rtmr_2"`
-		RTMR3 string `json:"rtmr_3"`
+// entry matcher so the two cannot disagree about what evidence carries. An
+// absent or non-string claim reads as "", which enforceRTMRsAgainst refuses
+// for any pinned register.
+func reportedRTMRs(resp types.VerifyResponse) [4]string {
+	var out [4]string
+	for i := range out {
+		out[i], _ = resp.Result.Claims.PlatformData[fmt.Sprintf("rtmr_%d", i)].(string)
 	}
-	if len(resp.Result.Claims.PlatformData) > 0 {
-		if err := json.Unmarshal(resp.Result.Claims.PlatformData, &platform); err != nil {
-			return [4]string{}, fmt.Errorf("%w: platform data unreadable: %w", ErrRTMRNotAllowed, err)
-		}
-	}
-	return [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}, nil
+	return out
 }
 
 func enforceRTMRsAgainst(reported [4]string, pinned map[int][]byte) error {

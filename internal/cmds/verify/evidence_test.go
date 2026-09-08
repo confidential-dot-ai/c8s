@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -102,25 +101,17 @@ func TestGatherFromRATLSCert(t *testing.T) {
 func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
-	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	sess := fakeSession(0x02)
 	// A genuine attest-pq body, so the only thing wrong in each case below is
 	// the one field the mutation corrupts.
 	id := mintEndpointIdentity(t)
 
 	mutate := func(field, value string) []byte {
 		var obj map[string]any
-		if err := json.Unmarshal(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m), &obj); err != nil {
+		if err := json.Unmarshal(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), sess), &obj); err != nil {
 			t.Fatal(err)
 		}
-		switch field {
-		case "nonce":
-			obj["nonce"] = value
-		case "x25519":
-			obj["session_pubkey"].(map[string]any)["x25519"] = value
-		case "mlkem768":
-			obj["session_pubkey"].(map[string]any)["mlkem768"] = value
-		}
+		obj[field] = value
 		data, err := json.Marshal(obj)
 		if err != nil {
 			t.Fatal(err)
@@ -128,34 +119,35 @@ func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
 		return data
 	}
 
-	if _, err := evidenceFromEndpointJSON([]byte("not json"), nonce, "t"); err == nil {
+	if _, err := evidenceFromEndpointJSON([]byte("not json"), nonce, sess.ek, "t"); err == nil {
 		t.Error("non-JSON must fail")
 	}
-	if _, err := evidenceFromEndpointJSON([]byte(`{"nonce":"AA"}`), nonce, "t"); err == nil {
+	if _, err := evidenceFromEndpointJSON([]byte(`{"nonce":"AA"}`), nonce, sess.ek, "t"); err == nil {
 		t.Error("missing evidence must fail")
 	}
-	if _, err := evidenceFromEndpointJSON(mutate("nonce", "!!!"), nonce, "t"); err == nil || !strings.Contains(err.Error(), "decode nonce") {
-		t.Errorf("bad nonce base64 should fail decoding, got %v", err)
-	}
-	if _, err := evidenceFromEndpointJSON(mutate("x25519", "!!!"), nonce, "t"); err == nil || !strings.Contains(err.Error(), "x25519") {
-		t.Errorf("bad x25519 base64 should fail decoding, got %v", err)
-	}
-	if _, err := evidenceFromEndpointJSON(mutate("mlkem768", "!!!"), nonce, "t"); err == nil || !strings.Contains(err.Error(), "mlkem768") {
-		t.Errorf("bad mlkem768 base64 should fail decoding, got %v", err)
+	// "!!!" is outside the base64url alphabet in every position.
+	for field, want := range map[string]string{
+		"nonce":      "decode nonce",
+		"xwing_ek":   "decode xwing_ek",
+		"xwing_ct":   "decode xwing_ct",
+		"session_id": "decode session_id",
+	} {
+		if _, err := evidenceFromEndpointJSON(mutate(field, "!!!"), nonce, sess.ek, "t"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("bad %s base64 should fail decoding, got %v", field, err)
+		}
 	}
 }
 
 func TestJoinAttestationURL(t *testing.T) {
-	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
-	got, err := joinAttestationURL("https://lb.example.com:443", nonce)
+	got, err := joinAttestationURL("https://lb.example.com:443")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "https://lb.example.com:443" + attestationPath + "?nonce=" + base64.RawURLEncoding.EncodeToString(nonce)
-	if got != want {
+	// The challenge travels in the POST body now, so the URL carries no query.
+	if want := "https://lb.example.com:443" + attestationPath; got != want {
 		t.Errorf("joined URL = %q, want %q", got, want)
 	}
-	if _, err := joinAttestationURL("https://\x7f", nonce); err == nil {
+	if _, err := joinAttestationURL("https://\x7f"); err == nil {
 		t.Error("unparseable base URL must fail")
 	}
 }

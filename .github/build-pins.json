@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "builds": {
+    "node-image": {
+      "confos_ref": "cffb512383ca0cfdc966e4a981319411e7840ba9",
+      "attestation_rs_ref": "384d72aab9ae74eb1fff5a238babc1628e8d8f77",
+      "mkosi_ref": "4736cd836108a97772142c461c49f1ddb4172348",
+      "mkosi_version": "v27"
+    },
+    "kata-guest": {
+      "confos_ref": "14e770f26f912d360f1a60a464145c3ee5615124",
+      "attestation_rs_ref": "384d72aab9ae74eb1fff5a238babc1628e8d8f77",
+      "mkosi_ref": "84af20892b61c8e177e391f997ded8b4cb5514f2",
+      "mkosi_version": "v26"
+    },
+    "kernel-snapshot": {
+      "confos_ref": "3e6f858f93e1b85c6d1473aa4a031fdefb387710",
+      "mkosi_ref": "84af20892b61c8e177e391f997ded8b4cb5514f2",
+      "mkosi_version": "v26"
+    }
+  }
+}

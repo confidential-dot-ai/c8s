@@ -16,7 +16,6 @@ package ratlsmesh
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -324,7 +323,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	// authenticate it by hardware attestation, not by SAN/hostname. The
 	// CDS-issued upgrade cert carries no SAN either; its CN binds the pod IP
 	// (see cdsclient.Client.createCSR).
-	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+	runtime, err := newMeshRuntime(&ratls.ServerConfig{
 		Platform:        c.platform,
 		AttestFunc:      attestFunc,
 		CertTTL:         c.certTTL,
@@ -332,93 +331,10 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		DynamicCACert:   true,
 		RotationTimeout: c.rotationTimeout,
 		Logger:          logger,
-	})
+	}, logger, 0)
 	if err != nil {
-		return fmt.Errorf("in-guest: create server TLS config: %w", err)
+		return fmt.Errorf("in-guest: %w", err)
 	}
-	clientTLS, clientCertMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:          meshPolicy,
-		Platform:        c.platform,
-		AttestFunc:      attestFunc,
-		DynamicCACert:   true,
-		CertTTL:         c.certTTL,
-		RotationTimeout: c.rotationTimeout,
-		Logger:          logger,
-	})
-	if err != nil {
-		return fmt.Errorf("in-guest: create client TLS config: %w", err)
-	}
-
-	m := newMetrics()
-	m.certModeConfigured.Store(1)
-	if len(meshPolicy.Measurements) > 0 {
-		m.measurementPinning.Set(1)
-	}
-
-	wrapVerify := func(orig func([][]byte, [][]*x509.Certificate) error) func([][]byte, [][]*x509.Certificate) error {
-		if orig == nil {
-			return nil
-		}
-		return func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
-			err := orig(rawCerts, chains)
-			if err != nil {
-				m.attestationFailures.Inc()
-			}
-			return err
-		}
-	}
-	serverTLS.VerifyPeerCertificate = wrapVerify(serverTLS.VerifyPeerCertificate)
-	clientTLS.VerifyPeerCertificate = wrapVerify(clientTLS.VerifyPeerCertificate)
-	serverCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	if clientCertMgr != nil {
-		clientCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	}
-
-	resolver := &inGuestResolver{podIP: normalizeIP(podIP)}
-	health := newHealthServer(m, serverCertMgr, clientCertMgr, 10, 5*time.Second, 10*time.Second)
-
-	proxy := &Proxy{
-		outboundAddr:      fmt.Sprintf(":%d", inGuestOutboundPort),
-		inboundAddr:       fmt.Sprintf(":%d", inGuestInboundPort),
-		serverTLS:         serverTLS,
-		clientTLS:         clientTLS,
-		nodeIP:            podIP,
-		inboundPort:       inGuestInboundPort,
-		resolver:          resolver,
-		origDstFunc:       defaultOrigDstFunc,
-		logger:            logger,
-		metrics:           m,
-		accessLog:         true,
-		dialTimeout:       c.dialTimeout,
-		tlsDialTimeout:    c.tlsDialTimeout,
-		destHeaderTimeout: c.destHeaderTimeout,
-		drainTimeout:      c.drainTimeout,
-		keepAlive:         c.keepAlive,
-		maxDestHeaderSize: 256,
-		pipeBufferSize:    32768,
-		bufPool:           newBufPool(32768),
-		onReady: func() {
-			warmupCtx, cancel := context.WithTimeout(ctx, 2*c.rotationTimeout)
-			defer cancel()
-			if err := serverCertMgr.WarmUp(warmupCtx); err != nil {
-				logger.Error("server certificate warm-up failed", "error", err)
-			}
-			if clientCertMgr != nil {
-				if err := clientCertMgr.WarmUp(warmupCtx); err != nil {
-					logger.Error("client certificate warm-up failed", "error", err)
-				}
-			}
-			health.ready.Store(true)
-		},
-		onShutdown: func() { health.ready.Store(false) },
-	}
-
-	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", inGuestHealthPort), nil); err != nil {
-			logger.Error("health server error", "error", err)
-		}
-	}()
-
 	cdsCfg := &cdsclient.Config{
 		CDSURL:            c.cdsURL,
 		AttestationApiURL: c.attestationServiceURL,
@@ -430,43 +346,53 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		CDSMeasurements:   cdsPins.Measurements,
 		CDSRTMRs:          cdsPins.RTMRs,
 	}
-	// A provider-construction failure (config validation) is logged and the
-	// mesh keeps serving self-signed certs; it never blocks startup.
-	if provider, err := cdsclient.NewProvider(cdsCfg, logger); err != nil {
-		logger.Error("in-guest cds provider creation failed", "error", err)
-	} else {
-		go cdsUpgrade{
-			logger:          logger,
-			logPrefix:       "in-guest cds",
-			provider:        provider,
-			retryBackoff:    c.cdsRetryBackoff,
-			retryMaxBackoff: c.cdsRetryMaxBackoff,
-			opTimeout:       c.cdsOpTimeout,
-			serverCertMgr:   serverCertMgr,
-			clientCertMgr:   clientCertMgr,
-			metrics:         m,
-		}.run(ctx)
-
-		go caBundleRefresh{
-			logger:        logger,
-			logPrefix:     "in-guest cds",
-			provider:      provider,
-			interval:      c.caPollInterval,
-			opTimeout:     c.cdsOpTimeout,
-			serverCertMgr: serverCertMgr,
-			clientCertMgr: clientCertMgr,
-		}.run(ctx)
+	if err := runtime.run(ctx, guestMesh{c: c, podIP: podIP, cds: cdsCfg}); err != nil {
+		return fmt.Errorf("in-guest proxy: %w", err)
 	}
+	return nil
+}
 
+type guestMesh struct {
+	c     *inGuestConfig
+	podIP string
+	cds   *cdsclient.Config
+}
+
+func (e guestMesh) configure(r *meshRuntime) *Proxy {
+	c, podIP := e.c, e.podIP
+	r.metrics.certModeConfigured.Store(1)
+	r.health = newHealthServer(r.metrics, r.serverCertMgr, r.clientCertMgr, 10, 5*time.Second, 10*time.Second)
+	r.healthPort = inGuestHealthPort
+	resolver := &inGuestResolver{podIP: normalizeIP(podIP)}
+	return &Proxy{
+		outboundAddr:      fmt.Sprintf(":%d", inGuestOutboundPort),
+		inboundAddr:       fmt.Sprintf(":%d", inGuestInboundPort),
+		nodeIP:            podIP,
+		inboundPort:       inGuestInboundPort,
+		resolver:          resolver,
+		accessLog:         true,
+		dialTimeout:       c.dialTimeout,
+		tlsDialTimeout:    c.tlsDialTimeout,
+		destHeaderTimeout: c.destHeaderTimeout,
+		drainTimeout:      c.drainTimeout,
+		keepAlive:         c.keepAlive,
+		maxDestHeaderSize: 256,
+		pipeBufferSize:    32768,
+	}
+}
+
+func (e guestMesh) start(ctx context.Context, r *meshRuntime) {
+	c := e.c
+	r.startCDS(ctx, e.cds, cdsUpgrade{
+		logPrefix: "in-guest cds", retryBackoff: c.cdsRetryBackoff,
+		retryMaxBackoff: c.cdsRetryMaxBackoff, opTimeout: c.cdsOpTimeout,
+	}, c.caPollInterval)
+	logger, proxy := r.logger, r.proxy
 	logger.Info("ratls-mesh in-guest listening",
 		"outbound", proxy.outboundAddr,
 		"inbound", proxy.inboundAddr,
 		"health", inGuestHealthPort,
 	)
-	if err := proxy.Run(ctx); err != nil {
-		return fmt.Errorf("in-guest proxy: %w", err)
-	}
-	return nil
 }
 
 // inGuestVerifyPins parses the env-delivered identity pins into the mesh

@@ -181,6 +181,9 @@ jobs:
   images:
     name: Docker (${{ matrix.binary }})
     runs-on: ubuntu-latest
+    # A build here is under a minute; a wedged registry or apt mirror
+    # must not hold the job for hours.
+    timeout-minutes: 30
     needs: [changes, go-modules]
     if: needs.changes.outputs.has_images == 'true'
     strategy:
@@ -234,14 +237,21 @@ jobs:
           # `latest`.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # GHA layer caching. ignore-error: a cache-service blip during the
-          # export must not fail a build that already succeeded.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          # Layer cache rides inside the pushed :main image (inline), not
+          # the Actions cache: exporting every layer there filled a third
+          # of the repository's 10 GB cap and evicted the small caches
+          # image builds depend on (c8s-image.yml, apt-debs). The only
+          # layers that can hit are the apt-get installs that precede the
+          # binary COPY, and sharing those is what matters: the release
+          # rebuild in semver-tag.yml resolves the same packages as the
+          # image CI scanned instead of whatever the mirror holds later.
+          # PR runs read :main and, not pushing, write nothing.
+          cache-from: type=registry,ref=${{ matrix.image }}:main
+          cache-to: type=inline
 
       - name: Scan Docker image
         id: container-scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: ${{ steps.meta.outputs.json != '' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}:ci', matrix.image) }}
           fail-build: false

@@ -26,16 +26,13 @@ jobs:
         with:
           path: c8s
 
-      - name: Read pins from c8s-image.yml
-        # Single source of truth for the confos/attestation-rs/mkosi pins.
+      - name: Read node-image pins
         id: pins
         run: |
-          set -euo pipefail
-          w=c8s/.github/workflows/c8s-image.yml
-          confos=$(grep -oE "inputs.confos_ref \|\| '[0-9a-f]{40}'" "$w" | grep -oE "[0-9a-f]{40}")
-          attest=$(grep -oE 'ATTESTATION_RS_REF: "[0-9a-f]{40}"' "$w" | grep -oE "[0-9a-f]{40}")
-          mkosi=$(grep -A2 "actions/setup-mkosi" "$w" | grep -oE "ref: [0-9a-f]{40}" | grep -oE "[0-9a-f]{40}")
-          for v in confos attest mkosi; do test -n "${!v}"; echo "$v=${!v}" >> "$GITHUB_OUTPUT"; done
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain node-image \
+            --format github-output >> "$GITHUB_OUTPUT"
 
       - name: Checkout attestation-rs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,11 +67,9 @@ jobs:
       - name: Install build deps
         # Same snapshot-pinned toolchain as c8s-image (confos#36): the A/B
         # verdicts only describe the real pipeline if the host debs match.
-        timeout-minutes: 10
-        run: |
-          confidential-os-builder/bin/host-deps \
-            systemd-container ovmf cpio acpica-tools \
-            libclang-dev clang libtss2-dev
+        # Same bound and retry as c8s-image.yml, for the reason given there.
+        timeout-minutes: 30
+        run: bash c8s/.github/scripts/host-deps.sh
 
       - name: Setup ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1

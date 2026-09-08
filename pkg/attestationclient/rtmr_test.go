@@ -2,7 +2,6 @@ package attestationclient
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,16 +24,15 @@ func rtmrBytes(t *testing.T, b byte) []byte {
 
 func respWithRTMRs(t *testing.T, platform map[string]string) types.VerifyResponse {
 	t.Helper()
-	var raw json.RawMessage
+	var pd map[string]any
 	if platform != nil {
-		b, err := json.Marshal(platform)
-		if err != nil {
-			t.Fatal(err)
+		pd = make(map[string]any, len(platform))
+		for k, v := range platform {
+			pd[k] = v
 		}
-		raw = b
 	}
 	return types.VerifyResponse{Result: types.VerificationResult{
-		Claims: types.Claims{PlatformData: raw},
+		Claims: types.Claims{PlatformData: pd},
 	}}
 }
 

@@ -29,9 +29,10 @@ import (
 )
 
 // attestationPath is the LB's explicit attest-pq endpoint for nonce-bound
-// attestation evidence (GET ?nonce=<b64url>), per c8s-verify-js PROTOCOL.md.
-// There is no alias for the retired /attestation path and no fallback to
-// attest-lb: a response must carry the attest-pq binding identifier.
+// attestation evidence (client-first POST {nonce, xwing_ek}), per
+// c8s-verify-js PROTOCOL.md. There is no alias for the retired /attestation
+// path and no fallback to attest-lb: a response must carry the attest-pq
+// binding identifier.
 const attestationPath = "/.well-known/c8s/attest-pq"
 
 // nonceSize is the verifier challenge length (bytes) for the endpoint flow.
@@ -127,15 +128,15 @@ func platformOrDefault(p string) string {
 // nonce, session keys, served mesh chain, and identity proof (which together
 // derive and authenticate the REPORTDATA binding) are parsed here.
 type attestationResponse struct {
-	Version       string          `json:"version"`
-	Platform      string          `json:"platform"`
-	Nonce         string          `json:"nonce"`
-	Evidence      json.RawMessage `json:"evidence"`
-	CDSCertPEM    string          `json:"cds_cert_pem"`
-	SessionPubkey struct {
-		X25519   string `json:"x25519"`
-		Mlkem768 string `json:"mlkem768"`
-	} `json:"session_pubkey"`
+	Version       string                   `json:"version"`
+	Platform      string                   `json:"platform"`
+	Nonce         string                   `json:"nonce"`
+	Evidence      json.RawMessage          `json:"evidence"`
+	CDSCertPEM    string                   `json:"cds_cert_pem"`
+	FrontDoorMode types.FrontDoorMode      `json:"front_door_mode"`
+	XWingEK       string                   `json:"xwing_ek"`
+	XWingCT       string                   `json:"xwing_ct"`
+	SessionID     string                   `json:"session_id"`
 	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
 }
 
@@ -284,44 +285,59 @@ func insecureClient(serverName string, timeout time.Duration) *http.Client {
 	}}
 }
 
-// gatherFromEndpoint fetches nonce-bound evidence from the attestation endpoint.
-// It generates a fresh challenge, requires the response to echo it, and binds
-// REPORTDATA to the attested session keys + nonce (a freshness proof).
+// gatherFromEndpoint fetches nonce-bound evidence from the attestation
+// endpoint, client-first: it generates a fresh challenge and a throwaway
+// X-Wing keypair, POSTs both, requires the response to echo them, and binds
+// REPORTDATA to the complete key exchange + session id + nonce (a freshness
+// proof). The keypair is discarded — this verifier never opens the channel.
 func gatherFromEndpoint(ctx context.Context, base, serverName string, timeout time.Duration) (*evidence, error) {
 	nonce := make([]byte, nonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	endpoint, err := joinAttestationURL(base, nonce)
+	clientKey, err := overenc.GenerateClientKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate X-Wing key: %w", err)
+	}
+	endpoint, err := joinAttestationURL(base)
 	if err != nil {
 		return nil, err
+	}
+	body, err := json.Marshal(types.AttestPQRequest{
+		Nonce:   base64.RawURLEncoding.EncodeToString(nonce),
+		XWingEK: base64.RawURLEncoding.EncodeToString(clientKey.EncapsulationKey()),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal attest-pq request: %w", err)
 	}
 
 	client := insecureClient(serverName, timeout)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, &connectError{err: fmt.Errorf("GET %s: %w", endpoint, err)}
+		return nil, &connectError{err: fmt.Errorf("POST %s: %w", endpoint, err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, &connectError{err: fmt.Errorf("GET %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))}
+		return nil, &connectError{err: fmt.Errorf("POST %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, &connectError{err: fmt.Errorf("read response: %w", err)}
 	}
-	return evidenceFromEndpointJSON(data, nonce, fmt.Sprintf("attestation endpoint %s", endpoint))
+	return evidenceFromEndpointJSON(data, nonce, clientKey.EncapsulationKey(), fmt.Sprintf("attestation endpoint %s", endpoint))
 }
 
 // evidenceFromEndpointJSON parses an attestation response. When expectNonce is
-// non-nil (live fetch) the response must echo it; when nil (from-file) the
-// response's own nonce is used and the result is not a freshness proof.
-func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidence, error) {
+// non-nil (live fetch) the response must echo it and expectEK (the client's
+// X-Wing encapsulation key); when nil (from-file) the response's own echoed
+// values are used and the result is not a freshness proof.
+func evidenceFromEndpointJSON(data, expectNonce, expectEK []byte, source string) (*evidence, error) {
 	var r attestationResponse
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("parse attestation response: %w", err)
@@ -349,16 +365,23 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		fresh = true
 	}
 
-	x25519, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.SessionPubkey.X25519, "="))
+	xwingEK, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.XWingEK, "="))
 	if err != nil {
-		return nil, fmt.Errorf("decode session x25519 key: %w", err)
+		return nil, fmt.Errorf("decode xwing_ek: %w", err)
 	}
-	mlkem, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.SessionPubkey.Mlkem768, "="))
+	if expectEK != nil && !bytes.Equal(xwingEK, expectEK) {
+		return nil, &securityError{err: fmt.Errorf("response xwing_ek does not echo the key the client sent (possible replay or MITM)")}
+	}
+	xwingCT, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.XWingCT, "="))
 	if err != nil {
-		return nil, fmt.Errorf("decode session mlkem768 key: %w", err)
+		return nil, fmt.Errorf("decode xwing_ct: %w", err)
 	}
-	if len(x25519) == 0 && len(mlkem) == 0 {
-		return nil, fmt.Errorf("attestation response has no session_pubkey; pass --expected-report-data to verify bare evidence")
+	sessionID, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.SessionID, "="))
+	if err != nil {
+		return nil, fmt.Errorf("decode session_id: %w", err)
+	}
+	if len(xwingCT) == 0 {
+		return nil, fmt.Errorf("attestation response has no xwing_ct; pass --expected-report-data to verify bare evidence")
 	}
 
 	leaf, ca, err := committedMeshChain(r.CDSCertPEM, r.IdentityProof)
@@ -368,8 +391,7 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	// The transcript rejects wrong-size keys and nonces: report_data framing is
 	// length-prefixed, so a wrong-size field can never reproduce the served
 	// hash — refuse it here instead of failing report-data match downstream.
-	erd, err := overenc.IdentityTranscriptHash(
-		overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, leaf.Raw, ca.Raw)
+	erd, err := overenc.IdentityTranscriptHash(r.FrontDoorMode, xwingEK, xwingCT, sessionID, nonce, leaf.Raw, ca.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("compute identity transcript: %w", err)
 	}
@@ -397,7 +419,7 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
-		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		bindingNote:      "REPORTDATA binds the identity transcript: front-door mode + session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
 		frontDoor:        frontDoorNone,
@@ -534,7 +556,7 @@ func gatherFromFile(data []byte, overrideERD []byte, source string, trust leafTr
 		}
 		// fall through to full-response parsing if it wasn't bare evidence
 	}
-	return evidenceFromEndpointJSON(data, nil, source)
+	return evidenceFromEndpointJSON(data, nil, nil, source)
 }
 
 // evidenceFromBareJSON parses a bare {platform, evidence:{attestation_report,
@@ -559,15 +581,14 @@ func evidenceFromBareJSON(data []byte, erd []byte, source string) (*evidence, er
 	}, nil
 }
 
-// joinAttestationURL appends the well-known attestation path and nonce query to
-// a base URL (scheme + host[:port]).
-func joinAttestationURL(base string, nonce []byte) (string, error) {
+// joinAttestationURL appends the well-known attestation path to a base URL
+// (scheme + host[:port]). The challenge travels in the POST body.
+func joinAttestationURL(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("parse url %q: %w", base, err)
 	}
 	u.Path = attestationPath
-	u.RawQuery = "nonce=" + base64.RawURLEncoding.EncodeToString(nonce)
 	return u.String(), nil
 }
 

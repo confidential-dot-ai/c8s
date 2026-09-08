@@ -31,8 +31,10 @@ type Config struct {
 	ServerCACert string
 	// CertTTL is the lifetime of issued operator certs.
 	CertTTL time.Duration
-	// CertOrg / CertCN are the Kubernetes group / user the issued cert
-	// carries. v1: O=system:masters, CN=operator (cluster-admin).
+	// CertOrg / CertCN are the Kubernetes group / user the issued cert carries.
+	// Authorization is ordinary RBAC on that group: the node image's baked
+	// cred-release-rbac AddOn binds defaultCertOrg to cluster-admin. Revocation
+	// semantics are in docs/operator.md.
 	CertOrg string
 	CertCN  string
 }

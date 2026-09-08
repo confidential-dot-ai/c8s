@@ -29,6 +29,7 @@ withheld. */ -}}
 {{- fail "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload" -}}
 {{- end -}}
 {{- end -}}
+{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
@@ -89,6 +90,48 @@ spec:
       shareProcessNamespace: true
       initContainers:
         {{- include "tls-lb.getCertContainers" . | nindent 8 }}
+        {{- if eq $publicTLSMode "acme" }}
+        # Native sidecar (restartPolicy: Always): issues one multi-SAN ACME
+        # leaf for the sanList domains, answers HTTP-01 on loopback behind the
+        # :80 server, renews at 2/3 lifetime, and SIGHUPs nginx on install —
+        # which needs the shared PID namespace and the nginx uid, same as
+        # c8s-cert.
+        - name: acme
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          restartPolicy: Always
+          args:
+            - acme
+            - --domains={{ include "tls-lb.sanList" . | fromJsonArray | join "," }}
+            {{- with .Values.tlsLb.acme.email }}
+            - --acme-email={{ . }}
+            {{- end }}
+            {{- with .Values.tlsLb.acme.directoryURL }}
+            - --acme-directory-url={{ . }}
+            {{- end }}
+            - --challenge-port={{ include "tls-lb.acmeChallengePort" . }}
+            - --http-port={{ include "tls-lb.acmeHTTPPort" . }}
+            - --cert-dir={{ include "tls-lb.acmeCertDir" . }}
+          # nginx's config names the acme cert files, so nginx must not start
+          # before the bootstrap placeholder exists; regular containers wait
+          # for a native sidecar's startup probe. Probing cert.pem suffices:
+          # the sidecar writes key before cert. Exec probes are fine here:
+          # acme mode never renders under kata (no ExecProcessRequest denial).
+          startupProbe:
+            exec:
+              command: ["/c8s", "probe-file", "{{ include "tls-lb.acmeCertDir" . }}/cert.pem"]
+            periodSeconds: 1
+            failureThreshold: 60
+          volumeMounts:
+            - name: acme-tls
+              mountPath: {{ include "tls-lb.acmeCertDir" . }}
+          securityContext:
+            {{- include "c8s.getCertSecurityContext" (dict
+              "runAsUser" .Values.tlsLb.nginx.runAsUser
+              "runAsGroup" .Values.tlsLb.nginx.runAsGroup
+              "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot
+            ) | nindent 12 }}
+        {{- end }}
       containers:
         - name: nginx
           image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}
@@ -100,6 +143,16 @@ spec:
               hostPort: {{ .Values.tlsLb.hostPort.https | default 443 }}
               {{- end }}
               protocol: TCP
+            {{- if eq $publicTLSMode "acme" }}
+            {{- /* HTTP-01 arrives on public :80; hostPort follows the same
+            gating as :443. */}}
+            - name: http
+              containerPort: {{ include "tls-lb.acmeHTTPPort" . }}
+              {{- if .Values.tlsLb.hostPort.enabled }}
+              hostPort: 80
+              {{- end }}
+              protocol: TCP
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -148,9 +201,14 @@ spec:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
-            {{- if .Values.tlsLb.publicTLS.secretName }}
+            {{- if eq $publicTLSMode "webpki" }}
             - name: public-tls
               mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if eq $publicTLSMode "acme" }}
+            - name: acme-tls
+              mountPath: {{ include "tls-lb.acmeCertDir" . }}
               readOnly: true
             {{- end }}
             {{- if .Values.tlsLb.discovery.enabled }}
@@ -177,7 +235,7 @@ spec:
           args:
             - cds-attest
             {{- /* Loopback only: every endpoint this sidecar registers
-            (/healthz, /readyz, both attest routes, /handshake, /tunnel) sits on
+            (/healthz, /readyz, both attest routes, /tunnel) sits on
             one listener, so binding the pod IP would publish the whole surface
             with no NetworkPolicy in front of it. The readiness probe reaches
             /readyz through nginx instead (location = /readyz). */}}
@@ -186,22 +244,14 @@ spec:
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
             - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
-            # attest-lb transport trust rests on the serving key being TEE-held:
-            # a publicTLS Secret's key is host-visible, so that front door is
-            # attest-pq-only and the sidecar refuses attest-lb with
-            # unsupported_front_door.
-            {{- if .Values.tlsLb.publicTLS.secretName }}
-            - --front-door-mode=webpki
-            {{- else }}
-            - --front-door-mode=cds
-            {{- end }}
+            # attest-lb needs a TEE-held serving key (cds, acme); webpki's
+            # host-visible Secret key stays attest-pq-only.
+            - --front-door-mode={{ $publicTLSMode }}
             # Bind the *exact* leaf nginx presents on the wire (ssl_certificate =
             # publicCertPath), so the attest-lb binding (GET
             # /.well-known/c8s/attest-lb) commits report_data to the leaf DER a
-            # direct-TLS client actually sees. With the default (publicTLS
-            # unset) this is the mesh leaf at tlsMountPath/cert.pem; with a
-            # publicTLS secret it is that cert (mounted below, attest-pq-only
-            # per --front-door-mode above). Re-read per request, so get-cert
+            # direct-TLS client actually sees: the mesh leaf (cds), the Secret
+            # cert (webpki), or the ACME leaf (acme). Re-read per request, so
             # renewals are picked up.
             - --serving-cert-file={{ include "tls-lb.publicCertPath" . }}
             {{- if .Values.tlsLb.attest.expectedWorkload }}
@@ -209,7 +259,7 @@ spec:
             {{- end }}
             # The identity-bound PQ flow must use the TEE-held mesh
             # credential, never the optional publicTLS Secret: report_data
-            # commits the hybrid session key to this leaf and the sidecar
+            # commits the X-Wing key exchange to this leaf and the sidecar
             # proves possession with its matching private key.
             - --mesh-identity-cert-file={{ .Values.tlsLb.tlsMountPath }}/cert.pem
             - --mesh-identity-key-file={{ .Values.tlsLb.tlsMountPath }}/key.pem
@@ -267,11 +317,16 @@ spec:
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-            {{- if .Values.tlsLb.publicTLS.secretName }}
+            {{- if eq $publicTLSMode "webpki" }}
             # cds-attest reads the same public leaf nginx serves
             # (--serving-cert-file).
             - name: public-tls
               mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if eq $publicTLSMode "acme" }}
+            - name: acme-tls
+              mountPath: {{ include "tls-lb.acmeCertDir" . }}
               readOnly: true
             {{- end }}
           securityContext:
@@ -348,7 +403,7 @@ spec:
           configMap:
             name: {{ include "c8s.fullname" . }}-measurements
         {{- end }}
-        {{- if .Values.tlsLb.publicTLS.secretName }}
+        {{- if eq $publicTLSMode "webpki" }}
         - name: public-tls
           secret:
             secretName: {{ .Values.tlsLb.publicTLS.secretName }}
@@ -357,6 +412,15 @@ spec:
                 path: {{ .Values.tlsLb.publicTLS.certKey }}
               - key: {{ .Values.tlsLb.publicTLS.keyKey }}
                 path: {{ .Values.tlsLb.publicTLS.keyKey }}
+        {{- end }}
+        {{- if eq $publicTLSMode "acme" }}
+        # ACME key, cert, and account state. Memory-medium: TEE-protected and
+        # lost on pod recreation, so the sidecar re-issues (LE duplicate-cert
+        # limits apply; use the staging directoryURL for tests).
+        - name: acme-tls
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
         {{- end }}
         {{- if .Values.tlsLb.discovery.enabled }}
         - name: discovery

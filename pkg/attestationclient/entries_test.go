@@ -2,7 +2,6 @@ package attestationclient
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -33,11 +32,11 @@ func evidence(t *testing.T, digest string, rtmrs map[string]string) types.Verify
 	var resp types.VerifyResponse
 	resp.Result.Claims.LaunchDigest = digest
 	if rtmrs != nil {
-		raw, err := json.Marshal(rtmrs)
-		if err != nil {
-			t.Fatal(err)
+		pd := make(map[string]any, len(rtmrs))
+		for k, v := range rtmrs {
+			pd[k] = v
 		}
-		resp.Result.Claims.PlatformData = raw
+		resp.Result.Claims.PlatformData = pd
 	}
 	return resp
 }

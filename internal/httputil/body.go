@@ -3,8 +3,10 @@
 package httputil
 
 import (
-	"io"
+	"errors"
 	"net/http"
+
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 )
 
 // ReadCappedBody reads up to maxBytes from r.Body. On read failure it
@@ -12,13 +14,13 @@ import (
 // failure it returns (nil, false). On success it returns the body
 // bytes and true.
 func ReadCappedBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
-	if err != nil {
-		http.Error(w, "read request body", http.StatusBadRequest)
+	body, err := readutil.ReadAll(r.Body, maxBytes)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return nil, false
 	}
-	if int64(len(body)) > maxBytes {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+	if err != nil {
+		http.Error(w, "read request body", http.StatusBadRequest)
 		return nil, false
 	}
 	return body, true

@@ -37,6 +37,27 @@ for src in "$ngi/kernel/c8s.config" confos/kernel/dev.config; do
   fi
 done
 
+# CONFIG_MODULES=y is a c8s-only widening (the base kernel compiles modules
+# out, which is why confos's 99-kspp-hardening.conf omits the key). The
+# profile must therefore latch kernel.modules_disabled itself: the gpu
+# profile's latch is absent from the GPU-less composition.
+latch="$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-modules-latch.service"
+preset="$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset"
+if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
+  if ! grep -qF 'kernel.modules_disabled=1' "$latch"; then
+    echo "::error::$ngi/kernel/c8s.config sets CONFIG_MODULES=y, so $latch must set kernel.modules_disabled=1"
+    exit 1
+  fi
+  if ! grep -qx 'enable c8s-modules-latch.service' "$preset"; then
+    echo "::error::$preset must enable c8s-modules-latch.service; an unenabled latch never runs"
+    exit 1
+  fi
+  if ! grep -qx 'RequiredBy=rke2-server.service rke2-agent.service' "$latch"; then
+    echo "::error::$latch must be RequiredBy the rke2 pair so rke2 cannot start with modules still loadable"
+    exit 1
+  fi
+fi
+
 # The baked NRI floor is a template whose always_allow entries are
 # @-tokens the sync fills with ref-resolved digests; a hardcoded
 # sha256 would bake a stale digest the fail-closed floor can't
@@ -63,6 +84,23 @@ if [ -z "$rke2_pod_cidr" ] || [ "$rke2_pod_cidr" = "10.42.0.0/16" ]; then
 fi
 if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   echo "::error::c8s RKE2 cluster-cidr ($rke2_pod_cidr) must match Cilium IPAM ($cilium_pod_cidr)"
+  exit 1
+fi
+
+# The locked image must keep the kubelet debugging handlers off (no kubectl
+# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
+# turn them back on, and only through the sync-rendered drop-in.
+if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+  exit 1
+fi
+if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
+  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+  exit 1
+fi
+if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \
+   || ! grep -q 'SYNC_INPUTS/dev' "$ngi/c8s/mkosi.sync"; then
+  echo "::error::the dev sync-input must flow from $ngi/build (C8S_DEV) into mkosi.sync"
   exit 1
 fi
 
@@ -174,6 +212,38 @@ fi
 if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh" \
    || ! grep -qF 'at least 64G' "$ngi/README.md"; then
   echo "::error::scratch floor drifted: scratch-enforce.sh MIN_SECTORS (64G = 125000000 sectors) and the README's 'at least 64G' must move together"
+  exit 1
+fi
+
+# psa-config.yaml exempts only the platform namespaces that need privileged
+# pods, and the baked policy that stops tenants relabelling their namespaces
+# keeps naming `restricted`, denying, and failing closed.
+psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
+vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
+if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
+  echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
+  exit 1
+fi
+if ! grep -q 'enforce: "restricted"' "$psa"; then
+  echo "::error::$psa must default to enforce: restricted"
+  exit 1
+fi
+if ! grep -q "== 'restricted'" "$vap" || ! grep -q "== 'latest'" "$vap"; then
+  echo "::error::$vap must pin the enforce label to restricted and enforce-version to latest"
+  exit 1
+fi
+if ! grep -q 'failurePolicy: Fail' "$vap"; then
+  echo "::error::$vap must fail closed (failurePolicy: Fail)"
+  exit 1
+fi
+if ! grep -q 'resources: \["namespaces", "namespaces/status", "namespaces/finalize"\]' "$vap" \
+   || ! grep -q 'operations: \["CREATE", "UPDATE"\]' "$vap"; then
+  echo "::error::$vap must match namespace CREATE and UPDATE on the resource and its status/finalize subresources, which also carry labels"
+  exit 1
+fi
+if ! grep -q '^    - Deny$' "$vap"; then
+  echo "::error::$vap binding must deny, not warn or audit"
   exit 1
 fi
 

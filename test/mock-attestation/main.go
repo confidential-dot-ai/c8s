@@ -104,7 +104,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, types.VerifyResponse{
 		Result: types.VerificationResult{
-			Platform:        req.Platform,
+			Platform:        types.Platform(req.Platform),
 			SignatureValid:  true,
 			ReportDataMatch: match,
 			Claims: types.Claims{

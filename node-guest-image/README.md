@@ -39,6 +39,10 @@ Layout:
   contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
+  The locked image runs the kubelet with `enable-debugging-handlers=false`,
+  so `kubectl exec`, `attach`, `port-forward`, and `logs` fail for every
+  kubeconfig holder; `C8S_DEV=1` turns them back on (with the serial
+  autologin), at a different measurement.
 
 ## Launch requirements
 
@@ -74,7 +78,60 @@ The other disks are optional; each is owned by one unit under
   cluster; absent means single-node server (`rke2-role.service`).
 - label `opkeydata` — an ISO carrying the operator public key; its
   presence turns on attested credential release (`cred-release.service`,
-  see [operator.md]).
+  see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
+  issued certificate's group to `cluster-admin` through ordinary RBAC;
+  identity, TTL and revocation are documented in [operator.md].
+
+## Workload isolation
+
+Tenant pods run on the node's own kernel under runc, so what a pod may ask
+for is what stands between it and the measured host. The image enforces the
+restricted PodSecurity standard by default
+(`etc/rancher/rke2/psa-config.yaml`): no privileged pods, no host
+namespaces, no root user, no added capabilities, no unconfined seccomp or
+AppArmor. Only `kube-system` and `local-path-storage` are exempt; `default`
+is not.
+
+A namespace label can normally lower that level. The baked
+`psa-level-policy.yaml` AddOn denies an `enforce` label other than
+`restricted`, or an `enforce-version` other than `latest`, unless the
+caller is authorized to grant `podsecurityexemptions.confidential.ai` (verb
+`grant`), a virtual resource no default role includes. cluster-admin and
+system:masters pass; a tenant holding `admin` or `edit` in its own
+namespaces does not. The invariant therefore rests on tenancy: hand tenants
+namespace-scoped credentials, never cluster-admin, and the launch
+measurement vouches for the floor their pods run under. cluster-admin can
+delete the policy, and RKE2 does not recreate deleted AddOn objects.
+
+The floor covers namespaces without confidential workloads. In node mode
+the webhook mounts the node's inventory socket into every
+`confidential.ai/cw` pod as a read-only hostPath, which restricted (and
+baseline) forbids, so a namespace hosting confidential workloads is opened
+by the operator with the privileged label, as `c8s install` does for its
+release namespace. Inside such a namespace the chart's own admission
+policies (host namespaces, hostPort, the mesh UID) are the controls, and the
+sample workload in `samples/` is restricted-compliant on its own so it can
+move back under the floor when the socket no longer needs a hostPath.
+
+## Module loading
+
+`kernel/c8s.config` sets `CONFIG_MODULES=y`, which the confos base kernel
+compiles out. It is on for exactly two out-of-tree modules, `nvidia.ko` and
+`nvidia-uvm.ko` (see [MODULE-SIGNING.md](MODULE-SIGNING.md)); every symbol
+kubelet, containerd and Cilium need is `=y`, so nothing modprobes at runtime.
+
+Because the key exists on this kernel, the runtime lock has to be set here:
+confos's `99-kspp-hardening.conf` omits `kernel.modules_disabled` on the
+grounds that the base kernel has no such key. `c8s-modules-latch.service`
+sets it to 1 once boot-time loading is done, ordered after the gpu profile's
+`nvidia-modules-latch.service` and before the rke2 pair, which it is
+`RequiredBy`. The latch is one-way for the rest of the boot.
+
+The gpu profile ships a latch of its own, so on the canonical GPU build both
+run and the second rewrites a 1. This one also covers the GPU-less
+composition (`attest` + `c8s`, no `gpu`), where that unit is absent. The same
+split applies to `99-c8s-bpf.conf`: the c8s profile owns the runtime locks its
+own kernel fragment makes necessary.
 
 ## Troubleshooting
 
@@ -100,7 +157,8 @@ Migration state (see [#264] for the full plan):
    `c8s-ref`/`c8s-registry` sync inputs explicitly. The
    `node-guest-image lint` workflow is permanent: it carries the
    invariants that moved here from confos `bin/lint` (fragment supersets
-   vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
+   vs confos's gpu/dev fragments at the `node-image` confos pin in
+   `.github/build-pins.json`, the NRI
    floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
    pod-CIDR match), plus the cloud-init disable gate.
 2. The switch was gated on building the same c8s ref both ways (confos

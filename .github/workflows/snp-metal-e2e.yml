@@ -285,8 +285,8 @@ jobs:
             bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
             if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
             if [ "\$WOK" != "1" ]; then
-              \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
-              \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
+              \$K -n c8s-e2e-cw describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
+              \$K -n c8s-e2e-cw logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
               # csr_denied with "the inventory callback has no node addresses"
               # is CDS-side, and CERTLOG only shows the workload's half. With
               # cds.sandboxInventoryCIDRs unset CDS derives the bound from the

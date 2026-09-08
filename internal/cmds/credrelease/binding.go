@@ -126,10 +126,7 @@ func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte
 		return nil, fmt.Errorf("verify self-report: %w", err)
 	}
 
-	hostData, err := hex.DecodeString(verified.Result.Claims.InitData)
-	if err != nil {
-		return nil, fmt.Errorf("HOSTDATA claim is not hex: %w", err)
-	}
+	hostData := []byte(verified.Result.Claims.InitData)
 	// A TDX report leaking into this arm carries a 48-byte MRCONFIGID here
 	// and is refused by length, not silently truncated.
 	if len(hostData) != runtimemeasure.HostDataSize {

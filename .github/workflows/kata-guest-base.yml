@@ -80,14 +80,6 @@ env:
   # download + its cache key below, and is inherited by build.sh (whose own
   # KATA_VERSION default is just the local-build fallback — keep it in sync).
   KATA_VERSION: "3.30.0"
-  # confos ref the guest kernel is built against. Single source of truth: the
-  # checkout pins it and the kernel-output cache key below is scoped to it (a
-  # different confos => a potentially different kernel). Bump deliberately: a
-  # new pin means a new guest kernel and therefore a new SNP launch
-  # measurement, and the committed kernel/config-x86_64.snapshot lockfile must
-  # be refreshed in the same PR (kernel-snapshot.yml produces it).
-  CONFOS_REF: "14e770f26f912d360f1a60a464145c3ee5615124" # v0.4.2 — apt pockets snapshot-pinned by URI, mirror-guarded (confos#96); rolls the kata kernel measurement once
-  ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA; rolls the SNP launch measurement
 
 jobs:
   build:
@@ -146,17 +138,30 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
 
+      - name: Load measured-build pins
+        id: pins
+        run: |
+          set -euo pipefail
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain kata-guest \
+            --format github-env >> "$GITHUB_ENV"
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain kata-guest \
+            --format github-output >> "$GITHUB_OUTPUT"
+
       - name: Checkout attestation-rs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: confidential-dot-ai/attestation-rs
-          ref: ${{ env.ATTESTATION_RS_REF }}
+          ref: ${{ steps.pins.outputs.attest }}
           path: attestation-rs
 
       - name: Record the resolved attestation-rs revision
         id: attestation-revision
-        # The checkout floats on main; the manifest records what it resolved to.
+        # Record the exact commit Git resolved for build provenance.
         run: |
           set -euo pipefail
 
@@ -165,12 +170,12 @@ jobs:
           echo "sha=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Checkout confidential-os-builder
-        # CONFOS_REF above is the single source of truth for the ref.
+        # The kata-guest manifest entry is the single source of truth.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: confidential-dot-ai/confidential-os-builder
-          ref: ${{ env.CONFOS_REF }}
+          ref: ${{ steps.pins.outputs.confos }}
           path: confidential-os-builder
 
       # --- Build the in-guest binaries ---------------------------------
@@ -220,7 +225,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attestation-rs/target/release/attestation-api
-          key: ${{ runner.os }}-attestation-api-${{ env.ATTESTATION_RS_REF }}-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**') }}
+          key: ${{ runner.os }}-attestation-api-${{ steps.pins.outputs.attest }}-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**') }}
 
       # attestation-api links tss-esapi-sys, whose build.rs resolves the TPM2-TSS
       # system library via pkg-config (tss2-sys.pc, shipped by libtss2-dev) for
@@ -258,12 +263,14 @@ jobs:
       # The mkosi/systemd-container/uv steps below are confos's kernel-
       # builder sandbox deps.
 
-      - name: Setup uv (mkosi v26 toolchain)
+      - name: Setup uv (mkosi toolchain)
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Setup mkosi
-        # Keep in lockstep with confidential-os-builder/.github/workflows/base.yml.
-        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+        # Local action accepts the exact ref resolved from the pin manifest.
+        uses: ./c8s/.github/actions/setup-mkosi
+        with:
+          ref: ${{ steps.pins.outputs.mkosi }}
 
       - name: Install systemd-container (mkosi sandbox dep)
         run: sudo apt-get update && sudo apt-get install -y systemd-container
@@ -439,9 +446,9 @@ jobs:
           path: |
             confidential-os-builder/output/kernel
             confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
           restore-keys: |
-            ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-
+            ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-
 
       # Cache confos's mkosi kernel-builder tools tree (build.sh Step 1 →
       # `confos kernel` Step 0a). The tools tree is the only part of this job
@@ -463,17 +470,16 @@ jobs:
       #
       # Key: the mkosi.conf hash — the exact digest confos stamps the tree
       # with (the snapshot mirror URL and package list are both in that file)
-      # — plus a mkosi version literal, because the stamp only covers the
-      # conf while the tree is built by whatever mkosi the Setup step
-      # installs. Keep "mkosi-v26" in lockstep with the Setup mkosi step
-      # above. No restore-keys: a prefix match could only restore a
+      # — plus the exact mkosi ref from the manifest, because the stamp only
+      # covers the conf while the tree is built by whatever mkosi the Setup
+      # step installs. No restore-keys: a prefix match could only restore a
       # stamp-mismatched tree that confos would rebuild anyway.
       - name: Restore kernel-builder tools tree
         id: tools-tree-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ runner.os }}-confos-tools-tree-mkosi-v26-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
+          key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ steps.pins.outputs.mkosi }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
 
       - name: Unpack kernel-builder tools tree
         if: steps.tools-tree-cache.outputs.cache-hit == 'true'
@@ -482,24 +488,9 @@ jobs:
             -xpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
             -C confidential-os-builder/mkosi/kernel-builder
 
-      # kata osbuilder's rootfs-builder Dockerfile fails its first RUN with
-      # "apparmor failed to apply profile: ... /proc/thread-self/attr/apparmor/
-      # exec: no such file or directory" on newer ubuntu runners. kata's own
-      # rootfs.sh already adds --security-opt apparmor=unconfined to its
-      # `docker run` (rootfs-builder/rootfs.sh ~L335) but not to its
-      # `docker build`, and exposes no env hook to inject one. Disable
-      # apparmor on the runner before invoking osbuilder.
-      #
-      # NOTE: on the self-hosted `the-machine` runner this is NOT bounded to a
-      # single ephemeral job the way it was on a throwaway GitHub-hosted VM —
-      # the host persists across jobs, so leaving AppArmor torn down would
-      # weaken every later workload on it. The "Re-enable AppArmor" step below
-      # (if: always()) restores it once the build is done or has failed.
-      - name: Disable AppArmor for kata osbuilder docker build
-        run: |
-          sudo systemctl stop apparmor.service || true
-          sudo aa-teardown || true
-          sudo systemctl restart docker
+      # Docker/AppArmor compatibility on the persistent `the-machine` runner
+      # is a provisioning invariant. CI deliberately never tears down AppArmor
+      # or changes host security policy: cancellation cannot guarantee repair.
 
       - name: Build kata-guest-base image (confos kernel + kata osbuilder)
         working-directory: c8s/kata-guest-base
@@ -528,7 +519,7 @@ jobs:
           REPRO_CRYPTSETUP_VERSION: "2.7.0"
           # Build provenance, recorded in manifest.json inputs (additive, v2).
           PROV_C8S_REF: ${{ github.event.workflow_run.head_sha || github.sha }}
-          PROV_CONFOS_REF: ${{ env.CONFOS_REF }}
+          PROV_CONFOS_REF: ${{ steps.pins.outputs.confos }}
           PROV_ATTESTATION_RS_REF: ${{ steps.attestation-revision.outputs.sha }}
           # GPU variants are mandatory in CI. build.sh Step 6 grafts the
           # NVIDIA payload from the staged kata-static artifacts
@@ -536,17 +527,6 @@ jobs:
           # the staging step above) — no /opt/kata needed on the runner host.
           BUILD_NVIDIA: "1"
         run: ./scripts/build.sh
-
-      # Restore the AppArmor posture torn down above. if: always() so it runs
-      # whether the build succeeded or failed — on the persistent self-hosted
-      # runner we must not leave the host with AppArmor disabled for the next
-      # job. Best-effort (|| true): the worst case is a stale teardown that the
-      # next run's disable step would redo anyway.
-      - name: Re-enable AppArmor
-        if: always()
-        run: |
-          sudo systemctl start apparmor.service || true
-          sudo systemctl restart docker || true
 
       # Save the guest kernel build even when a LATER step failed — the kernel
       # is Step 1/5 of build.sh, so an osbuilder/rootfs/publish failure (the
@@ -585,7 +565,7 @@ jobs:
           path: |
             confidential-os-builder/output/kernel
             confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ env.CONFOS_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
 
       # Publish the resolved kernel-config snapshot build.sh wrote in Step 1
       # (confos's required+hardening baseline + our container.config, merged) as

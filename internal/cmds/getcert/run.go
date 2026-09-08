@@ -81,8 +81,7 @@ type config struct {
 // the control plane cannot redirect).
 var inventoryEndpoint = workloadclaims.InventoryEndpoint
 
-// procRoot is the procfs mount findNginxMasterPID scans. It is a package
-// variable only so tests can substitute a fake /proc tree.
+// procRoot is the procfs mount used to find nginx; tests substitute a fake tree.
 var procRoot = "/proc"
 
 var (
@@ -128,7 +127,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
-	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys)")
+	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM (reused on restart if already present); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
@@ -143,7 +142,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryOutPath, "discovery-out", "", "Path to write JSON discovery metadata for the issued certificate and attestation evidence")
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
-	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
+	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds, webpki, or acme)")
 	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM, policy-monitor in the kata guest (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
 	flags.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory request")
@@ -219,6 +218,9 @@ func run(cfg config) error {
 	}
 
 	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
+		return err
+	}
+	if err := requireKeyOutRAMBacked(cfg.KeyOutPath); err != nil {
 		return err
 	}
 	slog.Debug("output paths validated")
@@ -360,7 +362,7 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				unnamedRuns++
 			}
 			if cfg.ReloadNginx {
-				if err := reloadNginx(); err != nil {
+				if err := cmdsutil.ReloadNginx(procRoot, slog.Default()); err != nil {
 					slog.Warn("certificate renewed but nginx reload failed", "error", err)
 				}
 			}
@@ -376,7 +378,7 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				continue
 			}
 			slog.Info("watched file changed, reloading nginx")
-			if err := reloadNginx(); err != nil {
+			if err := cmdsutil.ReloadNginx(procRoot, slog.Default()); err != nil {
 				slog.Warn("watched file changed but nginx reload failed", "error", err)
 			}
 		}
@@ -616,58 +618,6 @@ func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, no
 	return raw, nil
 }
 
-// reloadNginx sends SIGHUP to the nginx master process to reload certs.
-// Requires shareProcessNamespace: true in the pod spec. Walks /proc directly
-// instead of shelling out to pgrep so this works in distroless images.
-func reloadNginx() error {
-	pid, err := findNginxMasterPID()
-	if err != nil {
-		return err
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("find process %d: %w", pid, err)
-	}
-	if err := proc.Signal(syscall.SIGHUP); err != nil {
-		return fmt.Errorf("SIGHUP nginx (pid %d): %w", pid, err)
-	}
-	slog.Info("sent SIGHUP to nginx", "pid", pid)
-	return nil
-}
-
-// findNginxMasterPID scans /proc for the nginx master process.
-// Match: /proc/<pid>/comm == "nginx" AND cmdline contains "master".
-func findNginxMasterPID() (int, error) {
-	entries, err := os.ReadDir(procRoot)
-	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", procRoot, err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		comm, err := os.ReadFile(procRoot + "/" + e.Name() + "/comm")
-		if err != nil || strings.TrimSpace(string(comm)) != "nginx" {
-			continue
-		}
-		cmdline, err := os.ReadFile(procRoot + "/" + e.Name() + "/cmdline")
-		if err != nil {
-			continue
-		}
-		// /proc/<pid>/cmdline is NUL-separated; nginx master argv[0] is
-		// "nginx: master process ...".
-		if !strings.Contains(string(cmdline), "master") {
-			continue
-		}
-		return pid, nil
-	}
-	return 0, fmt.Errorf("no nginx master process found")
-}
-
 // validateConfig checks that all required configuration is valid.
 func validateConfig(cfg config) error {
 	if err := cmdsutil.ValidateHTTPURL("--cds-url", cfg.CDSURL); err != nil {
@@ -681,9 +631,9 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.DiscoveryOutPath != "" {
 		switch discoveryPublicTLSMode(cfg.DiscoveryPublicTLSMode) {
-		case "cds", "webpki":
+		case "cds", "webpki", "acme":
 		default:
-			return fmt.Errorf("%w: --discovery-public-tls-mode must be 'cds' or 'webpki', got %q", errInvalidDiscoveryPublicTLSMode, cfg.DiscoveryPublicTLSMode)
+			return fmt.Errorf("%w: --discovery-public-tls-mode must be 'cds', 'webpki', or 'acme', got %q", errInvalidDiscoveryPublicTLSMode, cfg.DiscoveryPublicTLSMode)
 		}
 	}
 	if len(cfg.ReloadWatchPaths) > 0 {
@@ -755,6 +705,16 @@ func validateHostname(s string) error {
 // isIPSAN returns true if the SAN is an IP address.
 func isIPSAN(san string) bool {
 	return net.ParseIP(san) != nil
+}
+
+// requireKeyOutRAMBacked enforces that --key-out sits on tmpfs/ramfs: the
+// private key must never reach persistent storage, which the host reads at
+// will. The cert and CA outputs are public and stay unconstrained.
+func requireKeyOutRAMBacked(keyOutPath string) error {
+	if keyOutPath == "" {
+		return nil
+	}
+	return cmdsutil.RequireRAMBackedDir("--key-out", filepath.Dir(keyOutPath))
 }
 
 // validateOutputPaths checks that output file locations are writable before

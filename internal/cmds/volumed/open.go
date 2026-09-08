@@ -165,6 +165,13 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 		return err
 	}
 
+	// A cancelled caller is one that has already posted its close (the sidecar
+	// cancels the open before it does), so a mapping landing now would outlive
+	// its pod with only the reaper behind it.
+	if err := ctx.Err(); err != nil {
+		o.teardown(ctx, m)
+		return err
+	}
 	// A concurrent identical request may have won the race; keep one mapping
 	// and tear the loser down outside the lock.
 	o.mu.Lock()
@@ -250,39 +257,59 @@ func (o *Opener) Close(ctx context.Context, podUID, name string) {
 	}
 	o.mu.Unlock()
 	if ok {
-		o.teardown(ctx, m)
+		o.closeMount(ctx, mountKey(podUID, name), m)
 	}
 }
 
-// ClosePod tears down every volume a pod holds, for when the pod goes away, and
-// reports how many it closed.
+// ClosePod tears down every volume a pod holds — the sidecar's termination
+// close, and the reaper's collection of a dead pod — and reports how many it
+// closed.
 func (o *Opener) ClosePod(ctx context.Context, podUID string) int {
 	if podUID == "" {
 		return 0
 	}
 	o.mu.Lock()
-	var doomed []*mount
+	doomed := map[string]*mount{}
 	for k, m := range o.mounts {
 		if m.pod.UID == podUID {
-			doomed = append(doomed, m)
+			doomed[k] = m
 			delete(o.mounts, k)
 		}
 	}
 	o.mu.Unlock()
-	for _, m := range doomed {
-		o.teardown(ctx, m)
+	closed := 0
+	for k, m := range doomed {
+		if o.closeMount(ctx, k, m) {
+			closed++
+		}
 	}
-	return len(doomed)
+	return closed
+}
+
+// closeMount tears m down and reports success. A mapping that refuses to close
+// keeps its record: it still holds the key and the device, so it must stay
+// visible to deviceConflict and to the reaper, which retries it each sweep.
+func (o *Opener) closeMount(ctx context.Context, key string, m *mount) bool {
+	if o.teardown(ctx, m) {
+		return true
+	}
+	o.mu.Lock()
+	if _, taken := o.mounts[key]; !taken {
+		o.mounts[key] = m
+	}
+	o.mu.Unlock()
+	return false
 }
 
 // teardown unwinds in reverse and does not stop at the first failure: the
 // device-mapper targets hold the key, so a failed unmount must not leave them
-// behind.
-func (o *Opener) teardown(ctx context.Context, m *mount) {
+// behind. It reports whether the crypt mapping — the layer holding the key and
+// the device — actually closed.
+func (o *Opener) teardown(ctx context.Context, m *mount) bool {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
 	modeFor(m.mutable).close(cleanup, o.Ops, m.pod.UID, m.name, m.target)
-	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
+	return o.Ops.CryptClose(cleanup, m.cryptDev) == nil
 }
 
 // SweepStale closes the c8s mappings left on this node by an earlier volumed,

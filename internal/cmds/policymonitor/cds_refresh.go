@@ -6,10 +6,10 @@ package policymonitor
 //
 // The baked bootstrap-allowlist.json (on the dm-verity root) is the SEED:
 // it lets the guest enforce from t=0 with no network. This loop keeps the
-// in-VM allowlist current with operator additions CDS has accepted by
-// polling CDS's `/allowlist` over RA-TLS and merging the result on top of
-// the seed. It reuses exactly the mechanism the host nri-image-policy
-// worker uses (pkg/ratls RA-TLS client pinned to cds.measurements +
+// in-VM policy current with what CDS serves by polling CDS's `/allowlist`
+// over RA-TLS and installing the result as the overlay beside the seed. It
+// reuses exactly the mechanism the host nri-image-policy worker uses
+// (pkg/ratls RA-TLS client pinned to cds.measurements +
 // pkg/allowlistclient), so the in-guest enforcer and the host enforcer
 // pull from the same authenticated source. See docs/kata-image-policy.md.
 //
@@ -72,7 +72,7 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 
 	logger.Info("allowlist refresh enabled", "cds_url", cfg.CDSURL, "interval", cfg.RefreshInterval, "call_timeout", callTimeout)
 	for {
-		landed := refreshOnce(ctx, logger, client, a, overlay, callTimeout)
+		landed := refreshOnce(ctx, logger, client, overlay, callTimeout)
 		if landed {
 			// The first pull runs before kata-agent has configured the pod
 			// network, so it usually fails; a verdict waits for one that
@@ -125,16 +125,14 @@ func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *
 		append([]any{"reason", reason, "entries", a.Size()}, args...)...)
 }
 
-// refreshOnce pulls the current CDS allowlist. Two layers update: the baked
-// floor grows additively with the pulled floor digests (never shrinks — a CDS
-// outage or rollback can't loosen digest-only admission), and the workload argv
-// policy overlay is replaced only when the pulled version advances the epoch.
-// A failed pull is logged and skipped — the existing allowlist and overlay keep
-// enforcing, so a CDS outage degrades to "stale but no smaller", never "open".
+// refreshOnce pulls the current CDS allowlist and installs it as the policy
+// overlay when its version advances the epoch. The baked seed is untouched: it
+// admits on its own from t=0, and a failed pull is logged and skipped, so a CDS
+// outage degrades to "stale", never "open".
 //
 // Reports whether the pull landed, which is what tells a waiting verdict the
 // allowlist is CDS-current rather than still the baked seed.
-func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclient.Client, a *allowlist, overlay *policyOverlay, callTimeout time.Duration) bool {
+func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclient.Client, overlay *policyOverlay, callTimeout time.Duration) bool {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	resp, version, err := client.List(callCtx)
@@ -143,21 +141,15 @@ func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclien
 		return false
 	}
 
-	pulled := make([]string, 0, len(resp.Digests))
-	for d := range resp.Digests {
-		pulled = append(pulled, d)
-	}
-	added := a.MergePulled(pulled)
-
 	v, verr := strconv.ParseUint(version, 10, 64)
 	if verr != nil {
 		logger.Warn("allowlist refresh: unparseable CDS version; keeping current overlay", "version", version, "error", verr)
 		return false
 	}
 	if overlay.apply(resp, v) {
-		logger.Info("allowlist refreshed from CDS", "version", v, "workloads", len(resp.Workloads), "floor_added", added, "floor_total", a.Size())
+		logger.Info("allowlist refreshed from CDS", "version", v, "workloads", len(resp.Workloads))
 	} else {
-		logger.Warn("allowlist refresh: ignoring rolled-back CDS version; keeping current overlay", "version", v, "floor_added", added, "floor_total", a.Size())
+		logger.Warn("allowlist refresh: ignoring rolled-back CDS version; keeping current overlay", "version", v)
 	}
 	return true
 }

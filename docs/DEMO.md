@@ -34,8 +34,16 @@ kubectl apply -f samples/confidentialworkload.yaml
 
 ## 3. Deploy an annotated workload
 
+The node image enforces the restricted PodSecurity standard in every tenant
+namespace. In node mode the injected sidecar mounts the node's inventory
+socket as a hostPath, which restricted forbids, so a namespace that hosts
+confidential workloads is opened by the operator. Only a credential allowed
+to grant PodSecurity exemptions can set this label; tenants cannot.
+
 ```sh
-kubectl apply -f samples/nginx-confidential-pod.yaml
+kubectl create namespace demo
+kubectl label namespace demo pod-security.kubernetes.io/enforce=privileged
+kubectl -n demo apply -f samples/nginx-confidential-pod.yaml
 ```
 
 The pod template annotation `confidential.ai/cw: demo-nginx` is the security
@@ -44,8 +52,8 @@ opt-in. The `ConfidentialWorkload` object is not required for injection.
 ## 4. Inspect the result
 
 ```sh
-kubectl get pods
-kubectl describe pod -l app=demo-nginx
+kubectl -n demo get pods
+kubectl -n demo describe pod -l app=demo-nginx
 kubectl get cwl -A
 ```
 
@@ -59,7 +67,7 @@ Expected injected pieces:
 ## Reset
 
 ```sh
-kubectl delete -f samples/nginx-confidential-pod.yaml
+kubectl delete namespace demo
 kubectl delete -f samples/confidentialworkload.yaml
 c8s uninstall
 ```

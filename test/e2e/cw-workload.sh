@@ -2,26 +2,27 @@
 # Live-cluster check that a confidential workload runs bound to CDS: the sample
 # cw deployment reaches Ready and carries the injected c8s-cert sidecar.
 #
-# Needs kubectl pointed at a cluster with c8s installed. Under a fail-closed
-# image floor the workload digest must be admitted first: set C8S_OPERATOR_KEY
-# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this adds it. An audit-mode
-# floor admits it without them.
+# Needs kubectl pointed at a cluster with c8s installed. Under fail-closed image
+# admission the workload digest must be allowlisted first: set C8S_OPERATOR_KEY
+# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this applies an entry for it.
+# Audit mode admits it without them.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 manifest="$(dirname "$0")/../../samples/nginx-confidential-pod.yaml"
 [ -f "$manifest" ] || fail "sample manifest not found at $manifest"
 
-ns=default
+ns=c8s-e2e-cw
 deploy=demo-nginx
 
 # A failed workload is left standing for the caller to diagnose.
 cleanup() {
   local rc=$?
   [ "$rc" -eq 0 ] || return 0
-  kubectl -n "$ns" delete -f "$manifest" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+cw_namespace "$ns"
 
 image=$(grep -oE '[[:graph:]]+@sha256:[0-9a-f]{64}' "$manifest" | head -1)
 [ -n "$image" ] || fail "no digest-pinned image in $manifest"
@@ -31,11 +32,11 @@ if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
   : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
   c8s allowlist add "${image#*@}" "$image" \
     --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
-    || fail "signed floor write rejected for the workload digest"
+    || fail "signed allowlist write rejected for the workload digest"
   echo "ok: workload digest admitted"
 fi
 
-kubectl apply -f "$manifest" >/dev/null
+kubectl -n "$ns" apply -f "$manifest" >/dev/null
 
 ready=""
 for _ in $(seq 1 60); do

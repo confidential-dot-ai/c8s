@@ -1,4 +1,5 @@
 {{- if .Values.volumed.enabled }}
+{{- $kubeletRoot := required "volumed.hostPaths.kubeletRoot is required" .Values.volumed.hostPaths.kubeletRoot }}
 {{- /*
   Pre-delete DaemonSet that reaps the device-mapper stack volumed opened on
   each node (files/scripts/volumed-teardown.sh). It runs before the release is
@@ -76,7 +77,7 @@ spec:
             # Bidirectional: the mounts live in the host namespace, so the
             # unmount has to propagate back out of this pod.
             - name: kubelet-root
-              mountPath: {{ include "c8s.volumedKubeletRoot" . }}
+              mountPath: {{ $kubeletRoot }}
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
@@ -97,7 +98,7 @@ spec:
       volumes:
         - name: kubelet-root
           hostPath:
-            path: {{ include "c8s.volumedKubeletRoot" . }}
+            path: {{ $kubeletRoot }}
             type: Directory
         - name: dev
           hostPath:

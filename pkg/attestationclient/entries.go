@@ -29,9 +29,7 @@ func EnforceEntries(resp types.VerifyResponse, entries []measurements.Entry, pla
 	var reported [4]string
 	checkRTMRs := TDXPlatform(platform)
 	if checkRTMRs {
-		if reported, err = reportedRTMRs(resp); err != nil {
-			return err
-		}
+		reported = reportedRTMRs(resp)
 	}
 
 	var lastErr error

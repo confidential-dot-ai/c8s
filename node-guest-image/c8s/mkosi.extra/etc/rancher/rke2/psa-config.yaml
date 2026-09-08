@@ -3,9 +3,13 @@
 #
 # Restricted enforcement by default. kube-system and local-path-storage are
 # exempt (they ship privileged daemonsets / hostPath helpers); add more
-# namespaces here for any privileged platform component you deploy. Workload
-# namespaces inherit the restricted policy unless explicitly labelled
-# otherwise.
+# namespaces here for any privileged platform component you deploy. Every
+# other namespace, `default` included, inherits restricted. The baked
+# ../../../var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml stops
+# a namespace label from lowering that level unless the caller may grant
+# PodSecurity exemptions. Namespaces hosting confidential workloads need
+# that grant in node mode (the injected sidecar mounts a hostPath); see
+# node-guest-image/README.md, "Workload isolation".
 apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration
 plugins:
@@ -26,7 +30,3 @@ plugins:
         namespaces:
           - kube-system
           - local-path-storage
-          # `default` is exempted because smoke tests run there. Move
-          # workloads to dedicated namespaces in production and drop this
-          # exemption.
-          - default

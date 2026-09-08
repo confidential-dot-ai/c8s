@@ -107,4 +107,9 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.tlsLb.nginx.httpsPort }}
+        {{- if eq (include "tls-lb.publicTLSMode" .) "acme" }}
+        # The :80 HTTP-01/redirect server.
+        - protocol: TCP
+          port: {{ include "tls-lb.acmeHTTPPort" . }}
+        {{- end }}
 {{- end }}

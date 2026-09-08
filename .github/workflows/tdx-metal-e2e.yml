@@ -419,7 +419,27 @@ jobs:
           # Same exposure as the tools step: this clone and the module fetches
           # behind `go install` cross the public internet under `set -e`.
           . "$GITHUB_WORKSPACE/bin/retry.sh"
-          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
+          # This clone reproduces fine anonymously from a pod in arc-runners and
+          # from this runner image, so when it fails HERE the cause is something
+          # in the job's own context, and the bare error says nothing useful:
+          #   fatal: could not read Username for 'https://github.com'
+          # Capture the config git actually reads and the exchange it actually
+          # gets, redacting any credential the trace would otherwise print.
+          clone_diag() {
+            echo "::group::c8s clone diagnostics"
+            git config --list --show-origin 2>&1 \
+              | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
+              | sed 's/^/cfg  /' | head -40
+            env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
+              | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
+            GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
+              git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
+              | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
+              | tail -40 | sed 's/^/wire /'
+            echo "::endgroup::"
+          }
+          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
+            || { clone_diag; exit 1; }
           git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
           echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
           retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'

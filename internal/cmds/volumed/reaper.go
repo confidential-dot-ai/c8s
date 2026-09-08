@@ -28,7 +28,9 @@ type PodLiveness interface {
 	Live(pod PodCgroup) (bool, error)
 }
 
-// Reaper tears down volumes whose pod has gone away.
+// Reaper tears down volumes whose pod has gone away. It is the fallback behind
+// the sidecar's close at termination (ClosePath): a pod that dies without one —
+// a crashed sidecar, a force delete — still gets its volumes collected.
 //
 // The signal is the pod's cgroup emptying of processes, which the runtime does
 // as it removes the last container. Neither the pod's kubelet directory nor its

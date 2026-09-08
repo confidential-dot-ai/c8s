@@ -220,8 +220,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ inputs.target-sha }}
             org.opencontainers.image.version=${{ needs.calculate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          # The apt layers come from the :main image CI built and scanned;
+          # see docker.yml.
+          cache-from: type=registry,ref=${{ matrix.image }}:main
 
       - name: Validate commit-scoped staging image
         env:
@@ -235,7 +236,7 @@ jobs:
 
       - name: Scan release image
         id: container-scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: ${{ matrix.image }}:release-${{ inputs.target-sha }}
           fail-build: false

@@ -822,3 +822,49 @@ func TestSweepStaleTouchesOnlyC8sMappings(t *testing.T) {
 		t.Error("closed a device-mapper target this platform did not open")
 	}
 }
+
+// A caller cancelled before its mapping lands has already posted its close, so
+// the mapping must not land — it would outlive the pod with only the reaper
+// behind it.
+func TestOpenDoesNotLandForACancelledCaller(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	ctx, cancel := context.WithCancel(context.Background())
+	ops.afterCryptOpen = cancel
+
+	if err := o.Open(ctx, testRequest(t)); err == nil {
+		t.Fatal("a cancelled open landed")
+	}
+	if o.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", o.Len())
+	}
+	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Fatalf("cancelled open leaked crypt=%d verity=%d mounts=%d", c, v, m)
+	}
+}
+
+// A mapping that refuses to close keeps its record, so the device stays marked
+// in use and the next close retries the teardown.
+func TestCloseKeepsTheRecordOfAStuckMapping(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	if err := o.Open(context.Background(), testRequest(t)); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	ops.failOn = "CryptClose"
+	if n := o.ClosePod(context.Background(), testPodUID); n != 0 {
+		t.Fatalf("a stuck close reported %d closed, want 0", n)
+	}
+	if o.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want the stuck 1", o.Len())
+	}
+
+	ops.failOn = ""
+	if n := o.ClosePod(context.Background(), testPodUID); n != 1 {
+		t.Fatalf("retry closed %d, want 1", n)
+	}
+	if o.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", o.Len())
+	}
+}
