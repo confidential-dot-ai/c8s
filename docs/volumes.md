@@ -127,14 +127,51 @@ c8s volume create --mutable \
   --operator-key ./operator.key
 ```
 
-Tenant workloads, including volume consumers, run under the non-root policy.
-Choose an explicit numeric `runAsUser`/`runAsGroup` and make the source tree's
-top-level directory readable (immutable) or writable (mutable) by that
-identity before building; `--source` preserves its ownership and modes. A
-source-less mutable image has a root-owned filesystem root, so use a preloaded
-source directory when the workload must create files at the mount root. Do not
-make the pod privileged or root to compensate for incompatible volume
-permissions—the tenant admission policy rejects that escape hatch.
+### Ownership for a non-root consumer
+
+The consumer pod runs under the Restricted controls, so it declares a numeric
+UID (`runAsUser`, not a user name; the admission check cannot resolve names)
+and the volume's filesystem has to be usable by that UID already. `c8s volume
+create` copies the source tree's ownership and modes into the image unchanged,
+and nothing on the node adjusts them at mount time: volumed mounts the device
+as it is, and `fsGroup` does not reach a mount that lands after the pod has
+started. So pick the UID first and prepare the tree for it. The simplest choice
+is the UID that owns the tree on the machine you build on (`id -u`); anything
+else needs `chown` as root, or the whole build run under `fakeroot`.
+
+```sh
+# Immutable: every file readable by the UID.
+chown -R 1000:1000 ./weights
+c8s volume create --name weights --source ./weights ...
+
+# Mutable: the UID must be able to create files at the mount root, so seed the
+# image from a directory that UID owns, even an empty one.
+mkdir scratch-seed && chown 1000:1000 scratch-seed
+c8s volume create --mutable --name scratch --source ./scratch-seed --size 50Gi ...
+```
+
+A mutable image built without `--source` has a root-owned `/`: a non-root pod
+can read it but cannot create anything at the mount root. The pod side is the
+usual Restricted shape, with the same UID:
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+```
+
+Do not make the pod root or privileged to get around volume permissions; the
+tenant admission policy rejects both.
 
 `--size` takes a byte count or a quantity like `50Gi`. Omitted with a
 `--source`, it is inferred — the tree's bytes plus a block per entry, grown by

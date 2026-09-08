@@ -401,8 +401,11 @@ Two things this rests on that attestation does not enforce:
 - the default tenant-security ValidatingAdmissionPolicy (or an equivalent
   control) holds. It denies host namespaces, host ports, privilege, and every
   non-Restricted pod shape; its only volume exception is the exact read-only
-  inventory-socket mount on webhook-owned c8s sidecars. It exempts the release
-  namespace, `kube-system`, `local-path-storage`, and explicitly configured
+  inventory-socket mount on webhook-owned c8s sidecars. Encrypted volumes
+  (docs/volumes.md) are unaffected: the webhook mounts them as `emptyDir`s
+  that volumed fills, and the `c8s-volume` sidecar carries only that same
+  socket mount. It exempts the release namespace, `kube-system`,
+  `local-path-storage`, and explicitly configured
   `hostNamespacePolicy.exemptNamespaces`.
 - privileged node DaemonSets — CNI, CSI, the NVIDIA GPU operator — *can* bind
   the port. They are already root inside the node CVM and can read another

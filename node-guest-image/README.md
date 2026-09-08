@@ -79,6 +79,12 @@ The other disks are optional; each is owned by one unit under
 
 ## Workload isolation
 
+"Tenant" in these docs names the workload side of the trust boundary: pods,
+and the namespaced credentials that create them, as opposed to the platform
+components in the release namespace and `kube-system`. A node CVM serves one
+tenant; the word says which side of the boundary a pod is on, not that
+several share a node.
+
 Tenant pods run on the node's own kernel under runc, so what a pod may ask
 for is what stands between it and the measured host. The image enforces the
 restricted PodSecurity standard by default
