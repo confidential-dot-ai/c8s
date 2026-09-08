@@ -136,3 +136,14 @@ func TestRecordOutboundDestRejectedUnknownReason(t *testing.T) {
 		t.Errorf("unknown reason not folded into unknown_pod bucket: %v", got)
 	}
 }
+
+func TestMetricsRegistriesAreIndependent(t *testing.T) {
+	first, second := newMetrics(), newMetrics()
+	first.attestationFailures.Inc()
+	for i, m := range []*metrics{first, second} {
+		want := float64(1 - i)
+		if got := registryValue(t, m, "ratls_mesh_attestation_failures_total", nil); got != want {
+			t.Errorf("registry %d attestation failures = %v, want %v", i, got, want)
+		}
+	}
+}
