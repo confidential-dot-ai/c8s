@@ -117,7 +117,7 @@ the webhook mounts the node's inventory socket into every
 baseline) forbids, so a namespace hosting confidential workloads is opened
 by the operator with the privileged label, as `c8s install` does for its
 release namespace. This does not grant workloads privileged semantics: the
-chart's fail-closed tenant-pod policies reproduce the Restricted controls and
+chart's fail-closed `deny-host-namespaces` policies reproduce the Restricted controls and
 carve out only the exact inventory directory, read-only and mounted only into
 the webhook-owned c8s sidecars. Application and ephemeral containers cannot
 mount it. Restricted warning and audit labels remain enabled, so the expected

@@ -96,7 +96,7 @@ hijack. On node-CVM it is a unix socket, and there are two separate threats:
   own pod. The socket lives on a host directory, so a *separate* malicious pod
   that could `hostPath`-mount that directory read-write could swap the socket
   before get-cert connects — a PodSecurity / filesystem-permission concern (the
-  socket dir must be unwritable by untrusted pods). The chart's tenant-security
+  socket dir must be unwritable by untrusted pods). The chart's `deny-host-namespaces`
   policy admits only the webhook's exact read-only mount on its recognized c8s
   native sidecars and rejects every other tenant `hostPath` shape.
   **Who creates the socket, and why the L0 host can't inject one, is
@@ -569,7 +569,7 @@ splits cleanly:
   residual as "Why a unix socket". It is
   gated by: the dir is **root-owned `0711`** (untrusted pods cannot write it),
   get-cert's own mount is **read-only**, get-cert dials a **compiled** path the
-  control plane cannot redirect, and the chart's tenant-security policy admits
+  control plane cannot redirect, and the chart's `deny-host-namespaces` policy admits
   that exact mount only on webhook-reconstructed c8s native sidecars. Application
   and ephemeral containers cannot mount it, and all other tenant `hostPath`
   volumes are denied. The residual opens only if that policy is disabled without

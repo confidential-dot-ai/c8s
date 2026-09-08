@@ -398,7 +398,7 @@ the node bound" is not.
 
 Two things this rests on that attestation does not enforce:
 
-- the default tenant-security ValidatingAdmissionPolicy (or an equivalent
+- the default `deny-host-namespaces` ValidatingAdmissionPolicy (or an equivalent
   control) holds. It denies host namespaces, host ports, privilege, and every
   non-Restricted pod shape; its only volume exception is the exact read-only
   inventory-socket mount on webhook-owned c8s sidecars. Encrypted volumes

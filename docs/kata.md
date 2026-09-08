@@ -251,7 +251,7 @@ listener. The trade-off is that 8443 is unmeshed inbound in every guest.
 A Kata pod is a VM and cannot join the host's network, PID, or IPC namespace.
 A pod that sets `hostNetwork`, `hostPID`, or `hostIPC` is therefore skipped by
 the Kata-specific webhook and runtime-class policy. The chart's separate,
-default-on tenant-security policy rejects that pod in tenant namespaces, even
+default-on `deny-host-namespaces` policy rejects that pod in tenant namespaces, even
 when the namespace carries the PSA `privileged` label needed for the injected
 inventory socket. Only trusted platform namespaces (or explicit
 `hostNamespacePolicy.exemptNamespaces`) may run the pod as an ordinary

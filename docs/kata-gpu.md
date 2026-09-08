@@ -57,7 +57,7 @@ un-mutated as plain runc.
 
 The Kata layer has two exceptions: it leaves host-namespace pods alone because
 Kata cannot run them, and it honors an explicitly selected Kata
-`runtimeClassName`. The chart's separate default tenant-security VAP rejects
+`runtimeClassName`. The chart's separate default `deny-host-namespaces` policy rejects
 host-namespace pods outside trusted platform namespaces, so the first exception
 does not provide a tenant path back to runc. An explicit runtime class is
 honored only when it names one of the Kata classes and rejected otherwise.
@@ -320,7 +320,7 @@ reach.
   staged.)
 - **Host-namespace GPU pods are rejected for tenants.** The Kata-specific
   webhook and runtime-class policy skip `hostNetwork`/`hostPID`/`hostIPC` (a VM
-  cannot share host namespaces), but the separate default tenant-security VAP
+  cannot share host namespaces), but the separate default `deny-host-namespaces` policy
   denies those fields. A host-namespace GPU pod can run outside a confidential
   VM only in a trusted/exempt namespace or when that VAP is deliberately
   disabled without an equivalent replacement. The sandbox device plugin also

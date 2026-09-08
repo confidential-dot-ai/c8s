@@ -191,7 +191,7 @@ layout) is detected from the cluster's kubelet versions.
   disabled — their function runs inside the kata-guest-base VM image.
 
 The Kata layer skips host-namespace pods and system namespaces. The separate
-default tenant-security policy still rejects host namespaces outside trusted
+default `deny-host-namespaces` policy still rejects host namespaces outside trusted
 platform namespaces. The Kata stack is off by default — a plain `c8s install`
 is unchanged.
 

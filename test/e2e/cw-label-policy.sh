@@ -15,7 +15,7 @@ pod=probe
 pause_image=registry.k8s.io/pause:3.9
 
 # kubectl run's generated pod is otherwise root/default-seccomp, which the
-# tenant security VAP correctly rejects in the privileged-labelled CW
+# deny-host-namespaces policy correctly rejects in the privileged-labelled CW
 # namespace. Keep every probe compliant so only the intended guard decides it.
 restricted_overrides() {
   local name=$1 image=$2

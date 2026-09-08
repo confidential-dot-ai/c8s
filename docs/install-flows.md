@@ -246,7 +246,7 @@ sync):
   `kube-node-lease`, and `webhook.extraExcluded`.
 - **host-namespace pods** (`hostNetwork`/`hostPID`/`hostIPC`) — a VM cannot
   share the host's namespaces, so the Kata layer leaves them as runc. The
-  separate tenant-security VAP rejects this shape outside trusted platform
+  separate `deny-host-namespaces` policy rejects this shape outside trusted platform
   namespaces; this exemption is what lets `kata-deploy` (which sets
   `hostPID`+`hostNetwork`) run in the excluded release namespace.
 

@@ -171,7 +171,7 @@ spec:
 ```
 
 Do not make the pod root or privileged to get around volume permissions; the
-tenant admission policy rejects both.
+chart's `deny-host-namespaces` policy rejects both.
 
 `--size` takes a byte count or a quantity like `50Gi`. Omitted with a
 `--source`, it is inferred — the tree's bytes plus a block per entry, grown by
