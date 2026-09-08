@@ -2,10 +2,6 @@ package verify
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,37 +24,9 @@ type measurementsReport struct {
 	note     string
 }
 
-// fetchServedMeasurements GETs <base>/measurements bound to the endpoint whose
-// attestation was just verified: the handshake requires the presented leaf's
-// SHA-256 to equal wantCertSHA256, so a different endpoint — or a MITM on this
-// second connection — cannot substitute its own set into the report.
+// fetchServedMeasurements parses /measurements from the attested endpoint.
 func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (measurements.ReferenceValues, error) {
-	if wantCertSHA256 == "" {
-		return measurements.ReferenceValues{}, fmt.Errorf("no attested serving certificate to bind the fetch to")
-	}
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // trust comes from the attested-cert pin below, not PKI
-		ServerName:         serverName,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no peer certificate")
-			}
-			sum := sha256.Sum256(rawCerts[0])
-			if got := hex.EncodeToString(sum[:]); got != wantCertSHA256 {
-				return fmt.Errorf("serving cert changed between attestation and measurement fetch (got sha256 %s, attested %s)", got, wantCertSHA256)
-			}
-			return nil
-		},
-	}
-	client := &http.Client{
-		Timeout:   timeout,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/measurements", nil)
-	if err != nil {
-		return measurements.ReferenceValues{}, err
-	}
-	resp, err := client.Do(req)
+	resp, err := fetchAttested(ctx, base+"/measurements", serverName, wantCertSHA256, timeout)
 	if err != nil {
 		return measurements.ReferenceValues{}, fmt.Errorf("fetch /measurements: %w", err)
 	}
