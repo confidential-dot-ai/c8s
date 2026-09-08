@@ -370,10 +370,6 @@ for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
 
-CDS folds a pre-unification `digests` floor table into entries of the same shape
-and name the first time it opens an existing database (`internal/allowlist`,
-`migrateFloorTable`), so a re-seed after the upgrade adds nothing.
-
 The guest-baked seed remains a flat `sha256_digests` list — it is measured into
 the SNP launch digest, and keeping it digest-only means a policy change never
 requires a guest-image rebuild.

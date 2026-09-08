@@ -1,11 +1,9 @@
 package allowlist
 
 import (
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -431,126 +429,6 @@ func TestOpenStoreCreatesAndReopens(t *testing.T) {
 	}
 	if ok, err := reopened.Contains(dB); err != nil || !ok {
 		t.Fatalf("Contains(workload digest) after reopen = %t, %v; want true, nil", ok, err)
-	}
-}
-
-// legacyFloorSQL is the pre-unification schema: the floor table beside the
-// version counter, with the workload tables absent.
-const legacyFloorSQL = `
-CREATE TABLE allowlist (digest TEXT PRIMARY KEY, image TEXT NOT NULL);
-CREATE TABLE allowlist_version (version TEXT NOT NULL DEFAULT '1');
-INSERT INTO allowlist_version (version) VALUES ('4');
-`
-
-// A database written before the unification carries its floor in a table of
-// its own. Opening it folds every row into an any-argv entry named the way the
-// chart seeds the same digest, drops the table, and bumps the version once so
-// pullers see the new shape.
-func TestOpenStoreMigratesFloorTable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "allowlist.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(legacyFloorSQL); err != nil {
-		t.Fatalf("legacy schema: %v", err)
-	}
-	for _, row := range [][2]string{
-		{digestA, "ghcr.io/confidential-dot-ai/cds@" + digestA},
-		{digestB, "registry.k8s.io/coredns/coredns:v1.11.1"},
-	} {
-		if _, err := db.Exec("INSERT INTO allowlist (digest, image) VALUES (?, ?)", row[0], row[1]); err != nil {
-			t.Fatalf("legacy row: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := OpenStore(path)
-	if err != nil {
-		t.Fatalf("open legacy store: %v", err)
-	}
-	defer store.Close()
-
-	doc, version, err := store.LoadAll()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if version != "5" {
-		t.Fatalf("version after migration = %q, want 5 (one bump)", version)
-	}
-	for name, want := range map[string]string{
-		"cds-" + digestA[7:19]:     digestA,
-		"coredns-" + digestB[7:19]: digestB,
-	} {
-		w, ok := doc.Workloads[name]
-		if !ok {
-			t.Fatalf("migrated entry %q missing: %#v", name, doc.Workloads)
-		}
-		if len(w.Containers) != 1 || w.Containers[0].Digest.String() != want || !w.Containers[0].AnyArgv() {
-			t.Fatalf("migrated entry %q = %#v, want one any/any container at %s", name, w, want)
-		}
-	}
-	if ok, err := store.Contains(mustParseDigest(t, digestA)); err != nil || !ok {
-		t.Fatalf("Contains(migrated digest) = %t, %v; want true, nil", ok, err)
-	}
-	var one int
-	if err := store.db.QueryRow("SELECT 1 FROM sqlite_master WHERE name = 'allowlist'").Scan(&one); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("legacy floor table still present after migration (err=%v)", err)
-	}
-
-	// The chart seeds the same entry under the same name, so a re-seed after
-	// the migration adds nothing and does not bump the version.
-	entry, err := normalizeEntry("cds-"+digestA[7:19], pkgallowlist.DigestEntry(mustParseDigest(t, digestA), "ghcr.io/confidential-dot-ai/cds@"+digestA))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if added, err := store.SeedWorkloads(map[string]pkgallowlist.Workload{"cds-" + digestA[7:19]: entry}); err != nil || added != 0 {
-		t.Fatalf("re-seed of a migrated entry: added=%d err=%v; want 0, nil", added, err)
-	}
-	if _, v, _ := store.LoadAll(); v != "5" {
-		t.Fatalf("re-seed bumped the version to %q", v)
-	}
-
-	// Reopening finds no floor table and changes nothing.
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := OpenStore(path)
-	if err != nil {
-		t.Fatalf("reopen after migration: %v", err)
-	}
-	defer reopened.Close()
-	if doc, v, _ := reopened.LoadAll(); v != "5" || len(doc.Workloads) != 2 {
-		t.Fatalf("reopen re-migrated: version %q, %d entries", v, len(doc.Workloads))
-	}
-}
-
-// Two floor rows that derive the same entry name would silently lose one
-// digest; the migration refuses instead, and the legacy table stays for the
-// operator to resolve.
-func TestOpenStoreRefusesFloorNameCollision(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "allowlist.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(legacyFloorSQL); err != nil {
-		t.Fatalf("legacy schema: %v", err)
-	}
-	prefix := "sha256:abcdef000000"
-	for _, d := range []string{prefix + strings.Repeat("1", 52), prefix + strings.Repeat("2", 52)} {
-		if _, err := db.Exec("INSERT INTO allowlist (digest, image) VALUES (?, ?)", d, "ghcr.io/x/coredns:v1"); err != nil {
-			t.Fatalf("legacy row: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := OpenStore(path); err == nil || !strings.Contains(err.Error(), "coredns-abcdef000000") {
-		t.Fatalf("OpenStore = %v, want a collision error naming the entry", err)
 	}
 }
 

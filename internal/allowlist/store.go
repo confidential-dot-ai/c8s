@@ -75,10 +75,6 @@ func OpenStore(path string) (Store, error) {
 		db.Close()
 		return Store{}, fmt.Errorf("init allowlist schema: %w", err)
 	}
-	if err := migrateFloorTable(db); err != nil {
-		db.Close()
-		return Store{}, fmt.Errorf("migrate allowlist floor: %w", err)
-	}
 
 	return Store{db: db}, nil
 }
@@ -438,95 +434,4 @@ func normalizeEntry(name string, w pkgallowlist.Workload) (pkgallowlist.Workload
 		return pkgallowlist.Workload{}, fmt.Errorf("%w: %v", ErrInvalidWorkload, err)
 	}
 	return parsed.Workloads[name], nil
-}
-
-// migrateFloorTable folds the pre-unification `allowlist(digest, image)` floor
-// table into workload entries and drops it. Each row becomes the entry the
-// chart now seeds for that digest (pkgallowlist.DigestEntry under
-// DigestEntryName), so a re-seed after the migration adds nothing; a name
-// already taken is left alone.
-func migrateFloorTable(db *sql.DB) error {
-	var one int
-	err := db.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'allowlist'").Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.Query("SELECT digest, image FROM allowlist")
-	if err != nil {
-		return err
-	}
-	entries := map[string]pkgallowlist.Workload{}
-	for rows.Next() {
-		var digestStr, image string
-		if err := rows.Scan(&digestStr, &image); err != nil {
-			rows.Close()
-			return err
-		}
-		digest, err := types.ParseDigest(digestStr)
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("floor digest %q: %w", digestStr, err)
-		}
-		name := pkgallowlist.DigestEntryName(digest, image)
-		if _, dup := entries[name]; dup {
-			rows.Close()
-			return fmt.Errorf("floor digests %s and %s both map to entry %q", entries[name].Containers[0].Digest, digest, name)
-		}
-		entry, err := normalizeEntry(name, pkgallowlist.DigestEntry(digest, image))
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		entries[name] = entry
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	// A floor digest that another entry already declares now shadows that
-	// entry for matching (docs/allowlist-and-capabilities.md); the operator
-	// resolves it, this only names the pair.
-	for name, entry := range entries {
-		var holder string
-		err := tx.QueryRow("SELECT entry_name FROM workload_entry_digest WHERE digest = ? LIMIT 1", entry.Containers[0].Digest.String()).Scan(&holder)
-		if err == nil {
-			slog.Warn("migrated floor digest is also declared by a workload entry, which it now shadows for matching",
-				"digest", entry.Containers[0].Digest.String(), "entry", name, "shadowed", holder)
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-	}
-
-	added, err := seedWorkloadsTx(tx, entries)
-	if err != nil {
-		return err
-	}
-	if added < len(entries) {
-		slog.Warn("floor digests whose entry name the store already held were not migrated", "skipped", len(entries)-added)
-	}
-	if _, err := tx.Exec("DROP TABLE allowlist"); err != nil {
-		return err
-	}
-	if added > 0 {
-		if err := bumpVersionTx(tx); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	slog.Info("migrated floor digests into workload entries", "floor_rows", len(entries), "entries_added", added)
-	return nil
 }
