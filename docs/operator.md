@@ -98,7 +98,7 @@ from `opkeydata` and the node's attestation instead — see
 
 Deployment configuration that `c8s install --values` would otherwise carry
 (tls-lb hostnames and CORS, `cds.dnsSanPatterns`, rate limits,
-image-policy exempt namespaces and bootstrap digests, `volumed.enabled`, ...)
+image-policy exempt namespaces and bootstrap allowlist workloads, `volumed.enabled`, ...)
 can be supplied to the node image without a rebuild, via a `values.yaml`
 fragment on the `opkeydata` ISO next to the operator public key. Sign it with
 the operator private key before attaching the disk:

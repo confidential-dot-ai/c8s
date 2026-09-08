@@ -217,8 +217,13 @@ func TestRenderValidFragmentMergesUnderBootDerivedKeys(t *testing.T) {
 		"      exemptNamespaces:\n"+
 		"        - kube-system\n"+
 		"    bootstrapAllowlist:\n"+
-		"      digests:\n"+
-		"        sha256:abc: \"ghcr.io/example/img:v1\"\n"+
+		"      workloads:\n"+
+		"        example:\n"+
+		"          containers:\n"+
+		"            - digest: sha256:abc\n"+
+		"              image: ghcr.io/example/img:v1\n"+
+		"              command: {policy: any}\n"+
+		"              args: {policy: any}\n"+
 		"  volumed:\n"+
 		"    enabled: true\n")
 

@@ -11,8 +11,10 @@ import (
 // rebuild, but that must also not be trusted from the host-attached
 // opkeydata disk unauthenticated beyond this set. Every entry covers both
 // itself and every path under it (e.g. "tlsLb.cors" also allows
-// "tlsLb.cors.allowOrigins"), checked against
-// internal/helmchart/c8s/values.yaml.
+// "tlsLb.cors.allowOrigins"). TestAllowedPrefixesExistInChartValues pins
+// every entry to a key in internal/helmchart/c8s/values.yaml: the chart's
+// schema rejects unknown keys, so a stale entry here would fail the baked
+// install at boot rather than at build time.
 //
 // Anything not covered here is denied by construction, in particular every
 // image/digest/tag, attestationApi.*, hostNamespacePolicy, cds.image,
@@ -33,7 +35,7 @@ var allowedPrefixes = []string{
 	"cds.rateBurst",
 	"volumed.enabled",
 	"nriImagePolicy.policy.exemptNamespaces",
-	"nriImagePolicy.bootstrapAllowlist.digests",
+	"nriImagePolicy.bootstrapAllowlist.workloads",
 }
 
 // checkAllowlist walks every leaf of values and fails closed on the first
