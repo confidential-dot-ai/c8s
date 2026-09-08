@@ -13,6 +13,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 // RunMain is the body of the per-binary thin shim under cmd/<name>/main.go.
@@ -48,6 +50,34 @@ func ValidateAttestationAPIURL(flagName, u string) error {
 		return nil
 	}
 	return ValidateHTTPURL(flagName, u)
+}
+
+// RequireRAMBackedDir returns an error unless dir sits on tmpfs/ramfs
+// (fileutil.RequireRAMBacked). The flagName is interpolated into the error so
+// callers needn't wrap. Shared by get-secret (--out-dir) and get-cert
+// (--key-out): each secret-writing sidecar gets the same refusal shape.
+func RequireRAMBackedDir(flagName, dir string) error {
+	root, err := OpenRAMBackedDir(flagName, dir)
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}
+
+// OpenRAMBackedDir opens dir, verifies the filesystem behind that open handle
+// is RAM-backed, then returns the still-open root. Secret writers must use the
+// returned root for every write so replacing dir's pathname cannot redirect
+// bytes after verification.
+func OpenRAMBackedDir(flagName, dir string) (*os.Root, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open %s: %w", flagName, dir, err)
+	}
+	if err := fileutil.RequireRAMBackedRoot(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("%s: %w", flagName, err)
+	}
+	return root, nil
 }
 
 // ParseFlags is the standard fs.Parse(args) call used by every Run-style
