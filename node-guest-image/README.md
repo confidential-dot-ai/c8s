@@ -108,6 +108,26 @@ policies (host namespaces, hostPort, the mesh UID) are the controls, and the
 sample workload in `samples/` is restricted-compliant on its own so it can
 move back under the floor when the socket no longer needs a hostPath.
 
+## Module loading
+
+`kernel/c8s.config` sets `CONFIG_MODULES=y`, which the confos base kernel
+compiles out. It is on for exactly two out-of-tree modules, `nvidia.ko` and
+`nvidia-uvm.ko` (see [MODULE-SIGNING.md](MODULE-SIGNING.md)); every symbol
+kubelet, containerd and Cilium need is `=y`, so nothing modprobes at runtime.
+
+Because the key exists on this kernel, the runtime lock has to be set here:
+confos's `99-kspp-hardening.conf` omits `kernel.modules_disabled` on the
+grounds that the base kernel has no such key. `c8s-modules-latch.service`
+sets it to 1 once boot-time loading is done, ordered after the gpu profile's
+`nvidia-modules-latch.service` and before the rke2 pair, which it is
+`RequiredBy`. The latch is one-way for the rest of the boot.
+
+The gpu profile ships a latch of its own, so on the canonical GPU build both
+run and the second rewrites a 1. This one also covers the GPU-less
+composition (`attest` + `c8s`, no `gpu`), where that unit is absent. The same
+split applies to `99-c8s-bpf.conf`: the c8s profile owns the runtime locks its
+own kernel fragment makes necessary.
+
 Migration state (see [#264] for the full plan):
 
 1. This directory is the canonical definition: `c8s-image.yml` builds via
