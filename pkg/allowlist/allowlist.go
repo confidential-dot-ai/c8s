@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -217,7 +218,7 @@ func (w Workload) ArgvPinned() bool {
 
 // containers is the init containers followed by the main containers.
 func (w Workload) containers() []Container {
-	return append(append(make([]Container, 0, len(w.InitContainers)+len(w.Containers)), w.InitContainers...), w.Containers...)
+	return slices.Concat(w.InitContainers, w.Containers)
 }
 
 // AdmitsAnyArgv reports whether some entry admits the digest under an
