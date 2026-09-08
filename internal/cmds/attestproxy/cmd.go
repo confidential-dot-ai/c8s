@@ -108,6 +108,11 @@ func runContext(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	return serve(ctx, cfg, proxy, listener)
+}
+
+// serve runs proxy on an already-bound listener until ctx is done.
+func serve(ctx context.Context, cfg config, proxy http.Handler, listener net.Listener) error {
 	defer listener.Close()
 
 	srv := &http.Server{
