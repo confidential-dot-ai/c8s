@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/admissionhistory"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -33,10 +33,9 @@ var sandboxIDAnnotations = []string{
 // the guest boundary is the isolation, so no peer-credential check is needed.
 type admissionInventory struct {
 	mu         sync.RWMutex
-	containers map[string]string                          // live container id -> image digest
-	admitted   map[string]workloadclaims.SandboxContainer // key -> everything ever admitted
-	unresolved map[string]struct{}                        // container ids with no digest; cleared only by a later resolved record
-	sandboxID  string                                     // the guest's single pod sandbox
+	containers map[string]string // live container id -> image digest
+	admitted   admissionhistory.History
+	sandboxID  string // the guest's single pod sandbox
 	// refresh renders the allowlist-refresh posture. Set by runMonitor; nil
 	// leaves the field off the wire rather than reporting a false "disabled".
 	refresh func() workloadclaims.AllowlistRefresh
@@ -45,8 +44,6 @@ type admissionInventory struct {
 func newAdmissionInventory() *admissionInventory {
 	return &admissionInventory{
 		containers: map[string]string{},
-		admitted:   map[string]workloadclaims.SandboxContainer{},
-		unresolved: map[string]struct{}{},
 	}
 }
 
@@ -61,14 +58,10 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if digest == "" {
-		b.unresolved[cid] = struct{}{}
-		return
+	b.admitted.Record(cid, digest, argv)
+	if digest != "" {
+		b.containers[cid] = digest
 	}
-	delete(b.unresolved, cid)
-	b.containers[cid] = digest
-	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
-	b.admitted[c.Key()] = c
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
@@ -121,18 +114,11 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 	if b.sandboxID == "" || sandboxID != b.sandboxID {
 		return nil, nil, false, nil
 	}
-	if len(b.unresolved) > 0 {
-		return nil, nil, true, fmt.Errorf("sandbox %s admitted a container with no resolved image digest", sandboxID)
+	digests, containers, err := b.admitted.Snapshot()
+	if err != nil {
+		return nil, nil, true, fmt.Errorf("sandbox %s %w", sandboxID, err)
 	}
-	digests := []string{}
-	containers := make([]workloadclaims.SandboxContainer, 0, len(b.admitted))
-	for _, c := range b.admitted {
-		digests = append(digests, c.Digest)
-		containers = append(containers, c)
-	}
-	slices.Sort(digests)
-	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
-	return slices.Compact(digests), containers, true, nil
+	return digests, containers, true, nil
 }
 
 // AllowlistRefresh satisfies workloadclaims.AllowlistRefreshReporter: it puts

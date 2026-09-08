@@ -2,9 +2,9 @@ package nriimagepolicy
 
 import (
 	"fmt"
-	"slices"
 	"sync"
 
+	"github.com/confidential-dot-ai/c8s/internal/admissionhistory"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -20,9 +20,9 @@ import (
 // leave one running, and the inventory reports what runs.
 type admissionInventory struct {
 	mu         sync.RWMutex
-	containers map[string]ctrRec   // live containerID -> record (caller resolution)
-	admitted   map[string]sbxRec   // sandboxID -> everything ever admitted there
-	sandboxes  map[string]struct{} // live pod sandbox IDs
+	containers map[string]ctrRec                   // live containerID -> record (caller resolution)
+	admitted   map[string]admissionhistory.History // sandboxID -> everything ever admitted there
+	sandboxes  map[string]struct{}                 // live pod sandbox IDs
 	procRoot   string
 }
 
@@ -33,18 +33,10 @@ type ctrRec struct {
 	argv      []string
 }
 
-// sbxRec is a sandbox's admission high-water mark: every distinct (digest,
-// argv) admitted in it, keyed for dedup, never pruned while the sandbox lives.
-// See docs/secrets.md — "The report is a high-water mark".
-type sbxRec struct {
-	byKey      map[string]workloadclaims.SandboxContainer
-	unresolved map[string]struct{} // container IDs with no digest; cleared only by a later resolved record for the same ID
-}
-
 func newAdmissionInventory(procRoot string) *admissionInventory {
 	return &admissionInventory{
 		containers: map[string]ctrRec{},
-		admitted:   map[string]sbxRec{},
+		admitted:   map[string]admissionhistory.History{},
 		sandboxes:  map[string]struct{}{},
 		procRoot:   procRoot,
 	}
@@ -62,20 +54,8 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	defer b.mu.Unlock()
 	b.containers[containerID] = ctrRec{sandboxID: sandboxID, name: name, digest: digest, argv: argv}
 
-	rec, ok := b.admitted[sandboxID]
-	if !ok {
-		rec = sbxRec{
-			byKey:      map[string]workloadclaims.SandboxContainer{},
-			unresolved: map[string]struct{}{},
-		}
-	}
-	if digest == "" {
-		rec.unresolved[containerID] = struct{}{}
-	} else {
-		delete(rec.unresolved, containerID)
-		c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
-		rec.byKey[c.Key()] = c
-	}
+	rec := b.admitted[sandboxID]
+	rec.Record(containerID, digest, argv)
 	b.admitted[sandboxID] = rec
 
 	// A container implies its sandbox, so a record arriving before (or without)
@@ -85,7 +65,7 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 
 // remove evicts a stopped container from caller resolution only. The sandbox's
 // admission record keeps it: a stopped container must not bind a caller, but it
-// still ran here (sbxRec). That includes an unresolved digest, so a container
+// still ran here. That includes an unresolved digest, so a container
 // that stops before one resolves closes its sandbox's answer for the sandbox's
 // life.
 func (b *admissionInventory) remove(containerID string) {
@@ -183,17 +163,9 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 	if _, ok := b.sandboxes[sandboxID]; !ok {
 		return nil, nil, false, nil
 	}
-	rec := b.admitted[sandboxID]
-	if len(rec.unresolved) > 0 {
-		return nil, nil, true, fmt.Errorf("sandbox %s admitted a container with no resolved image digest", sandboxID)
+	digests, containers, err := b.admitted[sandboxID].Snapshot()
+	if err != nil {
+		return nil, nil, true, fmt.Errorf("sandbox %s %w", sandboxID, err)
 	}
-	digests := []string{}
-	containers := make([]workloadclaims.SandboxContainer, 0, len(rec.byKey))
-	for _, c := range rec.byKey {
-		digests = append(digests, c.Digest)
-		containers = append(containers, c)
-	}
-	slices.Sort(digests)
-	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
-	return slices.Compact(digests), containers, true, nil
+	return digests, containers, true, nil
 }
