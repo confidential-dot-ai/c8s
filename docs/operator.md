@@ -251,6 +251,10 @@ whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
 that token (see the README, "Managing the image allowlist"). Without
 `cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
 
+Operator clients construct signed requests through `operatorauth.NewRequest`,
+which binds the token to the actual HTTP method, parsed URL path (including
+any base URL prefix), and an owned copy of the body.
+
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
 those flows comes from EAR validation, measurement allowlists, and CA
 continuity checks rather than WebPKI on the Service hop.
