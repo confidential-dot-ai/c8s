@@ -156,11 +156,8 @@ KATA_NVIDIA_VMLINUZ="${KATA_NVIDIA_VMLINUZ:-/opt/kata/share/kata-containers/vmli
 # snapshot into this repo (KERNEL_SNAPSHOT), committed, so any drift is
 # reviewable in git. See README.md "Build" + container.config header.
 KERNEL_FRAGMENT="${IMAGE_DIR}/kernel/container.config"
-# Resolved-config lockfile: confos writes CONFOS_SNAPSHOT during the kernel
-# build; Step 1 copies it to KERNEL_SNAPSHOT (tracked in git) for drift
-# detection. Not read by the build.
+# Resolved-config lockfile captured and checked by build-kernel.sh.
 KERNEL_SNAPSHOT="${IMAGE_DIR}/kernel/config-x86_64.snapshot"
-CONFOS_SNAPSHOT="${CONFOS_DIR}/kernel/config-x86_64.snapshot"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 die() { echo "FATAL: $*" >&2; exit 1; }
@@ -254,56 +251,7 @@ VMLINUZ_OUT="${OUTPUT_DIR}/vmlinuz"
 if [[ "${SKIP_KERNEL:-0}" == "1" && -f "${VMLINUZ_OUT}" ]]; then
     log "Step 1/5: reusing existing kernel (SKIP_KERNEL=1): ${VMLINUZ_OUT}"
 else
-    log "Step 1/5: building hardened kernel with confos"
-    [[ -d "${CONFOS_DIR}" ]] || die "confos checkout not found at ${CONFOS_DIR} (set CONFOS_DIR)."
-    CONFOS_BIN="${CONFOS_BIN:-${CONFOS_DIR}/target/release/confos}"
-    if [[ ! -x "${CONFOS_BIN}" ]]; then
-        echo "    building confos (cargo build --release)"
-        ( cd "${CONFOS_DIR}" && cargo build --release )
-    fi
-    # confos writes output/kernel/vmlinuz relative to its own dir. confos
-    # resolves its config snapshot internally (fixed kernel/config-x86_64.snapshot
-    # in the confos tree, auto-updated each build), so we pass only the fragment —
-    # the old --kernel-snapshot flag no longer exists.
-    ( cd "${CONFOS_DIR}" && "${CONFOS_BIN}" kernel \
-        --kernel-config-fragment "${KERNEL_FRAGMENT}" )
-    CONFOS_VMLINUZ="${CONFOS_DIR}/output/kernel/vmlinuz"
-    [[ -f "${CONFOS_VMLINUZ}" ]] || die "confos did not produce ${CONFOS_VMLINUZ}"
-    install -m 0644 "${CONFOS_VMLINUZ}" "${VMLINUZ_OUT}"
-
-    # Capture the resolved-config snapshot confos just wrote (baseline +
-    # our container.config, merged). confos keeps it in its own tree where
-    # it gets overwritten/discarded; copy it next to the fragment in THIS
-    # repo so the merged config is committed and reviewable — this is how a
-    # change in confos's kernel base that affects our guest kernel becomes
-    # visible here. Not a build input. (SKIP_KERNEL reuses an existing
-    # vmlinuz without re-resolving, so it intentionally leaves the
-    # committed snapshot untouched.)
-    [[ -f "${CONFOS_SNAPSHOT}" ]] || die "confos did not produce ${CONFOS_SNAPSHOT} — cannot capture the resolved-config snapshot."
-    # Drift gate: compare the freshly-resolved config against the committed
-    # lockfile BEFORE overwriting it. CHECK_SNAPSHOT=1 (set by CI on the
-    # publish path) makes a mismatch fatal HERE — at Step 1, before osbuilder
-    # (Steps 2-5) and the GHCR push — so a guest image whose kernel config
-    # drifted from what's committed/reviewed never gets built or published.
-    # Local builds leave CHECK_SNAPSHOT unset and just refresh the lockfile.
-    snapshot_drift=0
-    if [[ -f "${KERNEL_SNAPSHOT}" ]] && ! cmp -s "${CONFOS_SNAPSHOT}" "${KERNEL_SNAPSHOT}"; then
-        snapshot_drift=1
-        committed_sha="$(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}')"
-    fi
-    # Copy regardless (so the uploaded artifact reflects what THIS build
-    # resolved, even on a gate failure) — then enforce.
-    install -m 0644 "${CONFOS_SNAPSHOT}" "${KERNEL_SNAPSHOT}"
-    echo "    snapshot: ${KERNEL_SNAPSHOT} (sha256 $(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}'))"
-    if [[ "${CHECK_SNAPSHOT:-0}" == "1" && "${snapshot_drift}" == "1" ]]; then
-        die "resolved kernel config drifted from the committed snapshot.
-       committed ${KERNEL_SNAPSHOT}: ${committed_sha}
-       resolved  (this build):       $(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}')
-   confos's baseline (CONFOS_REF) or kernel/container.config changed without
-   re-committing kata-guest-base/kernel/config-x86_64.snapshot. Re-resolve and
-   commit it (run the 'Kernel config snapshot' workflow, or a local build), or
-   revert the change that moved it. Failing before osbuilder + the GHCR push."
-    fi
+    bash "${HERE}/build-kernel.sh" "${CONFOS_DIR}" "${IMAGE_DIR}" "${OUTPUT_DIR}"
 fi
 echo "    kernel: ${VMLINUZ_OUT}"
 

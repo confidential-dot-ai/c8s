@@ -96,3 +96,9 @@ if bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths" \
 fi
 
 echo "repro gate change-classification tests passed"
+
+for path in kata-guest-base/scripts/build-kernel.sh .github/actions/build-guest-kernel/action.yml; do
+  reset_case
+  set_paths "$path"
+  expect_result false true
+done
