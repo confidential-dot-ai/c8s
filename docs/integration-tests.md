@@ -27,9 +27,9 @@ The NRI image-policy plugin runs for real: the harness renders the chart's
 full installer DaemonSet and applies it out-of-band (node mode renders only
 the baked pins patcher, and the kind node bakes no plugin for it to pin). The
 installer patches the node's containerd config and restarts it, which kind
-survives. The install-time allowlist floor is generated from the node
+survives. The install-time bootstrap entries are generated from the node
 containerd's image store, because `policy.enforceExisting` checks
-already-running containers against it.
+already-running containers against them.
 
 Two operator-facing commands verify evidence **in-process** with real hardware
 cryptography, which synthetic evidence cannot pass: `c8s verify` and the `c8s
@@ -94,8 +94,8 @@ digest in run.sh; bump it with the kind release. CI installs kind itself
 ### Failure notes
 
 - A pod stuck `CreateContainerError` with `image not in allowlist` is the NRI
-  plugin doing its job: the image's containerd store digest is missing from
-  the floor. The floor is written from the node's image store before install,
+  plugin doing its job: the image's containerd store digest has no bootstrap
+  entry. The entries are written from the node's image store before install,
   so an image first pulled *during* the run lands here — pre-pull it next to
   the other fixtures in run.sh.
 - The mock-attestation deployment is `Recreate` on purpose: two hostNetwork

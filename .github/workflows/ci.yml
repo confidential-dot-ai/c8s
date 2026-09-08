@@ -172,17 +172,25 @@ jobs:
           path: ~/.cache/go-build
           key: go-ci-${{ github.sha }}
 
-      - name: Prune superseded go-ci caches
-        # Only go-ci-* entries this job created; never touches other caches.
+      - name: Prune superseded Go caches
+        # Only the Go cache families this job writes (go-ci-*, go-mod-*)
+        # and the setup-go-* entries setup-go-c8s used to write; never
+        # touches other caches. Cache entries are scoped per ref, so a
+        # go-mod-* saved on a PR branch is a duplicate of main's: keep one
+        # entry per family, the current key on main.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-          CURRENT_KEY: go-ci-${{ github.sha }}
+          CURRENT_CI: go-ci-${{ github.sha }}
+          CURRENT_MOD: go-mod-${{ hashFiles('go.sum') }}
           REPO: ${{ github.repository }}
         run: |
-          gh api "repos/$REPO/actions/caches?per_page=100" \
-            --jq '.actions_caches[]|select(.key|startswith("go-ci-"))|"\(.id) \(.key)"' |
-            awk -v cur="$CURRENT_KEY" '$2 != cur {print $1}' |
+          for prefix in go-ci- go-mod- setup-go-; do
+            gh api --paginate "repos/$REPO/actions/caches?key=$prefix&per_page=100" \
+              --jq '.actions_caches[]|"\(.id) \(.key) \(.ref)"'
+          done |
+            awk -v ci="$CURRENT_CI" -v mod="$CURRENT_MOD" \
+              '!(($2 == ci || $2 == mod) && $3 == "refs/heads/main") {print $1}' |
             while read -r id; do
               gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
             done

@@ -104,10 +104,10 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 			len(cfg.Allowlist.AlwaysAllow), want, len(floor))
 	}
 
-	// Every floor key must be a digest the index admits as-is.
-	idx := alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow).BuildIndex()
+	// Every floor key must be a digest the store admits as-is.
+	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
 	for d := range cfg.Allowlist.AlwaysAllow {
-		if !idx.AdmitsDigest(d) {
+		if !store.alwaysAllows(d) {
 			t.Errorf("floor key %q is not an admissible digest", d)
 		}
 	}

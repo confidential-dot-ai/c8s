@@ -28,8 +28,8 @@ updates:
         update-types: ["minor", "patch"]
 
   # The runtime bases of attestation-gated components: nri-image-policy's image
-  # is in the measured allowlist floor, and docker.yml's type=gha cache means a
-  # repointed base can otherwise ride a warm layer unnoticed.
+  # is in the measured allowlist floor, so a repointed base must not go
+  # unnoticed.
   - package-ecosystem: docker
     directories:
       - /cmd/c8s

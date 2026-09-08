@@ -70,7 +70,7 @@ cleanup() {
   for p in $PF_PODS ${PF_CDS:-}; do kill "$p" 2>/dev/null || true; done
   if cw_namespace_owned "$ns"; then
     kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    al workload delete "$READER" "$WRITER" >/dev/null 2>&1 || true
+    al delete "$READER" "$WRITER" >/dev/null 2>&1 || true
   fi
   return 0
 }
@@ -188,7 +188,7 @@ consumer_pod() {
 EOF
 }
 
-entry "$READER" "$reader_script" "$IMM_PATH" | al workload apply - >/dev/null \
+entry "$READER" "$reader_script" "$IMM_PATH" | al apply - >/dev/null \
   || fail "reader workload entry rejected"
 echo "ok: reader workload entry applied (grant $IMM_PATH)"
 # The plugin polls CDS for allowlist changes on a 5s interval.
@@ -235,7 +235,7 @@ kubectl -n "$ns" delete pod $DENIED --wait=true --timeout=60s >/dev/null
 
 # --- 4. the writer: mutable volume, write + read + persistence -----------------
 
-entry "$WRITER" "$writer_script" "$MUT_PATH" | al workload apply - >/dev/null \
+entry "$WRITER" "$writer_script" "$MUT_PATH" | al apply - >/dev/null \
   || fail "writer workload entry rejected"
 echo "ok: writer workload entry applied (grant $MUT_PATH)"
 sleep 8

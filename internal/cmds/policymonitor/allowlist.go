@@ -15,9 +15,9 @@ package policymonitor
 // kata-guest-base/scripts/fetch.sh substitutes the c8s container image
 // digests into the template before osbuilder materializes the rootfs.
 // It is the SEED: read once at boot so the guest can enforce from t=0
-// with no network. The set is then extended at runtime by the CDS
-// allowlist refresh (cds_refresh.go) — the effective allowlist is the
-// baked seed UNION every digest CDS has served. See MergePulled and
+// with no network. The CDS allowlist refresh (cds_refresh.go) installs the
+// served document beside it as the policy overlay — the effective allowlist
+// is the baked seed UNION the latest served document. See
 // docs/kata-image-policy.md.
 //
 // Match semantics:
@@ -38,7 +38,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -48,11 +47,9 @@ import (
 // error on empty input so the daemon never enters a permissive state
 // silently — operators get a clear startup failure instead).
 //
-// It is read concurrently by per-container decision goroutines
-// (Contains) and written by the CDS refresh loop (MergePulled), so the
-// digest set is guarded by mu.
+// It is written once by loadAllowlist and only read after that, so
+// per-container decision goroutines share it without a lock.
 type allowlist struct {
-	mu sync.RWMutex
 	// digests is the set of bare hex strings (no "sha256:" prefix).
 	digests map[string]struct{}
 }
@@ -117,45 +114,16 @@ func (a *allowlist) Contains(digest string) bool {
 	if err != nil {
 		return false
 	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	_, ok := a.digests[norm]
 	return ok
 }
 
-// MergePulled adds CDS-pulled digests on top of the existing set and
-// returns the number of newly-added (previously-unseen) entries.
-// Malformed entries are skipped. It only ever ADDS — a transient CDS
-// outage can never shrink enforcement below the baked seed. Thread-safe
-// against concurrent Contains.
-func (a *allowlist) MergePulled(digests []string) int {
-	if a == nil {
-		return 0
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	added := 0
-	for _, d := range digests {
-		norm, err := normalizeDigest(d)
-		if err != nil {
-			continue
-		}
-		if _, ok := a.digests[norm]; !ok {
-			a.digests[norm] = struct{}{}
-			added++
-		}
-	}
-	return added
-}
-
-// Size returns the number of accepted entries. Used in startup + refresh
-// logs so operators can see the seed loaded and the set growing.
+// Size returns the number of accepted entries, for the startup and refresh
+// logs.
 func (a *allowlist) Size() int {
 	if a == nil {
 		return 0
 	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	return len(a.digests)
 }
 

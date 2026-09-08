@@ -74,8 +74,80 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  host-deps:
+    name: Seed build-dep debs
+    # One cold apt install per run instead of one per platform leg: the
+    # legs otherwise fetch the same set concurrently from a mirror whose
+    # throughput is the scarce resource. Warm runs cost a checkout and a
+    # cache lookup. Same runner as the legs: the cache key carries the
+    # runner image.
+    if: |
+      inputs.gate == true ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'workflow_dispatch') &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: the-machine
+    timeout-minutes: 45
+    steps:
+      - name: Checkout c8s
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          path: c8s
+          sparse-checkout: .github
+
+      - name: Load measured-build pins
+        id: pins
+        env:
+          CONFOS_REF_OVERRIDE: ${{ inputs.confos_ref }}
+        run: |
+          set -euo pipefail
+          bash c8s/.github/scripts/pin-manifest.sh export \
+            --manifest c8s/.github/build-pins.json \
+            --domain node-image \
+            --format github-output \
+            --confos-override "$CONFOS_REF_OVERRIDE" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout confidential-os-builder (host-deps and its sources)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: confidential-dot-ai/confidential-os-builder
+          ref: ${{ steps.pins.outputs.confos }}
+          path: confidential-os-builder
+
+      - name: Compute runner-image cache term
+        id: image
+        run: echo "key=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Look up build-dep debs
+        id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apt-debs
+          key: apt-debs-${{ steps.image.outputs.key }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
+          lookup-only: true
+
+      - name: Install build deps
+        # See the legs' step of the same name for the bound.
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        run: bash c8s/.github/scripts/host-deps.sh --cache-dir apt-debs
+
+      - name: Save build-dep debs
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apt-debs
+          key: apt-debs-${{ steps.image.outputs.key }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
+
   build-and-push:
     name: Build c8s node image (${{ matrix.platform }})
+    needs: host-deps
     # Auto path: Docker succeeded on main (its PR runs don't publish components).
     # Gate legs arrive via workflow_call, where event_name is the caller's.
     if: |
@@ -207,8 +279,12 @@ jobs:
         # Keyed on the runner-image release and the host-deps pin (script +
         # the base mkosi.sources it reads): the resolved deb set is a
         # function of confos's committed snapshot and the preinstalled
-        # package state. Warm runs never touch the apt mirror, whose
-        # degradation has taken out gate legs repeatedly.
+        # package state. Seeded by the host-deps job, so a miss here is a
+        # race with eviction and the install below falls back to the
+        # mirror. Warm runs never touch it. No restore-keys:
+        # host-deps only uses a cache whose snapshot and package set match
+        # its manifest exactly, so a prefix candidate from another pin is a
+        # download it would discard.
         id: apt-debs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -216,20 +292,18 @@ jobs:
           key: apt-debs-${{ steps.image.outputs.key }}-${{ hashFiles('confidential-os-builder/bin/host-deps', 'confidential-os-builder/mkosi/base/mkosi.sandbox/etc/apt/sources.list.d/mkosi.sources') }}
 
       - name: Install build deps
-        # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
-        # base ovmf is for the SNP path.
-        # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
-        # iasl (DSDT) and clang (bindgen) shape measured bytes: host-deps
-        # installs them snapshot-pinned, fail-closed on live-mirror fetches
-        # (confos#36); with a warm apt-debs it reinstalls fully offline.
-        # Bounded: a dead mirror connection otherwise hangs until the job's
-        # 3h limit.
-        timeout-minutes: 10
+        # The package set and why it is snapshot-pinned: host-deps.sh.
+        # With a warm apt-debs this reinstalls fully offline. Bounded so
+        # a wedged mirror cannot hold the job to its 3h limit: host-deps
+        # bounds each file fetch (see its apt_snapshot), not the
+        # transaction, and a cold install is ~30 debs plus indexes,
+        # ~85 MB, which a degraded snapshot.ubuntu.com has served at tens
+        # of KB/s, so 10 minutes is not enough and 30 is. The script
+        # retries the transaction within a 25 minute budget under it.
+        timeout-minutes: 30
         run: |
           set -euo pipefail
-          confidential-os-builder/bin/host-deps --cache-dir apt-debs \
-            systemd-container ovmf cpio acpica-tools \
-            libclang-dev clang libtss2-dev
+          bash c8s/.github/scripts/host-deps.sh --cache-dir apt-debs
           # The exact host set, for auditing a published measurement's toolchain.
           { echo "### host build-dep debs"; find apt-debs -maxdepth 1 -name '*.deb' -printf '- %f\n' | sort; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -385,6 +459,11 @@ jobs:
           ldd target/release/attestation-api | grep -q libnvat
 
       - name: Build c8s image
+        # Warm builds take 2 minutes; a cold pkgcache or driver download
+        # took 20 in the last 40 runs. Bounded so a wedged mirror fails
+        # here rather than at the job's 3h limit, which exists for the
+        # kernel rebuild step above.
+        timeout-minutes: 60
         working-directory: confidential-os-builder
         env:
           ATTEST_GPU_BIN: ${{ github.workspace }}/attestation-rs/target/release/attestation-api

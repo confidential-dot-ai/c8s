@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -17,7 +19,7 @@ import (
 func newListCmd(o *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List the current allowlist floor and workload entries",
+		Short: "List the current allowlist entries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			al, version, err := o.fetch(ctx(cmd))
@@ -54,8 +56,7 @@ func newExportCmd(o *options) *cobra.Command {
 				if err := os.WriteFile(args[0], data, 0o644); err != nil {
 					return fmt.Errorf("write %q: %w", args[0], err)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %d floor digest(s) and %d workload(s) to %s\n",
-					len(al.Digests), len(al.Workloads), args[0])
+				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %d workload(s) to %s\n", len(al.Workloads), args[0])
 				return nil
 			}
 			_, err = cmd.OutOrStdout().Write(data)
@@ -135,23 +136,8 @@ func writeJSON(w io.Writer, v any) error {
 // --- text rendering ---
 
 func printAllowlistText(w io.Writer, al *pkgallowlist.Allowlist, version string) {
-	fmt.Fprintf(w, "version %s: %d floor digest(s), %d workload(s)\n\n", version, len(al.Digests), len(al.Workloads))
-	printFloorTable(w, al.Digests)
-	fmt.Fprintln(w)
+	fmt.Fprintf(w, "version %s: %d workload(s)\n\n", version, len(al.Workloads))
 	printWorkloadTable(w, al.Workloads)
-}
-
-func printFloorTable(w io.Writer, digests map[string]string) {
-	fmt.Fprintf(w, "floor (%d):\n", len(digests))
-	if len(digests) == 0 {
-		return
-	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "DIGEST\tIMAGE")
-	for _, d := range sortedKeys(digests) {
-		fmt.Fprintf(tw, "%s\t%s\n", d, digests[d])
-	}
-	tw.Flush()
 }
 
 func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload) {
@@ -159,19 +145,15 @@ func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload)
 	if len(workloads) == 0 {
 		return
 	}
-	names := make([]string, 0, len(workloads))
-	for name := range workloads {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(workloads))
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tINIT\tCTRS\tCOMMAND/ARGS\tPATHS")
+	fmt.Fprintln(tw, "NAME\tLABEL\tINIT\tCTRS\tCOMMAND/ARGS\tSECRETS")
 	for _, name := range names {
 		wl := workloads[name]
-		command, args, paths := summarizeWorkload(wl)
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n", name, len(wl.InitContainers), len(wl.Containers),
-			"command="+command+" args="+args, paths)
+		command, args, secrets := summarizeWorkload(wl)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\n", name, wl.Label, len(wl.InitContainers), len(wl.Containers),
+			"command="+command+" args="+args, secrets)
 	}
 	tw.Flush()
 }
@@ -203,19 +185,7 @@ func argvPolicyName(p pkgallowlist.ArgvPolicy) string {
 }
 
 func joinSet(set map[string]bool) string {
-	keys := make([]string, 0, len(set))
-	for k := range set {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := ""
-	for i, k := range keys {
-		if i > 0 {
-			out += ","
-		}
-		out += k
-	}
-	return out
+	return strings.Join(slices.Sorted(maps.Keys(set)), ",")
 }
 
 // argvSummary renders one argv policy for diff output.
