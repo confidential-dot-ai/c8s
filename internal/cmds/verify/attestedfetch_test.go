@@ -83,10 +83,13 @@ func TestAttestedFetchClosesConnection(t *testing.T) {
 }
 
 func TestAttestedFetchBoundsBodyRead(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
 	base, pin := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
-		<-r.Context().Done()
+		// Keep the response incomplete until the client observes cancellation.
+		<-release
 	})
 	for _, cancelEarly := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(context.Background())
