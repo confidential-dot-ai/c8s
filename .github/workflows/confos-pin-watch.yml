@@ -123,8 +123,17 @@ jobs:
             new_oid=$remote_oid
           else
             if [ "$remote_tree" != "$base_tree" ]; then
-              echo "::error::candidate branch $branch contains a different tree; refusing to overwrite it"
-              exit 1
+              # A branch left behind by a pin-watch PR closed without merging
+              # differs from main only in the manifest; anything else on it
+              # is someone's work and stays put.
+              if [ "$(git diff-tree -r --name-only "$base_tree" "$remote_tree")" != ".github/build-pins.json" ]; then
+                echo "::error::candidate branch $branch carries changes beyond .github/build-pins.json; refusing to overwrite it (delete the branch to let pin-watch recreate it)"
+                exit 1
+              fi
+              echo "resetting stale pin-watch branch $branch to $base_oid" >> "$GITHUB_STEP_SUMMARY"
+              gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/$branch" \
+                -f sha="$base_oid" -F force=true >/dev/null
+              remote_oid=$base_oid
             fi
             mutation=$(cat <<'GRAPHQL'
           mutation($repository: String!, $branch: String!, $expected: GitObjectID!, $headline: String!, $path: String!, $contents: Base64String!) {

@@ -155,11 +155,7 @@ jobs:
             ratls-mesh:
               - '{cmd/ratls-mesh/**,internal/cmds/ratlsmesh/**}'
             nri-image-policy:
-              # internal/helmchart/c8s is baked into this image (see its
-              # Dockerfile) so node-guest-image/c8s/mkosi.sync can stage the
-              # chart alongside the plugin binary — a chart-only change must
-              # rebuild it too.
-              - '{cmd/nri-image-policy/**,internal/cmds/nri-image-policy/**,internal/helmchart/c8s/**}'
+              - '{cmd/nri-image-policy/**,internal/cmds/nri-image-policy/**}'
             volumed:
               - '{cmd/volumed/**,internal/cmds/volumed/**}'
       - name: Build Docker matrix

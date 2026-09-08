@@ -10,12 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY build/c8s /usr/local/bin/c8s
 COPY cmd/nri-image-policy/enable-nri.sh /usr/local/bin/enable-nri.sh
-# The c8s chart, so node-guest-image/c8s/mkosi.sync can stage it into the
-# node image's HelmChart AddOn without a separate chart-fetch step: this
-# image is already extracted at build time for the plugin binary (see
-# mkosi.sync "3. nri-image-policy plugin binary"), so the chart rides the
-# same C8S_REF-pinned artifact.
-COPY internal/helmchart/c8s /usr/share/c8s/chart
 RUN chmod +x /usr/local/bin/c8s /usr/local/bin/enable-nri.sh \
     && ln -s /usr/local/bin/c8s /usr/local/bin/nri-image-policy
 

@@ -222,6 +222,12 @@ jobs:
           tar -czf /tmp/chart.tgz -C "\$CD" c8s || { say FAIL_CHART_PACK; exit 0; }
           CC=\$(base64 -w0 /tmp/chart.tgz)
           say CHART_FROM_SOURCE
+          # A node image that bakes the chart (node-guest-image/c8s/mkosi.sync,
+          # HelmChart c8s labelled confidential.ai/baked=true) installs c8s
+          # itself at boot; applying this lane's HelmChart on top would race
+          # helm-install-c8s with contradicting values. Refuse until the lane
+          # waits on the baked install the way tdx-metal-e2e.yml does.
+          if [ "\$(\$K -n kube-system get helmchart c8s -o jsonpath='{.metadata.labels.confidential\\.ai/baked}' 2>/dev/null)" = true ]; then say FAIL_IMAGE_BAKES_CHART; exit 0; fi
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi

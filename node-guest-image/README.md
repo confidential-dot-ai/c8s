@@ -100,8 +100,9 @@ The other disks are optional; each is owned by one unit under
 
 The image installs the c8s chart itself at boot — no `c8s install` step is
 needed (and `c8s install` refuses to run against a cluster that already
-carries the baked release). `c8s/mkosi.sync` packs `internal/helmchart/c8s`
-into `server/static/charts/c8s.tgz` and renders the platform's
+carries the baked release). `c8s/mkosi.sync` fetches `internal/helmchart/c8s`
+from the c8s source tree at `C8S_REF`, packs it into
+`server/static/charts/c8s.tgz`, and renders the platform's
 `c8s/c8s-chart.<platform>.yaml.in` into a `HelmChart c8s` AddOn
 (`server/manifests/c8s-chart.yaml`) that points `spec.chart` at that static
 tarball, with the node-mode component digests resolved at the same `C8S_REF`
