@@ -17,9 +17,9 @@ import (
 )
 
 // SocketName is the daemon's socket, created inside the same directory the
-// admission inventory uses. That directory is the one the webhook mounts into
-// cw pods and the one the deny-host-namespaces VAP carves out by exact path, so
-// a second directory would be denied to every pod that needs to reach this.
+// admission inventory uses. That directory is the one the inventory's NRI
+// plugin mounts into cw-pod sidecars, so a socket in a second directory would
+// be unreachable from every pod that needs it.
 const SocketName = "volumed.sock"
 
 type config struct {
