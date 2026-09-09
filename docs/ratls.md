@@ -245,11 +245,6 @@ Properties worth noting:
   response and afterwards accept only bundle updates signed by an
   already-trusted CA (`pkg/ratls/cdsclient`). A MITM'd `/ca` read cannot
   inject a new root.
-- **EAR tokens, not certs, for key-only attestation.** `POST /attest-key`
-  runs the same challenge/evidence flow but returns a signed EAR JWT (ES256,
-  JWKS at `/.well-known/jwks.json`) for a caller-held key instead of signing
-  a CSR. Callers already holding an EAR can have a CSR signed via
-  `POST /sign-csr`.
 - **The serving certificate commits only CDS's key and measurement** — not its
   operator-key set, not its allowlist seed. A verifier cross-checks the key set
   CDS *serves* at `/operator-keys`, fetched over that attested serving cert
@@ -323,7 +318,7 @@ What it does **not** guarantee:
   into RTMR[1] and the command line — carrying the dm-verity root hash — into
   RTMR[2]. In-cluster those registers are pinned by `cds.rtmrs` /
   `ratlsMesh.rtmrs` (`c8s install --rtmrs 1=<hex>,2=<hex>`): CDS requires
-  them of TDX callers on `/attest` and `/attest-key`, and every component
+  them of TDX callers on `/attest`, and every component
   dialing CDS (and every mesh peer policy) enforces them on the handshake.
   Left empty — the default, warned on a TDX install — the in-cluster pins
   confer **no guest-code identity**: any TD booting the pinned firmware is
@@ -845,7 +840,6 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
 | tls-lb public leaf | tls-lb pod volume — get-cert init container (mode `cds`) or the `c8s acme` sidecar's Memory-medium emptyDir (mode `acme`) — or an operator-supplied `publicTLS` Secret (mode `webpki`, host-visible) | mesh CA (`cds`), ACME CA (`acme`), or external CA (`webpki`) | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
 | Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
-| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (EAR-gated signing) |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:
 

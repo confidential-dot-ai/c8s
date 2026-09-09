@@ -271,7 +271,7 @@ cds:
   ## TDX: the launch digest (MRTD) covers TDVF firmware only, while RTMR[1]
   ## pins the guest kernel and RTMR[2] the command line carrying the dm-verity
   ## root hash. Used the same two ways as `measurements`: CDS requires them of
-  ## TDX callers on /attest and /attest-key, and every component dialing CDS
+  ## TDX callers on /attest, and every component dialing CDS
   ## pins CDS's RA-TLS cert against them. Ignored for SNP evidence. Empty = no
   ## RTMR pinning (on TDX the measurement pin then confers no guest-code
   ## identity, UNSAFE).

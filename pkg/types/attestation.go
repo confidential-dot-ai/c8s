@@ -21,34 +21,12 @@ type AttestRequestBody struct {
 	// SandboxToken is the inventory-signed sandbox identity of the requesting
 	// pod (workloadclaims.SignedSandboxToken as JSON): its CRI sandbox ID and
 	// the inventory's callback address, bound to the requester's CSR key and
-	// this request's challenge, signed by an inventory key CDS attested via
-	// /attest-key. CDS verifies the token, asks that inventory which images
+	// this request's challenge, signed by the inventory's RA-TLS key.
+	// CDS verifies the token, asks that inventory which images
 	// the sandbox is running, and stamps the sandbox ID into the leaf
 	// (ratls.OIDSandboxID) — docs/ratls.md, "Sandbox identity". Kept opaque
 	// here (types must not import workloadclaims).
 	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
-}
-
-// AttestKeyRequestBody is the request body for POST /attest-key. Used by
-// in-cluster c8s components that need a CDS-issued EAR bound to a
-// TEE-attested ECDSA public key, without going through the full
-// cert-issuance flow that /attest does.
-type AttestKeyRequestBody struct {
-	Challenge string              `json:"challenge"`
-	Evidence  AttestationEvidence `json:"evidence"`
-	// PublicKey is the standard-base64-encoded PKIX DER of the ECDSA public
-	// key the caller wants attested. The TEE evidence's REPORTDATA must be
-	// SHA-384(this key) — the server verifies this binding before issuing
-	// the EAR.
-	PublicKey string `json:"public_key"`
-}
-
-// AttestKeyResponseBody is the response body for POST /attest-key.
-type AttestKeyResponseBody struct {
-	// EAR is a signed JWT whose tee_public_key claim equals PublicKey from
-	// the request. Verifiers re-check the JWT signature against CDS's
-	// JWKS and re-derive the binding before trusting it for any action.
-	EAR string `json:"ear"`
 }
 
 // AttestationEvidence carries platform-specific attestation evidence.

@@ -5331,7 +5331,7 @@ func TestChartCDSAllowlistPersistentTracksPVC(t *testing.T) {
 
 // TestChartCDSServesRATLS confirms the cds container renders with a non-empty
 // --ratls-platform by default, i.e. RA-TLS serving is ON. An empty platform
-// makes cds serve /attest, /sign-csr, and /attest-key over plaintext HTTP,
+// makes cds serve /attest and /sign-csr over plaintext HTTP,
 // collapsing the H1 bootstrap-channel MITM defence — a regression this guards.
 func TestChartCDSServesRATLS(t *testing.T) {
 	out, err := helmTemplate(t)

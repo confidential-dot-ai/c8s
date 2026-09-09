@@ -239,9 +239,9 @@ type DigestsClient struct {
 
 // NewDigestsClient builds the client. pins hold the launch digests (and any
 // TDX RTMR pins) an inventory may present — the same allowlist CDS pins for
-// the inventory's /attest-key EAR, so a sandbox token and the callback that
+// the inventory's RA-TLS certificate, so a sandbox token and the callback that
 // follows it are held to one standard. Zero pins accept any RA-TLS-attested
-// inventory, matching what an empty allowlist already means for the EAR:
+// inventory, matching what an empty allowlist already means for the certificate:
 // UNSAFE outside development; callers warn.
 //
 // It warms its own RA-TLS certificate before returning: provisioning costs an
