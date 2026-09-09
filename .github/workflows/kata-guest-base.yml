@@ -275,32 +275,6 @@ jobs:
       - name: Install systemd-container (mkosi sandbox dep)
         run: sudo apt-get update && sudo apt-get install -y systemd-container
 
-      # restore/save split for the same reason as attestation-api above —
-      # the save must not hang off whole-job success while we stabilise the
-      # kata-guest-base build.
-      - name: Restore confos build
-        id: confos-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: confidential-os-builder/target/release/confos
-          key: ${{ runner.os }}-confos-${{ hashFiles('confidential-os-builder/Cargo.lock', 'confidential-os-builder/src/**', 'confidential-os-builder/crates/**') }}
-
-      # confos changes less often than this repo; skip the rebuild when the cached
-      # binary matches the source. (Without this gate the cache restored the
-      # binary but cargo rebuilt it anyway — its fingerprints aren't cached.)
-      - name: Build confos
-        id: build-confos
-        if: steps.confos-cache.outputs.cache-hit != 'true'
-        working-directory: confidential-os-builder
-        run: cargo build --release
-
-      - name: Save confos build
-        if: steps.confos-cache.outputs.cache-hit != 'true' && steps.build-confos.outcome == 'success'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: confidential-os-builder/target/release/confos
-          key: ${{ steps.confos-cache.outputs.cache-primary-key }}
-
       # --- Assemble + build the rootfs image ---------------------------
 
       # Set up oras BEFORE fetch.sh runs: the script's bootstrap-
@@ -412,87 +386,18 @@ jobs:
           path: ${{ runner.temp }}/kata-base-rootfs.tar.zst
           key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh', 'c8s/kata-guest-base/patches/*.patch') }}
 
-      # Cache the guest kernel build output (confidential-os-builder/output/kernel) — the most
-      # expensive INVARIANT in this job. build.sh Step 1/5 runs `confos kernel`,
-      # which short-circuits the compile + the mkosi tools-tree build (and the
-      # kernel-source download under output/kernel/cache/) when its
-      # manifest.json fingerprint matches the inputs (confos
-      # src/commands/kernel.rs).
-      #
-      # The resolved-config snapshot (confidential-os-builder/kernel/config-x86_64.snapshot) MUST
-      # be cached alongside: confos rewrites it during the build (committed
-      # baseline + our container.config fragment merged in) and hashes it into
-      # the fingerprint. Without it a fresh confos checkout reverts the snapshot
-      # to the committed baseline, the fingerprint never matches, and the
-      # "cached" kernel rebuilds every run — tools tree (~200s) + compile
-      # (~150s) — which is exactly what happened before the -v2 key.
-      # Bumping the version literal busts stale entries (cache keys are
-      # immutable, so an exact hit on a bad entry would skip the save forever).
-      # -v2 dropped the old snapshot-less entries; -v3 drops the incomplete
-      # ~30 KiB snapshot-only entries an unguarded always()-save once seeded
-      # when a build died mid-kernel (see the Save step's completeness guard).
-      #
-      # Key on CONFOS_REF (a different confos can yield a different kernel) + the
-      # c8s kernel config fragment; restore-keys falls back to the latest
-      # same-confos cache so even a fragment change reuses the cached
-      # kernel-source tarball. confos re-validates the fingerprint internally,
-      # so a stale restore can never yield the wrong kernel — it just rebuilds.
-      # Restore here (before build); the matching always()-save is after the
-      # build step below.
-      - name: Restore guest kernel build
-        id: kernel-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Build guest kernel
+        uses: ./c8s/.github/actions/build-guest-kernel
         with:
-          path: |
-            confidential-os-builder/output/kernel
-            confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
-          restore-keys: |
-            ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-
-
-      # Cache confos's mkosi kernel-builder tools tree (build.sh Step 1 →
-      # `confos kernel` Step 0a). The tools tree is the only part of this job
-      # that talks to snapshot.ubuntu.com — the point-in-time apt mirror
-      # pinned in confos's mkosi/kernel-builder/mkosi.conf — which 5xxes often
-      # enough to be the job's top flake source. A cache hit takes it off the
-      # network entirely: confos owns the reuse decision (it stamps
-      # mkosi.output/.confos-tools-stamp with the mkosi.conf hash and skips the
-      # `sudo mkosi --force` rebuild on a match — src/commands/kernel.rs
-      # ensure_tools_tree), so a restored tree short-circuits Step 0a and a
-      # stale one is merely rebuilt, never trusted.
-      #
-      # Like the base rootfs, the cache unit is a sudo-tar, NOT the directory:
-      # mkosi runs under sudo and leaves a root-owned tree, and actions/cache
-      # tars as the runner user, which would drop that ownership. The tarball
-      # contains mkosi.output itself (not just its contents) so the
-      # directory's own ownership/mode round-trip too — confos (running
-      # unprivileged) must still be able to manage the stamp file inside.
-      #
-      # Key: the mkosi.conf hash — the exact digest confos stamps the tree
-      # with (the snapshot mirror URL and package list are both in that file)
-      # — plus the exact mkosi ref from the manifest, because the stamp only
-      # covers the conf while the tree is built by whatever mkosi the Setup
-      # step installs. No restore-keys: a prefix match could only restore a
-      # stamp-mismatched tree that confos would rebuild anyway.
-      - name: Restore kernel-builder tools tree
-        id: tools-tree-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ steps.pins.outputs.mkosi }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
-
-      - name: Unpack kernel-builder tools tree
-        if: steps.tools-tree-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
-            -xpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
-            -C confidential-os-builder/mkosi/kernel-builder
+          confos-ref: ${{ steps.pins.outputs.confos }}
+          mkosi-ref: ${{ steps.pins.outputs.mkosi }}
+          check-snapshot: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && '1' || '0' }}
 
       # Docker/AppArmor compatibility on the persistent `the-machine` runner
       # is a provisioning invariant. CI deliberately never tears down AppArmor
       # or changes host security policy: cancellation cannot guarantee repair.
 
-      - name: Build kata-guest-base image (confos kernel + kata osbuilder)
+      - name: Build kata-guest-base image (kata osbuilder)
         working-directory: c8s/kata-guest-base
         env:
           # build.sh fetches the kata-containers source at the pinned
@@ -506,14 +411,7 @@ jobs:
           # Step 2; otherwise build.sh packs the freshly built rootfs here,
           # right after Step 2, for the Save step below.
           ROOTFS_CACHE_TAR: ${{ runner.temp }}/kata-base-rootfs.tar.zst
-          # Snapshot drift gate: on the master / release-tag publish path, make
-          # build.sh abort at Step 1 (before osbuilder + the GHCR push) if the
-          # resolved kernel config doesn't match the committed lockfile
-          # kata-guest-base/kernel/config-x86_64.snapshot. Off for
-          # workflow_dispatch (head_branch empty) so a side-branch test build of
-          # an in-flight kernel change can still publish a branch-* image before
-          # the snapshot is committed.
-          CHECK_SNAPSHOT: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && '1' || '0' }}
+          SKIP_KERNEL: "1" # The shared kernel action already checked the snapshot.
           # Re-lay toolchain gate (values = published artifact's relay_toolchain): a runner upgrade fails preflight instead of silently shifting root_hash; re-pin on upgrade, expecting a new measurement.
           REPRO_E2FSPROGS_VERSION: "1.47.0"
           REPRO_CRYPTSETUP_VERSION: "2.7.0"
@@ -528,55 +426,7 @@ jobs:
           BUILD_NVIDIA: "1"
         run: ./scripts/build.sh
 
-      # Save the guest kernel build even when a LATER step failed — the kernel
-      # is Step 1/5 of build.sh, so an osbuilder/rootfs/publish failure (the
-      # historically flaky part) still leaves a complete output/kernel worth
-      # keeping. if: always() is the whole point: the default success()-gated
-      # post-save of the unified cache action would skip on those late failures
-      # and re-pay the ~10-min compile next run. Skip only on an exact-key hit
-      # (nothing new to store); a restore-keys-only (prefix) hit still saves
-      # under the new fragment's key.
-      #
-      # COMPLETENESS GUARD: always() also fires when the build died DURING the
-      # kernel (a Step 0a tools-tree flake or a Step 0d compile error) — but by
-      # then Step 0c.5 has already written confidential-os-builder/kernel/config-x86_64.snapshot,
-      # so an unguarded save banks a snapshot-only ~30 KiB cache with no
-      # vmlinuz/manifest. That entry then exact-hits the key forever (this save
-      # only re-runs on a miss), so every later build recompiles against a cache
-      # that can never satisfy confos's fingerprint. Only save when output/kernel
-      # is actually complete — the same existence-probe the rootfs/tools-tree
-      # saves use.
-      - name: Check guest kernel output
-        id: kernel-out
-        if: always()
-        run: |
-          if [[ -f confidential-os-builder/output/kernel/vmlinuz && -f confidential-os-builder/output/kernel/manifest.json ]]; then
-            echo "complete=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "complete=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Save guest kernel build
-        if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          # Keep in lockstep with the Restore step: the snapshot must travel
-          # with output/kernel or confos's fingerprint check misses every run.
-          path: |
-            confidential-os-builder/output/kernel
-            confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
-
-      # Publish the resolved kernel-config snapshot build.sh wrote in Step 1
-      # (confos's required+hardening baseline + our container.config, merged) as
-      # a downloadable artifact — the runner-produced source of truth for the
-      # committed lockfile kata-guest-base/kernel/config-x86_64.snapshot and the
-      # reference a future drift gate diffs. Pulling it from the build (not the
-      # kernel cache) means it always matches THIS run's kernel; the cache can
-      # legitimately hold an earlier resolve. always() + warn: the snapshot is
-      # written early (Step 1), so it's captured even when a later
-      # osbuilder/publish step fails; a build that died before Step 1 has
-      # nothing to upload and the warn is harmless.
+      # Keep the resolved snapshot available after a later image-build failure.
       - name: Upload kernel-config snapshot
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -584,36 +434,6 @@ jobs:
           name: config-x86_64.snapshot
           path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
           if-no-files-found: warn
-
-      # Pack + save the kernel-builder tools tree (see the Restore step
-      # above). The stamp file is the completeness witness: confos writes it
-      # only after a successful `mkosi --force` and wipes it before any
-      # rebuild, so stamp present ⇒ tree complete, and a Step-0a failure
-      # (e.g. snapshot.ubuntu.com 5xx mid-build) leaves nothing to save.
-      # if: always() for the usual reason — the historically flaky steps come
-      # later, and the tools tree is worth banking even when they fail. Note
-      # a kernel-cache HIT run skips Step 0a entirely and produces no tree;
-      # exists=false then skips the save, leaving the cold-build run to seed
-      # this cache.
-      - name: Pack kernel-builder tools tree
-        id: tools-tree-tar
-        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true'
-        run: |
-          if [[ -f confidential-os-builder/mkosi/kernel-builder/mkosi.output/.confos-tools-stamp ]]; then
-            sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
-              -cpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
-              -C confidential-os-builder/mkosi/kernel-builder mkosi.output
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Save kernel-builder tools tree
-        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
 
       # build.sh packs the tarball right after Step 2, before the later steps
       # that historically fail, so an always()-save still banks the ~4-min

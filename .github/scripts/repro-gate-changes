@@ -58,7 +58,8 @@ main() {
         .github/workflows/c8s-image-publish.yml)
         image=true
         ;;
-      kata-guest-base/kernel/* | .github/workflows/kernel-snapshot.yml)
+      kata-guest-base/kernel/* | kata-guest-base/scripts/build-kernel.sh | \
+        .github/actions/build-guest-kernel/* | .github/workflows/kernel-snapshot.yml)
         kernel_snapshot=true
         ;;
       .github/build-pins.json)
