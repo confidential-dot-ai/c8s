@@ -98,21 +98,12 @@ mkdir -p "$STAGE_DIR/etc/systemd/system/cred-release.service.d" \
          "$STAGE_DIR/etc/rancher/rke2/config.yaml.d"
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/cred-release.service.d/10-platform.conf"
-# Same env var name and drop-in shape for c8s-chart-values.service: it reads
-# its own launch measurement the platform-appropriate way (TDX sysfs vs SNP
-# self-attestation) and needs to know which.
+# Same env var name and drop-in shape for c8s-chart-values.service: the
+# render checks the platform the image was built for against the one its
+# verified self-report proves, so a chart baked for one TEE is never pinned
+# to the other's measurement.
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/10-platform.conf"
-# SNP only: c8s launch-values render self-attests against the local
-# attestation-api to read its own launch digest; TDX reads its own sysfs and
-# never dials it, so the dependency only belongs on an SNP build. Requires=,
-# not Wants=: without the attester the render cannot pin and the boot must
-# fail closed. Readiness (the port binds after the unit starts) is waited for
-# in the binary.
-if [ "$PLATFORM" = snp ]; then
-    printf '[Unit]\nRequires=attestation-api.service\nAfter=attestation-api.service\n' \
-        > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/20-snp-attestation-api.conf"
-fi
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
@@ -294,6 +285,11 @@ tar -xzf "$CACHE_DIR/rke2-${CACHE_VER}.tar.gz" -C "$STAGE_DIR/usr/local"
 chmod 0755 "$STAGE_DIR/usr/local/bin/rke2" \
            "$STAGE_DIR/usr/local/bin/rke2-killall.sh" \
            "$STAGE_DIR/usr/local/bin/rke2-uninstall.sh"
+# rke2 keeps containerd on the default CNI dirs and the bundled Cilium chart
+# hostPath-mounts them. Under confos's immutable root they get a writable
+# overlay (state.d/60-c8s.conf), and the initrd only overlays directories
+# that already exist in the image — so bake them empty here.
+mkdir -p "$STAGE_DIR/opt/cni/bin" "$STAGE_DIR/etc/cni/net.d"
 # Marker for inspecting a built image.
 echo "$RKE2_VERSION" > "$STAGE_DIR/usr/local/share/rke2/.confos-baked-version"
 

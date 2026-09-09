@@ -80,7 +80,7 @@ allowlist.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&cfg.Platform, "platform", "", "TEE platform: tdx or snp (required)")
-	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", DefaultAttestationAPIURL, "local attestation-api base URL (SNP self-measurement)")
+	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", DefaultAttestationAPIURL, "local attestation-api base URL (self-measurement)")
 	f.StringVar(&cfg.FragmentPath, "fragment", "", "opkeydata values.yaml fragment (optional; omit to render only the boot-derived tree)")
 	f.StringVar(&cfg.SignaturePath, "signature", "", "detached signature for --fragment (c8s keys sign-values output; required when --fragment is set)")
 	f.StringVar(&out, "out", "", "write the full HelmChartConfig manifest here instead of the bare values tree to stdout")

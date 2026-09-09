@@ -42,8 +42,8 @@ const ownMeasurement = "00172e354c536a71889fa6bdc4dbe2f900172e354c536a71889fa6bd
 
 // fakeOwnMeasurementBytes/fakeRTMRs are the fixed measurement and RTMR pins
 // every fake loader below hands back, standing in for
-// credrelease.OwnLaunchMeasurement (no real tdx_guest sysfs or
-// attestation-api under `go test`).
+// credrelease.OwnLaunchMeasurement (no real attestation-api under
+// `go test`).
 func fakeOwnMeasurementBytes() []byte {
 	b, err := hex.DecodeString(ownMeasurement)
 	if err != nil {
@@ -78,9 +78,9 @@ func noOperatorKeyLoader(context.Context, string, string) ([]byte, error, []byte
 	return nil, err, fakeOwnMeasurementBytes(), fakeRTMRs(), nil
 }
 
-// missingRegisterLoader simulates a staged operator key whose TDX binding
-// check failed because RTMR[3] could not be read: an ENOENT, but from the
-// sysfs, not the pubkey. Render must fail closed, not treat it as a
+// missingRegisterLoader simulates a staged operator key whose binding check
+// failed on an ENOENT from somewhere other than the pubkey (a register node
+// the loader could not read). Render must fail closed, not treat it as a
 // non-operator boot.
 func missingRegisterLoader(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
 	_, err := os.Open(filepath.Join(os.TempDir(), "c8s-launchvalues-test-rtmr3-does-not-exist"))
@@ -93,17 +93,17 @@ var errSubstitutedKey = errors.New("operator pubkey does not match the measured 
 // pubkey was substituted after boot (not a "does not exist" failure, so
 // Render must not treat it as a non-operator boot). The own measurement
 // still resolves — verifyKeyLaunchBound/verifyKeyMeasured failing does not
-// stop credrelease from reading this guest's own sysfs state.
+// stop credrelease from reading this guest's own measurement off the report.
 func failingLoader(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
 	return nil, errSubstitutedKey, fakeOwnMeasurementBytes(), fakeRTMRs(), nil
 }
 
 // unresolvableMeasurementLoader simulates the combined loader's hard-fail
 // path: this guest's own launch measurement itself cannot be read (e.g. the
-// tdx_guest sysfs is gone), which fails the whole call regardless of the
+// attestation-api never comes up), which fails the whole call regardless of the
 // operator key.
 func unresolvableMeasurementLoader(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
-	return nil, nil, nil, nil, errors.New("tdx_guest sysfs unreadable (test fixture)")
+	return nil, nil, nil, nil, errors.New("attestation-api not ready after 90s (test fixture)")
 }
 
 // withLoader overrides the package-level combined seam for the duration of
@@ -374,7 +374,7 @@ func TestRenderFailsClosedWhenLoaderFails(t *testing.T) {
 }
 
 // TestRenderFailsClosedOnMissingRegister covers a staged operator key whose
-// binding check hit ENOENT on the sysfs register: that is not an absent
+// binding check hit an ENOENT elsewhere: that is not an absent
 // pubkey and must not silently drop cds.operatorKeys.
 func TestRenderFailsClosedOnMissingRegister(t *testing.T) {
 	withLoader(t, missingRegisterLoader)

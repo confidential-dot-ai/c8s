@@ -473,7 +473,7 @@ images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
 rootfs pins with it.
 
 `--rtmr 3=<sha384-hex>` can additionally pin the runtime register — the ordered
-operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
+operator-key/workload extend chain ([`runtimemeasure`](https://github.com/confidential-dot-ai/attestation-go/tree/main/runtimemeasure)) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
 anything and reproduce that chain. (`--expected-rtmr3` is the former spelling of
@@ -555,7 +555,7 @@ and again on the RA-TLS credential-release connection:
   build-artifact manifest carrying all three fields under its `tdx` object. A
   generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
-  (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
+  (`runtimemeasure.Seed` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are
   rejected). With no `--workload-image` the register must equal the bare seed;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be

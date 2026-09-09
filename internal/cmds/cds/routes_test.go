@@ -80,7 +80,7 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 	r := newRouter(deps)
 
 	do := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/sign-csr", bytes.NewReader([]byte(`{}`)))
+		req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader([]byte(`{}`)))
 		req.RemoteAddr = "10.0.0.1:1234"
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -228,6 +228,7 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 		{http.MethodGet, "/ca", http.StatusOK},
 		{http.MethodGet, "/allowlist", http.StatusOK},
 		{http.MethodGet, "/does-not-exist", http.StatusNotFound},
+		{http.MethodPost, "/sign-csr", http.StatusNotFound},
 		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
 	}
 
@@ -244,16 +245,15 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}
 }
 
-func TestRouter_AttestKeyMounted(t *testing.T) {
-	// /attest-key is always mounted; an empty body is rejected as a bad request,
-	// proving the route exists (a missing route would 404, a wrong method 405).
+func TestRouter_AttestKeyRemoved(t *testing.T) {
+	// The retired key-only flow must no longer expose an issuance route.
 	r := newStubRouter(t)
 	req := httptest.NewRequest(http.MethodPost, "/attest-key", bytes.NewReader([]byte(`{}`)))
 	req.RemoteAddr = "10.0.0.1:1234"
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("/attest-key not mounted: got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/attest-key: got %d, want 404", w.Code)
 	}
 }
 
@@ -377,7 +377,6 @@ func TestNewHTTPServerSetsTimeouts(t *testing.T) {
 func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	valid := config{
 		maxHeaderBytes:             1,
-		maxTTL:                     time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
 		maxRequestSize:             1,
 		secretsMaxPaths:            1024,
@@ -398,8 +397,6 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		{name: "negative write timeout", edit: func(c *config) { c.writeTimeout = -time.Second }},
 		{name: "negative idle timeout", edit: func(c *config) { c.idleTimeout = -time.Second }},
 		{name: "negative max header bytes", edit: func(c *config) { c.maxHeaderBytes = -1 }},
-		{name: "zero max ttl", edit: func(c *config) { c.maxTTL = 0 }},
-		{name: "negative max ttl", edit: func(c *config) { c.maxTTL = -time.Hour }},
 		{name: "zero named cert ttl", edit: func(c *config) { c.namedCertTTL = 0 }},
 		{name: "negative named cert ttl", edit: func(c *config) { c.namedCertTTL = -time.Hour }},
 		{name: "named cert ttl above the ceiling", edit: func(c *config) { c.namedCertTTL = issuer.MaxNamedLeafTTL + time.Hour }},

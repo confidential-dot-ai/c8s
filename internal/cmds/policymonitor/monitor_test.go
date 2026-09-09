@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
-	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -56,15 +56,15 @@ func writeConfigJSONArgs(t *testing.T, watchDir, cid string, annotations map[str
 
 // exactEntrypointOverlay builds a workload overlay pinning wlDigest to an exact
 // entrypoint (cmd unconstrained).
-func exactEntrypointOverlay(t *testing.T, wlDigest string, entrypoint []string) *allowlistpkg.Allowlist {
+func exactEntrypointOverlay(t *testing.T, wlDigest string, entrypoint []string) *allowlist.Allowlist {
 	t.Helper()
-	return &allowlistpkg.Allowlist{
-		Schema: allowlistpkg.Schema,
-		Workloads: map[string]allowlistpkg.Workload{
-			"w": {Containers: []allowlistpkg.Container{{
+	return &allowlist.Allowlist{
+		Schema: allowlist.Schema,
+		Workloads: map[string]allowlist.Workload{
+			"w": {Containers: []allowlist.Container{{
 				Digest:  mustParseDigest(t, wlDigest),
-				Command: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyExact, Argv: entrypoint},
-				Args:    allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
+				Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: entrypoint},
+				Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 			}}},
 		},
 	}
@@ -121,7 +121,7 @@ func newTestMonitor(t *testing.T, allowlistEntries []string) (*monitor, *fakeKil
 			LogLevel:      "debug",
 		},
 		logger:                logger,
-		allowlist:             a,
+		seed:                  a,
 		overlay:               &policyOverlay{},
 		killer:                killer,
 		configReadDeadline:    200 * time.Millisecond,
@@ -262,10 +262,10 @@ func TestPolicyOverlayAntiRollback(t *testing.T) {
 		t.Fatalf("version = %d, want 5 (rollback ignored)", o.version)
 	}
 	// The version-5 policy still governs: /bin/app matches, /bin/other does not.
-	if !o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
+	if !o.index().AdmitsContainer(allowlist.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
 		t.Fatal("version-5 argv policy dropped by rollback attempt")
 	}
-	if o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
+	if o.index().AdmitsContainer(allowlist.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
 		t.Fatal("rolled-back argv policy took effect")
 	}
 }
@@ -282,10 +282,10 @@ func TestPolicyOverlayIgnoresEqualVersion(t *testing.T) {
 	if o.apply(exactEntrypointOverlay(t, wl, []string{"/bin/other"}), 5) {
 		t.Fatal("replayed version 5 was applied")
 	}
-	if !o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
+	if !o.index().AdmitsContainer(allowlist.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
 		t.Fatal("original version-5 policy dropped by equal-version replay")
 	}
-	if o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
+	if o.index().AdmitsContainer(allowlist.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
 		t.Fatal("equal-version replay policy took effect")
 	}
 }

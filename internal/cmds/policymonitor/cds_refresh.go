@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -36,7 +37,7 @@ import (
 // until ctx is cancelled. Construction failures (bad measurements, RA-TLS
 // setup) disable refresh but never crash the monitor — the baked seed
 // still enforces.
-func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist, overlay *policyOverlay, state *refreshState) {
+func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist.Index, overlay *policyOverlay, state *refreshState) {
 	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
 		disableRefresh(logger, state, reasonBadMeasurements, a, "error", err)
@@ -116,7 +117,7 @@ const refreshCallTimeoutMax = 15 * time.Second
 // disableRefresh records why the refresh will not run and says so at ERROR,
 // naming the frozen entry count so the line states the blast radius rather than
 // only the cause.
-func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *allowlist, args ...any) {
+func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *allowlist.Index, args ...any) {
 	state.disable(reason)
 	// Terminal, so the seed is the final answer: settling here keeps a guest
 	// that will never refresh from making every deny serve out the budget.

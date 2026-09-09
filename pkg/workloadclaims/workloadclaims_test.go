@@ -504,7 +504,7 @@ func TestValidateInventoryHost(t *testing.T) {
 	}
 }
 
-// A sandbox token is mintable by anything holding an /attest-key EAR, so the
+// A sandbox token is mintable by anything holding an attested RA-TLS key, so the
 // address it carries is attacker-chosen. These are the request-forgery targets
 // that must never be dialable: the cloud metadata service, CDS's own loopback,
 // and names that let DNS pick the destination after the check.

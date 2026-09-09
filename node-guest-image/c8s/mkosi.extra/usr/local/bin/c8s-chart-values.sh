@@ -1,7 +1,7 @@
 #!/bin/sh
 # Thin wrapper around `c8s launch-values render --out` (internal/cmds/
-# launchvalues), which resolves this guest's own launch measurement (TDX
-# sysfs / SNP self-attestation), loads and verifies the operator key,
+# launchvalues), which resolves this guest's own launch measurement (one
+# verified self-attestation), loads and verifies the operator key,
 # verifies and merges an optional opkeydata values.yaml fragment, and writes
 # the HelmChartConfig atomically. See internal/cmds/launchvalues's package
 # doc for the trust chain and docs/operator.md, "Launch-time values", for the

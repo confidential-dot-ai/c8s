@@ -40,10 +40,9 @@ const DefaultAttestationAPIURL = "http://127.0.0.1:8400"
 
 // loadMeasuredOperatorKeyAndOwnMeasurementFunc matches
 // credrelease.LoadMeasuredOperatorKeyAndOwnMeasurement's signature. A package
-// var, not a direct call, so tests can fake attestation and the tdx_guest
-// sysfs without a real TDX/SNP guest. On SNP the real implementation shares
-// one selfReport call between the operator-key HOSTDATA check and the
-// launch-digest read, so Render only attests once per boot.
+// var, not a direct call, so tests can fake attestation without a real
+// TDX/SNP guest. The real implementation answers both questions off one
+// verified self-report, so Render only attests once per boot.
 type loadMeasuredOperatorKeyAndOwnMeasurementFunc func(ctx context.Context, platform, attestationAPIURL string) (pub []byte, pubErr error, measurement []byte, rtmrs map[int][]byte, err error)
 
 // loadMeasuredOperatorKeyAndOwnMeasurement defaults to the real,
@@ -52,11 +51,11 @@ var loadMeasuredOperatorKeyAndOwnMeasurement loadMeasuredOperatorKeyAndOwnMeasur
 
 // Config is the input to Render.
 type Config struct {
-	// Platform is the TEE platform, already normalized via
-	// ratls.NormalizePlatform to what LoadMeasuredOperatorKey expects
-	// ("tdx" or "sev-snp").
+	// Platform is the TEE platform this image was built for, normalized via
+	// ratls.NormalizePlatform ("tdx" or "sev-snp"). It is checked against the
+	// platform the verified self-report proves, never used in its place.
 	Platform string
-	// AttestationAPIURL is the local attestation-api base URL (SNP self-verify).
+	// AttestationAPIURL is the local attestation-api base URL (self-report).
 	AttestationAPIURL string
 	// FragmentPath is the opkeydata values.yaml fragment. Empty means no
 	// fragment: Render emits the boot-derived tree alone.
@@ -90,9 +89,9 @@ func Render(ctx context.Context, cfg Config) (string, error) {
 	}
 
 	// This guest's own launch measurement, (TDX only) RTMR pins, and the
-	// operator pubkey, read directly from measured state (TDX: tdx_guest
-	// sysfs; SNP: one verified self-report shared between the operator-key
-	// HOSTDATA check and the launch-digest read).
+	// operator pubkey, all off one self-report the local attestation-api
+	// verified: the operator-key binding check and the measurement read
+	// share it. platform is checked against what that report proves.
 	operatorPub, pubErr, measurement, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, platform, attestationAPIURL)
 	if err != nil {
 		return "", fmt.Errorf("resolve this guest's own launch measurement: %w", err)

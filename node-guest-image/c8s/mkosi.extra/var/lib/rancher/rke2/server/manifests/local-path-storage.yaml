@@ -3,6 +3,10 @@
 # the confidential node has no StorageClass and any PVC (e.g. c8s tee-proxy
 # certs, CDI rootdisks) stays Pending forever. v0.0.30 matches the ansible
 # local-path-provisioner role on the outer clusters.
+#
+# Volumes live under /var/lib/local-path-provisioner, not upstream's /opt:
+# /opt is on the read-only verity root, while /var is a writable state
+# overlay (scratch-disk backed).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -146,7 +150,7 @@ data:
             "nodePathMap":[
             {
                     "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
-                    "paths":["/opt/local-path-provisioner"]
+                    "paths":["/var/lib/local-path-provisioner"]
             }
             ]
     }

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // writeSpec writes a bundle config.json carrying the fields workload policy is
@@ -34,15 +34,15 @@ func writeSpec(t *testing.T, watchDir, cid string, annotations map[string]string
 	}
 }
 
-func mountPolicyOverlay(t *testing.T, digest string, destinations []string) *allowlistpkg.Allowlist {
+func mountPolicyOverlay(t *testing.T, digest string, destinations []string) *allowlist.Allowlist {
 	t.Helper()
-	return &allowlistpkg.Allowlist{
-		Schema: allowlistpkg.Schema,
-		Workloads: map[string]allowlistpkg.Workload{"w": {Containers: []allowlistpkg.Container{{
+	return &allowlist.Allowlist{
+		Schema: allowlist.Schema,
+		Workloads: map[string]allowlist.Workload{"w": {Containers: []allowlist.Container{{
 			Digest:  mustParseDigest(t, digest),
-			Command: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
-			Args:    allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
-			Mounts:  allowlistpkg.MountPolicy{Policy: allowlistpkg.PolicyExact, Destinations: destinations},
+			Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+			Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+			Mounts:  allowlist.MountPolicy{Policy: allowlist.PolicyExact, Destinations: destinations},
 		}}}},
 	}
 }

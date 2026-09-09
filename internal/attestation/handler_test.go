@@ -1,74 +1,29 @@
 package attestation_test
 
 import (
-	"bytes"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
-	"github.com/confidential-dot-ai/c8s/internal/earclaims"
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-func testKeyPEM() []byte {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		panic(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-}
-
-func mustJSON(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
-}
-
-// testApp mounts the attestation routes /authenticate and /attest-key. CSR
-// signing happens in-process in cds, so these handlers carry no signer
-// dependency.
-func testApp(attestationURL string) http.Handler {
+// testApp mounts the challenge endpoint used by certificate issuance.
+func testApp() http.Handler {
 	challengeStore := attestation.NewChallengeStore(60 * time.Second)
-
-	earIssuer, err := ear.NewIssuer(testKeyPEM(), "test-issuer", 24*time.Hour)
-	if err != nil {
-		panic(err)
-	}
-
-	h := attestation.Handler{
-		Challenges:        &challengeStore,
-		AttestationClient: attestationclient.NewClient(attestationURL),
-		EarIssuer:         earIssuer,
-	}
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /authenticate", attestation.HandleAuthenticate(h.Challenges))
-	mux.HandleFunc("POST /attest-key", h.HandleAttestKey)
+	mux.HandleFunc("POST /authenticate", attestation.HandleAuthenticate(&challengeStore))
 	return mux
 }
 
@@ -90,7 +45,7 @@ func authenticate(t *testing.T, appURL string) string {
 }
 
 func TestAuthenticateReturnsBase64Challenge(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
+	app := httptest.NewServer(testApp())
 	defer app.Close()
 
 	challenge := authenticate(t, app.URL)
@@ -105,7 +60,7 @@ func TestAuthenticateReturnsBase64Challenge(t *testing.T) {
 }
 
 func TestAuthenticateReturnsUniqueChallenges(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
+	app := httptest.NewServer(testApp())
 	defer app.Close()
 
 	c1 := authenticate(t, app.URL)
@@ -116,7 +71,7 @@ func TestAuthenticateReturnsUniqueChallenges(t *testing.T) {
 }
 
 func TestAuthenticateRejectsGetMethod(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
+	app := httptest.NewServer(testApp())
 	defer app.Close()
 
 	resp, err := http.Get(app.URL + "/authenticate")
@@ -126,170 +81,6 @@ func TestAuthenticateRejectsGetMethod(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("got status %d, want 405", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
-	stub := testattest.New(t)
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-
-	pubKey := generateAttestKeyPubKey(t)
-	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
-	if err != nil {
-		t.Fatalf("marshal pubkey: %v", err)
-	}
-
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence: types.AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{"quote":"abc"}`),
-		},
-		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
-	})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-
-	resp, err := http.Post(app.URL+"/attest-key", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatalf("POST /attest-key: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
-	}
-
-	var out types.AttestKeyResponseBody
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if out.EAR == "" {
-		t.Fatal("response missing ear")
-	}
-
-	var claims map[string]any
-	decodeJWTPayload(t, out.EAR, &claims)
-	if claims[earclaims.TEEPublicKey] == nil {
-		t.Fatal("EAR missing tee_public_key claim")
-	}
-	wantPubKeyClaim := base64.RawURLEncoding.EncodeToString(pubDER)
-	if got, _ := claims[earclaims.TEEPublicKey].(string); got != wantPubKeyClaim {
-		t.Fatalf("tee_public_key = %q, want %q", got, wantPubKeyClaim)
-	}
-}
-
-// TestAttestKeyEmbedsSubmittedEvidence: the issued EAR's ear_raw_evidence must
-// carry the evidence envelope the caller submitted, verbatim.
-func TestAttestKeyEmbedsSubmittedEvidence(t *testing.T) {
-	stub := testattest.New(t)
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	pubDER, err := x509.MarshalPKIXPublicKey(generateAttestKeyPubKey(t))
-	if err != nil {
-		t.Fatalf("marshal pubkey: %v", err)
-	}
-	submitted := types.AttestationEvidence{
-		Platform: "snp",
-		Evidence: json.RawMessage(`{"quote":"abc"}`),
-	}
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence:  submitted,
-		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
-	})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-
-	resp, err := http.Post(app.URL+"/attest-key", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatalf("POST /attest-key: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
-	}
-	var out types.AttestKeyResponseBody
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-
-	var claims struct {
-		Submods map[string]struct {
-			RawEvidence json.RawMessage `json:"ear_raw_evidence"`
-		} `json:"submods"`
-	}
-	decodeJWTPayload(t, out.EAR, &claims)
-	att, ok := claims.Submods[earclaims.SubmodAttester]
-	if !ok {
-		t.Fatalf("EAR missing %q submod", earclaims.SubmodAttester)
-	}
-	var got types.AttestationEvidence
-	if err := json.Unmarshal(att.RawEvidence, &got); err != nil {
-		t.Fatalf("unmarshal ear_raw_evidence %s: %v", att.RawEvidence, err)
-	}
-	if got.Platform != submitted.Platform {
-		t.Errorf("ear_raw_evidence platform = %q, want %q", got.Platform, submitted.Platform)
-	}
-	if string(got.Evidence) != string(submitted.Evidence) {
-		t.Errorf("ear_raw_evidence evidence = %s, want %s", got.Evidence, submitted.Evidence)
-	}
-}
-
-func TestAttestKeyRejectsNonECDSAPubkey(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		PublicKey: base64.StdEncoding.EncodeToString([]byte("not-a-pubkey")),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Post(app.URL+"/attest-key", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-}
-
-func generateAttestKeyPubKey(t *testing.T) crypto.PublicKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	return &key.PublicKey
-}
-
-func decodeJWTPayload(t *testing.T, token string, v any) {
-	t.Helper()
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		t.Fatalf("expected 3 JWT parts, got %d", len(parts))
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode JWT payload: %v", err)
-	}
-	if err := json.Unmarshal(payload, v); err != nil {
-		t.Fatalf("unmarshal JWT payload: %v", err)
 	}
 }
 
@@ -438,320 +229,5 @@ func TestWriteError(t *testing.T) {
 	}
 	if out.Error != "some_code" || out.Message != "some message" {
 		t.Fatalf("unexpected error envelope: %+v", out)
-	}
-}
-
-func postAttestKey(t *testing.T, appURL, body string) *http.Response {
-	t.Helper()
-	resp, err := http.Post(appURL+"/attest-key", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /attest-key: %v", err)
-	}
-	return resp
-}
-
-func TestAttestKeyInvalidJSONBody(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, `{"unknown_field": 1}`)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyInvalidChallengeBase64(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
-	defer app.Close()
-
-	body := mustJSON(types.AttestKeyRequestBody{
-		Challenge: "!!!not-base64!!!",
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		PublicKey: "",
-	})
-	resp := postAttestKey(t, app.URL, body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyUnknownChallenge(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
-	defer app.Close()
-
-	// Valid base64 but never issued by the store.
-	unknown := base64.StdEncoding.EncodeToString(make([]byte, 32))
-	body := mustJSON(types.AttestKeyRequestBody{
-		Challenge: unknown,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		PublicKey: "",
-	})
-	resp := postAttestKey(t, app.URL, body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyInvalidPublicKeyBase64(t *testing.T) {
-	app := httptest.NewServer(testApp("http://unused"))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	body := mustJSON(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		PublicKey: "!!!not-base64!!!",
-	})
-	resp := postAttestKey(t, app.URL, body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-}
-
-// attestKeyBody builds a valid request body for a freshly authenticated
-// challenge against the given app.
-func attestKeyBody(t *testing.T, appURL string) string {
-	t.Helper()
-	challenge := authenticate(t, appURL)
-	pubKey := generateAttestKeyPubKey(t)
-	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
-	if err != nil {
-		t.Fatalf("marshal pubkey: %v", err)
-	}
-	return mustJSON(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence: types.AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{"quote":"abc"}`),
-		},
-		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
-	})
-}
-
-// Defense in depth: a self-contradicting 200 must still mint no EAR. The
-// production refusal shape is the 422 below (testattest.Verdict).
-func TestAttestKeySignatureInvalid(t *testing.T) {
-	stub := testattest.New(t)
-	verdict := testattest.PassingVerdict("")
-	verdict.SignatureValid = false
-	stub.SetVerdict(verdict)
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-// The attestation-api refuses a report it cannot verify with a 422; evidence
-// it rejected must mint no EAR.
-func TestAttestKeyVerifierRefusalMintsNoEAR(t *testing.T) {
-	stub := testattest.New(t)
-	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusOK {
-		t.Fatalf("status = 200 for evidence the verifier refused; body=%s", body)
-	}
-	var out types.AttestKeyResponseBody
-	if json.Unmarshal(body, &out) == nil && out.EAR != "" {
-		t.Fatalf("an EAR was minted for refused evidence; body=%s", body)
-	}
-}
-
-// Defensive: non-production shape (testattest.Verdict). Production refuses a
-// mismatch with the 422 of VerificationFailed; the 401 pins the handler's own
-// fail-closed gate.
-func TestAttestKeyReportDataMismatch(t *testing.T) {
-	stub := testattest.New(t)
-	verdict := testattest.PassingVerdict("")
-	match := false
-	verdict.ReportDataMatch = &match
-	stub.SetVerdict(verdict)
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyReportDataMatchNil(t *testing.T) {
-	// ReportDataMatch omitted (nil) should be treated as a mismatch.
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.Verdict{SignatureValid: true})
-
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-// The verify request must bind this request's public key and challenge: an
-// EAR minted against anything weaker attests a key the caller does not hold.
-func TestAttestKeyBindsChallengeIntoReportData(t *testing.T) {
-	stub := testattest.New(t)
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("marshal pubkey: %v", err)
-	}
-	body := mustJSON(types.AttestKeyRequestBody{
-		Challenge: challenge,
-		Evidence: types.AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{"quote":"abc"}`),
-		},
-		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
-	})
-
-	resp := postAttestKey(t, app.URL, body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
-	}
-
-	reqs := stub.VerifyRequests()
-	if len(reqs) != 1 {
-		t.Fatalf("/verify called %d times, want 1", len(reqs))
-	}
-	if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
-		t.Fatal("/verify carried no expected_report_data")
-	}
-	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
-	if err != nil {
-		t.Fatalf("decode challenge: %v", err)
-	}
-	want, err := ratls.ReportDataForKey(&key.PublicKey, challengeBytes)
-	if err != nil {
-		t.Fatalf("ReportDataForKey: %v", err)
-	}
-	if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
-		t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte binding %x",
-			got, len(got), want[:sha512.Size384])
-	}
-	// The caller's evidence envelope must reach the verifier intact.
-	if reqs[0].Platform != "snp" {
-		t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
-	}
-	if got := string(reqs[0].Evidence); got != `{"quote":"abc"}` {
-		t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"quote":"abc"}`, got)
-	}
-}
-
-// A consumed challenge must not attest twice: replaying it denies the second
-// EAR even when every other field is fresh.
-func TestAttestKeyRejectsReplayedChallenge(t *testing.T) {
-	stub := testattest.New(t)
-	app := httptest.NewServer(testApp(stub.URL))
-	defer app.Close()
-
-	challenge := authenticate(t, app.URL)
-	body := func() string {
-		pubDER, err := x509.MarshalPKIXPublicKey(generateAttestKeyPubKey(t))
-		if err != nil {
-			t.Fatalf("marshal pubkey: %v", err)
-		}
-		return mustJSON(types.AttestKeyRequestBody{
-			Challenge: challenge,
-			Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-			PublicKey: base64.StdEncoding.EncodeToString(pubDER),
-		})
-	}
-
-	resp := postAttestKey(t, app.URL, body())
-	first, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("first attest-key: status = %d, want 200; body=%s", resp.StatusCode, first)
-	}
-
-	resp = postAttestKey(t, app.URL, body())
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("replayed challenge: status = %d, want 400", resp.StatusCode)
-	}
-	if got := len(stub.VerifyRequests()); got != 1 {
-		t.Fatalf("/verify calls = %d, want 1: the replay must die before the verifier round-trip", got)
-	}
-}
-
-func TestAttestKeyAttestationAPIError(t *testing.T) {
-	// Structured JSON error -> APIError -> 502.
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, mustJSON(types.ErrorResponse{Error: "bad", Message: "nope"}))
-	}))
-	defer mockAS.Close()
-
-	app := httptest.NewServer(testApp(mockAS.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyAttestationUnexpectedError(t *testing.T) {
-	// Non-JSON error body -> UnexpectedError -> 502.
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		io.WriteString(w, "plain text boom")
-	}))
-	defer mockAS.Close()
-
-	app := httptest.NewServer(testApp(mockAS.URL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
-	}
-}
-
-func TestAttestKeyAttestationUnreachable(t *testing.T) {
-	// Closed server -> transport RequestError -> 502.
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	asURL := mockAS.URL
-	mockAS.Close() // immediately closed so the connection is refused
-
-	app := httptest.NewServer(testApp(asURL))
-	defer app.Close()
-
-	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }

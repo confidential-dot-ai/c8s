@@ -2,33 +2,15 @@ package attestation
 
 import (
 	"crypto/ecdsa"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
-	"github.com/confidential-dot-ai/c8s/internal/ear"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
-
-// Handler holds the dependencies for attestation HTTP handlers.
-type Handler struct {
-	Challenges        *ChallengeStore
-	AttestationClient attestationclient.Client
-	EarIssuer         ear.Issuer
-	// RTMRs pins TDX runtime measurement registers on /attest-key: the launch
-	// digest recorded in the issued EAR covers TDVF firmware alone on TDX, so
-	// without these the EAR vouches for a guest image the host chose. Enforced
-	// only against TDX-shaped evidence; empty = no RTMR pinning.
-	RTMRs map[int][]byte
-}
 
 // HandleAuthenticate returns a handler that issues a single-use base64
 // challenge nonce.
@@ -39,92 +21,6 @@ func HandleAuthenticate(challenges *ChallengeStore) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(types.ChallengeResponse{Challenge: encoded})
 	}
-}
-
-// HandleAttestKey handles POST /attest-key: it issues an EAR (no certificate)
-// for a caller-generated ECDSA pubkey — used by in-cluster c8s components that
-// need a TEE-attested EAR for a key they generate in-process.
-func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
-	var req types.AttestKeyRequestBody
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		WriteError(w, http.StatusUnprocessableEntity, "invalid_request", err.Error())
-		return
-	}
-
-	challengeBytes, err := base64.StdEncoding.DecodeString(req.Challenge)
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_challenge", "invalid or expired challenge")
-		return
-	}
-	if !h.Challenges.Consume(challengeBytes) {
-		WriteError(w, http.StatusBadRequest, "invalid_challenge", "invalid or expired challenge")
-		return
-	}
-
-	pubDER, err := base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_public_key", err.Error())
-		return
-	}
-	pubAny, err := x509.ParsePKIXPublicKey(pubDER)
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_public_key", err.Error())
-		return
-	}
-	pub, ok := pubAny.(*ecdsa.PublicKey)
-	if !ok {
-		WriteError(w, http.StatusBadRequest, "invalid_public_key", "public_key must be ECDSA")
-		return
-	}
-
-	expectedReportData, err := ratls.ReportDataForKey(pub, challengeBytes)
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_public_key", err.Error())
-		return
-	}
-
-	evidenceJSON, err := json.Marshal(req.Evidence)
-	if err != nil {
-		evidenceJSON = []byte("null")
-	}
-
-	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyReportData(req.Evidence, reportData)
-	verifyResp, err := h.AttestationClient.VerifyEnforced(r.Context(), verifyReq)
-	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
-		slog.Warn("attest-key: attestation signature invalid")
-		WriteError(w, http.StatusUnauthorized, "verification_failed", "attestation signature invalid")
-		return
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
-		slog.Warn("attest-key: challenge did not match attestation evidence")
-		WriteError(w, http.StatusUnauthorized, "verification_failed", "challenge mismatch in attestation evidence")
-		return
-	case err != nil:
-		h.handleAttestationError(w, err)
-		return
-	}
-
-	if attestationclient.TDXPlatform(req.Evidence.Platform) {
-		if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
-			slog.Warn("attest-key: RTMR pin not satisfied", "error", err)
-			WriteError(w, http.StatusForbidden, "verification_failed", "TDX runtime measurement registers not allowed")
-			return
-		}
-	}
-
-	earToken, err := h.EarIssuer.IssueWithLaunchDigestAndPubKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, pub)
-	if err != nil {
-		slog.Error("attest-key: failed to issue EAR token", "error", err)
-		WriteError(w, http.StatusInternalServerError, "ear_issuance_failed",
-			fmt.Sprintf("failed to issue EAR token: %s", err))
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(types.AttestKeyResponseBody{EAR: earToken})
 }
 
 // ParseAndVerifyCSR decodes a PEM CSR and verifies its self-signature.
@@ -151,36 +47,6 @@ func ECDSAPublicKeyFromCSR(csr *x509.CertificateRequest) (*ecdsa.PublicKey, erro
 		return nil, fmt.Errorf("CSR public key must be ECDSA, got %T", csr.PublicKey)
 	}
 	return pub, nil
-}
-
-func (h Handler) handleAttestationError(w http.ResponseWriter, err error) {
-	var reqErr *attestationclient.RequestError
-	var apiErr *attestationclient.APIError
-	var unexpErr *attestationclient.UnexpectedError
-
-	switch {
-	case errors.As(err, &reqErr):
-		slog.Warn("attestation-api unreachable", "error", reqErr.Err)
-		WriteError(w, http.StatusBadGateway, "attestation_api_unreachable",
-			fmt.Sprintf("failed to reach attestation-api: %s", reqErr.Err))
-
-	case errors.As(err, &apiErr):
-		slog.Warn("attestation-api returned error",
-			"status", apiErr.Status, "error", apiErr.Response.Message)
-		WriteError(w, http.StatusBadGateway, "attestation_api_error",
-			fmt.Sprintf("attestation-api returned %d: %s", apiErr.Status, apiErr.Response.Message))
-
-	case errors.As(err, &unexpErr):
-		slog.Warn("unexpected response from attestation-api",
-			"status", unexpErr.Status, "body", unexpErr.Text)
-		WriteError(w, http.StatusBadGateway, "attestation_api_error",
-			fmt.Sprintf("attestation-api returned %d: %s", unexpErr.Status, unexpErr.Text))
-
-	default:
-		slog.Warn("attestation-api unreachable", "error", err)
-		WriteError(w, http.StatusBadGateway, "attestation_api_unreachable",
-			fmt.Sprintf("failed to reach attestation-api: %s", err))
-	}
 }
 
 // WriteError writes a JSON error response in the c8s error-envelope shape.

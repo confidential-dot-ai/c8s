@@ -14,11 +14,13 @@ Requires=rke2-role.service
 # rke2-server.service: the write must land before RKE2's deploy controller
 # applies server/manifests/, or the baked HelmChart installs once with
 # unpinned cds.operatorKeys/measurements and only self-heals on the
-# controller's next reconcile. On SNP builds a drop-in
-# (20-snp-attestation-api.conf) adds Requires=/After=attestation-api.service
-# for the self-measurement; the binary then waits for its /health, since the
-# unit is up before its port is bound.
-After=rke2-role.service
+# controller's next reconcile. attestation-api.service: the render reads the
+# operator-key binding and this guest's own launch measurement off one
+# verified self-report on every platform. Requires=, not Wants=: without the
+# attester the render cannot pin and the boot must fail closed. Readiness
+# (the port binds after the unit starts) is waited for in the binary.
+Requires=attestation-api.service
+After=rke2-role.service attestation-api.service
 Before=rke2-server.service
 
 [Service]
@@ -35,8 +37,8 @@ ExecStart=/usr/local/bin/c8s-chart-values.sh --platform=${CRED_PLATFORM}
 # fails its start job for good whatever a later restart does. Waiting for
 # transient dependencies happens inside the binary instead; anything else is
 # a fail-closed boot.
-# Reads /etc/confai and (on TDX) the tdx_guest sysfs read-only, and writes
-# only the rendered manifest and /run/confos/opkeydata. mount(8) still works
+# Reads /etc/confai read-only, and writes only the rendered manifest and
+# /run/confos/opkeydata. mount(8) still works
 # here: the unit stays root with CAP_SYS_ADMIN, and NoNewPrivileges=yes only
 # blocks gaining privilege beyond that, not the mount(2) syscall itself.
 ProtectSystem=strict
