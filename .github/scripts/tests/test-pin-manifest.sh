@@ -37,13 +37,35 @@ new_attest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 new_mkosi=cccccccccccccccccccccccccccccccccccccccc
 
 bash "$script" validate --manifest "$source_manifest" >/dev/null
-[[ $(jq -r '.builds["node-image"].confos_ref' "$source_manifest") == \
-  cffb512383ca0cfdc966e4a981319411e7840ba9 ]] || fail "node default moved"
-[[ $(jq -r '.builds["kata-guest"].confos_ref' "$source_manifest") == \
-  14e770f26f912d360f1a60a464145c3ee5615124 ]] || fail "kata default moved"
-[[ $(jq -r '.builds["kernel-snapshot"].confos_ref' "$source_manifest") == \
-  3e6f858f93e1b85c6d1473aa4a031fdefb387710 ]] || fail "kernel default moved"
 pass
+
+# Validate production pins above, but keep behavior tests independent of pin
+# bumps. Distinct domain pins make accidental cross-domain updates observable.
+source_manifest="$fixture_dir/source.json"
+cat >"$source_manifest" <<'EOF'
+{
+  "schema_version": 1,
+  "builds": {
+    "node-image": {
+      "confos_ref": "1111111111111111111111111111111111111111",
+      "attestation_rs_ref": "2222222222222222222222222222222222222222",
+      "mkosi_ref": "3333333333333333333333333333333333333333",
+      "mkosi_version": "v27"
+    },
+    "kata-guest": {
+      "confos_ref": "4444444444444444444444444444444444444444",
+      "attestation_rs_ref": "5555555555555555555555555555555555555555",
+      "mkosi_ref": "6666666666666666666666666666666666666666",
+      "mkosi_version": "v26"
+    },
+    "kernel-snapshot": {
+      "confos_ref": "8888888888888888888888888888888888888888",
+      "mkosi_ref": "6666666666666666666666666666666666666666",
+      "mkosi_version": "v26"
+    }
+  }
+}
+EOF
 
 exported=$(bash "$script" export --manifest "$source_manifest" \
   --domain node-image --format github-env)
