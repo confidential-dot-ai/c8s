@@ -61,10 +61,6 @@ func run(cfg config) error {
 	}
 	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
 
-	// EAR JWT validation reads the clock-skew leeway from this package-level
-	// var; set it before any /sign-csr request can be served.
-	issuer.JWTClockSkew = time.Duration(cfg.jwtClockSkew) * time.Second
-
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
 		return fmt.Errorf("challenge rate limiter: %w", err)
@@ -306,17 +302,6 @@ func run(cfg config) error {
 			InventoryHosts:    inventoryHosts,
 			SandboxBindings:   sandboxBindings,
 		},
-		SignCSRHandler: SignCSRHandler{
-			CA:             mesh,
-			CAChainPEM:     caChainPEM,
-			MaxTTL:         cfg.maxTTL,
-			KeyProvider:    rotator,
-			ExpectedIssuer: cfg.expectedIssuer,
-			RequestTimeout: cfg.requestTimeout,
-			Measurements:   measurements,
-			Policy:         policy,
-			SANValidation:  cfg.sanValidation,
-		},
 		AllowlistHandler: allowlist.Handler{
 			Store:             &allowlistStore,
 			WriteAuthorizer:   writeAuthorizer,
@@ -504,9 +489,6 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.maxHeaderBytes < 0 {
 		return fmt.Errorf("--max-header-bytes must be non-negative")
-	}
-	if cfg.maxTTL <= 0 {
-		return fmt.Errorf("--max-ttl must be positive")
 	}
 	// Not "0 disables": this is the stale-identity bound for a named leaf, and
 	// 0 is the disable idiom elsewhere in the chart, so a zero here would read

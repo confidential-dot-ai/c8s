@@ -174,7 +174,6 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		caCertValidity:             24 * time.Hour,
 		earIssuerName:              "cds",
 		jwtClockSkew:               30,
-		maxTTL:                     time.Hour,
 		certTTL:                    time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
 		challengeTTL:               time.Minute,
@@ -227,8 +226,8 @@ func TestRun_ErrorPaths(t *testing.T) {
 		},
 		{
 			name:    "invalid config",
-			mutate:  func(_ *testing.T, cfg *config) { cfg.maxTTL = 0 },
-			wantSub: "--max-ttl",
+			mutate:  func(_ *testing.T, cfg *config) { cfg.namedCertTTL = 0 },
+			wantSub: "--named-cert-ttl",
 		},
 		{
 			name:    "rate limiter max entries",
@@ -430,22 +429,6 @@ func startRunServer(t *testing.T, cfg config) string {
 		}
 	})
 	return base
-}
-
-// TestRun_SetsJWTClockSkew: --jwt-clock-skew is seconds; run() must convert it
-// before any request can be served. The rate-limiter failure exits right after
-// the conversion, keeping the test hermetic.
-func TestRun_SetsJWTClockSkew(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.jwtClockSkew = 7
-	cfg.rateLimiterMax = 0
-	if err := run(cfg); err == nil {
-		t.Fatal("run() with rateLimiterMax=0 should fail")
-	}
-	if issuer.JWTClockSkew != 7*time.Second {
-		t.Fatalf("issuer.JWTClockSkew = %v, want %v", issuer.JWTClockSkew, 7*time.Second)
-	}
 }
 
 // TestRun_LogsMeasurementPinning: with --measurements set, startup must log the

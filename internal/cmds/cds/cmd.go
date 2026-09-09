@@ -50,9 +50,7 @@ func NewCmd() *cobra.Command {
 	flags.StringSliceVar(&cfg.rtmrs, "rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> required of TDX callers on /attest (repeatable; RTMR[1] pins the guest kernel, RTMR[2] the command line carrying the dm-verity root hash). SNP evidence is unaffected. Empty = no RTMR pinning: on TDX the reference values then cover TDVF firmware only, UNSAFE")
 
 	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
-	flags.StringVar(&cfg.expectedIssuer, "expected-issuer", "", "EAR JWT issuer claim required on /sign-csr (empty disables)")
-	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "EAR JWT exp/nbf/iat clock skew tolerance in seconds")
-	flags.DurationVar(&cfg.maxTTL, "max-ttl", 24*time.Hour, "upper bound on /sign-csr leaf TTL")
+	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "operator JWT clock skew tolerance in seconds")
 	flags.DurationVar(&cfg.certTTL, "cert-ttl", 24*time.Hour, "")
 	flags.DurationVar(&cfg.namedCertTTL, "named-cert-ttl", issuer.MaxNamedLeafTTL, "upper bound on the TTL of a leaf carrying a matched-workload stamp — the documented stale-identity bound for a named leaf (never applied to membership-only leaves). Must be positive and may only shorten the built-in ceiling, never raise it")
 	flags.DurationVar(&cfg.challengeTTL, "challenge-ttl", 60*time.Second, "")
@@ -126,9 +124,7 @@ type config struct {
 	measurementsConfig  string
 	rtmrs               []string
 	earIssuerName       string
-	expectedIssuer      string
 	jwtClockSkew        int64
-	maxTTL              time.Duration
 	certTTL             time.Duration
 	namedCertTTL        time.Duration
 	challengeTTL        time.Duration

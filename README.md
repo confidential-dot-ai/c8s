@@ -355,7 +355,6 @@ attestation and reports the operator keys it pins.
 | [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
 | [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
 | [`pkg/types`](pkg/types/) | Shared request/response types |
-| [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
 | [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
 | [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
 | [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |

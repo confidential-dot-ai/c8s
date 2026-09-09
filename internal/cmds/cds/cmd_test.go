@@ -20,7 +20,6 @@ func TestNewCmdDurationFlagDefaults(t *testing.T) {
 		want string
 	}{
 		{"ca-cert-validity", "8760h0m0s"},
-		{"max-ttl", "24h0m0s"},
 		{"cert-ttl", "24h0m0s"},
 		{"challenge-ttl", "1m0s"},
 		{"request-timeout", "5s"},
