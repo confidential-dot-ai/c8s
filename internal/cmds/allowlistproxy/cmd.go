@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -136,18 +137,18 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.cdsMeasurements)
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.cdsMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
 	if len(measurements) == 0 {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.cdsRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.cdsRTMRs)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Entries}, cfg.attestationAPIURL)
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Images}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

@@ -5,13 +5,14 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
@@ -492,13 +493,13 @@ func TestNewRouter_PanicsOnASharedChallengeLimiter(t *testing.T) {
 // set rather than hiding it: "admits any measurement" is the finding a
 // verifier most needs.
 func TestHandleMeasurements(t *testing.T) {
-	set, err := measurements.Parse([]byte(
+	set, err := refvalues.Parse([]byte(
 		`{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"` +
 			strings.Repeat("ab", 48) + `"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := measurements.Serve(set)
+	doc, err := refvalues.Serve(set)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,15 +509,15 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	served, err := measurements.ParseServed(w.Body.Bytes())
+	served, err := refvalues.ParseServed(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("served body does not parse: %v", err)
 	}
-	if len(served.Entries) != 1 || served.TEE != measurements.TEESNP {
+	if len(served.Images) != 1 || served.Family != teetypes.FamilySNP {
 		t.Errorf("served set = %+v, want the one pinned image", served)
 	}
 
-	empty, err := measurements.Serve(measurements.ReferenceValues{TEE: measurements.TEESNP})
+	empty, err := refvalues.Serve(refvalues.ReferenceValues{Family: teetypes.FamilySNP})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,11 +526,11 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("empty set status = %d, want 200 (not a 404)", w.Code)
 	}
-	servedEmpty, err := measurements.ParseServed(w.Body.Bytes())
+	servedEmpty, err := refvalues.ParseServed(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("empty served body does not parse: %v", err)
 	}
-	if len(servedEmpty.Entries) != 0 {
-		t.Errorf("empty set served %d entries", len(servedEmpty.Entries))
+	if len(servedEmpty.Images) != 0 {
+		t.Errorf("empty set served %d entries", len(servedEmpty.Images))
 	}
 }

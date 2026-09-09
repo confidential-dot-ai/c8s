@@ -174,7 +174,7 @@ func verifiedResultFor(exp tdxMeasuredPolicy) *teetypes.VerificationResult {
 			PlatformData: map[string]any{
 				"rtmr_1": hex.EncodeToString(exp.pins.RTMR1[:]),
 				"rtmr_2": hex.EncodeToString(exp.pins.RTMR2[:]),
-				"rtmr_3": hex.EncodeToString(exp.rtmr3[:]),
+				"rtmr_3": hex.EncodeToString(expectedRTMR3(exp)),
 			},
 		},
 	}
@@ -248,7 +248,7 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 		}, "RTMR[2] mismatch"},
 		{"wrong rtmr3", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
-		}, "RTMR[3] mismatch"},
+		}, "not bound to the expected anchor"},
 		{"absent MRTD", func(r *teetypes.VerificationResult) {
 			r.Claims.LaunchDigest = ""
 		}, "no launch digest"},
@@ -397,7 +397,7 @@ func snpResultFor(exp snpMeasuredPolicy, smp int) *teetypes.VerificationResult {
 		ReportDataMatch: teetypes.Ptr(true),
 		Claims: teetypes.Claims{
 			LaunchDigest: hex.EncodeToString(digest[:]),
-			InitData:     teetypes.HexBytes(exp.hostData[:]),
+			InitData:     teetypes.HexBytes(expectedHostData(exp)),
 		},
 	}
 }
@@ -432,7 +432,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 			r.Claims.InitData = teetypes.HexBytes(make([]byte, runtimemeasure.HostDataSize))
 		},
 		"HOSTDATA of a different operator key": func(r *teetypes.VerificationResult) {
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 		},
 		"no HOSTDATA": func(r *teetypes.VerificationResult) {
 			r.Claims.InitData = nil
@@ -519,8 +519,8 @@ func TestVerifyServerCertSNPEnforcesBothPins(t *testing.T) {
 	if len(params.Measurements) != len(exp.snpPins.BySMP) {
 		t.Errorf("passed %d measurements, want %d (every pinned SMP variant)", len(params.Measurements), len(exp.snpPins.BySMP))
 	}
-	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
-		t.Errorf("ExpectedInitDataHash = %x, want the operator-key binding %x", params.ExpectedInitDataHash, exp.hostData)
+	if !bytes.Equal(params.ExpectedInitDataHash, expectedHostData(exp)) {
+		t.Errorf("ExpectedInitDataHash = %x, want the operator-key binding %x", params.ExpectedInitDataHash, expectedHostData(exp))
 	}
 	if len(params.ExpectedReportData) == 0 {
 		t.Error("ExpectedReportData empty: the quote would not be bound to this TLS channel")
@@ -536,7 +536,7 @@ func TestVerifyServerCertSNPRejectsContradictoryClaims(t *testing.T) {
 	for name, res := range map[string]*teetypes.VerificationResult{
 		"wrong HOSTDATA": func() *teetypes.VerificationResult {
 			r := snpResultFor(exp, 2)
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 			return r
 		}(),
 		"unpinned launch digest": func() *teetypes.VerificationResult {
@@ -590,8 +590,8 @@ func TestAttestGateAcceptsSNPEvidenceWithoutInlineVCEK(t *testing.T) {
 	if len(params.Measurements) != len(exp.snpPins.BySMP) {
 		t.Errorf("passed %d measurements, want %d", len(params.Measurements), len(exp.snpPins.BySMP))
 	}
-	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
-		t.Errorf("ExpectedInitDataHash = %x, want %x", params.ExpectedInitDataHash, exp.hostData)
+	if !bytes.Equal(params.ExpectedInitDataHash, expectedHostData(exp)) {
+		t.Errorf("ExpectedInitDataHash = %x, want %x", params.ExpectedInitDataHash, expectedHostData(exp))
 	}
 	if !bytes.Equal(params.ExpectedReportData, nonce) {
 		t.Errorf("ExpectedReportData = %q, want the caller's nonce %q", params.ExpectedReportData, nonce)
@@ -615,7 +615,7 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 		},
 		"another operator key's HOSTDATA": func() (*teetypes.VerificationResult, error) {
 			r := snpResultFor(exp, 2)
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 			return r, nil
 		},
 		"unpinned launch digest": func() (*teetypes.VerificationResult, error) {
@@ -633,6 +633,20 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// expectedRTMR3 is the register a node satisfying exp must report: the
+// operator-key seed extended by exp's workload chain. VerifyBinding derives
+// the same value inside the gate; here it builds the claims to feed it.
+func expectedRTMR3(exp tdxMeasuredPolicy) []byte {
+	reg := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(exp.operatorPubPEM), exp.workloadDigests)
+	return reg[:]
+}
+
+// expectedHostData is the HOSTDATA a node satisfying exp must report.
+func expectedHostData(exp snpMeasuredPolicy) []byte {
+	hd := runtimemeasure.HostData(exp.operatorPubPEM)
+	return hd[:]
 }
 
 func requireTDXPolicy(t *testing.T, policy measuredPolicy) tdxMeasuredPolicy {

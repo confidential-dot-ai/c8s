@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -241,7 +242,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	meshPolicy.Entries = pins.Entries
+	meshPolicy.Entries = pins.Images
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
@@ -281,11 +282,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return err
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := refvalues.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
@@ -320,7 +321,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
-		CDSEntries:        pins.Entries,
+		CDSEntries:        pins.Images,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)
@@ -626,7 +627,7 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 // development only).
 func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
-	pins, err := ratls.ParseRTMRPinsString(rtmrs)
+	pins, err := refvalues.ParseRTMRPinsString(rtmrs)
 	if err != nil {
 		return nil, fmt.Errorf("--rtmrs: %w", err)
 	}

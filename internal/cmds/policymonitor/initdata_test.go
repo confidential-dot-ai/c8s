@@ -49,6 +49,18 @@ func attesterWithVerdict(t *testing.T, v testattest.Verdict) string {
 	return stub.URL
 }
 
+// tdxAttesterWithVerdict is attesterWithVerdict on a TDX node, where the
+// init-data claim is the 48-byte MRCONFIGID rather than SNP's 32-byte
+// HOST_DATA. The anchor is read family-first, so which one the stub reports
+// decides which width is legal.
+func tdxAttesterWithVerdict(t *testing.T, v testattest.Verdict) string {
+	t.Helper()
+	stub := testattest.New(t)
+	stub.SetPlatform(types.PlatformTdx)
+	stub.SetVerdict(v)
+	return stub.URL
+}
+
 // scriptedVerifier is an in-guest attestation-api whose /attest comes from the
 // shared stub and whose /verify answers status for its first `failures` calls
 // before proxying to the stub; failures < 0 fails every call. Verify calls are
@@ -496,16 +508,22 @@ func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		claim []byte
+		tdx   bool
 	}{
-		{"absent", nil},
-		{"tdx mrconfigid with a non-zero tail", bytes.Repeat([]byte{0xaa}, 48)},
-		{"neither width", make([]byte, 40)},
+		{name: "absent", claim: nil},
+		{name: "tdx mrconfigid with a non-zero tail", claim: bytes.Repeat([]byte{0xaa}, 48), tdx: true},
+		{name: "snp host_data at mrconfigid's width", claim: bytes.Repeat([]byte{0xaa}, 48)},
+		{name: "neither width", claim: make([]byte, 40)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := testattest.PassingVerdict("")
 			v.Claims.InitData = tc.claim
+			attester := attesterWithVerdict
+			if tc.tdx {
+				attester = tdxAttesterWithVerdict
+			}
 
-			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attester(t, v)})
 			if !errors.Is(err, errNoHostDataAnchor) {
 				t.Fatalf("err = %v for claim %q, want errNoHostDataAnchor", err, tc.claim)
 			}
@@ -703,7 +721,7 @@ func TestVerifiedSelfHostDataAcceptsZeroPaddedMRCONFIGID(t *testing.T) {
 	v := testattest.PassingVerdict("")
 	v.Claims.InitData = padded
 
-	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: tdxAttesterWithVerdict(t, v)})
 	if err != nil {
 		t.Fatalf("verifiedSelfHostData: %v", err)
 	}
@@ -718,7 +736,7 @@ func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 	shortInitDataWait(t, time.Minute, 10*time.Second)
 
 	// MRCONFIGID's width, but not carrying a zero-padded digest.
-	cfg := &Config{AttestationServiceURL: attesterServing(t, bytes.Repeat([]byte{0xaa}, 48))}
+	cfg := &Config{AttestationServiceURL: tdxAttesterWithVerdict(t, hostDataVerdict(bytes.Repeat([]byte{0xaa}, 48)))}
 	rec := &levelRecorder{}
 	start := time.Now()
 	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)

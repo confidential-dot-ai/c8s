@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
@@ -243,14 +244,14 @@ func Run(args []string) error {
 // URL is always https (enforced by config.Validate), so this always verifies
 // the CDS attestation handshake.
 func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("parse CDS measurements: %w", err)
 	}
 	if len(measurements) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.CDSRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.CDSRTMRs)
 	if err != nil {
 		return nil, fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}
@@ -487,14 +488,14 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 // startSandboxDigests serves the CDS-facing digests endpoint over
 // mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
 func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
 	if err != nil {
 		return fmt.Errorf("parse CDS measurements: %w", err)
 	}
 	if len(measurements) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.Allowlist.Pull.CDSRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.Allowlist.Pull.CDSRTMRs)
 	if err != nil {
 		return fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}

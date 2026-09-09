@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -103,7 +103,7 @@ type EvidencePolicy struct {
 	// Entries pins whole images — a launch digest together with the registers
 	// measured from the same build. When set it replaces Measurements and
 	// RTMRs, so a digest from one image cannot be paired with another's.
-	Entries []measurements.Entry
+	Entries []apiclient.ImagePin
 
 	// Measurements is the set of acceptable launch measurements; empty
 	// accepts any (callers are expected to warn). The attestation-api

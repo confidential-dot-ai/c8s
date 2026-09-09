@@ -6,7 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -15,9 +16,9 @@ import (
 // peers this proxy talks to and the CDS it dials are drawn from that one set.
 // Filling the flat fields keeps the gates that can only express a digest list
 // pinning exactly what they pin today.
-func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, error) {
+func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error) {
 	if c.measurementsConfig == "" {
-		return measurements.ReferenceValues{}, nil
+		return refvalues.ReferenceValues{}, nil
 	}
 	for _, f := range []struct{ name, value string }{
 		{"--measurements", c.measurements},
@@ -26,21 +27,21 @@ func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, er
 		{"--cds-rtmrs", c.cdsRTMRs},
 	} {
 		if f.value != "" {
-			return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with %s", f.name)
+			return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with %s", f.name)
 		}
 	}
-	set, err := measurements.Load(c.measurementsConfig)
+	set, err := refvalues.Load(c.measurementsConfig)
 	if err != nil {
-		return measurements.ReferenceValues{}, err
+		return refvalues.ReferenceValues{}, err
 	}
 
-	digests := strings.Join(set.HexDigests(), ",")
-	common, uniform := set.CommonRTMRs()
+	hexDigests, common, uniform := set.Flatten()
+	digests := strings.Join(hexDigests, ",")
 	if !uniform {
 		// A single register set cannot express per-image tuples; say so
 		// rather than appearing to pin them.
 		slog.Warn("measurements config pins different registers per image: peers and CDS are matched as whole images, but flags carrying one register set are digest-only",
-			"images", len(set.Entries))
+			"images", len(set.Images))
 	}
 	joined := make([]string, 0, len(common))
 	for _, idx := range sortedRTMRIndices(common) {
@@ -50,7 +51,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, er
 
 	c.measurements, c.cdsMeasurements = digests, digests
 	c.rtmrs, c.cdsRTMRs = pins, pins
-	slog.Info("measurements config loaded", "tee", set.TEE, "images", len(set.Entries))
+	slog.Info("measurements config loaded", "tee", set.Family.String(), "images", len(set.Images))
 	return set, nil
 }
 
@@ -66,21 +67,21 @@ func sortedRTMRIndices(m map[int][]byte) []int {
 // checkTEEMatchesPlatform reports a config written for the other platform. It
 // runs after --platform=auto has probed the guest devices, so the comparison
 // is against the platform this proxy actually attests on.
-func checkTEEMatchesPlatform(set measurements.ReferenceValues, teeType ratls.TEEType) error {
+func checkTEEMatchesPlatform(set refvalues.ReferenceValues, teeType ratls.TEEType) error {
 	if set.Empty() {
 		return nil
 	}
-	platform := ""
+	var family teetypes.Family
 	switch teeType {
 	case ratls.TEETypeSEVSNP:
-		platform = measurements.TEESNP
+		family = teetypes.FamilySNP
 	case ratls.TEETypeTDX:
-		platform = measurements.TEETDX
+		family = teetypes.FamilyTDX
 	default:
 		return nil
 	}
-	if set.TEE != platform {
-		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.TEE, platform)
+	if set.Family != family {
+		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.Family, family)
 	}
 	return nil
 }

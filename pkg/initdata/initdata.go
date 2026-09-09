@@ -18,7 +18,6 @@ package initdata
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -26,6 +25,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
 )
@@ -49,7 +50,7 @@ const (
 	GuestDocumentPath = "/run/confidential-containers/initdata/initdata.toml"
 
 	// DigestSize is sha256's, and the width of SNP HOST_DATA.
-	DigestSize = sha256.Size
+	DigestSize = runtimemeasure.HostDataSize
 )
 
 // [data] keys. These are a wire contract between the webhook that stamps the
@@ -148,9 +149,10 @@ func ValidateAlgorithm(algorithm string) error {
 	return nil
 }
 
-// Digest is the value the kata shim places in SNP HOST_DATA for raw.
+// Digest is the value the kata shim places in SNP HOST_DATA for raw: the
+// launch-time anchor binding runtimemeasure defines, over the document bytes.
 func Digest(raw []byte) [DigestSize]byte {
-	return sha256.Sum256(raw)
+	return runtimemeasure.HostData(raw)
 }
 
 // Build renders the document and returns it alongside the annotation value and

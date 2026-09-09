@@ -10,33 +10,58 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-func TestTEETypeForPlatform(t *testing.T) {
-	cases := map[string]struct {
-		want    ratls.TEEType
-		wantErr bool
+// TestRATLSEvidenceShapes pins which platforms embed a raw report and which
+// keep their envelope. The split follows the vTPM boundary, not the tag: gcp-snp
+// attests through the hardware report alone, so it embeds the raw report like
+// bare-metal snp, while az-snp keeps the envelope its quote lives in.
+func TestRATLSEvidenceShapes(t *testing.T) {
+	report := base64.StdEncoding.EncodeToString(make([]byte, ratls.SNPReportSize))
+	for _, tc := range []struct {
+		platform types.Platform
+		evidence string
+		wantRaw  bool
 	}{
-		"snp":     {ratls.TEETypeSEVSNP, false},
-		"az-snp":  {ratls.TEETypeSEVSNP, false},
-		"gcp-snp": {ratls.TEETypeSEVSNP, false},
-		"tdx":     {ratls.TEETypeTDX, false},
-		"az-tdx":  {ratls.TEETypeTDX, false},
-		"auto":    {0, true},
-		"":        {0, true},
+		{types.PlatformSnp, `{"attestation_report":"` + report + `"}`, true},
+		{types.PlatformGcpSnp, `{"attestation_report":"` + report + `"}`, true},
+		{types.PlatformAzSnp, `{"hcl_report":"AAAA"}`, false},
+		{types.PlatformTdx, `{"quote":"abc"}`, false},
+		{types.PlatformGcpTdx, `{"quote":"abc"}`, false},
+	} {
+		t.Run(string(tc.platform), func(t *testing.T) {
+			out, err := RATLSEvidence(types.AttestResponse{
+				Platform: string(tc.platform),
+				Evidence: json.RawMessage(tc.evidence),
+			})
+			if err != nil {
+				t.Fatalf("RATLSEvidence: %v", err)
+			}
+			if gotRaw := len(out) == ratls.SNPReportSize; gotRaw != tc.wantRaw {
+				t.Fatalf("raw report = %t (payload %d bytes), want %t", gotRaw, len(out), tc.wantRaw)
+			}
+		})
 	}
-	for platform, tc := range cases {
-		got, err := TEETypeForPlatform(platform)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("%q: err = %v, wantErr %t", platform, err, tc.wantErr)
-		}
-		if got != tc.want {
-			t.Fatalf("%q: TEEType = %d, want %d", platform, got, tc.want)
-		}
+}
+
+// TestRATLSEvidenceGcpTDXStripsEventlog: gcp-tdx attests through its hardware
+// quote, so like bare-metal tdx it loses the event log that would push the
+// certificate past a TLS handshake record.
+func TestRATLSEvidenceGcpTDXStripsEventlog(t *testing.T) {
+	out, err := RATLSEvidence(types.AttestResponse{
+		Platform: string(types.PlatformGcpTdx),
+		Evidence: json.RawMessage(`{"quote":"abc","cc_eventlog":"AAAA"}`),
+	})
+	if err != nil {
+		t.Fatalf("RATLSEvidence: %v", err)
+	}
+	if strings.Contains(out, "cc_eventlog") {
+		t.Fatalf("cc_eventlog survived the strip: %s", out)
 	}
 }
 

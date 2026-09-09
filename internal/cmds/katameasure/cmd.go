@@ -21,8 +21,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/confidential-dot-ai/c8s/pkg/snpmeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/tdxmeasure"
+	"github.com/confidential-dot-ai/attestation-go/launchmeasure/snp"
+	"github.com/confidential-dot-ai/attestation-go/launchmeasure/tdx"
 )
 
 type config struct {
@@ -203,7 +203,7 @@ func runTDX(cfg config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read firmware: %w", err)
 	}
-	mrtd, err := tdxmeasure.MRTD(firmware)
+	mrtd, err := tdx.MRTD(firmware)
 	if err != nil {
 		return err
 	}
@@ -285,7 +285,7 @@ func runSNP(cfg config, stdout, stderr io.Writer) error {
 		}
 	}
 
-	sig, err := snpmeasure.VCPUSignatureByName(cfg.vcpuType)
+	sig, err := snp.VCPUSignatureByName(cfg.vcpuType)
 	if err != nil {
 		return err
 	}
@@ -293,14 +293,14 @@ func runSNP(cfg config, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read firmware: %w", err)
 	}
-	hashes, err := snpmeasure.KernelHashesFromFiles(guest.KernelPath, "", cmdline)
+	hashes, err := snp.KernelHashesFromFiles(guest.KernelPath, "", cmdline)
 	if err != nil {
 		return err
 	}
 	if err := guest.VerifyKernel(hex.EncodeToString(hashes.Kernel[:])); err != nil {
 		return err
 	}
-	ld, err := snpmeasure.LaunchDigest(snpmeasure.Config{
+	ld, err := snp.LaunchDigest(snp.Config{
 		FirmwarePath:  cfg.firmware,
 		KernelHashes:  hashes,
 		VCPUs:         vcpus,

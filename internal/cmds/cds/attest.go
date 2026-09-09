@@ -19,12 +19,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -61,7 +61,7 @@ type AttestHandler struct {
 
 	// Entries pins whole images. When set it replaces Measurements and RTMRs,
 	// so a digest from one image cannot be paired with another's registers.
-	Entries []measurements.Entry
+	Entries []apiclient.ImagePin
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any

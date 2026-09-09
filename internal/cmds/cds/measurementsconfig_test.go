@@ -35,8 +35,8 @@ func TestResolveMeasurementsConfigFillsFlatLists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(set.Entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(set.Entries))
+	if len(set.Images) != 2 {
+		t.Fatalf("got %d entries, want 2", len(set.Images))
 	}
 	if len(cfg.measurements) != 2 {
 		t.Fatalf("flat measurements = %v, want 2 digests", cfg.measurements)
@@ -85,9 +85,9 @@ func TestResolveMeasurementsConfigDropsDivergentRTMRs(t *testing.T) {
 	if len(cfg.measurements) != 2 {
 		t.Errorf("flat measurements = %v, want both digests", cfg.measurements)
 	}
-	for _, e := range set.Entries {
-		if len(e.RTMRs) == 0 {
-			t.Errorf("entry %s lost its register pins", e.Name)
+	for _, img := range set.Images {
+		if len(img.RTMRs) == 0 {
+			t.Errorf("entry %s lost its register pins", img.Name)
 		}
 	}
 }

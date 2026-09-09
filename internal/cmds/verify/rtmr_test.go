@@ -9,7 +9,7 @@ import (
 
 func sha384Hex(b byte) string { return strings.Repeat(hex.EncodeToString([]byte{b}), 48) }
 
-// Pin parsing itself is ratls.ParseRTMRPins, tested with pkg/ratls; the tests
+// Pin parsing itself is refvalues.ParseRTMRPins, tested in attestation-go; the tests
 // here cover the flag rules this command layers on top.
 
 func TestBuildPolicyCarriesRTMRPins(t *testing.T) {

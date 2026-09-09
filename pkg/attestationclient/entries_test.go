@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -41,9 +42,9 @@ func evidence(t *testing.T, digest string, rtmrs map[string]string) types.Verify
 	return resp
 }
 
-func entryTDX(t *testing.T, name, digest string, r1, r2 string) measurements.Entry {
+func entryTDX(t *testing.T, name, digest string, r1, r2 string) apiclient.ImagePin {
 	t.Helper()
-	e := measurements.Entry{Name: name, Digest: mustHex(t, digest), RTMRs: map[int][]byte{}}
+	e := apiclient.ImagePin{Name: name, Digest: mustHex(t, digest), RTMRs: map[int][]byte{}}
 	if r1 != "" {
 		e.RTMRs[1] = mustHex(t, r1)
 	}
@@ -56,7 +57,7 @@ func entryTDX(t *testing.T, name, digest string, r1, r2 string) measurements.Ent
 // The bug this feature exists for: image A's MRTD with image B's registers.
 // Pinning the two separately accepts it; one tuple per image does not.
 func TestEnforceEntriesRejectsCrossedTuple(t *testing.T) {
-	entries := []measurements.Entry{
+	entries := []apiclient.ImagePin{
 		entryTDX(t, "image-a", digestA, regA1, regA2),
 		entryTDX(t, "image-b", digestB, regB1, ""),
 	}
@@ -76,7 +77,7 @@ func TestEnforceEntriesRejectsCrossedTuple(t *testing.T) {
 }
 
 func TestEnforceEntriesRefusals(t *testing.T) {
-	entries := []measurements.Entry{entryTDX(t, "image-a", digestA, regA1, "")}
+	entries := []apiclient.ImagePin{entryTDX(t, "image-a", digestA, regA1, "")}
 	tdx := string(types.PlatformTdx)
 
 	tests := []struct {
@@ -107,7 +108,7 @@ func TestEnforceEntriesRefusals(t *testing.T) {
 // SNP folds the guest image into its launch digest and reports no registers,
 // so entry RTMRs must not be enforced against it.
 func TestEnforceEntriesIgnoresRTMRsOnSNP(t *testing.T) {
-	entries := []measurements.Entry{entryTDX(t, "image-a", digestA, regA1, regA2)}
+	entries := []apiclient.ImagePin{entryTDX(t, "image-a", digestA, regA1, regA2)}
 	resp := evidence(t, digestA, nil)
 	if err := EnforceEntries(resp, entries, string(types.PlatformSnp)); err != nil {
 		t.Fatalf("enforced TDX registers against SNP evidence: %v", err)
@@ -121,7 +122,7 @@ func TestEnforceEntriesEmptyIsNoGate(t *testing.T) {
 }
 
 func TestEnforceEntriesAcceptsUppercaseClaim(t *testing.T) {
-	entries := []measurements.Entry{{Name: "a", Digest: mustHex(t, digestA)}}
+	entries := []apiclient.ImagePin{{Name: "a", Digest: mustHex(t, digestA)}}
 	resp := evidence(t, strings.ToUpper(digestA), nil)
 	if err := EnforceEntries(resp, entries, string(types.PlatformSnp)); err != nil {
 		t.Fatalf("rejected an uppercase claim the legacy path accepts: %v", err)
@@ -133,7 +134,7 @@ func TestEnforceEntriesAcceptsUppercaseClaim(t *testing.T) {
 func TestEnforceEntriesMatchesFlatFlagSemantics(t *testing.T) {
 	digests := [][]byte{mustHex(t, digestA), mustHex(t, digestB)}
 	rtmrs := map[int][]byte{1: mustHex(t, regA1)}
-	set := measurements.FromFlags(digests, rtmrs)
+	set := refvalues.FromFlags(digests, rtmrs)
 	tdx := string(types.PlatformTdx)
 
 	cases := []struct {
@@ -151,7 +152,7 @@ func TestEnforceEntriesMatchesFlatFlagSemantics(t *testing.T) {
 			if legacy == nil {
 				legacy = EnforceRTMRs(tc.resp, rtmrs)
 			}
-			entries := EnforceEntries(tc.resp, set.Entries, tdx)
+			entries := EnforceEntries(tc.resp, set.Images, tdx)
 			if (legacy == nil) != (entries == nil) {
 				t.Errorf("legacy err=%v but entries err=%v", legacy, entries)
 			}

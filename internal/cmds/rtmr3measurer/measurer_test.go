@@ -3,6 +3,7 @@
 package rtmr3measurer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -23,38 +24,43 @@ const (
 )
 
 // fakeTDX emulates the RTMR[3] sysfs node: writes fold into the register,
-// reads return it.
+// reads return it. readFail makes the readback fail without failing writes.
 type fakeTDX struct {
-	reg     [runtimemeasure.Size]byte
-	extends int
-	fail    error
+	reg      [runtimemeasure.Size]byte
+	extends  int
+	fail     error
+	readFail error
 }
 
-func (f *fakeTDX) extend(event [runtimemeasure.Size]byte) error {
+func (f *fakeTDX) Extend(event []byte) error {
 	if f.fail != nil {
 		return f.fail
 	}
-	f.reg = runtimemeasure.Extend(f.reg, event)
+	f.reg = runtimemeasure.Extend(f.reg, [runtimemeasure.Size]byte(event))
 	f.extends++
 	return nil
 }
 
-func (f *fakeTDX) read() ([runtimemeasure.Size]byte, error) { return f.reg, nil }
+func (f *fakeTDX) Extension() ([]byte, error) {
+	if f.readFail != nil {
+		return nil, f.readFail
+	}
+	return bytes.Clone(f.reg[:]), nil
+}
 
 // newTestMeasurer wires a measurer against a tempdir watch dir, a tempdir
 // state file, and a fake TDX register. Reusing statePath and tdx across
 // instances simulates a daemon restart inside a still-running VM.
-func newTestMeasurer(t *testing.T, watchDir, statePath string, tdx *fakeTDX) *measurer {
+func newTestMeasurer(t *testing.T, watchDir, statePath string, reg runtimemeasure.Register) *measurer {
 	t.Helper()
 	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	m.watchDir = watchDir
 	m.statePath = statePath
-	m.extend = tdx.extend
-	m.readRegister = tdx.read
+	m.reg = reg
 	m.configReadDeadline = 100 * time.Millisecond
 	m.configReadInterval = 5 * time.Millisecond
-	if err := m.loadState(); err != nil {
-		t.Fatalf("loadState: %v", err)
+	if err := m.open(); err != nil {
+		t.Fatalf("open: %v", err)
 	}
 	return m
 }
@@ -117,7 +123,8 @@ func TestReplicaOrRestartSameImageDoesNotReExtend(t *testing.T) {
 
 // The finding this package's persistence exists for: a daemon restart
 // (Restart=always) inside a still-running VM must NOT re-extend digests the
-// previous process already measured.
+// previous process already measured. The journal file is the real one, so
+// this exercises the on-disk format the two processes share.
 func TestDaemonRestartDoesNotReExtend(t *testing.T) {
 	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
 	tdx := &fakeTDX{}
@@ -147,33 +154,10 @@ func TestDaemonRestartDoesNotReExtend(t *testing.T) {
 	}
 }
 
-// Crash after record() but before the extend landed: the log names a digest
-// the register lacks. Startup must finish the interrupted extend.
-func TestCrashBetweenRecordAndExtendIsRepaired(t *testing.T) {
-	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
-	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tdx := &fakeTDX{} // register still at the boot value: the extend never ran
-
-	m := newTestMeasurer(t, watch, state, tdx)
-	if tdx.extends != 1 {
-		t.Fatalf("extends = %d, want 1 (startup repair)", tdx.extends)
-	}
-	if tdx.reg != runtimemeasure.FromDigests([]string{"sha256:" + hexA}) {
-		t.Fatal("register does not match the repaired fold")
-	}
-	// The repaired digest stays deduped.
-	writeWorkload(t, watch, cid1, hexA)
-	m.scanOnce()
-	if tdx.extends != 1 {
-		t.Fatalf("extends = %d, want 1 (repaired digest must not re-extend)", tdx.extends)
-	}
-}
-
-// Register matching neither fold means a foreign extend: never "repair" that
-// by extending again — surface it and keep the log as dedup truth.
-func TestForeignExtendIsNotReExtended(t *testing.T) {
+// A register carrying extends the journal cannot account for is a soft
+// anomaly: the daemon starts, logs, and keeps scanning — it just never
+// extends again, because an extra extend is unrecoverable.
+func TestForeignExtendKeepsTheDaemonRunning(t *testing.T) {
 	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
 	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -181,13 +165,49 @@ func TestForeignExtendIsNotReExtended(t *testing.T) {
 	tdx := &fakeTDX{reg: runtimemeasure.FromDigests([]string{"sha256:" + hexB})}
 
 	m := newTestMeasurer(t, watch, state, tdx)
+	writeWorkload(t, watch, cid1, hexB)
+	m.scanOnce()
 	if tdx.extends != 0 {
-		t.Fatalf("extends = %d, want 0 (diverged register must not be extended)", tdx.extends)
+		t.Fatalf("extends = %d, want 0 (a diverged register must not be extended)", tdx.extends)
 	}
+}
+
+// An unreadable register at startup must not block either: the journal stays
+// the dedup truth and the daemon keeps measuring new images.
+func TestUnreadableRegisterKeepsTheDaemonRunning(t *testing.T) {
+	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
+	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tdx := &fakeTDX{readFail: errors.New("sysfs read failed")}
+
+	m := newTestMeasurer(t, watch, state, tdx)
 	writeWorkload(t, watch, cid1, hexA)
 	m.scanOnce()
 	if tdx.extends != 0 {
-		t.Fatalf("extends = %d, want 0 (recorded digest stays deduped)", tdx.extends)
+		t.Fatalf("extends = %d, want 0 (the journaled digest stays deduped)", tdx.extends)
+	}
+	writeWorkload(t, watch, cid2, hexB)
+	m.scanOnce()
+	if tdx.extends != 1 {
+		t.Fatalf("extends = %d, want 1 (a new digest must still measure)", tdx.extends)
+	}
+}
+
+// A journal the register is one extend behind is repaired at open; a repair
+// that itself fails is the one fatal case, so the daemon refuses to run with
+// a mismatch it knows how to fix but could not.
+func TestFailedStartupRepairIsFatal(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "measured")
+	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	m.statePath = state
+	m.reg = &fakeTDX{fail: errors.New("sysfs write failed")} // register still at boot value
+
+	if err := m.open(); err == nil {
+		t.Fatal("open = nil, want an error when the repair extend fails")
 	}
 }
 
@@ -241,9 +261,9 @@ func TestUnpinnedImageNotMeasured(t *testing.T) {
 	}
 }
 
-// A failed extend must roll the log back so a later cid with the same digest
-// retries, and the log keeps matching the register.
-func TestExtendFailureRollsBackAndRetries(t *testing.T) {
+// A failed extend must leave the journal able to retry, so a later cid with
+// the same digest still measures.
+func TestExtendFailureRetriesOnTheNextContainer(t *testing.T) {
 	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
 	tdx := &fakeTDX{fail: errors.New("sysfs write failed")}
 	m := newTestMeasurer(t, watch, state, tdx)
@@ -253,18 +273,12 @@ func TestExtendFailureRollsBackAndRetries(t *testing.T) {
 	if tdx.extends != 0 {
 		t.Fatalf("extends = %d, want 0", tdx.extends)
 	}
-	if len(m.measuredOrder) != 0 {
-		t.Fatalf("measuredOrder = %v, want empty after rollback", m.measuredOrder)
-	}
-	if b, err := os.ReadFile(state); err != nil || len(b) != 0 {
-		t.Fatalf("state file = %q, %v; want empty after rollback", b, err)
-	}
 
 	tdx.fail = nil
 	writeWorkload(t, watch, cid2, hexA) // same image, new cid
 	m.scanOnce()
 	if tdx.extends != 1 {
-		t.Fatalf("extends = %d, want 1 (retry after rollback)", tdx.extends)
+		t.Fatalf("extends = %d, want 1 (retry after the failed extend)", tdx.extends)
 	}
 }
 
@@ -285,7 +299,30 @@ func TestSeenCidsPrunedWhenContainerDirGoes(t *testing.T) {
 	if _, seen := m.seenCids[cid1]; seen {
 		t.Fatal("cid1 should be pruned after its dir disappeared")
 	}
-	if _, measured := m.measuredDigests["sha256:"+hexA]; !measured {
-		t.Fatal("measuredDigests must NOT be pruned (it mirrors the append-only register)")
+	if got := m.journal.Digests(); len(got) != 1 || got[0] != "sha256:"+hexA {
+		t.Fatalf("journal digests = %v; the journal must NOT be pruned (it mirrors the append-only register)", got)
+	}
+}
+
+// The measurer must drive the register it opened, not a copy: a workload
+// measured through a real TDXRegister lands in the backing node.
+func TestMeasurerExtendsTheRegisterItOpened(t *testing.T) {
+	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
+	node := filepath.Join(t.TempDir(), "rtmr3:sha384")
+	if err := os.WriteFile(node, make([]byte, runtimemeasure.Size), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestMeasurer(t, watch, state, runtimemeasure.TDXRegister(node))
+
+	writeWorkload(t, watch, cid1, hexA)
+	m.scanOnce()
+
+	got, err := os.ReadFile(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := runtimemeasure.Event("sha256:" + hexA)
+	if !bytes.Equal(got, event[:]) {
+		t.Fatalf("register node holds %x, want the measured event %x", got, event)
 	}
 }

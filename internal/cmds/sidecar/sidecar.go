@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -102,7 +103,7 @@ func (c *Config) Validate() error {
 // ParsePins decodes --measurements and --rtmrs, refusing an empty measurement
 // pin inside a kata guest and warning outside one.
 func (c *Config) ParsePins() (ratls.Pins, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(c.Measurements)
+	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
@@ -110,7 +111,7 @@ func (c *Config) ParsePins() (ratls.Pins, error) {
 		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
 		return ratls.Pins{}, err
 	}
-	rtmrs, err := ratls.ParseRTMRPins(c.RTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(c.RTMRs)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
 	}

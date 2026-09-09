@@ -7,9 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -56,22 +54,6 @@ func fakeSNPReport(reportData [64]byte) []byte {
 	return report
 }
 
-// fakeHCLEnvelope builds the AKS Hyper-V HCL envelope around a raw SNP report:
-// header(32) + report + var_data header(20) + var_data content, with trailing
-// null padding bytes after the content.
-func fakeHCLEnvelope(report []byte, trailing int) []byte {
-	varData := []byte(`{"keys":[]}`)
-	env := make([]byte, 32+len(report)+20+len(varData)+trailing)
-	copy(env[:4], "HCLA")
-	binary.LittleEndian.PutUint32(env[4:8], 1)
-	copy(env[32:], report)
-	hdr := env[32+len(report):]
-	binary.LittleEndian.PutUint32(hdr[8:12], 2) // report_type: SNP
-	binary.LittleEndian.PutUint32(hdr[16:20], uint32(len(varData)+trailing))
-	copy(hdr[20:], varData)
-	return env
-}
-
 // testKeyAndAttestation generates a keypair and matching attestation for tests.
 func testKeyAndAttestation(t *testing.T) (*ecdsa.PrivateKey, *Attestation) {
 	t.Helper()
@@ -111,155 +93,6 @@ func requireRATLSExtension(t *testing.T, cert *x509.Certificate) {
 		}
 	}
 	t.Error("RA-TLS attestation extension not found in certificate")
-}
-
-func TestExtensionMarshalUnmarshal(t *testing.T) {
-	reportData := [64]byte{1, 2, 3, 4}
-	report := fakeSNPReport(reportData)
-	certChain := []byte("fake-cert-chain")
-
-	att := &Attestation{
-		TEEType:   TEETypeSEVSNP,
-		Report:    report,
-		CertChain: certChain,
-	}
-
-	ext, err := att.MarshalExtension()
-	if err != nil {
-		t.Fatalf("MarshalExtension: %v", err)
-	}
-
-	if !ext.Id.Equal(OIDRATLSAttestation) {
-		t.Errorf("OID = %v, want %v", ext.Id, OIDRATLSAttestation)
-	}
-	if ext.Critical {
-		t.Error("extension should not be critical")
-	}
-
-	got, err := UnmarshalExtension(ext.Value)
-	if err != nil {
-		t.Fatalf("UnmarshalExtension: %v", err)
-	}
-
-	if got.TEEType != TEETypeSEVSNP {
-		t.Errorf("TEEType = %d, want %d", got.TEEType, TEETypeSEVSNP)
-	}
-	if !bytes.Equal(got.Report, report) {
-		t.Error("Report mismatch")
-	}
-	if !bytes.Equal(got.CertChain, certChain) {
-		t.Error("CertChain mismatch")
-	}
-}
-
-func TestUnmarshalExtensionInvalid(t *testing.T) {
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		{"empty", []byte{}},
-		{"garbage", []byte{0xFF, 0xFF}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := UnmarshalExtension(tt.data)
-			if err == nil {
-				t.Error("expected error for invalid data")
-			}
-		})
-	}
-}
-
-func TestUnmarshalUnknownTEEType(t *testing.T) {
-	att := &attestationASN1{
-		TEEType:   99,
-		Report:    []byte("report"),
-		CertChain: []byte("chain"),
-	}
-	data, err := marshalASN1(att)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = UnmarshalExtension(data)
-	if err == nil {
-		t.Error("expected error for unknown TEE type")
-	}
-}
-
-func TestReportDataForKey(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rd1, err := ReportDataForKey(&key.PublicKey, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Should be deterministic.
-	rd2, err := ReportDataForKey(&key.PublicKey, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rd1 != rd2 {
-		t.Error("ReportDataForKey not deterministic")
-	}
-
-	// First 48 bytes should be SHA-384, rest should be zero.
-	keyBytes, _ := marshalPublicKey(&key.PublicKey)
-	expected := sha512.Sum384(keyBytes)
-	if !bytes.Equal(rd1[:48], expected[:]) {
-		t.Error("REPORTDATA does not match SHA-384 of public key")
-	}
-	for i := 48; i < 64; i++ {
-		if rd1[i] != 0 {
-			t.Errorf("REPORTDATA[%d] = %d, want 0 (padding)", i, rd1[i])
-		}
-	}
-}
-
-func TestReportDataForKeyWithNonce(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	nonce := []byte("test-nonce-32-bytes-of-randomnes")
-
-	rdWithNonce, err := ReportDataForKey(&key.PublicKey, nonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rdWithoutNonce, err := ReportDataForKey(&key.PublicKey, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if rdWithNonce == rdWithoutNonce {
-		t.Error("nonce did not change REPORTDATA")
-	}
-
-	// Same nonce should produce same result.
-	rdWithNonce2, err := ReportDataForKey(&key.PublicKey, nonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rdWithNonce != rdWithNonce2 {
-		t.Error("same nonce produced different REPORTDATA")
-	}
-
-	// Different nonce should produce different result.
-	rdDiffNonce, err := ReportDataForKey(&key.PublicKey, []byte("different-nonce-32bytes-of-rand!"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rdWithNonce == rdDiffNonce {
-		t.Error("different nonces produced same REPORTDATA")
-	}
 }
 
 func TestGenerateKeyPair(t *testing.T) {
@@ -306,24 +139,8 @@ func TestCreateAttestedCertDefaultOpts(t *testing.T) {
 	}
 }
 
-func TestTEETypeString(t *testing.T) {
-	tests := []struct {
-		t    TEEType
-		want string
-	}{
-		{TEETypeSEVSNP, "AMD SEV-SNP"},
-		{TEETypeTDX, "Intel TDX"},
-		{TEEType(99), "unknown(99)"},
-	}
-	for _, tt := range tests {
-		if got := tt.t.String(); got != tt.want {
-			t.Errorf("TEEType(%d).String() = %q, want %q", tt.t, got, tt.want)
-		}
-	}
-}
-
 func TestSentinelErrors(t *testing.T) {
-	t.Run("ErrNotAttested", func(t *testing.T) {
+	t.Run("ErrNoAttestation", func(t *testing.T) {
 		// Certificate without RA-TLS extension.
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -346,25 +163,8 @@ func TestSentinelErrors(t *testing.T) {
 		}
 
 		_, err = VerifyCert(cert, nil, nil)
-		if !errors.Is(err, ErrNotAttested) {
-			t.Errorf("got %v, want errors.Is ErrNotAttested", err)
-		}
-	})
-
-	t.Run("ErrUnsupportedTEE", func(t *testing.T) {
-		att := &attestationASN1{
-			TEEType:   99,
-			Report:    []byte("report"),
-			CertChain: []byte("chain"),
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, err = UnmarshalExtension(data)
-		if !errors.Is(err, ErrUnsupportedTEE) {
-			t.Errorf("got %v, want errors.Is ErrUnsupportedTEE", err)
+		if !errors.Is(err, ErrNoAttestation) {
+			t.Errorf("got %v, want errors.Is ErrNoAttestation", err)
 		}
 	})
 
@@ -374,151 +174,6 @@ func TestSentinelErrors(t *testing.T) {
 			t.Errorf("got %v, want errors.Is ErrUnsupportedTEE", err)
 		}
 	})
-}
-
-// marshalASN1 helper for tests.
-func marshalASN1(v *attestationASN1) ([]byte, error) {
-	return asn1.Marshal(*v)
-}
-
-func TestNormalizeSEVSNPReportHCLEnvelope(t *testing.T) {
-	reportData := [64]byte{1, 2, 3}
-	report := fakeSNPReport(reportData)
-	envelope := fakeHCLEnvelope(report, 128)
-
-	normalized, err := NormalizeSEVSNPReport(envelope)
-	if err != nil {
-		t.Fatalf("NormalizeSEVSNPReport failed: %v", err)
-	}
-	if !bytes.Equal(normalized, report) {
-		t.Fatal("normalized report mismatch")
-	}
-}
-
-func TestUnmarshalExtensionHCLEnvelope(t *testing.T) {
-	reportData := [64]byte{1, 2, 3}
-	report := fakeSNPReport(reportData)
-	att := &attestationASN1{
-		TEEType: int(TEETypeSEVSNP),
-		Report:  fakeHCLEnvelope(report, 128),
-	}
-	data, err := marshalASN1(att)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := UnmarshalExtension(data)
-	if err != nil {
-		t.Fatalf("UnmarshalExtension failed for HCL envelope: %v", err)
-	}
-	if !bytes.Equal(result.Report, report) {
-		t.Fatal("unmarshaled report mismatch")
-	}
-}
-
-func TestUnmarshalExtensionReportSize(t *testing.T) {
-	t.Run("truncated SNP report", func(t *testing.T) {
-		att := &attestationASN1{
-			TEEType: int(TEETypeSEVSNP),
-			Report:  make([]byte, 100), // way too short
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = UnmarshalExtension(data)
-		if !errors.Is(err, ErrInvalidReport) {
-			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
-		}
-	})
-
-	t.Run("oversized SNP report", func(t *testing.T) {
-		att := &attestationASN1{
-			TEEType: int(TEETypeSEVSNP),
-			Report:  make([]byte, SNPReportSize+1),
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = UnmarshalExtension(data)
-		if !errors.Is(err, ErrInvalidReport) {
-			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
-		}
-	})
-
-	t.Run("correct size SNP report", func(t *testing.T) {
-		reportData := [64]byte{1, 2, 3}
-		att := &attestationASN1{
-			TEEType: int(TEETypeSEVSNP),
-			Report:  fakeSNPReport(reportData),
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-		result, err := UnmarshalExtension(data)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(result.Report) != SNPReportSize {
-			t.Errorf("report size = %d, want %d", len(result.Report), SNPReportSize)
-		}
-	})
-
-	t.Run("TDX raw bytes are rejected", func(t *testing.T) {
-		// TDX extensions carry the full attestation-api evidence
-		// envelope (JSON), not raw quote bytes — verifyEnvelopeOnline
-		// reads the envelope back and forwards it to attestation-api. Refuse
-		// raw bytes at parse time so a wire-format regression fails
-		// loudly instead of silently taking the "empty embedded" path.
-		att := &attestationASN1{
-			TEEType: int(TEETypeTDX),
-			Report:  []byte("variable-length-tdx-quote"),
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = UnmarshalExtension(data)
-		if !errors.Is(err, ErrInvalidReport) {
-			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
-		}
-	})
-
-	t.Run("TDX evidence envelope is accepted", func(t *testing.T) {
-		// The TDX shape: RA-TLS extension Report field carries a JSON
-		// AttestationEvidence produced by RATLSEvidence(resp) for a
-		// platform="tdx" AttestResponse.
-		att := &attestationASN1{
-			TEEType: int(TEETypeTDX),
-			Report:  []byte(`{"platform":"tdx","evidence":{"quote":"AAAA"}}`),
-		}
-		data, err := marshalASN1(att)
-		if err != nil {
-			t.Fatal(err)
-		}
-		result, err := UnmarshalExtension(data)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if result.TEEType != TEETypeTDX {
-			t.Errorf("TEEType = %v, want TDX", result.TEEType)
-		}
-		embedded, ok := result.EmbeddedEvidence()
-		if !ok || embedded.Platform != "tdx" {
-			t.Errorf("EmbeddedEvidence() ok=%v platform=%q, want ok=true platform=tdx", ok, embedded.Platform)
-		}
-	})
-}
-
-func TestSNPReportSizeConstant(t *testing.T) {
-	if SNPReportSize != 0x4A0 {
-		t.Errorf("SNPReportSize = 0x%X, want 0x4A0", SNPReportSize)
-	}
-	if SNPReportSize != 1184 {
-		t.Errorf("SNPReportSize = %d, want 1184", SNPReportSize)
-	}
 }
 
 func TestSNPMeasurementSizeConstant(t *testing.T) {
@@ -877,8 +532,8 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 
 	t.Run("az-tdx evidence with a mismatched SEV-SNP TEE type is rejected", func(t *testing.T) {
 		// az-tdx is a TDX-family platform; carrying it in a cert that declares
-		// the SEV-SNP TEE type is a family mismatch and must fail closed rather
-		// than be verified under SNP rules.
+		// the SEV-SNP TEE type is a family mismatch and must fail closed at
+		// parse time rather than be verified under SNP rules.
 		key, _, err := GenerateKeyPair()
 		if err != nil {
 			t.Fatal(err)
@@ -901,8 +556,8 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		stub := testattest.New(t)
 		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
-		if !errors.Is(err, ErrUnsupportedTEE) {
-			t.Fatalf("got %v, want ErrUnsupportedTEE", err)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
 	})
 }
@@ -1007,101 +662,6 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 		_, err := VerifyCert(cert, &VerifyPolicy{Measurements: [][]byte{measurement}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
-		}
-	})
-}
-
-func TestNormalizeSEVSNPReportSizeEdges(t *testing.T) {
-	t.Run("header-only HCL input reports HCL truncation", func(t *testing.T) {
-		// Exactly one HCL header, no payload: must be recognized as an HCL
-		// envelope and rejected as truncated, not misreported as a bare report.
-		raw := make([]byte, 32)
-		copy(raw[:4], "HCLA")
-		_, err := NormalizeSEVSNPReport(raw)
-		if err == nil {
-			t.Fatal("expected error for truncated HCL envelope")
-		}
-		if !strings.Contains(err.Error(), "HCL report") {
-			t.Fatalf("error = %v, want HCL truncation error", err)
-		}
-	})
-
-	t.Run("HCL envelope with a TDX report type is rejected", func(t *testing.T) {
-		env := fakeHCLEnvelope(fakeSNPReport([64]byte{1, 2, 3}), 0)
-		binary.LittleEndian.PutUint32(env[32+SNPReportSize+8:], 4) // report_type: TDX
-		_, err := NormalizeSEVSNPReport(env)
-		if err == nil || !strings.Contains(err.Error(), "report type 4") {
-			t.Fatalf("error = %v, want a report-type rejection", err)
-		}
-	})
-
-	t.Run("exact-size HCL envelope is accepted", func(t *testing.T) {
-		report := fakeSNPReport([64]byte{1, 2, 3})
-		normalized, err := NormalizeSEVSNPReport(fakeHCLEnvelope(report, 0))
-		if err != nil {
-			t.Fatalf("NormalizeSEVSNPReport: %v", err)
-		}
-		if !bytes.Equal(normalized, report) {
-			t.Fatal("normalized report mismatch")
-		}
-	})
-}
-
-func TestAttestationReportData(t *testing.T) {
-	rd := [64]byte{0xA1, 0xB2, 0xC3}
-
-	t.Run("raw SNP report exposes REPORTDATA", func(t *testing.T) {
-		att := &Attestation{TEEType: TEETypeSEVSNP, Report: fakeSNPReport(rd)}
-		got, ok := att.ReportData()
-		if !ok {
-			t.Fatal("ReportData() = false for raw SNP report")
-		}
-		if !bytes.Equal(got, rd[:]) {
-			t.Fatalf("ReportData = %x, want %x", got, rd[:])
-		}
-	})
-
-	t.Run("minimum-length report is accepted", func(t *testing.T) {
-		report := make([]byte, snpReportDataOffset+64)
-		copy(report[snpReportDataOffset:], rd[:])
-		att := &Attestation{TEEType: TEETypeSEVSNP, Report: report}
-		got, ok := att.ReportData()
-		if !ok {
-			t.Fatal("ReportData() = false for minimum-length report")
-		}
-		if !bytes.Equal(got, rd[:]) {
-			t.Fatalf("ReportData = %x, want %x", got, rd[:])
-		}
-	})
-
-	t.Run("short report is refused", func(t *testing.T) {
-		att := &Attestation{TEEType: TEETypeSEVSNP, Report: make([]byte, snpReportDataOffset+63)}
-		if got, ok := att.ReportData(); ok || got != nil {
-			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
-		}
-	})
-
-	t.Run("TDX type is refused", func(t *testing.T) {
-		att := &Attestation{TEEType: TEETypeTDX, Report: fakeSNPReport(rd)}
-		if got, ok := att.ReportData(); ok || got != nil {
-			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
-		}
-	})
-
-	t.Run("envelope evidence is refused", func(t *testing.T) {
-		data, err := marshalASN1(&attestationASN1{
-			TEEType: int(TEETypeSEVSNP),
-			Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		att, err := UnmarshalExtension(data)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, ok := att.ReportData(); ok || got != nil {
-			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
 		}
 	})
 }

@@ -9,9 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -35,7 +37,10 @@ func TestStubAttestRecordsAndReturnsSNPEvidence(t *testing.T) {
 		t.Fatalf("platform = %q, want snp", resp.Platform)
 	}
 
-	report, err := attestclient.ExtractSNPReport(resp)
+	report, err := agratls.ExtractSNPReport(teetypes.AttestationEvidence{
+		Platform: teetypes.NormalizePlatform(resp.Platform),
+		Evidence: resp.Evidence,
+	})
 	if err != nil {
 		t.Fatalf("ExtractSNPReport: %v", err)
 	}
@@ -44,7 +49,7 @@ func TestStubAttestRecordsAndReturnsSNPEvidence(t *testing.T) {
 	}
 	var wantReportData [64]byte
 	copy(wantReportData[:], reportData.Bytes())
-	if got := []byte(report[0x50:0x90]); !bytes.Equal(got, wantReportData[:]) {
+	if got := report[0x50:0x90]; !bytes.Equal(got, wantReportData[:]) {
 		t.Fatalf("REPORTDATA = %x, want %x", got, wantReportData)
 	}
 
@@ -69,11 +74,14 @@ func TestStubAttestClampsReportDataToTheField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Attest: %v", err)
 	}
-	report, err := attestclient.ExtractSNPReport(resp)
+	report, err := agratls.ExtractSNPReport(teetypes.AttestationEvidence{
+		Platform: teetypes.NormalizePlatform(resp.Platform),
+		Evidence: resp.Evidence,
+	})
 	if err != nil {
 		t.Fatalf("ExtractSNPReport: %v", err)
 	}
-	if got := []byte(report[0x50:0x90]); !bytes.Equal(got, oversize.Bytes()[:64]) {
+	if got := report[0x50:0x90]; !bytes.Equal(got, oversize.Bytes()[:64]) {
 		t.Fatalf("REPORTDATA = %x, want the leading 64 bytes %x", got, oversize.Bytes()[:64])
 	}
 }

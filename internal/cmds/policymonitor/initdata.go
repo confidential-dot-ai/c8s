@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
@@ -28,14 +30,9 @@ var errAttestUnavailable = errors.New("policy-monitor: attestation service unava
 var errAttestVerdict = errors.New("policy-monitor: self-report refused")
 
 // The verified report carries no usable init-data anchor to compare the
-// document against: neither SNP's 32-byte HOST_DATA nor TDX's 48-byte
-// MRCONFIGID carrying a zero-padded 32-byte digest.
-var errNoHostDataAnchor = errors.New("policy-monitor: init-data claim is not a 32-byte anchor")
-
-// mrConfigIDSize is the width of TDX's MRCONFIGID, into which the shim commits
-// sha256(document) zero-padded — the same shape attestation-rs's TDX verifier
-// binds expected_init_data_hash against (pad_report_data(expected, 48)).
-const mrConfigIDSize = 48
+// document against. Wraps runtimemeasure.ErrNoAnchor; callers branch on this
+// one to stop waiting for a document the report can never authenticate.
+var errNoHostDataAnchor = errors.New("policy-monitor: unusable init-data anchor")
 
 // Bounds the self-attestation; on expiry the caller falls back to the seed.
 const initDataTimeout = 15 * time.Second
@@ -244,27 +241,11 @@ func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %w", classifyVerifyError(err), err)
 	}
 
-	return initDataAnchor(verified.Result.Claims.InitData)
-}
-
-// initDataAnchor extracts the 32-byte sha256(document) anchor from the
-// platform's init-data claim: SNP HOST_DATA carries it verbatim; TDX
-// MRCONFIGID carries it zero-padded to 48 bytes, so the tail must be zero for
-// the prefix to be that anchor rather than an arbitrary 48-byte value.
-func initDataAnchor(claim []byte) ([]byte, error) {
-	switch len(claim) {
-	case initdata.DigestSize:
-		return claim, nil
-	case mrConfigIDSize:
-		for _, b := range claim[initdata.DigestSize:] {
-			if b != 0 {
-				return nil, fmt.Errorf("%w: %d-byte MRCONFIGID is not a zero-padded %d-byte digest", errNoHostDataAnchor, mrConfigIDSize, initdata.DigestSize)
-			}
-		}
-		return claim[:initdata.DigestSize], nil
-	default:
-		return nil, fmt.Errorf("%w: %d bytes, want %d (SNP HOST_DATA) or %d (TDX MRCONFIGID)", errNoHostDataAnchor, len(claim), initdata.DigestSize, mrConfigIDSize)
+	anchor, err := runtimemeasure.InitDataAnchor(&verified.Result)
+	if errors.Is(err, runtimemeasure.ErrNoAnchor) {
+		return nil, fmt.Errorf("%w: %w", errNoHostDataAnchor, err)
 	}
+	return anchor, err
 }
 
 // classifyVerifyError splits a refusal of the report from a failure to reach

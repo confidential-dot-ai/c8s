@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -46,8 +46,8 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(set.Entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(set.Entries))
+	if len(set.Images) != 2 {
+		t.Fatalf("got %d entries, want 2", len(set.Images))
 	}
 	if c.measurements == "" || c.cdsMeasurements == "" {
 		t.Fatalf("a pin field was left empty: peers=%q cds=%q", c.measurements, c.cdsMeasurements)
@@ -63,10 +63,10 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 		t.Errorf("--rtmrs = %q, want the shared register pins", c.rtmrs)
 	}
 	// The filled fields must parse with the same helpers run() uses.
-	if _, err := ratls.ParseHexMeasurements(c.measurements); err != nil {
+	if _, err := refvalues.ParseHexMeasurements(c.measurements); err != nil {
 		t.Errorf("flat measurements do not parse: %v", err)
 	}
-	if _, err := ratls.ParseRTMRPinsString(c.rtmrs); err != nil {
+	if _, err := refvalues.ParseRTMRPinsString(c.rtmrs); err != nil {
 		t.Errorf("flat rtmrs do not parse: %v", err)
 	}
 }
@@ -89,9 +89,9 @@ func TestResolveDropsDivergentRTMRs(t *testing.T) {
 	if strings.Count(c.measurements, ",") != 1 {
 		t.Errorf("--measurements = %q, want both digests", c.measurements)
 	}
-	for _, e := range set.Entries {
-		if len(e.RTMRs) == 0 {
-			t.Errorf("entry %s lost its register pins", e.Name)
+	for _, img := range set.Images {
+		if len(img.RTMRs) == 0 {
+			t.Errorf("entry %s lost its register pins", img.Name)
 		}
 	}
 }
@@ -133,11 +133,11 @@ func TestResolveFailsClosed(t *testing.T) {
 // --platform=auto resolves by probing the guest devices, so the config's
 // platform is compared against what this node actually attests on.
 func TestCheckTEEMatchesPlatform(t *testing.T) {
-	snp, err := measurements.Parse([]byte(snpDoc(`{"name":"a","measurement":"00` + meshDigestA + `"}`)))
+	snp, err := refvalues.Parse([]byte(snpDoc(`{"name":"a","measurement":"00` + meshDigestA + `"}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tdx, err := measurements.Parse([]byte(tdxDoc(`{"name":"a","mrtd":"00` + meshDigestA + `"}`)))
+	tdx, err := refvalues.Parse([]byte(tdxDoc(`{"name":"a","mrtd":"00` + meshDigestA + `"}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestCheckTEEMatchesPlatform(t *testing.T) {
 	if err := checkTEEMatchesPlatform(tdx, ratls.TEETypeSEVSNP); err == nil {
 		t.Error("accepted a tdx config on an SNP node")
 	}
-	if err := checkTEEMatchesPlatform(measurements.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
+	if err := checkTEEMatchesPlatform(refvalues.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
 		t.Errorf("an unset config reported a mismatch: %v", err)
 	}
 }

@@ -23,13 +23,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -495,7 +495,7 @@ type verifyPlan struct {
 	initDataHash []byte
 	// refValues is the parsed --measurements-config, empty when unset. It
 	// both pins the target and is compared against what the target serves.
-	refValues measurementspkg.ReferenceValues
+	refValues refvalues.ReferenceValues
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -534,9 +534,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}
 
 	// Read once, here, like every other file-backed pin on this path.
-	var refValues measurementspkg.ReferenceValues
+	var refValues refvalues.ReferenceValues
 	if cfg.measurementsConfig != "" {
-		loaded, err := measurementspkg.Load(cfg.measurementsConfig)
+		loaded, err := refvalues.Load(cfg.measurementsConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -551,7 +551,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(hexes)
+	measurements, err := refvalues.ParseHexMeasurementsList(hexes)
 	if err != nil {
 		return nil, err
 	}
@@ -626,7 +626,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
-			Entries:      refValues.Entries,
+			Entries:      refValues.Images,
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
@@ -712,7 +712,7 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	manual, err := refvalues.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
 		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
@@ -1436,7 +1436,7 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
-// rtmrMeaning labels a register in operator-facing output. ratls.ParseRTMRPins
+// rtmrMeaning labels a register in operator-facing output. refvalues.ParseRTMRPins
 // admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {

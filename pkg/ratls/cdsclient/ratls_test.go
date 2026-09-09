@@ -56,8 +56,8 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 	if err == nil {
 		t.Fatal("Provision succeeded against unattested CDS")
 	}
-	if !errors.Is(err, ratls.ErrNotAttested) {
-		t.Fatalf("Provision error = %v, want ErrNotAttested", err)
+	if !errors.Is(err, ratls.ErrNoAttestation) {
+		t.Fatalf("Provision error = %v, want ErrNoAttestation", err)
 	}
 }
 

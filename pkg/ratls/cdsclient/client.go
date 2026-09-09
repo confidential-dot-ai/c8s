@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -84,7 +84,7 @@ type Config struct {
 	// CDSEntries pins CDS as a whole image — a launch digest together with
 	// the registers measured from the same build. When set it replaces
 	// CDSMeasurements and CDSRTMRs.
-	CDSEntries []measurements.Entry
+	CDSEntries []apiclient.ImagePin
 
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that

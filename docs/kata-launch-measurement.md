@@ -144,7 +144,8 @@ Then diff it against `c8s kata measure --vcpus N --json | jq -r .cmdline`.
 ## Verifying against a real cluster
 
 The SNP implementation reproduces both live measurements in the table above
-from the artifacts on the node, and `pkg/snpmeasure`'s unit tests check it
+from the artifacts on the node, and `attestation-go`'s `launchmeasure/snp`
+unit tests check it
 against `sev-snp-measure`'s own published vectors using that project's 4 KiB
 OVMF fixture — so CI validates the algorithm without a multi-GB guest image.
 The end-to-end check against the real image is manual:
@@ -202,7 +203,7 @@ is the only thing that moves it.
 
 ### Implementation
 
-`pkg/tdxmeasure` is a thin wrapper over
+`attestation-go`'s `launchmeasure/tdx` is a thin wrapper over
 [`github.com/google/gce-tcb-verifier/tdx`](https://github.com/google/gce-tcb-verifier)
 `MRTD()` rather than a local reimplementation of the Intel TDX Module Base
 Architecture Specification. That library is the only maintained Go
@@ -218,7 +219,7 @@ for kata/QEMU**:
 | `LaunchOptionsDefaultTDHOBBug("")` | `2815d6db…` — models a Google hypervisor bug ❌ |
 | `DisableUnacceptedMemory = true` | `2815d6db…` — changes the TD HOB ❌ |
 
-`pkg/tdxmeasure.launchOptions()` pins the correct one, and
+`launchmeasure/tdx`'s `launchOptions()` pins the correct one, and
 `TestOtherLaunchOptionsAreWrong` fails if upstream ever makes the others
 equivalent. **Risk accepted:** a change to the library's default `LaunchOptions`
 would silently move the pinned measurement. `TestMRTDMatchesHardware` is the
@@ -230,9 +231,9 @@ moves the value fails the build rather than shipping a wrong pin.
 The 4 MiB TDVF is not committed. CI's TDX MRTD tripwire job fetches the
 pinned TDVF out of the kata-static release the nodes' kata-deploy installs,
 sha256-checks it against the pin next to its URL in `.github/workflows/ci.yml`,
-and runs the `pkg/tdxmeasure` tests with `C8S_TDVF` set, failing if any test
-skips. Elsewhere the hardware check runs only where the firmware exists (a TDX
-node, or `C8S_TDVF=/path/to/OVMF.inteltdx.fd`), skipping if the TDVF is not
+and runs the `launchmeasure/tdx` tests with `TDVF_PATH` set, failing if any
+test skips. Elsewhere the hardware check runs only where the firmware exists (a
+TDX node, or `TDVF_PATH=/path/to/OVMF.inteltdx.fd`), skipping if the TDVF is not
 the sha256 the expected digest was captured from. The CLI wiring is covered in
 CI with a synthetic TDVF.
 

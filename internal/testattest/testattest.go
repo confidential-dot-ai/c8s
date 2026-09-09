@@ -4,7 +4,7 @@
 // ratls.SNPReportSize bytes with the requested report data clamped into the
 // 64-byte REPORTDATA field, carried under attestation_report as standard
 // base64 — the shape production evidence extraction
-// (attestclient.ExtractSNPReport) consumes.
+// (attestation-go/ratls.ExtractSNPReport) consumes.
 // The response platform resolves like the real api's: an explicit request
 // platform is honored; "auto" or empty resolves to the platform the stub
 // detects — snp, unless SetPlatform says otherwise.
@@ -161,7 +161,7 @@ func (s *Stub) handleAttest(w http.ResponseWriter, r *http.Request) {
 
 // fakeSNPEvidence wraps a minimal SEV-SNP report — version 2, SMT-allowed
 // policy, the requested report data in the 64-byte REPORTDATA field at
-// 0x50 — in the attestation_report envelope ExtractSNPReport reads.
+// 0x50 — in the attestation_report envelope ratls.ExtractSNPReport reads.
 func fakeSNPEvidence(reportData []byte) json.RawMessage {
 	report := make([]byte, 1184) // AMD SEV-SNP report size (ratls.SNPReportSize)
 	report[0] = 0x02

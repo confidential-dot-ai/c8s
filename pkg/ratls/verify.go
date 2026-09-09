@@ -4,17 +4,16 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -23,7 +22,7 @@ type VerifyPolicy struct {
 	// Entries pins whole images — a launch digest together with the registers
 	// measured from the same build. When set it replaces Measurements and
 	// RTMRs, so a digest from one image cannot be paired with another's.
-	Entries []measurements.Entry
+	Entries []apiclient.ImagePin
 
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
@@ -246,55 +245,28 @@ func CheckSandboxPin(cert *x509.Certificate, expectedID string) error {
 	return nil
 }
 
-// ExtractAttestation finds and parses the RA-TLS extension from a certificate.
-func ExtractAttestation(cert *x509.Certificate) (*Attestation, error) {
-	for _, ext := range cert.Extensions {
-		if ext.Id.Equal(OIDRATLSAttestation) {
-			return UnmarshalExtension(ext.Value)
-		}
-	}
-	return nil, fmt.Errorf("%w (OID %s)", ErrNotAttested, OIDRATLSAttestation)
-}
-
 // verifyReport normalizes the attestation into an evidence envelope and hands
 // it to the attestation-api enforced verifier. The extension's TEE type must
 // match the envelope's platform family — fail closed rather than approve one
 // platform's evidence under another's rules.
+//
+// c8s ships no in-process quote parser: every platform, including bare-metal
+// SNP whose raw report [Attestation.Envelope] wraps for us, is verified by the
+// attestation-api. An inline VCEK rides along in the envelope; the api ignores
+// it or uses it.
 func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
-	evidence := att.embedded
-	switch att.TEEType {
-	case TEETypeSEVSNP:
-		// Envelope platforms (az-snp) embed their evidence in the
-		// extension directly; bare-metal SNP carries the raw report,
-		// which is wrapped in the "snp" evidence envelope here.
-		if evidence == nil {
-			var err error
-			if evidence, err = snpEvidence(att.Report); err != nil {
-				return nil, err
-			}
-		}
-		switch evidence.Platform {
-		case string(types.PlatformSnp), string(types.PlatformAzSnp), string(types.PlatformGcpSnp):
-		default:
-			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
-		}
-	case TEETypeTDX:
-		// TDX always carries a JSON envelope in the RA-TLS extension (see
-		// extension.go's UnmarshalExtension). We do NOT ship an in-process
-		// TDX quote parser — delegating keeps the heavy Intel dependencies
-		// out of every c8s Go binary.
-		if evidence == nil {
-			return nil, fmt.Errorf("%w: TDX RA-TLS extension missing evidence envelope", ErrInvalidReport)
-		}
-		switch evidence.Platform {
-		case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
-		default:
-			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
-		}
-	default:
-		return nil, fmt.Errorf("%w: TEE type %d", ErrUnsupportedTEE, att.TEEType)
+	env, err := att.Envelope()
+	if err != nil {
+		return nil, err
 	}
-	return verifyEnvelopeOnline(evidence, policy, expectedReportData)
+	family := env.Platform.Family()
+	if family == teetypes.FamilyUnknown {
+		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, env.Platform)
+	}
+	if family != att.TEEType.Family() {
+		return nil, fmt.Errorf("%w: extension declares %s but carries %q evidence", ErrInvalidReport, att.TEEType, env.Platform)
+	}
+	return verifyEnvelopeOnline(env, policy, expectedReportData)
 }
 
 const defaultAttestationVerifyTimeout = 10 * time.Second
@@ -316,7 +288,7 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 // verifier ([attestationclient.Client.VerifyEvidence] — verdict gate,
 // platform-specific REPORTDATA wire form, measurement reference values) and maps its
 // verdicts onto this package's sentinels.
-func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
+func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
 	timeout := policy.AttestationVerifyTimeout
 	if timeout <= 0 {
 		timeout = defaultAttestationVerifyTimeout
@@ -329,7 +301,10 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		m := unpackSNPMinTcb(policy.MinTCBVersion)
 		minTcb = &m
 	}
-	resp, err := attestationclient.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, *evidence, attestationclient.EvidencePolicy{
+	resp, err := attestationclient.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, types.AttestationEvidence{
+		Platform: string(evidence.Platform),
+		Evidence: evidence.Evidence,
+	}, attestationclient.EvidencePolicy{
 		ExpectedReportData: expectedReportData,
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
@@ -338,11 +313,11 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		RTMRs:              policy.RTMRs,
 	})
 	if err != nil {
-		return nil, mapVerifyError(evidence.Platform, err)
+		return nil, mapVerifyError(string(evidence.Platform), err)
 	}
 
 	teeType := TEETypeSEVSNP
-	if teetypes.NormalizePlatform(evidence.Platform).IsTDX() {
+	if evidence.Platform.IsTDX() {
 		teeType = TEETypeTDX
 	}
 	result := &VerifyResult{TEEType: teeType}
@@ -378,22 +353,4 @@ func mapVerifyError(platform string, err error) error {
 	default:
 		return fmt.Errorf("ratls: online %s attestation verify: %w", platform, err)
 	}
-}
-
-// snpEvidence wraps a raw SEV-SNP attestation report in the attestation-api's
-// bare-metal "snp" evidence envelope for POST /verify. Only bare-metal SNP
-// carries raw report bytes in the RA-TLS extension; every other platform
-// carries the full envelope directly, so no wrapping is needed for them
-// (att.embedded is populated by UnmarshalExtension in that case).
-func snpEvidence(rawReport []byte) (*types.AttestationEvidence, error) {
-	inner, err := json.Marshal(struct {
-		AttestationReport string `json:"attestation_report"`
-	}{base64.StdEncoding.EncodeToString(rawReport)})
-	if err != nil {
-		return nil, fmt.Errorf("ratls: build snp evidence: %w", err)
-	}
-	return &types.AttestationEvidence{
-		Platform: string(types.PlatformSnp),
-		Evidence: inner,
-	}, nil
 }

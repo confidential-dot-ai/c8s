@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -248,10 +249,10 @@ func (c *config) Validate() error {
 		if c.Allowlist.Pull.AttestationApiURL == "" {
 			return fmt.Errorf("allowlist.pull.attestation_api_url must be set")
 		}
-		if _, err := ratls.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
+		if _, err := refvalues.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_measurements: %w", err)
 		}
-		if _, err := ratls.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
+		if _, err := refvalues.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
 		}
 	}

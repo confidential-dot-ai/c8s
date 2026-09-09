@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/sha512"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,10 +21,9 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/snp"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
+	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // KDS getter bounds: the retry backoff is capped so several attempts fit inside
@@ -83,7 +81,19 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		MinTCB:               p.MinTCB,
 	}
 
-	res, err := dispatch(ctx, platform, evidence, params)
+	envelope, err := json.Marshal(teetypes.AttestationEvidence{
+		Platform: teetypes.NormalizePlatform(platform),
+		Evidence: evidence,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal evidence envelope: %w", err)
+	}
+	// A bare RA-TLS serving cert carries the SNP report with no inline VCEK;
+	// the Getter lets the snp and gcp-snp arms fetch it from AMD KDS, bounded
+	// by ctx. Nothing else here reaches the network.
+	res, err := teeverify.VerifyWithOptionsContext(ctx, envelope, params, teeverify.Options{
+		SNP: snp.Options{Getter: snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)},
+	})
 	if err != nil {
 		var re *trust.AttestationRecreationErr
 		if errors.Is(err, snp.ErrCollateralUnavailable) || errors.As(err, &re) {
@@ -101,7 +111,7 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 }
 
 // enforceResult re-checks the verdict against p on the verifier's own claims.
-// Defense in depth: a nil dispatch error already implies these, but never
+// Defense in depth: a nil verification error already implies these, but never
 // report a success the result contradicts.
 func enforceResult(res *teetypes.VerificationResult, p Params) error {
 	if !res.SignatureValid {
@@ -125,101 +135,25 @@ func enforceResult(res *teetypes.VerificationResult, p Params) error {
 	return nil
 }
 
-// dispatch routes evidence to attestation-go. The envelope path
-// (teeverify.Verify) verifies offline and is used whenever the VCEK is already
-// inline (a discovery doc or endpoint response). A bare RA-TLS serving cert
-// carries the SNP report but no VCEK, and the envelope path requires it inline
-// (attestation-go does no KDS fetch there); for that case we drop to
-// snp.VerifyReportContext with a KDS Getter — it resolves the product from the
-// report (Zen4c/Siena-aware) and fetches the VCEK from AMD KDS itself, bounded
-// by ctx.
-func dispatch(ctx context.Context, platform string, evidence json.RawMessage, params teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
-	if mayMissVCEK(platform) {
-		var se snp.SnpEvidence
-		if err := json.Unmarshal(evidence, &se); err != nil {
-			return nil, fmt.Errorf("parse snp evidence: %w", err)
-		}
-		if se.CertChain == nil || se.CertChain.Vcek == "" {
-			report, err := base64.StdEncoding.DecodeString(se.AttestationReport)
-			if err != nil {
-				return nil, fmt.Errorf("decode attestation_report: %w", err)
-			}
-			// nil VCEK + a Getter ⇒ attestation-go fetches the VCEK from AMD KDS,
-			// retrying until ctx or the backstop expires, whichever is sooner.
-			getter := &trust.RetryHTTPSGetter{
-				Timeout:       kdsMaxFetchTime,
-				MaxRetryDelay: kdsMaxRetryDelay,
-				Getter:        &trust.SimpleHTTPSGetter{},
-			}
-			return snp.VerifyReportContext(ctx, report, nil, params,
-				teetypes.PlatformType(platform), snp.MinReportVersion,
-				snp.Options{Getter: getter})
-		}
-	}
-
-	envelope, err := json.Marshal(teetypes.AttestationEvidence{
-		Platform: teetypes.PlatformType(platform),
-		Evidence: evidence,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal evidence envelope: %w", err)
-	}
-	return teeverify.Verify(envelope, params)
-}
-
-// mayMissVCEK reports whether evidence for this platform might lack the VCEK the
-// bare-cert path needs (so we fetch it from AMD KDS). True for bare-metal/GCP
-// SEV-SNP, whose {attestation_report, cert_chain?} object can omit it. az-snp
-// always ships the VCEK inside its HCL-report envelope, and TDX has no VCEK —
-// both verify through the envelope path (teeverify.Verify) directly.
-func mayMissVCEK(platform string) bool {
-	p := teetypes.NormalizePlatform(platform)
-	return p == teetypes.PlatformSNP || p == teetypes.PlatformGcpSNP
-}
-
 // CertEnvelope extracts the RA-TLS attestation from a certificate and returns
 // the evidence envelope plus the expected REPORTDATA anchor — SHA-384 over the
 // public key (no per-request nonce, so no freshness proof).
+//
+// An extension carrying a full envelope (az-snp, TDX) is forwarded verbatim; a
+// raw SEV-SNP report is wrapped as {attestation_report, cert_chain.vcek?}, with
+// the VCEK inline when the extension carried one.
 func CertEnvelope(cert *x509.Certificate) (platform string, evidence json.RawMessage, expectedReportData []byte, err error) {
-	att, err := ratls.ExtractAttestation(cert)
+	att, err := agratls.ExtractAttestation(cert)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	platform, evidence, err = EnvelopeFromAttestation(att)
+	env, err := att.Envelope()
 	if err != nil {
 		return "", nil, nil, err
 	}
-	rd, err := ratls.ReportDataForKey(cert.PublicKey, nil)
+	rd, err := agratls.ReportDataForKey(cert.PublicKey, nil)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
 	}
-	return platform, evidence, rd[:sha512.Size384], nil
-}
-
-// EnvelopeFromAttestation turns an RA-TLS cert's embedded attestation into the
-// platform + evidence object the verifier expects. An embedded {platform,
-// evidence} envelope (e.g. az-snp) is forwarded verbatim; a raw SEV-SNP report
-// is wrapped as {attestation_report, cert_chain.vcek?}. A raw TDX report has no
-// evidence shape wired here — use the discovery / attestation endpoint, which
-// carries the attester's evidence object directly.
-func EnvelopeFromAttestation(att *ratls.Attestation) (string, json.RawMessage, error) {
-	if env, ok := att.EmbeddedEvidence(); ok {
-		return env.Platform, env.Evidence, nil
-	}
-	switch att.TEEType {
-	case ratls.TEETypeSEVSNP:
-		inner := snp.SnpEvidence{AttestationReport: base64.StdEncoding.EncodeToString(att.Report)}
-		if len(att.CertChain) > 0 {
-			inner.CertChain = &snp.SnpCertChain{Vcek: base64.StdEncoding.EncodeToString(att.CertChain)}
-		}
-		raw, err := json.Marshal(inner)
-		if err != nil {
-			return "", nil, fmt.Errorf("marshal snp evidence: %w", err)
-		}
-		return string(types.PlatformSnp), raw, nil
-	case ratls.TEETypeTDX:
-		return "", nil, fmt.Errorf("verifying a raw TDX report from an RA-TLS serving cert is not yet supported; use the discovery or attestation endpoint")
-	default:
-		return "", nil, fmt.Errorf("unsupported TEE type %d", att.TEEType)
-	}
+	return string(env.Platform), env.Evidence, rd[:sha512.Size384], nil
 }

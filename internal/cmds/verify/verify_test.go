@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
@@ -991,7 +992,7 @@ func TestRenderOutcome(t *testing.T) {
 
 	pinnedPlan := func(t *testing.T) *verifyPlan {
 		t.Helper()
-		m, err := ratls.ParseHexMeasurementsList([]string{measHex})
+		m, err := refvalues.ParseHexMeasurementsList([]string{measHex})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1101,7 +1102,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("measurement not in allowlist -> not verified", func(t *testing.T) {
 		// A genuine TEE whose launch digest isn't pinned must fail closed: the
 		// allowlist is enforced here (the verifier has no --measurements input).
-		other, err := ratls.ParseHexMeasurementsList([]string{"00" + strings.Repeat("11", 47)})
+		other, err := refvalues.ParseHexMeasurementsList([]string{"00" + strings.Repeat("11", 47)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1482,8 +1483,8 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	defer srv.Close()
 
 	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
-	if !errors.Is(err, ratls.ErrNotAttested) {
-		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
+	if !errors.Is(err, ratls.ErrNoAttestation) {
+		t.Fatalf("want fall-through to the serving-cert path (ErrNoAttestation), got: %v", err)
 	}
 }
 

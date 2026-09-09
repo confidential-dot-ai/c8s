@@ -34,6 +34,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -184,7 +185,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		return nil, fmt.Errorf("--cds-url must use https (RA-TLS); got scheme %q", parsed.Scheme)
 	}
 
-	measurements, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
+	measurements, err := refvalues.ParseHexMeasurements(cfg.CDSMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
@@ -192,7 +193,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
 		return nil, err
 	}
-	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}

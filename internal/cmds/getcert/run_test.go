@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/apiclient/apiclienttest"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -946,12 +947,11 @@ func startFakeServersRefusing(t *testing.T, issuedChain string, refusals int) (c
 			http.NotFound(w, r)
 			return
 		}
-		// snp evidence must carry attestation_report; the CSR extension
-		// build extracts the raw report bytes for the on-cert form.
-		fakeReport := base64.StdEncoding.EncodeToString([]byte("fake-snp-report"))
+		// snp evidence must carry a full-size attestation_report; the CSR
+		// extension build extracts the raw report bytes for the on-cert form.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"platform": "snp",
-			"evidence": json.RawMessage(`{"attestation_report":"` + fakeReport + `"}`),
+			"evidence": apiclienttest.FakeSNPEvidence(nil),
 		})
 	}))
 	t.Cleanup(att.Close)
@@ -1009,7 +1009,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 
 func TestObtainCertCDSError(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": apiclienttest.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1059,7 +1059,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 	chain := testIssuedChainPEM(t)
 
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": apiclienttest.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 
@@ -1102,7 +1102,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 
 func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": apiclienttest.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	var calls int

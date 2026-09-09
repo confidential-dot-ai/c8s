@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"strings"
 )
 
@@ -202,7 +202,7 @@ func TestListenAddressRequiresLoopback(t *testing.T) {
 
 func TestNewHandlerRejectsBadMeasurement(t *testing.T) {
 	bad := []string{"not-hex"}
-	_, parseErr := ratls.ParseHexMeasurementsList(bad)
+	_, parseErr := refvalues.ParseHexMeasurementsList(bad)
 	_, err := newHandler(config{
 		cdsURL:            "https://c8s-cds:8443",
 		cdsMeasurements:   bad,

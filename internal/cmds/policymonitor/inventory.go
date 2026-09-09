@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/admissionhistory"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -162,7 +163,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	// A parse failure is a typo and stays fail-closed; empty is the explicit
 	// dev opt-out, so tokens still flow and the guest can still be issued a
 	// sandbox-bound leaf.
-	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
+	measurements, err := refvalues.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
 		logger.Error("sandbox tokens disabled: C8S_CDS_MEASUREMENTS invalid", "error", err)
 		signers.Disable()
@@ -171,7 +172,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: C8S_CDS_RTMRS invalid", "error", err)
 		signers.Disable()

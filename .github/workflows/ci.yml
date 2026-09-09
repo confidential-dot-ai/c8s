@@ -253,15 +253,17 @@ jobs:
           curl -fsSL "$TDVF_URL" | zstd -d | tar -xO --occurrence=1 ./opt/kata/share/ovmf/OVMF.inteltdx.fd > tdvf.fd || true
           echo "$TDVF_SHA256  tdvf.fd" | sha256sum -c -
 
-      # With C8S_TDVF present nothing in this package may skip: a skip means
+      # With TDVF_PATH present nothing in this package may skip: a skip means
       # the tripwire did not run, so it fails the job rather than reading green.
-      - name: Test pkg/tdxmeasure, failing on any skip
+      # The package is attestation-go's; c8s pins the MRTD it predicts, so c8s
+      # is where a dependency bump that moves the value has to fail.
+      - name: Test attestation-go's launchmeasure/tdx, failing on any skip
         env:
-          C8S_TDVF: ${{ github.workspace }}/tdvf.fd
+          TDVF_PATH: ${{ github.workspace }}/tdvf.fd
         run: |
-          go test -count=1 -json ./pkg/tdxmeasure/... | tee tdxmeasure.json
+          go test -count=1 -json github.com/confidential-dot-ai/attestation-go/launchmeasure/tdx | tee tdxmeasure.json
           if grep '"Action":"skip"' tdxmeasure.json; then
-            echo "::error::pkg/tdxmeasure test skipped — the MRTD tripwire must run (TDVF missing or sha mismatch)" >&2
+            echo "::error::launchmeasure/tdx test skipped — the MRTD tripwire must run (TDVF missing or sha mismatch)" >&2
             exit 1
           fi
           if ! grep -q '"Action":"pass".*"Test":"TestMRTDMatchesHardware"' tdxmeasure.json; then

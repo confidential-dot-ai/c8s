@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -17,7 +17,7 @@ import (
 //
 // RTMRs are checked only for TDX-shaped evidence, as elsewhere: SNP folds the
 // guest image into its launch digest and reports no registers.
-func EnforceEntries(resp types.VerifyResponse, entries []measurements.Entry, platform string) error {
+func EnforceEntries(resp types.VerifyResponse, entries []apiclient.ImagePin, platform string) error {
 	if len(entries) == 0 {
 		return nil
 	}

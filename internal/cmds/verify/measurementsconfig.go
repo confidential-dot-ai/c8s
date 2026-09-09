@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 // maxServedMeasurements bounds the served document. Reference values for a
@@ -19,34 +19,34 @@ const maxServedMeasurements = 1 << 20
 // measurementsReport is the cross-check section of the verdict: what the
 // attested target says it is enforcing, beside what the operator pinned.
 type measurementsReport struct {
-	served   measurements.ReferenceValues
+	served   refvalues.ReferenceValues
 	fetched  bool
 	fetchErr error
 	note     string
 }
 
 // fetchServedMeasurements parses /measurements from the attested endpoint.
-func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (measurements.ReferenceValues, error) {
+func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (refvalues.ReferenceValues, error) {
 	resp, err := fetchAttested(ctx, base+"/measurements", serverName, wantCertSHA256, timeout)
 	if err != nil {
-		return measurements.ReferenceValues{}, fmt.Errorf("fetch /measurements: %w", err)
+		return refvalues.ReferenceValues{}, fmt.Errorf("fetch /measurements: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return measurements.ReferenceValues{}, fmt.Errorf("/measurements not served: this target predates the endpoint, so its enforced set cannot be checked")
+		return refvalues.ReferenceValues{}, fmt.Errorf("/measurements not served: this target predates the endpoint, so its enforced set cannot be checked")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return measurements.ReferenceValues{}, fmt.Errorf("/measurements returned %d", resp.StatusCode)
+		return refvalues.ReferenceValues{}, fmt.Errorf("/measurements returned %d", resp.StatusCode)
 	}
 	body, err := readutil.ReadAll(resp.Body, maxServedMeasurements)
 	if errors.Is(err, readutil.ErrTooLarge) {
-		return measurements.ReferenceValues{}, fmt.Errorf("/measurements body exceeds %d bytes", maxServedMeasurements)
+		return refvalues.ReferenceValues{}, fmt.Errorf("/measurements body exceeds %d bytes", maxServedMeasurements)
 	}
 	if err != nil {
-		return measurements.ReferenceValues{}, fmt.Errorf("read /measurements: %w", err)
+		return refvalues.ReferenceValues{}, fmt.Errorf("read /measurements: %w", err)
 	}
-	return measurements.ParseServed(body)
+	return refvalues.ParseServed(body)
 }
 
 // checkServedMeasurements compares the served set against the operator's file.
@@ -54,7 +54,7 @@ func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA2
 // does not is the substitution this check exists to catch, and one the file
 // pins and the target does not means the cluster is enforcing less than the
 // operator believes.
-func checkServedMeasurements(want measurements.ReferenceValues, report measurementsReport, fail func(string, ...any)) {
+func checkServedMeasurements(want refvalues.ReferenceValues, report measurementsReport, fail func(string, ...any)) {
 	if report.fetchErr != nil {
 		fail("could not fetch /measurements to check it against --measurements-config: %v", report.fetchErr)
 		return
@@ -63,15 +63,15 @@ func checkServedMeasurements(want measurements.ReferenceValues, report measureme
 		fail("--measurements-config cannot be checked: %s", report.note)
 		return
 	}
-	if len(report.served.Entries) == 0 {
-		fail("the target serves an empty measurement set: it admits any TEE attestation, while --measurements-config pins %d image(s)", len(want.Entries))
+	if len(report.served.Images) == 0 {
+		fail("the target serves an empty measurement set: it admits any TEE attestation, while --measurements-config pins %d image(s)", len(want.Images))
 		return
 	}
-	if want.TEE != report.served.TEE {
-		fail("--measurements-config is for %q but the target enforces %q", want.TEE, report.served.TEE)
+	if want.Family != report.served.Family {
+		fail("--measurements-config is for %q but the target enforces %q", want.Family, report.served.Family)
 		return
 	}
-	missing, extra := measurements.Diff(want, report.served)
+	missing, extra := refvalues.Diff(want, report.served)
 	for _, e := range extra {
 		fail("the target admits an image --measurements-config does not pin: %s (%x)", e.Name, e.Digest)
 	}

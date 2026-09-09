@@ -18,12 +18,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
@@ -256,7 +255,7 @@ func TestRunErrors(t *testing.T) {
 func TestRunRejectsWrongRTMR3(t *testing.T) {
 	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
 	res := verifiedResultFor(env.exp)
-	res.Claims.PlatformData["rtmr_3"] = "00"
+	res.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
 	stubVerify(t, res, nil) // overrides the env's stub
 
 	// Count cred-release hits on a plain-HTTP server so any request — even one
@@ -271,8 +270,8 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	cfg.ReleaseBaseURL = release.URL
 
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "RTMR[3] mismatch") {
-		t.Fatalf("want RTMR[3] mismatch, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not bound to the expected anchor") {
+		t.Fatalf("want an anchor-binding refusal, got %v", err)
 	}
 	if n := releaseHits.Load(); n != 0 {
 		t.Fatalf("cred-release hits = %d, want 0 (Run must stop at the trust gate)", n)
@@ -289,8 +288,8 @@ func TestRATLSClientRejectsPlainCert(t *testing.T) {
 	cfg := env.config()
 	cfg.ReleaseBaseURL = plain.URL
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "missing RA-TLS extension") {
-		t.Fatalf("want RA-TLS handshake failure (missing RA-TLS extension), got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "carries no RA-TLS attestation extension") {
+		t.Fatalf("want RA-TLS handshake failure (no RA-TLS extension), got %v", err)
 	}
 }
 
@@ -412,26 +411,25 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, bare).rtmr3 != runtimemeasure.Seed(pub) {
-		t.Error("with no workload images the expected register must equal the bare operator-key seed")
+	if got := requireTDXPolicy(t, bare).workloadDigests; len(got) != 0 {
+		t.Errorf("workloadDigests = %v, want none so the expected register is the bare operator-key seed", got)
 	}
 
 	chained, err := policyFor(manifest, pub, []string{digA, digB})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub),
-		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
-	if requireTDXPolicy(t, chained).rtmr3 != want {
-		t.Error("workload images must chain onto the operator-key seed via the shared convention")
+	want := []string{digA, "sha256:" + strings.Repeat("bb", 32)}
+	if got := requireTDXPolicy(t, chained).workloadDigests; !slices.Equal(got, want) {
+		t.Errorf("workloadDigests = %v, want %v (canonicalized, in first-extend order)", got, want)
 	}
 
 	reversed, err := policyFor(manifest, pub, []string{digB, digA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, reversed).rtmr3 == requireTDXPolicy(t, chained).rtmr3 {
-		t.Error("extend order must change the expected register — the chain is ordered")
+	if got := requireTDXPolicy(t, reversed).workloadDigests; slices.Equal(got, want) {
+		t.Error("extend order must reach the chain unchanged — the register is ordered")
 	}
 
 	for _, bad := range []string{"nginx:latest", "ghcr.io/acme/api:v1", "sha256:" + strings.Repeat("AB", 32)} {
@@ -471,8 +469,8 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, single).rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub), []string{dig}) {
-		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
+	if got := requireTDXPolicy(t, single).workloadDigests; !slices.Equal(got, []string{dig}) {
+		t.Errorf("workloadDigests = %v, want [%s]", got, dig)
 	}
 }
 
