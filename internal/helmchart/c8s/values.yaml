@@ -134,7 +134,6 @@ webhook:
     enabled: true
   certVolume:
     fsGroup: 65532
-    keyMode: "0640"
   getCert:
     ## Must be strictly shorter than cds.namedCertTTL, which is the shortest
     ## TTL CDS issues (a named leaf's, 6h) and therefore the binding one — a

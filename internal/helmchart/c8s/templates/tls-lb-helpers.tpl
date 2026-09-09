@@ -610,7 +610,6 @@ list.
   "volume" "tls-certs"
   "mountPath" .Values.tlsLb.tlsMountPath
   "renewInterval" .Values.tlsLb.certProvisioning.renewInterval
-  "keyMode" "0640"
   "runAsUser" .Values.tlsLb.nginx.runAsUser
   "runAsGroup" .Values.tlsLb.nginx.runAsGroup
   "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot

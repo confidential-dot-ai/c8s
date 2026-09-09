@@ -614,7 +614,6 @@ get-cert \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
   --ca-out=/etc/c8s/certs/ca.crt \
-  --key-mode=<webhook.certVolume.keyMode> \
   --renew-interval=<webhook.getCert.renewInterval> \
   --reload-nginx=<from annotation> \
   --continue-on-initial-error
@@ -815,9 +814,10 @@ guard, not this render guard.
 
 ## Certificate file permissions
 
-`get-cert` writes the private key with the mode passed by `--key-mode`. The
-webhook default is `0640`, and it sets `fsGroup: 65532` on injected pods that
-do not already define an `fsGroup`. This lets application containers running
+`get-cert` writes private keys with mode `0640` (owner read/write, group read)
+in setgid directories and `0600` (owner read/write) elsewhere, on every write.
+The webhook sets `fsGroup: 65532` on injected pods that do not already
+define an `fsGroup`. This lets application containers running
 as a different non-root UID read `tls.key` through the shared group.
 
 Relevant values:
@@ -826,7 +826,6 @@ Relevant values:
 webhook:
   certVolume:
     fsGroup: 65532
-    keyMode: "0640"
   getCert:
     renewInterval: 2h
     runAsUser: 65532

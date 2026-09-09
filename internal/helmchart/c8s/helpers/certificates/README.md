@@ -24,7 +24,6 @@ The helper takes a dict with these fields:
 | `caOut` | Optional output path for the mesh CA bundle trailing the leaf |
 | `volume`, `mountPath` | Writable certificate volume and its mount directory |
 | `renewInterval` | Go duration, such as `6h` or `30m` |
-| `keyMode` | Octal private-key mode; defaults to `0640` |
 | `runAsUser`, `runAsGroup`, `runAsNonRoot` | Consumer-compatible security context |
 | `reloadNginx` | Enable nginx SIGHUP on renewal; defaults to `false` |
 | `extraArgs` | Optional list of additional get-cert arguments |

@@ -13,7 +13,6 @@
     - --san={{ .san }}
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
-    - --key-mode={{ default "0640" .keyMode }}
     {{- with .caOut }}
     - --ca-out={{ . }}
     {{- end }}
