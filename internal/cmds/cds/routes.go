@@ -17,7 +17,6 @@ import (
 // dependencies bundles everything the cds router needs.
 type dependencies struct {
 	AttestHandler     AttestHandler
-	SignCSRHandler    SignCSRHandler
 	AllowlistHandler  allowlist.Handler
 	ReadyFn           attestation.ReadinessFunc
 	EarIssuer         ear.Issuer
@@ -59,7 +58,6 @@ func newRouter(deps dependencies) http.Handler {
 
 	r.Method(http.MethodPost, "/authenticate", deps.challengeProtected(attestation.HandleAuthenticate(deps.AttestHandler.Challenges)))
 	r.Method(http.MethodPost, "/attest", deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest)))
-	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
 
 	// GET is unauthenticated (RA-TLS integrity only); every mutation goes
 	// through allowlistWrite (operator-JWT auth in the handler + rate limit +
