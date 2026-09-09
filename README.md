@@ -357,7 +357,6 @@ attestation and reports the operator keys it pins.
 | [`pkg/types`](pkg/types/) | Shared request/response types |
 | [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
 | [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
-| [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Repository layout

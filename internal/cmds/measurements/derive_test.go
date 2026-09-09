@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	snpFixture = "../../../pkg/runtimemeasure/testdata/confos-snp-manifest.json"
-	tdxFixture = "../../../pkg/runtimemeasure/testdata/confos-tdx-manifest.json"
+	snpFixture = "testdata/confos-snp-manifest.json"
+	tdxFixture = "testdata/confos-tdx-manifest.json"
 )
 
 // stageImage copies a build manifest into a directory named like a build
