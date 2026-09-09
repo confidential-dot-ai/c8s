@@ -60,7 +60,6 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		"--out=/etc/c8s/certs/tls.crt",
 		"--key-out=/etc/c8s/certs/tls.key",
 		"--ca-out=/etc/c8s/certs/ca.crt",
-		"--key-mode=0640",
 		"--renew-interval=2h0m0s",
 		"--reload-nginx=false",
 		"--continue-on-initial-error",
@@ -191,7 +190,6 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		AttestationApiURL:   "http://attestation-api",
 		CertDir:             "/etc/c8s/certs",
 		CertFSGroup:         ptr.To(int64(4242)),
-		CertKeyMode:         "0440",
 		CertRenewInterval:   time.Hour,
 		GetCertRunAsUser:    ptr.To(int64(0)),
 		GetCertRunAsGroup:   ptr.To(int64(0)),
@@ -205,9 +203,6 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
 	}
 	cert := pod.Spec.InitContainers[0]
-	if !hasArg(cert.Args, "--key-mode=0440") {
-		t.Fatalf("c8s-cert args %v missing --key-mode=0440", cert.Args)
-	}
 	if !hasArg(cert.Args, "--renew-interval=1h0m0s") {
 		t.Fatalf("c8s-cert args %v missing configured renewal interval", cert.Args)
 	}

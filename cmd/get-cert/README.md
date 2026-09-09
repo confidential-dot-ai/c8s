@@ -49,8 +49,7 @@ get-cert \
 | `--san` | | *(required)* | Subject Alternative Name — IP address or hostname |
 | `--out` | `-o` | *(stdout)* | Path to write the signed certificate chain PEM |
 | `--key` | | *(ephemeral)* | Path to an existing PEM private key for the CSR |
-| `--key-out` | | | Path to write the generated private key PEM |
-| `--key-mode` | | `0600` | Octal mode for a generated private key |
+| `--key-out` | | | Path to write the private key PEM with mode `0600` (`0640` in shared setgid directories); must be on a memory-backed filesystem |
 | `--renew-interval` | | `0` | Re-obtain the certificate at this interval; `0` runs once and exits |
 | `--reload-nginx` | | `true` | SIGHUP nginx after certificate renewal or watched file changes |
 | `--continue-on-initial-error` | | `false` | In renewal mode, keep running when the first certificate request fails |
@@ -59,6 +58,8 @@ get-cert \
 ## Output path validation
 
 Before generating keys or contacting cds, get-cert verifies that the output directories for `--out` and `--key-out` exist and are writable. This prevents requesting certificates that can't be saved.
+
+The `--key-out` directory must additionally sit on a memory-backed filesystem (tmpfs or ramfs): the private key must never reach storage the host can read. In Kubernetes the injected cert volume is already a Memory-medium emptyDir, so this holds automatically; for manual runs point `--key-out` at a tmpfs such as `/dev/shm`. The cert and CA outputs are public and carry no such restriction.
 
 ## SAN detection
 

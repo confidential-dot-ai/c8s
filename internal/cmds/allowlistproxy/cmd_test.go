@@ -41,8 +41,8 @@ func TestProxyPreservesAuthorizedRequests(t *testing.T) {
 		{
 			name:       "delete body",
 			method:     http.MethodDelete,
-			requestURI: "/allowlist/digests",
-			body:       []byte(`{"digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}`),
+			requestURI: "/allowlist/workloads/model",
+			body:       []byte(`{"reason":"rotated"}`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,7 +130,7 @@ func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
 		want int
 	}{
 		{path: "/allowlist", want: http.StatusNoContent},
-		{path: "/allowlist/digests", want: http.StatusNoContent},
+		{path: "/allowlist/workloads/model", want: http.StatusNoContent},
 		{path: "/allowlisted", want: http.StatusNotFound},
 		{path: "/", want: http.StatusNotFound},
 	} {

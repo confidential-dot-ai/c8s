@@ -351,13 +351,12 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	cmd.Flags().Int64("webhook-cert-fs-group", 0, "")
-	cmd.Flags().String("webhook-cert-key-mode", "", "")
 	cmd.Flags().Duration("webhook-get-cert-renew-interval", 0, "")
 	cmd.Flags().Int64("webhook-get-cert-run-as-user", 0, "")
 	cmd.Flags().Int64("webhook-get-cert-run-as-group", 0, "")
 	cmd.Flags().Bool("webhook-get-cert-run-as-non-root", false, "")
 	for _, name := range []string{
-		flagCvmMode, "webhook-cert-fs-group", "webhook-cert-key-mode",
+		flagCvmMode, "webhook-cert-fs-group",
 		"webhook-get-cert-renew-interval", "webhook-get-cert-run-as-user",
 		"webhook-get-cert-run-as-group", "webhook-get-cert-run-as-non-root",
 	} {

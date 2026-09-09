@@ -178,7 +178,7 @@ func TestSettleIsIdempotent(t *testing.T) {
 func TestDisabledRefreshSettlesImmediately(t *testing.T) {
 	s := &refreshState{}
 	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	disableRefresh(logger, s, reasonNoMeasurements, &allowlist{})
+	disableRefresh(logger, s, reasonNoMeasurements, nil)
 
 	start := time.Now()
 	s.awaitSettled(context.Background(), time.Minute)

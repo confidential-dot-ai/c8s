@@ -29,7 +29,7 @@ func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plug
 	}
 	p := &plugin{
 		cfg:        cfg,
-		policy:     newPolicyStore(floorAllowlist(cfg.Allowlist.AlwaysAllow)),
+		policy:     newPolicyStore(cfg.Allowlist.AlwaysAllow),
 		audit:      audit.NewLogger(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		containerd: &fakeContainerd{},

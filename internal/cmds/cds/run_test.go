@@ -172,9 +172,7 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		attestationApiURL:          attestationURL,
 		caCommonName:               "test ca",
 		caCertValidity:             24 * time.Hour,
-		earIssuerName:              "cds",
 		jwtClockSkew:               30,
-		maxTTL:                     time.Hour,
 		certTTL:                    time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
 		challengeTTL:               time.Minute,
@@ -227,8 +225,8 @@ func TestRun_ErrorPaths(t *testing.T) {
 		},
 		{
 			name:    "invalid config",
-			mutate:  func(_ *testing.T, cfg *config) { cfg.maxTTL = 0 },
-			wantSub: "--max-ttl",
+			mutate:  func(_ *testing.T, cfg *config) { cfg.namedCertTTL = 0 },
+			wantSub: "--named-cert-ttl",
 		},
 		{
 			name:    "rate limiter max entries",
@@ -297,13 +295,13 @@ func TestRun_ErrorPaths(t *testing.T) {
 	}
 }
 
-// Full plain-HTTP startup: operator keys, measurements, seed, and key
-// rotation all enabled. run() must serve /healthz and exit cleanly on SIGTERM.
+// Full plain-HTTP startup: operator keys, measurements, seed, and
+// SAN validation enabled. run() must serve /healthz and exit cleanly on SIGTERM.
 func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 
 	seedPath := filepath.Join(t.TempDir(), "seed.json")
-	seedJSON := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`
+	seedJSON := anySeed(map[string]string{"cds": digestA})
 	if err := os.WriteFile(seedPath, []byte(seedJSON), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
@@ -315,8 +313,6 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	cfg.allowedCNPattern = `^.*$`
 	cfg.operatorKeys = writeOperatorKeysPEM(t)
 	cfg.allowlistSeed = seedPath
-	cfg.rotationInterval = time.Hour
-	cfg.rotationOverlap = time.Minute
 	cfg.sanValidation = true
 
 	errCh := make(chan error, 1)
@@ -354,15 +350,15 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	}
 	body := resp.Body
 	var listing struct {
-		Digests map[string]string `json:"digests"`
+		Workloads map[string]json.RawMessage `json:"workloads"`
 	}
 	decodeErr := json.NewDecoder(body).Decode(&listing)
 	_ = body.Close()
 	if decodeErr != nil {
 		t.Fatalf("decode /allowlist: %v", decodeErr)
 	}
-	if _, ok := listing.Digests[digestA]; !ok {
-		t.Errorf("seeded digest missing from /allowlist: %v", listing.Digests)
+	if _, ok := listing.Workloads["cds"]; !ok {
+		t.Errorf("seeded entry missing from /allowlist: %v", listing.Workloads)
 	}
 
 	// Operator keys are pinned, so /operator-keys must serve the bundle.
@@ -432,22 +428,6 @@ func startRunServer(t *testing.T, cfg config) string {
 	return base
 }
 
-// TestRun_SetsJWTClockSkew: --jwt-clock-skew is seconds; run() must convert it
-// before any request can be served. The rate-limiter failure exits right after
-// the conversion, keeping the test hermetic.
-func TestRun_SetsJWTClockSkew(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.jwtClockSkew = 7
-	cfg.rateLimiterMax = 0
-	if err := run(cfg); err == nil {
-		t.Fatal("run() with rateLimiterMax=0 should fail")
-	}
-	if issuer.JWTClockSkew != 7*time.Second {
-		t.Fatalf("issuer.JWTClockSkew = %v, want %v", issuer.JWTClockSkew, 7*time.Second)
-	}
-}
-
 // TestRun_LogsMeasurementPinning: with --measurements set, startup must log the
 // pinning-enabled line, not the UNSAFE empty-allowlist warning. The bad DNS
 // pattern exits startup right after that log line.
@@ -496,7 +476,7 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	cfg.operatorKeys = keysPath
 	base := startRunServer(t, cfg)
 
-	body := []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`)
+	body := []byte(anySeed(map[string]string{"cds": digestA}))
 	sum := sha256.Sum256(body)
 	issued := time.Now().Add(10 * time.Second) // inside the 30s leeway
 	token, err := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
@@ -523,35 +503,6 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT /allowlist = %d (%s), want 204", resp.StatusCode, respBody)
-	}
-}
-
-// TestRun_NoRotationWhenIntervalZero: --token-signer-rotation-interval 0 must
-// disable the rotation loop entirely; with a long overlap any rotation would
-// leave extra keys in the served JWKS.
-func TestRun_NoRotationWhenIntervalZero(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.port = freePort(t)
-	cfg.rotationInterval = 0
-	cfg.rotationOverlap = time.Hour
-	base := startRunServer(t, cfg)
-
-	resp, err := http.Get(base + "/.well-known/jwks.json")
-	if err != nil {
-		t.Fatalf("GET jwks: %v", err)
-	}
-	defer resp.Body.Close()
-	var jwks struct {
-		Keys []struct {
-			Kid string `json:"kid"`
-		} `json:"keys"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		t.Fatalf("decode jwks: %v", err)
-	}
-	if len(jwks.Keys) != 1 {
-		t.Fatalf("JWKS has %d keys, want exactly 1 (rotation must be disabled)", len(jwks.Keys))
 	}
 }
 

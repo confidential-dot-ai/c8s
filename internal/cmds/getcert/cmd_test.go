@@ -25,7 +25,6 @@ func TestNewCmdFlagDefaultsAndRequired(t *testing.T) {
 		name string
 		want string
 	}{
-		{"key-mode", "0600"},
 		{"discovery-public-tls-mode", "cds"},
 		{"reload-watch-interval", "1m0s"},
 		{"ca-watch-interval", "0s"},

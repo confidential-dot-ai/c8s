@@ -14,6 +14,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -26,9 +27,27 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// floorAllowlist builds a floor-only allowlist (digest -> image label).
-func floorAllowlist(digests map[string]string) *allowlist.Allowlist {
-	return &allowlist.Allowlist{Schema: allowlist.Schema, Digests: digests}
+// anyAllowlist builds an allowlist with one any-argv entry per digest, named
+// "w-" plus the first 12 hex digits of the digest.
+func anyAllowlist(digests map[string]string) *allowlist.Allowlist {
+	al := &allowlist.Allowlist{Schema: allowlist.Schema, Workloads: map[string]allowlist.Workload{}}
+	for d, image := range digests {
+		al.Workloads["w-"+d[len("sha256:"):][:12]] = allowlist.Workload{Label: image, Containers: []allowlist.Container{{
+			Digest:  mustDigestOrPanic(d),
+			Image:   image,
+			Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+			Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		}}}
+	}
+	return al
+}
+
+func mustDigestOrPanic(s string) types.Digest {
+	d, err := types.ParseDigest(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
 }
 
 // canonicalBody renders an allowlist as the CDS /allowlist wire body.
@@ -41,64 +60,11 @@ func canonicalBody(t *testing.T, al *allowlist.Allowlist) []byte {
 	return b
 }
 
+// admitsDigest mirrors the plugin's admission order: always_allow first, then
+// the served index.
 func admitsDigest(store *policyStore, digest string) bool {
 	snap := store.current()
-	return snap != nil && snap.index != nil && snap.index.AdmitsDigest(digest)
-}
-
-// --- mergeAllowlists ---
-
-func TestMergeAllowlistsOverlay(t *testing.T) {
-	a := floorAllowlist(map[string]string{pushDigestA: "image-a"})
-	b := floorAllowlist(map[string]string{pushDigestB: "image-b"})
-
-	merged := mergeAllowlists(a, b)
-
-	if got, ok := merged.Digests[pushDigestA]; !ok || got != "image-a" {
-		t.Fatalf("floor entry missing: %q ok=%v", got, ok)
-	}
-	if got, ok := merged.Digests[pushDigestB]; !ok || got != "image-b" {
-		t.Fatalf("pulled entry missing: %q ok=%v", got, ok)
-	}
-}
-
-func TestMergeAllowlistsOverlayOverrides(t *testing.T) {
-	a := floorAllowlist(map[string]string{pushDigestA: "old-image"})
-	b := floorAllowlist(map[string]string{pushDigestA: "new-image"})
-
-	merged := mergeAllowlists(a, b)
-	if got := merged.Digests[pushDigestA]; got != "new-image" {
-		t.Fatalf("override entry = %q, want new-image", got)
-	}
-}
-
-func TestMergeAllowlistsCarriesWorkloads(t *testing.T) {
-	a := floorAllowlist(map[string]string{pushDigestA: "floor"})
-	b := &allowlist.Allowlist{
-		Schema:    allowlist.Schema,
-		Workloads: map[string]allowlist.Workload{"w": {Containers: []allowlist.Container{{Digest: mustDigest(t, pushDigestB), Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}, Args: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}}}}},
-	}
-	merged := mergeAllowlists(a, b)
-	idx := merged.BuildIndex()
-	if !idx.AdmitsDigest(pushDigestA) {
-		t.Fatal("floor digest not admitted after merge")
-	}
-	if !idx.AdmitsContainer(allowlist.RunningContainer{Digest: pushDigestB, Argv: []string{"anything"}}) {
-		t.Fatal("workload digest not admitted after merge")
-	}
-}
-
-func TestMergeAllowlistsNilOverlay(t *testing.T) {
-	a := floorAllowlist(map[string]string{pushDigestA: "image-a"})
-	merged := mergeAllowlists(a, nil)
-	if merged.Digests[pushDigestA] != "image-a" {
-		t.Fatalf("nil overlay should return a copy of a, got %+v", merged)
-	}
-	// Caller mutating the result must not bleed into a.
-	merged.Digests[pushDigestA] = "mutated"
-	if a.Digests[pushDigestA] != "image-a" {
-		t.Fatalf("merged result aliases a; mutation leaked")
-	}
+	return store.alwaysAllows(digest) || (snap != nil && snap.index.AdmitsDigest(digest))
 }
 
 func TestStartupSourceMode(t *testing.T) {
@@ -154,9 +120,9 @@ func TestStartupSourceMode(t *testing.T) {
 // --- policyStore epoch anti-rollback ---
 
 func TestPolicyStoreEpochAntiRollback(t *testing.T) {
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 
-	if !store.apply(floorAllowlist(map[string]string{pushDigestB: "v5"}), 5) {
+	if !store.apply(anyAllowlist(map[string]string{pushDigestB: "v5"}), 5) {
 		t.Fatal("apply of version 5 rejected")
 	}
 	if store.current().version != 5 {
@@ -164,7 +130,7 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 	}
 
 	// A lower version (rolled-back / withheld CDS) must be ignored.
-	if store.apply(floorAllowlist(map[string]string{pushDigestC: "v3"}), 3) {
+	if store.apply(anyAllowlist(map[string]string{pushDigestC: "v3"}), 3) {
 		t.Fatal("rolled-back version 3 was applied")
 	}
 	if store.current().version != 5 {
@@ -178,7 +144,7 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 	}
 
 	// A forward version applies.
-	if !store.apply(floorAllowlist(map[string]string{pushDigestC: "v6"}), 6) {
+	if !store.apply(anyAllowlist(map[string]string{pushDigestC: "v6"}), 6) {
 		t.Fatal("forward version 6 rejected")
 	}
 	if !admitsDigest(store, pushDigestC) {
@@ -191,12 +157,12 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 // Rollback protection is per-process-lifetime; state re-syncs from CDS.
 func TestPolicyStoreTrustsFirstVersionAfterRestart(t *testing.T) {
 	// A prior process reached version 9.
-	prior := newPolicyStore(floorAllowlist(map[string]string{}))
-	prior.apply(floorAllowlist(map[string]string{pushDigestB: "v9"}), 9)
+	prior := newPolicyStore(map[string]string{})
+	prior.apply(anyAllowlist(map[string]string{pushDigestB: "v9"}), 9)
 
 	// A restart is a brand-new store; its first apply is trusted regardless of value.
-	fresh := newPolicyStore(floorAllowlist(map[string]string{}))
-	if !fresh.apply(floorAllowlist(map[string]string{pushDigestC: "v3"}), 3) {
+	fresh := newPolicyStore(map[string]string{})
+	if !fresh.apply(anyAllowlist(map[string]string{pushDigestC: "v3"}), 3) {
 		t.Fatal("fresh store must trust the first version seen after a restart")
 	}
 	if fresh.current().version != 3 {
@@ -247,14 +213,14 @@ func TestPullLoopOnly200UpdatesIndexAndETag(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"1", "2"},
 		bodyByV: map[string][]byte{
-			"1": canonicalBody(t, floorAllowlist(map[string]string{pushDigestA: "image-1"})),
-			"2": canonicalBody(t, floorAllowlist(map[string]string{pushDigestB: "image-2"})),
+			"1": canonicalBody(t, anyAllowlist(map[string]string{pushDigestA: "image-1"})),
+			"2": canonicalBody(t, anyAllowlist(map[string]string{pushDigestB: "image-2"})),
 		},
 	})
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -290,13 +256,13 @@ func TestPullLoopOnly200UpdatesIndexAndETag(t *testing.T) {
 func TestPullLoop304LeavesIndexUntouched(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"1"},
-		bodyByV:  map[string][]byte{"1": canonicalBody(t, floorAllowlist(map[string]string{pushDigestA: "image-1"}))},
+		bodyByV:  map[string][]byte{"1": canonicalBody(t, anyAllowlist(map[string]string{pushDigestA: "image-1"}))},
 	})
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
-	store.apply(floorAllowlist(map[string]string{pushDigestA: "image-1"}), 1)
+	store := newPolicyStore(map[string]string{})
+	store.apply(anyAllowlist(map[string]string{pushDigestA: "image-1"}), 1)
 	before := store.current()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -331,8 +297,8 @@ func TestPullLoop5xxLeavesIndexUntouched(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
-	store.apply(floorAllowlist(map[string]string{pushDigestA: "image-1"}), 5)
+	store := newPolicyStore(map[string]string{})
+	store.apply(anyAllowlist(map[string]string{pushDigestA: "image-1"}), 5)
 	before := store.current()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -360,15 +326,15 @@ func TestPullLoop5xxLeavesIndexUntouched(t *testing.T) {
 	<-done
 }
 
-func TestPullLoopMergesBootstrapWithPulled(t *testing.T) {
+func TestPullLoopKeepsAlwaysAllowBesidePulled(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"1"},
-		bodyByV:  map[string][]byte{"1": canonicalBody(t, floorAllowlist(map[string]string{pushDigestB: "pulled-image"}))},
+		bodyByV:  map[string][]byte{"1": canonicalBody(t, anyAllowlist(map[string]string{pushDigestB: "pulled-image"}))},
 	})
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
+	store := newPolicyStore(map[string]string{pushDigestA: "bootstrap-image"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -394,7 +360,7 @@ func TestPullLoopMergesBootstrapWithPulled(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("bootstrap floor entry lost after pull")
+		t.Fatal("always_allow entry lost after pull")
 	}
 
 	cancel()
@@ -408,14 +374,14 @@ func TestPullLoopIgnoresRolledBackFetch(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"5", "3"},
 		bodyByV: map[string][]byte{
-			"5": canonicalBody(t, floorAllowlist(map[string]string{pushDigestB: "v5"})),
-			"3": canonicalBody(t, floorAllowlist(map[string]string{pushDigestC: "v3"})),
+			"5": canonicalBody(t, anyAllowlist(map[string]string{pushDigestB: "v5"})),
+			"3": canonicalBody(t, anyAllowlist(map[string]string{pushDigestC: "v3"})),
 		},
 	})
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -459,7 +425,7 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 	allowlistApiInitialDelay = time.Millisecond
 	defer func() { allowlistApiInitialDelay = orig }()
 
-	body := canonicalBody(t, floorAllowlist(map[string]string{pushDigestB: "pulled-image"}))
+	body := canonicalBody(t, anyAllowlist(map[string]string{pushDigestB: "pulled-image"}))
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if n.Add(1) <= 2 {
@@ -473,7 +439,7 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 2 * time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
+	store := newPolicyStore(map[string]string{pushDigestA: "bootstrap-image"})
 
 	pluginErrCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -496,7 +462,7 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 		t.Fatal("store missing pulled entry")
 	}
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("store missing bootstrap floor entry")
+		t.Fatal("store missing always_allow entry")
 	}
 }
 
@@ -511,7 +477,7 @@ func TestPullInitialFailsAfterMaxRetries(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 200 * time.Millisecond})
-	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
+	store := newPolicyStore(map[string]string{pushDigestA: "bootstrap-image"})
 	pluginErrCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -526,14 +492,14 @@ func TestPullInitialFailsAfterMaxRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after max retries against a 5xx server")
 	}
-	// A fetch failure must NOT look like a dead plugin: run() degrades to the
-	// bootstrap floor on a fetch failure but stays fatal on errPluginDied.
+	// A fetch failure must NOT look like a dead plugin: run() degrades to
+	// always_allow on a fetch failure but stays fatal on errPluginDied.
 	if errors.Is(err, errPluginDied) {
 		t.Fatalf("fetch failure misclassified as errPluginDied: %v", err)
 	}
-	// The seeded floor still enforces after the failure.
+	// always_allow still enforces after the failure.
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("bootstrap floor lost after failed initial pull")
+		t.Fatal("always_allow lost after failed initial pull")
 	}
 }
 
@@ -544,7 +510,7 @@ func TestPullInitialPluginDeathWrapsErrPluginDied(t *testing.T) {
 	pluginErrCh <- errors.New("nri socket closed")
 	_, err := pullInitial(context.Background(), pullArgs{
 		client:      allowlistclient.NewClientWithHTTP("https://unused", &http.Client{}),
-		store:       newPolicyStore(floorAllowlist(map[string]string{})),
+		store:       newPolicyStore(map[string]string{}),
 		timeout:     time.Second,
 		pluginErrCh: pluginErrCh,
 		logger:      discardLogger(),
@@ -570,7 +536,7 @@ func TestPullInitialNotModifiedDoesNotDereferenceNilAllowlist(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 200 * time.Millisecond})
-	store := newPolicyStore(floorAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
+	store := newPolicyStore(map[string]string{pushDigestA: "bootstrap-image"})
 	before := store.current()
 	pluginErrCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -601,7 +567,7 @@ func TestPullInitialCancelledMidRetry(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 200 * time.Millisecond})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 	pluginErrCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 

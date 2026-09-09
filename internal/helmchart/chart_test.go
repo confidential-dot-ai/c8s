@@ -1880,7 +1880,6 @@ func durationArg(t *testing.T, args []string, prefix string) time.Duration {
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "webhook.certVolume.fsGroup=4242",
-		"--set-string", "webhook.certVolume.keyMode=0440",
 		"--set-string", "webhook.getCert.renewInterval=3h",
 		"--set", "webhook.getCert.runAsUser=0",
 		"--set", "webhook.getCert.runAsGroup=0",
@@ -1898,7 +1897,6 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	for _, want := range []string{
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--cert-fs-group=4242",
-		"--cert-key-mode=0440",
 		"--get-cert-renew-interval=3h",
 		"--get-cert-run-as-user=0",
 		"--get-cert-run-as-group=0",
@@ -5077,12 +5075,16 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
 		// The fail-closed default (this PR) activates the
 		// uncovered_component_digest guard: every digest-pinned component must be
-		// covered in the allowlist floor or the plugin would deny it on its own
-		// node. The nri installer also self-allows by digest, so the image must
-		// stay digest-pinned. Cover the base nri digest in the floor so the
-		// default render is a valid fail-closed config. Tests that exercise the
-		// guard pin a different, deliberately-uncovered digest.
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		// admitted under any argv by a bootstrap entry or the plugin would deny
+		// it on its own node. The nri installer also self-allows by digest, so
+		// the image must stay digest-pinned. Cover the base nri digest with an
+		// entry so the default render is a valid fail-closed config. Tests that
+		// exercise the guard pin a different, deliberately-uncovered digest.
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".label=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].digest=" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].args.policy=any",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 	}
 	cmd := exec.Command("helm", append(base, args...)...)
@@ -5281,8 +5283,7 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 }
 
 // TestChartCDSWiresInProcessTrustRoot confirms the flag set: the in-memory CA
-// (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
-// --jwks-url, since signing happens in the same binary).
+// (no Secret/ca-cert flag) and the allowlist DB.
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
 	// gke: host-side attestation-api over the on-node Unix socket. node points
 	// CDS at the baked host attestation-api via HOST_IP (covered separately),
@@ -5327,7 +5328,7 @@ func TestChartCDSAllowlistPersistentTracksPVC(t *testing.T) {
 
 // TestChartCDSServesRATLS confirms the cds container renders with a non-empty
 // --ratls-platform by default, i.e. RA-TLS serving is ON. An empty platform
-// makes cds serve /attest, /sign-csr, and /attest-key over plaintext HTTP,
+// makes cds serve /attest over plaintext HTTP,
 // collapsing the H1 bootstrap-channel MITM defence — a regression this guards.
 func TestChartCDSServesRATLS(t *testing.T) {
 	out, err := helmTemplate(t)
@@ -5752,7 +5753,11 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".label=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].digest=" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].args.policy=any",
 		"--set-string", "tlsLb.upstream.address=vllm:8000",
 		// Secured (https + verify) upstream baseline for the tls-lb subchart
 		// tests, on a bare vllm address. A manual address must be app-TLS now
@@ -5916,16 +5921,46 @@ func podVolume(spec corev1.PodSpec, name string) (corev1.Volume, bool) {
 	return corev1.Volume{}, false
 }
 
-// TestChartSeedsCDSAllowlistFromFloor proves the single authoritative floor
-// (nriImagePolicy.bootstrapAllowlist.digests) plus the CDS image self-entry are
-// rendered into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
-// non-empty on the first worker pull. Decoded with the same typed Allowlist
-// shape CDS parses, not substring-matched.
-func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
-	const floorDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
-	out, err := helmTemplate(t,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+floorDigest+"=ghcr.io/x/coredns:v1",
-	)
+// seedEntry finds the seed entry whose single container carries digest.
+func seedEntry(seed *pkgallowlist.Allowlist, digest string) (pkgallowlist.Workload, bool) {
+	for _, w := range seed.Workloads {
+		for _, c := range w.Containers {
+			if c.Digest.String() == digest {
+				return w, true
+			}
+		}
+	}
+	return pkgallowlist.Workload{}, false
+}
+
+// seedLabel is the label of the entry admitting digest, or "" when none does.
+func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
+	w, _ := seedEntry(seed, digest)
+	return w.Label
+}
+
+// anyArgvEntryArgs renders one bootstrapAllowlist.workloads entry admitting
+// digest under any command and args, as `helm --set-string` arguments.
+func anyArgvEntryArgs(name, digest, image string) []string {
+	p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
+	return []string{
+		"--set-string", p + "label=" + image,
+		"--set-string", p + "containers[0].digest=" + digest,
+		"--set-string", p + "containers[0].image=" + image,
+		"--set-string", p + "containers[0].command.policy=any",
+		"--set-string", p + "containers[0].args.policy=any",
+	}
+}
+
+// TestChartSeedsCDSAllowlistFromBootstrapEntries proves a
+// bootstrapAllowlist.workloads entry and the CDS image self-entry are rendered
+// into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
+// non-empty on the first worker pull, and that an entry admitting its digest
+// under any argv also reaches every plugin's always_allow. Decoded with the
+// same typed Allowlist shape CDS parses, not substring-matched.
+func TestChartSeedsCDSAllowlistFromBootstrapEntries(t *testing.T) {
+	const bootDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t, anyArgvEntryArgs("coredns", bootDigest, "ghcr.io/x/coredns:v1")...)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -5941,16 +5976,144 @@ func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 		t.Fatalf("seed JSON does not parse as a Allowlist (CDS would fail closed): %v\n%s", err, raw)
 	}
 
-	// The floor digest the operator supplied.
-	if got := seed.Digests[floorDigest]; got != "ghcr.io/x/coredns:v1" {
-		t.Errorf("seed floor digest = %q, want ghcr.io/x/coredns:v1\nseed: %v", got, seed.Digests)
+	w, ok := seed.Workloads["coredns"]
+	if !ok {
+		t.Fatalf("seed entry coredns missing\nseed: %v", seed.Workloads)
+	}
+	if w.Label != "ghcr.io/x/coredns:v1" || len(w.InitContainers) != 0 || len(w.Containers) != 1 {
+		t.Errorf("seed entry = %#v, want label ghcr.io/x/coredns:v1 with one main container", w)
+	}
+	if c := w.Containers[0]; c.Digest.String() != bootDigest || c.Image != "ghcr.io/x/coredns:v1" || !c.AnyArgv() {
+		t.Errorf("seed container = %#v, want %s under any command and args", c, bootDigest)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if got := worker.Allowlist.AlwaysAllow[bootDigest]; got != "ghcr.io/x/coredns:v1" {
+		t.Errorf("always_allow[%s] = %q, want the entry's image\nalways_allow: %v", bootDigest, got, worker.Allowlist.AlwaysAllow)
 	}
 	// The CDS self-entry, derived from cds.image (set by the test harness to
 	// digest ...0001); the reference is repository@digest.
 	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
-	if got := seed.Digests[cdsDigest]; got != cdsRef {
-		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Digests)
+	if got := seedLabel(seed, cdsDigest); got != cdsRef {
+		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+}
+
+// An entry that pins a command line is seed-only: the host plugin admits by
+// digest alone, so always_allow carries only what the seed admits under any
+// command and args.
+func TestChartAlwaysAllowSkipsPinnedEntries(t *testing.T) {
+	const pinned = "sha256:abcdef0000000000000000000000000000000000000000000000000000000001"
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.infer.containers[0]."
+	out, err := helmTemplate(t,
+		"--set-string", p+"digest="+pinned,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/bin/vllm",
+		"--set-string", p+"args.policy=any",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if _, ok := seed.Workloads["infer"]; !ok {
+		t.Fatalf("pinned entry missing from the seed: %v", seed.Workloads)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if _, ok := worker.Allowlist.AlwaysAllow[pinned]; ok {
+		t.Errorf("a pinned entry's digest reached always_allow, where it would be admitted under any argv: %v", worker.Allowlist.AlwaysAllow)
+	}
+}
+
+// The derived name lowercases the digest whatever case the values key used, so
+// the chart and pkg/allowlist DigestEntryName agree on it.
+func TestChartSeedEntryNameIsCaseInsensitive(t *testing.T) {
+	const d = "sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t, "--set-string", "cds.image.digest="+d)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if _, ok := seed.Workloads["cds-abcdef000000"]; !ok {
+		t.Fatalf("seed entry cds-abcdef000000 missing\nseed: %v", seed.Workloads)
+	}
+}
+
+// The chart derives entry names with the rule pkg/allowlist DigestEntryName
+// pins (TestDigestEntryName): the same inputs must yield the same names, tag
+// and digest stripping, the "image" fallback and the 50-byte truncation
+// included. Driven through the tls-lb nginx image, whose repository the
+// operator sets freely.
+func TestChartSeedEntryNamesMatchMigration(t *testing.T) {
+	const d = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	for _, tc := range []struct{ repository, want string }{
+		{"ghcr.io/x/coredns:v1", "coredns"},
+		{"registry:5000/team/app", "app"},
+		{"busybox", "busybox"},
+		{"ghcr.io/x/not a name!", "image"},
+		{"ghcr.io/x/" + strings.Repeat("y", 60), strings.Repeat("y", 50)},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			out, err := helmTemplate(t,
+				"--set-string", "tlsLb.nginx.image.repository="+tc.repository,
+				"--set-string", "tlsLb.nginx.image.digest="+d,
+			)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+			}
+			if _, ok := seed.Workloads[tc.want+"-abcdef000000"]; !ok {
+				t.Errorf("repository %q: entry %q missing\nseed: %v", tc.repository, tc.want+"-abcdef000000", seed.Workloads)
+			}
+		})
+	}
+}
+
+// A bootstrapAllowlist.workloads entry sharing a derived entry's name replaces
+// it whole in the seed, so an operator can narrow a component's policy without
+// the chart re-widening it; the component stays in always_allow regardless.
+func TestChartSeedWorkloadsOverrideDerivedEntry(t *testing.T) {
+	// The harness pins cds.image.digest to ...0001; its derived entry is
+	// cds-000000000000.
+	const d = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.cds-000000000000.containers[0]."
+	out, err := helmTemplate(t,
+		"--set-string", p+"digest="+d,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/cds",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	w, ok := seed.Workloads["cds-000000000000"]
+	if !ok || len(w.Containers) != 1 {
+		t.Fatalf("seed entry = %#v, want one container", w)
+	}
+	if c := w.Containers[0]; c.Command.Policy != pkgallowlist.PolicyExact || c.Digest.String() != d {
+		t.Errorf("operator entry did not win over the derived one: %#v", c)
+	}
+	if w.Label != "" {
+		t.Errorf("derived label leaked into the operator's entry: %q", w.Label)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if _, ok := worker.Allowlist.AlwaysAllow[d]; !ok {
+		t.Errorf("narrowing the seed entry dropped CDS from always_allow: %v", worker.Allowlist.AlwaysAllow)
 	}
 }
 
@@ -5994,8 +6157,8 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
 	}
 	for digest, ref := range want {
-		if got := seed.Digests[digest]; got != ref {
-			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Digests)
+		if got := seedLabel(seed, digest); got != ref {
+			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Workloads)
 		}
 	}
 
@@ -6033,8 +6196,8 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got, want := seed.Digests[nxDigest], nxRepo+"@"+nxDigest; got != want {
-			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Digests)
+		if got, want := seedLabel(seed, nxDigest), nxRepo+"@"+nxDigest; got != want {
+			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Workloads)
 		}
 	})
 
@@ -6052,8 +6215,8 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[nxDigest]; ok {
-			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, nxDigest); ok {
+			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6080,8 +6243,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; !ok {
-			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Workloads)
 		}
 	})
 
@@ -6098,8 +6261,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; ok {
-			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6200,7 +6363,7 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
-	if got := seed.Digests[pinsImageDigest]; got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
+	if got := seedLabel(seed, pinsImageDigest); got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
 		t.Errorf("seed[%s] = %q, want the pins installer image; the baked plugin would deny it", pinsImageDigest, got)
 	}
 }
@@ -6236,15 +6399,15 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	}
 	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
 	// and tls-lb's nginx (default digest from values.yaml).
-	if got := seed.Digests[opD]; got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
-		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Digests)
+	if got := seedLabel(seed, opD); got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
+		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
-		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
+	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
+		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
 	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
-	if _, ok := seed.Digests[nginxD]; !ok {
-		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
+	if _, ok := seedEntry(seed, nginxD); !ok {
+		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Workloads)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
@@ -6280,8 +6443,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got := seed.Digests[prepDigest]; got != wantRef {
-			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Digests)
+		if got := seedLabel(seed, prepDigest); got != wantRef {
+			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Workloads)
 		}
 
 		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
@@ -6304,8 +6467,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[prepDigest]; ok {
-			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Digests)
+		if _, ok := seedEntry(seed, prepDigest); ok {
+			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Workloads)
 		}
 	})
 }
@@ -6425,30 +6588,6 @@ func TestChartBootConfigRendersExemptNamespaces(t *testing.T) {
 	}
 }
 
-// A fleet-supplied bootstrapAllowlist.digests entry must override a derived
-// entry for the same sha256 (fleet values win).
-func TestChartFleetAllowlistOverridesDerived(t *testing.T) {
-	const cdsD = "sha256:00000000000000000000000000000000000000000000000000000000000000a3"
-	out, err := helmTemplate(t,
-		// deriveComponents on so cds.image.digest produces a derived entry for
-		// the fleet `digests` value to override.
-		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
-		"--set-string", "cds.image.digest="+cdsD,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+cdsD+"=mirror.local/cds@"+cdsD,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-	if err != nil {
-		t.Fatalf("seed JSON does not parse: %v", err)
-	}
-	if got := seed.Digests[cdsD]; got != "mirror.local/cds@"+cdsD {
-		t.Errorf("fleet override lost: %s = %q, want mirror.local/cds@%s\nseed: %v", cdsD, got, cdsD, seed.Digests)
-	}
-}
-
 // deriveComponents is OFF by default (a demo convenience, like
 // --resolve-digests): the seed carries only the CDS floor self-entry and
 // operator-supplied digests, not the auto-derived component images. Covers both
@@ -6475,12 +6614,12 @@ func TestChartDeriveComponentsDefaultsOff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seed JSON does not parse: %v", err)
 			}
-			if _, ok := seed.Digests[opD]; ok {
-				t.Errorf("operator digest derived without deriveComponents: %v", seed.Digests)
+			if _, ok := seedEntry(seed, opD); ok {
+				t.Errorf("operator digest derived without deriveComponents: %v", seed.Workloads)
 			}
 			// The CDS floor self-entry is always present, independent of derivation.
-			if _, ok := seed.Digests[cdsDigest]; !ok {
-				t.Errorf("CDS floor self-entry missing: %v", seed.Digests)
+			if _, ok := seedEntry(seed, cdsDigest); !ok {
+				t.Errorf("CDS floor self-entry missing: %v", seed.Workloads)
 			}
 		})
 	}
@@ -6521,16 +6660,14 @@ func TestChartWiresCDSAllowlistSeedFlagAndVolume(t *testing.T) {
 
 // Under kata the host NRI plugin is off, but admission is the in-guest
 // policy-monitor fed from CDS's served allowlist, so the seed must still render.
-// Otherwise adopted --workload-ref digests (in bootstrapAllowlist.digests) never
-// reach CDS and the in-guest monitor denies those images.
+// Otherwise adopted --workload-ref entries (in bootstrapAllowlist.workloads)
+// never reach CDS and the in-guest monitor denies those images.
 func TestChartRendersCDSSeedUnderKata(t *testing.T) {
 	const (
 		wlDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
 		wlRepo   = "example.test/vllm-router"
 	)
-	out, err := helmTemplateKata(t,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+wlDigest+"="+wlRepo+"@"+wlDigest,
-	)
+	out, err := helmTemplateKata(t, anyArgvEntryArgs("vllm-router", wlDigest, wlRepo+"@"+wlDigest)...)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -6539,8 +6676,8 @@ func TestChartRendersCDSSeedUnderKata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
-	if got, want := seed.Digests[wlDigest], wlRepo+"@"+wlDigest; got != want {
-		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Digests)
+	if got, want := seedLabel(seed, wlDigest), wlRepo+"@"+wlDigest; got != want {
+		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Workloads)
 	}
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
@@ -6561,15 +6698,16 @@ func TestChartRejectsImagePolicyWithoutCDSDigest(t *testing.T) {
 	}
 }
 
-// In fail-closed mode with deriveComponents off, a digest-pinned component
-// whose digest is absent from bootstrapAllowlist.digests would be denied on its
-// own node, so the chart fails the render. cds.image is exempt (always seeded).
+// In fail-closed mode with deriveComponents off, a digest-pinned component no
+// bootstrapAllowlist.workloads entry admits under any argv would be denied on
+// its own node, so the chart fails the render. cds.image is exempt (always
+// seeded).
 func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
-	// A digest distinct from the harness floor (baseNRIDigest), so it is
+	// A digest distinct from the harness entry (baseNRIDigest), so it is
 	// genuinely uncovered unless a case below covers it.
 	const nriD = "sha256:bbbb000000000000000000000000000000000000000000000000000000000000"
 
-	// Uncovered: nriImagePolicy.image is digest-pinned but not in digests,
+	// Uncovered: nriImagePolicy.image is digest-pinned but no entry admits it,
 	// deriveComponents off, fail-closed -> guard fires.
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.policy.mode=fail-closed",
@@ -6589,13 +6727,30 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 	}{
 		{"audit mode is non-blocking", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=audit"}},
 		{"deriveComponents covers it", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true"}},
-		{"digest listed in floor", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + nriD + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD}},
+		{"any-argv entry admits it", append([]string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed"}, anyArgvEntryArgs("nri", nriD, "ghcr.io/confidential-dot-ai/nri-image-policy@"+nriD)...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if out, err := helmTemplate(t, tc.args...); err != nil {
 				t.Fatalf("helm template should render: %v\n%s", err, out)
 			}
 		})
+	}
+
+	// An entry that pins the plugin's command line is seed-only, so it does not
+	// cover the plugin on its own node and the guard still fires.
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.nri.containers[0]."
+	out, err = helmTemplate(t,
+		"--set-string", "nriImagePolicy.image.digest="+nriD,
+		"--set", "nriImagePolicy.policy.mode=fail-closed",
+		"--set-string", p+"digest="+nriD,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/c8s",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with the component covered only by a pinned entry\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "uncovered_component_digest" {
+		t.Fatalf("validation error kind = %q, want uncovered_component_digest\n%s", kind, out)
 	}
 }
 
@@ -6616,7 +6771,11 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest="+baseNRIDigest,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+baseNRIDigest+"=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".label=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].digest="+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].args.policy=any",
 		// discovery defaults to enabled; scope this example to route rendering
 		// (discovery's own locations are covered by a dedicated test above).
 		"--set", "tlsLb.discovery.enabled=false",

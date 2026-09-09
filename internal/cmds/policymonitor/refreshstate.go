@@ -6,7 +6,7 @@ package policymonitor
 // log line.
 //
 // A guest whose refresh never starts enforces its baked seed forever, and
-// `c8s allowlist add` has no effect on it. That state is invisible from
+// operator allowlist writes have no effect on it. That state is invisible from
 // outside: the locked guest denies ReadStreamRequest, so its journal is
 // unreachable — kubectl logs on locked-guest pods is empty by design. This
 // type carries the state to the two places an operator can reach it: every
@@ -28,14 +28,14 @@ const (
 	reasonNotYetStarted = "the CDS refresh loop has not reported yet"
 
 	reasonNoCDSURL = "no CDS URL configured; enforcing the baked seed alone, " +
-		"so `c8s allowlist add` does not reach this guest"
+		"so operator allowlist writes do not reach this guest"
 	reasonNoMeasurements = "C8S_CDS_URL set but C8S_CDS_MEASUREMENTS empty, and an unpinned CDS " +
-		"could serve any allowlist; enforcing the baked seed alone, so `c8s allowlist add` " +
-		"does not reach this guest (docs/kata-image-policy.md)"
+		"could serve any allowlist; enforcing the baked seed alone, so operator allowlist writes " +
+		"do not reach this guest (docs/kata-image-policy.md)"
 	reasonBadMeasurements = "C8S_CDS_MEASUREMENTS is not a valid measurement list; enforcing the " +
-		"baked seed alone, so `c8s allowlist add` does not reach this guest"
+		"baked seed alone, so operator allowlist writes do not reach this guest"
 	reasonClientFailed = "the RA-TLS client to CDS could not be built; enforcing the baked seed " +
-		"alone, so `c8s allowlist add` does not reach this guest"
+		"alone, so operator allowlist writes do not reach this guest"
 )
 
 // refreshState is the allowlist-refresh posture. The zero value is "disabled,

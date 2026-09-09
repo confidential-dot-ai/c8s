@@ -3,12 +3,30 @@ package getsecret
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
+
+// TestPrepareOutDir: the "must be memory-backed" invariant on --out-dir is
+// enforced, not merely documented.
+func TestPrepareOutDir(t *testing.T) {
+	dir := t.TempDir()
+	if fileutil.RequireRAMBacked(dir) == nil {
+		t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
+	}
+	out := filepath.Join(dir, "secrets")
+	if _, err := prepareOutDir(out); err == nil {
+		t.Fatal("expected an out-dir on persistent storage to be refused")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatal("refusal must not create the out-dir on the storage it rejects")
+	}
+}
 
 func TestParseSecretSpec(t *testing.T) {
 	for _, tc := range []struct {
@@ -121,11 +139,12 @@ func TestValidateTrimsURL(t *testing.T) {
 
 func TestWriteAll(t *testing.T) {
 	cfg := validConfig(t)
+	root := openOutRoot(t, cfg.OutDir)
 	values := map[string][]byte{
 		"DB":    []byte("s3cret"),
 		"OTHER": {0x00, 0xff, '\n', '"'}, // raw bytes, not text
 	}
-	if err := writeAll(cfg, values); err != nil {
+	if err := writeAll(root, cfg, values); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range values {
@@ -151,7 +170,8 @@ func TestWriteAll(t *testing.T) {
 // must not find a temp file and mistake it for its secret.
 func TestWriteAllLeavesNoTempFiles(t *testing.T) {
 	cfg := validConfig(t)
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err != nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("v")}); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(cfg.OutDir)
@@ -171,10 +191,11 @@ func TestWriteAllLeavesNoTempFiles(t *testing.T) {
 // than fail or append.
 func TestWriteAllOverwrites(t *testing.T) {
 	cfg := validConfig(t)
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("first")}); err != nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("second")}); err != nil {
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("second")}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(cfg.OutDir, "DB"))
@@ -186,10 +207,14 @@ func TestWriteAllOverwrites(t *testing.T) {
 	}
 }
 
-func TestWriteAllCreatesDir(t *testing.T) {
+func TestWriteAllWritesPreparedDir(t *testing.T) {
 	cfg := validConfig(t)
 	cfg.OutDir = filepath.Join(cfg.OutDir, "nested", "secrets")
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err != nil {
+	if err := os.MkdirAll(cfg.OutDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("v")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutDir, "DB")); err != nil {
@@ -229,14 +254,15 @@ func ptr(c config) *config { return &c }
 // with no file on disk.
 func TestWriteAllUnwritable(t *testing.T) {
 	cfg := validConfig(t)
-	cfg.OutDir = filepath.Join(cfg.OutDir, "readonly", "secrets")
-	if err := os.MkdirAll(filepath.Dir(cfg.OutDir), 0o500); err != nil {
+	cfg.OutDir = filepath.Join(cfg.OutDir, "readonly")
+	if err := os.MkdirAll(cfg.OutDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root, which ignores the directory mode")
 	}
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
 		t.Fatal("an unwritable directory reported success")
 	}
 }
@@ -244,9 +270,63 @@ func TestWriteAllUnwritable(t *testing.T) {
 func TestWriteAllRejectsBadMode(t *testing.T) {
 	cfg := validConfig(t)
 	cfg.FileMode = "notamode"
-	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
 		t.Fatal("a bad file mode was accepted")
 	}
+}
+
+// The final RAM-backed check returns an open root. Keeping it through the
+// write is what prevents an attacker from replacing --out-dir after startup.
+func TestWriteAllStaysInVerifiedOutDirAfterPathReplacement(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RAM-backed output verification is linux-only")
+	}
+	base, err := os.MkdirTemp("/dev/shm", "c8s-getsecret-")
+	if err != nil {
+		t.Skipf("cannot create a temporary directory in /dev/shm: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	if err := fileutil.RequireRAMBacked(base); err != nil {
+		t.Skipf("/dev/shm is not usable tmpfs: %v", err)
+	}
+
+	cfg := validConfig(t)
+	cfg.OutDir = filepath.Join(base, "out")
+	root, err := prepareOutDir(cfg.OutDir)
+	if err != nil {
+		t.Fatalf("prepareOutDir: %v", err)
+	}
+	defer root.Close()
+
+	moved := filepath.Join(base, "moved")
+	if err := os.Rename(cfg.OutDir, moved); err != nil {
+		t.Fatalf("move verified directory: %v", err)
+	}
+	trap := t.TempDir()
+	if err := os.Symlink(trap, cfg.OutDir); err != nil {
+		t.Fatalf("replace verified directory: %v", err)
+	}
+
+	if err := writeAll(root, cfg, map[string][]byte{"DB": []byte("secret")}); err != nil {
+		t.Fatalf("writeAll: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(moved, "DB")); err != nil || string(got) != "secret" {
+		t.Fatalf("original verified directory holds %q, %v; want secret", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(trap, "DB")); !os.IsNotExist(err) {
+		t.Fatalf("write followed replacement --out-dir, stat error = %v", err)
+	}
+}
+
+func openOutRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("open output root: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }
 
 // A malformed RTMR pin is a typo in rendered config; pinning nothing is not
