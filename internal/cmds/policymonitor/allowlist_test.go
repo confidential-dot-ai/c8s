@@ -38,11 +38,11 @@ func TestLoadAllowlist_HappyPath(t *testing.T) {
 	if a.Size() != 2 {
 		t.Fatalf("Size = %d, want 2", a.Size())
 	}
-	if !a.Contains("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+	if !a.AdmitsDigest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
 		t.Fatal("missing first digest")
 	}
 	// Case-insensitive match: input upper-case, allowlist normalises to lower.
-	if !a.Contains("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
+	if !a.AdmitsDigest("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
 		t.Fatal("missing second digest (case-insensitive)")
 	}
 }
@@ -90,35 +90,13 @@ func TestLoadAllowlist_MissingFile(t *testing.T) {
 	}
 }
 
-// The accepted input forms are pinned by pkg/types; this only asserts the
-// package's map-key contract — bare hex out, errors passed through.
-func TestNormalizeDigestReturnsBareHex(t *testing.T) {
-	hex := strings.Repeat("a", 64)
-	if got, err := normalizeDigest("sha256:" + hex); err != nil || got != hex {
-		t.Fatalf("normalizeDigest = %q, %v; want the bare hex", got, err)
-	}
-	if _, err := normalizeDigest("ghcr.io/confidential-dot-ai/assam:v1.0.0"); err == nil {
-		t.Fatal("a tag-only reference was accepted")
-	}
-}
-
-func TestAllowlistNilReceivers(t *testing.T) {
-	var a *allowlist
-	if a.Contains("sha256:" + strings.Repeat("a", 64)) {
-		t.Error("nil allowlist Contains should be false")
-	}
-	if a.Size() != 0 {
-		t.Error("nil allowlist Size should be 0")
-	}
-}
-
-func TestAllowlistContains_Malformed(t *testing.T) {
+func TestSeedAdmitsDigest_Malformed(t *testing.T) {
 	a := newSeededAllowlist(t, "sha256:"+strings.Repeat("a", 64))
-	if a.Contains("garbage") {
-		t.Error("Contains should be false for malformed input")
+	if a.AdmitsDigest("garbage") {
+		t.Error("AdmitsDigest should be false for malformed input")
 	}
-	if a.Contains("") {
-		t.Error("Contains should be false for empty input")
+	if a.AdmitsDigest("") {
+		t.Error("AdmitsDigest should be false for empty input")
 	}
 }
 

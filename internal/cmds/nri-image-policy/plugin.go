@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -48,20 +49,17 @@ type policySnapshot struct {
 // The always_allow digests are checked ahead of every snapshot, so a failed or
 // withheld pull never drops them.
 type policyStore struct {
-	alwaysAllow map[string]struct{} // canonical digests admitted by digest alone
+	alwaysAllow *allowlist.Index // digests admitted by digest alone
 	snap        atomic.Pointer[policySnapshot]
 }
 
 // newPolicyStore seeds the store with an empty snapshot (version 0) so admission
 // enforces always_allow alone before the first pull lands and after any pull
-// failure.
+// failure. Config validation has already rejected a malformed digest, so
+// DigestIndex's warnings cannot fire here.
 func newPolicyStore(alwaysAllow map[string]string) *policyStore {
-	s := &policyStore{alwaysAllow: make(map[string]struct{}, len(alwaysAllow))}
-	for d := range alwaysAllow {
-		if pd, err := types.ParseDigest(d); err == nil {
-			s.alwaysAllow[pd.String()] = struct{}{}
-		}
-	}
+	idx, _ := allowlist.DigestIndex(slices.Collect(maps.Keys(alwaysAllow)))
+	s := &policyStore{alwaysAllow: idx}
 	s.snap.Store(&policySnapshot{index: (&allowlist.Allowlist{}).BuildIndex()})
 	return s
 }
@@ -78,12 +76,7 @@ func (s *policyStore) alwaysAllows(digest string) bool {
 	if s == nil {
 		return false
 	}
-	pd, err := types.ParseDigest(digest)
-	if err != nil {
-		return false
-	}
-	_, ok := s.alwaysAllow[pd.String()]
-	return ok
+	return s.alwaysAllow.AdmitsDigest(digest)
 }
 
 // apply installs the pulled document at version, unless version is below the

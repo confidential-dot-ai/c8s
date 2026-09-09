@@ -64,7 +64,7 @@ func canonicalBody(t *testing.T, al *allowlist.Allowlist) []byte {
 // the served index.
 func admitsDigest(store *policyStore, digest string) bool {
 	snap := store.current()
-	return store.alwaysAllows(digest) || (snap != nil && snap.index != nil && snap.index.AdmitsDigest(digest))
+	return store.alwaysAllows(digest) || (snap != nil && snap.index.AdmitsDigest(digest))
 }
 
 func TestStartupSourceMode(t *testing.T) {
