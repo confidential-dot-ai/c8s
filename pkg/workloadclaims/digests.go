@@ -11,21 +11,24 @@ package workloadclaims
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"fmt"
-	"io"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // DigestsPort is the port every inventory serves its digests endpoint on, and
@@ -260,9 +263,9 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 	if err != nil {
 		return nil, fmt.Errorf("workloadclaims: build sandbox-digests client: %w", err)
 	}
-	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	warmupCtx, cancel := context.WithTimeout(ctx, warmUpBudget)
 	defer cancel()
-	if err := certMgr.WarmUp(warmupCtx); err != nil {
+	if err := warmUpCert(warmupCtx, certMgr); err != nil {
 		return nil, fmt.Errorf("workloadclaims: warm up sandbox-digests client cert: %w", err)
 	}
 	if timeout <= 0 {
@@ -285,6 +288,57 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		},
 		timeout: timeout,
 	}, nil
+}
+
+const (
+	// Budget for provisioning the client certificate at startup.
+	warmUpBudget = 30 * time.Second
+	// Gap between attempts. The attestation API is reached over a DaemonSet's
+	// Unix socket, so the common failure is "not there yet" rather than "slow".
+	warmUpInterval = time.Second
+)
+
+// certWarmer is the slice of ratls.CertManager this needs, so the retry can be
+// tested without provisioning a real certificate.
+type certWarmer interface {
+	WarmUp(context.Context) error
+}
+
+// peerNotUpYet reports whether err means the attestation API is not listening
+// yet, as opposed to answering and refusing. Only the former is worth waiting
+// on: a live peer that rejects us is a real failure and must fail closed.
+func peerNotUpYet(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// warmUpCert retries only while the attestation API has not come up, returning
+// the last failure once ctx's budget is spent.
+//
+// A single attempt is not enough: the attestation API lives on a DaemonSet
+// socket that may not exist yet when CDS starts, and lstat on a missing socket
+// fails instantly. One attempt therefore leaves the whole budget unspent and
+// aborts startup for a peer that is usually seconds away. That is expensive
+// because the allowlist is not persistent, so CDS exiting here drops every
+// operator-added digest on restart.
+//
+// Anything else returns immediately, so a peer that answers and refuses still
+// fails closed at once rather than after the budget. WarmUp caches on success,
+// so the repeated calls cost nothing once provisioning lands.
+func warmUpCert(ctx context.Context, w certWarmer) error {
+	for {
+		err := w.WarmUp(ctx)
+		if err == nil {
+			return nil
+		}
+		if !peerNotUpYet(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(warmUpInterval):
+		}
+	}
 }
 
 // ErrSandboxUnknown reports that the inventory does not know the sandbox — it
