@@ -6,7 +6,9 @@ CONFOS_DIR="$(realpath "${1:?confos checkout required}")"
 IMAGE_DIR="$(realpath "${2:?guest image directory required}")"
 KERNEL_FRAGMENT="${IMAGE_DIR}/kernel/container.config"
 KERNEL_SNAPSHOT="${IMAGE_DIR}/kernel/config-x86_64.snapshot"
-CONFOS_SNAPSHOT="${CONFOS_DIR}/kernel/config-x86_64.snapshot"
+# confos writes the resolved config beside the fragment. Keep it separate
+# from the committed snapshot so cached output cannot replace the drift baseline.
+CONFOS_SNAPSHOT="${IMAGE_DIR}/kernel/config-x86_64-container.snapshot"
 VMLINUZ_OUT="${3:-${IMAGE_DIR}/output}/vmlinuz"
 die() { echo "FATAL: $*" >&2; exit 1; }
 [[ -f "$KERNEL_FRAGMENT" ]] || die "kernel fragment missing: $KERNEL_FRAGMENT"

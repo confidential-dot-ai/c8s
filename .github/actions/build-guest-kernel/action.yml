@@ -43,7 +43,7 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-        key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
+        key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf', 'confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**') }}
 
     - name: Unpack kernel-builder tools tree
       if: steps.tools-tree-cache.outputs.cache-hit == 'true'
@@ -59,10 +59,10 @@ runs:
       with:
         path: |
           confidential-os-builder/output/kernel
-          confidential-os-builder/kernel/config-x86_64.snapshot
-        key: ${{ runner.os }}-kata-kernel-v3-${{ inputs.confos-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          c8s/kata-guest-base/kernel/config-x86_64-container.snapshot
+        key: ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
         restore-keys: |
-          ${{ runner.os }}-kata-kernel-v3-${{ inputs.confos-ref }}-
+          ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-
 
     - name: Build guest kernel and check snapshot
       id: snapshot
@@ -101,7 +101,9 @@ runs:
       if: always()
       shell: bash
       run: |
-        if [[ -f confidential-os-builder/output/kernel/vmlinuz && -f confidential-os-builder/output/kernel/manifest.json ]]; then
+        if [[ -f confidential-os-builder/output/kernel/vmlinuz &&
+              -f confidential-os-builder/output/kernel/manifest.json &&
+              -f c8s/kata-guest-base/kernel/config-x86_64-container.snapshot ]]; then
           echo "complete=true" >> "${GITHUB_OUTPUT}"
         else
           echo "complete=false" >> "${GITHUB_OUTPUT}"
@@ -113,5 +115,5 @@ runs:
       with:
         path: |
           confidential-os-builder/output/kernel
-          confidential-os-builder/kernel/config-x86_64.snapshot
-        key: ${{ runner.os }}-kata-kernel-v3-${{ inputs.confos-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          c8s/kata-guest-base/kernel/config-x86_64-container.snapshot
+        key: ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}

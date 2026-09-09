@@ -146,15 +146,13 @@ PATCH_DIR="${IMAGE_DIR}/patches"
 BUILD_NVIDIA="${BUILD_NVIDIA:-auto}"
 KATA_NVIDIA_CONFIDENTIAL_IMG="${KATA_NVIDIA_CONFIDENTIAL_IMG:-/opt/kata/share/kata-containers/kata-containers-nvidia-gpu-confidential.img}"
 KATA_NVIDIA_VMLINUZ="${KATA_NVIDIA_VMLINUZ:-/opt/kata/share/kata-containers/vmlinuz-nvidia-gpu.container}"
-# c8s's kernel config fragment, merged after confos's required + hardening
-# baseline by `confos kernel --kernel-config-fragment`. confos resolves the
-# merged .config and writes it to a fixed path in its own tree (the old
-# --kernel-snapshot flag is gone). That snapshot is NOT a build input —
-# confos regenerates it from scratch each resolve — but it is the only
-# place the effect of confos's baseline (kernel version / hardening) on OUR
-# guest kernel is visible. So after the kernel build Step 1 copies confos's
-# snapshot into this repo (KERNEL_SNAPSHOT), committed, so any drift is
-# reviewable in git. See README.md "Build" + container.config header.
+# c8s's kernel config fragment, merged after confos's required, hardening,
+# and confidential baselines by `confos kernel --kernel-config-fragment`.
+# confos writes config-x86_64-container.snapshot beside the fragment and
+# fingerprints it for cache reuse. build-kernel.sh compares that output with
+# the committed KERNEL_SNAPSHOT before capturing the resolved config there.
+# CI caches only the generated snapshot, keeping the committed drift baseline
+# intact. See README.md "Build" and the container.config header.
 KERNEL_FRAGMENT="${IMAGE_DIR}/kernel/container.config"
 # Resolved-config lockfile captured and checked by build-kernel.sh.
 KERNEL_SNAPSHOT="${IMAGE_DIR}/kernel/config-x86_64.snapshot"
