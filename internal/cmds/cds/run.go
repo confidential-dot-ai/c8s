@@ -21,7 +21,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
@@ -29,7 +28,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -148,25 +146,6 @@ func run(cfg config) error {
 	cnPattern, err := compilePattern("--allowed-cn-pattern", cfg.allowedCNPattern)
 	if err != nil {
 		return err
-	}
-
-	earKeyPEM, err := earsigner.Generate()
-	if err != nil {
-		return fmt.Errorf("generate token-signing key: %w", err)
-	}
-	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
-	if err != nil {
-		return fmt.Errorf("create EAR issuer: %w", err)
-	}
-
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: cfg.rotationInterval,
-		Overlap:  cfg.rotationOverlap,
-		Jitter:   cfg.rotationJitter,
-		Logger:   slog.Default(),
-	}, earKeyPEM, earIssuer.SwapKey)
-	if err != nil {
-		return fmt.Errorf("create EAR key rotator: %w", err)
 	}
 
 	asClient := attestationclient.NewClient(cfg.attestationApiURL)
@@ -308,8 +287,6 @@ func run(cfg config) error {
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:         earIssuer,
-		JWKSFunc:          rotator.JWKSetJSON,
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
 		MeasurementsDoc:   measurementsDoc,
@@ -320,9 +297,6 @@ func run(cfg config) error {
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
-	}
-	if cfg.rotationInterval > 0 {
-		go rotator.Run(ctx)
 	}
 	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 	go challengeLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)

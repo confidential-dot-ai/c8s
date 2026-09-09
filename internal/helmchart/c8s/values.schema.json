@@ -27,7 +27,6 @@
         "challengeTTL": {},
         "cnPattern": {},
         "dnsSanPatterns": {},
-        "earIssuer": {},
         "image": {
           "type": [
             "object",
@@ -124,10 +123,7 @@
               ]
             }
           }
-        },
-        "tokenSignerOverlap": {},
-        "tokenSignerRotationInterval": {},
-        "tokenSignerRotationJitter": {}
+        }
       }
     },
     "nriImagePolicy": {

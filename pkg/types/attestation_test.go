@@ -183,7 +183,7 @@ func TestVerifyReportData(t *testing.T) {
 	if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, reportData.Bytes()) {
 		t.Fatalf("expected report-data = %x, want %x", got, reportData.Bytes())
 	}
-	// Token issuance must be explicitly off — c8s mints its own EAR.
+	// Certificate issuance verifies evidence without requesting a token.
 	if req.IssueToken == nil || *req.IssueToken {
 		t.Fatalf("IssueToken = %v, want explicit false", req.IssueToken)
 	}

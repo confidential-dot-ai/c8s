@@ -31,8 +31,7 @@ import (
 )
 
 // AttestHandler serves POST /attest by verifying TEE evidence and signing the
-// requester's CSR in-process — attestation and mesh-CA signing live in the same
-// binary, so there is no EAR JWT round-trip to a separate signer.
+// requester's CSR in-process.
 //
 // THREAT MODEL: the measurement check is the only thing standing between an
 // attacker who controls a TEE workload and a CA-signed leaf for any subject

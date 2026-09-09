@@ -150,12 +150,11 @@ webhook:
     runAsNonRoot: true
 
 ## Certificate Distribution Service (cds): the c8s trust root. One binary, one Service,
-## one ServiceAccount, and one measurement allowlist serve EAR issuance,
-## allowlist, JWKS, and mesh-CA leaf signing.
+## one ServiceAccount, and one measurement allowlist serve attestation,
+## allowlist, and mesh-CA leaf signing.
 ##
 ## The mesh CA key is generated inside the cds process and stays in memory
-## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
-## and JWKS are in-process too, so there is no internal RA-TLS hop.
+## only — it is never rendered into a Kubernetes Secret or volume.
 cds:
   ## Pin `image.digest` for production deployments. The kata-guest-base
   ## bootstrap allowlist binds to the cds digest that was `:main` at the
@@ -205,7 +204,7 @@ cds:
         value: cds
         effect: NoSchedule
   ## CDS is a singleton in-memory trust root: any voluntary eviction (node
-  ## drain, autoscaler) destroys the CA and EAR keys and forces every workload
+  ## drain, autoscaler) destroys the CA key and forces every workload
   ## to re-bootstrap. The default PDB (maxUnavailable: 0) blocks voluntary
   ## disruptions so a drain cannot silently take CDS down — the operator must
   ## delete the pod deliberately (a planned re-bootstrap). Set maxUnavailable: 1
@@ -216,7 +215,6 @@ cds:
     maxUnavailable: 0
   logLevel: info
   allowlistDB: /data/allowlist.db
-  earIssuer: cds
   jwtClockSkew: 30
   certTTL: 24h
   # -- Upper bound on the TTL of a leaf carrying a matched-workload stamp
@@ -228,8 +226,8 @@ cds:
   namedCertTTL: 6h
   challengeTTL: 60s
   requestTimeout: 5s
-  # -- Max HTTP request body CDS accepts on /authenticate, /attest-key, and
-  # /attest. Sized for the largest evidence envelope we serve today: an Intel
+  # -- Max HTTP request body CDS accepts on /authenticate and /attest.
+  # Sized for the largest evidence envelope we serve today: an Intel
   # TDX quote + full cc_eventlog is ~90 KB uncompressed (the eventlog alone
   # runs 40-85 KB on real TDX hosts; see kata-guest-base's
   # attestation-service.toml). The stock 64 KiB limit is fine for SEV-SNP
@@ -286,9 +284,6 @@ cds:
   ## disables whole-image matching; `measurements` above still pins.
   measurementsConfig: ""
   operatorKeys: ""
-  tokenSignerRotationInterval: 720h
-  tokenSignerOverlap: 25h
-  tokenSignerRotationJitter: 0.1
   rateLimit: 10
   rateBurst: 20
   rateLimiterMaxEntries: 10000
