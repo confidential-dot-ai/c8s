@@ -276,13 +276,13 @@ allowlist:
       []
 {{- end }}
 {{- /* Self-allow the installer image first (load-bearing when
-       bootstrapAllowlist.deriveComponents=false, where the floor omits it), then
-       add the floor — skipping the installer digest so the map has no
+       bootstrapAllowlist.deriveComponents=false, where c8s.alwaysAllow omits
+       it), then add the rest — skipping the installer digest so the map has no
        duplicate key (the plugin loads this with yaml.v3, which rejects dups). */ -}}
 {{- $selfDigest := required "image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest }}
   always_allow:
     {{ $selfDigest | quote }}: {{ printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest | quote }}
-{{- range $digest, $image := (include "c8s.imageAllowlist" $root | fromJson) }}
+{{- range $digest, $image := (include "c8s.alwaysAllow" $root | fromJson) }}
 {{- if ne $digest $selfDigest }}
     {{ $digest | quote }}: {{ $image | quote }}
 {{- end }}

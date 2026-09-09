@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/spf13/cobra"
 )
 

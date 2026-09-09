@@ -150,12 +150,11 @@ webhook:
     runAsNonRoot: true
 
 ## Certificate Distribution Service (cds): the c8s trust root. One binary, one Service,
-## one ServiceAccount, and one measurement allowlist serve EAR issuance,
-## allowlist, JWKS, and mesh-CA leaf signing.
+## one ServiceAccount, and one measurement allowlist serve attestation,
+## allowlist, and mesh-CA leaf signing.
 ##
 ## The mesh CA key is generated inside the cds process and stays in memory
-## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
-## and JWKS are in-process too, so there is no internal RA-TLS hop.
+## only — it is never rendered into a Kubernetes Secret or volume.
 cds:
   ## Pin `image.digest` for production deployments. The kata-guest-base
   ## bootstrap allowlist binds to the cds digest that was `:main` at the
@@ -205,7 +204,7 @@ cds:
         value: cds
         effect: NoSchedule
   ## CDS is a singleton in-memory trust root: any voluntary eviction (node
-  ## drain, autoscaler) destroys the CA and EAR keys and forces every workload
+  ## drain, autoscaler) destroys the CA key and forces every workload
   ## to re-bootstrap. The default PDB (maxUnavailable: 0) blocks voluntary
   ## disruptions so a drain cannot silently take CDS down — the operator must
   ## delete the pod deliberately (a planned re-bootstrap). Set maxUnavailable: 1
@@ -216,8 +215,6 @@ cds:
     maxUnavailable: 0
   logLevel: info
   allowlistDB: /data/allowlist.db
-  earIssuer: cds
-  expectedIssuer: ""
   jwtClockSkew: 30
   certTTL: 24h
   # -- Upper bound on the TTL of a leaf carrying a matched-workload stamp
@@ -227,11 +224,10 @@ cds:
   # It may only shorten the 6h built-in ceiling — CDS refuses to start on a
   # larger value, or on 0, which is not a disable switch here.
   namedCertTTL: 6h
-  maxTTL: 24h
   challengeTTL: 60s
   requestTimeout: 5s
-  # -- Max HTTP request body CDS accepts on /authenticate, /sign-csr, and
-  # /attest. Sized for the largest evidence envelope we serve today: an Intel
+  # -- Max HTTP request body CDS accepts on /authenticate and /attest.
+  # Sized for the largest evidence envelope we serve today: an Intel
   # TDX quote + full cc_eventlog is ~90 KB uncompressed (the eventlog alone
   # runs 40-85 KB on real TDX hosts; see kata-guest-base's
   # attestation-service.toml). The stock 64 KiB limit is fine for SEV-SNP
@@ -245,7 +241,7 @@ cds:
   # alongside secretsMaxPathsPerWorkload.
   secretsMaxPaths: 1024
   readinessInterval: 10s
-  ## /sign-csr CSRs arrive without a matching TCP source IP under chart routing,
+  ## /attest CSRs arrive without a matching TCP source IP under chart routing,
   ## so leave sanValidation off and pin DNS SAN / CN patterns instead.
   sanValidation: false
   ## Extra full-match regexes a CSR's DNS SANs may match, on top of the chart's
@@ -262,7 +258,7 @@ cds:
   dnsSanPatterns: []
   cnPattern: ""
   ## The single flat allowlist of SHA-384 hex launch digests, used two ways:
-  ##   1. CDS admits these to call /attest and /sign-csr.
+  ##   1. CDS admits these to call /attest.
   ##   2. The ratls-mesh daemonset and nri-image-policy plugin pin CDS's RA-TLS
   ##      serving cert against it when they dial CDS.
   ## Empty = no pinning (UNSAFE outside dev).
@@ -271,7 +267,7 @@ cds:
   ## TDX: the launch digest (MRTD) covers TDVF firmware only, while RTMR[1]
   ## pins the guest kernel and RTMR[2] the command line carrying the dm-verity
   ## root hash. Used the same two ways as `measurements`: CDS requires them of
-  ## TDX callers on /attest and /attest-key, and every component dialing CDS
+  ## TDX callers on /attest, and every component dialing CDS
   ## pins CDS's RA-TLS cert against them. Ignored for SNP evidence. Empty = no
   ## RTMR pinning (on TDX the measurement pin then confers no guest-code
   ## identity, UNSAFE).
@@ -288,9 +284,6 @@ cds:
   ## disables whole-image matching; `measurements` above still pins.
   measurementsConfig: ""
   operatorKeys: ""
-  tokenSignerRotationInterval: 720h
-  tokenSignerOverlap: 25h
-  tokenSignerRotationJitter: 0.1
   rateLimit: 10
   rateBurst: 20
   rateLimiterMaxEntries: 10000
@@ -959,46 +952,47 @@ nriImagePolicy:
     # container start.
     interval: 5s
 
-  # --- Bootstrap allowlist (the authoritative floor) ---
-  # The single source of truth for the image-digest floor. Used two ways:
-  #   1. Rendered into every plugin's always_allow (both installer DaemonSets,
-  #      via nri-image-policy.bootConfig), so the cluster can bring itself up
-  #      before CDS is reachable.
-  #   2. Rendered into CDS's --allowlist-seed (templates/cds.yaml), so CDS's
-  #      served /allowlist is non-empty on the first worker pull.
-  # `digests` is the floor: everything needed to reach a Ready CDS on the CDS
-  # node and a working kubelet on every node — the c8s component images plus
-  # kube-proxy, coredns, pause/sandbox, CNI — supplied via values or `-f`
-  # (resolve digests with crane/skopeo). In production you pin the full set
-  # here; deriveComponents below is a demo convenience for the c8s images only.
+  # --- Bootstrap allowlist ---
+  # The entries the cluster needs before an operator writes anything, rendered
+  # into CDS's --allowlist-seed (templates/cds.yaml) beside the chart's own
+  # component entries, so CDS's served /allowlist is non-empty on the first
+  # worker pull. An entry admitting a digest under any command and args also
+  # lands in every plugin's always_allow (nri-image-policy.bootConfig), so the
+  # cluster can bring itself up before CDS is reachable; an entry that pins a
+  # command line is seed-only.
   #
-  # Format: map of "sha256:<hex>" -> "<image reference>"
+  # Everything needed to reach a Ready CDS on the CDS node and a working kubelet
+  # on every node goes here as any-argv entries — the c8s component images plus
+  # kube-proxy, coredns, pause/sandbox, CNI — supplied via values or `-f`
+  # (resolve digests with crane/skopeo; `c8s allowlist add` writes the same
+  # shape). In production you pin the full set here; deriveComponents below is
+  # a demo convenience for the c8s images only.
   bootstrapAllowlist:
     # deriveComponents: a demo convenience (off by default, like
     # `c8s install --resolve-digests`, which turns it on). When true, the c8s
     # component images this chart installs (operator, cds, attestation-api,
-    # ratls-mesh, nri-image-policy) are auto-added to the floor
-    # whenever their image.digest is set, so a digest-pinned install self-allows
-    # the c8s images without listing them in `digests`. It never covers the
-    # non-c8s system images, so production installs pin the full floor in
-    # `digests` instead. Entries in `digests` override a derived entry for the
-    # same sha256.
+    # ratls-mesh, nri-image-policy) are seeded and admitted whenever their
+    # image.digest is set, so a digest-pinned install self-allows the c8s
+    # images without an entry for each. It never covers the non-c8s system
+    # images, so production installs pin the full set in `workloads` instead.
     deriveComponents: false
-    digests: {}
-    # sha256:abc123...: "ghcr.io/confidential-dot-ai/cds:v0.1.0"
-    # workloads: named workload entries folded into the served seed alongside
-    # the floor. Each entry pins an init/main container set with per-container
-    # argv (command/args) and paths policy; policy is matched by container
-    # digest. Standalone/injected component images stay digest-only in `digests`
-    # above. Keys are the pkg/allowlist Workload JSON fields (initContainers,
-    # containers, digest, command, args, paths). Default empty.
+    # workloads: named entries; keys are the pkg/allowlist Workload JSON fields
+    # (label, initContainers, containers, digest, image, command, args, mounts,
+    # env, secrets). A chart-derived component entry is named
+    # "<image basename>-<first 12 hex of digest>"; an entry of the same name
+    # here replaces it. Default empty.
     workloads: {}
+    #   coredns:
+    #     containers:
+    #       - digest: sha256:...
+    #         image: registry.k8s.io/coredns/coredns:v1.11.1
+    #         command: {policy: any}
+    #         args: {policy: any}
     #   infer:
     #     containers:
     #       - digest: sha256:...
     #         command: {policy: exact, argv: ["/bin/vllm"]}
     #         args: {policy: any}
-    #         paths: {policy: deny}
 
   # --- Uninstall hook ---
   # Pre-delete DaemonSet that reverts the containerd config patch and removes

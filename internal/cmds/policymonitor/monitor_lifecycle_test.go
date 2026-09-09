@@ -19,8 +19,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // lockedBuffer is a goroutine-safe log sink for monitors running in goroutines.
@@ -141,19 +139,6 @@ func cgroupKillContent(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-// --- normalizeDigest edge: separator at position zero ----------------------
-
-func TestNormalizeDigest_SeparatorAtStart(t *testing.T) {
-	hex := strings.Repeat("a", 64)
-	got, err := normalizeDigest("@sha256:" + hex)
-	if err != nil {
-		t.Fatalf("normalizeDigest: %v", err)
-	}
-	if got != hex {
-		t.Fatalf("got %q, want %q", got, hex)
-	}
 }
 
 // --- writeCgroupKill --------------------------------------------------------
@@ -334,11 +319,10 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 	pulled := "sha256:" + strings.Repeat("b", 64)
 	deniedHex := strings.Repeat("c", 64)
 
-	al := &allowlistpkg.Allowlist{Schema: allowlistpkg.Schema, Digests: map[string]string{
+	body, err := anyAllowlist(t, map[string]string{
 		seed:   "seed-image",
 		pulled: "pulled-image",
-	}}
-	body, err := al.Canonical()
+	}).Canonical()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,9 +396,9 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 }
 
 // runAllowlistRefresh with valid pinned measurements must actually poll and
-// merge; every disable path (bad measurements, no measurements) is already
-// covered separately.
-func TestRunAllowlistRefresh_MergesFromCDS(t *testing.T) {
+// install the served document; every disable path (bad measurements, no
+// measurements) is already covered separately.
+func TestRunAllowlistRefresh_InstallsFromCDS(t *testing.T) {
 	seed := "sha256:" + strings.Repeat("a", 64)
 	pulled := "sha256:" + strings.Repeat("b", 64)
 	a := newSeededAllowlist(t, seed)
@@ -439,8 +423,14 @@ func TestRunAllowlistRefresh_MergesFromCDS(t *testing.T) {
 		close(done)
 	}()
 
-	if !waitUntil(3*time.Second, func() bool { return a.Contains(pulled) }) {
-		t.Fatal("pulled digest never merged; refresh loop did not run")
+	if !waitUntil(3*time.Second, func() bool {
+		idx := overlay.index()
+		return idx != nil && idx.AdmitsDigest(pulled)
+	}) {
+		t.Fatal("pulled digest never installed; refresh loop did not run")
+	}
+	if a.AdmitsDigest(pulled) {
+		t.Fatal("a pull must not grow the baked seed")
 	}
 	cancel()
 	<-done

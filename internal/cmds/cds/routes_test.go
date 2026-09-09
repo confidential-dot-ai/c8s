@@ -14,24 +14,14 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"golang.org/x/time/rate"
 )
 
 func newStubRouter(t *testing.T) http.Handler {
 	t.Helper()
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
 		t.Fatalf("allowlist: %v", err)
@@ -46,7 +36,6 @@ func newStubRouter(t *testing.T) http.Handler {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -56,8 +45,6 @@ func newStubRouter(t *testing.T) http.Handler {
 }
 
 func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -71,7 +58,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -80,7 +66,7 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 	r := newRouter(deps)
 
 	do := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/sign-csr", bytes.NewReader([]byte(`{}`)))
+		req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader([]byte(`{}`)))
 		req.RemoteAddr = "10.0.0.1:1234"
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -98,8 +84,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 // the same per-IP limiter as the attestation endpoints: token verification
 // costs ECDSA verifies before any authentication.
 func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -110,7 +94,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	deps := dependencies{
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -119,7 +102,7 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	r := newRouter(deps)
 
 	do := func() int {
-		req := httptest.NewRequest(http.MethodPut, "/allowlist", bytes.NewReader([]byte(`{"schema":"c8s.allowlist/v1","digests":{}}`)))
+		req := httptest.NewRequest(http.MethodPut, "/allowlist", bytes.NewReader([]byte(`{"schema":"c8s.allowlist/v1","workloads":{}}`)))
 		req.RemoteAddr = "10.0.0.2:1234"
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -138,8 +121,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 // is authenticated at that point. Its budget is its own, so spending it leaves
 // the /attest that redeems the challenge servable.
 func TestRouter_RateLimitsAuthenticate(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -161,7 +142,6 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: challengeRL,
@@ -223,11 +203,12 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}{
 		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/readyz", http.StatusOK},
-		{http.MethodGet, "/.well-known/jwks.json", http.StatusOK},
+		{http.MethodGet, "/.well-known/jwks.json", http.StatusNotFound},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/ca", http.StatusOK},
 		{http.MethodGet, "/allowlist", http.StatusOK},
 		{http.MethodGet, "/does-not-exist", http.StatusNotFound},
+		{http.MethodPost, "/sign-csr", http.StatusNotFound},
 		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
 	}
 
@@ -244,22 +225,19 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}
 }
 
-func TestRouter_AttestKeyMounted(t *testing.T) {
-	// /attest-key is always mounted; an empty body is rejected as a bad request,
-	// proving the route exists (a missing route would 404, a wrong method 405).
+func TestRouter_AttestKeyRemoved(t *testing.T) {
+	// The retired key-only flow must no longer expose an issuance route.
 	r := newStubRouter(t)
 	req := httptest.NewRequest(http.MethodPost, "/attest-key", bytes.NewReader([]byte(`{}`)))
 	req.RemoteAddr = "10.0.0.1:1234"
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("/attest-key not mounted: got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/attest-key: got %d, want 404", w.Code)
 	}
 }
 
 func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -268,7 +246,6 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -377,7 +354,6 @@ func TestNewHTTPServerSetsTimeouts(t *testing.T) {
 func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	valid := config{
 		maxHeaderBytes:             1,
-		maxTTL:                     time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
 		maxRequestSize:             1,
 		secretsMaxPaths:            1024,
@@ -398,8 +374,6 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		{name: "negative write timeout", edit: func(c *config) { c.writeTimeout = -time.Second }},
 		{name: "negative idle timeout", edit: func(c *config) { c.idleTimeout = -time.Second }},
 		{name: "negative max header bytes", edit: func(c *config) { c.maxHeaderBytes = -1 }},
-		{name: "zero max ttl", edit: func(c *config) { c.maxTTL = 0 }},
-		{name: "negative max ttl", edit: func(c *config) { c.maxTTL = -time.Hour }},
 		{name: "zero named cert ttl", edit: func(c *config) { c.namedCertTTL = 0 }},
 		{name: "negative named cert ttl", edit: func(c *config) { c.namedCertTTL = -time.Hour }},
 		{name: "named cert ttl above the ceiling", edit: func(c *config) { c.namedCertTTL = issuer.MaxNamedLeafTTL + time.Hour }},

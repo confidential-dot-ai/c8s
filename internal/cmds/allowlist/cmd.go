@@ -1,20 +1,17 @@
 // Package allowlist implements the `c8s allowlist` operator CLI for reading and
 // mutating the CDS-served image allowlist that nri-image-policy enforces on
-// every node. The allowlist has two layers: a digest floor (admitted by digest
-// alone) and named workload entries (each pins an init/main container set with
-// per-container argv and path policy, looked up by container digest).
+// every node: named workload entries, each pinning an init/main container set
+// with per-container argv and path policy, looked up by container digest.
 //
-// Reads (list, export, diff, workload list/get, lint, inspect-image) are
-// unauthenticated. Writes (add, remove, upload, workload apply/edit/delete) are
-// authorized by an operator EC private key whose public key CDS pins
-// (cds --operator-keys); the CLI mints a short-lived, body-bound token per write
-// via pkg/operatorauth.
+// Reads (list, get, export, diff, lint, inspect-image) are unauthenticated.
+// Writes (add, apply, edit, delete, upload) are authorized by an operator EC
+// private key whose public key CDS pins (cds --operator-keys); the CLI mints a
+// short-lived, body-bound token per write via pkg/operatorauth.
 package allowlist
 
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -65,13 +62,14 @@ func newCmd(verify localverify.VerifyFunc) *cobra.Command {
 		Use:   "allowlist",
 		Short: "Manage the CDS image allowlist",
 		Long: `Read and mutate the image allowlist that CDS serves and nri-image-policy
-enforces on every node. The allowlist has two layers: a digest floor (images
-admitted by digest alone) and named workload entries under 'allowlist workload'
-(each pins an init/main container set with per-container argv and path policy).
+enforces on every node: named workload entries, each pinning an init/main
+container set with per-container argv and path policy. An image that may run
+with any command line is an entry whose command and args policy are both "any";
+'add' writes one.
 
-Reads (list, export, diff, workload list/get, lint, inspect-image) are
-unauthenticated. Writes (add, remove, upload, workload apply/edit/delete) are
-signed with an operator EC private key you supply to THIS CLI via --operator-key
+Reads (list, get, export, diff, lint, inspect-image) are unauthenticated. Writes
+(add, apply, edit, delete, upload) are signed with an operator EC private key
+you supply to THIS CLI via --operator-key
 (or C8S_OPERATOR_KEY). The private key never leaves the CLI — it signs a
 short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
@@ -94,12 +92,15 @@ allowlist").`,
 
 	cmd.AddCommand(
 		newListCmd(o),
+		newGetCmd(o),
 		newExportCmd(o),
 		newDiffCmd(o),
 		newAddCmd(o),
-		newRemoveCmd(o),
+		newApplyCmd(o),
+		newDeriveCmd(o),
+		newEditCmd(o),
+		newDeleteCmd(o),
 		newUploadCmd(o),
-		newWorkloadCmd(o),
 		newLintCmd(o),
 		newInspectImageCmd(o),
 	)
@@ -129,23 +130,9 @@ func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
 // signer builds the operator credential. Required only for write subcommands.
 func (o *options) signer() (*operatorauth.Signer, error) { return o.Signer() }
 
-// matchedComponents returns the required component identifiers that appear as a
-// (case-insensitive) substring of image — the same name-based signal the upload
-// guard uses, applied to a single reference to recognise a component floor image.
-func matchedComponents(image string, required []string) []string {
-	low := strings.ToLower(image)
-	var hits []string
-	for _, comp := range required {
-		if strings.Contains(low, strings.ToLower(comp)) {
-			hits = append(hits, comp)
-		}
-	}
-	return hits
-}
-
-// uploadImageLabels gathers every image label an allowlist carries — floor
-// values, workload labels, and workload container images — the surface the
-// upload component guard scans. Keys are synthetic; only the values matter.
+// uploadImageLabels gathers every image label an allowlist carries — workload
+// labels and workload container images — the surface the upload component
+// guard scans. Keys are synthetic; only the values matter.
 func uploadImageLabels(al *pkgallowlist.Allowlist) map[string]string {
 	labels := map[string]string{}
 	n := 0
@@ -154,9 +141,6 @@ func uploadImageLabels(al *pkgallowlist.Allowlist) map[string]string {
 			labels[strconv.Itoa(n)] = s
 			n++
 		}
-	}
-	for _, img := range al.Digests {
-		add(img)
 	}
 	for _, w := range al.Workloads {
 		add(w.Label)
@@ -188,16 +172,6 @@ func missingComponents(images map[string]string, required []string) []string {
 		}
 	}
 	return missing
-}
-
-// sortedKeys returns the map keys sorted, for stable output.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // ctx returns the command context or a background context as a fallback.

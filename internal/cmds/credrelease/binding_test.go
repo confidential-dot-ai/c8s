@@ -1,230 +1,160 @@
 package credrelease
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// overrideBindingPaths points the package's sysfs/staging paths at files under
-// a temp dir for the duration of the test. The files do not exist yet; each
-// test writes what its scenario needs.
-func overrideBindingPaths(t *testing.T) (pubPath, rtmrPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	pubPath = filepath.Join(dir, "operator-pubkey")
-	rtmrPath = filepath.Join(dir, "rtmr3")
-	origPub, origRTMR := operatorPubkeyPath, rtmr3SysfsPath
-	operatorPubkeyPath, rtmr3SysfsPath = pubPath, rtmrPath
-	t.Cleanup(func() { operatorPubkeyPath, rtmr3SysfsPath = origPub, origRTMR })
-	return pubPath, rtmrPath
-}
+var operatorPub = []byte("operator public key bytes")
 
-func writeFileT(t *testing.T, path string, data []byte) {
+// stageOperatorPubkey points the package's staging path at a temp file and
+// writes pub to it. Pass nil to leave the file absent.
+func stageOperatorPubkey(t *testing.T, pub []byte) {
 	t.Helper()
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	path := filepath.Join(t.TempDir(), "operator-pubkey")
+	orig := operatorPubkeyPath
+	operatorPubkeyPath = path
+	t.Cleanup(func() { operatorPubkeyPath = orig })
+	if pub == nil {
+		return
+	}
+	if err := os.WriteFile(path, pub, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// expectedRTMR3ForKey adapts runtimemeasure.ForOperatorKey for the sysfs
-// fixtures the binding tests write. The formula and hardware vectors are
-// pinned in pkg/runtimemeasure.
-func expectedRTMR3ForKey(pub []byte) []byte {
-	v := runtimemeasure.ForOperatorKey(pub)
-	return v[:]
-}
-
-// TestLoadMeasuredOperatorKey covers the happy path: the staged pubkey matches
-// the (fake) RTMR[3] the initrd would have extended, so the key is released.
-func TestLoadMeasuredOperatorKey(t *testing.T) {
-	pubPath, rtmrPath := overrideBindingPaths(t)
-	pub := []byte("operator public key bytes")
-	writeFileT(t, pubPath, pub)
-	writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
-
-	got, err := LoadMeasuredOperatorKey(context.Background(), "tdx", "")
-	if err != nil {
-		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
-	}
-	if string(got) != string(pub) {
-		t.Errorf("returned key = %q, want %q", got, pub)
-	}
-}
-
-// TestLoadMeasuredOperatorKeyFailsClosed enumerates the ways the anchor check
-// must refuse: substituted key, malformed or missing RTMR, missing/empty key.
-func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
-	pub := []byte("operator public key bytes")
-	tests := []struct {
-		name  string
-		stage func(t *testing.T, pubPath, rtmrPath string)
-	}{
-		{
-			name: "substituted pubkey",
-			stage: func(t *testing.T, pubPath, rtmrPath string) {
-				writeFileT(t, pubPath, []byte("a different key the host swapped in"))
-				writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
-			},
-		},
-		{
-			name: "rtmr wrong length",
-			stage: func(t *testing.T, pubPath, rtmrPath string) {
-				writeFileT(t, pubPath, pub)
-				writeFileT(t, rtmrPath, make([]byte, 47))
-			},
-		},
-		{
-			name: "rtmr missing",
-			stage: func(t *testing.T, pubPath, rtmrPath string) {
-				writeFileT(t, pubPath, pub)
-			},
-		},
-		{
-			name:  "pubkey missing",
-			stage: func(t *testing.T, pubPath, rtmrPath string) {},
-		},
-		{
-			name: "pubkey empty",
-			stage: func(t *testing.T, pubPath, rtmrPath string) {
-				writeFileT(t, pubPath, nil)
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			pubPath, rtmrPath := overrideBindingPaths(t)
-			tc.stage(t, pubPath, rtmrPath)
-			if _, err := LoadMeasuredOperatorKey(context.Background(), "tdx", ""); err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
-	}
-}
-
-// snpAttester returns the URL of a stub attestation-api whose verified claims
-// report initData verbatim as this guest's HOSTDATA.
-func snpAttester(t *testing.T, initData []byte) string {
+// attester serves a fake attestation-api whose verified self-report carries
+// binding in whichever claim the platform uses: RTMR[3] on TDX, HOSTDATA on
+// SEV-SNP. Both arms go through one code path now, so both are exercised by
+// varying only the platform and the claim.
+func attester(t *testing.T, platform teetypes.PlatformType, binding []byte) string {
 	t.Helper()
 	stub := testattest.New(t)
+	stub.SetPlatform(types.Platform(platform))
 	v := testattest.PassingVerdict("")
-	v.Claims.InitData = initData
+	if platform.IsTDX() {
+		v.Claims.PlatformData = map[string]any{"rtmr_3": hex.EncodeToString(binding)}
+	} else {
+		v.Claims.InitData = binding
+	}
 	stub.SetVerdict(v)
 	return stub.URL
 }
 
-// TestLoadMeasuredOperatorKeySNP covers the SNP happy path: the verified
-// self-report's HOSTDATA equals sha256 of the staged pubkey bytes.
-func TestLoadMeasuredOperatorKeySNP(t *testing.T) {
-	pubPath, _ := overrideBindingPaths(t)
-	pub := []byte("operator public key bytes")
-	writeFileT(t, pubPath, pub)
-	want := runtimemeasure.HostDataForOperatorKey(pub)
-	url := snpAttester(t, want[:])
+func tdxBinding(pub []byte) []byte { v := runtimemeasure.Seed(pub); return v[:] }
+func snpBinding(pub []byte) []byte { v := runtimemeasure.HostData(pub); return v[:] }
 
-	got, err := LoadMeasuredOperatorKey(context.Background(), "sev-snp", url)
-	if err != nil {
-		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
-	}
-	if string(got) != string(pub) {
-		t.Errorf("returned key = %q, want %q", got, pub)
+// The happy path on both platforms: the staged pubkey is the one the launch
+// bound, so the key is released. The caller no longer passes a platform — it
+// comes from the verified report.
+func TestLoadMeasuredOperatorKey(t *testing.T) {
+	for _, tc := range []struct {
+		platform teetypes.PlatformType
+		binding  []byte
+	}{
+		{teetypes.PlatformTDX, tdxBinding(operatorPub)},
+		{teetypes.PlatformAzTDX, tdxBinding(operatorPub)},
+		{teetypes.PlatformSNP, snpBinding(operatorPub)},
+		{teetypes.PlatformGcpSNP, snpBinding(operatorPub)},
+	} {
+		t.Run(string(tc.platform), func(t *testing.T) {
+			stageOperatorPubkey(t, operatorPub)
+			url := attester(t, tc.platform, tc.binding)
+
+			got, err := LoadMeasuredOperatorKey(context.Background(), url)
+			if err != nil {
+				t.Fatalf("LoadMeasuredOperatorKey: %v", err)
+			}
+			if string(got) != string(operatorPub) {
+				t.Errorf("returned key = %q, want %q", got, operatorPub)
+			}
+		})
 	}
 }
 
-// TestLoadMeasuredOperatorKeySNPFailsClosed enumerates the SNP refusals:
-// keyless launch (zero HOSTDATA), a different key's HOSTDATA, TDX-shaped and
-// malformed claims, an unreachable attestation-api, an unknown platform.
-func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
-	pub := []byte("operator public key bytes")
-	otherKey := runtimemeasure.HostDataForOperatorKey([]byte("a different operator key"))
-	tests := []struct {
+// Every way the anchor check can fail must refuse. Releasing a key the launch
+// did not bind is the vulnerability this check exists to prevent.
+func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
+	otherKey := []byte("a different operator key")
+	zeroTDX := make([]byte, runtimemeasure.Size)
+	zeroSNP := make([]byte, runtimemeasure.HostDataSize)
+
+	for _, tc := range []struct {
 		name     string
-		platform string
-		url      func(t *testing.T) string
+		staged   []byte
+		platform teetypes.PlatformType
+		binding  []byte
 	}{
-		{
-			name:     "keyless launch: zero HOSTDATA",
-			platform: "sev-snp",
-			url: func(t *testing.T) string {
-				return snpAttester(t, bytes.Repeat([]byte{0}, runtimemeasure.HostDataSize))
-			},
-		},
-		{
-			name:     "launched for a different key",
-			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, otherKey[:]) },
-		},
-		{
-			name:     "TDX-sized InitData (48-byte MRCONFIGID)",
-			platform: "sev-snp",
-			url: func(t *testing.T) string {
-				return snpAttester(t, bytes.Repeat([]byte{0xa5}, 48))
-			},
-		},
-		{
-			// The wire's not-hex shape is refused by the HexBytes decoder in
-			// the client; through the typed stub only widths are expressible.
-			name:     "InitData wrong width",
-			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, []byte("zz")) },
-		},
-		{
-			name:     "InitData claim empty",
-			platform: "sev-snp",
-			url:      func(t *testing.T) string { return snpAttester(t, nil) },
-		},
-		// The two verdict cases carry a MATCHING InitData: refusal must come
-		// from verdict enforcement, not the claims compare, so a refactor
-		// that drops VerifyEvidence's enforcement fails here.
-		{
-			name:     "verifier refuses: signature invalid",
-			platform: "sev-snp",
-			url: func(t *testing.T) string {
-				want := runtimemeasure.HostDataForOperatorKey(pub)
-				stub := testattest.New(t)
-				v := testattest.PassingVerdict("")
-				v.SignatureValid = false
-				v.Claims.InitData = want[:]
-				stub.SetVerdict(v)
-				return stub.URL
-			},
-		},
-		{
-			name:     "verifier refuses: REPORTDATA not bound",
-			platform: "sev-snp",
-			url: func(t *testing.T) string {
-				want := runtimemeasure.HostDataForOperatorKey(pub)
-				stub := testattest.New(t)
-				v := testattest.PassingVerdict("")
-				v.ReportDataMatch = nil
-				v.Claims.InitData = want[:]
-				stub.SetVerdict(v)
-				return stub.URL
-			},
-		},
-		{
-			name:     "attestation-api unreachable",
-			platform: "sev-snp",
-			url:      func(t *testing.T) string { return "http://127.0.0.1:1" },
-		},
-		{
-			name:     "unknown platform has no binding check",
-			platform: "no-such-platform",
-			url:      func(t *testing.T) string { return "" },
-		},
-	}
-	for _, tc := range tests {
+		{"no staged pubkey", nil, teetypes.PlatformTDX, tdxBinding(operatorPub)},
+		{"empty staged pubkey", []byte{}, teetypes.PlatformTDX, tdxBinding(operatorPub)},
+		{"tdx: register holds another key's seed", operatorPub, teetypes.PlatformTDX, tdxBinding(otherKey)},
+		{"tdx: keyless launch leaves the register zero", operatorPub, teetypes.PlatformTDX, zeroTDX},
+		{"snp: HOSTDATA holds another key", operatorPub, teetypes.PlatformSNP, snpBinding(otherKey)},
+		{"snp: keyless launch leaves HOSTDATA zero", operatorPub, teetypes.PlatformSNP, zeroSNP},
+		// A TDX-width value in the SNP claim is MRCONFIGID, not HOSTDATA. It
+		// must be refused by width, never truncated into a match.
+		{"snp claim carrying a 48-byte value", operatorPub, teetypes.PlatformSNP, tdxBinding(operatorPub)},
+		{"tdx claim carrying a 32-byte value", operatorPub, teetypes.PlatformTDX, snpBinding(operatorPub)},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pubPath, _ := overrideBindingPaths(t)
-			writeFileT(t, pubPath, pub)
-			if _, err := LoadMeasuredOperatorKey(context.Background(), tc.platform, tc.url(t)); err == nil {
-				t.Fatal("expected error, got nil")
+			stageOperatorPubkey(t, tc.staged)
+			url := attester(t, tc.platform, tc.binding)
+			if _, err := LoadMeasuredOperatorKey(context.Background(), url); err == nil {
+				t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
 			}
 		})
+	}
+}
+
+// An unreachable attestation-api is a refusal, not a fallback to the local
+// register: the binding must come from a report whose signature was checked.
+func TestLoadMeasuredOperatorKeyRefusesUnreachableAttester(t *testing.T) {
+	stageOperatorPubkey(t, operatorPub)
+	if _, err := LoadMeasuredOperatorKey(context.Background(), "http://127.0.0.1:1"); err == nil {
+		t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
+	}
+}
+
+// A platform this build has no binding rules for gets no key.
+func TestLoadMeasuredOperatorKeyRefusesUnknownPlatform(t *testing.T) {
+	stageOperatorPubkey(t, operatorPub)
+	url := attester(t, "nonsense", tdxBinding(operatorPub))
+	if _, err := LoadMeasuredOperatorKey(context.Background(), url); err == nil {
+		t.Fatal("LoadMeasuredOperatorKey = nil error, want a refusal")
+	}
+}
+
+// The self-report must be non-replayable: the code asks the verifier to bind a
+// fresh nonce, and a stub reporting success without one would pass a replay.
+func TestSelfReportBindsAFreshNonce(t *testing.T) {
+	stageOperatorPubkey(t, operatorPub)
+	stub := testattest.New(t)
+	stub.SetPlatform(types.Platform(teetypes.PlatformSNP))
+	v := testattest.PassingVerdict("")
+	v.Claims.InitData = snpBinding(operatorPub)
+	stub.SetVerdict(v)
+
+	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL); err != nil {
+		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
+	}
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("verify requests = %d, want 1", len(reqs))
+	}
+	sent := reqs[0].Params.ExpectedReportData
+	if sent == nil || len(sent.Bytes()) == 0 {
+		t.Fatal("no expected report data sent; a self-report with no nonce is replayable")
+	}
+	var zero [64]byte
+	if string(sent.Bytes()) == string(zero[:len(sent.Bytes())]) {
+		t.Fatal("expected report data is all zero, so it is not a fresh nonce")
 	}
 }

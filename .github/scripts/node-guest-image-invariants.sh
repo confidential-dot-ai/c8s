@@ -4,6 +4,8 @@
 #
 # Inputs (env):
 #   CONFOS_REF   pinned confos ref the workflow resolved; names the pass line.
+#   EXPECT_IMMUTABLE_ROOT  1 once CONFOS_REF carries confos's immutable root
+#                (state.d in its initrd); makes its absence an error.
 
 set -euo pipefail
 
@@ -34,6 +36,27 @@ for src in "$ngi/kernel/c8s.config" confos/kernel/dev.config; do
     exit 1
   fi
 done
+
+# CONFIG_MODULES=y is a c8s-only widening (the base kernel compiles modules
+# out, which is why confos's 99-kspp-hardening.conf omits the key). The
+# profile must therefore latch kernel.modules_disabled itself: the gpu
+# profile's latch is absent from the GPU-less composition.
+latch="$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-modules-latch.service"
+preset="$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset"
+if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
+  if ! grep -qF 'kernel.modules_disabled=1' "$latch"; then
+    echo "::error::$ngi/kernel/c8s.config sets CONFIG_MODULES=y, so $latch must set kernel.modules_disabled=1"
+    exit 1
+  fi
+  if ! grep -qx 'enable c8s-modules-latch.service' "$preset"; then
+    echo "::error::$preset must enable c8s-modules-latch.service; an unenabled latch never runs"
+    exit 1
+  fi
+  if ! grep -qx 'RequiredBy=rke2-server.service rke2-agent.service' "$latch"; then
+    echo "::error::$latch must be RequiredBy the rke2 pair so rke2 cannot start with modules still loadable"
+    exit 1
+  fi
+fi
 
 # The baked NRI floor is a template whose always_allow entries are
 # @-tokens the sync fills with ref-resolved digests; a hardcoded
@@ -111,6 +134,77 @@ done
 if ! grep -qF '"$SCRATCH_DEV" scratch' confos/mkosi/initrd/mkosi.extra/init; then
   echo "::error::confos initrd no longer opens the scratch disk as dm 'scratch'; scratch-enforce.sh gates on that name — update both together"
   exit 1
+fi
+
+# confos's root is immutable; the profile declares the directories it
+# writes at runtime in usr/lib/confai/state.d, one path per line, read the
+# way the confos initrd reads them (whole line = one path, CR stripped,
+# leading slash tolerated). Each must exist in the built image or the
+# initrd refuses to boot: accepted if baked under mkosi.extra or created
+# under mkosi.sync's stage tree.
+state_confs=$(ls "$ngi"/c8s/mkosi.extra/usr/lib/confai/state.d/*.conf 2>/dev/null || true)
+if [ -z "$state_confs" ]; then
+  echo "::error::no state.d/*.conf under $ngi/c8s/mkosi.extra/usr/lib/confai — the immutable root needs the profile's writable dirs declared"
+  exit 1
+fi
+state_dirs=""
+while read -r d || [ -n "$d" ]; do
+  d="${d%$'\r'}"; d="${d#/}"
+  case "$d" in "" | \#*) continue ;; esac
+  if [ ! -d "$ngi/c8s/mkosi.extra/$d" ] && ! grep -qE "\"\\\$STAGE_DIR/$d(/|\")" "$ngi/c8s/mkosi.sync"; then
+    echo "::error::state.d declares '$d', which is neither baked under $ngi/c8s/mkosi.extra nor created under mkosi.sync's \$STAGE_DIR; the confos initrd refuses to boot an image whose state.d names a missing dir"
+    exit 1
+  fi
+  state_dirs="$state_dirs $d"
+done < <(cat $state_confs)
+
+# Every runtime write outside confos's own state dirs must sit under a
+# declared entry or it surfaces as EROFS mid-boot. Writers are gathered
+# mechanically: absolute /etc|/opt|/usr|/srv|/boot literals on write lines
+# in the profile's scripts (and the tests' FRAG* mirrors), tmpfiles.d
+# create/write entries, and hostPath / local-path "paths" in the baked
+# manifests. Reads that share a line with a write verb can trip this; that
+# is the cheap side to err on.
+covered() {
+  case "$1" in /var|/var/*|/home|/home/*|/root|/root/*|/tmp|/tmp/*|/run|/run/*) return 0 ;; esac
+  for d in $state_dirs; do case "$1" in "/$d"|"/$d"/*) return 0 ;; esac; done
+  return 1
+}
+writes=$( {
+  grep -hE '(>|tee |mkdir |install |cp |mv |touch |rm |^FRAG[A-Z]*=)' \
+       "$ngi"/c8s/mkosi.extra/usr/local/bin/*.sh "$ngi"/tests/lib.sh \
+    | grep -vE '^[[:space:]]*#' | grep -oE '/(etc|opt|usr|srv|boot)/[A-Za-z0-9_./-]+' || true
+  grep -hE '^[dDfFwLpc]\+? ' "$ngi"/c8s/mkosi.extra/etc/tmpfiles.d/*.conf \
+    | awk '{print $2}' | grep -E '^/(etc|opt|usr|srv|boot)/' || true
+  grep -hoE '(path: *|"paths":\[")/(etc|opt|usr|srv|boot)/[A-Za-z0-9_./-]+' \
+       "$ngi"/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/*.yaml \
+    | grep -oE '/(etc|opt|usr|srv|boot)/.*' || true
+} | sort -u )
+for w in $writes; do
+  if ! covered "$w"; then
+    echo "::error::$w is written at runtime (scripts / tmpfiles.d / baked manifests) but no state.d entry ($state_dirs) makes it writable under the immutable root"
+    exit 1
+  fi
+done
+
+# confos side. The parser this lint mirrors is pinned like the dm name
+# above. Until CONFOS_REF carries the immutable root the declaration is
+# inert (warning only); the bump PR sets EXPECT_IMMUTABLE_ROOT=1 in
+# node-guest-image-lint.yml so a later confos drop of state.d fails here
+# instead of reading as "older confos".
+init=confos/mkosi/initrd/mkosi.extra/init
+if grep -qF '/usr/lib/confai/state.d' "$init"; then
+  for pin in '[ -d "/sysroot/$dir" ]' 'while read -r dir || [ -n "$dir" ]'; do
+    if ! grep -qF "$pin" "$init"; then
+      echo "::error::confos initrd changed how it reads state.d (missing: $pin); update this lint's parser to match, then re-pin"
+      exit 1
+    fi
+  done
+elif [ "${EXPECT_IMMUTABLE_ROOT:-0}" = 1 ]; then
+  echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
+  exit 1
+else
+  echo "::warning::confos at CONFOS_REF $CONFOS_REF predates the immutable root (no state.d in its initrd): the state.d declaration is inert until the ref is bumped — then set EXPECT_IMMUTABLE_ROOT=1 in node-guest-image-lint.yml"
 fi
 
 # The scratch floor is prose in the README and a sector count in the gate;

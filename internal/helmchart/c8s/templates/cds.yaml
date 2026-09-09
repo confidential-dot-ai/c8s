@@ -70,8 +70,8 @@ metadata:
   annotations:
     confidential.ai/trust-root-mode: "inMemory"
 spec:
-  {{/* Fixed at 1: EAR signing keys are per pod, so a second Ready endpoint
-       breaks EAR verification. */}}
+  {{/* Fixed at 1: mesh CA keys are per pod, so a second Ready endpoint
+       would issue leaves from a different trust root. */}}
   replicas: 1
   # Recreate: two pods would mint divergent roots and can't co-mount the RWO
   # data PVC. Dependents ride out the gap via get-cert retry.
@@ -97,8 +97,8 @@ spec:
         {{- end }}
     spec:
       {{- if .Values.kata.enabled }}
-      # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
-      # keys live only in SEV-SNP-encrypted guest memory, and peers verify cds's
+      # Run the trust root inside a confidential VM. Its mesh CA
+      # key lives only in SEV-SNP-encrypted guest memory, and peers verify cds's
       # RA-TLS serving cert against the guest launch measurement. Pinned directly
       # (not via the confidential.ai/cw webhook path) because get-cert would dial
       # cds — cds fetching a leaf from itself is a bootstrap cycle. See
@@ -148,17 +148,12 @@ spec:
             {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
             {{- end }}
-            - --ear-issuer={{ .Values.cds.earIssuer }}
-            {{- if .Values.cds.expectedIssuer }}
-            - --expected-issuer={{ .Values.cds.expectedIssuer }}
-            {{- end }}
             - --jwt-clock-skew={{ .Values.cds.jwtClockSkew }}
             - --ca-common-name={{ .Values.cds.ca.commonName }}
             - --ca-cert-validity={{ .Values.cds.ca.certValidity }}
             - --min-ca-validity={{ .Values.cds.ca.minValidity }}
             - --cert-ttl={{ .Values.cds.certTTL }}
             - --named-cert-ttl={{ .Values.cds.namedCertTTL }}
-            - --max-ttl={{ .Values.cds.maxTTL }}
             - --challenge-ttl={{ .Values.cds.challengeTTL }}
             - --request-timeout={{ .Values.cds.requestTimeout }}
             - --max-request-size={{ .Values.cds.maxRequestSize }}
@@ -192,9 +187,6 @@ spec:
             {{- if .Values.cds.operatorKeys }}
             - --operator-keys=/etc/cds-operator-keys/keys.pem
             {{- end }}
-            - --token-signer-rotation-interval={{ .Values.cds.tokenSignerRotationInterval }}
-            - --token-signer-overlap={{ .Values.cds.tokenSignerOverlap }}
-            - --token-signer-rotation-jitter={{ .Values.cds.tokenSignerRotationJitter }}
             - --rate-limit={{ .Values.cds.rateLimit }}
             - --rate-burst={{ .Values.cds.rateBurst }}
             - --rate-limiter-max-entries={{ .Values.cds.rateLimiterMaxEntries }}

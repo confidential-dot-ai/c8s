@@ -21,7 +21,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -117,7 +116,7 @@ func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 
 func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
-		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 
 	// The containerd RPC blocks until the dial deadline; bound it so the
@@ -135,7 +134,7 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 
 func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
-		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 	p.inventory = newAdmissionInventory(t.TempDir())
 
@@ -471,7 +470,7 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 
 	start := time.Now()
 	_, err := pullInitial(context.Background(), pullArgs{
@@ -494,7 +493,7 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 
 func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 	t.Setenv("NRI_PLUGIN_NAME", "")
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 	for _, tc := range []struct {
 		name         string
 		socketDir    string
@@ -533,7 +532,7 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
-	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 	var buf bytes.Buffer
 	p.logger = slog.New(slog.NewJSONHandler(&buf, nil))

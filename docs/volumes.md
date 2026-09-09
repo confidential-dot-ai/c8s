@@ -421,9 +421,9 @@ of scope by decision, not by oversight.
   only comes from CDS, and only to a pod the grant covers. For a mutable
   volume, opening means writing too.
 - **Anyone with pod create or exec RBAC in the workload's namespace can read a
-  mounted volume.** Under `--cvm-mode=node` the control plane runs inside the
-  node CVM, so this is not a capability the host has — but it is a Kubernetes
-  RBAC boundary, not an attested one.
+  mounted volume.** This is a Kubernetes RBAC boundary, not an attested one —
+  the API server decides who holds it, and the control plane is untrusted in
+  every shape.
 - **Volume integrity is rooted in the operator keys CDS pins**, and CDS's
   arguments are host-supplied. A host that restarts CDS under its own operator
   key can write a matching grant and blob. This is detection rather than

@@ -18,26 +18,25 @@ const (
 	wlDigestC = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 )
 
-// fakeStore is an allowlistGate over a floor set and named workload entries.
+// fakeStore is an allowlistGate over named workload entries plus a set of
+// digests each admitted by its own any-argv entry (the shape the chart seeds
+// for a platform image).
 type fakeStore struct {
-	floor     map[string]bool
+	anyArgv   map[string]bool
 	workloads map[string]pkgallowlist.Workload
 }
 
-// floorStore admits the given digests as floor entries (no combination policy).
-func floorStore(digests ...string) fakeStore {
+// anyArgvStore admits the given digests under any argv, one entry each.
+func anyArgvStore(digests ...string) fakeStore {
 	f := make(map[string]bool, len(digests))
 	for _, d := range digests {
 		f[d] = true
 	}
-	return fakeStore{floor: f}
+	return fakeStore{anyArgv: f}
 }
 
 func (s fakeStore) Contains(d types.Digest) (bool, error) {
-	if s.floor[d.String()] {
-		return true, nil
-	}
-	for _, w := range s.workloads {
+	for _, w := range s.allWorkloads() {
 		for _, cd := range w.Digests() {
 			if cd.String() == d.String() {
 				return true, nil
@@ -48,11 +47,28 @@ func (s fakeStore) Contains(d types.Digest) (bool, error) {
 }
 
 func (s fakeStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
-	digs := map[string]string{}
-	for d := range s.floor {
-		digs[d] = ""
+	return &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: s.allWorkloads()}, "1", nil
+}
+
+// allWorkloads is the named entries plus one "any-<hex12>" entry per anyArgv
+// digest.
+func (s fakeStore) allWorkloads() map[string]pkgallowlist.Workload {
+	out := make(map[string]pkgallowlist.Workload, len(s.workloads)+len(s.anyArgv))
+	for name, w := range s.workloads {
+		out[name] = w
 	}
-	return &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: digs, Workloads: s.workloads}, "1", nil
+	for d := range s.anyArgv {
+		digest, err := types.ParseDigest(d)
+		if err != nil {
+			panic(err)
+		}
+		out["any-"+digest.Hex()[:12]] = pkgallowlist.Workload{Containers: []pkgallowlist.Container{{
+			Digest:  digest,
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+		}}}
+	}
+	return out
 }
 
 func wlDigest(t *testing.T, s string) types.Digest {
@@ -78,13 +94,13 @@ func workloadEntry(t *testing.T, initDigests, mainDigests []string) pkgallowlist
 	return w
 }
 
-// A sandbox running only allowlisted floor images is issued a leaf. The
+// A sandbox running only images admitted under any argv is issued a leaf. The
 // requester sent no image list: everything checked here came from the inventory
 // the token named.
 func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
-	h.AllowlistStore = floorStore(wlDigestA, wlDigestB)
+	h.AllowlistStore = anyArgvStore(wlDigestA, wlDigestB)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
@@ -101,7 +117,7 @@ func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
 func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
@@ -117,7 +133,7 @@ func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
 func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}, key: signer.PublicKey()} // knows no sandbox
 
 	csrPEM, _ := generateCSR(t)
@@ -136,7 +152,7 @@ func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
@@ -179,7 +195,7 @@ func TestAttest_SandboxWorkload_RejectsWhenGateUnwired(t *testing.T) {
 // reaped (the running set never equals init+main again).
 func TestAttest_SandboxWorkload_PartialLifecycleStatesIssue(t *testing.T) {
 	store := fakeStore{
-		floor: map[string]bool{wlDigestC: true}, // the injected c8s-cert sidecar
+		anyArgv: map[string]bool{wlDigestC: true}, // the injected c8s-cert sidecar
 		workloads: map[string]pkgallowlist.Workload{
 			"api": workloadEntry(t, []string{wlDigestA}, []string{wlDigestB}),
 		},
@@ -215,7 +231,7 @@ func TestAttest_SandboxWorkload_PartialLifecycleStatesIssue(t *testing.T) {
 // admits still blocks issuance, in every lifecycle state.
 func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 	store := fakeStore{
-		floor:     map[string]bool{wlDigestC: true},
+		anyArgv:   map[string]bool{wlDigestC: true},
 		workloads: map[string]pkgallowlist.Workload{"api": workloadEntry(t, []string{wlDigestA}, nil)},
 	}
 	stub := newStubAttestationApi(t, "deadbeef")
@@ -236,7 +252,7 @@ func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 func TestAttest_SandboxWorkload_NoTokenSkipsGate(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, _ := newSandboxTestEnv(t, stub.URL)
-	h.AllowlistStore = floorStore() // admits nothing
+	h.AllowlistStore = anyArgvStore() // admits nothing
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}}
 
 	csrPEM, _ := generateCSR(t)
@@ -255,7 +271,7 @@ func TestAttest_SandboxWorkload_UnpinnedMeasurementsStillIssue(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.Measurements = nil // dev: --measurements empty
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
@@ -280,7 +296,7 @@ func TestAttest_SandboxWorkload_UnpinnedStillEnforcesAllowlist(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.Measurements = nil
-	h.AllowlistStore = floorStore(wlDigestA)
+	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)

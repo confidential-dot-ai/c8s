@@ -214,7 +214,7 @@ func TDXPlatform(platform string) bool {
 // verifier reported. A pinned register the evidence does not carry is a
 // refusal, not a pass: that is what an SNP quote (or a verifier that stopped
 // reporting them) looks like, and neither says the guest is the expected one.
-// Exported for issuance gates (CDS /attest, /attest-key) that verify evidence
+// Exported for issuance gates (CDS /attest) that verify evidence
 // via [Client.VerifyEnforced] rather than [Client.VerifyEvidence]; such
 // callers gate on [TDXPlatform] first, since RTMRs exist only there.
 func EnforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
@@ -295,7 +295,7 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 }
 
 // verifyRequest builds the /verify request: expected REPORTDATA bound, token
-// issuance off (c8s callers mint their own EAR after verifying).
+// issuance off (c8s callers consume the verified result directly).
 func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowDebug bool, minTcb *types.MinTcb) types.VerifyRequest {
 	expected := types.NewBase64Bytes(reportData)
 	return types.NewVerifyRequest(evidence, &types.VerifyParams{

@@ -27,8 +27,6 @@
         "challengeTTL": {},
         "cnPattern": {},
         "dnsSanPatterns": {},
-        "earIssuer": {},
-        "expectedIssuer": {},
         "image": {
           "type": [
             "object",
@@ -45,7 +43,6 @@
         "jwtClockSkew": {},
         "logLevel": {},
         "maxRequestSize": {},
-        "maxTTL": {},
         "measurements": {},
         "measurementsConfig": {
           "type": "string"
@@ -126,10 +123,7 @@
               ]
             }
           }
-        },
-        "tokenSignerOverlap": {},
-        "tokenSignerRotationInterval": {},
-        "tokenSignerRotationJitter": {}
+        }
       }
     },
     "nriImagePolicy": {
@@ -148,7 +142,6 @@
           "additionalProperties": false,
           "properties": {
             "deriveComponents": {},
-            "digests": {},
             "workloads": {}
           }
         },

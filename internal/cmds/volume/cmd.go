@@ -1,7 +1,6 @@
 package volume
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // options holds the flags every subcommand shares.
@@ -84,16 +84,11 @@ func putBlob(ctx context.Context, hc *http.Client, baseURL, path string, blob Bl
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, baseURL+"/secrets"+path, bytes.NewReader(body))
+	req, err := operatorauth.NewRequest(ctx, http.MethodPut, baseURL+"/secrets"+path, body, auth)
 	if err != nil {
 		return err
 	}
-	authz, err := auth.Authorization(http.MethodPut, req.URL.Path, body)
-	if err != nil {
-		return fmt.Errorf("authorize request: %w", err)
-	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authz)
 
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -115,6 +110,4 @@ func putBlob(ctx context.Context, hc *http.Client, baseURL, path string, blob Bl
 
 // authorizer mints the operator Authorization header for one write, bound to
 // its method, path, and body. Implemented by operatorauth.Signer.
-type authorizer interface {
-	Authorization(method, path string, body []byte) (string, error)
-}
+type authorizer = operatorauth.Authorizer

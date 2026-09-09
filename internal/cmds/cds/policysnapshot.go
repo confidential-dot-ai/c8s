@@ -19,8 +19,8 @@ type PolicySnapshot struct {
 	Canonical []byte
 	Digest    []byte // SHA-256 of Canonical, 32 bytes
 
-	// members indexes every admitted digest — floor entries plus each
-	// workload's init and main containers — for the membership gate.
+	// members indexes every admitted digest — each workload's init and main
+	// containers — for the membership gate.
 	members map[string]struct{}
 }
 
@@ -48,10 +48,7 @@ func NewPolicySnapshot(al *pkgallowlist.Allowlist, version string) (*PolicySnaps
 	if err != nil {
 		return nil, fmt.Errorf("policy snapshot: digest allowlist: %w", err)
 	}
-	members := make(map[string]struct{}, len(al.Digests))
-	for d := range al.Digests {
-		members[d] = struct{}{}
-	}
+	members := make(map[string]struct{}, len(al.Workloads))
 	for _, w := range al.Workloads {
 		for _, d := range w.Digests() {
 			members[d.String()] = struct{}{}
@@ -128,10 +125,9 @@ func (c *policySnapshotCache) snapshot(store policyStore) (*PolicySnapshot, erro
 	return snapshot, nil
 }
 
-// Contains reports whether a canonical digest string is admitted: present in
-// the floor or as any workload container — the same question
-// internal/allowlist.Store.Contains answers, but against this snapshot rather
-// than a separate store read.
+// Contains reports whether a canonical digest string is admitted as any
+// workload container — the same question internal/allowlist.Store.Contains
+// answers, but against this snapshot rather than a separate store read.
 func (s *PolicySnapshot) Contains(digest string) bool {
 	_, ok := s.members[digest]
 	return ok

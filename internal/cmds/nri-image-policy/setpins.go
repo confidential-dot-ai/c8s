@@ -8,13 +8,13 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -208,23 +208,7 @@ func writeFileAtomic(path string, data []byte) error {
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := fileutil.WriteAtomic(path, data, mode); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
