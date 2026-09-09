@@ -12,15 +12,22 @@ cat > "$confos/target/release/confos" <<'STUB'
 set -euo pipefail
 [[ "$1" == kernel && "$2" == --kernel-config-fragment && -f "$3" ]]
 [[ "${RESULT:-}" != failure ]] || exit 17
+[[ "${RESULT:-}" != cache-hit ]] || exit 0
 mkdir -p output/kernel kernel
 [[ "${RESULT:-}" == no-kernel ]] || printf 'kernel\n' > output/kernel/vmlinuz
-[[ "${RESULT:-}" == no-snapshot ]] || printf '%s\n' "$RESOLVED" > kernel/config-x86_64.snapshot
+[[ "${RESULT:-}" == no-snapshot ]] || printf '%s\n' "$RESOLVED" > "$(dirname "$3")/config-x86_64-container.snapshot"
 STUB
 chmod +x "$confos/target/release/confos"
 
 run_case() {
   local mode=$1 resolved=$2 check=$3 expected=$4
-  rm -rf "$confos/output" "$confos/kernel" "$guest/output"
+  if [[ "$mode" != cache-hit ]]; then
+    rm -rf "$confos/output" "$guest/output"
+    rm -f "$guest/kernel/config-x86_64-container.snapshot"
+  fi
+  # A real confos checkout retains this unrelated bare-kernel baseline.
+  mkdir -p "$confos/kernel"
+  printf 'bare baseline\n' > "$confos/kernel/config-x86_64.snapshot"
   printf 'committed\n' > "$guest/kernel/config-x86_64.snapshot"
   local status=0
   RESULT="$mode" RESOLVED="$resolved" CHECK_SNAPSHOT="$check" \
@@ -34,8 +41,14 @@ run_case() {
 
 run_case normal committed 1 success
 cmp "$confos/output/kernel/vmlinuz" "$guest/output/vmlinuz"
-[[ $(stat -c %a "$guest/output/vmlinuz") == 644 ]]
+mode=$(stat -c %a "$guest/output/vmlinuz" 2>/dev/null || stat -f %Lp "$guest/output/vmlinuz")
+[[ "$mode" == 644 ]]
+[[ $(cat "$confos/kernel/config-x86_64.snapshot") == 'bare baseline' ]]
+run_case cache-hit ignored 1 success
 run_case normal changed 0 success
+[[ $(cat "$guest/kernel/config-x86_64.snapshot") == changed ]]
+run_case cache-hit ignored 1 failure
+grep -q 'resolved kernel config drifted' "$scratch/log"
 [[ $(cat "$guest/kernel/config-x86_64.snapshot") == changed ]]
 run_case normal changed 1 failure
 grep -q 'resolved kernel config drifted' "$scratch/log"
@@ -76,6 +89,11 @@ touch "$scratch/confidential-os-builder/output/kernel/vmlinuz"
 run_step 'Check guest kernel output'
 grep -qx complete=false "$GITHUB_OUTPUT"
 touch "$scratch/confidential-os-builder/output/kernel/manifest.json"
+: > "$GITHUB_OUTPUT"
+run_step 'Check guest kernel output'
+grep -qx complete=false "$GITHUB_OUTPUT"
+mkdir -p "$scratch/c8s/kata-guest-base/kernel"
+touch "$scratch/c8s/kata-guest-base/kernel/config-x86_64-container.snapshot"
 : > "$GITHUB_OUTPUT"
 run_step 'Check guest kernel output'
 grep -qx complete=true "$GITHUB_OUTPUT"
