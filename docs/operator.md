@@ -85,10 +85,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
-- CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one
-  process; EAR validation and signing share that process, so there is no
-  internal Service hop or JWKS fetch between them.
-- allowlist admin is EAR-authorized through CDS; the chart does not render a
+- CDS verifies evidence and signs workload CSRs in one process.
+- allowlist admin uses operator-signed JWTs through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
 - Sandbox identity needs the node addresses CDS may dial for a pod's admission
@@ -256,11 +254,10 @@ which binds the token to the actual HTTP method, parsed URL path (including
 any base URL prefix), and an owned copy of the body.
 
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
-those flows comes from EAR validation, measurement allowlists, and CA
-continuity checks rather than WebPKI on the Service hop.
+those flows comes from authenticated certificate issuance and CA continuity
+checks.
 
-CDS verifies EAR JWTs against its own in-process signer; there is no JWKS
-fetch to a separate component. The chart does not render a CA private key into
+The chart does not render a CA private key into
 a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
 public-bundle PVC.

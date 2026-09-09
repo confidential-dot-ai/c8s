@@ -1,5 +1,5 @@
 // Package cds implements the Certificate Distribution Service subcommand:
-// the c8s trust root (attestation, EAR issuance, mesh CA, leaf signing).
+// the c8s trust root (attestation, mesh CA, leaf signing).
 package cds
 
 import (
@@ -49,7 +49,6 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image may call /attest; the same file pins CDS itself for the components that dial it, so any listed image may serve as CDS. Cannot be combined with --measurements or --rtmrs")
 	flags.StringSliceVar(&cfg.rtmrs, "rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> required of TDX callers on /attest (repeatable; RTMR[1] pins the guest kernel, RTMR[2] the command line carrying the dm-verity root hash). SNP evidence is unaffected. Empty = no RTMR pinning: on TDX the reference values then cover TDVF firmware only, UNSAFE")
 
-	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
 	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "operator JWT clock skew tolerance in seconds")
 	flags.DurationVar(&cfg.certTTL, "cert-ttl", 24*time.Hour, "")
 	flags.DurationVar(&cfg.namedCertTTL, "named-cert-ttl", issuer.MaxNamedLeafTTL, "upper bound on the TTL of a leaf carrying a matched-workload stamp — the documented stale-identity bound for a named leaf (never applied to membership-only leaves). Must be positive and may only shorten the built-in ceiling, never raise it")
@@ -83,10 +82,6 @@ func NewCmd() *cobra.Command {
 	flags.IntVar(&cfg.secretsMaxPathsPerWorkload, "secrets-max-paths-per-workload", secrets.DefaultMaxPathsPerHolder, "max secret paths one allowlist entry may hold")
 	flags.IntVar(&cfg.secretsMaxValueBytes, "secrets-max-value-bytes", 4096, "max bytes in one secret value")
 	flags.IntVar(&cfg.sandboxLedgerMax, "sandbox-ledger-max-entries", 10000, "max sandbox-to-inventory bindings held in memory")
-
-	flags.DurationVar(&cfg.rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "EAR signing key rotation interval (0 disables)")
-	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
-	flags.Float64Var(&cfg.rotationJitter, "token-signer-rotation-jitter", 0.1, "")
 
 	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "", "TEE platform for the RA-TLS serving cert (REQUIRED): sev-snp or tdx (snp/az-snp/gcp-snp and az-tdx/gcp-tdx aliases are normalized)")
 	flags.DurationVar(&cfg.ratlsCertTTL, "ratls-cert-ttl", 24*time.Hour, "")
@@ -123,7 +118,6 @@ type config struct {
 	measurements        []string
 	measurementsConfig  string
 	rtmrs               []string
-	earIssuerName       string
 	jwtClockSkew        int64
 	certTTL             time.Duration
 	namedCertTTL        time.Duration
@@ -145,9 +139,6 @@ type config struct {
 	allowlistSeed       string
 	inventoryCIDRs      []string
 	operatorKeys        string
-	rotationInterval    time.Duration
-	rotationOverlap     time.Duration
-	rotationJitter      float64
 	ratlsPlatform       string
 	ratlsCertTTL        time.Duration
 

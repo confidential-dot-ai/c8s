@@ -1032,7 +1032,7 @@ var installCmd = &cobra.Command{
   - the ConfidentialWorkload CRD
   - the mutating admission webhook configuration
   - the attestation-api DaemonSet (per-node /attest + /verify)
-  - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
+  - the CDS trust root (attestation, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, and tls-lb components
 
 Under --cvm-mode=pod the install is ENFORCING: every workload pod runs as a kata VM

@@ -295,7 +295,7 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 }
 
 // verifyRequest builds the /verify request: expected REPORTDATA bound, token
-// issuance off (c8s callers mint their own EAR after verifying).
+// issuance off (c8s callers consume the verified result directly).
 func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowDebug bool, minTcb *types.MinTcb) types.VerifyRequest {
 	expected := types.NewBase64Bytes(reportData)
 	return types.NewVerifyRequest(evidence, &types.VerifyParams{

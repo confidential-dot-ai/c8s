@@ -5285,8 +5285,7 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 }
 
 // TestChartCDSWiresInProcessTrustRoot confirms the flag set: the in-memory CA
-// (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
-// --jwks-url, since signing happens in the same binary).
+// (no Secret/ca-cert flag) and the allowlist DB.
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
 	// gke: host-side attestation-api over the on-node Unix socket. node points
 	// CDS at the baked host attestation-api via HOST_IP (covered separately),

@@ -8,7 +8,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/server"
@@ -19,8 +18,6 @@ type dependencies struct {
 	AttestHandler     AttestHandler
 	AllowlistHandler  allowlist.Handler
 	ReadyFn           attestation.ReadinessFunc
-	EarIssuer         ear.Issuer
-	JWKSFunc          func() []byte
 	CACertPEM         []byte
 	OperatorKeysPEM   []byte                // pinned operator public keys; empty = /operator-keys 404s
 	MeasurementsDoc   []byte                // reference values being enforced, as served at /measurements
@@ -53,7 +50,6 @@ func newRouter(deps dependencies) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	r.Get("/readyz", attestation.HandleReadyz(deps.ReadyFn))
-	r.Get("/.well-known/jwks.json", server.HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
 	r.Method(http.MethodPost, "/authenticate", deps.challengeProtected(attestation.HandleAuthenticate(deps.AttestHandler.Challenges)))

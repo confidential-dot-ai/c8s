@@ -182,12 +182,12 @@ func TestAttest_SandboxToken_RejectsWrongRequesterKey(t *testing.T) {
 	}
 }
 
-// A token whose EAR the CDS cannot validate (unknown signer) must be
-// rejected: provenance from a CDS-attested inventory key is the whole point.
+// A token signed by a key other than the inventory key CDS resolves must be
+// rejected: the token must come from the attested inventory.
 func TestAttest_SandboxToken_RejectsForeignInventoryEAR(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, _ := newSandboxTestEnv(t, stub.URL)
-	// A second env with its own EAR issuer the handler does not trust.
+	// A second environment with a signing key the handler does not trust.
 	_, foreignSigner := newSandboxTestEnv(t, stub.URL)
 	csrPEM, _ := generateCSR(t)
 
@@ -271,8 +271,8 @@ func TestAttest_SandboxToken_RejectsStaleNonce(t *testing.T) {
 	}
 }
 
-// A CDS with no EAR key provider cannot verify tokens and must reject a
-// request that carries one rather than stamp it unverified.
+// A CDS without an inventory resolver cannot verify sandbox tokens and must
+// reject a request that carries one rather than stamp it unverified.
 func TestAttest_SandboxToken_RejectsWhenUnverifiable(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL)

@@ -14,24 +14,14 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"golang.org/x/time/rate"
 )
 
 func newStubRouter(t *testing.T) http.Handler {
 	t.Helper()
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
 		t.Fatalf("allowlist: %v", err)
@@ -46,7 +36,6 @@ func newStubRouter(t *testing.T) http.Handler {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -56,8 +45,6 @@ func newStubRouter(t *testing.T) http.Handler {
 }
 
 func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -71,7 +58,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -98,8 +84,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 // the same per-IP limiter as the attestation endpoints: token verification
 // costs ECDSA verifies before any authentication.
 func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -110,7 +94,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	deps := dependencies{
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -138,8 +121,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 // is authenticated at that point. Its budget is its own, so spending it leaves
 // the /attest that redeems the challenge servable.
 func TestRouter_RateLimitsAuthenticate(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -161,7 +142,6 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: challengeRL,
@@ -223,7 +203,7 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}{
 		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/readyz", http.StatusOK},
-		{http.MethodGet, "/.well-known/jwks.json", http.StatusOK},
+		{http.MethodGet, "/.well-known/jwks.json", http.StatusNotFound},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/ca", http.StatusOK},
 		{http.MethodGet, "/allowlist", http.StatusOK},
@@ -258,8 +238,6 @@ func TestRouter_AttestKeyRemoved(t *testing.T) {
 }
 
 func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -268,7 +246,6 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),

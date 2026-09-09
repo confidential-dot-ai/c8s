@@ -127,7 +127,7 @@ func NewVerifyRequest(evidence AttestationEvidence, params *VerifyParams, issueT
 
 // VerifyReportData builds a VerifyRequest that checks the evidence binds
 // expectedReportData and explicitly does not ask the attestation-api to
-// issue a token. c8s callers mint their own EAR after verifying, so token
+// issue a token. c8s callers consume the verified result directly, so token
 // issuance is always off; setting IssueToken here keeps that intent in one
 // place instead of every call site spelling out new(bool).
 func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes) VerifyRequest {
