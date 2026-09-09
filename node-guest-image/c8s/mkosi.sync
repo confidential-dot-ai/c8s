@@ -27,9 +27,8 @@
 #     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml \
 #     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/nvidia-device-plugin.yaml \
 #     -exclude-ref busybox
-# (-exclude-ref keeps the local-path helper's busybox out of the digest-only
-# floor: the chart seeds it argv-pinned instead — see c8s.argvPinnedEntries.
-# A busybox floor line would admit any command line on any pod.)
+# -exclude-ref omits busybox from the node's baked always_allow list;
+# the chart supplies its argv-pinned entry through the served allowlist.
 # After a bump, re-verify on first boot that the rendered containerd
 # config.toml has exactly ONE `imports` line — see the baked
 # config-v3.toml.tmpl in this profile's mkosi.extra for why.

@@ -29,15 +29,6 @@ stamped and diffed like the rest, and the same digest may also appear
 elsewhere under a narrower policy — see [union
 semantics](#a-digest-may-run-many-ways).
 
-The exception to that any-argv shape is the platform image whose argv the
-chart itself writes and so can pin: the nri-image-policy installer image (its
-install/pins and uninstall scripts are inline in argv) and the rke2 busybox
-uses (the containerd-prep script, and the node image's local-path helper
-pods). Those run shell interpreters — an any-argv entry for one admits any
-command line on any pod — so the chart seeds them argv-pinned instead
-([bootstrap](#bootstrap)), and the digest-only `always_allow` floors never
-carry them.
-
 ### Document shape
 
 ```json
@@ -301,15 +292,13 @@ up before CDS is reachable.
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
-digests (`c8s.imageAllowlist`), the argv-pinned platform entries
-(`c8s.argvPinnedEntries`), plus any `bootstrapAllowlist.workloads`. Each
-component digest becomes one entry named `<image basename>-<first 12 hex of
-digest>` with a single container under `command: any, args: any`; the
-argv-pinned entries carry the same name shape, and an operator-authored
-`workloads` entry of the same name replaces either whole in the rendered
-seed. Operator entries admitting a digest under any command and args also
-feed the host plugin's `always_allow`; an entry that pins a command line is
-seed-only. The
+digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
+unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
+digest>` with a single container under `command: any, args: any`; an
+operator-authored `workloads` entry of the same name replaces it whole in the
+rendered seed. Operator entries admitting a digest under any command and args
+also feed the host plugin's `always_allow`; an entry that pins a command line
+is seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
 running the old image keep matching while they recycle. The seed never
@@ -319,12 +308,10 @@ for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
 
-Because the argv-pinned entries ride the served document, the first container
-each one admits can lag a fresh node by one pull interval: the node-CVM
-installer (and the first local-path helper pod, on the first PVC) may be
-denied until the plugin's first successful pull and retry under kubelet
-backoff. The local floor cannot hold them instead — `always_allow` is
-digest-only admission, which is the hole the pinning closes.
+Busybox and the NRI installer provide general-purpose shells, so the chart
+admits their configured invocations through argv-pinned entries and excludes
+those digests from the local floors. Their first startup may wait for the
+plugin's first successful policy pull and kubelet retry.
 
 ## CLI
 
