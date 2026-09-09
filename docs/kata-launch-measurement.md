@@ -222,20 +222,21 @@ for kata/QEMU**:
 `launchmeasure/tdx`'s `launchOptions()` pins the correct one, and
 `TestOtherLaunchOptionsAreWrong` fails if upstream ever makes the others
 equivalent. **Risk accepted:** a change to the library's default `LaunchOptions`
-would silently move the pinned measurement. `TestMRTDMatchesHardware` is the
-tripwire — it asserts the hardware-captured digest, so a dependency bump that
-moves the value fails the build rather than shipping a wrong pin.
+would silently move the pinned measurement. `TestMRTDMatchesHardware` in
+attestation-go asserts the hardware-captured digest, and attestation-go's CI
+fetches the validated TDVF so that test cannot skip; a dependency bump that
+moves the value fails there rather than shipping a wrong pin.
 
 ### Re-validating against hardware
 
-The 4 MiB TDVF is not committed. CI's TDX MRTD tripwire job fetches the
-pinned TDVF out of the kata-static release the nodes' kata-deploy installs,
-sha256-checks it against the pin next to its URL in `.github/workflows/ci.yml`,
-and runs the `launchmeasure/tdx` tests with `TDVF_PATH` set, failing if any
-test skips. Elsewhere the hardware check runs only where the firmware exists (a
-TDX node, or `TDVF_PATH=/path/to/OVMF.inteltdx.fd`), skipping if the TDVF is not
-the sha256 the expected digest was captured from. The CLI wiring is covered in
-CI with a synthetic TDVF.
+Two pins, two checks. attestation-go pins the TDVF build its hardware-captured
+MRTD was taken from and proves the predictor reproduces it. c8s pins the kata
+release its nodes boot: CI's TDX MRTD tripwire job (`.github/workflows/ci.yml`)
+fetches the TDVF out of that kata-static release, sha256-checks it against the
+pin next to its URL, runs `c8s kata measure --platform tdx` on it, and fails if
+the result differs from `WANT_MRTD` in the same job. A kata bump that moves the
+MRTD therefore fails in c8s and is fixed by updating the three values together.
+The CLI wiring is covered in CI with a synthetic TDVF.
 
 To re-capture the expected MRTD after a kata-static bump, read it from a live
 pod's own attestation report. The in-guest attestation-service listens on
