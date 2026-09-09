@@ -41,7 +41,7 @@ func ratlsServingCert(t *testing.T, notBefore, notAfter time.Time) tls.Certifica
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: embedded}
-	ext, err := att.MarshalExtension()
+	ext, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

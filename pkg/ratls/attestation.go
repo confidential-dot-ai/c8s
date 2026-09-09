@@ -1,6 +1,10 @@
 package ratls
 
 import (
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
@@ -31,17 +35,32 @@ const (
 	SNPMeasurementSize = runtimemeasure.Size
 )
 
-// OIDRATLSAttestation identifies the RA-TLS attestation extension, under the
-// 1.3.6.1.4.1.66378 arc (our Private Enterprise Number):
+// OID arc: 1.3.6.1.4.1.66378 is our Private Enterprise Number. The library
+// assigns no identifier of its own; the extension format is
+// attestation-go/ratls's, the OID it rides under is ours.
 //
 //	1.3.6.1.4.1.66378.1   - confidential TEE attestation arc
-//	1.3.6.1.4.1.66378.1.1 - RA-TLS attestation extension (attestation-go/ratls)
+//	1.3.6.1.4.1.66378.1.1 - RA-TLS attestation extension
 //	1.3.6.1.4.1.66378.1.2 - attestation-evidence audit digest (certutil)
 //	1.3.6.1.4.1.66378.1.4 - pod sandbox ID extension (sandbox.go)
 //	1.3.6.1.4.1.66378.1.5 - matched workload extension (matchedworkload.go)
 //
 // .1.3 was the RA-TLS config-claims extension; it is retired, not reusable.
-var OIDRATLSAttestation = agratls.OIDRATLSAttestation
+var (
+	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1}
+	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 1}
+)
+
+// MarshalExtension encodes att as the X.509 extension under OIDRATLSAttestation.
+func MarshalExtension(att *Attestation) (pkix.Extension, error) {
+	return att.MarshalExtension(OIDRATLSAttestation)
+}
+
+// ExtractAttestation parses the extension under OIDRATLSAttestation out of a
+// certificate, failing with ErrNoAttestation when there is none.
+func ExtractAttestation(cert *x509.Certificate) (*Attestation, error) {
+	return agratls.ExtractAttestation(cert, OIDRATLSAttestation)
+}
 
 var (
 	// ReportDataForKey computes the REPORTDATA binding a public key (and an
@@ -50,9 +69,6 @@ var (
 
 	// UnmarshalExtension decodes a DER-encoded attestation extension.
 	UnmarshalExtension = agratls.UnmarshalExtension
-
-	// ExtractAttestation parses the RA-TLS extension out of a certificate.
-	ExtractAttestation = agratls.ExtractAttestation
 
 	// NormalizeSEVSNPReport returns the raw AMD report, unwrapping the Hyper-V
 	// HCL envelope an Azure guest's vTPM puts around it.

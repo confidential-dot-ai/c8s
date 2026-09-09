@@ -10,6 +10,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -60,7 +61,7 @@ func (c Client) AttestationExtension(ctx context.Context, attestationApiURL stri
 	if err != nil {
 		return pkix.Extension{}, err
 	}
-	return att.MarshalExtension()
+	return ratls.MarshalExtension(att)
 }
 
 // RATLSEvidence returns the payload to embed in an RA-TLS certificate

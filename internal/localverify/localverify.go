@@ -22,6 +22,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 )
@@ -143,7 +144,7 @@ func enforceResult(res *teetypes.VerificationResult, p Params) error {
 // raw SEV-SNP report is wrapped as {attestation_report, cert_chain.vcek?}, with
 // the VCEK inline when the extension carried one.
 func CertEnvelope(cert *x509.Certificate) (platform string, evidence json.RawMessage, expectedReportData []byte, err error) {
-	att, err := agratls.ExtractAttestation(cert)
+	att, err := ratls.ExtractAttestation(cert)
 	if err != nil {
 		return "", nil, nil, err
 	}

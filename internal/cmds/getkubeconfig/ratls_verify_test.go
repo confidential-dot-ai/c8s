@@ -304,7 +304,7 @@ func mintServingCert(t *testing.T, holder *ecdsa.PublicKey, signer *ecdsa.Privat
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: report}
-	ext, err := att.MarshalExtension()
+	ext, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

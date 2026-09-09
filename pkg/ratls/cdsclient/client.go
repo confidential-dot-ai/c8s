@@ -296,7 +296,7 @@ func (c *Client) attestationExtension(ctx context.Context, key *ecdsa.PrivateKey
 		TEEType: teeType,
 		Report:  []byte(report),
 	}
-	return att.MarshalExtension()
+	return ratls.MarshalExtension(att)
 }
 
 func (cfg *Config) teeType() (ratls.TEEType, error) {

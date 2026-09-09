@@ -22,7 +22,7 @@ import (
 func mintAttestedLeaf(t *testing.T, holder *ecdsa.PublicKey, signer *ecdsa.PrivateKey, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
 	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
-	attExt, err := att.MarshalExtension()
+	attExt, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func testKey(t *testing.T) *ecdsa.PrivateKey {
 func mintForgedIssuerLeaf(t *testing.T, holder *ecdsa.PublicKey, notAfter time.Time) *x509.Certificate {
 	t.Helper()
 	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
-	attExt, err := att.MarshalExtension()
+	attExt, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestMeshCAAuthenticatesCAIssuedCertBody(t *testing.T) {
 	}
 
 	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
-	attExt, err := att.MarshalExtension()
+	attExt, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -69,7 +69,7 @@ func CreateAttestedCert(key *ecdsa.PrivateKey, att *Attestation, opts *CertOptio
 		opts = &CertOptions{}
 	}
 
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		return nil, err
 	}

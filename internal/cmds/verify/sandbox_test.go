@@ -45,7 +45,7 @@ func attestedCert(t *testing.T, sandboxID string) *x509.Certificate {
 func reissueWithSandboxID(t *testing.T, key *ecdsa.PrivateKey, sandboxID string) []byte {
 	t.Helper()
 	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
-	attExt, err := att.MarshalExtension()
+	attExt, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

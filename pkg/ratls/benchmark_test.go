@@ -56,7 +56,7 @@ func BenchmarkMarshalExtension(b *testing.B) {
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		_, _ = att.MarshalExtension()
+		_, _ = MarshalExtension(att)
 	}
 }
 
@@ -67,7 +67,7 @@ func BenchmarkUnmarshalExtension(b *testing.B) {
 		Report:    fakeSNPReport(reportData),
 		CertChain: []byte("fake-cert-chain-data"),
 	}
-	ext, _ := att.MarshalExtension()
+	ext, _ := MarshalExtension(att)
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = UnmarshalExtension(ext.Value)

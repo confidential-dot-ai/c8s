@@ -1069,7 +1069,7 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 	// A CA-signed leaf carrying evidence bound to its own key (the shape the
 	// issuer produces by copying the requester's .1.1 extension).
 	key, att := testKeyAndAttestation(t)
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

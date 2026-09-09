@@ -26,7 +26,7 @@ import (
 func attestedCertWithWindow(t *testing.T, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
 	key, att := testKeyAndAttestation(t)
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
 	// Same attested key, body signed by a different key: a self-issued leaf
 	// whose signature was never anyone's to make.
 	key, att := testKeyAndAttestation(t)
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
