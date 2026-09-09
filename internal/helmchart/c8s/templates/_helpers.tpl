@@ -438,7 +438,6 @@ Caller passes a dict:
   volume          - name of the writable cert volume to mount
   mountPath       - where to mount it (the cert dir)
   renewInterval   - --renew-interval (Go time.Duration string, e.g. "6h", "30m", "1h30m")
-  keyMode         - --key-mode (octal)
   runAsUser/runAsGroup/runAsNonRoot - securityContext (match the consumer so the
                     shared cert volume is readable by it)
   reloadNginx     - "true"/"false": SIGHUP nginx on renewal (tls-lb only)
@@ -459,7 +458,6 @@ Caller passes a dict:
     - --san={{ .san }}
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
-    - --key-mode={{ default "0640" .keyMode }}
     {{- with .caOut }}
     - --ca-out={{ . }}
     {{- end }}

@@ -99,9 +99,8 @@ var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation
 
 // defaultCertFSGroup is the shared group used for the injected EmptyDir
 // when the pod does not already specify an fsGroup. The c8s image runs as
-// the distroless nonroot UID/GID 65532, and get-cert writes tls.key 0640.
+// the distroless nonroot UID/GID 65532, and get-cert creates tls.key 0640 in the setgid certificate volume.
 const defaultCertFSGroup int64 = 65532
-const defaultCertKeyMode = "0640"
 
 // defaultCertRenewInterval must stay strictly below issuer.MaxNamedLeafTTL, the
 // shortest TTL CDS issues: a leaf carrying a matched-workload stamp is capped
@@ -216,9 +215,6 @@ type Config struct {
 	// CertFSGroup is applied to the pod when it does not already specify
 	// fsGroup. A negative value disables fsGroup mutation.
 	CertFSGroup *int64
-
-	// CertKeyMode is passed to get-cert for the generated tls.key.
-	CertKeyMode string
 
 	// CertRenewInterval is passed to the renewal sidecar. Non-positive
 	// values use the default interval.
@@ -1092,7 +1088,6 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		// doing VERIFY_CA against the mesh) reads it directly instead of
 		// splitting the bundle in an entrypoint.
 		"--ca-out=" + certPath(inj.Cert.Dir, inj.Cert.CAFile),
-		"--key-mode=" + cfg.CertKeyMode,
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
@@ -1285,9 +1280,6 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.CertFSGroup == nil {
 		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
-	}
-	if cfg.CertKeyMode == "" {
-		cfg.CertKeyMode = defaultCertKeyMode
 	}
 	if cfg.CertRenewInterval <= 0 {
 		cfg.CertRenewInterval = defaultCertRenewInterval

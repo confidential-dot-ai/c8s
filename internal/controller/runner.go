@@ -71,7 +71,6 @@ type Options struct {
 	WebhookServiceNamespace string
 
 	CertFSGroup         int64
-	CertKeyMode         string
 	CertRenewInterval   time.Duration
 	GetCertRunAsUser    int64
 	GetCertRunAsGroup   int64
@@ -270,7 +269,6 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			CDSMeasurements:       opts.CDSMeasurements,
 			CDSRTMRs:              opts.CDSRTMRs,
 			CertFSGroup:           ptr.To(opts.CertFSGroup),
-			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,
 			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
 			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),

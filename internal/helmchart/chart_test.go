@@ -1880,7 +1880,6 @@ func durationArg(t *testing.T, args []string, prefix string) time.Duration {
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "webhook.certVolume.fsGroup=4242",
-		"--set-string", "webhook.certVolume.keyMode=0440",
 		"--set-string", "webhook.getCert.renewInterval=3h",
 		"--set", "webhook.getCert.runAsUser=0",
 		"--set", "webhook.getCert.runAsGroup=0",
@@ -1898,7 +1897,6 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	for _, want := range []string{
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--cert-fs-group=4242",
-		"--cert-key-mode=0440",
 		"--get-cert-renew-interval=3h",
 		"--get-cert-run-as-user=0",
 		"--get-cert-run-as-group=0",

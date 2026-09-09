@@ -240,14 +240,11 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 
 // appendWebhookInstallArgs emits the webhook cert / get-cert tuning values, each
 // only when its flag was passed (so an unset flag leaves the chart default or an
-// operator's -f to stand). Split out of buildValueArgs because the six clauses
+// operator's -f to stand). Split out of buildValueArgs because the five clauses
 // are a mechanical block, not part of its core flow.
 func appendWebhookInstallArgs(setArgs []string, cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("webhook-cert-fs-group") {
 		setArgs = append(setArgs, "--set", fmt.Sprintf("webhook.certVolume.fsGroup=%d", installCertFSGroup))
-	}
-	if cmd.Flags().Changed("webhook-cert-key-mode") {
-		setArgs = append(setArgs, "--set-string", "webhook.certVolume.keyMode="+installCertKeyMode)
 	}
 	if cmd.Flags().Changed("webhook-get-cert-renew-interval") {
 		setArgs = append(setArgs, "--set-string", "webhook.getCert.renewInterval="+installGetCertRenewInterval.String())

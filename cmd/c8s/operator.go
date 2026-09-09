@@ -70,7 +70,6 @@ by this command.`,
 			WebhookServiceName:      webhookServiceName,
 			WebhookServiceNamespace: webhookServiceNamespace,
 			CertFSGroup:             certFSGroup,
-			CertKeyMode:             certKeyMode,
 			CertRenewInterval:       certRenewInterval,
 			GetCertRunAsUser:        getCertRunAsUser,
 			GetCertRunAsGroup:       getCertRunAsGroup,
@@ -101,7 +100,6 @@ var (
 	webhookServiceNamespace string
 	excludeNamespaces       []string
 	certFSGroup             int64
-	certKeyMode             string
 	certRenewInterval       time.Duration
 	getCertRunAsUser        int64
 	getCertRunAsGroup       int64
@@ -131,7 +129,6 @@ func init() {
 	operatorCmd.Flags().StringVar(&webhookServiceName, "webhook-service-name", "", "webhook Service name (defaults to c8s)")
 	operatorCmd.Flags().StringVar(&webhookServiceNamespace, "webhook-service-namespace", "", "webhook Service namespace (defaults to --leader-election-namespace)")
 	operatorCmd.Flags().Int64Var(&certFSGroup, "cert-fs-group", 65532, "fsGroup applied to injected pods when unset (-1 disables mutation)")
-	operatorCmd.Flags().StringVar(&certKeyMode, "cert-key-mode", "0640", "octal mode for injected tls.key")
 	operatorCmd.Flags().DurationVar(&certRenewInterval, "get-cert-renew-interval", 2*time.Hour, "renewal interval for injected workload certificates")
 	operatorCmd.Flags().Int64Var(&getCertRunAsUser, "get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	operatorCmd.Flags().Int64Var(&getCertRunAsGroup, "get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")

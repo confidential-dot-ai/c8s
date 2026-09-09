@@ -99,7 +99,7 @@ func writeChart(t *testing.T, values string) string {
 func resetCLIState(t *testing.T) {
 	t.Helper()
 	saved := struct {
-		installNamespace, installRelease, installCertKeyMode, installCvmMode         string
+		installNamespace, installRelease, installCvmMode                             string
 		installHardwarePlatform, installImagePullSecret, installImageTag             string
 		installOperatorKeys, installUpstream, renderValuesDistro                     string
 		uninstallNamespace, uninstallRelease                                         string
@@ -112,7 +112,7 @@ func resetCLIState(t *testing.T) {
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup        int64
 		installGetCertRenewInterval                                                  time.Duration
 	}{
-		installNamespace, installRelease, installCertKeyMode, installCvmMode,
+		installNamespace, installRelease, installCvmMode,
 		installHardwarePlatform, installImagePullSecret, installImageTag,
 		installOperatorKeys, installUpstream, renderValuesDistro,
 		uninstallNamespace, uninstallRelease,
@@ -126,7 +126,7 @@ func resetCLIState(t *testing.T) {
 		installGetCertRenewInterval,
 	}
 	t.Cleanup(func() {
-		installNamespace, installRelease, installCertKeyMode, installCvmMode = saved.installNamespace, saved.installRelease, saved.installCertKeyMode, saved.installCvmMode
+		installNamespace, installRelease, installCvmMode = saved.installNamespace, saved.installRelease, saved.installCvmMode
 		installHardwarePlatform, installImagePullSecret, installImageTag = saved.installHardwarePlatform, saved.installImagePullSecret, saved.installImageTag
 		installOperatorKeys, installUpstream, renderValuesDistro = saved.installOperatorKeys, saved.installUpstream, saved.renderValuesDistro
 		uninstallNamespace, uninstallRelease = saved.uninstallNamespace, saved.uninstallRelease
@@ -143,7 +143,7 @@ func resetCLIState(t *testing.T) {
 
 	installNamespace, installRelease = "c8s-system", "c8s"
 	installValues, installWait, installCRDs = nil, true, true
-	installCertFSGroup, installCertKeyMode = 65532, "0640"
+	installCertFSGroup = 65532
 	installGetCertRenewInterval = 6 * time.Hour
 	installGetCertRunAsUser, installGetCertRunAsGroup, installGetCertRunAsNonRoot = 65532, 65532, true
 	installKataDebug, installCvmMode, installHardwarePlatform = false, "", "sev-snp"
