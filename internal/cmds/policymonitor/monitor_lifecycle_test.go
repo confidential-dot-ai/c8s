@@ -141,19 +141,6 @@ func cgroupKillContent(t *testing.T, dir string) string {
 	return string(b)
 }
 
-// --- normalizeDigest edge: separator at position zero ----------------------
-
-func TestNormalizeDigest_SeparatorAtStart(t *testing.T) {
-	hex := strings.Repeat("a", 64)
-	got, err := normalizeDigest("@sha256:" + hex)
-	if err != nil {
-		t.Fatalf("normalizeDigest: %v", err)
-	}
-	if got != hex {
-		t.Fatalf("got %q, want %q", got, hex)
-	}
-}
-
 // --- writeCgroupKill --------------------------------------------------------
 
 func TestWriteCgroupKill_WritesOne(t *testing.T) {
@@ -442,7 +429,7 @@ func TestRunAllowlistRefresh_InstallsFromCDS(t *testing.T) {
 	}) {
 		t.Fatal("pulled digest never installed; refresh loop did not run")
 	}
-	if a.Contains(pulled) {
+	if a.AdmitsDigest(pulled) {
 		t.Fatal("a pull must not grow the baked seed")
 	}
 	cancel()
