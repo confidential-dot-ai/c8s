@@ -119,7 +119,7 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	r := newRouter(deps)
 
 	do := func() int {
-		req := httptest.NewRequest(http.MethodPut, "/allowlist", bytes.NewReader([]byte(`{"schema":"c8s.allowlist/v1","digests":{}}`)))
+		req := httptest.NewRequest(http.MethodPut, "/allowlist", bytes.NewReader([]byte(`{"schema":"c8s.allowlist/v1","workloads":{}}`)))
 		req.RemoteAddr = "10.0.0.2:1234"
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)

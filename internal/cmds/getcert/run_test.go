@@ -566,6 +566,26 @@ func TestValidateOutputPaths(t *testing.T) {
 	})
 }
 
+// TestRequireKeyOutRAMBacked: the private key's memory-only invariant is
+// enforced, not merely documented.
+func TestRequireKeyOutRAMBacked(t *testing.T) {
+	t.Run("empty key-out exempt", func(t *testing.T) {
+		if err := requireKeyOutRAMBacked(""); err != nil {
+			t.Fatalf("requireKeyOutRAMBacked(\"\"): %v", err)
+		}
+	})
+
+	t.Run("persistent storage refused", func(t *testing.T) {
+		dir := t.TempDir()
+		if fileutil.RequireRAMBacked(dir) == nil {
+			t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
+		}
+		if err := requireKeyOutRAMBacked(filepath.Join(dir, "key.pem")); err == nil {
+			t.Fatal("expected a key-out on persistent storage to be refused")
+		}
+	})
+}
+
 func TestLoadOrGenerateKey(t *testing.T) {
 	t.Run("generate ephemeral", func(t *testing.T) {
 		key, keyPEM, err := loadOrGenerateKey(config{})

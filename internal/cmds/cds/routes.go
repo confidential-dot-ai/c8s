@@ -68,8 +68,6 @@ func newRouter(deps dependencies) http.Handler {
 	// 1 MiB body cap).
 	r.Get("/allowlist", deps.AllowlistHandler.HandleList)
 	r.Method(http.MethodPut, "/allowlist", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleReplaceAll)))
-	r.Method(http.MethodPost, "/allowlist/digests", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleAddDigest)))
-	r.Method(http.MethodDelete, "/allowlist/digests", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteDigests)))
 	r.Method(http.MethodPut, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandlePutWorkload)))
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
 

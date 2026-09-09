@@ -67,11 +67,9 @@ jobs:
       - name: Install build deps
         # Same snapshot-pinned toolchain as c8s-image (confos#36): the A/B
         # verdicts only describe the real pipeline if the host debs match.
-        timeout-minutes: 10
-        run: |
-          confidential-os-builder/bin/host-deps \
-            systemd-container ovmf cpio acpica-tools \
-            libclang-dev clang libtss2-dev
+        # Same bound and retry as c8s-image.yml, for the reason given there.
+        timeout-minutes: 30
+        run: bash c8s/.github/scripts/host-deps.sh
 
       - name: Setup ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1

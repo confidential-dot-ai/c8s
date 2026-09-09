@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
@@ -31,7 +32,6 @@ import (
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -763,7 +763,7 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		}
 		// The seed is derived by the shared convention package, never
 		// recomputed here: the initrd, cred-release and get-kubeconfig all go
-		// through ForOperatorKey, and a second implementation of the same
+		// through runtimemeasure.Seed, and a second implementation of the same
 		// arithmetic is a second thing to drift. It hashes the file bytes
 		// verbatim — the check above only inspects them.
 		seed := runtimemeasure.Seed(pubPEM)
@@ -811,7 +811,7 @@ func manualIndexList(manual map[int][]byte) string {
 }
 
 // checkOperatorPublicKeyPEM rejects a file that is not a PKIX public key before
-// its bytes become a register pin. ForOperatorKey hashes whatever it is given,
+// its bytes become a register pin. runtimemeasure.Seed hashes whatever it is given,
 // so any file yields some digest: without this check a mistyped path or a
 // private key handed over by mistake produces a pin no node can ever match, and
 // the resulting RTMR[3] mismatch would read like a compromised node rather than

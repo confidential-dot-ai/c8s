@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -13,41 +15,6 @@ import (
 type changedEntry struct {
 	From string `json:"from"`
 	To   string `json:"to"`
-}
-
-// floorDiff reports what applying a desired floor over the current floor changes.
-type floorDiff struct {
-	Added   map[string]string       `json:"added"`
-	Removed map[string]string       `json:"removed"`
-	Changed map[string]changedEntry `json:"changed"`
-}
-
-// computeDiff reports what applying desired over current would change (floor).
-func computeDiff(current, desired map[string]string) floorDiff {
-	d := floorDiff{
-		Added:   map[string]string{},
-		Removed: map[string]string{},
-		Changed: map[string]changedEntry{},
-	}
-	for digest, image := range desired {
-		cur, ok := current[digest]
-		switch {
-		case !ok:
-			d.Added[digest] = image
-		case cur != image:
-			d.Changed[digest] = changedEntry{From: cur, To: image}
-		}
-	}
-	for digest, image := range current {
-		if _, ok := desired[digest]; !ok {
-			d.Removed[digest] = image
-		}
-	}
-	return d
-}
-
-func (d floorDiff) empty() bool {
-	return len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0
 }
 
 // containerDiff names one container-level change within a workload entry. Kind
@@ -71,24 +38,20 @@ func (e entryDiff) empty() bool {
 	return e.Label == nil && len(e.Added) == 0 && len(e.Removed) == 0 && len(e.Changed) == 0
 }
 
-// allowlistDiff is the combined floor + workload diff.
+// allowlistDiff is the entry-level diff of two allowlists.
 type allowlistDiff struct {
-	Floor            floorDiff            `json:"floor"`
 	WorkloadsAdded   []string             `json:"workloadsAdded"`
 	WorkloadsRemoved []string             `json:"workloadsRemoved"`
 	WorkloadsChanged map[string]entryDiff `json:"workloadsChanged"`
 }
 
 func (d allowlistDiff) empty() bool {
-	return d.Floor.empty() && len(d.WorkloadsAdded) == 0 && len(d.WorkloadsRemoved) == 0 && len(d.WorkloadsChanged) == 0
+	return len(d.WorkloadsAdded) == 0 && len(d.WorkloadsRemoved) == 0 && len(d.WorkloadsChanged) == 0
 }
 
 // diffAllowlists computes the entry- and field-level diff of desired over live.
 func diffAllowlists(live, desired *pkgallowlist.Allowlist) allowlistDiff {
-	d := allowlistDiff{
-		Floor:            computeDiff(live.Digests, desired.Digests),
-		WorkloadsChanged: map[string]entryDiff{},
-	}
+	d := allowlistDiff{WorkloadsChanged: map[string]entryDiff{}}
 	for name, dw := range desired.Workloads {
 		lw, ok := live.Workloads[name]
 		if !ok {
@@ -138,11 +101,7 @@ func diffContainers(kind string, live, desired []pkgallowlist.Container) (added,
 	for d := range desiredByDigest {
 		digests[d] = true
 	}
-	ordered := make([]string, 0, len(digests))
-	for d := range digests {
-		ordered = append(ordered, d)
-	}
-	sort.Strings(ordered)
+	ordered := slices.Sorted(maps.Keys(digests))
 
 	for _, digest := range ordered {
 		onlyDesired := multisetSub(desiredByDigest[digest], liveByDigest[digest])
@@ -199,20 +158,6 @@ func printDiff(w io.Writer, format string, d allowlistDiff) error {
 		return nil
 	}
 
-	fmt.Fprintln(w, "floor:")
-	for _, digest := range sortedKeys(d.Floor.Added) {
-		fmt.Fprintf(w, "+ %s  %s\n", digest, d.Floor.Added[digest])
-	}
-	for _, digest := range sortedKeys(d.Floor.Removed) {
-		fmt.Fprintf(w, "- %s  %s\n", digest, d.Floor.Removed[digest])
-	}
-	for _, digest := range sortedChangedKeys(d.Floor.Changed) {
-		fmt.Fprintf(w, "~ %s  %s -> %s\n", digest, d.Floor.Changed[digest].From, d.Floor.Changed[digest].To)
-	}
-	if d.Floor.empty() {
-		fmt.Fprintln(w, "  (no changes)")
-	}
-
 	fmt.Fprintln(w, "workloads:")
 	for _, name := range d.WorkloadsAdded {
 		fmt.Fprintf(w, "+ %s\n", name)
@@ -220,17 +165,10 @@ func printDiff(w io.Writer, format string, d allowlistDiff) error {
 	for _, name := range d.WorkloadsRemoved {
 		fmt.Fprintf(w, "- %s\n", name)
 	}
-	changedNames := make([]string, 0, len(d.WorkloadsChanged))
-	for name := range d.WorkloadsChanged {
-		changedNames = append(changedNames, name)
-	}
-	sort.Strings(changedNames)
+	changedNames := slices.Sorted(maps.Keys(d.WorkloadsChanged))
 	for _, name := range changedNames {
 		fmt.Fprintf(w, "~ %s\n", name)
 		printEntryDiff(w, d.WorkloadsChanged[name])
-	}
-	if len(d.WorkloadsAdded) == 0 && len(d.WorkloadsRemoved) == 0 && len(d.WorkloadsChanged) == 0 {
-		fmt.Fprintln(w, "  (no changes)")
 	}
 	return nil
 }
@@ -248,13 +186,4 @@ func printEntryDiff(w io.Writer, e entryDiff) {
 	for _, c := range e.Changed {
 		fmt.Fprintf(w, "    ~ %s %s  %s -> %s\n", c.Kind, c.Digest, c.From, c.To)
 	}
-}
-
-func sortedChangedKeys(m map[string]changedEntry) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

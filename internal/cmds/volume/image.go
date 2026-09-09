@@ -67,76 +67,66 @@ type BuildConfig struct {
 // a way to identify the contents; and the root hash then commits to the data
 // itself rather than to one encryption of it.
 func Build(ctx context.Context, cfg BuildConfig) (Verity, error) {
-	run := cfg.Run
-	if run == nil {
-		run = execRunner
-	}
 	if err := checkSource(cfg.Source); err != nil {
 		return Verity{}, err
 	}
 	if len(cfg.Key) != KeyBytes {
 		return Verity{}, fmt.Errorf("volume: key is %d bytes, want %d", len(cfg.Key), KeyBytes)
 	}
-	// O_EXCL on the output: a build that silently replaced an existing image
-	// would destroy a volume whose key is already in the store.
-	out, err := os.OpenFile(cfg.Out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return Verity{}, fmt.Errorf("volume: create %s: %w", cfg.Out, err)
-	}
-	defer out.Close()
-
-	work, cleanup, err := workDir(cfg.WorkDir)
-	if err != nil {
+	b := &immutableImage{source: cfg.Source}
+	if err := buildImage(ctx, cfg, b); err != nil {
 		return Verity{}, err
 	}
-	defer cleanup()
+	return b.verity, nil
+}
 
-	dataPath := filepath.Join(work, "data.erofs")
-	treePath := filepath.Join(work, "hash.tree")
-	// The erofs image is the plaintext this design exists to protect, so it goes
-	// whether the build succeeds or not, and whether or not WorkDir was the
-	// caller's (in which case removing the directory is not ours to do).
-	defer func() {
-		os.Remove(dataPath)
-		os.Remove(treePath)
-	}()
+type immutableImage struct {
+	source     string
+	data, tree imagePart
+	verity     Verity
+}
 
-	if _, err := run(ctx, "mkfs.erofs", erofsArgs(dataPath, cfg.Source)...); err != nil {
-		return Verity{}, err
+func (b *immutableImage) prepare(work string) []imagePart {
+	b.data = imagePart{filepath.Join(work, "data.erofs"), "erofs image"}
+	b.tree = imagePart{filepath.Join(work, "hash.tree"), "hash tree"}
+	return []imagePart{b.data, b.tree}
+}
+
+func (b *immutableImage) build(ctx context.Context, run Runner) error {
+	dataPath, treePath := b.data.path, b.tree.path
+	if _, err := run(ctx, "mkfs.erofs", erofsArgs(dataPath, b.source)...); err != nil {
+		return err
 	}
 	dataSize, err := fileSize(dataPath)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 	if dataSize == 0 || dataSize%VerityBlockSize != 0 {
-		return Verity{}, fmt.Errorf("volume: erofs image is %d bytes, not a multiple of %d", dataSize, VerityBlockSize)
+		return fmt.Errorf("volume: erofs image is %d bytes, not a multiple of %d", dataSize, VerityBlockSize)
 	}
 
 	salt := make([]byte, saltBytes)
 	if _, err := rand.Read(salt); err != nil {
-		return Verity{}, fmt.Errorf("volume: generate verity salt: %w", err)
+		return fmt.Errorf("volume: generate verity salt: %w", err)
 	}
 	saltHex := hex.EncodeToString(salt)
 
 	stdout, err := run(ctx, "veritysetup", verityArgs(dataPath, treePath, saltHex)...)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 	rootHash, err := parseRootHash(stdout)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 
-	v := Verity{
+	b.verity = Verity{
 		RootHash:   rootHash,
 		Salt:       saltHex,
 		DataBlocks: dataSize / VerityBlockSize,
 		HashOffset: dataSize,
 	}
-	if err := encryptConcat(out, cfg.Key, dataPath, treePath); err != nil {
-		return Verity{}, err
-	}
-	return v, nil
+	return nil
 }
 
 // MutableBuildConfig describes one writable image build.
@@ -165,10 +155,6 @@ type MutableBuildConfig struct {
 // zeros the filesystem expects, so the image must hold real ciphertext end to
 // end.
 func BuildMutable(ctx context.Context, cfg MutableBuildConfig) (uint64, error) {
-	run := cfg.Run
-	if run == nil {
-		run = execRunner
-	}
 	if len(cfg.Key) != KeyBytes {
 		return 0, fmt.Errorf("volume: key is %d bytes, want %d", len(cfg.Key), KeyBytes)
 	}
@@ -196,42 +182,40 @@ func BuildMutable(ctx context.Context, cfg MutableBuildConfig) (uint64, error) {
 			size, minMutableBytes>>20)
 	}
 
-	// O_EXCL on the output, as in Build.
-	out, err := os.OpenFile(cfg.Out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("volume: create %s: %w", cfg.Out, err)
-	}
-	defer out.Close()
-
-	work, cleanup, err := workDir(cfg.WorkDir)
-	if err != nil {
-		return 0, err
-	}
-	defer cleanup()
-
-	dataPath := filepath.Join(work, "data.ext4")
-	// The plaintext image is removed on the way out, as in Build.
-	defer func() { os.Remove(dataPath) }()
-
-	data, err := os.OpenFile(dataPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("volume: create intermediate image: %w", err)
-	}
-	if err := data.Truncate(int64(size)); err != nil {
-		data.Close()
-		return 0, fmt.Errorf("volume: size intermediate image: %w", err)
-	}
-	if err := data.Close(); err != nil {
-		return 0, fmt.Errorf("volume: close intermediate image: %w", err)
-	}
-
-	if _, err := run(ctx, "mkfs.ext4", ext4Args(dataPath, cfg.Source, inodes)...); err != nil {
-		return 0, err
-	}
-	if err := encryptFile(out, cfg.Key, dataPath); err != nil {
+	b := &mutableImage{source: cfg.Source, size: size, inodes: inodes}
+	if err := buildImage(ctx, BuildConfig{Out: cfg.Out, Key: cfg.Key, WorkDir: cfg.WorkDir, Run: cfg.Run}, b); err != nil {
 		return 0, err
 	}
 	return size, nil
+}
+
+type mutableImage struct {
+	source       string
+	data         imagePart
+	size, inodes uint64
+}
+
+func (b *mutableImage) prepare(work string) []imagePart {
+	b.data = imagePart{filepath.Join(work, "data.ext4"), "intermediate image"}
+	return []imagePart{b.data}
+}
+
+func (b *mutableImage) build(ctx context.Context, run Runner) error {
+	dataPath := b.data.path
+	data, err := os.OpenFile(dataPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("volume: create intermediate image: %w", err)
+	}
+	if err := data.Truncate(int64(b.size)); err != nil {
+		data.Close()
+		return fmt.Errorf("volume: size intermediate image: %w", err)
+	}
+	if err := data.Close(); err != nil {
+		return fmt.Errorf("volume: close intermediate image: %w", err)
+	}
+
+	_, err = run(ctx, "mkfs.ext4", ext4Args(dataPath, b.source, b.inodes)...)
+	return err
 }
 
 // ext4Args builds a 4K-block ext4 with no root-reserved blocks, preloading
@@ -341,31 +325,48 @@ func parseRootHash(veritysetupOutput []byte) (string, error) {
 	return root, nil
 }
 
-// encryptFile encrypts one whole file to out.
-func encryptFile(out io.Writer, key []byte, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("volume: open intermediate image: %w", err)
-	}
-	defer f.Close()
-	return Encrypt(out, f, key)
+// imagePart order is the plaintext stream order, including the verity tree.
+type imagePart struct {
+	path, description string
 }
 
-// encryptConcat encrypts data followed by tree as one stream, so sector indices
-// — and therefore the XTS tweaks — run continuously across the join exactly as
-// they will when the device is read.
-func encryptConcat(out io.Writer, key []byte, dataPath, treePath string) error {
-	data, err := os.Open(dataPath)
-	if err != nil {
-		return fmt.Errorf("volume: open erofs image: %w", err)
+type imageBuilder interface {
+	prepare(work string) []imagePart
+	build(context.Context, Runner) error
+}
+
+func buildImage(ctx context.Context, cfg BuildConfig, builder imageBuilder) error {
+	run := cfg.Run
+	if run == nil {
+		run = execRunner
 	}
-	defer data.Close()
-	tree, err := os.Open(treePath)
+	out, err := os.OpenFile(cfg.Out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("volume: open hash tree: %w", err)
+		return fmt.Errorf("volume: create %s: %w", cfg.Out, err)
 	}
-	defer tree.Close()
-	return Encrypt(out, io.MultiReader(data, tree), key)
+	defer out.Close()
+	work, cleanup, err := workDir(cfg.WorkDir)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	files := builder.prepare(work)
+	for _, part := range files {
+		defer os.Remove(part.path)
+	}
+	if err := builder.build(ctx, run); err != nil {
+		return err
+	}
+	readers := make([]io.Reader, 0, len(files))
+	for _, part := range files {
+		f, err := os.Open(part.path)
+		if err != nil {
+			return fmt.Errorf("volume: open %s: %w", part.description, err)
+		}
+		defer f.Close()
+		readers = append(readers, f)
+	}
+	return Encrypt(out, io.MultiReader(readers...), cfg.Key)
 }
 
 func checkSource(source string) error {

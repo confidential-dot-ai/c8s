@@ -21,10 +21,10 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -63,13 +63,13 @@ func snpManifest() string {
 
 // testPolicy builds the full measured policy for the test tuple + operator
 // key, with no workload images (bare-seed RTMR[3]).
-func testPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
+func testPolicy(t *testing.T, operatorPubPEM []byte) tdxMeasuredPolicy {
 	t.Helper()
 	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return exp
+	return requireTDXPolicy(t, exp)
 }
 
 // operatorPub is a throwaway operator public key PEM for the tests.
@@ -164,7 +164,7 @@ func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) *veri
 
 // verifiedResultFor builds a passing VerificationResult whose claims satisfy
 // exp exactly. Tests break individual claims from here.
-func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
+func verifiedResultFor(exp tdxMeasuredPolicy) *teetypes.VerificationResult {
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformTDX,
@@ -373,19 +373,23 @@ func TestVerifyServerCertAuthenticatesBody(t *testing.T) {
 }
 
 // snpTestPolicy builds an SNP gate from a two-variant manifest.
-func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
+func snpTestPolicy(t *testing.T, operatorPubPEM []byte) snpMeasuredPolicy {
 	t.Helper()
 	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exp.platform != teetypes.PlatformSNP {
-		t.Fatalf("policy platform = %q, want snp", exp.platform)
+	if exp.platform() != teetypes.PlatformSNP {
+		t.Fatalf("policy platform = %q, want snp", exp.platform())
 	}
-	return exp
+	p, ok := exp.(snpMeasuredPolicy)
+	if !ok {
+		t.Fatalf("policy type = %T, want SNP", exp)
+	}
+	return p
 }
 
-func snpResultFor(exp measuredPolicy, smp int) *teetypes.VerificationResult {
+func snpResultFor(exp snpMeasuredPolicy, smp int) *teetypes.VerificationResult {
 	digest := exp.snpPins.BySMP[smp]
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
@@ -403,7 +407,7 @@ func snpResultFor(exp measuredPolicy, smp int) *teetypes.VerificationResult {
 func TestSNPGateAcceptsEveryPinnedVariant(t *testing.T) {
 	exp := snpTestPolicy(t, operatorPub(t))
 	for _, smp := range []int{2, 4} {
-		if err := checkMeasuredIdentity(snpResultFor(exp, smp), exp); err != nil {
+		if err := exp.checkIdentity(snpResultFor(exp, smp)); err != nil {
 			t.Errorf("smp%d: %v", smp, err)
 		}
 	}
@@ -441,7 +445,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			res := snpResultFor(exp, 2)
 			mutate(res)
-			if err := checkMeasuredIdentity(res, exp); err == nil {
+			if err := exp.checkIdentity(res); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})
@@ -629,4 +633,13 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func requireTDXPolicy(t *testing.T, policy measuredPolicy) tdxMeasuredPolicy {
+	t.Helper()
+	p, ok := policy.(tdxMeasuredPolicy)
+	if !ok {
+		t.Fatalf("policy type = %T, want TDX", policy)
+	}
+	return p
 }

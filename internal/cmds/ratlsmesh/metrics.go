@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // metrics holds the proxy's Prometheus metrics. Each instance owns its own
@@ -74,6 +75,7 @@ func newMetrics() *metrics {
 		startTime: time.Now(),
 	}
 
+	factory := promauto.With(m.registry)
 	dirCert := []string{"direction", "cert_mode"}
 	histOpts := func(name, help string) prometheus.HistogramOpts {
 		return prometheus.HistogramOpts{
@@ -83,215 +85,181 @@ func newMetrics() *metrics {
 		}
 	}
 
-	m.activeConnections = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.activeConnections = factory.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ratls_mesh_active_connections",
 		Help: "Currently active proxy connections.",
 	}, []string{"direction"})
-	m.connectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.connectionsTotal = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratls_mesh_connections_total",
 		Help: "Total connections handled.",
 	}, []string{"direction", "result"})
-	m.bytesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.bytesTotal = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratls_mesh_bytes_total",
 		Help: "Bytes transferred through the proxy.",
 	}, []string{"direction", "side"})
-	m.tlsDialFailures = prometheus.NewCounter(prometheus.CounterOpts{
+	m.tlsDialFailures = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_tls_dial_failures_total",
 		Help: "RA-TLS dial failures.",
 	})
-	m.dialFailures = prometheus.NewCounter(prometheus.CounterOpts{
+	m.dialFailures = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_dial_failures_total",
 		Help: "Plain TCP dial failures.",
 	})
-	m.connLimitRejected = prometheus.NewCounter(prometheus.CounterOpts{
+	m.connLimitRejected = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_connection_limit_rejected_total",
 		Help: "Connections rejected by global limit.",
 	})
-	m.connLimitPerSourceRejected = prometheus.NewCounter(prometheus.CounterOpts{
+	m.connLimitPerSourceRejected = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_connection_limit_per_source_rejected_total",
 		Help: "Connections rejected by per-source limit.",
 	})
-	m.routeErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	m.routeErrors = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_route_errors_total",
 		Help: "Outbound routing failures (origDst, resolve, parse).",
 	})
-	m.destHeaderErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.destHeaderErrors = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratls_mesh_dest_header_errors_total",
 		Help: "Destination header read/write failures.",
 	}, []string{"side"})
-	m.inboundDestRejected = prometheus.NewCounter(prometheus.CounterOpts{
+	m.inboundDestRejected = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_inbound_dest_rejected_total",
 		Help: "Inbound destinations rejected (not a local pod).",
 	})
-	m.outboundDestRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.outboundDestRejected = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratls_mesh_outbound_dest_rejected_total",
 		Help: "Outbound destinations rejected, split by reason (host_addr=direct dial, unknown_pod=informer skew baseline).",
 	}, []string{"reason"})
-	m.iptablesJumpViolations = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesJumpViolations = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_jump_position_violations_total",
 		Help: "Sidecar-reported count of base-chain jumps that were displaced and reinserted. Mirrored as a Gauge so a sidecar restart isn't a counter-reset.",
 	})
-	m.iptablesJumpCheckErrors = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesJumpCheckErrors = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_jump_position_check_errors_total",
 		Help: "Sidecar-reported count of jump-position read failures.",
 	})
-	m.iptablesIPSetOverflows = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesIPSetOverflows = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_ipset_overflow_total",
 		Help: "Sidecar-reported reconcile cycles where pod count exceeded --ipset-maxelem.",
 	})
-	m.iptablesIPSetSyncFailures = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesIPSetSyncFailures = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_ipset_sync_failures_total",
 		Help: "Sidecar-reported ipset writes that failed. A set keeps its previous contents, so enforcement runs against a stale membership until the next cycle succeeds.",
 	})
-	m.iptablesPodIPSetMembers = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesPodIPSetMembers = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_pod_ipset_members",
 		Help: "Sidecar-reported pod IPs in the interception ipset (v4+v6). Interception is membership-driven, so a drop means those pods stopped being redirected through the proxy.",
 	})
-	m.iptablesCWIPSetMembers = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesCWIPSetMembers = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_cw_ipset_members",
 		Help: "Sidecar-reported confidential-workload pod IPs in the cw guard ipset (v4+v6). The guard only drops plaintext to addresses in this set, so a drop to zero is enforcement off, not quiet.",
 	})
-	m.iptablesCWIPSetShrinks = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesCWIPSetShrinks = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_cw_ipset_shrink_total",
 		Help: "Sidecar-reported reconciles where the cw ipset came back smaller than the previous one. Expected on a scale-down; unexplained increments mean cw pods stopped being reported by the Kubernetes API.",
 	})
-	m.iptablesCWInboundDrops = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesCWInboundDrops = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_cw_inbound_drops_total",
 		Help: "Sidecar-reported packets dropped by the cw guard chain: non-mesh traffic that tried to reach a confidential-workload pod (Service VIP bypass, excluded-namespace or direct-to-pod-IP dials).",
 	})
-	m.iptablesCWPassthroughReturns = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesCWPassthroughReturns = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_cw_passthrough_returns_total",
 		Help: "Sidecar-reported packets admitted by the cw guard's passthrough exemptions ahead of the drop: traffic matching an allowlisted source port, the ephemeral destination window and, for TCP, a reply segment shape.",
 	})
-	m.iptablesMetricsTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.iptablesMetricsTimestamp = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_metrics_file_updated_at_seconds",
 		Help: "Unix-seconds timestamp of the last sidecar metrics snapshot the proxy successfully read; 0 = never read.",
 	})
-	m.resolverCacheSize = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.resolverCacheSize = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_cache_entries",
 		Help: "Pod-to-node resolver cache size.",
 	})
-	m.resolverLocalCIDRs = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.resolverLocalCIDRs = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_local_cidrs",
 		Help: "Host-discovered pod-network CIDRs available for ValidateLocalDest route cross-checks (0 = Kubernetes pod HostIP fallback active).",
 	})
-	m.resolverLastEvent = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.resolverLastEvent = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_last_event_timestamp_seconds",
 		Help: "Unix timestamp of last K8s informer event.",
 	})
-	m.certRotationFailures = prometheus.NewCounter(prometheus.CounterOpts{
+	m.certRotationFailures = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_cert_rotation_failures_total",
 		Help: "Background RA-TLS certificate rotation failures.",
 	})
-	m.attestationFailures = prometheus.NewCounter(prometheus.CounterOpts{
+	m.attestationFailures = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_attestation_failures_total",
 		Help: "RA-TLS peer attestation verification failures.",
 	})
-	m.acceptErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	m.acceptErrors = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_accept_errors_total",
 		Help: "Listener accept errors (triggers backoff).",
 	})
-	m.tlsSessionResumptions = prometheus.NewCounter(prometheus.CounterOpts{
+	m.tlsSessionResumptions = factory.NewCounter(prometheus.CounterOpts{
 		Name: "ratls_mesh_tls_session_resumptions_total",
 		Help: "TLS session resumptions (skipped full handshake).",
 	})
-	m.measurementPinning = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.measurementPinning = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_measurement_pinning",
 		Help: "1 when --measurements is configured (T2/T3: unsafe without this in production).",
 	})
-	m.certPipelineHealthy = prometheus.NewGauge(prometheus.GaugeOpts{
+	m.certPipelineHealthy = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_cert_pipeline_healthy",
 		Help: "1 when CDS /readyz is reachable (0=unreachable). Stays at -1 when CDS probing is not configured.",
 	})
 	m.certPipelineHealthy.Set(-1)
-	m.certExpiry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	m.certExpiry = factory.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ratls_mesh_cert_expiry_timestamp_seconds",
 		Help: "Unix timestamp when the RA-TLS certificate expires.",
 	}, []string{"role"})
 
-	m.tlsHandshakeDuration = prometheus.NewHistogramVec(histOpts(
+	m.tlsHandshakeDuration = factory.NewHistogramVec(histOpts(
 		"ratls_mesh_tls_handshake_duration_seconds",
 		"RA-TLS handshake duration in seconds."), dirCert)
-	m.connectionDuration = prometheus.NewHistogramVec(histOpts(
+	m.connectionDuration = factory.NewHistogramVec(histOpts(
 		"ratls_mesh_connection_duration_seconds",
 		"Total connection duration from accept to close in seconds."), dirCert)
-	m.timeToFirstByte = prometheus.NewHistogramVec(histOpts(
+	m.timeToFirstByte = factory.NewHistogramVec(histOpts(
 		"ratls_mesh_time_to_first_byte_seconds",
 		"Time from accept to pipe start in seconds."), dirCert)
 
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_accept_consecutive_errors",
+		Help:        "Consecutive accept errors per listener (readiness degrades at threshold).",
+		ConstLabels: prometheus.Labels{"direction": "inbound"},
+	}, func() float64 { return float64(m.acceptConsecutiveInbound.Load()) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_accept_consecutive_errors",
+		Help:        "Consecutive accept errors per listener (readiness degrades at threshold).",
+		ConstLabels: prometheus.Labels{"direction": "outbound"},
+	}, func() float64 { return float64(m.acceptConsecutiveOutbound.Load()) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_cert_mode",
+		Help:        "Active certificate mode (1=active).",
+		ConstLabels: prometheus.Labels{"mode": "cds"},
+	}, func() float64 { return boolFloat(m.certMode.Load() == 1) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_cert_mode",
+		Help:        "Active certificate mode (1=active).",
+		ConstLabels: prometheus.Labels{"mode": "self-signed"},
+	}, func() float64 { return boolFloat(m.certMode.Load() == 0) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_cert_mode_configured",
+		Help:        "Configured certificate mode (1=active).",
+		ConstLabels: prometheus.Labels{"mode": "cds"},
+	}, func() float64 { return boolFloat(m.certModeConfigured.Load() == 1) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ratls_mesh_cert_mode_configured",
+		Help:        "Configured certificate mode (1=active).",
+		ConstLabels: prometheus.Labels{"mode": "self-signed"},
+	}, func() float64 { return boolFloat(m.certModeConfigured.Load() == 0) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "ratls_mesh_cert_mode_mismatch",
+		Help: "1 when active cert mode differs from configured (stuck upgrade).",
+	}, func() float64 { return boolFloat(m.certMode.Load() != m.certModeConfigured.Load()) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "ratls_mesh_process_uptime_seconds",
+		Help: "Seconds since proxy start.",
+	}, func() float64 { return time.Since(m.startTime).Seconds() })
 	m.registry.MustRegister(
-		m.activeConnections,
-		m.connectionsTotal,
-		m.bytesTotal,
-		m.tlsDialFailures,
-		m.dialFailures,
-		m.connLimitRejected,
-		m.connLimitPerSourceRejected,
-		m.routeErrors,
-		m.destHeaderErrors,
-		m.inboundDestRejected,
-		m.outboundDestRejected,
-		m.iptablesJumpViolations,
-		m.iptablesJumpCheckErrors,
-		m.iptablesIPSetOverflows,
-		m.iptablesIPSetSyncFailures,
-		m.iptablesPodIPSetMembers,
-		m.iptablesCWIPSetMembers,
-		m.iptablesCWIPSetShrinks,
-		m.iptablesCWInboundDrops,
-		m.iptablesCWPassthroughReturns,
-		m.iptablesMetricsTimestamp,
-		m.resolverCacheSize,
-		m.resolverLocalCIDRs,
-		m.resolverLastEvent,
-		m.certRotationFailures,
-		m.attestationFailures,
-		m.acceptErrors,
-		m.tlsSessionResumptions,
-		m.measurementPinning,
-		m.certPipelineHealthy,
-		m.certExpiry,
-		m.tlsHandshakeDuration,
-		m.connectionDuration,
-		m.timeToFirstByte,
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_accept_consecutive_errors",
-			Help:        "Consecutive accept errors per listener (readiness degrades at threshold).",
-			ConstLabels: prometheus.Labels{"direction": "inbound"},
-		}, func() float64 { return float64(m.acceptConsecutiveInbound.Load()) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_accept_consecutive_errors",
-			Help:        "Consecutive accept errors per listener (readiness degrades at threshold).",
-			ConstLabels: prometheus.Labels{"direction": "outbound"},
-		}, func() float64 { return float64(m.acceptConsecutiveOutbound.Load()) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_cert_mode",
-			Help:        "Active certificate mode (1=active).",
-			ConstLabels: prometheus.Labels{"mode": "cds"},
-		}, func() float64 { return boolFloat(m.certMode.Load() == 1) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_cert_mode",
-			Help:        "Active certificate mode (1=active).",
-			ConstLabels: prometheus.Labels{"mode": "self-signed"},
-		}, func() float64 { return boolFloat(m.certMode.Load() == 0) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_cert_mode_configured",
-			Help:        "Configured certificate mode (1=active).",
-			ConstLabels: prometheus.Labels{"mode": "cds"},
-		}, func() float64 { return boolFloat(m.certModeConfigured.Load() == 1) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name:        "ratls_mesh_cert_mode_configured",
-			Help:        "Configured certificate mode (1=active).",
-			ConstLabels: prometheus.Labels{"mode": "self-signed"},
-		}, func() float64 { return boolFloat(m.certModeConfigured.Load() == 0) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "ratls_mesh_cert_mode_mismatch",
-			Help: "1 when active cert mode differs from configured (stuck upgrade).",
-		}, func() float64 { return boolFloat(m.certMode.Load() != m.certModeConfigured.Load()) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "ratls_mesh_process_uptime_seconds",
-			Help: "Seconds since proxy start.",
-		}, func() float64 { return time.Since(m.startTime).Seconds() }),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

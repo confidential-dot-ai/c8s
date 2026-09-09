@@ -23,10 +23,12 @@ func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	tdx := requireTDXPolicy(t, exp)
+
 	keyDigest := sha512.Sum384(pub)
 	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	if hex.EncodeToString(exp.rtmr3[:]) != hex.EncodeToString(want[:]) {
-		t.Errorf("expected RTMR[3] = %x, want %x", exp.rtmr3, want)
+	if hex.EncodeToString(tdx.rtmr3[:]) != hex.EncodeToString(want[:]) {
+		t.Errorf("expected RTMR[3] = %x, want %x", tdx.rtmr3, want)
 	}
 }
 

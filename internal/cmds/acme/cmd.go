@@ -27,6 +27,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
+var procRoot = "/proc"
+
 const letsEncryptDirectoryURL = "https://acme-v02.api.letsencrypt.org/directory"
 
 type config struct {
@@ -147,7 +149,7 @@ func run(cfg config) error {
 		if !cfg.reloadNginx {
 			return
 		}
-		if err := reloadNginx(logger); err != nil {
+		if err := cmdsutil.ReloadNginx(procRoot, logger); err != nil {
 			logger.Error("nginx reload failed", "error", err)
 		}
 	})

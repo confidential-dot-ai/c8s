@@ -744,12 +744,26 @@ func TestBuildWorkloadImageArgsAddsNRIAllowlistDigests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkloadImageArgs: %v", err)
 	}
-	assertArgsEqual(t, got, []string{
-		"upgrade",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=ghcr.io/acme/engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=ghcr.io/acme/router@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc=docker.io/library/busybox@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	})
+	entry := func(name, digest, ref string) []string {
+		p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
+		return []string{
+			"--set-string", p + "label=" + ref,
+			"--set-string", p + "containers[0].digest=" + digest,
+			"--set-string", p + "containers[0].image=" + ref,
+			"--set-string", p + "containers[0].command.policy=any",
+			"--set-string", p + "containers[0].args.policy=any",
+		}
+	}
+	const (
+		dA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		dB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		dC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	want := []string{"upgrade"}
+	want = append(want, entry("engine-aaaaaaaaaaaa", dA, "ghcr.io/acme/engine@"+dA)...)
+	want = append(want, entry("router-bbbbbbbbbbbb", dB, "ghcr.io/acme/router@"+dB)...)
+	want = append(want, entry("busybox-cccccccccccc", dC, "docker.io/library/busybox@"+dC)...)
+	assertArgsEqual(t, got, want)
 }
 
 func TestBuildWorkloadImageArgsFailsClosedOnResolveError(t *testing.T) {
@@ -1949,22 +1963,24 @@ func TestImageDigest(t *testing.T) {
 func TestAdmissibleDigests(t *testing.T) {
 	const (
 		componentDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-		floorDigest     = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		bootDigest      = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 		workloadDigest  = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 		initDigest      = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 	)
 	values := map[string]any{
 		"cds": map[string]any{"image": map[string]any{"digest": componentDigest}},
 		"nriImagePolicy": map[string]any{"bootstrapAllowlist": map[string]any{
-			"digests": map[string]any{floorDigest: "example.test/etcd@" + floorDigest},
-			"workloads": map[string]any{"infer": map[string]any{
-				"initContainers": []any{map[string]any{"digest": initDigest}},
-				"containers":     []any{map[string]any{"digest": workloadDigest}},
-			}},
+			"workloads": map[string]any{
+				"etcd": map[string]any{"containers": []any{map[string]any{"digest": bootDigest}}},
+				"infer": map[string]any{
+					"initContainers": []any{map[string]any{"digest": initDigest}},
+					"containers":     []any{map[string]any{"digest": workloadDigest}},
+				},
+			},
 		}},
 	}
 	got := admissibleDigests(values, []c8sComponent{{valuePrefix: "cds.image"}, {valuePrefix: "volumed.image"}})
-	want := map[string]bool{componentDigest: true, floorDigest: true, workloadDigest: true, initDigest: true}
+	want := map[string]bool{componentDigest: true, bootDigest: true, workloadDigest: true, initDigest: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("admissibleDigests = %v, want %v", got, want)
 	}
@@ -2128,7 +2144,7 @@ func TestReportExemptedImages(t *testing.T) {
 			t.Errorf("report omits %q — a truncated audit list is not one:\n%s", image, out)
 		}
 	}
-	for _, want := range []string{"kube-system", "nriImagePolicy.bootstrapAllowlist.digests", exemptNamespacesPath} {
+	for _, want := range []string{"kube-system", "nriImagePolicy.bootstrapAllowlist.workloads", exemptNamespacesPath} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report does not mention %q:\n%s", want, out)
 		}

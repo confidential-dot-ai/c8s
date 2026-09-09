@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -23,9 +24,9 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 // verifyEnvelope verifies a self-describing evidence envelope in-process with
@@ -34,30 +35,25 @@ import (
 // verdict.
 var verifyEnvelope = teeverify.Verify
 
-// measuredPolicy is the full trust gate a node must satisfy before any
-// credential flows: the TDX image tuple from one provenanced build-artifact
-// manifest, and the expected RTMR[3] chain. RTMR[3] alone is not an identity
-// gate — the untrusted host stages the operator key, so it can boot ANY image
-// and reproduce the bare operator-key register — which is why the image tuple
-// anchors the policy and RTMR[3] then binds the key and workload set.
-type measuredPolicy struct {
-	// platform is the TEE this policy gates, inferred from the manifest's
-	// shape (see policyFor). Other platforms are refused before the claims
-	// are read.
-	platform teetypes.PlatformType
+// measuredPolicy receives a validated envelope or an authenticated certificate body.
+type measuredPolicy interface {
+	platform() teetypes.PlatformType
+	verifyEvidence(env teetypes.AttestationEvidence, envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error)
+	verifyCertificate(*x509.Certificate) error
+}
 
-	pins runtimemeasure.ImagePins
-	// rtmr3 = FromDigestsSeeded(ForOperatorKey(pubPEM), workload digests):
-	// equal to the bare operator-key seed only when no workload images are
-	// expected. TDX only.
+type tdxMeasuredPolicy struct {
+	pins  runtimemeasure.ImagePins
 	rtmr3 [runtimemeasure.Size]byte
+}
 
-	// SNP: the pinned per-SMP launch digests plus the operator-key binding
-	// committed as HOSTDATA at launch. No runtime-extend register, so there
-	// is no workload chain to pin (c8s#331).
+type snpMeasuredPolicy struct {
 	snpPins  runtimemeasure.SNPImagePins
 	hostData [runtimemeasure.HostDataSize]byte
 }
+
+func (tdxMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformTDX }
+func (snpMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformSNP }
 
 // policyFor builds the trust gate from the operator's inputs: the image
 // manifest (MRTD + RTMR[1] + RTMR[2], loaded atomically), the operator public
@@ -76,7 +72,7 @@ func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []stri
 	}
 	snpPins, snpErr := runtimemeasure.LoadSNPImageManifest(manifestPath)
 	if snpErr != nil {
-		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", tdxErr)
+		return nil, fmt.Errorf("--image-manifest: %w", tdxErr)
 	}
 	return snpPolicy(snpPins, operatorPubPEM, workloadImages)
 }
@@ -87,10 +83,9 @@ func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workload
 	// Accepting --workload-image here would claim an enforcement that cannot
 	// exist rather than silently ignoring the flag.
 	if len(workloadImages) > 0 {
-		return measuredPolicy{}, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
+		return nil, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
 	}
-	return measuredPolicy{
-		platform: teetypes.PlatformSNP,
+	return snpMeasuredPolicy{
 		snpPins:  pins,
 		hostData: runtimemeasure.HostData(operatorPubPEM),
 	}, nil
@@ -104,7 +99,7 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 	for _, ref := range workloadImages {
 		d, err := runtimemeasure.CanonicalDigest(ref)
 		if err != nil {
-			return measuredPolicy{}, fmt.Errorf("--workload-image: %w", err)
+			return nil, fmt.Errorf("--workload-image: %w", err)
 		}
 		// RTMR[3] is an ordered extend chain over the deduped digest set (see
 		// FromDigests): the node's measurer extends a given image once, so a
@@ -113,15 +108,14 @@ func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadIma
 		// dedup silently — a repeat is a copy/paste, and a permanently red
 		// gate is worse than a usage error.
 		if prev, dup := seen[d]; dup {
-			return measuredPolicy{}, fmt.Errorf("--workload-image %q and %q are the same image (%s): each expected image must be given once, in first-extend order, or the expected RTMR[3] chain can never match the node's", prev, ref, d)
+			return nil, fmt.Errorf("--workload-image %q and %q are the same image (%s): each expected image must be given once, in first-extend order, or the expected RTMR[3] chain can never match the node's", prev, ref, d)
 		}
 		seen[d] = ref
 		digests = append(digests, d)
 	}
-	return measuredPolicy{
-		platform: teetypes.PlatformTDX,
-		pins:     pins,
-		rtmr3:    runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(operatorPubPEM), digests),
+	return tdxMeasuredPolicy{
+		pins:  pins,
+		rtmr3: runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(operatorPubPEM), digests),
 	}, nil
 }
 
@@ -139,8 +133,8 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 	// The policy's platform comes from the manifest; the node must be that
 	// platform. Bare-metal snp only: on az-snp/gcp-snp the HOSTDATA field is
 	// owned by the cloud stack, so it cannot carry the operator-key binding.
-	if env.Platform != exp.platform {
-		return nil, fmt.Errorf("node platform is %q but --image-manifest pins %q: credential release requires the node to be the platform the manifest describes", env.Platform, exp.platform)
+	if env.Platform != exp.platform() {
+		return nil, fmt.Errorf("node platform is %q but --image-manifest pins %q: credential release requires the node to be the platform the manifest describes", env.Platform, exp.platform())
 	}
 	if len(env.Evidence) == 0 {
 		return nil, fmt.Errorf("evidence envelope carries no evidence object")
@@ -156,16 +150,10 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 		return nil, fmt.Errorf("evidence envelope is double-wrapped ({platform,evidence} inside evidence); the envelope must wrap the platform evidence object exactly once")
 	}
 
-	// Bare-metal SNP evidence is a raw report with NO inline VCEK — the guest
-	// attestation-api serves cert_chain: null and offers no endpoint to fetch
-	// one — so attestation-go's offline path cannot verify it. localverify
-	// handles that shape and fetches the VCEK from AMD KDS, and is already
-	// what the RA-TLS dial arm uses; routing the gate through it too keeps
-	// the two halves of one policy able to consume the same evidence (c8s#415).
-	if exp.platform == teetypes.PlatformSNP {
-		return verifySNPEvidence(env, expectedReportData, exp)
-	}
+	return exp.verifyEvidence(env, envelopeJSON, expectedReportData)
+}
 
+func (exp tdxMeasuredPolicy) verifyEvidence(_ teetypes.AttestationEvidence, envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error) {
 	res, err := verifyEnvelope(envelopeJSON, teetypes.VerifyParams{
 		ExpectedReportData: expectedReportData,
 	})
@@ -180,21 +168,18 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 	if res.ReportDataMatch == nil || !*res.ReportDataMatch {
 		return nil, fmt.Errorf("report_data does not match the expected binding (stale/replayed quote)")
 	}
-	if err := checkMeasuredIdentity(res, exp); err != nil {
+	if err := exp.checkIdentity(res); err != nil {
 		return nil, err
 	}
 	return res, nil
 }
 
-// checkMeasuredIdentity asserts the verified claims match the full policy:
+// checkIdentity asserts the verified claims match the full policy:
 // MRTD against the launch digest, RTMR[1]/[2] against the image tuple,
 // RTMR[3] against the operator-key/workload chain. The compares are over the
 // claims attestation-go extracted from the signature-verified quote body.
 // Absent or malformed claims fail closed.
-func checkMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy) error {
-	if exp.platform == teetypes.PlatformSNP {
-		return checkSNPMeasuredIdentity(res, exp)
-	}
+func (exp tdxMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
 	launch := strings.ToLower(strings.TrimSpace(res.Claims.LaunchDigest))
 	if launch == "" {
 		return fmt.Errorf("verified claims carry no launch digest (MRTD)")
@@ -222,12 +207,12 @@ func checkMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy)
 	return nil
 }
 
-// checkSNPMeasuredIdentity asserts the verified claims match the SNP policy:
+// checkIdentity asserts the verified claims match the SNP policy:
 // the launch digest against the pinned per-SMP set, and HOSTDATA against the
 // operator-key binding the launcher committed. Together these are the SNP
 // analog of TDX's image tuple + RTMR[3] (c8s#331). Absent or malformed claims
 // fail closed.
-func checkSNPMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy) error {
+func (exp snpMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
 	launch := strings.ToLower(strings.TrimSpace(res.Claims.LaunchDigest))
 	if launch == "" {
 		return fmt.Errorf("verified claims carry no launch digest (SNP MEASUREMENT)")
@@ -317,27 +302,18 @@ func postAttest(ctx context.Context, attestURL string, nonce []byte) ([]byte, er
 // (VCEK from AMD KDS) crosses the network.
 const snpAttestTimeout = 30 * time.Second
 
-// verifySNPEvidence is verifyEvidence's SNP arm. It verifies a bare-metal SNP
+// verifyEvidence verifies SNP evidence. It verifies a bare-metal SNP
 // envelope through localverify — which accepts the raw-report shape and pulls
 // the VCEK from AMD KDS, rather than requiring the guest to have volunteered
 // it inline — then enforces the same measured identity the RA-TLS dial does.
 //
 // The engine already enforces both pins (Measurements, ExpectedInitDataHash);
-// checkSNPMeasuredIdentity re-checks them over the returned claims so a
+// checkIdentity re-checks them over the returned claims so a
 // success the claims contradict is never accepted.
-func verifySNPEvidence(env teetypes.AttestationEvidence, expectedReportData []byte, exp measuredPolicy) (*teetypes.VerificationResult, error) {
-	measurements := make([][]byte, 0, len(exp.snpPins.BySMP))
-	for _, d := range exp.snpPins.Digests() {
-		measurements = append(measurements, append([]byte(nil), d[:]...))
-	}
-
+func (exp snpMeasuredPolicy) verifyEvidence(env teetypes.AttestationEvidence, _ []byte, expectedReportData []byte) (*teetypes.VerificationResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), snpAttestTimeout)
 	defer cancel()
-	res, err := verifySNPRATLS(ctx, string(env.Platform), env.Evidence, localverify.Params{
-		ExpectedReportData:   expectedReportData,
-		Measurements:         measurements,
-		ExpectedInitDataHash: exp.hostData[:],
-	})
+	res, err := verifySNPRATLS(ctx, string(env.Platform), env.Evidence, exp.verificationParams(expectedReportData))
 	if err != nil {
 		return nil, fmt.Errorf("verify evidence: %w", err)
 	}
@@ -347,8 +323,20 @@ func verifySNPEvidence(env teetypes.AttestationEvidence, expectedReportData []by
 	if res.ReportDataMatch == nil || !*res.ReportDataMatch {
 		return nil, fmt.Errorf("report_data does not match the expected binding (stale/replayed quote)")
 	}
-	if err := checkSNPMeasuredIdentity(res, exp); err != nil {
+	if err := exp.checkIdentity(res); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+func (exp snpMeasuredPolicy) verificationParams(reportData []byte) localverify.Params {
+	measurements := make([][]byte, 0, len(exp.snpPins.BySMP))
+	for _, d := range exp.snpPins.Digests() {
+		measurements = append(measurements, append([]byte(nil), d[:]...))
+	}
+	return localverify.Params{
+		ExpectedReportData:   reportData,
+		Measurements:         measurements,
+		ExpectedInitDataHash: exp.hostData[:],
+	}
 }

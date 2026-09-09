@@ -102,63 +102,6 @@ func TestNormalizeDigestReturnsBareHex(t *testing.T) {
 	}
 }
 
-func TestAllowlistMergePulled(t *testing.T) {
-	dir := t.TempDir()
-	seed := "sha256:" + strings.Repeat("a", 64)
-	path := writeFile(t, dir, "seed.json", `{"sha256_digests":["`+seed+`"]}`)
-	a, _, err := loadAllowlist(path)
-	if err != nil {
-		t.Fatalf("loadAllowlist: %v", err)
-	}
-	if a.Size() != 1 {
-		t.Fatalf("seed size = %d, want 1", a.Size())
-	}
-
-	pulled := "sha256:" + strings.Repeat("b", 64)
-	// One new, one duplicate-of-seed, one malformed → only the new counts.
-	if added := a.MergePulled([]string{pulled, seed, "not-a-digest"}); added != 1 {
-		t.Fatalf("MergePulled added = %d, want 1", added)
-	}
-	if a.Size() != 2 {
-		t.Fatalf("size after merge = %d, want 2", a.Size())
-	}
-	if !a.Contains(pulled) {
-		t.Errorf("Contains(pulled) = false, want true")
-	}
-	if !a.Contains(seed) {
-		t.Errorf("Contains(seed) = false, want true (merge must never drop the seed)")
-	}
-	// Re-merging the same set adds nothing.
-	if again := a.MergePulled([]string{pulled, seed}); again != 0 {
-		t.Errorf("re-merge added = %d, want 0", again)
-	}
-}
-
-// TestAllowlistMergeConcurrent is a race-detector smoke test: concurrent
-// Contains/Size reads while MergePulled writes. Earns its keep under
-// `go test -race`.
-func TestAllowlistMergeConcurrent(t *testing.T) {
-	dir := t.TempDir()
-	seed := "sha256:" + strings.Repeat("a", 64)
-	path := writeFile(t, dir, "seed.json", `{"sha256_digests":["`+seed+`"]}`)
-	a, _, err := loadAllowlist(path)
-	if err != nil {
-		t.Fatalf("loadAllowlist: %v", err)
-	}
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 1000; i++ {
-			a.Contains(seed)
-			a.Size()
-		}
-		close(done)
-	}()
-	for i := 0; i < 1000; i++ {
-		a.MergePulled([]string{"sha256:" + strings.Repeat("c", 64)})
-	}
-	<-done
-}
-
 func TestAllowlistNilReceivers(t *testing.T) {
 	var a *allowlist
 	if a.Contains("sha256:" + strings.Repeat("a", 64)) {
@@ -166,9 +109,6 @@ func TestAllowlistNilReceivers(t *testing.T) {
 	}
 	if a.Size() != 0 {
 		t.Error("nil allowlist Size should be 0")
-	}
-	if a.MergePulled([]string{"sha256:" + strings.Repeat("a", 64)}) != 0 {
-		t.Error("nil allowlist MergePulled should add 0")
 	}
 }
 

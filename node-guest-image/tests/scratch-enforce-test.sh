@@ -1,6 +1,6 @@
 #!/bin/bash
 # Unit test for scratch-enforce.sh: passes only when a dm device named
-# "scratch" exists, i.e. the initrd really backed the rootfs upper with the
+# "scratch" exists, i.e. the initrd really backed the state overlays with the
 # confai-scratch disk. Root-free: fakes the dm sysfs tree under a temp root.
 set -u
 

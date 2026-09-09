@@ -217,6 +217,39 @@ func TestUnrecordLastRewriteFailureIsLoggedNotFatal(t *testing.T) {
 	}
 }
 
+func TestUnrecordLastRenameFailureCleansUpTemp(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "measured")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(state, "keep")
+	if err := os.WriteFile(marker, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m := newMeasurer(slog.New(slog.NewTextHandler(&logs, nil)))
+	m.statePath = state
+	m.measuredOrder = []string{"sha256:" + hexA}
+	m.unrecordLast("sha256:" + hexA)
+	if len(m.measuredOrder) != 0 {
+		t.Fatalf("measuredOrder = %v, want empty", m.measuredOrder)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("rewrite measured-digest log failed")) {
+		t.Fatalf("rewrite failure was not logged: %s", logs.String())
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "original" {
+		t.Fatalf("failed rewrite changed destination: %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "measured" {
+		t.Fatalf("failed rewrite left temporary files: %v", entries)
+	}
+}
+
 // The adapters, pointed at a temp file standing in for the TSM node. Register
 // semantics (widths, a missing node) are covered in attestation-go; this checks
 // only that the measurer is wired to the register it thinks it is.

@@ -180,8 +180,8 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 type monitor struct {
 	cfg                   *Config
 	logger                *slog.Logger
-	allowlist             *allowlist     // baked floor: additive digest set, never shrinks
-	overlay               *policyOverlay // latest CDS pull's workload argv policy
+	allowlist             *allowlist     // baked seed: digest set measured into the guest
+	overlay               *policyOverlay // latest CDS pull's workload policy
 	refresh               *refreshState  // whether the allowlist still tracks CDS
 	killer                containerKiller
 	inventory             *admissionInventory          // sandbox identity + digests (docs/ratls.md); always set
@@ -200,9 +200,9 @@ type monitor struct {
 }
 
 // policyOverlay holds the Index of the latest CDS pull that advanced the epoch.
-// The baked floor stays authoritative for digest-only admission; the overlay
-// adds the pulled document's workload argv policy. Read by per-container
-// decision goroutines, replaced by the single refresh goroutine.
+// The baked seed admits its digests on its own; the overlay adds the served
+// document's workload policy. Read by per-container decision goroutines,
+// replaced by the single refresh goroutine.
 type policyOverlay struct {
 	mu      sync.RWMutex
 	idx     *allowlistpkg.Index
@@ -239,11 +239,11 @@ func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
 	return true
 }
 
-// admits reports whether a container may run. The baked floor (additive digest
-// set) admits by digest alone; otherwise the pulled overlay's Index decides on
-// the whole observation — digest, argv, bind-mount destinations and env names.
-// With no overlay (CDS refresh disabled, or no successful pull yet) only the
-// baked floor admits — behavior from t=0.
+// admits reports whether a container may run. The baked seed admits by digest
+// alone; otherwise the pulled overlay's Index decides on the whole observation
+// — digest, argv, bind-mount destinations and env names. With no overlay (CDS
+// refresh disabled, or no successful pull yet) only the baked seed admits —
+// behavior from t=0.
 func (m *monitor) admits(rc allowlistpkg.RunningContainer) bool {
 	if m.allowlist.Contains(rc.Digest) {
 		return true
@@ -552,8 +552,8 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// What the container actually runs, as the allowlist describes it. Floor
-	// digests ignore all of it; workload digests are gated on the whole set.
+	// What the container actually runs, as the allowlist describes it. The
+	// baked seed ignores all of it; a served entry is gated on the whole set.
 	rc := allowlistpkg.RunningContainer{
 		Digest:     digest,
 		BindMounts: bindMountDestinations(spec.Mounts),
