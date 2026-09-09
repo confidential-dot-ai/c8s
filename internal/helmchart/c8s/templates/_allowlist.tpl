@@ -76,6 +76,7 @@
 {{- printf "%s-%s" $base (.digest | trimPrefix "sha256:" | lower | trunc 12) -}}
 {{- end -}}
 
+{{/* See ../helpers/allowlist/README.md#argv-pinned-entries for the seed contract. */}}
 {{- define "c8s.argvPinnedEntries" -}}
 {{- $entries := dict -}}
 {{- if .Values.nriImagePolicy.enabled -}}
@@ -123,6 +124,7 @@
 {{ $entries | toJson }}
 {{- end -}}
 
+{{/* Values-only to avoid boot-config recursion; see ../helpers/allowlist/README.md#argv-pinned-entries. */}}
 {{- define "c8s.argvPinnedDigests" -}}
 {{- $digests := list -}}
 {{- if and .Values.nriImagePolicy.enabled .Values.nriImagePolicy.image.digest -}}
