@@ -3,12 +3,8 @@ package types
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
-	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // ChallengeResponse is the response body for POST /authenticate.
@@ -207,42 +203,4 @@ type CacheStats struct {
 type ErrorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
-}
-
-// SignCsrRequest is sent to CDS POST /sign-csr.
-type SignCsrRequest struct {
-	Ear string `json:"ear"`
-	Csr string `json:"csr"`
-	Ttl string `json:"ttl"`
-}
-
-// SignCsrResponse is the response from CDS POST /sign-csr.
-type SignCsrResponse struct {
-	Certificate   string `json:"certificate"`
-	CACertificate string `json:"ca_certificate"`
-}
-
-// SignedCert validates the response certificate fields and returns the PEM leaf
-// plus CA bundle in the order expected by TLS clients.
-func (r SignCsrResponse) SignedCert() (string, error) {
-	certPEM := strings.TrimSpace(r.Certificate)
-	if certPEM == "" {
-		return "", fmt.Errorf("certificate is required")
-	}
-	certs, err := certutil.ParsePEMCertificates([]byte(certPEM))
-	if err != nil {
-		return "", fmt.Errorf("certificate must be PEM-encoded X.509: %w", err)
-	}
-	if len(certs) != 1 {
-		return "", fmt.Errorf("certificate must contain exactly one CERTIFICATE block, got %d", len(certs))
-	}
-
-	caPEM := strings.TrimSpace(r.CACertificate)
-	if caPEM == "" {
-		return certPEM + "\n", nil
-	}
-	if _, err := certutil.ParsePEMCertificates([]byte(caPEM)); err != nil {
-		return "", fmt.Errorf("ca_certificate must be PEM-encoded X.509: %w", err)
-	}
-	return certPEM + "\n" + caPEM + "\n", nil
 }
