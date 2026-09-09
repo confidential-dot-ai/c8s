@@ -127,7 +127,7 @@ func run(cfg config) error {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
 	if len(rtmrPins) > 0 {
-		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
+		slog.Info("TDX RTMR pinning enabled for /attest", "count", len(rtmrPins))
 	} else if len(measurements) > 0 {
 		slog.Warn("--rtmrs empty: on TDX the measurement allowlist pins TDVF firmware only (MRTD); the guest kernel and rootfs are not pinned. SNP is unaffected.")
 	}
@@ -199,20 +199,10 @@ func run(cfg config) error {
 		AllowedCNPattern: cnPattern,
 	}
 
-	// /attest-key issues a TEE-attested EAR for a caller-generated key (no CSR,
-	// no certificate). Shares the challenge store, attestation-api, and EAR
-	// issuer with /attest.
-	attestKeyHandler := attestation.Handler{
-		Challenges:        &challengeStore,
-		AttestationClient: asClient,
-		EarIssuer:         earIssuer,
-		RTMRs:             rtmrPins,
-	}
-
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
 	// admitted a pod what the pod is running (docs/ratls.md, "Sandbox
 	// identity"). Pins the same measurement allowlist as /attest, so the
-	// inventory answering is held to the standard its EAR already met.
+	// inventory answering is held to the standard its RA-TLS certificate already met.
 	//
 	// Needs an RA-TLS identity of its own, since inventories require a client
 	// certificate; without --ratls-platform there is none, and a request
@@ -332,7 +322,6 @@ func run(cfg config) error {
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
-		AttestKeyHandler:  attestKeyHandler,
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
 		EarIssuer:         earIssuer,
 		JWKSFunc:          rotator.JWKSetJSON,

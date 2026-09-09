@@ -244,16 +244,15 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}
 }
 
-func TestRouter_AttestKeyMounted(t *testing.T) {
-	// /attest-key is always mounted; an empty body is rejected as a bad request,
-	// proving the route exists (a missing route would 404, a wrong method 405).
+func TestRouter_AttestKeyRemoved(t *testing.T) {
+	// The retired key-only flow must no longer expose an issuance route.
 	r := newStubRouter(t)
 	req := httptest.NewRequest(http.MethodPost, "/attest-key", bytes.NewReader([]byte(`{}`)))
 	req.RemoteAddr = "10.0.0.1:1234"
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("/attest-key not mounted: got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/attest-key: got %d, want 404", w.Code)
 	}
 }
 

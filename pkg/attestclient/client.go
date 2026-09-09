@@ -187,63 +187,6 @@ func (c Client) ObtainCertificateWithSandboxContext(ctx context.Context, attesta
 	}, nil
 }
 
-// AttestKey performs the attestation flow for an in-process ECDSA key:
-//  1. Requests a challenge nonce from CDS (POST /authenticate)
-//  2. Calls the local attestation-api for evidence binding
-//     SHA-384(pubkey || challenge) into REPORTDATA
-//  3. Submits evidence + the PKIX-DER pubkey to CDS (POST /attest-key) and
-//     returns the signed EAR JWT
-//
-// The EAR is the key-bound token POST /sign-csr requires.
-func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyDER []byte) (string, error) {
-	ctx = contextOrBackground(ctx)
-
-	challengeResp, err := c.AuthenticateContext(ctx)
-	if err != nil {
-		return "", fmt.Errorf("authenticate: %w", err)
-	}
-	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 in challenge: %w", err)
-	}
-
-	pubAny, err := x509.ParsePKIXPublicKey(pubKeyDER)
-	if err != nil {
-		return "", fmt.Errorf("parse public key: %w", err)
-	}
-	reportData, err := ratls.ReportDataForKey(pubAny, challengeBytes)
-	if err != nil {
-		return "", err
-	}
-
-	asResp, err := c.GenerateEvidenceContext(ctx, attestationApiURL, reportData[:sha512.Size384])
-	if err != nil {
-		return "", fmt.Errorf("attestation-api: %w", err)
-	}
-
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge: challengeResp.Challenge,
-		Evidence:  types.AttestationEvidence(asResp),
-		PublicKey: base64.StdEncoding.EncodeToString(pubKeyDER),
-	})
-	if err != nil {
-		return "", err
-	}
-
-	respBody, err := c.do(ctx, http.MethodPost, "/attest-key", body)
-	if err != nil {
-		return "", err
-	}
-	var out types.AttestKeyResponseBody
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	if out.EAR == "" {
-		return "", fmt.Errorf("response missing ear")
-	}
-	return out.EAR, nil
-}
-
 // Authenticate requests an attestation challenge nonce.
 func (c Client) Authenticate() (types.ChallengeResponse, error) {
 	return c.AuthenticateContext(context.Background())
