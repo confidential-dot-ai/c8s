@@ -592,7 +592,7 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	seen := map[string]bool{}
 	var lines []string
 	for _, p := range pods {
-		if !platformPod(p) || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		if !platformPod(p) || isTerminalPod(p) {
 			continue
 		}
 		for _, st := range podContainerStatuses(p) {
@@ -608,6 +608,10 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	}
 	slices.Sort(lines)
 	return lines
+}
+
+func isTerminalPod(p corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
 
 // deniedPlatformImages lists the platform-pod images the policy would deny.

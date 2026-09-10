@@ -696,7 +696,8 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// under kata. An operator with neither has nothing to point it at, so
 	// injecting would produce a Running pod whose fetcher CrashLoops while the
 	// workload blocks forever on a file that never lands. Refuse at admission.
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	hasWorkloadClaimsEndpoint := m.cfg.WorkloadClaimsHostDir != "" || m.cfg.WorkloadClaimsGuest
+	if inj != nil && len(inj.Secrets.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
@@ -705,7 +706,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// socket directory on node-CVM or on guest loopback under kata. An operator
 	// with neither shape has no daemon to hand it to, so the workload would wait
 	// on a mount that can never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	if inj != nil && len(inj.Volumes.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
 			errInvalidInjectionAnnotation, AnnotationVolumes))

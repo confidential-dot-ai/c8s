@@ -344,7 +344,7 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				// close to expiry. Sleeping out --renew-interval here would
 				// leave the workload serving a dead certificate.
 				failures++
-				if leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter) {
+				if shouldRestartAfterRenewalFailures(leaf, failures) {
 					// The installed leaf is dead and renewal from this process
 					// keeps failing, so retrying in-process serves an expired
 					// certificate indefinitely. Exit instead: as a native
@@ -490,6 +490,10 @@ func renewalRetryInterval(cfg config, leaf *x509.Certificate, failures int) time
 		delay *= 2
 	}
 	return min(delay, ceiling)
+}
+
+func shouldRestartAfterRenewalFailures(leaf *x509.Certificate, failures int) bool {
+	return leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter)
 }
 
 // isNamedLeaf reports whether the installed leaf carries a valid
