@@ -626,7 +626,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
-			Entries:      refValues.Images,
+			ImagePins:    refValues.Images,
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
@@ -667,7 +667,7 @@ func parseInitDataPin(flag string) ([]byte, error) {
 // two would otherwise pin RTMR[1]/[2] from different sources and a
 // disagreement is a policy no guest can satisfy.
 type rtmrPins struct {
-	image *runtimemeasure.ImagePins
+	image runtimemeasure.ImageIdentity
 	rtmr3 []byte
 	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
 	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
@@ -740,7 +740,14 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		if err != nil {
 			return rtmrPins{}, fmt.Errorf("--image-manifest: %w", err)
 		}
-		pins.image = &img
+		// The pins below (MRTD, RTMR[1], RTMR[2]) exist only on TDX, so an
+		// SNP manifest would load and then pin nothing. Refuse it here rather
+		// than report an enforcement that never ran.
+		if img.Family() != teetypes.FamilyTDX {
+			return rtmrPins{}, fmt.Errorf("--image-manifest: %s pins a %s image; c8s verify pins the TDX image tuple (MRTD + RTMR[1] + RTMR[2]) and has no gate for another family",
+				cfg.imageManifest, img.Family())
+		}
+		pins.image = img
 	}
 	if cfg.expectedRTMR3Hex != "" {
 		b, err := hex.DecodeString(strings.TrimSpace(cfg.expectedRTMR3Hex))
@@ -1296,15 +1303,21 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		// allowlist: RTMR[1]/[2] are pinned against THIS manifest, so an MRTD
 		// that merely appears somewhere in --measurements would let a launch
 		// digest from a different build satisfy the tuple. Same rule as
-		// getkubeconfig.checkMeasuredIdentity — one manifest, one meaning.
+		// getkubeconfig's measuredPolicy.checkIdentity — one manifest, one
+		// meaning.
 		// buildPolicy now refuses a manifest and an allowlist in the same run,
 		// so the two compares below cannot both fire on a CLI-built plan; the
 		// exact compare stays exact anyway, because widening it is precisely
 		// the bypass this rule exists to close.
-		if plan.pins.image != nil && !bytes.Equal(mb, plan.pins.image.MRTD[:]) {
-			oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
-				launch, hex.EncodeToString(plan.pins.image.MRTD[:]))
-			return oc
+		if plan.pins.image != nil {
+			// A TDX identity has exactly one launch digest, its MRTD;
+			// buildPolicy refuses any other family.
+			mrtd := plan.pins.image.LaunchDigests()[0].Digest
+			if !bytes.Equal(mb, mrtd[:]) {
+				oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
+					launch, hex.EncodeToString(mrtd[:]))
+				return oc
+			}
 		}
 		if len(plan.policy.Measurements) > 0 && !attestationclient.MeasurementAllowed(mb, plan.policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
@@ -1419,8 +1432,14 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 		return true
 	}
 	if pins.image != nil {
-		if !check(1, "guest kernel", pins.image.RTMR1[:]) || !check(2, "guest rootfs", pins.image.RTMR2[:]) {
-			return false
+		regs := pins.image.RTMRs()
+		// Ascending index, for the same reproducibility reason as the manual
+		// pins below.
+		for _, idx := range slices.Sorted(maps.Keys(regs)) {
+			want := regs[idx]
+			if !check(idx, imageRTMRMeaning(idx), want[:]) {
+				return false
+			}
 		}
 	}
 	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
@@ -1434,6 +1453,20 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 		}
 	}
 	return true
+}
+
+// imageRTMRMeaning labels the registers an image manifest pins. RTMR[2] reads
+// differently here than in [rtmrMeaning]: the manifest measures the rootfs the
+// command line names, so name the thing the pin identifies.
+func imageRTMRMeaning(idx int) string {
+	switch idx {
+	case 1:
+		return "guest kernel"
+	case 2:
+		return "guest rootfs"
+	default:
+		return rtmrMeaning(idx)
+	}
 }
 
 // rtmrMeaning labels a register in operator-facing output. refvalues.ParseRTMRPins

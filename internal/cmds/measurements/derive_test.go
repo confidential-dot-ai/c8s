@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 const (
@@ -278,7 +278,7 @@ func patchManifest(t *testing.T, dir string, edit func(map[string]any)) {
 	}
 }
 
-func hasEntry(images []apiclient.ImagePin, name string) bool {
+func hasEntry(images []remote.ImagePin, name string) bool {
 	for _, img := range images {
 		if img.Name == name {
 			return true
@@ -287,7 +287,7 @@ func hasEntry(images []apiclient.ImagePin, name string) bool {
 	return false
 }
 
-func names(images []apiclient.ImagePin) []string {
+func names(images []remote.ImagePin) []string {
 	out := make([]string, 0, len(images))
 	for _, img := range images {
 		out = append(out, img.Name)

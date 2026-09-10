@@ -24,13 +24,11 @@ func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tdx := requireTDXPolicy(t, exp)
-
 	keyDigest := sha512.Sum384(pub)
 	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	res := verifiedResultFor(tdx)
+	res := verifiedResultFor(exp)
 	res.Claims.PlatformData["rtmr_3"] = hex.EncodeToString(want[:])
-	if err := tdx.checkIdentity(res); err != nil {
+	if err := exp.checkIdentity(res); err != nil {
 		t.Errorf("a node reporting the hand-derived seed RTMR[3] %x was refused: %v", want, err)
 	}
 }

@@ -207,7 +207,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Images},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, ImagePins: pinned.Images},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -272,7 +272,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
-			Entries:           pinned.Images,
+			ImagePins:         pinned.Images,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

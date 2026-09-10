@@ -1,7 +1,7 @@
 package ratls
 
 import (
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // Pins is the peer-identity pin set an in-cluster RA-TLS verifier enforces:
@@ -17,10 +17,10 @@ type Pins struct {
 	// folds the guest image into the launch digest.
 	RTMRs map[int][]byte
 
-	// Entries pins whole images (VerifyPolicy.Entries). When set it replaces
+	// ImagePins pins whole images (VerifyPolicy.ImagePins). When set it replaces
 	// Measurements and RTMRs, so a digest from one image cannot be paired
 	// with another's registers.
-	Entries []apiclient.ImagePin
+	ImagePins []remote.ImagePin
 }
 
 // VerifyPolicy converts the pins into the policy the verifying paths read.
@@ -28,7 +28,7 @@ type Pins struct {
 // field drops those pins while still compiling.
 func (p Pins) VerifyPolicy(attestationApiURL string) *VerifyPolicy {
 	return &VerifyPolicy{
-		Entries:           p.Entries,
+		ImagePins:         p.ImagePins,
 		Measurements:      p.Measurements,
 		RTMRs:             p.RTMRs,
 		AttestationApiURL: attestationApiURL,

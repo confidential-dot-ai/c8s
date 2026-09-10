@@ -3,6 +3,9 @@ package ratls
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -10,8 +13,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -19,10 +22,10 @@ import (
 
 // VerifyPolicy defines what attestation claims are acceptable.
 type VerifyPolicy struct {
-	// Entries pins whole images — a launch digest together with the registers
+	// ImagePins pins whole images — a launch digest together with the registers
 	// measured from the same build. When set it replaces Measurements and
 	// RTMRs, so a digest from one image cannot be paired with another's.
-	Entries []apiclient.ImagePin
+	ImagePins []remote.ImagePin
 
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
@@ -308,7 +311,7 @@ func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyP
 		ExpectedReportData: expectedReportData,
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
-		Entries:            policy.Entries,
+		ImagePins:          policy.ImagePins,
 		Measurements:       policy.Measurements,
 		RTMRs:              policy.RTMRs,
 	})
@@ -352,5 +355,20 @@ func mapVerifyError(platform string, err error) error {
 		return fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, platform)
 	default:
 		return fmt.Errorf("ratls: online %s attestation verify: %w", platform, err)
+	}
+}
+
+// publicKeyFromCert extracts and validates the public key from a certificate.
+func publicKeyFromCert(cert *x509.Certificate) (crypto.PublicKey, error) {
+	switch pub := cert.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		if pub.Curve != elliptic.P256() && pub.Curve != elliptic.P384() {
+			return nil, fmt.Errorf("ratls: unsupported ECDSA curve: %s", pub.Curve.Params().Name)
+		}
+		return pub, nil
+	case ed25519.PublicKey:
+		return pub, nil
+	default:
+		return nil, fmt.Errorf("ratls: unsupported key type in certificate: %T", pub)
 	}
 }

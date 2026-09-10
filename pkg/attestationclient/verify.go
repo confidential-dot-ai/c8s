@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -100,10 +100,10 @@ type EvidencePolicy struct {
 	// only: the attestation-api's TDX verifier has no minimum-TCB parameter.
 	MinTcb *types.MinTcb
 
-	// Entries pins whole images — a launch digest together with the registers
+	// ImagePins pins whole images — a launch digest together with the registers
 	// measured from the same build. When set it replaces Measurements and
 	// RTMRs, so a digest from one image cannot be paired with another's.
-	Entries []apiclient.ImagePin
+	ImagePins []remote.ImagePin
 
 	// Measurements is the set of acceptable launch measurements; empty
 	// accepts any (callers are expected to warn). The attestation-api
@@ -162,12 +162,12 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 	return resp, nil
 }
 
-// enforcePins applies whichever pin form the caller configured. Entries are
+// enforcePins applies whichever pin form the caller configured. ImagePins are
 // matched whole; the flat pair keeps its own path so an operator who set only
 // it sees exactly the decisions it always made.
 func enforcePins(resp types.VerifyResponse, policy EvidencePolicy, platform string) error {
-	if len(policy.Entries) > 0 {
-		return EnforceEntries(resp, policy.Entries, platform)
+	if len(policy.ImagePins) > 0 {
+		return EnforceImagePins(resp, policy.ImagePins, platform)
 	}
 	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
 		return err

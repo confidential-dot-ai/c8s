@@ -33,26 +33,33 @@ import (
 // verdict.
 var verifyEnvelope = teeverify.Verify
 
-// measuredPolicy receives a validated envelope or an authenticated certificate body.
-type measuredPolicy interface {
+// platformVerifier is what the checks common to every platform hand a
+// validated envelope or an authenticated certificate body to. [measuredPolicy]
+// is the only production implementation; tests stub it to assert those common
+// checks run first.
+type platformVerifier interface {
 	platform() teetypes.PlatformType
 	verifyEvidence(env teetypes.AttestationEvidence, envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error)
 	verifyCertificate(*x509.Certificate) error
 }
 
-type tdxMeasuredPolicy struct {
-	pins            runtimemeasure.ImagePins
+// measuredPolicy is the trust gate for one manifest: the pinned image, the
+// operator key the node must have been launched for, and the workload images
+// its measurer was expected to extend, in first-extend order. The image
+// identity carries its own family, so nothing here branches on a platform
+// string.
+type measuredPolicy struct {
+	identity        runtimemeasure.ImageIdentity
 	operatorPubPEM  []byte
 	workloadDigests []string
 }
 
-type snpMeasuredPolicy struct {
-	snpPins        runtimemeasure.SNPImagePins
-	operatorPubPEM []byte
+// platform is the bare-metal tag of the manifest's family. Cloud overlays are
+// deliberately excluded: on az-*/gcp-* the launch-binding field is owned by the
+// cloud stack, so it cannot carry the operator-key binding this gate reads.
+func (exp measuredPolicy) platform() teetypes.PlatformType {
+	return exp.identity.Family().DefaultPlatform()
 }
-
-func (tdxMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformTDX }
-func (snpMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.PlatformSNP }
 
 // policyFor builds the trust gate from the operator's inputs: the image
 // manifest (loaded atomically, its shape naming the platform), the operator
@@ -61,22 +68,18 @@ func (snpMeasuredPolicy) platform() teetypes.PlatformType { return teetypes.Plat
 // expected to have extended, in first-extend order. Tag references are
 // rejected — only a canonical digest identifies an image.
 func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
-	identity, err := runtimemeasure.LoadAnyImageManifest(manifestPath)
+	identity, err := runtimemeasure.LoadImageManifest(manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("--image-manifest: %w", err)
+		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", err)
+	}
+	if p := identity.Family().DefaultPlatform(); p == "" {
+		return measuredPolicy{}, fmt.Errorf("--image-manifest: %s carries an image pin this flow has no gate for (family %q)", manifestPath, identity.Family())
 	}
 	digests, err := workloadChain(identity.Family(), workloadImages)
 	if err != nil {
-		return nil, err
+		return measuredPolicy{}, err
 	}
-	switch pins := identity.(type) {
-	case runtimemeasure.SNPImagePins:
-		return snpMeasuredPolicy{snpPins: pins, operatorPubPEM: operatorPubPEM}, nil
-	case runtimemeasure.ImagePins:
-		return tdxMeasuredPolicy{pins: pins, operatorPubPEM: operatorPubPEM, workloadDigests: digests}, nil
-	default:
-		return nil, fmt.Errorf("--image-manifest: %s carries an image pin this flow has no gate for (%T)", manifestPath, identity)
-	}
+	return measuredPolicy{identity: identity, operatorPubPEM: operatorPubPEM, workloadDigests: digests}, nil
 }
 
 // workloadChain canonicalizes --workload-image into the deduped, ordered
@@ -110,26 +113,20 @@ func workloadChain(family teetypes.Family, workloadImages []string) ([]string, e
 	return digests, nil
 }
 
-// checkMeasuredIdentity checks both halves of the measured identity against the
-// claims attestation-go extracted from the signature-verified quote: the pinned
-// image booted, and the node was launched for the operator's key and measured
+// checkIdentity checks both halves of the measured identity against the claims
+// attestation-go extracted from the signature-verified quote: the pinned image
+// booted, and the node was launched for the operator's key and measured
 // exactly these workloads. runtimemeasure resolves which field carries the
 // binding (RTMR[3] on TDX, HOSTDATA on SNP) and how wide it is.
-func checkMeasuredIdentity(identity runtimemeasure.ImageIdentity, operatorPubPEM []byte, workloadDigests []string, res *teetypes.VerificationResult) error {
-	if err := identity.Verify(res); err != nil {
+//
+// workloadDigests is empty on SNP — it has no runtime-extend register, and
+// workloadChain refuses --workload-image there — so the binding checked is the
+// launch-committed HOSTDATA alone.
+func (exp measuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
+	if err := exp.identity.Verify(res); err != nil {
 		return err
 	}
-	return runtimemeasure.VerifyBinding(res, operatorPubPEM, workloadDigests)
-}
-
-func (exp tdxMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
-	return checkMeasuredIdentity(exp.pins, exp.operatorPubPEM, exp.workloadDigests, res)
-}
-
-// SNP has no runtime-extend register, so its binding is the launch-committed
-// HOSTDATA alone and there is no workload chain to pass.
-func (exp snpMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) error {
-	return checkMeasuredIdentity(exp.snpPins, exp.operatorPubPEM, nil, res)
+	return runtimemeasure.VerifyBinding(res, exp.operatorPubPEM, exp.workloadDigests)
 }
 
 // verifyEvidence verifies an evidence envelope with attestation-go (HW chain +
@@ -138,7 +135,7 @@ func (exp snpMeasuredPolicy) checkIdentity(res *teetypes.VerificationResult) err
 // caller's nonce on the attest gate, the cert-key hash on the RA-TLS dial.
 // Both paths funnel through here so the two gates cannot diverge. Fails
 // closed on any missing piece.
-func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy) (*teetypes.VerificationResult, error) {
+func verifyEvidence(envelopeJSON, expectedReportData []byte, exp platformVerifier) (*teetypes.VerificationResult, error) {
 	var env teetypes.AttestationEvidence
 	if err := json.Unmarshal(envelopeJSON, &env); err != nil {
 		return nil, fmt.Errorf("parse evidence envelope: %w", err)
@@ -166,7 +163,21 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 	return exp.verifyEvidence(env, envelopeJSON, expectedReportData)
 }
 
-func (exp tdxMeasuredPolicy) verifyEvidence(_ teetypes.AttestationEvidence, envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error) {
+// verifyEvidence routes to the arm the manifest's family names. An unknown
+// family cannot reach here — policyFor refuses one — but the default fails
+// closed rather than falling through to another family's rules.
+func (exp measuredPolicy) verifyEvidence(env teetypes.AttestationEvidence, envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error) {
+	switch exp.identity.Family() {
+	case teetypes.FamilySNP:
+		return exp.verifySNPEvidence(env, expectedReportData)
+	case teetypes.FamilyTDX:
+		return exp.verifyTDXEvidence(envelopeJSON, expectedReportData)
+	default:
+		return nil, fmt.Errorf("--image-manifest pins TEE family %q, which this flow has no gate for", exp.identity.Family())
+	}
+}
+
+func (exp measuredPolicy) verifyTDXEvidence(envelopeJSON, expectedReportData []byte) (*teetypes.VerificationResult, error) {
 	res, err := verifyEnvelope(envelopeJSON, teetypes.VerifyParams{
 		ExpectedReportData: expectedReportData,
 	})
@@ -192,7 +203,7 @@ func (exp tdxMeasuredPolicy) verifyEvidence(_ teetypes.AttestationEvidence, enve
 // and enforces the full measured-identity policy. It proves: genuine TDX +
 // the pinned guest image booted + the node trusts the operator's key and ran
 // exactly the expected workload extends. Returns nil on success.
-func attestAndVerify(ctx context.Context, attestURL string, exp measuredPolicy) error {
+func attestAndVerify(ctx context.Context, attestURL string, exp platformVerifier) error {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("nonce: %w", err)
@@ -242,15 +253,15 @@ func postAttest(ctx context.Context, attestURL string, nonce []byte) ([]byte, er
 // (VCEK from AMD KDS) crosses the network.
 const snpAttestTimeout = 30 * time.Second
 
-// verifyEvidence verifies SNP evidence. It verifies a bare-metal SNP
-// envelope through localverify — which accepts the raw-report shape and pulls
-// the VCEK from AMD KDS, rather than requiring the guest to have volunteered
-// it inline — then enforces the same measured identity the RA-TLS dial does.
+// verifySNPEvidence verifies a bare-metal SNP envelope through localverify —
+// which accepts the raw-report shape and pulls the VCEK from AMD KDS, rather
+// than requiring the guest to have volunteered it inline — then enforces the
+// same measured identity the RA-TLS dial does.
 //
 // The engine already enforces both pins (Measurements, ExpectedInitDataHash);
 // checkIdentity re-checks them over the returned claims so a
 // success the claims contradict is never accepted.
-func (exp snpMeasuredPolicy) verifyEvidence(env teetypes.AttestationEvidence, _ []byte, expectedReportData []byte) (*teetypes.VerificationResult, error) {
+func (exp measuredPolicy) verifySNPEvidence(env teetypes.AttestationEvidence, expectedReportData []byte) (*teetypes.VerificationResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), snpAttestTimeout)
 	defer cancel()
 	res, err := verifySNPRATLS(ctx, string(env.Platform), env.Evidence, exp.verificationParams(expectedReportData))
@@ -269,11 +280,12 @@ func (exp snpMeasuredPolicy) verifyEvidence(env teetypes.AttestationEvidence, _ 
 	return res, nil
 }
 
-func (exp snpMeasuredPolicy) verificationParams(reportData []byte) localverify.Params {
+func (exp measuredPolicy) verificationParams(reportData []byte) localverify.Params {
 	hostData := runtimemeasure.HostData(exp.operatorPubPEM)
-	measurements := make([][]byte, 0, len(exp.snpPins.BySMP))
-	for _, d := range exp.snpPins.Digests() {
-		measurements = append(measurements, append([]byte(nil), d[:]...))
+	variants := exp.identity.LaunchDigests()
+	measurements := make([][]byte, 0, len(variants))
+	for _, v := range variants {
+		measurements = append(measurements, append([]byte(nil), v.Digest[:]...))
 	}
 	return localverify.Params{
 		ExpectedReportData:   reportData,

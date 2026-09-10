@@ -113,7 +113,7 @@ type testEnv struct {
 	attestURL    string
 	releaseURL   string
 	outPath      string
-	exp          tdxMeasuredPolicy
+	exp          measuredPolicy
 }
 
 func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody string) testEnv {
@@ -137,7 +137,7 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 	if err != nil {
 		t.Fatal(err)
 	}
-	exp := requireTDXPolicy(t, policy)
+	exp := policy
 	stubVerify(t, verifiedResultFor(exp), nil)
 
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
@@ -411,7 +411,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := requireTDXPolicy(t, bare).workloadDigests; len(got) != 0 {
+	if got := bare.workloadDigests; len(got) != 0 {
 		t.Errorf("workloadDigests = %v, want none so the expected register is the bare operator-key seed", got)
 	}
 
@@ -420,7 +420,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{digA, "sha256:" + strings.Repeat("bb", 32)}
-	if got := requireTDXPolicy(t, chained).workloadDigests; !slices.Equal(got, want) {
+	if got := chained.workloadDigests; !slices.Equal(got, want) {
 		t.Errorf("workloadDigests = %v, want %v (canonicalized, in first-extend order)", got, want)
 	}
 
@@ -428,7 +428,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := requireTDXPolicy(t, reversed).workloadDigests; slices.Equal(got, want) {
+	if got := reversed.workloadDigests; slices.Equal(got, want) {
 		t.Error("extend order must reach the chain unchanged — the register is ordered")
 	}
 
@@ -469,7 +469,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := requireTDXPolicy(t, single).workloadDigests; !slices.Equal(got, []string{dig}) {
+	if got := single.workloadDigests; !slices.Equal(got, []string{dig}) {
 		t.Errorf("workloadDigests = %v, want [%s]", got, dig)
 	}
 }

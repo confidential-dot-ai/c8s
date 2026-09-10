@@ -6,19 +6,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// EnforceEntries accepts evidence matching one reference image whole: its
+// EnforceImagePins accepts evidence matching one reference image whole: its
 // launch digest AND, on TDX, every register that image pins. A digest from one
 // build with registers from another matches nothing, which is what pinning the
 // two separately could not express.
 //
 // RTMRs are checked only for TDX-shaped evidence, as elsewhere: SNP folds the
 // guest image into its launch digest and reports no registers.
-func EnforceEntries(resp types.VerifyResponse, entries []apiclient.ImagePin, platform string) error {
-	if len(entries) == 0 {
+func EnforceImagePins(resp types.VerifyResponse, pins []remote.ImagePin, platform string) error {
+	if len(pins) == 0 {
 		return nil
 	}
 	digest, err := launchDigest(resp)
@@ -33,7 +33,7 @@ func EnforceEntries(resp types.VerifyResponse, entries []apiclient.ImagePin, pla
 	}
 
 	var lastErr error
-	for _, e := range entries {
+	for _, e := range pins {
 		if !bytes.Equal(digest, e.Digest) {
 			continue
 		}
@@ -53,7 +53,7 @@ func EnforceEntries(resp types.VerifyResponse, entries []apiclient.ImagePin, pla
 }
 
 // launchDigest validates the reported digest. A missing digest is a refusal:
-// entries always pin, so there is nothing it could legitimately match.
+// an image pin always pins, so there is nothing it could legitimately match.
 func launchDigest(resp types.VerifyResponse) ([]byte, error) {
 	raw := strings.ToLower(strings.TrimSpace(resp.Result.Claims.LaunchDigest))
 	if raw == "" {

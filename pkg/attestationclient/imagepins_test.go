@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -42,9 +42,9 @@ func evidence(t *testing.T, digest string, rtmrs map[string]string) types.Verify
 	return resp
 }
 
-func entryTDX(t *testing.T, name, digest string, r1, r2 string) apiclient.ImagePin {
+func entryTDX(t *testing.T, name, digest string, r1, r2 string) remote.ImagePin {
 	t.Helper()
-	e := apiclient.ImagePin{Name: name, Digest: mustHex(t, digest), RTMRs: map[int][]byte{}}
+	e := remote.ImagePin{Name: name, Digest: mustHex(t, digest), RTMRs: map[int][]byte{}}
 	if r1 != "" {
 		e.RTMRs[1] = mustHex(t, r1)
 	}
@@ -56,28 +56,28 @@ func entryTDX(t *testing.T, name, digest string, r1, r2 string) apiclient.ImageP
 
 // The bug this feature exists for: image A's MRTD with image B's registers.
 // Pinning the two separately accepts it; one tuple per image does not.
-func TestEnforceEntriesRejectsCrossedTuple(t *testing.T) {
-	entries := []apiclient.ImagePin{
+func TestEnforceImagePinsRejectsCrossedTuple(t *testing.T) {
+	entries := []remote.ImagePin{
 		entryTDX(t, "image-a", digestA, regA1, regA2),
 		entryTDX(t, "image-b", digestB, regB1, ""),
 	}
 	crossed := evidence(t, digestA, map[string]string{"rtmr_1": regB1, "rtmr_2": regA2})
-	if err := EnforceEntries(crossed, entries, string(types.PlatformTdx)); err == nil {
+	if err := EnforceImagePins(crossed, entries, string(types.PlatformTdx)); err == nil {
 		t.Fatal("accepted image A's digest with image B's RTMR[1]")
 	}
 
 	matched := evidence(t, digestA, map[string]string{"rtmr_1": regA1, "rtmr_2": regA2})
-	if err := EnforceEntries(matched, entries, string(types.PlatformTdx)); err != nil {
+	if err := EnforceImagePins(matched, entries, string(types.PlatformTdx)); err != nil {
 		t.Fatalf("rejected a whole matching image: %v", err)
 	}
 	second := evidence(t, digestB, map[string]string{"rtmr_1": regB1})
-	if err := EnforceEntries(second, entries, string(types.PlatformTdx)); err != nil {
+	if err := EnforceImagePins(second, entries, string(types.PlatformTdx)); err != nil {
 		t.Fatalf("rejected the second pinned image: %v", err)
 	}
 }
 
-func TestEnforceEntriesRefusals(t *testing.T) {
-	entries := []apiclient.ImagePin{entryTDX(t, "image-a", digestA, regA1, "")}
+func TestEnforceImagePinsRefusals(t *testing.T) {
+	entries := []remote.ImagePin{entryTDX(t, "image-a", digestA, regA1, "")}
 	tdx := string(types.PlatformTdx)
 
 	tests := []struct {
@@ -94,7 +94,7 @@ func TestEnforceEntriesRefusals(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := EnforceEntries(tc.resp, entries, tdx)
+			err := EnforceImagePins(tc.resp, entries, tdx)
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -107,31 +107,31 @@ func TestEnforceEntriesRefusals(t *testing.T) {
 
 // SNP folds the guest image into its launch digest and reports no registers,
 // so entry RTMRs must not be enforced against it.
-func TestEnforceEntriesIgnoresRTMRsOnSNP(t *testing.T) {
-	entries := []apiclient.ImagePin{entryTDX(t, "image-a", digestA, regA1, regA2)}
+func TestEnforceImagePinsIgnoresRTMRsOnSNP(t *testing.T) {
+	entries := []remote.ImagePin{entryTDX(t, "image-a", digestA, regA1, regA2)}
 	resp := evidence(t, digestA, nil)
-	if err := EnforceEntries(resp, entries, string(types.PlatformSnp)); err != nil {
+	if err := EnforceImagePins(resp, entries, string(types.PlatformSnp)); err != nil {
 		t.Fatalf("enforced TDX registers against SNP evidence: %v", err)
 	}
 }
 
-func TestEnforceEntriesEmptyIsNoGate(t *testing.T) {
-	if err := EnforceEntries(evidence(t, digestA, nil), nil, string(types.PlatformTdx)); err != nil {
+func TestEnforceImagePinsEmptyIsNoGate(t *testing.T) {
+	if err := EnforceImagePins(evidence(t, digestA, nil), nil, string(types.PlatformTdx)); err != nil {
 		t.Fatalf("empty entry set gated: %v", err)
 	}
 }
 
-func TestEnforceEntriesAcceptsUppercaseClaim(t *testing.T) {
-	entries := []apiclient.ImagePin{{Name: "a", Digest: mustHex(t, digestA)}}
+func TestEnforceImagePinsAcceptsUppercaseClaim(t *testing.T) {
+	entries := []remote.ImagePin{{Name: "a", Digest: mustHex(t, digestA)}}
 	resp := evidence(t, strings.ToUpper(digestA), nil)
-	if err := EnforceEntries(resp, entries, string(types.PlatformSnp)); err != nil {
+	if err := EnforceImagePins(resp, entries, string(types.PlatformSnp)); err != nil {
 		t.Fatalf("rejected an uppercase claim the legacy path accepts: %v", err)
 	}
 }
 
 // Converted flat flags must decide exactly as the flat path does: a digest
 // from the list AND the one pinned register set.
-func TestEnforceEntriesMatchesFlatFlagSemantics(t *testing.T) {
+func TestEnforceImagePinsMatchesFlatFlagSemantics(t *testing.T) {
 	digests := [][]byte{mustHex(t, digestA), mustHex(t, digestB)}
 	rtmrs := map[int][]byte{1: mustHex(t, regA1)}
 	set := refvalues.FromFlags(digests, rtmrs)
@@ -152,7 +152,7 @@ func TestEnforceEntriesMatchesFlatFlagSemantics(t *testing.T) {
 			if legacy == nil {
 				legacy = EnforceRTMRs(tc.resp, rtmrs)
 			}
-			entries := EnforceEntries(tc.resp, set.Images, tdx)
+			entries := EnforceImagePins(tc.resp, set.Images, tdx)
 			if (legacy == nil) != (entries == nil) {
 				t.Errorf("legacy err=%v but entries err=%v", legacy, entries)
 			}

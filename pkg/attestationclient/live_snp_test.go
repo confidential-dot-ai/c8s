@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -43,27 +43,27 @@ func TestLiveSNPEntryEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := attestationclient.NewClient(apiURL)
+	attestClient := attestationclient.NewClient(apiURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// The evidence was requested with an all-zero REPORTDATA.
 	var policy attestationclient.EvidencePolicy
-	policy.Entries = pinned.Images
+	policy.ImagePins = pinned.Images
 
-	if _, err := client.VerifyEvidence(ctx, evidence, policy); err != nil {
+	if _, err := attestClient.VerifyEvidence(ctx, evidence, policy); err != nil {
 		t.Fatalf("rejected the image it was booted from: %v", err)
 	}
 
 	// Flip one byte of every pinned digest: same shape, different image.
-	wrong := make([]apiclient.ImagePin, 0, len(pinned.Images))
+	wrong := make([]remote.ImagePin, 0, len(pinned.Images))
 	for _, e := range pinned.Images {
 		d := append([]byte(nil), e.Digest...)
 		d[0] ^= 0xff
-		wrong = append(wrong, apiclient.ImagePin{Name: e.Name, Digest: d, RTMRs: e.RTMRs})
+		wrong = append(wrong, remote.ImagePin{Name: e.Name, Digest: d, RTMRs: e.RTMRs})
 	}
-	policy.Entries = wrong
-	_, err = client.VerifyEvidence(ctx, evidence, policy)
+	policy.ImagePins = wrong
+	_, err = attestClient.VerifyEvidence(ctx, evidence, policy)
 	if err == nil {
 		t.Fatal("admitted a guest whose launch measurement is not pinned")
 	}

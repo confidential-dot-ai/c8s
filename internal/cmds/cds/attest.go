@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/apiclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
@@ -59,9 +59,9 @@ type AttestHandler struct {
 	// its launch digest). Empty = no RTMR pinning.
 	RTMRs map[int][]byte
 
-	// Entries pins whole images. When set it replaces Measurements and RTMRs,
+	// ImagePins pins whole images. When set it replaces Measurements and RTMRs,
 	// so a digest from one image cannot be paired with another's registers.
-	Entries []apiclient.ImagePin
+	ImagePins []remote.ImagePin
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
@@ -205,8 +205,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// measurement is admitted, so the digest a leaf was issued against is the
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-	if len(h.Entries) > 0 {
-		if err := attestationclient.EnforceEntries(verifyResp, h.Entries, req.Evidence.Platform); err != nil {
+	if len(h.ImagePins) > 0 {
+		if err := attestationclient.EnforceImagePins(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
 			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
