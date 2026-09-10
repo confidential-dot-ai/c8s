@@ -128,15 +128,26 @@ jobs:
           # never tracked and get-cert dies with "caller cgroup names no tracked
           # container". Pin it like cds and nri already are.
           OPDIG=$(resolve_digest c8s-operator "$OPTAG")
-          # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
-          # c8s-ancestry walk can never find its tags (learned the hard way:
-          # InvalidImageName, run 29473241754). :main is the canonical pointer the
-          # c8s-integration fleet uses; accepted race until c8s pins a digest.
-          # aa_ref lets a caller PIN it (tag or sha-<short>) — floating :main drifts
-          # (e.g. attestation-rs enforce-VMPL0/reject-debug-policy landed on :main and
-          # broke this dev-sandbox CVM while the boot image was unchanged).
-          AATAG="${{ inputs.aa_ref || 'main' }}"
-          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
+          # attestation-api is versioned by attestation-rs, not c8s, so a c8s-ancestry
+          # walk can never find its tags (InvalidImageName, run 29473241754). The chart
+          # under test pins the image built from the attestation-rs commit in
+          # build-pins.json as c8sComponents[].pinnedDigest; only `c8s install` reads
+          # that field and this lane applies raw values, so read it here and install
+          # the same image the installer would. Until this the lane floated on :main,
+          # which drifted under an unchanged boot image (enforce-VMPL0 landed on :main
+          # and broke this CVM). aa_ref still overrides with a tag or sha-<short>.
+          AATAG="${{ inputs.aa_ref || '' }}"
+          AADIG=""
+          if [ -z "$AATAG" ]; then
+            helm show values c8s/internal/helmchart/c8s > /tmp/chart-values.yaml
+            AAPIN=$(yq '.c8sComponents[] | select(.valuePath == "attestationApi.image") | .pinnedDigest // ""' /tmp/chart-values.yaml)
+            if ! printf '%s' "$AAPIN" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::c8s $SHORT declares no sha256 attestationApi pinnedDigest (got '${AAPIN}'); pass aa_ref to test a specific attestation-api image"
+              exit 1
+            fi
+            AADIG=$(resolve_digest attestation-api "$AAPIN")   # platform digest of the pinned index
+          fi
+          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=${AADIG:-$AATAG} (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
@@ -177,6 +188,7 @@ jobs:
           attestationApi:
             image:
               tag: "$AATAG"
+              digest: "$AADIG"
             # cvmMode=node (what we ship on metal), but this node image
             # predates the baked host attestation-api — so the chart's own
             # DaemonSet + attest-proxy sidecar supplies the node-local
