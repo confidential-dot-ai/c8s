@@ -78,24 +78,12 @@ jobs:
             --mkosi-ver "$(grep -oE 'v[0-9.]+$' <<<"$mkosi_line")")
           echo "$out"
           grep -q '^no-drift$' <<<"$out" && exit 0
-          # The attestation-api image is one cluster component, so only the
-          # node-image leg carries its chart pin alongside the source pin. An
-          # unpublished sha-<7> tag fails the leg: never pin an unbuilt image.
-          if [ "$DOMAIN" = node-image ]; then
-            bash .github/scripts/attestation-api-pin.sh stamp \
-              --values internal/helmchart/c8s/values.yaml --attest "$attest"
-          fi
           changes=$(git status --short --untracked-files=all)
-          case "$changes" in
-            " M .github/build-pins.json") ;;
-            " M .github/build-pins.json"$'\n'" M internal/helmchart/c8s/values.yaml") ;;
-            *)
-              echo "::error::pin updater changed an unexpected path"
-              printf '%s\n' "$changes"
-              exit 1
-              ;;
-          esac
-          mapfile -t changed_paths < <(printf '%s\n' "$changes" | cut -c4-)
+          if [ "$changes" != " M .github/build-pins.json" ]; then
+            echo "::error::pin updater changed an unexpected path"
+            printf '%s\n' "$changes"
+            exit 1
+          fi
           branch="pin-watch/${DOMAIN}-${confos:0:12}-${attest:0:12}"
           title="build(${DOMAIN}): pin-watch bump — confos ${confos:0:7}, attestation-rs ${attest:0:7}"
           open_pr=$(
@@ -109,8 +97,8 @@ jobs:
             exit 0
           fi
 
-          git add -- "${changed_paths[@]}"
-          test "$(git diff --cached --name-only)" = "$(printf '%s\n' "${changed_paths[@]}")"
+          git add -- .github/build-pins.json
+          test "$(git diff --cached --name-only)" = ".github/build-pins.json"
           desired_tree=$(git write-tree)
           base_oid=$(git rev-parse HEAD)
           base_tree=$(git rev-parse 'HEAD^{tree}')
@@ -139,32 +127,26 @@ jobs:
               exit 1
             fi
             mutation=$(cat <<'GRAPHQL'
-          mutation($repository: String!, $branch: String!, $expected: GitObjectID!, $headline: String!, $additions: [FileAddition!]!) {
+          mutation($repository: String!, $branch: String!, $expected: GitObjectID!, $headline: String!, $path: String!, $contents: Base64String!) {
             createCommitOnBranch(input: {
               branch: {repositoryNameWithOwner: $repository, branchName: $branch}
               expectedHeadOid: $expected
               message: {headline: $headline}
-              fileChanges: {additions: $additions}
+              fileChanges: {additions: [{path: $path, contents: $contents}]}
             }) {
               commit { oid }
             }
           }
           GRAPHQL
             )
-            additions='[]'
-            for p in "${changed_paths[@]}"; do
-              contents=$(base64 -w0 "$p")
-              additions=$(jq --arg path "$p" --arg contents "$contents" \
-                '. + [{path: $path, contents: $contents}]' <<<"$additions")
-            done
-            variables=$(jq -n \
-              --arg repository "$GITHUB_REPOSITORY" --arg branch "$branch" \
-              --arg expected "$remote_oid" --arg headline "$title" \
-              --argjson additions "$additions" \
-              '{repository: $repository, branch: $branch, expected: $expected, headline: $headline, additions: $additions}')
-            commit_json=$(jq -n --arg query "$mutation" --argjson variables "$variables" \
-              '{query: $query, variables: $variables}' |
-              gh api graphql --input -)
+            commit_json=$(gh api graphql \
+              -f query="$mutation" \
+              -f repository="$GITHUB_REPOSITORY" \
+              -f branch="$branch" \
+              -f expected="$remote_oid" \
+              -f headline="$title" \
+              -f path=.github/build-pins.json \
+              -f contents="$(base64 -w0 .github/build-pins.json)")
             new_oid=$(jq -er '.data.createCommitOnBranch.commit.oid' <<<"$commit_json")
           fi
 
@@ -174,8 +156,4 @@ jobs:
             echo "::error::GitHub did not verify pin-watch commit $new_oid; refusing to open the PR"
             exit 1
           fi
-          body="Automated \`${DOMAIN}\` pin-set bump in \`.github/build-pins.json\`: confos main \`${confos:0:9}\`, attestation-rs main \`${attest:0:9}\`, and mkosi \`${mkosi_line#systemd/mkosi@}\` from that confos commit's base workflow. This rolls the affected measurements; review the upstream logs and reproducibility gate before merging."
-          if [ "${#changed_paths[@]}" -eq 2 ]; then
-            body+=" The chart's attestationApi pinnedDigest moves with it to \`attestation-api:sha-${attest:0:7}\`."
-          fi
-          gh pr create --head "$branch" --title "$title" --body "$body"
+          gh pr create --head "$branch" --title "$title" --body "Automated \`${DOMAIN}\` pin-set bump in \`.github/build-pins.json\`: confos main \`${confos:0:9}\`, attestation-rs main \`${attest:0:9}\`, and mkosi \`${mkosi_line#systemd/mkosi@}\` from that confos commit's base workflow. This rolls the affected measurements; review the upstream logs and reproducibility gate before merging."

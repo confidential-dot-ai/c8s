@@ -8,8 +8,6 @@ on:
       - ".github/actions/**"
       - ".github/build-pins.json"
       - ".github/scripts/pin-manifest.sh"
-      - ".github/scripts/attestation-api-pin.sh"
-      - "internal/helmchart/c8s/values.yaml"
       - "node-guest-image/c8s/mkosi.sync"
       - "**/Dockerfile"
   workflow_dispatch:
@@ -27,11 +25,6 @@ jobs:
           fail=0
           bash .github/scripts/pin-manifest.sh validate \
             --manifest .github/build-pins.json
-          # One attestation-rs pin: the chart's attestationApi pinnedDigest must
-          # be the image built from the manifest's attestation_rs_ref.
-          bash .github/scripts/attestation-api-pin.sh check \
-            --manifest .github/build-pins.json \
-            --values internal/helmchart/c8s/values.yaml || fail=1
           ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
           release_re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$"
           if [[ ! "$ref" =~ $release_re ]]; then

@@ -25,9 +25,9 @@ c8sComponents:
   - valuePath: attestationApi.image
     enabledPath: attestationApi.enabled
     cdsExempt: false
-    ## attestation-api:sha-<7> of the attestation-rs commit pinned in
-    ## .github/build-pins.json (node-image). pin-watch stamps it; pin hygiene
-    ## fails when the two disagree. See .github/scripts/attestation-api-pin.sh.
+    ## Released by attestation-rs: the image built from .github/build-pins.json's
+    ## attestation_rs_ref. Bump together with that pin, to
+    ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:sha-<first 7 of the ref>
     pinnedDigest: sha256:fb0d98a3f248f6d0f0a8feb8d497fba58d40d775b2db3e9e33d25d3fb283815f
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
