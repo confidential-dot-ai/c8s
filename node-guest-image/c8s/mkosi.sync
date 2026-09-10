@@ -124,7 +124,7 @@ NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
 echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}"
 
 # Render the NRI floor template into the stage tree, substituting the resolved
-# nri + cds digests into always_allow. The template lives outside mkosi.extra
+# nri + cds digests into the floor. The template lives outside mkosi.extra
 # (image-policy.yaml.in) so mkosi never copies the raw template; this rendered
 # copy is the only one at etc/nri/conf.d/image-policy.yaml, so it lands with no
 # extra-tree precedence ambiguity. Both digests track C8S_REF.

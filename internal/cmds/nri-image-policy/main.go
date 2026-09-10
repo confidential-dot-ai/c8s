@@ -1,7 +1,7 @@
 // Package nriimagepolicy is an NRI plugin that validates container images
 // against a digest allowlist. Every plugin polls a remote CDS service (pull
-// mode) for the allowlist, with a bootstrap file on disk (always_allow) as the
-// cold-boot baseline.
+// mode) for the allowlist, with a floor document baked into its boot config
+// (allowlist.floor) as the cold-boot baseline.
 package nriimagepolicy
 
 import (
@@ -51,8 +51,8 @@ func startupSourceMode(cfg *config) string {
 	}
 
 	sources := make([]string, 0, 2)
-	if len(cfg.Allowlist.AlwaysAllow) > 0 {
-		sources = append(sources, "always_allow")
+	if cfg.floorEnabled() {
+		sources = append(sources, "floor")
 	}
 	if len(cfg.Policy.LabelRules) > 0 {
 		sources = append(sources, "label_rules")
@@ -107,7 +107,7 @@ func Run(args []string) error {
 
 	auditLogger := audit.NewLogger()
 
-	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
+	store := newPolicyStore(cfg.Allowlist.Floor)
 
 	var wlClient allowlistclient.Client
 	if cfg.PullEnabled() {
@@ -135,7 +135,7 @@ func Run(args []string) error {
 		cancel()
 	}()
 
-	logger.Info("policy store seeded", "always_allow_entries", len(cfg.Allowlist.AlwaysAllow))
+	logger.Info("policy store seeded", "floor_entries", store.floor.Size())
 
 	addr := *healthAddr
 	if cfg.Plugin.HealthAddr != "" {
@@ -202,9 +202,9 @@ func Run(args []string) error {
 			case errors.Is(err, errPluginDied):
 				return err
 			default:
-				// The cache already holds the bootstrap floor (always_allow), so
-				// stay up serving it rather than crash-loop the plugin and block
-				// container creation node-wide. runPullLoop keeps retrying.
+				// The cache already holds the boot floor, so stay up serving it
+				// rather than crash-loop the plugin and block container creation
+				// node-wide. runPullLoop keeps retrying.
 				logger.Warn("initial allowlist pull failed; serving bootstrap floor and retrying in background", "error", err)
 			}
 		}

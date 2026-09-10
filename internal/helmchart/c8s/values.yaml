@@ -958,7 +958,7 @@ nriImagePolicy:
   # into CDS's --allowlist-seed (templates/cds.yaml) beside the chart's own
   # component entries, so CDS's served /allowlist is non-empty on the first
   # worker pull. An entry admitting a digest under any command and args also
-  # lands in every plugin's always_allow (nri-image-policy.bootConfig), so the
+  # lands in every plugin's boot floor (nri-image-policy.bootConfig), so the
   # cluster can bring itself up before CDS is reachable; an entry that pins a
   # command line is seed-only.
   #

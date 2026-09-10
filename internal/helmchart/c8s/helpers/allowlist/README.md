@@ -24,8 +24,9 @@ Prep entries apply when NRI enforcement is enabled: the NRI prep image requires
 an unbaked RKE2 installer, and Kata's prep image requires Kata on RKE2.
 
 `c8s.anyArgvDigests` extracts workload digests whose command and args policies
-are both `any`. `c8s.alwaysAllow` merges these with `c8s.imageAllowlist` for the
-host plugin's local admission list. Workloads that pin argv remain in the served
+are both `any`. `c8s.floorWorkloads` renders these, merged with
+`c8s.imageAllowlist`, as any-argv workload entries for the host plugin's boot
+floor. Workloads that pin argv remain in the served
 seed without being added by `c8s.anyArgvDigests`.
 
 `c8s.digestWorkloadName` takes `digest` and `image`, strips the image reference

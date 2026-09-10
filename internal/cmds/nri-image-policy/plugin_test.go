@@ -83,7 +83,7 @@ func TestCheckImage_MissingAnnotation_DenyDisabled(t *testing.T) {
 
 func TestCheckContainer_MissingAnnotation_SystemNamespaceDenied(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			DenyMissingAnnotation: true,
@@ -287,7 +287,7 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 		},
 		audit:      audit.NewLogger(),
 		logger:     slog.Default(),
-		policy:     newPolicyStore(map[string]string{}),
+		policy:     newPolicyStore(nil),
 		containerd: &fakeContainerd{},
 	}
 	p.SetReady()
@@ -331,7 +331,7 @@ func TestCreateContainer_MountsSocketDirIntoInjectedSidecars(t *testing.T) {
 			p.inventory = newAdmissionInventory(t.TempDir())
 			if ready {
 				p.SetReady()
-				p.policy = newPolicyStore(map[string]string{})
+				p.policy = newPolicyStore(nil)
 			}
 			pod := makePod("default", "pod1")
 			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
@@ -391,7 +391,7 @@ func TestCreateContainer_NoSocketDirMountOutsideInjectedSidecars(t *testing.T) {
 				p.inventory = newAdmissionInventory(t.TempDir())
 			}
 			p.SetReady()
-			p.policy = newPolicyStore(map[string]string{})
+			p.policy = newPolicyStore(nil)
 
 			adjust, _, err := p.CreateContainer(context.Background(), tc.pod, makeCtr(tc.pod.Id, tc.ctr))
 			if err != nil {
@@ -417,7 +417,7 @@ func TestCreateContainer_DeniedContainerGetsNoAdjustment(t *testing.T) {
 			p.inventory = newAdmissionInventory(t.TempDir())
 			if ready {
 				p.SetReady()
-				p.policy = newPolicyStore(map[string]string{})
+				p.policy = newPolicyStore(nil)
 			}
 			pod := makePod("default", "pod1")
 			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
@@ -681,12 +681,12 @@ func mustDigest(t *testing.T, s string) types.Digest {
 }
 
 // newCachedPlugin builds a plugin whose policy store admits wl (applied as a
-// version-1 pull) plus the config's always_allow.
+// version-1 pull) plus the config's floor.
 func newCachedPlugin(cfg *config, wl *allowlist.Allowlist) (*plugin, *policyStore) {
 	if err := validateLabelRules(cfg.Policy.LabelRules); err != nil {
 		panic(err)
 	}
-	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
+	store := newPolicyStore(cfg.Allowlist.Floor)
 	store.apply(wl, 1)
 	p := &plugin{
 		cfg:        cfg,
@@ -769,22 +769,22 @@ func TestCheckImage_AnyArgvEntry_AdmitsAnyArgv(t *testing.T) {
 	}
 }
 
-// always_allow admits by digest ahead of the served index, whatever the argv,
-// and it is not consulted for a digest it does not name.
-func TestCheckImage_AlwaysAllow_AdmitsByDigestAlone(t *testing.T) {
+// An any-argv floor entry admits by digest ahead of the served index, whatever
+// the argv, and it is not consulted for a digest it does not name.
+func TestCheckImage_FloorAdmitsByDigestAlone(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "installer"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "installer"})},
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, &allowlist.Allowlist{Schema: allowlist.Schema})
 
 	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestA, []string{"/anything"})
 	if verdict != verdictAllow {
-		t.Fatalf("always_allow digest should be admitted, got %d (reason=%q)", verdict, reason)
+		t.Fatalf("a floor digest should be admitted, got %d (reason=%q)", verdict, reason)
 	}
 	if verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/anything"}); verdict != verdictDeny {
-		t.Fatalf("a digest outside always_allow and the served index must be denied, got %d", verdict)
+		t.Fatalf("a digest outside the floor and the served index must be denied, got %d", verdict)
 	}
 }
 
@@ -831,7 +831,7 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 
 func TestCreateContainer_WorkloadArgv_MatchAndMismatch(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "floor-image"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "floor-image"})},
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
 	p.SetReady()
@@ -870,7 +870,7 @@ func makeCtrWithImageArgs(podSandboxID, name, image string, args []string) *api.
 
 func TestCreateContainer_DigestNotInAllowlist_FailClosed(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -886,7 +886,7 @@ func TestCreateContainer_DigestNotInAllowlist_FailClosed(t *testing.T) {
 
 func TestCreateContainer_DigestNotInAllowlist_AuditAllows(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeAudit},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -902,7 +902,7 @@ func TestCreateContainer_DigestNotInAllowlist_AuditAllows(t *testing.T) {
 
 func TestCreateContainer_DigestInAllowlist_Allows(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -920,7 +920,7 @@ func TestCreateContainer_DigestInAllowlist_Allows(t *testing.T) {
 // container without its own annotation has no reference to check.
 func TestCreateContainer_PodAnnotationDoesNotSupplyImage(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, DenyMissingAnnotation: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -949,7 +949,7 @@ func assertDeferredCleared(t *testing.T, p *plugin) {
 
 func TestRunDeferredCheck_AuditMode_NoKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy: policyConfig{
 			Mode:            ModeAudit, // audit → never calls resolver.StopContainer
 			EnforceExisting: true,
@@ -975,7 +975,7 @@ func TestRunDeferredCheck_AuditMode_NoKill(t *testing.T) {
 func TestRunDeferredCheck_OrphanContainer_Skipped(t *testing.T) {
 	// A container whose pod sandbox is absent is skipped (podByID miss).
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeAudit, EnforceExisting: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -992,7 +992,7 @@ func TestRunDeferredCheck_OrphanContainer_Skipped(t *testing.T) {
 
 func TestRunDeferredCheck_EnforceExistingDisabled_NoOp(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.SetReady()
@@ -1017,7 +1017,7 @@ func TestRunDeferredCheck_EnforceExistingDisabled_NoOp(t *testing.T) {
 
 func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1058,7 +1058,7 @@ func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *test
 // pull completes, so recovery runs through the deferred path.
 func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1083,7 +1083,7 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 
 func TestSynchronize_Ready_AuditMode_ChecksWithoutEnforcing(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeAudit, EnforceExisting: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1140,13 +1140,13 @@ func captureAudit(t *testing.T, fn func()) []map[string]any {
 	return events
 }
 
-// floorPlugin admits pushDigestA via always_allow, and carries an inventory.
+// floorPlugin admits pushDigestA from its floor, and carries an inventory.
 // No pull has been applied, the state a plugin is in before its first CDS
 // fetch.
 func floorPlugin(t *testing.T) *plugin {
 	t.Helper()
 	cfg := &config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
@@ -1158,7 +1158,7 @@ func floorPlugin(t *testing.T) *plugin {
 	}
 	p := &plugin{
 		cfg:        cfg,
-		policy:     newPolicyStore(cfg.Allowlist.AlwaysAllow),
+		policy:     newPolicyStore(cfg.Allowlist.Floor),
 		audit:      audit.NewLogger(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		containerd: &fakeContainerd{},
@@ -1365,7 +1365,7 @@ func TestCreateContainer_NotReady_ResolveFails_Denied(t *testing.T) {
 // Audit mode admits what it denies, so what it admits it must record.
 func TestCreateContainer_AuditModeDenial_IsRecorded(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeAudit},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1388,7 +1388,7 @@ func TestCreateContainer_AuditModeDenial_IsRecorded(t *testing.T) {
 
 func TestCheckExisting_RecordsBeforeAttemptingTheKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1445,7 +1445,7 @@ func TestCheckExisting_KubeSystemForeignContainerIsStopped(t *testing.T) {
 // other, so the sandbox's answer must carry it.
 func TestCheckExisting_OrphanContainerIsStillRecorded(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1471,7 +1471,7 @@ func TestCheckExisting_OrphanContainerIsStillRecorded(t *testing.T) {
 // Only the pre-allowlist hook skips containerd; the startup path resolves.
 func TestCheckExisting_ResolvesTagOnlyReference(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")
@@ -1499,7 +1499,7 @@ func TestCheckExisting_ResolvesTagOnlyReference(t *testing.T) {
 // argv reaches MatchWorkload, so the recorded value must be the container's.
 func TestCreateContainer_RecordsTheContainerArgv(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	p.inventory = newAdmissionInventory("/proc")

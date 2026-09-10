@@ -241,7 +241,7 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.always_allow is the floor that pins the
+runs pull mode (polls CDS); allowlist.floor is the boot floor that pins the
 install image + CDS digest so chart upgrades can roll.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
@@ -275,18 +275,16 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-{{- /* Self-allow the installer image first (load-bearing when
-       bootstrapAllowlist.deriveComponents=false, where c8s.alwaysAllow omits
-       it), then add the rest — skipping the installer digest so the map has no
-       duplicate key (the plugin loads this with yaml.v3, which rejects dups). */ -}}
-{{- $selfDigest := required "image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest }}
-  always_allow:
-    {{ $selfDigest | quote }}: {{ printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest | quote }}
-{{- range $digest, $image := (include "c8s.alwaysAllow" $root | fromJson) }}
-{{- if ne $digest $selfDigest }}
-    {{ $digest | quote }}: {{ $image | quote }}
-{{- end }}
-{{- end }}
+  floor:
+    {{- /* Self-allow the installer image (load-bearing when
+           bootstrapAllowlist.deriveComponents=false, where c8s.floorWorkloads
+           omits it), then merge the rest of the floor. */ -}}
+    {{- $selfDigest := required "image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest -}}
+    {{- $selfImage := printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest -}}
+    {{- $selfContainer := dict "digest" $selfDigest "image" $selfImage "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+    {{- $floor := include "c8s.floorWorkloads" $root | fromJson -}}
+    {{- $_ := set $floor (include "c8s.digestWorkloadName" (dict "digest" $selfDigest "image" $selfImage)) (dict "label" $selfImage "initContainers" list "containers" (list $selfContainer)) -}}
+    {{- dict "schema" "c8s.allowlist/v1" "workloads" $floor | toYaml | nindent 4 }}
 containerd:
   socket: {{ include "nri-image-policy.containerdSocket" $root | quote }}
   namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}

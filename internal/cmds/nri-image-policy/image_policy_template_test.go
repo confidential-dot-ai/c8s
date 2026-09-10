@@ -90,25 +90,33 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		"sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77": "nvcr.io/nvidia/k8s-device-plugin:v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
 		"sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f": "rancher/local-path-provisioner:v0.0.36@sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f",
 	}
+	// The floor carries one any-argv entry per admitted image; index it by
+	// digest for the lookups below.
+	floorEntries := map[string]string{}
+	for _, w := range cfg.Allowlist.Floor.Workloads {
+		for _, d := range w.Digests() {
+			floorEntries[d.String()] = w.Label
+		}
+	}
 	for digest, ref := range floor {
-		if _, ok := cfg.Allowlist.AlwaysAllow[digest]; !ok {
+		if _, ok := floorEntries[digest]; !ok {
 			t.Errorf("%s (%s) missing from the baked floor — the node cannot boot its system components", ref, digest)
 		}
 	}
 
-	// always_allow is the generated floor plus the two rendered tokens (the
+	// The floor is the generated system set plus the two rendered tokens (the
 	// nri plugin self-allow and cds), so the exact count catches an entry a
 	// regen adds or drops.
-	if want := len(floor) + 2; len(cfg.Allowlist.AlwaysAllow) != want {
-		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + nri + cds)",
-			len(cfg.Allowlist.AlwaysAllow), want, len(floor))
+	if want := len(floor) + 2; len(cfg.Allowlist.Floor.Workloads) != want {
+		t.Errorf("baked floor has %d entries, want %d (%d system floor + nri + cds)",
+			len(cfg.Allowlist.Floor.Workloads), want, len(floor))
 	}
 
-	// Every floor key must be a digest the store admits as-is.
-	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
-	for d := range cfg.Allowlist.AlwaysAllow {
-		if !store.alwaysAllows(d) {
-			t.Errorf("floor key %q is not an admissible digest", d)
+	// Every floor entry must be a digest the store admits under any argv.
+	store := newPolicyStore(cfg.Allowlist.Floor)
+	for d := range floorEntries {
+		if !store.floorAdmits(d, nil) {
+			t.Errorf("floor entry %q is not admitted by digest alone", d)
 		}
 	}
 }

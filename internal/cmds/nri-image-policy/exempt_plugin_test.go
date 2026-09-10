@@ -18,7 +18,7 @@ import (
 func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plugin {
 	t.Helper()
 	cfg := &config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "floor-image"}},
+		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "floor-image"})},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
@@ -29,7 +29,7 @@ func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plug
 	}
 	p := &plugin{
 		cfg:        cfg,
-		policy:     newPolicyStore(cfg.Allowlist.AlwaysAllow),
+		policy:     newPolicyStore(cfg.Allowlist.Floor),
 		audit:      audit.NewLogger(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		containerd: &fakeContainerd{},

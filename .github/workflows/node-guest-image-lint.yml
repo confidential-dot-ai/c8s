@@ -136,7 +136,7 @@ jobs:
           echo "$CILIUM_SHA256  cilium.tar.zst" | sha256sum -c -
 
       - name: The baked floor matches the pinned bundles
-        # systemfloor re-derives the always_allow block from the pinned
+        # systemfloor re-derives the floor block from the pinned
         # bundles; -check fails when image-policy.yaml.in is stale, so an RKE2
         # pin bump without a floor regen cannot merge and wedge node boot.
         run: |
