@@ -63,8 +63,6 @@ replaced whole — this never field-merges into a live entry.`,
 				return fmt.Errorf("no workload entries in %q", args[0])
 			}
 
-			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
-
 			c, err := o.client(ctx(cmd))
 			if err != nil {
 				return err
@@ -74,6 +72,11 @@ replaced whole — this never field-merges into a live entry.`,
 				return err
 			}
 
+			entries, err = parseWorkloadEntriesForSchema(data, live.Schema)
+			if err != nil {
+				return err
+			}
+			findings := lintOffline(&pkgallowlist.Allowlist{Schema: live.Schema, Workloads: entries})
 			// The ambiguity check is the one finding that cannot be made from
 			// the file alone: the entry it collides with is usually one already
 			// served. Only pairs that span both are added here, since a
@@ -145,7 +148,7 @@ func newEditCmd(o *options) *cobra.Command {
 				return fmt.Errorf("no workload entry named %q", name)
 			}
 
-			edited, err := editWorkloadInEditor(orig, name)
+			edited, err := editWorkloadInEditor(orig, name, live.Schema)
 			if err != nil {
 				return err
 			}
@@ -250,7 +253,14 @@ func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallow
 // parseWorkloadEntries accepts either a full/partial allowlist document or a
 // bare name-keyed map of workload entries.
 func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error) {
+	return parseWorkloadEntriesForSchema(data, "")
+}
+
+func parseWorkloadEntriesForSchema(data []byte, schema string) (map[string]pkgallowlist.Workload, error) {
 	if al, perr := pkgallowlist.ParseJSON(data); perr == nil {
+		if schema != "" && schema != al.Schema {
+			return nil, fmt.Errorf("document schema differs from CDS; use allowlist upload for an explicit whole-document migration")
+		}
 		if al.Workloads == nil {
 			al.Workloads = map[string]pkgallowlist.Workload{}
 		}
@@ -265,7 +275,7 @@ func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error)
 	}
 	out := make(map[string]pkgallowlist.Workload, len(raw))
 	for name, body := range raw {
-		w, werr := pkgallowlist.ParseWorkloadJSON(body)
+		w, werr := pkgallowlist.ParseWorkloadJSONForSchema(body, schema)
 		if werr != nil {
 			return nil, fmt.Errorf("workload %q: %w", name, werr)
 		}
@@ -287,7 +297,7 @@ func readFileOrStdin(cmd *cobra.Command, path string) ([]byte, error) {
 
 // editWorkloadInEditor writes the entry to a temp file, opens $EDITOR (vi if
 // unset) on it, and re-validates the result via ParseWorkloadJSON.
-func editWorkloadInEditor(w pkgallowlist.Workload, name string) (*pkgallowlist.Workload, error) {
+func editWorkloadInEditor(w pkgallowlist.Workload, name string, schema ...string) (*pkgallowlist.Workload, error) {
 	tmp, err := os.CreateTemp("", "c8s-workload-"+sanitizeFileName(name)+"-*.json")
 	if err != nil {
 		return nil, err
@@ -312,6 +322,9 @@ func editWorkloadInEditor(w pkgallowlist.Workload, name string) (*pkgallowlist.W
 	edited, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if len(schema) > 0 {
+		return pkgallowlist.ParseWorkloadJSONForSchema(edited, schema[0])
 	}
 	return pkgallowlist.ParseWorkloadJSON(edited)
 }

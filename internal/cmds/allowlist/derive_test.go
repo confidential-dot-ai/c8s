@@ -50,7 +50,7 @@ func runDerive(t *testing.T, stdin string, args ...string) (map[string]pkgallowl
 }
 
 func TestDeriveCoversInitContainers(t *testing.T) {
-	got, err := runDerive(t, deployJSON(), "dynamo", "-")
+	got, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestDeriveCoversInitContainers(t *testing.T) {
 }
 
 func TestDeriveArgvPolicies(t *testing.T) {
-	got, _ := runDerive(t, deployJSON(), "dynamo", "-")
+	got, _ := runDerive(t, deployJSON(), "dynamo", "-", "--env=any")
 	w := got["dynamo"]
 
 	// A command with no args is Deny. Exact would be rejected on apply
@@ -91,12 +91,12 @@ func TestDeriveArgvPolicies(t *testing.T) {
 }
 
 func TestDeriveSecretsOnlyWhenAsked(t *testing.T) {
-	got, _ := runDerive(t, deployJSON(), "dynamo", "-")
+	got, _ := runDerive(t, deployJSON(), "dynamo", "-", "--env=any")
 	if got["dynamo"].Secrets != nil {
 		t.Errorf("secrets block emitted without --secret-read")
 	}
 
-	got, _ = runDerive(t, deployJSON(), "dynamo", "-", "--secret-read", "/dynamo/volumes/w235")
+	got, _ = runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--secret-read", "/dynamo/volumes/w235")
 	s := got["dynamo"].Secrets
 	if s == nil {
 		t.Fatal("no secrets block with --secret-read")
@@ -108,7 +108,7 @@ func TestDeriveSecretsOnlyWhenAsked(t *testing.T) {
 
 func TestDeriveAcceptsABarePod(t *testing.T) {
 	pod := `{"kind":"Pod","spec":{"containers":[{"name":"c","image":"` + testImage + `","command":["sleep","inf"]}]}}`
-	got, err := runDerive(t, pod, "p", "-")
+	got, err := runDerive(t, pod, "p", "-", "--env=any")
 	if err != nil {
 		t.Fatalf("derive pod: %v", err)
 	}

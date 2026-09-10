@@ -182,8 +182,8 @@ func TestListTextWorkloadTable(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"web":   {"web", "web-img", "0", "2", "command=any,exact", "args=any,deny", "allow(r=2,w=1)"},
-		"plain": {"plain", "0", "1", "command=exact", "args=deny", "allow(r=1,w=0)"},
+		"web":   {"web", "web-img", "0", "2", "command=any,exact", "args=any,deny", "env=any", "allow(r=2,w=1)"},
+		"plain": {"plain", "0", "1", "command=exact", "args=deny", "env=any", "allow(r=1,w=0)"},
 	}
 	for name, wantRow := range want {
 		got, ok := rows[name]

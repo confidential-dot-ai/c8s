@@ -40,6 +40,8 @@ const (
 var ErrInvalidWorkload = errors.New("invalid workload entry")
 
 const initSQL = `
+CREATE TABLE IF NOT EXISTS allowlist_format (id INTEGER PRIMARY KEY CHECK(id=1), schema TEXT NOT NULL);
+INSERT OR IGNORE INTO allowlist_format VALUES (1, 'c8s.allowlist/v1');
 CREATE TABLE IF NOT EXISTS allowlist_version (
 	version TEXT NOT NULL DEFAULT '1'
 );
@@ -119,8 +121,12 @@ func (s *Store) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 		return nil, "", err
 	}
 
+	var schema string
+	if err := s.db.QueryRow("SELECT schema FROM allowlist_format WHERE id=1").Scan(&schema); err != nil {
+		return nil, "", err
+	}
 	return &pkgallowlist.Allowlist{
-		Schema:    pkgallowlist.Schema,
+		Schema:    schema,
 		Workloads: workloads,
 	}, version, nil
 }
@@ -244,8 +250,22 @@ func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, 
 // seedWorkloadsTx inserts every entry whose name is free and returns how many
 // it inserted.
 func seedWorkloadsTx(tx *sql.Tx, workloads map[string]pkgallowlist.Workload) (int, error) {
+	var schema string
+	if err := tx.QueryRow("SELECT schema FROM allowlist_format WHERE id=1").Scan(&schema); err != nil {
+		return 0, err
+	}
 	var added int
 	for name, w := range workloads {
+		var exists int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM workload_entry WHERE name=?", name).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if exists != 0 {
+			continue
+		}
+		if err := w.ValidateEnvSchema(schema); err != nil {
+			return 0, fmt.Errorf("%w: %v", ErrInvalidWorkload, err)
+		}
 		entryJSON, err := json.Marshal(w)
 		if err != nil {
 			return 0, err
@@ -277,13 +297,16 @@ func seedWorkloadsTx(tx *sql.Tx, workloads map[string]pkgallowlist.Workload) (in
 // validated against the frozen allowlist rules; a rejection wraps
 // ErrInvalidWorkload.
 func (s *Store) PutWorkload(name string, w pkgallowlist.Workload) error {
-	norm, err := normalizeEntry(name, w)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var schema string
+	if err := s.db.QueryRow("SELECT schema FROM allowlist_format WHERE id=1").Scan(&schema); err != nil {
+		return err
+	}
+	norm, err := normalizeEntryForSchema(name, w, schema)
 	if err != nil {
 		return err
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -360,6 +383,17 @@ func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 // replaceContentsTx clears every entry and reloads them from al, without
 // touching the version. Callers set the version (bump or restore).
 func replaceContentsTx(tx *sql.Tx, al *pkgallowlist.Allowlist) error {
+	if al.Schema != pkgallowlist.Schema && al.Schema != pkgallowlist.SchemaV2 {
+		return fmt.Errorf("unknown allowlist schema")
+	}
+	for _, w := range al.Workloads {
+		if err := w.ValidateEnvSchema(al.Schema); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("UPDATE allowlist_format SET schema=? WHERE id=1", al.Schema); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		"DELETE FROM workload_entry",
 		"DELETE FROM workload_entry_digest",
@@ -418,11 +452,11 @@ func indexWorkloadTx(tx *sql.Tx, name string, w pkgallowlist.Workload) error {
 	return nil
 }
 
-// normalizeEntry validates name and w through the frozen allowlist validator and
+// normalizeEntryForSchema validates name and w through the allowlist validator and
 // returns the canonical entry to store. A rejection wraps ErrInvalidWorkload.
-func normalizeEntry(name string, w pkgallowlist.Workload) (pkgallowlist.Workload, error) {
+func normalizeEntryForSchema(name string, w pkgallowlist.Workload, schema string) (pkgallowlist.Workload, error) {
 	probe := &pkgallowlist.Allowlist{
-		Schema:    pkgallowlist.Schema,
+		Schema:    schema,
 		Workloads: map[string]pkgallowlist.Workload{name: w},
 	}
 	canon, err := probe.Canonical()

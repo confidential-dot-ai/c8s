@@ -3,6 +3,7 @@ package allowlist
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -91,6 +92,7 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
+	var envMode, envFile string
 	cmd := &cobra.Command{
 		Use:   "derive <name> <file|->",
 		Short: "Build an entry from a live Kubernetes object",
@@ -104,6 +106,11 @@ wrong. Init containers are part of the set CDS matches, so omitting them makes
 every release fail with "no workload entry matches the running containers". And
 a container with a command and no args needs an args policy of "deny", because
 "exact" requires a non-empty argv.
+
+Environment policy must be supplied using --env=any|deny or --env-file, a JSON
+map of container names to env policies. Exact values describe the complete OCI
+launch environment, including image/runtime additions. Pod env/envFrom alone
+cannot establish it. Value policies require a v2 allowlist on CDS.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
@@ -128,6 +135,45 @@ deliberately absent from the derived entry.`,
 			if err != nil {
 				return err
 			}
+			if (envMode == "") == (envFile == "") {
+				return fmt.Errorf("specify exactly one of --env=any|deny or --env-file")
+			}
+			var policies map[string]allowlist.EnvPolicy
+			if envFile != "" {
+				data, err := os.ReadFile(envFile)
+				if err != nil {
+					return err
+				}
+				policies, err = allowlist.ParseEnvPoliciesJSON(data)
+				if err != nil {
+					return err
+				}
+			} else if envMode != allowlist.PolicyAny && envMode != allowlist.PolicyDeny {
+				return fmt.Errorf("--env must be any or deny; use --env-file for exact values")
+			}
+			used := map[string]bool{}
+			for _, part := range []struct {
+				templates  []templateContainer
+				containers []allowlist.Container
+			}{{spec.InitContainers, initContainers}, {spec.Containers, containers}} {
+				for i, c := range part.templates {
+					p := allowlist.EnvPolicy{Policy: envMode}
+					if envFile != "" {
+						var ok bool
+						p, ok = policies[c.Name]
+						if !ok {
+							return fmt.Errorf("missing env policy for container %q", c.Name)
+						}
+						used[c.Name] = true
+					}
+					part.containers[i].Env = p
+				}
+			}
+			for name := range policies {
+				if !used[name] {
+					return fmt.Errorf("env policy names unknown container %q", name)
+				}
+			}
 			w := allowlist.Workload{
 				Label:          label,
 				InitContainers: initContainers,
@@ -146,6 +192,8 @@ deliberately absent from the derived entry.`,
 	}
 	cmd.Flags().StringArrayVar(&secrets, "secret-read", nil,
 		"grant read on this secret path (repeatable); omit for no secrets block")
+	cmd.Flags().StringVar(&envMode, "env", "", "environment policy for every container: any or deny")
+	cmd.Flags().StringVar(&envFile, "env-file", "", "JSON map of container names to explicit env policies (including exact values)")
 	cmd.Flags().StringVar(&label, "label", "", "optional entry label")
 	return cmd
 }

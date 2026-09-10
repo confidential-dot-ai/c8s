@@ -2,14 +2,23 @@ package allowlist
 
 import "fmt"
 
-// RunningContainer is one container as an enforcer observes it: the image digest
-// and the effective argv it was told to run.
+// RunningContainer is one container as an enforcer observes it: the bytes, the
+// effective argv they were told to run, the destinations of its BIND mounts
+// (the ones that can carry host-supplied content in), and its environment
+// commitment without values (and legacy variable names).
 //
 // A local type rather than the inventory's own keeps this package a pure
 // function of the allowlist — the caller converts.
+//
+// Missing Env is unavailable evidence, and fails v2 exact/deny policies.
+// Legacy v1 mount/name-set policies retain their historical subset semantics.
+// Kata fills bind mounts and legacy names; both backends report v2 env evidence.
 type RunningContainer struct {
-	Digest string
-	Argv   []string
+	Digest     string
+	Argv       []string
+	BindMounts []string
+	EnvNames   []string // legacy v1 only
+	Env        *EnvObservation
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -138,9 +147,55 @@ func (c Container) admits(r RunningContainer) bool {
 	if c.Digest.String() != r.Digest {
 		return false
 	}
+	if !c.admitsProcess(r) {
+		return false
+	}
+	return c.Mounts.admits(r.BindMounts) && c.Env.matches(r)
+}
+
+func (c Container) admitsProcess(r RunningContainer) bool {
+	if c.Digest.String() != r.Digest {
+		return false
+	}
 	rest, ok := c.Command.matchCommand(r.Argv)
 	if !ok || !c.Args.matchArgs(rest) {
 		return false
+	}
+	return true
+}
+
+// admits reports whether every bind destination is one this policy names.
+func (p MountPolicy) admits(destinations []string) bool {
+	if p.Policy != PolicyExact {
+		return true
+	}
+	return everyIn(destinations, p.Destinations)
+}
+
+// matches preserves v1 names-only semantics; v2 value policies always require
+// complete observed evidence, including for deny.
+func (p EnvPolicy) matches(r RunningContainer) bool {
+	if p.Policy == PolicyExact && p.Names != nil {
+		return everyIn(r.EnvNames, p.Names)
+	}
+	return p.admitsObservation(r.Env)
+}
+
+// everyIn reports whether every observed value appears in allowed. An empty
+// observation is vacuously true — see RunningContainer on enforcers that cannot
+// see a field.
+func everyIn(observed, allowed []string) bool {
+	if len(observed) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		set[a] = struct{}{}
+	}
+	for _, o := range observed {
+		if _, ok := set[o]; !ok {
+			return false
+		}
 	}
 	return true
 }

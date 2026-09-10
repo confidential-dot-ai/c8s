@@ -819,6 +819,9 @@ func TestSandboxContainerKeyIsInjective(t *testing.T) {
 		{"/app\x1e--serve"},
 		{"/app --serve"},
 		{"/app\t--serve"},
+		{"/app", "\xff"},
+		{"/app", "\xfe"},
+		{"/app", "�"},
 		{"/app\n--serve"},
 		{"/app", "", "--serve"},
 	}

@@ -3,7 +3,7 @@
 //
 // The allowlist is a map of named workload entries. Each entry pins an
 // init/main container set; every container binds a digest to the process
-// (argv) permitted for those bytes, and the
+// (argv), bind-mount and environment policy permitted for those bytes, and the
 // entry as a whole carries a secret-store grant. An image that may run however
 // it is invoked — a standalone or injected c8s component, whose argv is
 // per-pod — is an entry whose container policy is any. Policy is always looked
@@ -35,6 +35,9 @@ import (
 // Schema identifies the allowlist document format. It is the first field of the
 // canonical form.
 const Schema = "c8s.allowlist/v1"
+
+// SchemaV2 adds exact environment values and requires explicit env policies.
+const SchemaV2 = "c8s.allowlist/v2"
 
 // Policy values. Argv policies use Deny/Any/Exact; secrets grants use
 // Deny/Allow — never Any (normalizeSecrets).
@@ -68,6 +71,8 @@ type Container struct {
 	Image   string       `json:"image,omitempty"`
 	Command ArgvPolicy   `json:"command"`
 	Args    ArgvPolicy   `json:"args"`
+	Mounts  MountPolicy  `json:"mounts,omitempty"`
+	Env     EnvPolicy    `json:"env,omitempty"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -78,6 +83,33 @@ type Container struct {
 type ArgvPolicy struct {
 	Policy string   `json:"policy"`
 	Argv   []string `json:"argv,omitempty"`
+}
+
+// MountPolicy governs where the host may bind content into the container.
+//
+// It constrains BIND mounts only — a mount whose source is an absolute guest
+// path. The rest of a container's mount table names filesystem types (proc,
+// sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing in, so pinning it
+// would make an operator restate the OCI base set to say nothing.
+//
+// Exact requires every bind destination to appear in Destinations, which is the
+// set an operator recognises: it is what the pod spec's volumeMounts declare,
+// plus the handful the kubelet always adds (/etc/hosts, /etc/hostname,
+// /etc/resolv.conf, /dev/termination-log, /dev/shm, the serviceaccount token).
+// Any leaves them unconstrained, and is what an absent policy means — unlike
+// argv, a Deny default would refuse every real pod, since the base set is never
+// empty.
+type MountPolicy struct {
+	Policy       string   `json:"policy"`
+	Destinations []string `json:"destinations,omitempty"`
+}
+
+// EnvPolicy constrains the OCI launch environment. Values is an exact map;
+// Names is retained only for legacy v1 permitted-name policies.
+type EnvPolicy struct {
+	Policy string            `json:"policy"`
+	Names  []string          `json:"names,omitempty"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -109,6 +141,9 @@ func ParseServedJSON(data []byte) (*Allowlist, error) {
 }
 
 func parseJSON(data []byte, strict bool) (*Allowlist, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if strict {
 		dec.DisallowUnknownFields()
@@ -127,11 +162,28 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 // a PUT /allowlist/workloads/{name} — applying the same normalization as
 // ParseJSON so a stored entry is canonical.
 func ParseWorkloadJSON(data []byte) (*Workload, error) {
+	return parseWorkloadJSON(data, "")
+}
+
+// ParseWorkloadJSONForSchema validates before normalization can default legacy fields.
+func ParseWorkloadJSONForSchema(data []byte, schema string) (*Workload, error) {
+	return parseWorkloadJSON(data, schema)
+}
+
+func parseWorkloadJSON(data []byte, schema string) (*Workload, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var w Workload
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("decode workload: %w", err)
+	}
+	if schema != "" {
+		if err := w.ValidateEnvSchema(schema); err != nil {
+			return nil, err
+		}
 	}
 	if err := normalizeContainers("entry", "initContainers", w.InitContainers); err != nil {
 		return nil, err
@@ -222,6 +274,7 @@ func DigestEntry(digest types.Digest, image string) Workload {
 			Image:   image,
 			Command: ArgvPolicy{Policy: PolicyAny},
 			Args:    ArgvPolicy{Policy: PolicyAny},
+			Env:     EnvPolicy{Policy: PolicyAny},
 		}},
 	}
 }
@@ -268,10 +321,13 @@ func (a *Allowlist) CanonicalDigest() ([]byte, error) {
 // break every allowlist pull in the cluster over one legacy name — so an
 // over-long entry is dropped instead. See docs/allowlist-and-capabilities.md.
 func (a *Allowlist) normalize(strict bool) error {
-	if a.Schema != Schema {
-		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
+	if a.Schema != Schema && a.Schema != SchemaV2 {
+		return fmt.Errorf("allowlist: unknown schema %q (expected %q or %q)", a.Schema, Schema, SchemaV2)
 	}
 	for name, w := range a.Workloads {
+		if err := w.ValidateEnvSchema(a.Schema); err != nil {
+			return fmt.Errorf("workload %q: %w", name, err)
+		}
 		// The grammar is not negotiable on either path: the name is used
 		// verbatim as a URL path segment.
 		if !workloadNameGrammarOK(name) {
@@ -321,8 +377,101 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if err := normalizeArgv(&c.Args); err != nil {
 			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
 		}
+		if err := normalizeMounts(&c.Mounts); err != nil {
+			return fmt.Errorf("workload %q %s %s mounts: %w", workload, field, c.Digest, err)
+		}
+		if err := normalizeEnv(&c.Env); err != nil {
+			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
+		}
 	}
 	return nil
+}
+
+// normalizeMounts validates a mount policy. An absent policy canonicalizes to
+// Any: every container has a mount table it did not ask for (the OCI base set,
+// /etc/hosts, the serviceaccount token), so Deny would refuse every real pod and
+// an operator adopting this field would be opting into an outage.
+func normalizeMounts(p *MountPolicy) error {
+	switch p.Policy {
+	case PolicyAny, "":
+		if len(p.Destinations) != 0 {
+			return fmt.Errorf("any policy takes no destinations")
+		}
+		p.Policy = PolicyAny
+		p.Destinations = nil
+	case PolicyExact:
+		if len(p.Destinations) == 0 {
+			return fmt.Errorf("exact policy requires at least one destination")
+		}
+		for _, d := range p.Destinations {
+			if !path.IsAbs(d) {
+				return fmt.Errorf("destination %q is not an absolute path", d)
+			}
+		}
+		p.Destinations = sortedUnique(p.Destinations)
+	default:
+		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+	}
+	return nil
+}
+
+// normalizeEnv validates both versions. Only v1 permits an absent policy,
+// defaulting to Any; ValidateEnvSchema rejects absence before v2 normalization.
+func normalizeEnv(p *EnvPolicy) error {
+	switch p.Policy {
+	case PolicyAny, "", PolicyDeny:
+		if len(p.Names) != 0 || p.Values != nil {
+			return fmt.Errorf("%s policy takes no names or values", p.Policy)
+		}
+		if p.Policy == "" {
+			p.Policy = PolicyAny
+		}
+		p.Names = nil
+	case PolicyExact:
+		if p.Names != nil {
+			if p.Values != nil || len(p.Names) == 0 {
+				return fmt.Errorf("exact legacy env requires names only")
+			}
+			for _, n := range p.Names {
+				if !validEnvPair(n, "") {
+					return fmt.Errorf("invalid environment name")
+				}
+			}
+			p.Names = sortedUnique(p.Names)
+		} else {
+			if p.Values == nil {
+				return fmt.Errorf("exact env requires values (or legacy names)")
+			}
+			for n, v := range p.Values {
+				if !validEnvPair(n, v) {
+					return fmt.Errorf("invalid environment name or value")
+				}
+			}
+			if len(p.Values) == 0 {
+				p.Policy = PolicyDeny
+				p.Values = nil
+			}
+		}
+	default:
+		return fmt.Errorf("unknown env policy %q (want deny, any, or exact)", p.Policy)
+	}
+	return nil
+}
+
+// sortedUnique makes a list a function of its content, so Canonical does not
+// churn on the order an operator happened to write.
+func sortedUnique(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // normalizeArgv validates an argv policy and canonicalizes an absent policy to
@@ -433,7 +582,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env})
 	return string(b)
 }
 
