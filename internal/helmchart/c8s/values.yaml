@@ -25,9 +25,10 @@ c8sComponents:
   - valuePath: attestationApi.image
     enabledPath: attestationApi.enabled
     cdsExempt: false
-    ## Released by attestation-rs. Bump with:
-    ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:main
-    pinnedDigest: sha256:53a1bbe33746de94841cfd69e977b2f70db9ea2862be911be9d7af00f7ab7229
+    ## Released by attestation-rs: the image built from .github/build-pins.json's
+    ## attestation_rs_ref. Bump together with that pin, to
+    ##   crane digest ghcr.io/confidential-dot-ai/attestation-api:sha-<first 7 of the ref>
+    pinnedDigest: sha256:fb0d98a3f248f6d0f0a8feb8d497fba58d40d775b2db3e9e33d25d3fb283815f
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
     cdsExempt: false
