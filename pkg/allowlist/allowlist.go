@@ -45,10 +45,13 @@ const (
 	PolicyAllow = "allow"
 )
 
+// The yaml tags mirror the json ones so a document embeds in a YAML config
+// (the NRI plugin's boot floor) in the same shape it has on the wire.
+//
 // Allowlist is the complete image allowlist.
 type Allowlist struct {
-	Schema    string              `json:"schema"`
-	Workloads map[string]Workload `json:"workloads"`
+	Schema    string              `json:"schema" yaml:"schema"`
+	Workloads map[string]Workload `json:"workloads" yaml:"workloads"`
 }
 
 // Workload is a named policy entry. Label is an informational image reference.
@@ -56,18 +59,18 @@ type Allowlist struct {
 // normalizes to: an entry that releases nothing carries no "secrets" key at
 // all, so a consumer that does not know the field never sees it.
 type Workload struct {
-	Label          string         `json:"label,omitempty"`
-	InitContainers []Container    `json:"initContainers"`
-	Containers     []Container    `json:"containers"`
-	Secrets        *SecretsPolicy `json:"secrets,omitempty"`
+	Label          string         `json:"label,omitempty" yaml:"label,omitempty"`
+	InitContainers []Container    `json:"initContainers" yaml:"initContainers,omitempty"`
+	Containers     []Container    `json:"containers" yaml:"containers"`
+	Secrets        *SecretsPolicy `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 }
 
 // Container binds a digest to the process policy permitted for it.
 type Container struct {
-	Digest  types.Digest `json:"digest"`
-	Image   string       `json:"image,omitempty"`
-	Command ArgvPolicy   `json:"command"`
-	Args    ArgvPolicy   `json:"args"`
+	Digest  types.Digest `json:"digest" yaml:"digest"`
+	Image   string       `json:"image,omitempty" yaml:"image,omitempty"`
+	Command ArgvPolicy   `json:"command" yaml:"command"`
+	Args    ArgvPolicy   `json:"args" yaml:"args"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -76,8 +79,8 @@ type Container struct {
 // it. Exact requires equality, Any leaves it unconstrained, Deny requires it to
 // be empty. An absent policy defaults to Deny.
 type ArgvPolicy struct {
-	Policy string   `json:"policy"`
-	Argv   []string `json:"argv,omitempty"`
+	Policy string   `json:"policy" yaml:"policy"`
+	Argv   []string `json:"argv,omitempty" yaml:"argv,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -85,9 +88,9 @@ type ArgvPolicy struct {
 // every container in the pod can read, so a per-container grant would not
 // describe what is actually released. See docs/secrets.md.
 type SecretsPolicy struct {
-	Policy string   `json:"policy"`
-	Read   []string `json:"read,omitempty"`
-	Write  []string `json:"write,omitempty"`
+	Policy string   `json:"policy" yaml:"policy"`
+	Read   []string `json:"read,omitempty" yaml:"read,omitempty"`
+	Write  []string `json:"write,omitempty" yaml:"write,omitempty"`
 }
 
 // ParseJSON decodes and validates an operator-authored allowlist, rejecting
@@ -121,6 +124,12 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// Normalize validates and canonicalizes a document decoded outside ParseJSON
+// (the NRI plugin's YAML boot config), under the same strict ingest posture.
+func (a *Allowlist) Normalize() error {
+	return a.normalize(true)
 }
 
 // ParseWorkloadJSON decodes and validates a single workload entry — the body of

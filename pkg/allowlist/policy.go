@@ -29,10 +29,9 @@ func (a *Allowlist) BuildIndex() *Index {
 }
 
 // DigestIndex builds an index that admits each digest whatever it runs — the
-// shape of a DigestEntry, without a document to carry one. The bootstrap layers
-// are its callers: the NRI plugin's always_allow set and the guest monitor's
-// baked seed both sit beside a pulled snapshot rather than inside it, so a
-// withheld or failed pull cannot drop them.
+// shape of a DigestEntry, without a document to carry one. The guest monitor's
+// baked seed is its caller: a flat digest list measured into the launch digest,
+// kept digest-only so a policy change never needs a guest-image rebuild.
 //
 // Digests arrive in the forms enforcers see (types.NormalizeDigest). One that
 // does not normalize is skipped and named in warnings, which leaves the caller

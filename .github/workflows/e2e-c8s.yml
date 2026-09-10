@@ -101,7 +101,7 @@ jobs:
       # WHY, and the earlier comment here had this WRONG. It claimed the image
       # bakes a floor "from its build ref, so installing any other ref gets that
       # ref's own components denied". That is not the mechanism. The measured
-      # always_allow in the node image (confidential-os-builder
+      # floor in the node image (confidential-os-builder
       # mkosi/base/mkosi.profiles/c8s/image-policy.yaml.in) holds exactly TWO
       # entries, the nri-image-policy image and the cds image. It has never
       # contained the operator, ratls-mesh, tls-lb, get-cert or attestation-api

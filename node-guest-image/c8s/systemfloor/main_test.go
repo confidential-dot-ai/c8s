@@ -10,6 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // writeSyntheticBundle builds a minimal deterministic docker-archive bundle:
@@ -120,14 +124,49 @@ func TestManifestEntries_DigestPinnedOnly(t *testing.T) {
 
 func TestRender_DedupesAliasedDigests(t *testing.T) {
 	// Two tags on one manifest (or a bundle/manifest overlap) must not emit a
-	// duplicate YAML key.
-	out := render([]entry{
-		{digest: "sha256:aaa", ref: "example.com/a:1"},
-		{digest: "sha256:aaa", ref: "example.com/a:2"},
-		{digest: "sha256:bbb", ref: "example.com/b:1"},
+	// second entry for the same digest.
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	digestB := "sha256:" + strings.Repeat("b", 64)
+	out, err := render([]entry{
+		{digest: digestA, ref: "example.com/a:1"},
+		{digest: digestA, ref: "example.com/a:2"},
+		{digest: digestB, ref: "example.com/b:1"},
 	})
-	if strings.Count(out, `"sha256:aaa"`) != 1 || strings.Count(out, `"sha256:bbb"`) != 1 {
-		t.Fatalf("aliased digest produced duplicate keys:\n%s", out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, digestA) != 1 || strings.Count(out, digestB) != 1 {
+		t.Fatalf("aliased digest produced duplicate entries:\n%s", out)
+	}
+}
+
+// The rendered block must decode as an allowlist document whose entries admit
+// their digest under any argv — the shape the plugin's boot floor loads.
+func TestRender_ParsesAsFloorWorkloads(t *testing.T) {
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	out, err := render([]entry{{digest: digestA, ref: "example.com/a:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Workloads map[string]allowlist.Workload `yaml:"workloads"`
+	}
+	if err := yaml.Unmarshal([]byte("schema: c8s.allowlist/v1\nworkloads:\n"+out), &doc); err != nil {
+		t.Fatalf("rendered block does not decode: %v\n%s", err, out)
+	}
+	if len(doc.Workloads) != 1 {
+		t.Fatalf("want 1 entry, got %v", doc.Workloads)
+	}
+	for name, w := range doc.Workloads {
+		if name != "a-"+strings.Repeat("a", 12) {
+			t.Errorf("entry name = %q, want the DigestEntryName form", name)
+		}
+		if len(w.Containers) != 1 || w.Containers[0].Digest.String() != digestA || !w.Containers[0].AnyArgv() {
+			t.Errorf("entry = %#v, want %s under any command and args", w, digestA)
+		}
+		if w.Label != "example.com/a:1" {
+			t.Errorf("label = %q", w.Label)
+		}
 	}
 }
 
