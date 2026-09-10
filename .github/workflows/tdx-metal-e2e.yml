@@ -426,6 +426,11 @@ jobs:
           # Capture the config git actually reads and the exchange it actually
           # gets, redacting any credential the trace would otherwise print.
           clone_diag() {
+            # Diagnostics must not abort themselves: this runs under the step's
+            # set -e, and `grep` with no match (a clean runner has no GIT_/GH_
+            # vars) would otherwise kill the function before the wire trace,
+            # which is the one artifact that explains the failure.
+            set +e
             echo "::group::c8s clone diagnostics"
             git config --list --show-origin 2>&1 \
               | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
@@ -437,6 +442,7 @@ jobs:
               | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
               | tail -40 | sed 's/^/wire /'
             echo "::endgroup::"
+            set -e
           }
           retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
             || { clone_diag; exit 1; }
