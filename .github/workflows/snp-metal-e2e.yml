@@ -128,14 +128,34 @@ jobs:
           # never tracked and get-cert dies with "caller cgroup names no tracked
           # container". Pin it like cds and nri already are.
           OPDIG=$(resolve_digest c8s-operator "$OPTAG")
-          # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
-          # c8s-ancestry walk can never find its tags (learned the hard way:
-          # InvalidImageName, run 29473241754). :main is the canonical pointer the
-          # c8s-integration fleet uses; accepted race until c8s pins a digest.
-          # aa_ref lets a caller PIN it (tag or sha-<short>) — floating :main drifts
-          # (e.g. attestation-rs enforce-VMPL0/reject-debug-policy landed on :main and
-          # broke this dev-sandbox CVM while the boot image was unchanged).
-          AATAG="${{ inputs.aa_ref || 'main' }}"
+          # attestation-api is versioned by the attestation-rs repo, NOT c8s, so a
+          # c8s-ancestry walk can never find its tags (InvalidImageName, run
+          # 29473241754). Pin it to the attestation-rs commit the node image was
+          # built from (.github/build-pins.json, kept current by confos-pin-watch),
+          # so the DaemonSet and the copy baked into the guest are the same code.
+          # Floating :main ran two attestation-rs versions in one cluster and went
+          # red for attestation-rs reasons on days with no c8s change
+          # (enforce-VMPL0/reject-debug-policy landing on :main). aa_ref still
+          # overrides for a caller who wants tip on purpose.
+          PINS=c8s/.github/build-pins.json
+          if [ -n '${{ inputs.aa_ref }}' ]; then
+            AATAG='${{ inputs.aa_ref }}'
+          elif [ -f "$PINS" ]; then
+            AA_REF=$(jq -er '.builds["node-image"].attestation_rs_ref' "$PINS") \
+              || { echo "::error::$PINS exists but has no builds.node-image.attestation_rs_ref"; exit 1; }
+            AATAG="sha-${AA_REF:0:7}"
+            tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/attestation-api:pull" | jq -r .token)
+            code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+              "https://ghcr.io/v2/confidential-dot-ai/attestation-api/manifests/${AATAG}")
+            # A pin that points at nothing is broken, not something to fall back from.
+            [ "$code" = 200 ] || { echo "::error::build-pins.json pins attestation-rs ${AA_REF:0:7} but ghcr has no attestation-api:${AATAG} (HTTP $code)"; exit 1; }
+          else
+            # c8s refs before 2026-09-03 (c8s#523) carry no pin file. Nothing to
+            # honour, so float, and say so.
+            echo "::warning title=attestation-api unpinned::this c8s ref has no $PINS; using attestation-api:main"
+            AATAG=main
+          fi
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
