@@ -143,11 +143,11 @@ Then diff it against `c8s kata measure --vcpus N --json | jq -r .cmdline`.
 
 ## Verifying against a real cluster
 
-The SNP implementation reproduces both live measurements in the table above
-from the artifacts on the node, and `attestation-go`'s `launchmeasure/snp`
-unit tests check it
-against `sev-snp-measure`'s own published vectors using that project's 4 KiB
-OVMF fixture — so CI validates the algorithm without a multi-GB guest image.
+The SNP implementation reproduces both live measurements in the preceding
+table from the artifacts on the node, and `attestation-go`'s `launchmeasure/snp`
+unit tests check it against `sev-snp-measure`'s own published vectors using that
+project's 4 KiB OVMF fixture — so CI validates the algorithm without a multi-GB
+guest image.
 The end-to-end check against the real image is manual:
 
 ```console
@@ -224,19 +224,20 @@ for kata/QEMU**:
 equivalent. **Risk accepted:** a change to the library's default `LaunchOptions`
 would silently move the pinned measurement. `TestMRTDMatchesHardware` in
 attestation-go asserts the hardware-captured digest, and attestation-go's CI
-fetches the validated TDVF so that test cannot skip; a dependency bump that
-moves the value fails there rather than shipping a wrong pin.
+fetches the validated TDVF so that test cannot skip. A dependency bump that
+moves the value fails there instead of shipping a wrong pin.
 
 ### Re-validating against hardware
 
 Two pins, two checks. attestation-go pins the TDVF build its hardware-captured
-MRTD was taken from and proves the predictor reproduces it. c8s pins the kata
-release its nodes boot: CI's TDX MRTD tripwire job (`.github/workflows/ci.yml`)
-fetches the TDVF out of that kata-static release, sha256-checks it against the
-pin next to its URL, runs `c8s kata measure --platform tdx` on it, and fails if
-the result differs from `WANT_MRTD` in the same job. A kata bump that moves the
-MRTD therefore fails in c8s and is fixed by updating the three values together.
-The CLI wiring is covered in CI with a synthetic TDVF.
+MRTD was taken from, and proves the predictor reproduces that MRTD. c8s pins the
+kata release its nodes boot: CI's TDX MRTD tripwire job
+(`.github/workflows/ci.yml`) fetches the TDVF out of that kata-static release,
+sha256-checks it against the pin next to its URL, runs `c8s kata measure
+--platform tdx` on it, and fails if the result differs from `WANT_MRTD` in the
+same job. A kata bump that moves the MRTD therefore fails in c8s; fix it by
+updating the URL, the sha256 and `WANT_MRTD` together. The CLI wiring is covered
+in CI with a synthetic TDVF.
 
 To re-capture the expected MRTD after a kata-static bump, read it from a live
 pod's own attestation report. The in-guest attestation-service listens on

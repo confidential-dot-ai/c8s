@@ -88,8 +88,8 @@ func TestExtractSNPReportRealAKSEnvelope(t *testing.T) {
 		t.Fatalf("report length = %d, want %d", len(report), ratls.SNPReportSize)
 	}
 	// First 4 bytes of an AMD SEV-SNP report are the version field (uint32 LE).
-	// Currently shipping versions are 2 and 3; reject anything else as a check
-	// that we sliced the right bytes.
+	// Currently shipping versions are 2 and 3. Anything else means the slice
+	// offsets are wrong, so reject it.
 	if version := binary.LittleEndian.Uint32(report[:4]); version != 2 && version != 3 {
 		t.Fatalf("SNP report version = %d, want 2 or 3", version)
 	}

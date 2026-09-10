@@ -233,7 +233,7 @@ between the two can only under-extend, which `OpenJournal` repairs by
 reading the register back and comparing it against the journal's fold
 (never the reverse — an extra extend is unrecoverable). A register that
 folds to neither is a divergence: the daemon logs it and stops
-extending rather than piling on events no verifier will accept.
+extending rather than adding events no verifier accepts.
 
 **Scan, not inotify.** kata-agent sets up `/run/kata-containers` as its
 own mount after the daemon starts at boot; an inotify watch added early

@@ -85,8 +85,8 @@ func workloadChain(family teetypes.Family, workloadImages []string) ([]string, e
 	if len(workloadImages) == 0 {
 		return nil, nil
 	}
-	// Accepting --workload-image off TDX would claim an enforcement that
-	// cannot exist rather than silently ignoring the flag.
+	// Accepting --workload-image off TDX would report an enforcement that
+	// cannot exist, so refuse the flag instead of ignoring it.
 	if family != teetypes.FamilyTDX {
 		return nil, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
 	}
@@ -98,10 +98,9 @@ func workloadChain(family teetypes.Family, workloadImages []string) ([]string, e
 			return nil, fmt.Errorf("--workload-image: %w", err)
 		}
 		// The node's measurer extends a given image once, so a repeated ref
-		// here extends the expected register one time too many and produces a
-		// gate NO node can ever satisfy. Reject it rather than dedup silently
-		// — a repeat is a copy/paste, and a permanently red gate is worse than
-		// a usage error.
+		// here extends the expected register one time too many and builds a
+		// gate no node can satisfy. A repeat is a copy/paste slip, so report
+		// it rather than dedup silently.
 		if prev, dup := seen[d]; dup {
 			return nil, fmt.Errorf("--workload-image %q and %q are the same image (%s): each expected image must be given once, in first-extend order, or the expected RTMR[3] chain can never match the node's", prev, ref, d)
 		}
@@ -111,11 +110,11 @@ func workloadChain(family teetypes.Family, workloadImages []string) ([]string, e
 	return digests, nil
 }
 
-// checkMeasuredIdentity asserts both halves of the measured identity over the
-// claims attestation-go extracted from the signature-verified quote: the
-// pinned image booted, and it was launched for the operator's key having
-// measured exactly these workloads. runtimemeasure resolves which field
-// carries the binding (RTMR[3] on TDX, HOSTDATA on SNP) and how wide it is.
+// checkMeasuredIdentity checks both halves of the measured identity against the
+// claims attestation-go extracted from the signature-verified quote: the pinned
+// image booted, and the node was launched for the operator's key and measured
+// exactly these workloads. runtimemeasure resolves which field carries the
+// binding (RTMR[3] on TDX, HOSTDATA on SNP) and how wide it is.
 func checkMeasuredIdentity(identity runtimemeasure.ImageIdentity, operatorPubPEM []byte, workloadDigests []string, res *teetypes.VerificationResult) error {
 	if err := identity.Verify(res); err != nil {
 		return err

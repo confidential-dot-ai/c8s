@@ -250,10 +250,10 @@ func CheckSandboxPin(cert *x509.Certificate, expectedID string) error {
 // match the envelope's platform family — fail closed rather than approve one
 // platform's evidence under another's rules.
 //
-// c8s ships no in-process quote parser: every platform, including bare-metal
-// SNP whose raw report [Attestation.Envelope] wraps for us, is verified by the
-// attestation-api. An inline VCEK rides along in the envelope; the api ignores
-// it or uses it.
+// c8s ships no in-process quote parser, so the attestation-api verifies every
+// platform, bare-metal SNP included; [Attestation.Envelope] wraps that raw
+// report in an envelope first. An inline VCEK travels in the envelope, for the
+// attestation-api to use as collateral.
 func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
 	env, err := att.Envelope()
 	if err != nil {

@@ -11,8 +11,8 @@ import (
 
 // The RA-TLS extension, its wire format and its verification live in
 // attestation-go/ratls. What follows is the c8s spelling of that surface, kept
-// because the call sites are many and the names are load-bearing in the docs;
-// new code can take the library names directly.
+// because many call sites and the docs use these names. New code can take the
+// library names directly.
 
 // Attestation is the TEE evidence an RA-TLS certificate extension carries.
 type Attestation = agratls.Attestation
@@ -35,9 +35,9 @@ const (
 	SNPMeasurementSize = runtimemeasure.Size
 )
 
-// OID arc: 1.3.6.1.4.1.66378 is our Private Enterprise Number. The library
-// assigns no identifier of its own; the extension format is
-// attestation-go/ratls's, the OID it rides under is ours.
+// OID arc: 1.3.6.1.4.1.66378 is the c8s Private Enterprise Number. The library
+// assigns no identifier of its own: attestation-go/ratls owns the extension
+// format, c8s owns the OID it is carried under.
 //
 //	1.3.6.1.4.1.66378.1   - confidential TEE attestation arc
 //	1.3.6.1.4.1.66378.1.1 - RA-TLS attestation extension

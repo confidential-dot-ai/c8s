@@ -112,8 +112,8 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 }
 
 // enforceResult re-checks the verdict against p on the verifier's own claims.
-// Defense in depth: a nil verification error already implies these, but never
-// report a success the result contradicts.
+// A nil verification error already implies these checks; re-running them keeps
+// a result that contradicts itself from reading as a success.
 func enforceResult(res *teetypes.VerificationResult, p Params) error {
 	if !res.SignatureValid {
 		return fmt.Errorf("verifier returned signature_valid=false")

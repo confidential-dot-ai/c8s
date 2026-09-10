@@ -96,7 +96,7 @@ The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 
 | OID | Extension | Stamped by |
 |---|---|---|
-| `…1.1` | RA-TLS attestation (`TEEAttestation`, above) — format owned by attestation-go/ratls, OID assigned here in `pkg/ratls` | the attesting component, on its own certificate and on its CSR |
+| `…1.1` | RA-TLS attestation (`TEEAttestation`) — format owned by attestation-go/ratls, OID assigned here in `pkg/ratls` | the attesting component, on its own certificate and on its CSR |
 | `…1.2` | SHA-256 audit digest of the issuance evidence — `pkg/certutil` | CDS, on every issued leaf |
 | `…1.4` | pod sandbox ID — `sandbox.go`, see [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key) | CDS, on a leaf whose requester presented a sandbox token |
 | `…1.5` | matched workload — `matchedworkload.go`, see [Matched workload](#matched-workload-which-allowlist-entry-is-behind-a-key) | CDS, on a leaf whose sandbox's high-water inventory uniquely matches one allowlist entry |
@@ -106,8 +106,8 @@ The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 The `report` field carries one of two shapes, auto-detected on parse by
 attestation-go/ratls, which owns the wire format:
 
-- **Native SEV-SNP** (`snp`, `gcp-snp`): the raw 1184-byte `ATTESTATION_REPORT`.
-  Kept raw so it stays extractable by offline SNP verifiers.
+- **Native SEV-SNP** (`snp`, `gcp-snp`): the raw 1184-byte `ATTESTATION_REPORT`,
+  kept raw so an offline SNP verifier can extract it.
 - **Everything else** (`az-snp`, `tdx`, `gcp-tdx`, `az-tdx`): the attestation-api's
   JSON evidence envelope, forwarded verbatim to `/verify` at handshake time. Both
   TDX shapes must use the envelope (c8s deliberately ships no in-process quote

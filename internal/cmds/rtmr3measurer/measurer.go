@@ -8,10 +8,10 @@
 // It is the measurement-only counterpart to policy-monitor (allowlist
 // enforcement); either or both may run.
 //
-// The extend convention and the exactly-once bookkeeping are the
-// runtimemeasure package's — verifiers MUST build on that package. Its
-// [runtimemeasure.Journal] persists the extended set to tmpfs, so a daemon
-// restart cannot re-extend the append-only register. Design and rationale:
+// The extend convention and the exactly-once bookkeeping belong to the
+// runtimemeasure package, and a verifier must build on that package. Its
+// [runtimemeasure.Journal] keeps the extended set on tmpfs, so a daemon restart
+// cannot re-extend the append-only register. Design and rationale:
 // docs/kata-guest-base.md "Per-workload RTMR[3] measurement".
 package rtmr3measurer
 
@@ -102,7 +102,7 @@ func Run(_ []string) error {
 // A soft anomaly (a skipped malformed line, an unreadable register, a register
 // carrying extends the journal cannot account for) comes back alongside a
 // usable journal: log it and keep measuring, because giving up would leave the
-// guest measuring nothing for the rest of its life. Only a nil journal is
+// guest measuring nothing for the rest of the boot. Only a nil journal is
 // fatal.
 func (m *measurer) open() error {
 	if m.reg == nil {
@@ -152,7 +152,8 @@ func (m *measurer) scanOnce() {
 	}
 	// Prune decided cids whose dirs are gone (container removed) so the map
 	// cannot grow unbounded in a container-churning guest. Cids are never
-	// reused; the journal intentionally mirrors the register instead.
+	// reused, and the durable dedup is the journal, which mirrors the
+	// register.
 	for cid := range m.seenCids {
 		if _, ok := present[cid]; !ok {
 			delete(m.seenCids, cid)

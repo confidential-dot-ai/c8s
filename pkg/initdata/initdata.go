@@ -149,8 +149,9 @@ func ValidateAlgorithm(algorithm string) error {
 	return nil
 }
 
-// Digest is the value the kata shim places in SNP HOST_DATA for raw: the
-// launch-time anchor binding runtimemeasure defines, over the document bytes.
+// Digest returns the value the kata shim places in SNP HOST_DATA for the
+// init-data document raw: runtimemeasure's launch-time anchor over the exact
+// document bytes.
 func Digest(raw []byte) [DigestSize]byte {
 	return runtimemeasure.HostData(raw)
 }
