@@ -87,12 +87,7 @@ func (h Handler) HandlePutWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current, _, err := h.Store.LoadAll()
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	entry, err := pkgallowlist.ParseWorkloadJSONForSchema(body, current.Schema)
+	entry, err := pkgallowlist.ParseWorkloadJSON(body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return

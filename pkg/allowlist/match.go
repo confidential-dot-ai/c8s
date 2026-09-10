@@ -2,22 +2,12 @@ package allowlist
 
 import "fmt"
 
-// RunningContainer is one container as an enforcer observes it: the bytes, the
-// effective argv they were told to run, the destinations of its BIND mounts
-// (the ones that can carry host-supplied content in), and its environment
-// commitment without values (and legacy variable names).
-//
-// A local type rather than the inventory's own keeps this package a pure
-// function of the allowlist — the caller converts.
-//
-// Missing Env is unavailable evidence, and fails v2 exact/deny policies.
-// Legacy v1 mount/name-set policies retain their historical subset semantics.
-// Kata fills bind mounts and legacy names; both backends report v2 env evidence.
+// RunningContainer holds the launch characteristics observed by an enforcer.
+// Missing Env is unavailable evidence and fails exact/deny policies.
 type RunningContainer struct {
 	Digest     string
 	Argv       []string
 	BindMounts []string
-	EnvNames   []string // legacy v1 only
 	Env        *EnvObservation
 }
 
@@ -172,12 +162,7 @@ func (p MountPolicy) admits(destinations []string) bool {
 	return everyIn(destinations, p.Destinations)
 }
 
-// matches preserves v1 names-only semantics; v2 value policies always require
-// complete observed evidence, including for deny.
 func (p EnvPolicy) matches(r RunningContainer) bool {
-	if p.Policy == PolicyExact && p.Names != nil {
-		return everyIn(r.EnvNames, p.Names)
-	}
 	return p.admitsObservation(r.Env)
 }
 

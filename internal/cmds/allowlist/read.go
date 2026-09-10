@@ -233,9 +233,6 @@ func summarizeEnv(w pkgallowlist.Workload) string {
 		if mode == "" {
 			mode = pkgallowlist.PolicyAny
 		}
-		if c.Env.Names != nil {
-			mode = "names"
-		}
 		modes[mode] = true
 	}
 	return joinSet(modes)

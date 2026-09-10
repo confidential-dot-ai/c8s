@@ -478,18 +478,15 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 	}
 }
 
-func TestEnvironmentSchemaMigrationPersists(t *testing.T) {
+func TestEnvironmentValuesPersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.db")
 	store, err := OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v2","workloads":{"w":{"containers":[{"digest":"` + digestA + `","env":{"policy":"exact","values":{"MODE":"production"}}}]}}}`))
+	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","env":{"policy":"exact","values":{"MODE":"production"}}}]}}}`))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := store.PutWorkload("w", al.Workloads["w"]); err == nil {
-		t.Fatal("v2 policy entered v1 document")
 	}
 	if err := store.ReplaceAll(al); err != nil {
 		t.Fatal(err)
@@ -501,19 +498,11 @@ func TestEnvironmentSchemaMigrationPersists(t *testing.T) {
 	}
 	defer store.Close()
 	got, _, err := store.LoadAll()
-	if err != nil || got.Schema != pkgallowlist.SchemaV2 {
+	if err != nil || got.Schema != pkgallowlist.Schema || got.Workloads["w"].Containers[0].Env.Values["MODE"] != "production" {
 		t.Fatalf("schema lost: %v %v", got, err)
 	}
 	if err := store.PutWorkload("w", al.Workloads["w"]); err != nil {
 		t.Fatal(err)
 	}
-	legacy := al.Workloads["w"]
-	legacy.Containers = append([]pkgallowlist.Container{}, legacy.Containers...)
-	legacy.Containers[0].Env = pkgallowlist.EnvPolicy{}
-	if err := store.PutWorkload("w", legacy); err == nil {
-		t.Fatal("implicit env accepted in v2")
-	}
-	if _, err := store.SeedWorkloads(map[string]pkgallowlist.Workload{"legacy": legacy}); err == nil {
-		t.Fatal("seed bypassed v2 schema")
-	}
+
 }

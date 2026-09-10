@@ -51,15 +51,12 @@ func TestEnvironmentEditsAndCollisionShapes(t *testing.T) {
 	if diffEntry(a, b).empty() {
 		t.Fatal("env-only edit invisible")
 	}
-	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.SchemaV2, Workloads: map[string]pkgallowlist.Workload{"a": a, "b": b}}
+	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{"a": a, "b": b}}
 	if len(indistinguishableEntries(al)) != 0 {
 		t.Fatal("env-distinct workloads treated as identical")
 	}
 	al.Workloads["b"] = a
 	if len(indistinguishableEntries(al)) != 1 {
 		t.Fatal("identical workloads not flagged")
-	}
-	if _, err := parseWorkloadEntriesForSchema([]byte(`{"w":{"containers":[{"digest":"`+testDigest+`"}]}}`), pkgallowlist.SchemaV2); err == nil {
-		t.Fatal("v2 apply silently defaults env")
 	}
 }

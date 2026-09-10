@@ -172,7 +172,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 				entriesByDigest[d] = map[string]bool{}
 			}
 			entriesByDigest[d][name] = true
-			if c.AnyArgv() && (c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "") && c.Mounts.Policy != pkgallowlist.PolicyExact {
+			if hasUnconstrainedRuntimePolicy(c) {
 				fullyAny[d] = true
 			}
 			if argvPolicyName(c.Command) == pkgallowlist.PolicyDeny {
@@ -184,7 +184,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 		}
 		if w.Secrets != nil {
 			for _, c := range allContainers(w) {
-				if c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "" || c.Env.Names != nil {
+				if c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "" {
 					warnings = append(warnings, warnf("workload %q grants secrets without pinning environment values for container %s", name, c.Digest))
 				}
 			}
@@ -271,16 +271,7 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 	return true
 }
 
-func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
-	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
-		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
-}
-
-// unobservedFieldPolicies reports mount and env policy that the deployment's
-// enforcer cannot see. Only the in-guest policy-monitor reads the guest OCI
-// spec; the host NRI plugin sees the CRI container, reports neither field, and
-// an unobserved field is vacuously satisfied — so outside pod mode such a
-// policy admits every container with no signal at write, install or deny time.
+// unobservedFieldPolicies reports mount restrictions outside pod mode.
 func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
 	if cvmMode == "pod" {
 		return nil
@@ -291,9 +282,6 @@ func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []findi
 			var fields []string
 			if c.Mounts.Policy == pkgallowlist.PolicyExact {
 				fields = append(fields, "mounts")
-			}
-			if c.Env.Policy == pkgallowlist.PolicyExact && c.Env.Names != nil {
-				fields = append(fields, "env")
 			}
 			if fields == nil {
 				continue
@@ -365,7 +353,7 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 		out := make([]string, 0, len(cs))
 		for _, c := range cs {
 			env := c.Env
-			if env.Names != nil || env.Policy == "" {
+			if env.Policy == "" {
 				env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyAny}
 			}
 			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env})
@@ -431,4 +419,9 @@ func isTagForm(image string) bool {
 	}
 	_, digested := named.(reference.Digested)
 	return !digested
+}
+
+func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
+	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
+		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
 }

@@ -66,7 +66,7 @@ func TestEnvEncodingAndPrivacy(t *testing.T) {
 	}
 }
 
-func TestEnvSchemaMigration(t *testing.T) {
+func TestEnvPolicyParsing(t *testing.T) {
 	doc := func(schema, env string) []byte {
 		return []byte(`{"schema":"` + schema + `","workloads":{"w":{"containers":[{"digest":"` + digestA + `","env":` + env + `}]}}}`)
 	}
@@ -74,16 +74,13 @@ func TestEnvSchemaMigration(t *testing.T) {
 		schema, env string
 		want        bool
 	}{
-		{Schema, `{"policy":"exact","names":["A"]}`, true},
-		{Schema, `{"policy":"exact","values":{"A":"x"}}`, false},
-		{Schema, `{"policy":"deny"}`, false},
-		{SchemaV2, `{"policy":"exact","names":["A"]}`, false},
-		{SchemaV2, `{"policy":"exact","values":{"A":"x"}}`, true},
-		{SchemaV2, `{"policy":"exact","values":{}}`, true},
-		{SchemaV2, `{"policy":"deny"}`, true},
-		{SchemaV2, `{}`, false},
-		{SchemaV2, `{"policy":"exact","values":{"A":"x","A":"y"}}`, false},
-		{SchemaV2, `{"policy":"any","values":{"A":"x"}}`, false},
+		{Schema, `{"policy":"exact","names":["A"]}`, false},
+		{Schema, `{"policy":"exact","values":{"A":"x"}}`, true},
+		{Schema, `{"policy":"exact","values":{}}`, true},
+		{Schema, `{"policy":"deny"}`, true},
+		{Schema, `{}`, true},
+		{Schema, `{"policy":"exact","values":{"A":"x","A":"y"}}`, false},
+		{Schema, `{"policy":"any","values":{"A":"x"}}`, false},
 	} {
 		for _, parse := range []func([]byte) (*Allowlist, error){ParseJSON, ParseServedJSON} {
 			al, err := parse(doc(tc.schema, tc.env))
@@ -95,13 +92,13 @@ func TestEnvSchemaMigration(t *testing.T) {
 			}
 		}
 	}
-	if _, err := ParseJSON(append(doc(SchemaV2, `{"policy":"any"}`), []byte(`{}`)...)); err == nil {
+	if _, err := ParseJSON(append(doc(Schema, `{"policy":"any"}`), []byte(`{}`)...)); err == nil {
 		t.Fatal("trailing JSON accepted")
 	}
 }
 
 func TestEnvDistinguishesWorkloadsAndHistory(t *testing.T) {
-	al := mustParse(t, `{"schema":"c8s.allowlist/v2","workloads":{
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
  "a":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"a"}}}]},
  "b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"b"}}}]}}}`)
 	a, _ := ObserveEnv([]string{"MODE=a"})
@@ -125,7 +122,7 @@ func TestEnvCanonicalOrder(t *testing.T) {
 	c := `{"digest":"` + digestA + `","env":{"policy":"exact","values":{"A":"VALUE"}}}`
 	a, b := strings.ReplaceAll(c, "VALUE", "a"), strings.ReplaceAll(c, "VALUE", "b")
 	parse := func(cs string) []byte {
-		al := mustParse(t, `{"schema":"c8s.allowlist/v2","workloads":{"w":{"containers":[`+cs+`]}}}`)
+		al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+cs+`]}}}`)
 		out, _ := al.Canonical()
 		return out
 	}

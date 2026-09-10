@@ -18,7 +18,7 @@ type History struct {
 
 // Record adds an admission; only a resolved record for the same ID clears an
 // unresolved container. History owns its copy of argv.
-func (h *History) Record(id, digest string, argv []string, env ...*allowlist.EnvObservation) {
+func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObservation) {
 	if h.byKey == nil {
 		h.byKey = map[string]workloadclaims.SandboxContainer{}
 		h.unresolved = map[string]struct{}{}
@@ -28,10 +28,7 @@ func (h *History) Record(id, digest string, argv []string, env ...*allowlist.Env
 		return
 	}
 	delete(h.unresolved, id)
-	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv)}
-	if len(env) > 0 {
-		c.Env = env[0].Clone()
-	}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone()}
 	h.byKey[c.Key()] = c
 }
 

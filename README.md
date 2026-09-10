@@ -71,7 +71,8 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - **Container image and command-line allowlisting.** Every container is
   enforced against a CDS-served allowlist of named workload entries, each
   pinning the image digests a workload runs and the command line each may run
-  with. Enforced by an NRI plugin on the node inside the CVM.
+  with, and the environment values it launches with. Enforced by an NRI plugin
+  on the node inside the CVM.
 
 - **Attestation-gated secrets.** CDS releases an application secret only once
   a pod's running containers resolve to a single allowlist entry carrying a
@@ -475,8 +476,8 @@ than let you discover them:
 
 - **The image allowlist gates digest and command line, not the rest of the
   pod spec.** Each container's `command` prefix and `args` remainder are
-  enforced against the effective argv, and bind-mount destinations and env
-  variable names are enforceable in the guest; capabilities and the
+  enforced against the effective argv, env values are enforced by both backends,
+  and bind-mount destinations are enforceable in the guest; capabilities and the
   remaining pod-spec fields are not. Nothing enforces which images run
   *together* — every running image must be allowlisted, but no gate requires
   the set in one pod to match a single workload entry.

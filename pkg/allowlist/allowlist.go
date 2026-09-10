@@ -36,9 +36,6 @@ import (
 // canonical form.
 const Schema = "c8s.allowlist/v1"
 
-// SchemaV2 adds exact environment values and requires explicit env policies.
-const SchemaV2 = "c8s.allowlist/v2"
-
 // Policy values. Argv policies use Deny/Any/Exact; secrets grants use
 // Deny/Allow — never Any (normalizeSecrets).
 const (
@@ -104,11 +101,9 @@ type MountPolicy struct {
 	Destinations []string `json:"destinations,omitempty"`
 }
 
-// EnvPolicy constrains the OCI launch environment. Values is an exact map;
-// Names is retained only for legacy v1 permitted-name policies.
+// EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
 	Policy string            `json:"policy"`
-	Names  []string          `json:"names,omitempty"`
 	Values map[string]string `json:"values,omitempty"`
 }
 
@@ -162,15 +157,6 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 // a PUT /allowlist/workloads/{name} — applying the same normalization as
 // ParseJSON so a stored entry is canonical.
 func ParseWorkloadJSON(data []byte) (*Workload, error) {
-	return parseWorkloadJSON(data, "")
-}
-
-// ParseWorkloadJSONForSchema validates before normalization can default legacy fields.
-func ParseWorkloadJSONForSchema(data []byte, schema string) (*Workload, error) {
-	return parseWorkloadJSON(data, schema)
-}
-
-func parseWorkloadJSON(data []byte, schema string) (*Workload, error) {
 	if err := validateJSON(data); err != nil {
 		return nil, err
 	}
@@ -179,11 +165,6 @@ func parseWorkloadJSON(data []byte, schema string) (*Workload, error) {
 	var w Workload
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("decode workload: %w", err)
-	}
-	if schema != "" {
-		if err := w.ValidateEnvSchema(schema); err != nil {
-			return nil, err
-		}
 	}
 	if err := normalizeContainers("entry", "initContainers", w.InitContainers); err != nil {
 		return nil, err
@@ -321,13 +302,10 @@ func (a *Allowlist) CanonicalDigest() ([]byte, error) {
 // break every allowlist pull in the cluster over one legacy name — so an
 // over-long entry is dropped instead. See docs/allowlist-and-capabilities.md.
 func (a *Allowlist) normalize(strict bool) error {
-	if a.Schema != Schema && a.Schema != SchemaV2 {
-		return fmt.Errorf("allowlist: unknown schema %q (expected %q or %q)", a.Schema, Schema, SchemaV2)
+	if a.Schema != Schema {
+		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
 	}
 	for name, w := range a.Workloads {
-		if err := w.ValidateEnvSchema(a.Schema); err != nil {
-			return fmt.Errorf("workload %q: %w", name, err)
-		}
 		// The grammar is not negotiable on either path: the name is used
 		// verbatim as a URL path segment.
 		if !workloadNameGrammarOK(name) {
@@ -415,42 +393,27 @@ func normalizeMounts(p *MountPolicy) error {
 	return nil
 }
 
-// normalizeEnv validates both versions. Only v1 permits an absent policy,
-// defaulting to Any; ValidateEnvSchema rejects absence before v2 normalization.
 func normalizeEnv(p *EnvPolicy) error {
 	switch p.Policy {
 	case PolicyAny, "", PolicyDeny:
-		if len(p.Names) != 0 || p.Values != nil {
-			return fmt.Errorf("%s policy takes no names or values", p.Policy)
+		if p.Values != nil {
+			return fmt.Errorf("%s env policy takes no values", p.Policy)
 		}
 		if p.Policy == "" {
 			p.Policy = PolicyAny
 		}
-		p.Names = nil
 	case PolicyExact:
-		if p.Names != nil {
-			if p.Values != nil || len(p.Names) == 0 {
-				return fmt.Errorf("exact legacy env requires names only")
+		if p.Values == nil {
+			return fmt.Errorf("exact env requires values")
+		}
+		for n, v := range p.Values {
+			if !validEnvPair(n, v) {
+				return fmt.Errorf("invalid environment name or value")
 			}
-			for _, n := range p.Names {
-				if !validEnvPair(n, "") {
-					return fmt.Errorf("invalid environment name")
-				}
-			}
-			p.Names = sortedUnique(p.Names)
-		} else {
-			if p.Values == nil {
-				return fmt.Errorf("exact env requires values (or legacy names)")
-			}
-			for n, v := range p.Values {
-				if !validEnvPair(n, v) {
-					return fmt.Errorf("invalid environment name or value")
-				}
-			}
-			if len(p.Values) == 0 {
-				p.Policy = PolicyDeny
-				p.Values = nil
-			}
+		}
+		if len(p.Values) == 0 {
+			p.Policy = PolicyDeny
+			p.Values = nil
 		}
 	default:
 		return fmt.Errorf("unknown env policy %q (want deny, any, or exact)", p.Policy)

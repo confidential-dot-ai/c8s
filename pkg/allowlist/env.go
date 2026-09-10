@@ -71,37 +71,14 @@ func (o *EnvObservation) Clone() *EnvObservation {
 func (p EnvPolicy) admitsObservation(o *EnvObservation) bool {
 	switch p.Policy {
 	case PolicyAny, "":
-		return true // absent only in legacy v1
+		return true
 	case PolicyDeny:
 		return o.Valid() && *o == *fingerprintEnv(nil)
 	case PolicyExact:
-		return p.Names == nil && p.Values != nil && o.Valid() && *o == *fingerprintEnv(p.Values)
+		return p.Values != nil && o.Valid() && *o == *fingerprintEnv(p.Values)
 	default:
 		return false
 	}
-}
-
-// ValidateEnvSchema prevents older consumers from silently accepting value
-// restrictions as names-only v1 policies. New v2 entries require explicit env.
-func (w Workload) ValidateEnvSchema(schema string) error {
-	for _, c := range w.containers() {
-		switch schema {
-		case SchemaV2:
-			if c.Env.Policy == "" {
-				return fmt.Errorf("v2 requires an explicit env policy")
-			}
-			if c.Env.Names != nil {
-				return fmt.Errorf("v2 env uses values, not legacy names")
-			}
-		case Schema:
-			if c.Env.Values != nil || c.Env.Policy == PolicyDeny {
-				return fmt.Errorf("env value pinning requires c8s.allowlist/v2; replace the complete document to migrate")
-			}
-		default:
-			return fmt.Errorf("unknown allowlist schema")
-		}
-	}
-	return nil
 }
 
 // ParseEnvPoliciesJSON reads per-container policies for CLI derivation. Exact
@@ -117,8 +94,8 @@ func ParseEnvPoliciesJSON(data []byte) (map[string]EnvPolicy, error) {
 		return nil, fmt.Errorf("invalid environment policy file")
 	}
 	for name, p := range policies {
-		if p.Policy == "" || p.Names != nil {
-			return nil, fmt.Errorf("container %q requires a v2 env policy", name)
+		if p.Policy == "" {
+			return nil, fmt.Errorf("container %q requires an explicit env policy", name)
 		}
 		if err := normalizeEnv(&p); err != nil {
 			return nil, fmt.Errorf("container %q: %w", name, err)

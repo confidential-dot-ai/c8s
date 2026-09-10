@@ -14,12 +14,12 @@ func TestHistoryRetainsDistinctAdmissions(t *testing.T) {
 	if err != nil || digests == nil || containers == nil || len(digests)+len(containers) != 0 {
 		t.Fatalf("empty history = %v, %v, %v", digests, containers, err)
 	}
-	h.Record("one", "sha256:b", []string{"run", "z"})
-	h.Record("two", "sha256:a", nil)
-	h.Record("three", "sha256:a", []string{})
-	h.Record("replica", "sha256:b", []string{"run", "z"})
-	h.Record("one", "sha256:b", []string{"run", "a"})
-	h.Record("one", "sha256:a", []string{""})
+	h.Record("one", "sha256:b", []string{"run", "z"}, nil)
+	h.Record("two", "sha256:a", nil, nil)
+	h.Record("three", "sha256:a", []string{}, nil)
+	h.Record("replica", "sha256:b", []string{"run", "z"}, nil)
+	h.Record("one", "sha256:b", []string{"run", "a"}, nil)
+	h.Record("one", "sha256:a", []string{""}, nil)
 	digests, containers, err = h.Snapshot()
 	want := []workloadclaims.SandboxContainer{
 		{Digest: "sha256:a", Argv: []string{}},
@@ -34,9 +34,9 @@ func TestHistoryRetainsDistinctAdmissions(t *testing.T) {
 
 func TestHistoryResolutionIsPerContainer(t *testing.T) {
 	var h History
-	h.Record("known", "sha256:a", nil)
-	h.Record("first", "", nil)
-	h.Record("second", "", nil)
+	h.Record("known", "sha256:a", nil, nil)
+	h.Record("first", "", nil, nil)
+	h.Record("second", "", nil, nil)
 	assertUnresolved := func() {
 		t.Helper()
 		digests, containers, err := h.Snapshot()
@@ -45,17 +45,17 @@ func TestHistoryResolutionIsPerContainer(t *testing.T) {
 		}
 	}
 	assertUnresolved()
-	h.Record("different", "sha256:b", nil)
+	h.Record("different", "sha256:b", nil, nil)
 	assertUnresolved()
-	h.Record("first", "sha256:b", nil)
+	h.Record("first", "sha256:b", nil, nil)
 	assertUnresolved()
-	h.Record("second", "sha256:b", nil)
+	h.Record("second", "sha256:b", nil, nil)
 	if digests, containers, err := h.Snapshot(); err != nil || len(digests) != 2 || len(containers) != 2 {
 		t.Fatalf("resolved snapshot = %v, %v, %v", digests, containers, err)
 	}
-	h.Record("known", "", nil)
+	h.Record("known", "", nil, nil)
 	assertUnresolved()
-	h.Record("known", "sha256:c", nil)
+	h.Record("known", "sha256:c", nil, nil)
 	if digests, _, err := h.Snapshot(); err != nil || len(digests) != 3 {
 		t.Fatalf("resolution lost an earlier admission: %v, %v", digests, err)
 	}
@@ -64,7 +64,7 @@ func TestHistoryResolutionIsPerContainer(t *testing.T) {
 func TestHistoryOwnsArgumentsAndSnapshots(t *testing.T) {
 	var h History
 	argv := []string{"run", "original"}
-	h.Record("one", "sha256:a", argv)
+	h.Record("one", "sha256:a", argv, nil)
 	argv[1] = "changed input"
 	digests, containers, err := h.Snapshot()
 	if err != nil || len(containers) != 1 || containers[0].Argv[1] != "original" {
@@ -83,7 +83,7 @@ func TestHistoryEnvVariantsAndOwnership(t *testing.T) {
 	var h History
 	a, _ := allowlist.ObserveEnv([]string{"MODE=a"})
 	b, _ := allowlist.ObserveEnv([]string{"MODE=b"})
-	h.Record("c", "sha256:a", []string{"run"}) // older/unavailable evidence
+	h.Record("c", "sha256:a", []string{"run"}, nil) // older/unavailable evidence
 	h.Record("c", "sha256:a", []string{"run"}, a)
 	h.Record("c", "sha256:a", []string{"run"}, b)
 	a.Digest = "mutated"

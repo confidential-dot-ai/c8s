@@ -40,22 +40,18 @@ func (e entryDiff) empty() bool {
 
 // allowlistDiff is the entry-level diff of two allowlists.
 type allowlistDiff struct {
-	Schema           *changedEntry        `json:"schema,omitempty"`
 	WorkloadsAdded   []string             `json:"workloadsAdded"`
 	WorkloadsRemoved []string             `json:"workloadsRemoved"`
 	WorkloadsChanged map[string]entryDiff `json:"workloadsChanged"`
 }
 
 func (d allowlistDiff) empty() bool {
-	return d.Schema == nil && len(d.WorkloadsAdded) == 0 && len(d.WorkloadsRemoved) == 0 && len(d.WorkloadsChanged) == 0
+	return len(d.WorkloadsAdded) == 0 && len(d.WorkloadsRemoved) == 0 && len(d.WorkloadsChanged) == 0
 }
 
 // diffAllowlists computes the entry- and field-level diff of desired over live.
 func diffAllowlists(live, desired *pkgallowlist.Allowlist) allowlistDiff {
 	d := allowlistDiff{WorkloadsChanged: map[string]entryDiff{}}
-	if live.Schema != desired.Schema {
-		d.Schema = &changedEntry{From: live.Schema, To: desired.Schema}
-	}
 	for name, dw := range desired.Workloads {
 		lw, ok := live.Workloads[name]
 		if !ok {
@@ -175,9 +171,6 @@ func printDiff(w io.Writer, format string, d allowlistDiff) error {
 		return nil
 	}
 
-	if d.Schema != nil {
-		fmt.Fprintf(w, "schema: %s -> %s\n", d.Schema.From, d.Schema.To)
-	}
 	fmt.Fprintln(w, "workloads:")
 	for _, name := range d.WorkloadsAdded {
 		fmt.Fprintf(w, "+ %s\n", name)

@@ -152,10 +152,11 @@ deliberately absent from the derived entry.`,
 				return fmt.Errorf("--env must be any or deny; use --env-file for exact values")
 			}
 			used := map[string]bool{}
-			for _, part := range []struct {
+			type derivedContainerGroup struct {
 				templates  []templateContainer
 				containers []allowlist.Container
-			}{{spec.InitContainers, initContainers}, {spec.Containers, containers}} {
+			}
+			for _, part := range []derivedContainerGroup{{spec.InitContainers, initContainers}, {spec.Containers, containers}} {
 				for i, c := range part.templates {
 					p := allowlist.EnvPolicy{Policy: envMode}
 					if envFile != "" {
