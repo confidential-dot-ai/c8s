@@ -49,28 +49,28 @@ func TestRenewalInterval(t *testing.T) {
 		}
 	})
 	t.Run("named leaf settles to renew-interval", func(t *testing.T) {
-		if got := renewalInterval(base, namedLeaf(t), 0); got != 6*time.Hour {
-			t.Fatalf("interval = %v, want 6h", got)
+		if got := renewalInterval(base, namedLeaf(t), 0); got < 288*time.Minute || got > 6*time.Hour {
+			t.Fatalf("interval = %v, want [4h48m, 6h]", got)
 		}
 	})
 	t.Run("no workload-claims never fast-polls", func(t *testing.T) {
 		cfg := base
 		cfg.WorkloadClaims = false
-		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 6*time.Hour {
-			t.Fatalf("interval = %v, want 6h", got)
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got < 288*time.Minute || got > 6*time.Hour {
+			t.Fatalf("interval = %v, want [4h48m, 6h]", got)
 		}
 	})
 	t.Run("fast poll disabled by zero", func(t *testing.T) {
 		cfg := base
 		cfg.UnnamedRenewInterval = 0
-		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 6*time.Hour {
-			t.Fatalf("interval = %v, want 6h", got)
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got < 288*time.Minute || got > 6*time.Hour {
+			t.Fatalf("interval = %v, want [4h48m, 6h]", got)
 		}
 	})
 	t.Run("fast interval never exceeds renew-interval", func(t *testing.T) {
 		cfg := base
 		cfg.RenewInterval = 10 * time.Second
-		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 10*time.Second {
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got < 8*time.Second || got > 10*time.Second {
 			t.Fatalf("interval = %v, want the shorter renew-interval", got)
 		}
 	})
@@ -120,6 +120,21 @@ func TestRenewalIntervalFloor(t *testing.T) {
 	}
 }
 
+func TestRenewalIntervalSpreadsDefaultRefreshes(t *testing.T) {
+	cfg := config{RenewInterval: 2 * time.Hour}
+	seen := map[time.Duration]bool{}
+	for range 100 {
+		got := renewalInterval(cfg, nil, 0)
+		if got < 96*time.Minute || got > 2*time.Hour {
+			t.Fatalf("delay = %v, want [1h36m, 2h]", got)
+		}
+		seen[got] = true
+	}
+	if len(seen) == 1 {
+		t.Fatal("all refresh delays are identical")
+	}
+}
+
 // Jitter is added before the clamp, so no delay may exceed --renew-interval —
 // the probe that found this used 31s/30s, where +25% jitter overshot.
 func TestRenewalIntervalJitterIsClamped(t *testing.T) {
@@ -155,12 +170,12 @@ func TestRenewalIntervalUnnamedBacksOff(t *testing.T) {
 	if got := renewalInterval(cfg, leaf, unnamedBackoffAfter+4); got < 8*steady {
 		t.Fatalf("delay after 4 backoff steps = %v, want at least 8x the fast poll", got)
 	}
-	if got := renewalInterval(cfg, leaf, 1000); got != cfg.RenewInterval {
-		t.Fatalf("delay for a permanently unnamed pod = %v, want --renew-interval %v", got, cfg.RenewInterval)
+	if got := renewalInterval(cfg, leaf, 1000); got < 48*time.Minute || got > cfg.RenewInterval {
+		t.Fatalf("delay for a permanently unnamed pod = %v, want [48m, 1h]", got)
 	}
 	// A leaf that gets named resets to the ordinary interval.
-	if got := renewalInterval(cfg, namedLeaf(t), 1000); got != cfg.RenewInterval {
-		t.Fatalf("named delay = %v, want %v", got, cfg.RenewInterval)
+	if got := renewalInterval(cfg, namedLeaf(t), 1000); got < 48*time.Minute || got > cfg.RenewInterval {
+		t.Fatalf("named delay = %v, want [48m, 1h]", got)
 	}
 }
 
@@ -177,9 +192,9 @@ func TestRenewalRetryInterval(t *testing.T) {
 	if second := renewalRetryInterval(cfg, leaf, 2); second != 2*renewalRetryBase {
 		t.Fatalf("second retry = %v, want %v", second, 2*renewalRetryBase)
 	}
-	// Never past what ordinary pacing would have chosen.
+	// Never past the ordinary pacing ceiling; each call samples fresh jitter.
 	for _, failures := range []int{1, 5, 50} {
-		ceiling := renewalInterval(cfg, leaf, 0)
+		ceiling := min(cfg.RenewInterval, time.Until(leaf.NotAfter)/2)
 		if got := renewalRetryInterval(cfg, leaf, failures); got > ceiling {
 			t.Fatalf("retry after %d failures = %v, exceeds the pacing ceiling %v", failures, got, ceiling)
 		}

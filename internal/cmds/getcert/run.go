@@ -446,6 +446,11 @@ func renewalInterval(cfg config, leaf *x509.Certificate, unnamedRuns int) time.D
 			delay = half
 		}
 	}
+	// Renew up to 20% early so certificates issued together do not refresh
+	// in lockstep. Keep the already-jittered unnamed fast poll and delay floor.
+	if fifth := int64(delay) / 5; fifth > 0 {
+		delay -= time.Duration(mrand.Int64N(fifth + 1))
+	}
 	if fast := unnamedPollInterval(cfg, leaf, unnamedRuns); fast > 0 && fast < delay {
 		delay = fast
 	}
