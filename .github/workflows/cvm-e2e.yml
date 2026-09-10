@@ -394,8 +394,16 @@ jobs:
           bash /tmp/gsend.sh "(setsid sh -c 'bash /tmp/drive.sh 2>&1 | tee /tmp/drive.out >/dev/ttyS0' </dev/null &) ; echo @@LAUNCHED@@"
 
           echo "--- payload progress (host-side polling of guest-console-log) ---"
+          # The payload is the side with diagnostics (FAIL_HELM, WARN_NRI_NOT_READY,
+          # FAIL_CDS_NOT_READY), so it must be the side that decides "too slow".
+          # Its own pre-suite caps sum to ~18 min (node Ready ~4, helm 45x12s=9,
+          # NRI health 60x5s=5) before any suite runs; 110 iterations here was
+          # ~18-22 min, so a slow image pull made the host give up first, report
+          # "did not report PAYLOAD_OK", and tear the guest down mid-work with no
+          # marker to explain it. 200 x ~12s is ~40 min, under the 55 min job
+          # timeout with room for the dump and teardown.
           seen=""; ok=""
-          for i in $(seq 1 110); do
+          for i in $(seq 1 200); do
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
             NEW=$(printf '%s' "$LOG" | grep -oE '@@[^@]{1,140}@@' | sed 's/@@//g')
             comm -13 <(printf '%s\n' "$seen" | sort -u) <(printf '%s\n' "$NEW" | sort -u) 2>/dev/null | grep -vE '^$' | sed 's/^/  · /'
