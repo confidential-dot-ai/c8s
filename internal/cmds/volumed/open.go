@@ -193,7 +193,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 // deviceConflict reports whether opening device in mode mutable conflicts with
 // a live mount or an in-flight open. Caller holds mu.
 func (o *Opener) deviceConflict(device string, mutable bool) bool {
-	if m, inFlight := o.opening[device]; inFlight && (m || mutable) {
+	if openingMutable, inFlight := o.opening[device]; inFlight && (openingMutable || mutable) {
 		return true
 	}
 	for _, m := range o.mounts {

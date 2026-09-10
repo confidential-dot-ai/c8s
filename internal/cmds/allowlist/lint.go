@@ -245,7 +245,7 @@ func shadowFinding(wide, narrow string) finding {
 func shadows(wide, narrow pkgallowlist.Workload) bool {
 	unconstrained := map[string]bool{}
 	for _, c := range allContainers(wide) {
-		if c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact && c.Env.Policy != pkgallowlist.PolicyExact {
+		if hasUnconstrainedRuntimePolicy(c) {
 			unconstrained[c.Digest.String()] = true
 		}
 	}
@@ -264,6 +264,10 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 		}
 	}
 	return true
+}
+
+func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
+	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact && c.Env.Policy != pkgallowlist.PolicyExact
 }
 
 // unobservedFieldPolicies reports mount and env policy that the deployment's
