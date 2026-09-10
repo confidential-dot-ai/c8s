@@ -225,6 +225,10 @@ jobs:
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
+          # The lane's claim is "a cert is issued only against the pinned launch
+          # digest". An empty or malformed MEAS used to install the chart with
+          # measurements: [] and still reach PAYLOAD_OK. Refuse before the apply.
+          [ "\$MMARK" = MEAS_ENFORCED ] || { say "FAIL_MEAS_UNAVAILABLE len=\${#MEAS}"; exit 0; }
           NODEIP=\$(\$K get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
           { printf '%s' "\$NODEIP" | grep -qE '^[0-9.]+\$'; } || { say FAIL_NODEIP; exit 0; }
           say "NODE_CIDR \$NODEIP/32"
@@ -256,6 +260,7 @@ jobs:
             \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'
             \$K -n c8s-system logs deploy/c8s-cds --tail=15 2>&1 | sed 's/^/@@CDSLOG /;s/\$/@@/'
             \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
+            say FAIL_CDS_NOT_READY; exit 0
           fi
           if [ "\$CDSOK" = "1" ]; then
             # Gate on the POLICY plane, not just CDS. The injected c8s-cert sidecar
@@ -283,7 +288,6 @@ jobs:
             # Under MEAS_ENFORCED the cert is only issued if the node attests the pinned measurement, so this is the enforcement test.
             bash "\$E2E/cw-workload.sh" && { WOK=1; say WORKLOAD_OK; } || FAILED="\$FAILED cw-workload"
             bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
-            if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
             if [ "\$WOK" != "1" ]; then
               \$K -n c8s-e2e-cw describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
               \$K -n c8s-e2e-cw logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
@@ -300,6 +304,9 @@ jobs:
               \$K get nodes -o jsonpath='{range .items[*]}{.metadata.name} internalIP={.status.addresses[?(@.type=="InternalIP")].address} podCIDR={.spec.podCIDR}{"\\n"}{end}' 2>&1 \\
                 | sed 's/^/@@NODEADDR /;s/\$/@@/'
             fi
+            # Verdict LAST: the host tears the VM down on the first FAIL_ marker,
+            # which used to cut off the CWDESC/CERTLOG/CDSBOUND lines above.
+            if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
           fi
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -10 | sed 's/^/@@EV /;s/\$/@@/'
           PAYLOAD
