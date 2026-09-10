@@ -2,6 +2,7 @@ package nriimagepolicy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -17,9 +18,9 @@ import (
 func validConfig() config {
 	return config{
 		Allowlist: allowlistConfig{
-			AlwaysAllow: map[string]string{
+			Floor: anyAllowlist(map[string]string{
 				"sha256:0000000000000000000000000000000000000000000000000000000000000001": "test-installer",
-			},
+			}),
 			Pull: pullConfig{
 				URL:               "https://127.0.0.1:30808",
 				Timeout:           30 * time.Second,
@@ -31,6 +32,22 @@ func validConfig() config {
 			Mode: "fail-closed",
 		},
 	}
+}
+
+// floorYAML renders an allowlist.floor config block: one any-argv entry.
+func floorYAML(digest, image string) string {
+	return fmt.Sprintf(`
+  floor:
+    schema: c8s.allowlist/v1
+    workloads:
+      floor-entry:
+        label: %q
+        containers:
+          - digest: %q
+            image: %q
+            command: {policy: any}
+            args: {policy: any}
+`, image, digest, image)
 }
 
 func TestValidate_Valid(t *testing.T) {
@@ -105,36 +122,42 @@ func TestValidate_PullRejectsUnsupportedScheme(t *testing.T) {
 	}
 }
 
-func TestValidate_AlwaysAllowRequiredWithPull(t *testing.T) {
+func TestValidate_FloorRequiredWithPull(t *testing.T) {
 	cfg := validConfig()
-	cfg.Allowlist.AlwaysAllow = nil
+	cfg.Allowlist.Floor = nil
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when pull is configured but always_allow is empty")
+		t.Fatal("expected error when pull is configured but the floor is empty")
 	}
 }
 
-func TestValidate_AlwaysAllowRejectsMalformedDigest(t *testing.T) {
-	cfg := validConfig()
-	cfg.Allowlist.AlwaysAllow = map[string]string{
-		"sha256:not-hex": "installer",
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for non-hex digest in always_allow")
-	}
-
-	cfg.Allowlist.AlwaysAllow = map[string]string{
-		"sha512:0000000000000000000000000000000000000000000000000000000000000001": "installer",
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for non-sha256 digest in always_allow")
-	}
-
-	cfg.Allowlist.AlwaysAllow = map[string]string{
-		// 63 hex chars instead of 64.
-		"sha256:000000000000000000000000000000000000000000000000000000000000001": "installer",
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for short digest in always_allow")
+// A malformed floor fails at load: the digest type validates on decode, and
+// the document's own validation catches a bad policy or schema.
+func TestLoadConfig_RejectsMalformedFloor(t *testing.T) {
+	good := "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	for _, tc := range []struct {
+		name  string
+		floor string
+	}{
+		{"non-hex digest", floorYAML("sha256:not-hex", "installer")},
+		{"non-sha256 digest", floorYAML("sha512:"+good[7:], "installer")},
+		{"short digest", floorYAML(good[:len(good)-1], "installer")},
+		{"unknown argv policy", strings.Replace(floorYAML(good, "installer"), "policy: any", "policy: anu", 1)},
+		{"unknown schema", strings.Replace(floorYAML(good, "installer"), "c8s.allowlist/v1", "c8s.allowlist/v2", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "allowlist:" + tc.floor + `
+  pull:
+    url: https://127.0.0.1:30808
+    attestation_api_url: http://localhost:30840
+`
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadConfig(path); err == nil {
+				t.Fatalf("expected a load error for %s", tc.name)
+			}
+		})
 	}
 }
 
@@ -147,10 +170,7 @@ func TestValidate_InvalidMode(t *testing.T) {
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	yaml := `
-allowlist:
-  always_allow:
-    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -182,10 +202,7 @@ allowlist:
 // exempt_namespaces is parsed into the policy config alongside the snapshot
 // path the plugin persists its captured digest set to.
 func TestLoadConfig_ExemptNamespacesParsed(t *testing.T) {
-	const body = `
-allowlist:
-  always_allow:
-    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+	body := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -253,7 +270,7 @@ func TestAllowlistEnabled_WithURL(t *testing.T) {
 func TestAllowlistEnabled_WithoutURL(t *testing.T) {
 	cfg := validConfig()
 	cfg.Allowlist.Pull.URL = ""
-	cfg.Allowlist.AlwaysAllow = nil
+	cfg.Allowlist.Floor = nil
 	if cfg.AllowlistEnabled() {
 		t.Fatal("expected allowlist to be disabled")
 	}
@@ -417,10 +434,7 @@ func TestLoadConfig_UnixAttestationAPIURL(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
-	yaml := `
-allowlist:
-  always_allow:
-    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: unix://` + sock + `
@@ -444,10 +458,7 @@ allowlist:
 }
 
 func TestLoadConfig_WithLabelRules(t *testing.T) {
-	yaml := `
-allowlist:
-  always_allow:
-    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -531,11 +542,10 @@ func TestLabelOperator(t *testing.T) {
 // TDX node, and the resulting error names the evidence platform rather than this
 // setting, so the cause sits several hops from the symptom.
 func TestConfigPlatform(t *testing.T) {
-	const floor = `
-allowlist:
-  always_allow:
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000": "example.com/img@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-`
+	floor := "allowlist:" + floorYAML(
+		"sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		"example.com/img@sha256:0000000000000000000000000000000000000000000000000000000000000000")
+
 	t.Run("defaults to snp so existing SNP deployments are unchanged", func(t *testing.T) {
 		cfg := writeAndLoad(t, floor)
 		if got := cfg.NormalizedPlatform(); got != "sev-snp" {

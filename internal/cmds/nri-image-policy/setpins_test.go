@@ -27,9 +27,23 @@ workload_claims:
   advertise_host: ""
 
 allowlist:
-  always_allow:
-    "sha256:7d4e658ad73aca6a80ab26d392395e9958f03105df5541d7552f70451ac0267d": "docker.io/rancher/hardened-kubernetes:v1.34.5-rke2r1-build20260227"
-    "sha256:4f502170a33ec2b687e1b703abe31b1e290ff17cd45fba45b138c73689d3b02c": "docker.io/rancher/rke2-runtime:v1.34.5-rke2r1"
+  floor:
+    schema: c8s.allowlist/v1
+    workloads:
+      hardened-kubernetes-7d4e658ad73a:
+        label: "docker.io/rancher/hardened-kubernetes:v1.34.5-rke2r1-build20260227"
+        containers:
+          - digest: "sha256:7d4e658ad73aca6a80ab26d392395e9958f03105df5541d7552f70451ac0267d"
+            image: "docker.io/rancher/hardened-kubernetes:v1.34.5-rke2r1-build20260227"
+            command: {policy: any}
+            args: {policy: any}
+      rke2-runtime-4f502170a33e:
+        label: "docker.io/rancher/rke2-runtime:v1.34.5-rke2r1"
+        containers:
+          - digest: "sha256:4f502170a33ec2b687e1b703abe31b1e290ff17cd45fba45b138c73689d3b02c"
+            image: "docker.io/rancher/rke2-runtime:v1.34.5-rke2r1"
+            command: {policy: any}
+            args: {policy: any}
   pull:
     url: "https://127.0.0.1:30808"
     interval: "30s"
@@ -105,8 +119,8 @@ func TestSetCDSPinsKeepsTheBakedFloor(t *testing.T) {
 	if got := cfg.Allowlist.Pull.CDSMeasurements; len(got) != 2 || got[0] != pinA || got[1] != pinB {
 		t.Errorf("cds_measurements = %v, want [%s %s]", got, pinA, pinB)
 	}
-	if len(cfg.Allowlist.AlwaysAllow) != 2 {
-		t.Errorf("always_allow = %v, want the 2 baked entries", cfg.Allowlist.AlwaysAllow)
+	if len(cfg.Allowlist.Floor.Workloads) != 2 {
+		t.Errorf("floor = %v, want the 2 baked entries", cfg.Allowlist.Floor.Workloads)
 	}
 	if cfg.Platform != "snp" || cfg.WorkloadClaims.SocketDir != "/var/run/nri-image-policy" {
 		t.Errorf("patch disturbed unrelated keys: platform=%q socket_dir=%q", cfg.Platform, cfg.WorkloadClaims.SocketDir)

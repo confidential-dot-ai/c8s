@@ -241,9 +241,8 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.always_allow is the digest-only boot
-floor (CDS + any-argv bootstrap digests), so a roll admits the new images
-before the first pull lands.
+runs pull mode (polls CDS); allowlist.floor is the boot floor for CDS and
+any-argv bootstrap digests. Argv-pinned images are admitted by the served seed.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
@@ -276,18 +275,9 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-{{- /* always_allow is digest-only admission, so it must never carry an
-       argv-pinned image (the installer itself, the busybox prep/helper
-       images): those are admitted by the served argv-pinned entries, whose
-       pull this config bootstraps. The CDS self-entry keeps the map non-empty
-       (the plugin validates it when pull.url is set). */ -}}
-{{- $pinnedDigests := include "c8s.argvPinnedDigests" $root | fromJsonArray }}
-  always_allow:
-{{- range $digest, $image := (include "c8s.alwaysAllow" $root | fromJson) }}
-{{- if not (has $digest $pinnedDigests) }}
-    {{ $digest | quote }}: {{ $image | quote }}
-{{- end }}
-{{- end }}
+  floor:
+    {{- $floor := include "c8s.floorWorkloads" $root | fromJson -}}
+    {{- dict "schema" "c8s.allowlist/v1" "workloads" $floor | toYaml | nindent 4 }}
 containerd:
   socket: {{ include "nri-image-policy.containerdSocket" $root | quote }}
   namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}

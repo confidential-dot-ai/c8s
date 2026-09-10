@@ -1,6 +1,7 @@
 // Command systemfloor regenerates the RKE2 system-image floor in
-// image-policy.yaml.in: the always_allow entries that admit the node's baked
-// system components (rke2 static pods, Cilium, CoreDNS, local-path-storage).
+// image-policy.yaml.in: the allowlist.floor workloads that admit the node's
+// baked system components (rke2 static pods, Cilium, CoreDNS,
+// local-path-storage) under any command line.
 //
 // The digests are the ones containerd computes when it IMPORTS the airgap
 // bundles at rke2 boot, not the registry's: the bundles are docker-archive
@@ -15,9 +16,9 @@
 //	    -manifest .../server/manifests/local-path-storage.yaml \
 //	    -manifest .../server/manifests/nvidia-device-plugin.yaml
 //
-// prints the always_allow block. With -template pointing at
-// image-policy.yaml.in, -check reports drift and -write rewrites the block
-// between the BEGIN/END markers in place.
+// prints the floor block. With -template pointing at image-policy.yaml.in,
+// -check reports drift and -write rewrites the block between the BEGIN/END
+// markers in place.
 package main
 
 import (
@@ -39,6 +40,9 @@ import (
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/klauspost/compress/zstd"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // entry is one floor line: a digest admitted under an image reference.
@@ -126,13 +130,16 @@ func manifestEntries(path string) ([]entry, error) {
 	return out, nil
 }
 
-// render formats the entries as always_allow YAML lines at the template's
-// indent, one line per digest, sorted by image reference. References matching
-// an exclude substring are dropped: the floor admits by digest alone, so an
-// interpreter-class image (busybox) belongs in an argv-pinned workload entry,
-// never here.
-func render(entries []entry, excludes []string) string {
-	byRef := make(map[string]string, len(entries))
+// render formats the entries as allowlist.floor workloads at the template's
+// indent: one any-argv entry per digest, named the way pkg/allowlist
+// DigestEntryName names it, sorted by image reference.
+func render(entries []entry, excludes []string) (string, error) {
+	type floorEntry struct {
+		name   string
+		digest string
+		ref    string
+	}
+	floor := make([]floorEntry, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if seen[e.digest] {
@@ -149,19 +156,31 @@ func render(entries []entry, excludes []string) string {
 			continue
 		}
 		seen[e.digest] = true
-		byRef[e.ref] = e.digest
+		d, err := types.ParseDigest(e.digest)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", e.ref, err)
+		}
+		floor = append(floor, floorEntry{name: allowlist.DigestEntryName(d, e.ref), digest: e.digest, ref: e.ref})
 	}
-	refs := make([]string, 0, len(byRef))
-	for r := range byRef {
-		refs = append(refs, r)
-	}
-	sort.Strings(refs)
+	sort.Slice(floor, func(i, j int) bool {
+		if floor[i].ref != floor[j].ref {
+			return floor[i].ref < floor[j].ref
+		}
+		return floor[i].name < floor[j].name
+	})
 
 	var b strings.Builder
-	for _, r := range refs {
-		fmt.Fprintf(&b, "    %q: %q\n", byRef[r], r)
+	for _, f := range floor {
+		fmt.Fprintf(&b, `      %s:
+        label: %q
+        containers:
+          - digest: %q
+            image: %q
+            command: {policy: any}
+            args: {policy: any}
+`, f.name, f.ref, f.digest, f.ref)
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 const (
@@ -245,7 +264,10 @@ func run(args []string, stdout io.Writer) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("no images found in the inputs")
 	}
-	block := render(entries, excludes)
+	block, err := render(entries, excludes)
+	if err != nil {
+		return err
+	}
 
 	if templatePath == "" {
 		_, err := io.WriteString(stdout, block)

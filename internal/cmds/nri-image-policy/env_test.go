@@ -37,7 +37,7 @@ func TestEnvAdmissionUsesFinalStartSpec(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 			al.Workloads["w"].Containers[0].Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact, Values: map[string]string{"MODE": "production"}}
-			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "floor"}}}, al)
+			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "floor"})}}, al)
 			p.SetReady()
 			p.inventory = newAdmissionInventory(t.TempDir())
 			pod := makePod("default", "pod")
@@ -105,7 +105,7 @@ func TestEnvCreationValidatorChecksCumulativeEdits(t *testing.T) {
 				policy = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
 			}
 			al.Workloads["w"].Containers[0].Env = policy
-			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "floor"}}}, al)
+			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "floor"})}}, al)
 			p.SetReady()
 			p.inventory = newAdmissionInventory(t.TempDir())
 			pod := makePod("default", "pod")
