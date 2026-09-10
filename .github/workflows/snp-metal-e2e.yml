@@ -75,15 +75,29 @@ jobs:
           # Under the post-merge trigger (workflow_run off Docker) this resolves
           # to $SHORT on the first probe. Anonymous pulls — the packages are public.
           resolve_tag(){
-            local comp=$1 tok code
-            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
+            local comp=$1 tok code sha attempt
+            tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
             for sha in $(git -C c8s log --format=%h --abbrev=7 -50); do
-              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-                "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
-              [ "$code" = "200" ] && { echo "$sha"; return; }
+              # Only a 404 means "no image for this commit", and only that walks to the
+              # parent. A 429, 5xx or timeout on the head sha used to walk too, so one
+              # ghcr hiccup silently tested the previous commit's image under the head's
+              # chart, with no warning until 50 misses. Retry those, then refuse.
+              for attempt in 1 2 3 4; do
+                code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+                  "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
+                case "$code" in
+                  200) echo "$sha"; return 0 ;;
+                  404) break ;;
+                  *)   sleep $((attempt * 3)) ;;
+                esac
+              done
+              if [ "$code" != "404" ]; then
+                echo "::error::ghcr answered ${code} for ${comp}:${sha} on 4 attempts; refusing to fall back to an older image" >&2
+                return 1
+              fi
             done
-            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)" >&2
+            echo "::warning::no sha tag found for ${comp} in the last 50 commits: falling back to :main (racy)" >&2
             echo main
           }
           # PLATFORM digest (linux/amd64), not the index digest: the NRI allowlist
