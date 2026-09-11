@@ -192,8 +192,7 @@ func requireAttestationApi(url string) error {
 }
 
 // StartDigestsEndpoint binds DigestsPort and serves the identity and digests
-// routes on it. Shared by both inventories, which differ only in where their
-// configuration comes from.
+// routes for the node's NRI inventory.
 //
 // The listener is bound before the certificate warm-up so a token never names a
 // port nothing is listening on, and so a port conflict surfaces immediately

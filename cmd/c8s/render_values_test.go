@@ -421,7 +421,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 
 	// Second pass: node mode with --measurements exercises the indexed key[i]=
-	// form (rejected in pod mode above). Its args must also stay within the
+	// form. Its args must also stay within the
 	// grammar and round-trip to a list.
 	installCvmMode = "node"
 	installMeasurements = []string{strings.Repeat("ab", 48)}

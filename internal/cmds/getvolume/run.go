@@ -37,9 +37,7 @@ type config struct {
 	sidecar.Config
 
 	Volumes []volumeRequest
-	// SocketDir holds volumed's socket, as this pod sees it. Unused under
-	// WorkloadClaimsGuest, where volumed is in the guest and there is no
-	// filesystem shared with it.
+	// SocketDir holds the node's volumed socket, as this pod sees it.
 	SocketDir string
 }
 

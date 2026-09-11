@@ -491,8 +491,8 @@ c8s exists because a lot of excellent open work came before it, and we want
 to be loud about that:
 
 - [Confidential Containers](https://github.com/confidential-containers)
-  pioneered the confidential pod model that c8s builds on, including the
-  guest-pull design that keeps container images out of the host's hands.
+  helped establish the foundations of confidential container workloads
+  that informed c8s's development.
 
 - The [Confidential Computing Consortium](https://confidentialcomputing.io/)
   and the wider ecosystem (the AMD SEV-SNP and Intel TDX stacks, the IGVM

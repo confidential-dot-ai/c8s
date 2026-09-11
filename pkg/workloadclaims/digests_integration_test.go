@@ -172,7 +172,7 @@ func TestDigestsClientIgnoresCallerSuppliedPort(t *testing.T) {
 	}
 }
 
-// StartDigestsEndpoint is what both inventories call, so its fail-soft
+// StartDigestsEndpoint serves the node's NRI inventory, so its fail-soft
 // behaviour is worth pinning: a certificate warm-up that fails must not stop
 // the endpoint binding and serving. On node-CVM the alternative is fatal —
 // containerd requires the plugin, so exiting takes container creation down

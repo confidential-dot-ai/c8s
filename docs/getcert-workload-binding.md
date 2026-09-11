@@ -433,7 +433,7 @@ see Enablement.
 
 ## Corner 8 — exempt namespaces admit on a captured digest, not the name
 
-On the hosted lanes (pod/gke/aks) the provider owns the platform pods in
+On the hosted lanes (gke/aks) the provider owns the platform pods in
 `kube-system` — kube-proxy, CoreDNS, the CNI, CSI drivers — and their images are
 not on the c8s allowlist. Nothing baked into the node measures them either;
 unlike node-CVM, whose image carries the RKE2 system floor, these nodes run the
@@ -489,14 +489,13 @@ and the baked floor stands alone there.
 
 ## Enablement
 
-**A failed digests endpoint is not fatal.** Both inventories log and continue:
+**A failed digests endpoint is not fatal.** The NRI plugin logs and continues:
 containerd sets `required_plugins`, so a plugin exit takes container creation
 down node-wide, whereas a missing digests endpoint only degrades issuance.
 
-The same ordering covers the secret and volume fetchers, which redeem at the
-same endpoints: a guest image predating `volumed --guest` answers nothing on
-`127.0.0.1:8402`, and a pod annotated for volumes there stays without its mount
-until the image is current.
+Secret and volume fetchers use the same issuance endpoints. Volume mounts
+also require the node's `volumed` DaemonSet and its Unix socket; see
+[Volumes](volumes.md) for setup and mount ordering.
 
 ## Audit pointers
 

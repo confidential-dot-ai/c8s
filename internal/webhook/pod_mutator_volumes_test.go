@@ -287,11 +287,11 @@ func TestVolumesAnnotationParsing(t *testing.T) {
 	}
 }
 
-// Neither shape configured means there is no daemon to hand the key to, so
+// Without a socket directory there is no daemon to hand the key to, so
 // admission refuses rather than leaving the workload waiting on a mount that
 // can never land.
 func TestHandleRejectsVolumesWithoutAnyDaemon(t *testing.T) {
-	cfg := secretsConfig() // neither WorkloadClaimsHostDir nor WorkloadClaimsGuest
+	cfg := secretsConfig() // WorkloadClaimsHostDir is unset
 
 	resp := handleVolumesPod(t, cfg)
 	if resp.Allowed {

@@ -348,9 +348,7 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 					// keeps failing, so retrying in-process serves an expired
 					// certificate indefinitely. Exit instead: as a native
 					// sidecar (restartPolicy: Always) the container restarts
-					// with fresh client state and re-runs the full issuance —
-					// the recovery a locked guest cannot get from an exec
-					// liveness probe (ExecProcessRequest is policy-denied).
+					// with fresh client state and re-runs the full issuance.
 					return fmt.Errorf("installed certificate expired at %s and %d consecutive renewals failed (last: %w); exiting for a clean restart", leaf.NotAfter.Format(time.RFC3339), failures, err)
 				}
 				retry := renewalRetryInterval(cfg, leaf, failures)

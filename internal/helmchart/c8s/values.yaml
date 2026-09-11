@@ -603,7 +603,7 @@ nriImagePolicy:
     mode: fail-closed  # fail-closed | audit
     enforceExisting: true
     denyMissingAnnotation: true
-    # exemptNamespaces: on the hosted lanes (pod/gke/aks), admit each listed
+    # exemptNamespaces: on the hosted lanes (gke/aks), admit each listed
     # namespace's provider platform pods — which are not on the c8s allowlist —
     # by the image digests captured running in it, frozen at first admission and
     # scoped to that namespace. `c8s install --cvm-mode=gke|aks` sets

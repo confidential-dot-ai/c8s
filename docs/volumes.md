@@ -308,11 +308,8 @@ one replica, or a `Recreate` strategy — a rolling update of a single-device
 workload briefly runs two pods against it. Immutable volumes share a device
 freely, as they always have.
 
-Where volumed runs, and how the sidecar reaches it, depends on the shape:
-
-|---|---|---|
-| volumed | a privileged DaemonSet on every node | `volumed --guest`, baked into the guest rootfs |
-| reached over | a unix socket in the inventory's socket directory | the guest's loopback `127.0.0.1:8402` |
+`volumed` runs as a privileged DaemonSet on each node. The sidecar reaches it
+over a Unix socket in the inventory's socket directory.
 
 What decides whether a mount happens, in order:
 
@@ -352,8 +349,6 @@ The daemon does not repeat CDS's release decision. It resolves who is calling
 only to decide where to mount, and checks nothing about what that caller is
 entitled to — any pod that reaches it presenting a well-formed blob has that
 volume opened into its own directory.
-
-What makes that sound is that the daemon's reach is confined to one tenant:
 
 ## Uninstalling, and what is left behind
 

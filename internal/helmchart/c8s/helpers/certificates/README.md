@@ -4,9 +4,9 @@ Source: [templates/_certificates.tpl](../../templates/_certificates.tpl).
 [All helpers](../README.md).
 
 The wait container gates workload startup on the certificate file using
-`/c8s probe-file`. This uses the guest's allowed container-creation path;
-locked guests deny the exec RPC an exec startup probe would require. Keep the
-`/c8s` command aligned with the binary location in `cmd/c8s/Dockerfile`.
+`/c8s probe-file`. Init-container completion holds the workload until its
+certificate exists. Keep the `/c8s` command aligned with the binary location
+in `cmd/c8s/Dockerfile`.
 
 The helper takes a dict with these fields:
 

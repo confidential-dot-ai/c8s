@@ -22,8 +22,8 @@ in via annotation.
 Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet, not
 by this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// The injected sidecars and the measured initdata document carry a
-		// flat digest list, so a config is flattened into the same fields.
+		// The injected sidecars carry a flat digest list, so a measurements
+		// config is flattened into the same fields.
 		if _, err := cmdsutil.LoadMeasurementsConfig(cdsMeasurementsConfig,
 			"--measurements-config", "--cds-measurements", "--cds-rtmrs",
 			&cdsMeasurements, &cdsRTMRs); err != nil {

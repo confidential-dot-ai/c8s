@@ -39,10 +39,8 @@
     {{- end }}
   securityContext:
     {{- include "c8s.getCertSecurityContext" . | nindent 4 }}
-# c8s-cert-wait gates the workload on the initial cert without an exec probe.
-# A plain (run-once) init container that blocks on the cert file is a
-# CreateContainerRequest the locked guest allows, and normal init-completion
-# ordering holds the workload until the attested cert exists — fail-closed.
+# c8s-cert-wait is a run-once init container that blocks on the cert file.
+# Init-container completion holds the workload until the attested cert exists.
 # The `/c8s` path is the binary location from cmd/c8s/Dockerfile; command
 # bypasses the ENTRYPOINT so the full path must match.
 - name: c8s-cert-wait

@@ -169,7 +169,7 @@ func handleSecretsPod(t *testing.T, cfg Config) admission.Response {
 }
 
 func TestHandleRejectsSecretsWithoutAnyInventory(t *testing.T) {
-	cfg := secretsConfig() // neither WorkloadClaimsHostDir nor WorkloadClaimsGuest
+	cfg := secretsConfig() // WorkloadClaimsHostDir is unset
 
 	resp := handleSecretsPod(t, cfg)
 	if resp.Allowed {

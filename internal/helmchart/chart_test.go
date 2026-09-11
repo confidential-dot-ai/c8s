@@ -2113,7 +2113,7 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 }
 
 // TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
-// not leak into the other cvmModes: pod/gke/aks dial the on-node Unix socket
+// not leak into the other cvmModes: gke/aks dial the on-node Unix socket
 // and render no HOST_IP env anywhere. The consumers that must carry both the
 // socket URL and the socket-directory mount are asserted per shape.
 func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
