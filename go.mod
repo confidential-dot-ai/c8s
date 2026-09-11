@@ -9,7 +9,7 @@ require (
 	github.com/containerd/containerd/api v1.11.1
 	github.com/containerd/containerd/v2 v2.3.5
 	github.com/containerd/errdefs v1.0.0
-	github.com/containerd/nri v0.12.2
+	github.com/containerd/nri v0.12.3
 	github.com/coreos/go-iptables v0.8.0
 	github.com/distribution/reference v0.6.0
 	github.com/fsnotify/fsnotify v1.10.1
