@@ -16,5 +16,6 @@ key signs allowlist, secrets, and volume writes (and get-kubeconfig); the
 public key is what CDS pins at install (c8s install --operator-keys).`,
 	}
 	cmd.AddCommand(newKeygenCmd())
+	cmd.AddCommand(newSignValuesCmd())
 	return cmd
 }

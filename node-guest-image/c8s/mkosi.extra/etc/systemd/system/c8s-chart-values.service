@@ -1,0 +1,54 @@
+# Write the launch-time-only HelmChartConfig inputs the baked HelmChart c8s
+# (server/manifests/c8s-chart.yaml, rendered from c8s-chart.yaml.in) cannot
+# carry itself: the operator key and this node's own measurement are only
+# known once the guest has booted and attested, not at image-build time.
+#
+# Server role only (also the no-joindata single-node default); agent boots
+# SKIP this unit via the condition rather than failing it — the same shape as
+# rke2-server.service.d/20-role.conf.
+[Unit]
+Description=Write the c8s HelmChartConfig from this boot's launch-time inputs
+Documentation=https://github.com/confidential-dot-ai/c8s
+ConditionPathExists=/run/confos/role-server
+Requires=rke2-role.service
+# rke2-server.service: the write must land before RKE2's deploy controller
+# applies server/manifests/, or the baked HelmChart installs once with
+# unpinned cds.operatorKeys/measurements and only self-heals on the
+# controller's next reconcile. attestation-api.service: the render reads the
+# operator-key binding and this guest's own launch measurement off one
+# verified self-report on every platform. Requires=, not Wants=: without the
+# attester the render cannot pin and the boot must fail closed. Readiness
+# (the port binds after the unit starts) is waited for in the binary.
+Requires=attestation-api.service
+After=rke2-role.service attestation-api.service
+Before=rke2-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ${CRED_PLATFORM} comes from the drop-in the c8s sync hook renders from the
+# build's required C8S_PLATFORM — the same variable and drop-in shape
+# cred-release.service.d/10-platform.conf uses. The `=` form matters: with
+# the variable unset systemd elides a bare word, but --platform= expands to
+# an empty value, which the script's platform validation rejects — fail
+# closed, never a default.
+ExecStart=/usr/local/bin/c8s-chart-values.sh --platform=${CRED_PLATFORM}
+# No Restart=: rke2-server Requires this oneshot, and a failed first attempt
+# fails its start job for good whatever a later restart does. Waiting for
+# transient dependencies happens inside the binary instead; anything else is
+# a fail-closed boot.
+# Reads /etc/confai read-only, and writes only the rendered manifest and
+# /run/confos/opkeydata. mount(8) still works
+# here: the unit stays root with CAP_SYS_ADMIN, and NoNewPrivileges=yes only
+# blocks gaining privilege beyond that, not the mount(2) syscall itself.
+ProtectSystem=strict
+ReadOnlyPaths=/etc/confai
+ReadWritePaths=/var/lib/rancher/rke2/server/manifests /run
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+# Preset creates the .requires link, so rke2-server cannot start while this
+# unit is failing or has not run — the gpu-cc-enforce.service precedent.
+RequiredBy=rke2-server.service

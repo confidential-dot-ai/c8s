@@ -76,11 +76,65 @@ The other disks are optional; each is owned by one unit under
   digests the workload verifies itself (`models-disk.service`).
 - label `joindata` — an ISO that picks server vs agent and joins the
   cluster; absent means single-node server (`rke2-role.service`).
-- label `opkeydata` — an ISO carrying the operator public key; its
-  presence turns on attested credential release (`cred-release.service`,
-  see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
-  issued certificate's group to `cluster-admin` through ordinary RBAC;
-  identity, TTL and revocation are documented in [operator.md].
+- label `opkeydata` — an ISO carrying, at its root:
+  - `pubkey` — the operator public key. Its presence turns on attested
+    credential release (`cred-release.service`, see [operator.md]). The
+    measured initrd is the one reader of the disk for this file: it stages
+    the bytes to `/etc/confai/operator-pubkey` and extends RTMR[3] (TDX) with
+    their digest before `switch_root`, and every later consumer
+    (`cred-release.service`, `c8s-chart-values.service`) reads that staged
+    file rather than mounting the ISO itself. The baked `cred-release-rbac`
+    RKE2 AddOn binds the issued certificate's group to `cluster-admin`
+    through ordinary RBAC; identity, TTL and revocation are documented in
+    [operator.md].
+  - `values.yaml` (optional) — a signed launch-time values fragment (see
+    "Chart install" below): deployment configuration that used to need a
+    `c8s install --values` on a live cluster. Present without a matching
+    `values.yaml.sig` next to it, boot fails closed. Unlike `pubkey`, the
+    initrd does not stage this file yet, so `c8s-chart-values.sh` mounts
+    the ISO itself at boot to read it — an interim step until it is staged
+    next to the pubkey the same way.
+  - `values.yaml.sig` (required with `values.yaml`) — its detached
+    signature: ECDSA (P-256) over SHA-256 of the file's exact bytes, ASN.1
+    DER, base64, one line. Produced with:
+    ```
+    c8s keys sign-values --key operator.key values.yaml
+    ```
+
+## Chart install
+
+The image installs the c8s chart itself at boot — no `c8s install` step is
+needed (and `c8s install` refuses to run against a cluster that already
+carries the baked release). `c8s/mkosi.sync` fetches `internal/helmchart/c8s`
+from the c8s source tree at `C8S_REF`, packs it into
+`server/static/charts/c8s.tgz`, and renders the platform's
+`c8s/c8s-chart.<platform>.yaml.in` into a `HelmChart c8s` AddOn
+(`server/manifests/c8s-chart.yaml`) that points `spec.chart` at that static
+tarball, with the node-mode component digests resolved at the same `C8S_REF`
+as the rest of the build. `c8s-chart-values.service` runs once at boot, before
+`rke2-server`, and writes the two inputs only a running boot knows into a
+`HelmChartConfig` RKE2 merges into that release:
+
+- `cds.operatorKeys`, from the initrd-staged operator pubkey — present only
+  on an operator boot (see `opkeydata` above); its absence is not an error,
+  it just leaves allowlist writes disabled until a later boot supplies one.
+- `cds.measurements`/`rtmrs` and `ratlsMesh.measurements`/`rtmrs`, this
+  node's own launch measurement, read off a self-attestation the local
+  attestation-api verified (MRTD plus RTMR[1]/[2] on TDX, LAUNCH_DIGEST on
+  SNP) — pinning the mesh to
+  the exact image that is running, the way an operator's `c8s install
+  --measurements` would on a chart-managed cluster.
+
+When opkeydata carries a `values.yaml` fragment, `c8s-chart-values.sh` mounts
+the disk (the same locked-down way `rke2-role.sh` mounts `joindata`) and
+hands the fragment, its signature, and this boot's own inputs to
+`c8s launch-values render` (`internal/cmds/launchvalues`), which owns
+`spec.valuesContent` from there: it verifies the signature under the
+measured operator key, checks the fragment's `measurement` names this exact
+boot, validates every leaf of its `values` subtree against an explicit
+allowlist, and deep-merges it underneath the boot-derived keys above so a
+fragment can never override them. See docs/operator.md, "Launch-time
+values", for the allowlist and the fragment shape.
 
 ## Workload isolation
 

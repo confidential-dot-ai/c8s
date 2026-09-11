@@ -113,6 +113,71 @@ func TestPreflightCDSNodeExec(t *testing.T) {
 	})
 }
 
+// notBakedKubectl scripts the two kubectl reads preflightNotBakedNode makes,
+// distinguished by their trailing "get crd"/"get helmchart" argv: crdOut is
+// what `kubectl get crd helmcharts.helm.cattle.io ... --ignore-not-found`
+// prints to stdout (empty = no CRD), helmchartOut is what
+// `kubectl get helmchart ... --ignore-not-found` prints (empty = no match).
+func notBakedKubectl(crdOut, helmchartOut string) string {
+	return `case "$*" in
+"get crd helmcharts.helm.cattle.io -o name --ignore-not-found") printf '%s' '` + crdOut + `' ;;
+"get helmchart -n kube-system -l confidential.ai/baked=true -o name --ignore-not-found") printf '%s' '` + helmchartOut + `' ;;
+esac`
+}
+
+func TestPreflightNotBakedNodeExec(t *testing.T) {
+	t.Run("baked HelmChart present refuses", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", notBakedKubectl("crd.helm.cattle.io/helmcharts.helm.cattle.io\n", "helmchart.helm.cattle.io/c8s\n"))
+		err := preflightNotBakedNode(context.Background())
+		if err == nil {
+			t.Fatal("want error when the cluster carries the baked HelmChart c8s")
+		}
+		if !strings.Contains(err.Error(), "confidential.ai/baked=true") {
+			t.Errorf("error %q should name the label", err)
+		}
+		mustContainLine(t, f.calls(t), "kubectl get helmchart -n kube-system -l confidential.ai/baked=true -o name --ignore-not-found")
+	})
+
+	t.Run("no HelmChart carries the label passes (empty stdout)", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", notBakedKubectl("crd.helm.cattle.io/helmcharts.helm.cattle.io\n", ""))
+		if err := preflightNotBakedNode(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("cluster has no HelmChart CRD passes without reading helmchart", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", notBakedKubectl("", "helmchart.helm.cattle.io/c8s\n"))
+		if err := preflightNotBakedNode(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		mustNotContainPrefix(t, f.calls(t), "kubectl get helmchart -n kube-system")
+	})
+
+	t.Run("crd read failure surfaces verbatim", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `echo 'Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io is forbidden' >&2; exit 1`)
+		err := preflightNotBakedNode(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "customresourcedefinitions.apiextensions.k8s.io is forbidden") {
+			t.Fatalf("want the kubectl stderr surfaced verbatim, got %v", err)
+		}
+	})
+
+	t.Run("helmchart read failure surfaces verbatim", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", `case "$*" in
+"get crd helmcharts.helm.cattle.io -o name --ignore-not-found") printf 'crd.helm.cattle.io/helmcharts.helm.cattle.io\n' ;;
+"get helmchart -n kube-system -l confidential.ai/baked=true -o name --ignore-not-found") echo 'Error from server (Forbidden): helmcharts.helm.cattle.io is forbidden' >&2; exit 1 ;;
+esac`)
+		err := preflightNotBakedNode(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "helmcharts.helm.cattle.io is forbidden") {
+			t.Fatalf("want the kubectl stderr surfaced verbatim, got %v", err)
+		}
+	})
+}
+
 // podListFile writes a typed PodList as the JSON `kubectl get pods -A -o json`
 // would emit and returns its path.
 func podListFile(t *testing.T, pods ...corev1.Pod) string {

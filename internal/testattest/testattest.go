@@ -87,6 +87,9 @@ type Stub struct {
 	platform  types.Platform
 	attest    []types.AttestRequest
 	verify    []types.VerifyRequest
+
+	health         int
+	healthFailures int
 }
 
 // New starts a stub attestation-api, closed at test cleanup.
@@ -94,6 +97,7 @@ func New(t testing.TB) *Stub {
 	t.Helper()
 	s := &Stub{verdict: PassingVerdict(""), platform: types.PlatformSnp}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /attest", s.handleAttest)
 	mux.HandleFunc("POST /verify", s.handleVerify)
 	s.Server = httptest.NewServer(mux)
@@ -137,6 +141,38 @@ func (s *Stub) VerifyRequests() []types.VerifyRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]types.VerifyRequest(nil), s.verify...)
+}
+
+// SetHealthFailures makes the next n GET /health calls answer 503, standing
+// in for an attestation-api that has started but not yet bound its port.
+func (s *Stub) SetHealthFailures(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.healthFailures = n
+}
+
+// HealthRequests returns how many GET /health calls the stub has answered.
+func (s *Stub) HealthRequests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.health
+}
+
+func (s *Stub) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	s.health++
+	failing := s.healthFailures > 0
+	if failing {
+		s.healthFailures--
+	}
+	platform := string(s.platform)
+	s.mu.Unlock()
+	if failing {
+		http.Error(w, "starting", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(types.HealthResponse{Status: "ok", Platform: &platform})
 }
 
 func (s *Stub) handleAttest(w http.ResponseWriter, r *http.Request) {

@@ -11,7 +11,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 
@@ -30,14 +33,24 @@ import (
 // Var (not const) so tests can point it at a temp file.
 var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 
+// ErrNoOperatorKey is returned (wrapped) by the Load* functions when no
+// operator pubkey is staged at all: the VM was launched without an opkeydata
+// disk. It is deliberately distinct from fs.ErrNotExist so that no other
+// ENOENT on the way to a binding check is ever mistaken for a non-operator
+// boot.
+var ErrNoOperatorKey = errors.New("no operator pubkey staged")
+
 // readOperatorPubkey reads the operator public key the initrd staged off the
 // opkeydata disk. The bytes are exactly what the initrd hashed into the launch
-// binding, so runtimemeasure can re-derive the same digest. Absence means the
-// VM was launched without an operator key (no opkeydata disk).
+// binding, so runtimemeasure can re-derive the same digest. Absence is
+// reported as ErrNoOperatorKey; every other read failure is a hard error.
 func readOperatorPubkey() ([]byte, error) {
 	pub, err := os.ReadFile(operatorPubkeyPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s — was the VM launched with an operator key?", ErrNoOperatorKey, operatorPubkeyPath)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w — was the VM launched with an operator key?", operatorPubkeyPath, err)
+		return nil, fmt.Errorf("read %s: %w", operatorPubkeyPath, err)
 	}
 	if len(pub) == 0 {
 		return nil, fmt.Errorf("%s is empty", operatorPubkeyPath)
@@ -49,6 +62,43 @@ func readOperatorPubkey() ([]byte, error) {
 // attestation-api; on expiry the service fails start and systemd retries.
 const selfReportTimeout = 15 * time.Second
 
+// attestationReadyTimeout bounds waitForAttestationAPI. attestation-api is a
+// Type=simple unit that fetches its certificate collateral over the network
+// before it binds its port, so an After= ordering alone lets a caller start
+// while the socket is still refusing connections. Package vars so tests can
+// shorten them.
+var (
+	attestationReadyTimeout  = 90 * time.Second
+	attestationReadyInterval = 2 * time.Second
+)
+
+// waitForAttestationAPI polls GET /health until the local attestation-api
+// answers or attestationReadyTimeout expires. A bounded wait in the binary
+// rather than a unit-level Restart=: c8s-chart-values.service is a oneshot
+// rke2-server Requires, and a failed first attempt fails rke2-server's start
+// job for good regardless of how many times systemd restarts the oneshot.
+func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error {
+	client := attestationclient.NewClient(attestationAPIURL)
+	deadline := time.Now().Add(attestationReadyTimeout)
+	var lastErr error
+	for {
+		hctx, cancel := context.WithTimeout(ctx, attestationReadyInterval)
+		_, lastErr = client.Health(hctx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("attestation-api at %s not ready after %s: %w", attestationAPIURL, attestationReadyTimeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(attestationReadyInterval):
+		}
+	}
+}
+
 // verifiedSelfReport returns this guest's own attestation as the local
 // attestation-api verified it.
 //
@@ -56,7 +106,15 @@ const selfReportTimeout = 15 * time.Second
 // from an unauthenticated field, so the report goes through /verify even though
 // the guest produced it. The anchor is a fresh nonce, which makes the report
 // non-replayable for free.
+//
+// One report answers every question this package asks about the guest: the
+// operator-key binding (LoadMeasuredOperatorKey) and its own launch
+// measurement (OwnLaunchMeasurement). A caller needing both on the same boot
+// uses LoadMeasuredOperatorKeyAndOwnMeasurement so the guest attests once.
 func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetypes.VerificationResult, error) {
+	if err := waitForAttestationAPI(ctx, attestationAPIURL); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
 	defer cancel()
 
@@ -111,4 +169,84 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 		return nil, err
 	}
 	return pub, nil
+}
+
+// OwnLaunchMeasurement returns this guest's own launch measurement (TDX MRTD
+// or SNP LAUNCH_DIGEST, 48 bytes) and, on TDX, its RTMR[1] and RTMR[2] — the
+// values c8s-chart-values pins cds.measurements/rtmrs and
+// ratlsMesh.measurements/rtmrs to, so the mesh trusts the exact image that
+// is running. rtmrs is nil on SNP, which has no runtime measurement registers.
+//
+// platform is the ratls-normalized platform this image was built for ("tdx"
+// or "sev-snp"). The values are read off one verified self-report; platform
+// does not select how they are read, it is checked against what the hardware
+// proved, so a chart baked for one TEE is never pinned to the other's report.
+func OwnLaunchMeasurement(ctx context.Context, platform, attestationAPIURL string) (measurement []byte, rtmrs map[int][]byte, err error) {
+	report, err := verifiedSelfReport(ctx, attestationAPIURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ownLaunchMeasurement(report, platform)
+}
+
+// ownLaunchMeasurement reads the launch measurement and (TDX) RTMR pins off a
+// verified report, failing closed on a family other than platform, a launch
+// digest of any width but 48 bytes, or a TDX report missing a register.
+func ownLaunchMeasurement(r *teetypes.VerificationResult, platform string) ([]byte, map[int][]byte, error) {
+	if !r.SignatureValid {
+		return nil, nil, fmt.Errorf("verification result does not carry a valid signature, so its claims are unverified")
+	}
+	family := r.Platform.Family()
+	if family == teetypes.FamilyUnknown {
+		return nil, nil, fmt.Errorf("%w %q", runtimemeasure.ErrUnknownPlatform, r.Platform)
+	}
+	if string(family) != platform {
+		return nil, nil, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, r.Platform)
+	}
+	digest, err := hex.DecodeString(r.Claims.LaunchDigest)
+	if err != nil {
+		return nil, nil, fmt.Errorf("launch_digest claim is not hex: %w", err)
+	}
+	if len(digest) != sha512.Size384 {
+		return nil, nil, fmt.Errorf("launch_digest claim is %d bytes, want %d", len(digest), sha512.Size384)
+	}
+	if family != teetypes.FamilyTDX {
+		return digest, nil, nil
+	}
+	rtmrs := make(map[int][]byte, 2)
+	for _, i := range []int{1, 2} {
+		if rtmrs[i], err = r.Claims.RTMR(i); err != nil {
+			return nil, nil, err
+		}
+	}
+	return digest, rtmrs, nil
+}
+
+// LoadMeasuredOperatorKeyAndOwnMeasurement does what LoadMeasuredOperatorKey
+// and OwnLaunchMeasurement do together, off one verified self-report instead
+// of attesting once per question.
+//
+// The own measurement is always resolved, operator key present or not — a
+// non-operator boot (pubErr wrapping ErrNoOperatorKey) still needs it for
+// cds/ratlsMesh measurements, so pub/pubErr come back alongside
+// measurement/rtmrs rather than short-circuiting the whole call. The caller
+// (launchvalues.Render) distinguishes "no key staged" from every other
+// pubErr via errors.Is(pubErr, ErrNoOperatorKey). err is set only when the
+// self-report itself, or the measurement read off it, fails.
+func LoadMeasuredOperatorKeyAndOwnMeasurement(ctx context.Context, platform, attestationAPIURL string) (pub []byte, pubErr error, measurement []byte, rtmrs map[int][]byte, err error) {
+	pub, pubErr = readOperatorPubkey()
+	report, err := verifiedSelfReport(ctx, attestationAPIURL)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if pubErr == nil {
+		if verr := runtimemeasure.VerifyBinding(report, pub, nil); verr != nil {
+			pub, pubErr = nil, verr
+		}
+	}
+	measurement, rtmrs, err = ownLaunchMeasurement(report, platform)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return pub, pubErr, measurement, rtmrs, nil
 }

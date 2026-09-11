@@ -26,8 +26,9 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Boots the PUBLISHED, UNMODIFIED c8s node image as an Intel TDX CVM on
-# tdx-gh-runner, installs the c8s bundle into it, and asserts the product's
-# security guarantee: the baked NRI floor DENIES a non-allowlisted image.
+# tdx-gh-runner, waits for the image's own baked c8s chart install, and
+# asserts the product's security guarantee: the baked NRI floor DENIES a
+# non-allowlisted image.
 #
 # Proven by hand on hardware 2026-07-26 before this lane existed: image
 # imported via CDI, CVM booted, operator-key-bound kubeconfig obtained over
@@ -66,7 +67,7 @@ on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: 'c8s git ref to install + test. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (VERSION PAIRING: the node image bakes an admission floor containing the bootstrap digests from ITS build ref, so a mismatched CLI gets its own components denied).'
+        description: 'c8s git ref to build the CLI from + test. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (VERSION PAIRING: the node image bakes an admission floor containing the bootstrap digests from ITS build ref, so a mismatched CLI gets its own components denied).'
         required: false
         default: ''
       keep_cvm:
@@ -103,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: tools (kubectl, go, crane, helm)
+      - name: tools (kubectl, go, crane)
         run: |
           set -euo pipefail
           # Every fetch here crosses the public internet from an ephemeral ARC
@@ -140,15 +141,11 @@ jobs:
           export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
-          # crane: `c8s install --resolve-digests=true` below shells out to it.
-          # Pinned rather than fetched through the GitHub releases API, which
-          # rate-limits by IP on a shared self-hosted host.
+          # crane: the image-tag lookups below use it. Pinned rather than
+          # fetched through the GitHub releases API, which rate-limits by IP
+          # on a shared self-hosted host. The ephemeral ARC pod has no crane,
+          # unlike the host, so install rather than assume.
           command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
-          # helm: c8s install shells out to it too. The ephemeral ARC pod has
-          # neither binary, unlike the host, so install rather than assume.
-          if ! command -v helm >/dev/null; then
-            retry 'curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm'
-          fi
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
       # Fail SAFE: only reap on a positive "completed", or on age. An unknown
@@ -449,8 +446,6 @@ jobs:
           git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
           echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
           retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
-          # An unstamped build reports "dev", which is exactly why --image-tag
-          # is passed explicitly at install rather than trusting build metadata.
           c8s --version || true
 
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
@@ -520,15 +515,36 @@ jobs:
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
 
-      - name: install the c8s bundle under test
+      # c8s-local patch (see node-guest-image-invariants.sh's tdx-metal-e2e.yml
+      # marker check): the node image now bakes the c8s chart install itself
+      # (HelmChart c8s in kube-system, node-guest-image/c8s/c8s-chart.<platform>.yaml.in) —
+      # `c8s install` refuses to run against a cluster carrying it
+      # (preflightNotBakedNode, cmd/c8s/install.go). RKE2's helm-controller
+      # reconciles that HelmChart into a Job named helm-install-c8s in
+      # kube-system; wait for it instead of running the install ourselves. The
+      # operator key and this node's own measurement (matching $mrtd asserted
+      # above) come from c8s-chart-values.service at boot (opkeydata +
+      # attestation), not from this workflow.
+      - name: wait for the baked chart install (helm-install-c8s)
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          c8s install --cvm-mode node --single-node --hardware-platform tdx \
-            --image-tag "$c8sRef" \
-            --operator-keys /tmp/op.pub \
-            --measurements "$mrtd" \
-            --resolve-digests=true
+          # `kubectl wait` errors immediately on a Job that does not exist
+          # yet, so wait for helm-controller to create it first.
+          for _ in $(seq 1 60); do
+            kubectl -n kube-system get job/helm-install-c8s >/dev/null 2>&1 && break
+            sleep 5
+          done
+          if ! kubectl -n kube-system wait --for=condition=complete job/helm-install-c8s --timeout=8m; then
+            echo "::error::helm-install-c8s did not complete"
+            echo "--- helmchart c8s status ---"
+            kubectl -n kube-system get helmchart c8s -o yaml || true
+            echo "--- helm-install-c8s job ---"
+            kubectl -n kube-system get job/helm-install-c8s -o yaml || true
+            echo "--- helm-install-c8s pod logs ---"
+            kubectl -n kube-system logs job/helm-install-c8s --all-containers --tail=-1 || true
+            exit 1
+          fi
           kubectl -n c8s-system get pods -o wide
 
       - name: assert components converged

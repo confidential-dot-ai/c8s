@@ -1624,10 +1624,11 @@ func TestComponentEnabledPredicateHonorsValuesFile(t *testing.T) {
 	}
 }
 
-// mergeValues must deep-merge a -f overlay the way helm coalesces it: a nested
-// map merges key-by-key (so enabling volumed via -f does not wipe its sibling
-// image/hostPaths defaults), while a scalar replaces. This is the fix for the
-// resolver treating a -f-enabled, default-disabled component as still off.
+// helmchart.MergeValues must deep-merge a -f overlay the way helm coalesces
+// it: a nested map merges key-by-key (so enabling volumed via -f does not
+// wipe its sibling image/hostPaths defaults), while a scalar replaces. This
+// is the fix for the resolver treating a -f-enabled, default-disabled
+// component as still off.
 func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	base := map[string]any{
 		"volumed": map[string]any{
@@ -1639,7 +1640,7 @@ func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	overlay := map[string]any{
 		"volumed": map[string]any{"enabled": true},
 	}
-	mergeValues(base, overlay)
+	helmchart.MergeValues(base, overlay)
 
 	if !boolAtPath(base, "volumed.enabled") {
 		t.Error("volumed.enabled not flipped to true by the overlay")

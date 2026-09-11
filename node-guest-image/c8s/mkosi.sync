@@ -64,8 +64,12 @@ RKE2_IMAGES_CILIUM_SHA256="1ab41422cc16f5d030b8f62889133dff5d9dce985fbf13360c160
 SYNC_INPUTS="$SRCDIR/mkosi.local/.confos-sync-inputs"
 C8S_REGISTRY=$(cat "$SYNC_INPUTS/c8s-registry" 2>/dev/null || true)
 C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
+# Where the chart tree is fetched from, as a source tarball at C8S_REF.
+C8S_SOURCE="https://codeload.github.com/confidential-dot-ai/c8s/tar.gz"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
+OPERATOR_REPO="${C8S_REGISTRY}/c8s-operator"
+RATLS_MESH_REPO="${C8S_REGISTRY}/ratls-mesh"
 # The image's TEE platform, from build's --sync-input. Required: the NRI
 # floor types the RA-TLS identity CDS checks against attestation evidence,
 # so a wrong or defaulted value denies every adopted workload a certificate.
@@ -90,9 +94,16 @@ case "$PLATFORM" in
     *)   LABEL_PLATFORM=$PLATFORM ;;
 esac
 mkdir -p "$STAGE_DIR/etc/systemd/system/cred-release.service.d" \
+         "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d" \
          "$STAGE_DIR/etc/rancher/rke2/config.yaml.d"
 printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
     > "$STAGE_DIR/etc/systemd/system/cred-release.service.d/10-platform.conf"
+# Same env var name and drop-in shape for c8s-chart-values.service: the
+# render checks the platform the image was built for against the one its
+# verified self-report proves, so a chart baked for one TEE is never pinned
+# to the other's measurement.
+printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
+    > "$STAGE_DIR/etc/systemd/system/c8s-chart-values.service.d/10-platform.conf"
 printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
@@ -109,19 +120,63 @@ C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.
 # docker.yml publishes images under v* tags, so the tag itself is the ref.
 C8S_REF="${C8S_REF:-v0.1.0-rc2}"
-echo "c8s sync: resolving nri-image-policy + cds at c8s ref ${C8S_REF}"
-resolve_digest() {  # <repo> <ref> -> prints sha256:... or FATALs
+echo "c8s sync: resolving nri-image-policy + cds + operator + ratls-mesh at c8s ref ${C8S_REF}"
+# The baked HelmChart (below) pins all four the same way node mode does live:
+# node mode renders the operator and ratls-mesh alongside nri-image-policy
+# (cvmMode=node turns off attestationApi and volumed stays off by default —
+# see appendCvmModeInstallArgs/appendResolvedDigestArgs in
+# cmd/c8s/install.go, which this sync mirrors so a baked boot resolves the
+# identical component set a live `c8s install --cvm-mode=node` would).
+#
+# Resolved concurrently: four independent oras/jq round trips have no
+# ordering dependency on each other, only on C8S_REF being known first.
+# resolve_digest_bg writes its result to a temp file rather than printing to
+# stdout, since a background job's stdout cannot be captured with $(...) the
+# way the old sequential calls did.
+DIGEST_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$DIGEST_TMPDIR"' EXIT
+resolve_digest_bg() {  # <repo> <ref> <out-file> -> writes sha256:... or FATALs
     local d
     d=$(oras manifest fetch --descriptor "$1:$2" 2>/dev/null | jq -r '.digest')
     case "$d" in
-        sha256:*) printf '%s' "$d" ;;
+        sha256:*) printf '%s' "$d" > "$3" ;;
         *) echo "c8s sync: FATAL cannot resolve $1:$2 (is the image published? run c8s docker.yml for the branch)" >&2; exit 1 ;;
     esac
 }
-NRI_DIGEST=$(resolve_digest "$NRI_REPO" "$C8S_REF")
-CDS_DIGEST=$(resolve_digest "$CDS_REPO" "$C8S_REF")
+resolve_digest_bg "$NRI_REPO" "$C8S_REF" "$DIGEST_TMPDIR/nri" &
+nri_pid=$!
+resolve_digest_bg "$CDS_REPO" "$C8S_REF" "$DIGEST_TMPDIR/cds" &
+cds_pid=$!
+resolve_digest_bg "$OPERATOR_REPO" "$C8S_REF" "$DIGEST_TMPDIR/operator" &
+operator_pid=$!
+resolve_digest_bg "$RATLS_MESH_REPO" "$C8S_REF" "$DIGEST_TMPDIR/ratls-mesh" &
+ratls_mesh_pid=$!
+# Wait on every job regardless of individual exit status (a bare `wait $pid`
+# chain under set -e would abort on the first failure and leave the rest
+# running as orphans) — resolve_digest_bg already printed a FATAL for
+# whichever repo failed; read_digest below re-checks each result file's
+# shape and is what actually fails the build closed.
+wait "$nri_pid" || true
+wait "$cds_pid" || true
+wait "$operator_pid" || true
+wait "$ratls_mesh_pid" || true
+
+read_digest() {  # <name> <out-file> -> prints sha256:... or FATALs on a bad/missing result
+    local d
+    d=$(cat "$2" 2>/dev/null || true)
+    case "$d" in
+        sha256:*) printf '%s' "$d" ;;
+        *) echo "c8s sync: FATAL $1 digest resolution produced '$d', want sha256:..." >&2; exit 1 ;;
+    esac
+}
+NRI_DIGEST=$(read_digest nri "$DIGEST_TMPDIR/nri")
+CDS_DIGEST=$(read_digest cds "$DIGEST_TMPDIR/cds")
+OPERATOR_DIGEST=$(read_digest operator "$DIGEST_TMPDIR/operator")
+RATLS_MESH_DIGEST=$(read_digest ratls-mesh "$DIGEST_TMPDIR/ratls-mesh")
+rm -rf "$DIGEST_TMPDIR"
+trap - EXIT
 NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
-echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}"
+echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}, operator ${OPERATOR_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}"
 
 # Render the NRI floor template into the stage tree, substituting the resolved
 # nri + cds digests into always_allow. The template lives outside mkosi.extra
@@ -141,6 +196,43 @@ render_nri_floor() {
         -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
     echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
+}
+
+# Deterministic chart-tree tarball: reproducible byte-for-byte across builds
+# of the same chart tree (so the launch measurement depends on chart
+# CONTENT, not the extraction filesystem's mtimes/ownership/order). Same
+# flags confidential-os-builder's own layer packing uses for the same reason.
+pack_chart_tarball() {  # <chart dir> <out tar.gz>
+    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+        -C "$(dirname "$1")" -cf - "$(basename "$1")" \
+    | gzip -n > "$2"
+}
+
+# Render the baked HelmChart AddOn into the stage tree: RKE2 serves this
+# platform's chart tarball from its own static file server
+# (server/static/charts/, the same mechanism its bundled AddOns like
+# rke2-coredns use — see spec.chart in the template), so the manifest itself
+# carries only a URL, not the chart bytes. Which template: cmd/c8s's
+# TestNodeChartGoldenFiles generates one golden file per hardware platform
+# (c8s-chart.tdx.yaml.in / c8s-chart.snp.yaml.in) with every static
+# platform-dependent value (cds.ratlsPlatform, teeDevices, tlsLb.attest, ...)
+# already baked in as a literal — only the four component digests are left as
+# @*_DIGEST@ tokens, since those alone depend on C8S_REF, not on PLATFORM.
+render_chart_helmchart() {  # <chart tarball path>
+    local tmpl="$SRCDIR/mkosi.profiles/c8s/c8s-chart.${PLATFORM}.yaml.in"
+    local dst="$STAGE_DIR/var/lib/rancher/rke2/server/manifests/c8s-chart.yaml"
+    local static_dst="$STAGE_DIR/var/lib/rancher/rke2/server/static/charts/c8s.tgz"
+    [ -f "$tmpl" ] || { echo "c8s sync: FATAL chart template $tmpl missing" >&2; exit 1; }
+    mkdir -p "$(dirname "$static_dst")"
+    install -D -m 0644 "$1" "$static_dst"
+    mkdir -p "$(dirname "$dst")"
+    sed \
+        -e "s|@IMAGE_DIGEST@|${OPERATOR_DIGEST}|g" \
+        -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
+        -e "s|@RATLS_MESH_DIGEST@|${RATLS_MESH_DIGEST}|g" \
+        -e "s|@NRI_IMAGE_POLICY_DIGEST@|${NRI_DIGEST}|g" \
+        "$tmpl" > "$dst"
+    echo "c8s sync: chart HelmChart rendered (image ${OPERATOR_DIGEST}, cds ${CDS_DIGEST}, ratls-mesh ${RATLS_MESH_DIGEST}, nri-image-policy ${NRI_DIGEST})"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
@@ -226,77 +318,110 @@ C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
 # Content-addressed by the image digest: a cached copy skips the GHCR pull
 # entirely (oras digest-verifies the blobs on the pull that populates it).
 PLUGIN_CACHE="$CACHE_DIR/nri-image-policy-${NRI_IMAGE##*@sha256:}"
-if [ -f "$PLUGIN_CACHE" ]; then
-    echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
-    install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
-    install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
-    render_nri_floor
-    echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
-    exit 0
-fi
+# The chart tree, fetched from the c8s source tree at C8S_REF and packed
+# deterministically. Keyed by the nri-image-policy digest rather than the
+# ref: the image was built from the same ref, and a moved tag changes the
+# digest where it would leave a ref-keyed cache stale.
+CHART_CACHE="$CACHE_DIR/c8s-chart-${NRI_IMAGE##*@sha256:}.tar.gz"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-EXTRACT="$TMP/rootfs"
-mkdir -p "$EXTRACT"
 
-REPO="${NRI_IMAGE%@*}"
-MANIFEST=$(oras manifest fetch "$NRI_IMAGE")
+# Extract the plugin binary from the pinned nri-image-policy image into
+# PLUGIN_CACHE.
+extract_plugin_binary() {
+    local EXTRACT="$TMP/rootfs" REPO MANIFEST CHILD LAYERS BIN TARGET
+    mkdir -p "$EXTRACT"
+    REPO="${NRI_IMAGE%@*}"
+    MANIFEST=$(oras manifest fetch "$NRI_IMAGE")
 
-# The pinned digest is an OCI image index (amd64 image + provenance
-# manifest); descend to the amd64 child. Plain single-arch manifests pass
-# through unchanged so the pin can point at either form.
-case "$(echo "$MANIFEST" | jq -r '.mediaType')" in
-*.index.v1+json | *.manifest.list.v2+json)
-    CHILD=$(echo "$MANIFEST" | jq -r '[.manifests[] | select(.platform.architecture == "amd64")][0].digest')
-    if [ -z "$CHILD" ] || [ "$CHILD" = "null" ]; then
-        echo "c8s sync: no amd64 manifest in index $NRI_IMAGE" >&2
+    # The pinned digest is an OCI image index (amd64 image + provenance
+    # manifest); descend to the amd64 child. Plain single-arch manifests pass
+    # through unchanged so the pin can point at either form.
+    case "$(echo "$MANIFEST" | jq -r '.mediaType')" in
+    *.index.v1+json | *.manifest.list.v2+json)
+        CHILD=$(echo "$MANIFEST" | jq -r '[.manifests[] | select(.platform.architecture == "amd64")][0].digest')
+        if [ -z "$CHILD" ] || [ "$CHILD" = "null" ]; then
+            echo "c8s sync: no amd64 manifest in index $NRI_IMAGE" >&2
+            exit 1
+        fi
+        MANIFEST=$(oras manifest fetch "${REPO}@${CHILD}")
+        ;;
+    esac
+
+    # Fetch every gzipped tar layer in manifest order and extract into a single
+    # staging dir; later layers shadow earlier ones (same flattening containerd
+    # performs). See attest/mkosi.sync for the full rationale. tar failures stay
+    # loud but non-fatal (layers legitimately carry entries we can't recreate,
+    # e.g. device nodes); the binary-presence check below is the gate.
+    LAYERS=$(echo "$MANIFEST" | jq -r '.layers[] | select(.mediaType | test("tar.?gzip$")) | .digest')
+    if [ -z "$LAYERS" ]; then
+        echo "c8s sync: no tar+gzip layers in $NRI_IMAGE (zstd or unexpected media types?)" >&2
+        echo "$MANIFEST" | jq -r '.layers[].mediaType' >&2
         exit 1
     fi
-    MANIFEST=$(oras manifest fetch "${REPO}@${CHILD}")
-    ;;
-esac
+    echo "$LAYERS" | while read -r layer; do
+        echo "c8s sync: fetching layer $layer" >&2
+        oras blob fetch --output "$TMP/layer.tar.gz" "${REPO}@${layer}"
+        tar -xzf "$TMP/layer.tar.gz" -C "$EXTRACT" || true
+        rm -f "$TMP/layer.tar.gz"
+    done
 
-# Fetch every gzipped tar layer in manifest order and extract into a single
-# staging dir; later layers shadow earlier ones (same flattening containerd
-# performs). See attest/mkosi.sync for the full rationale. tar failures stay
-# loud but non-fatal (layers legitimately carry entries we can't recreate,
-# e.g. device nodes); the binary-presence check below is the gate.
-LAYERS=$(echo "$MANIFEST" | jq -r '.layers[] | select(.mediaType | test("tar.?gzip$")) | .digest')
-if [ -z "$LAYERS" ]; then
-    echo "c8s sync: no tar+gzip layers in $NRI_IMAGE (zstd or unexpected media types?)" >&2
-    echo "$MANIFEST" | jq -r '.layers[].mediaType' >&2
-    exit 1
-fi
-echo "$LAYERS" | while read -r layer; do
-    echo "c8s sync: fetching layer $layer" >&2
-    oras blob fetch --output "$TMP/layer.tar.gz" "${REPO}@${layer}"
-    tar -xzf "$TMP/layer.tar.gz" -C "$EXTRACT" || true
-    rm -f "$TMP/layer.tar.gz"
-done
+    # In the image /usr/local/bin/nri-image-policy is a symlink to the
+    # multi-command c8s binary (argv[0] dispatch handles the 10- prefix, and
+    # the chart installs the same content — byte-identity holds). Resolve the
+    # link inside the extracted tree; absolute targets must not escape to the
+    # sandbox rootfs.
+    BIN="$EXTRACT/usr/local/bin/nri-image-policy"
+    if [ -L "$BIN" ]; then
+        TARGET=$(readlink "$BIN")
+        case "$TARGET" in
+            /*) BIN="$EXTRACT$TARGET" ;;
+            *)  BIN="$(dirname "$BIN")/$TARGET" ;;
+        esac
+    fi
+    if [ ! -f "$BIN" ]; then
+        echo "c8s sync: nri-image-policy binary not found in image" >&2
+        find "$EXTRACT" -name 'nri-image-policy*' -o -name 'c8s' >&2
+        exit 1
+    fi
+    install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
+}
 
-# In the image /usr/local/bin/nri-image-policy is a symlink to the
-# multi-command c8s binary (argv[0] dispatch handles the 10- prefix, and
-# the chart installs the same content — byte-identity holds). Resolve the
-# link inside the extracted tree; absolute targets must not escape to the
-# sandbox rootfs.
-BIN="$EXTRACT/usr/local/bin/nri-image-policy"
-if [ -L "$BIN" ]; then
-    TARGET=$(readlink "$BIN")
-    case "$TARGET" in
-        /*) BIN="$EXTRACT$TARGET" ;;
-        *)  BIN="$(dirname "$BIN")/$TARGET" ;;
-    esac
+# Fetch internal/helmchart/c8s from the c8s source tree at C8S_REF and pack
+# it into CHART_CACHE. The source tarball rather than the image: a chart
+# COPY in the nri-image-policy image would only exist in images built after
+# it was added, and the default C8S_REF must keep working at every published
+# tag. The SNP metal lane fetches the chart the same way.
+fetch_chart_source() {
+    local url="${C8S_SOURCE}/${C8S_REF}" chart
+    echo "c8s sync: downloading chart source $url"
+    curl -fL --retry 3 --retry-delay 5 --output "$TMP/src.tar.gz" "$url"
+    mkdir -p "$TMP/src"
+    tar -xzf "$TMP/src.tar.gz" -C "$TMP/src"
+    chart=$(echo "$TMP"/src/*/internal/helmchart/c8s)
+    if [ ! -f "$chart/Chart.yaml" ]; then
+        echo "c8s sync: FATAL no internal/helmchart/c8s/Chart.yaml in the c8s source at ${C8S_REF}" >&2
+        exit 1
+    fi
+    pack_chart_tarball "$chart" "$CHART_CACHE"
+}
+
+if [ -f "$PLUGIN_CACHE" ]; then
+    echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
+else
+    extract_plugin_binary
 fi
-if [ ! -f "$BIN" ]; then
-    echo "c8s sync: nri-image-policy binary not found in image" >&2
-    find "$EXTRACT" -name 'nri-image-policy*' -o -name 'c8s' >&2
-    exit 1
+install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
+install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
+
+if [ -f "$CHART_CACHE" ]; then
+    echo "c8s sync: cached chart (${NRI_IMAGE##*@})"
+else
+    fetch_chart_source
 fi
-install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
-install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
-install -D -m 0755 "$BIN" "$C8S_TARGET"
 
 render_nri_floor
+render_chart_helmchart "$CHART_CACHE"
 
-echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
+echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s + chart"
