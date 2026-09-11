@@ -32,6 +32,10 @@
 #   E2E_VOL_IMM_NAME / E2E_VOL_MUT_NAME   volume names (default imm / mut)
 #   E2E_VOL_MUT_MARKER  bytes the writer writes; a single shell word, no quotes
 #                       (default: c8s-e2e-mut-proof)
+#   E2E_VOL_UID         numeric non-root UID/GID used by both consumers
+#                       (default 65534). The immutable source must be readable
+#                       and the mutable source root writable by this identity;
+#                       c8s volume create --source preserves those modes.
 #   E2E_CDS_LOCAL_PORT  local port for the CDS port-forward (default 18443)
 #   E2E_MESH_CA         path to a pinned mesh CA bundle (default: read from the
 #                       tls-lb pod, which serves the live CA on its cert volume)
@@ -50,6 +54,10 @@ IMM=${E2E_VOL_IMM_NAME:-imm}
 MUT=${E2E_VOL_MUT_NAME:-mut}
 MARKER=${E2E_VOL_MUT_MARKER:-c8s-e2e-mut-proof}
 CDS_PORT=${E2E_CDS_LOCAL_PORT:-18443}
+VOL_UID=${E2E_VOL_UID:-65534}
+
+[[ "$VOL_UID" =~ ^[1-9][0-9]*$ ]] \
+  || fail "E2E_VOL_UID must be a positive numeric UID (got '$VOL_UID')"
 
 ns=c8s-e2e-volumes               # opened for CW pods by cw_namespace below
 READER=e2e-vol-reader
@@ -173,12 +181,22 @@ consumer_pod() {
   "spec": {
     "nodeSelector": { "kubernetes.io/hostname": "$E2E_VOL_NODE" },
     "restartPolicy": "Never",
+    "securityContext": {
+      "runAsNonRoot": true,
+      "runAsUser": $VOL_UID,
+      "runAsGroup": $VOL_UID,
+      "seccompProfile": { "type": "RuntimeDefault" }
+    },
     "containers": [
       {
         "name": "app",
         "image": "$image",
         "command": ["sh", "-c"],
-        "args": ["$5"]
+        "args": ["$5"],
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": { "drop": ["ALL"] }
+        }
       }
     ]
   }
@@ -210,8 +228,23 @@ cat <<EOF | kubectl apply -f - >/dev/null
   "spec": {
     "nodeSelector": { "kubernetes.io/hostname": "$E2E_VOL_NODE" },
     "restartPolicy": "Never",
+    "securityContext": {
+      "runAsNonRoot": true,
+      "runAsUser": $VOL_UID,
+      "runAsGroup": $VOL_UID,
+      "seccompProfile": { "type": "RuntimeDefault" }
+    },
     "containers": [
-      { "name": "app", "image": "$image", "command": ["sh", "-c"], "args": ["sleep 300"] }
+      {
+        "name": "app",
+        "image": "$image",
+        "command": ["sh", "-c"],
+        "args": ["sleep 300"],
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": { "drop": ["ALL"] }
+        }
+      }
     ]
   }
 }

@@ -84,13 +84,19 @@ The other disks are optional; each is owned by one unit under
 
 ## Workload isolation
 
+"Tenant" in these docs names the workload side of the trust boundary: pods,
+and the namespaced credentials that create them, as opposed to the platform
+components in the release namespace and `kube-system`. A node CVM serves one
+tenant; the word says which side of the boundary a pod is on, not that
+several share a node.
+
 Tenant pods run on the node's own kernel under runc, so what a pod may ask
 for is what stands between it and the measured host. The image enforces the
 restricted PodSecurity standard by default
 (`etc/rancher/rke2/psa-config.yaml`): no privileged pods, no host
-namespaces, no root user, no added capabilities, no unconfined seccomp or
-AppArmor. Only `kube-system` and `local-path-storage` are exempt; `default`
-is not.
+namespaces, no root user, dropped ALL capabilities (only `NET_BIND_SERVICE`
+may be added back), and no unconfined seccomp or AppArmor. Only `kube-system`
+and `local-path-storage` are exempt; `default` is not.
 
 A namespace label can normally lower that level. The baked
 `psa-level-policy.yaml` AddOn denies an `enforce` label other than
@@ -103,15 +109,34 @@ namespace-scoped credentials, never cluster-admin, and the launch
 measurement vouches for the floor their pods run under. cluster-admin can
 delete the policy, and RKE2 does not recreate deleted AddOn objects.
 
-The floor covers namespaces without confidential workloads. In node mode
-the webhook mounts the node's inventory socket into every
-`confidential.ai/cw` pod as a read-only hostPath, which restricted (and
-baseline) forbids, so a namespace hosting confidential workloads is opened
-by the operator with the privileged label, as `c8s install` does for its
-release namespace. Inside such a namespace the chart's own admission
-policies (host namespaces, hostPort, the mesh UID) are the controls, and the
-sample workload in `samples/` is restricted-compliant on its own so it can
-move back under the floor when the socket no longer needs a hostPath.
+RKE2 reconciles AddOns after kube-apiserver starts. The attested credential
+endpoint therefore remains closed until `psa-ready.sh` sees the policy and
+binding and proves, through server-side dry-runs as a synthetic non-granter,
+that a restricted namespace is admitted and a privileged one is denied by
+`confos-psa-level`. No externally released operator credential can enter the
+first-boot reconciliation window.
+
+The floor also covers namespaces hosting confidential workloads. In node mode,
+`nri-image-policy` mounts the inventory socket directory read-only into credential
+sidecars through NRI, below the Pod spec. Tenant namespaces keep Restricted
+enforcement, warning, and audit. `c8s install` labels its release namespace
+privileged for trusted platform components, including node DaemonSets.
+
+The chart's fail-closed `deny-host-namespaces` policies enforce Restricted
+controls and deny every tenant `hostPath` volume on Pod CREATE/UPDATE and
+`pods/ephemeralcontainers` updates. Existing Pods that still declare the old
+claims hostPath must be recreated to pick up NRI wiring; an unchanged prior
+sidecar or chart image never exempts the volume. Admission does not evict
+already-running Pods. The ephemeral policy also preserves the host-namespace
+and host-port checks over the full Pod.
+
+Ephemeral containers may inherit safe pod-level `runAsNonRoot` and seccomp
+settings when their own settings are absent. Explicit unsafe Pod settings,
+including root UID, Unconfined seccomp or AppArmor, disallowed SELinux settings,
+and unsafe sysctls, are rejected even when the debugger specifies safe
+container settings. Explicit `runAsNonRoot: false` and legacy Unconfined
+AppArmor annotations are rejected too. The same Pod-level guards apply to
+ordinary Pod admission.
 
 ## Module loading
 

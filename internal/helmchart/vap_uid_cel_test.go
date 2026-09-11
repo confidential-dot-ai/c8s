@@ -51,7 +51,18 @@ func renderedUIDPolicies(t *testing.T) map[string][]admissionregv1.Validation {
 // and reports whether it evaluates to true (allowed) without error.
 func evalPolicy(t *testing.T, expr string, object map[string]any) bool {
 	t.Helper()
-	env, err := cel.NewEnv(cel.Variable("object", cel.DynType))
+	return evalAdmissionPolicy(t, expr, object, nil, "CREATE")
+}
+
+// evalAdmissionPolicy supplies the prior persisted object and admission operation.
+// CREATE has a null oldObject, matching the API server rather than an empty map.
+func evalAdmissionPolicy(t *testing.T, expr string, object, oldObject map[string]any, operation string) bool {
+	t.Helper()
+	env, err := cel.NewEnv(
+		cel.Variable("object", cel.DynType),
+		cel.Variable("oldObject", cel.DynType),
+		cel.Variable("request", cel.DynType),
+	)
 	if err != nil {
 		t.Fatalf("cel env: %v", err)
 	}
@@ -63,7 +74,15 @@ func evalPolicy(t *testing.T, expr string, object map[string]any) bool {
 	if err != nil {
 		t.Fatalf("cel program: %v", err)
 	}
-	out, _, err := prg.Eval(map[string]any{"object": object})
+	var prior any
+	if oldObject != nil {
+		prior = oldObject
+	}
+	out, _, err := prg.Eval(map[string]any{
+		"object":    object,
+		"oldObject": prior,
+		"request":   map[string]any{"operation": operation},
+	})
 	if err != nil {
 		t.Fatalf("cel eval %q: %v", expr, err)
 	}
@@ -73,8 +92,13 @@ func evalPolicy(t *testing.T, expr string, object map[string]any) bool {
 // allTrue asserts every validation of a policy allows the object.
 func allTrue(t *testing.T, validations []admissionregv1.Validation, o map[string]any) {
 	t.Helper()
+	allTrueAdmission(t, validations, o, nil, "CREATE")
+}
+
+func allTrueAdmission(t *testing.T, validations []admissionregv1.Validation, o, old map[string]any, operation string) {
+	t.Helper()
 	for _, v := range validations {
-		if !evalPolicy(t, v.Expression, o) {
+		if !evalAdmissionPolicy(t, v.Expression, o, old, operation) {
 			t.Errorf("expression %q denied an object that should be allowed", v.Expression)
 		}
 	}
@@ -83,8 +107,13 @@ func allTrue(t *testing.T, validations []admissionregv1.Validation, o map[string
 // anyFalse asserts at least one validation denies the object.
 func anyFalse(t *testing.T, validations []admissionregv1.Validation, o map[string]any) {
 	t.Helper()
+	anyFalseAdmission(t, validations, o, nil, "CREATE")
+}
+
+func anyFalseAdmission(t *testing.T, validations []admissionregv1.Validation, o, old map[string]any, operation string) {
+	t.Helper()
 	for _, v := range validations {
-		if !evalPolicy(t, v.Expression, o) {
+		if !evalAdmissionPolicy(t, v.Expression, o, old, operation) {
 			return
 		}
 	}

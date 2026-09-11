@@ -393,8 +393,15 @@ the node bound" is not.
 
 Two things this rests on that attestation does not enforce:
 
-- the ValidatingAdmissionPolicy (or an equivalent PodSecurity floor) holds. It
-  is a values flag, and it exempts the release namespace and `kube-system`.
+- the default `deny-host-namespaces` ValidatingAdmissionPolicy (or an equivalent
+  control) holds. It enforces Restricted controls and denies host namespaces,
+  host ports, privilege, and every tenant `hostPath` volume, including on
+  ephemeral-container updates to existing Pods. Encrypted volumes
+  (docs/volumes.md) use `emptyDir`s that volumed fills; node-CVM credential
+  sidecars receive the read-only inventory socket directory through NRI below the Pod
+  spec. The policies exempt the release namespace, `kube-system`,
+  `local-path-storage`, and explicitly configured
+  `hostNamespacePolicy.exemptNamespaces`.
 - privileged node DaemonSets — CNI, CSI, the NVIDIA GPU operator — *can* bind
   the port. They are already root inside the node CVM and can read another
   pod's memory directly, so they are effectively part of the node's TCB;

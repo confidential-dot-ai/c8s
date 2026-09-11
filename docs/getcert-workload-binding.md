@@ -96,8 +96,10 @@ hijack. On node-CVM it is a unix socket, and there are two separate threats:
   own pod. The socket lives on a host directory, so a *separate* malicious pod
   that could `hostPath`-mount that directory read-write could swap the socket
   before get-cert connects — a PodSecurity / filesystem-permission concern (the
-  socket dir must be unwritable by untrusted pods), which the chart's
-  `deny-host-namespaces` policy also denies outright for tenant namespaces.
+  socket dir must be unwritable by untrusted pods). The chart's
+  `deny-host-namespaces` policy denies every tenant `hostPath` volume.
+  `nri-image-policy` supplies the read-only socket-directory mount through NRI,
+  below the Pod spec, so credential sidecars need no PodSecurity exception.
   **Who creates the socket, and why the L0 host can't inject one, is
   Corner 7.** (Corner 5, "Why a unix socket".)
 
@@ -575,8 +577,9 @@ splits cleanly:
   gated by: the dir is **root-owned `0711`** (untrusted pods cannot write it),
   get-cert's own mount is **read-only**, get-cert dials a **compiled** path the
   control plane cannot redirect, and the chart's `deny-host-namespaces` policy
-  denies `hostPath` volumes to tenant namespaces outright. It opens only if that
-  policy is disabled and PodSecurity lets untrusted pods RW-mount host paths.
+  denies `hostPath` volumes to tenant namespaces outright. The residual opens
+  if that policy is disabled and PodSecurity permits untrusted host-path mounts,
+  or an untrusted workload is placed in a trusted namespace exempt from both.
   (One nuance: the mount *source* — the
   inventory's configured socket dir — is operator-supplied, so a malicious
   operator could point it at a rogue dir — but the plugin runs inside the
@@ -704,6 +707,11 @@ crashloop window on not-yet-rolled nodes. Under kata the equivalent ordering is 
 `policy-monitor` predates the loopback token route answers nothing on
 `127.0.0.1:8401`, so roll the guest image before the operator starts injecting
 `--workload-claims-guest`.
+
+Existing Pods that still declare the old claims `hostPath` must be recreated to
+pick up the NRI mount. Pod CREATE/UPDATE and `pods/ephemeralcontainers` updates
+reject that volume even when it is unchanged from a previously admitted Pod.
+Admission does not evict already-running Pods.
 
 The same ordering covers the secret and volume fetchers, which redeem at the
 same endpoints: a guest image predating `volumed --guest` answers nothing on
