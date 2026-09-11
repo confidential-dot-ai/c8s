@@ -179,7 +179,7 @@ func tdxRTMRPinWarning(hardwarePlatform string, rtmrs, valuesFiles []string) (st
 }
 
 // valuesFilesSetRTMRs reports whether any -f values file pins TDX RTMRs
-// (cds.rtmrs), mirroring valuesFilesSetMeasurements.
+// (cds.rtmrs).
 func valuesFilesSetRTMRs(files []string) (bool, error) {
 	for _, f := range files {
 		tree, err := decodeValuesFile(f)
@@ -384,26 +384,6 @@ func podBindsHostPort(p corev1.Pod, port int32) bool {
 		}
 	}
 	return false
-}
-
-func labelSelector(sel map[string]any) (string, bool) {
-	if len(sel) == 0 {
-		return "", false
-	}
-	keys := make([]string, 0, len(sel))
-	for k := range sel {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	pairs := make([]string, 0, len(keys))
-	for _, k := range keys {
-		v, ok := sel[k].(string)
-		if !ok {
-			return "", false
-		}
-		pairs = append(pairs, k+"="+v)
-	}
-	return strings.Join(pairs, ","), true
 }
 
 // policyModeFailClosed is the image-policy mode that denies. In `audit` the
@@ -1011,7 +991,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
 		}
-		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs, installCvmMode)
+		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
 		if err != nil {
 			return err
 		}
@@ -1307,8 +1287,8 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	//        wraps either an SNP report (az-snp) or a TD quote (az-tdx). AKS
 	//        exposes no /dev/sev-guest or /dev/tdx_guest to the guest, so the
 	//        vTPM is the only evidence source for both SNP and TDX aks nodes.
-	//   pod/node/gke + --hardware-platform sev-snp: native /dev/sev-guest
-	//   pod/node/gke + --hardware-platform tdx:     native /dev/tdx-guest
+	//   node/gke + --hardware-platform sev-snp: native /dev/sev-guest
+	//   node/gke + --hardware-platform tdx:     native /dev/tdx-guest
 	sevGuest, tdxGuest, tpm := "false", "false", "false"
 	switch {
 	case cvmMode == "aks":
@@ -1517,7 +1497,7 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 	}
 	if _, err := crane.Digest(ctx, repo+":"+tag); err != nil {
 		if crane.IsNotFound(err) {
-			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
+			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo), err)
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not verify operator image %s:%s exists (%v); continuing\n", repo, tag, err)
 	}
@@ -1526,8 +1506,7 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 
 // appendSingleNodeInstallArgs collapses the dedicated-CDS-node partition for a
 // single-node / single-CVM cluster: an empty cds.node.selector makes every node
-// CDS-eligible (worker/pull installer everywhere, no split; the node pulls from
-// its co-hosted CDS), and the dedicated-node taint toleration is meaningless
+// CDS-eligible, and the dedicated-node taint toleration is meaningless
 // without it. helm renders =null as an empty value the chart reads as "no
 // partition". --set wins over -f, so the flag is authoritative if both are supplied.
 func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
@@ -1540,7 +1519,7 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 	)
 }
 
-func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []string {
+func appendVolumedInstallArgs(setArgs []string, volumes bool) []string {
 	if !volumes {
 		return setArgs
 	}
@@ -1909,7 +1888,7 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 	return parsed, repo + "@" + parsed.String(), nil
 }
 
-func tagCouplingHint(repo, tag string) string {
+func tagCouplingHint(repo string) string {
 	return fmt.Sprintf("the c8s component images publish in lockstep; verify the component tag exists with: crane ls %s", repo)
 }
 
@@ -2059,7 +2038,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 			digest, err = resolve(repo + ":" + tag)
 			if err != nil {
 				if crane.IsNotFound(err) {
-					return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
+					return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo), err)
 				}
 				return nil, err
 			}

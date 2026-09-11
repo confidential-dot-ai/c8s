@@ -545,7 +545,7 @@ true
 {{- if .Values.tlsLb.discovery.enabled -}}
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
-{{- if eq (include "c8s.attestationApiHostSocket" .) "true" -}}
+{{- if .Values.attestationApi.enabled -}}
 {{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
 {{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}

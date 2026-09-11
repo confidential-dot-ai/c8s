@@ -8,7 +8,6 @@ metadata:
     app.kubernetes.io/component: cds
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
-{{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,7 +19,6 @@ metadata:
 data:
   allowlist-seed.json: {{ include "c8s.allowlistSeedJSON" . | trim | quote }}
 ---
-{{- end }}
 {{- if .Values.cds.operatorKeys }}
 {{- if not (contains "BEGIN PUBLIC KEY" .Values.cds.operatorKeys) }}
 {{- fail "cds.operatorKeys must be the PEM content of the operator public-key bundle, not a file path — use `c8s install --operator-keys <file>`, `c8s render-values --operator-keys <file>`, or helm --set-file cds.operatorKeys=<file>" }}
@@ -128,9 +126,7 @@ spec:
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
             - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
-            {{- end }}
             - --jwt-clock-skew={{ .Values.cds.jwtClockSkew }}
             - --ca-common-name={{ .Values.cds.ca.commonName }}
             - --ca-cert-validity={{ .Values.cds.ca.certValidity }}
@@ -206,11 +202,9 @@ spec:
             - name: data
               mountPath: /data
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
-            {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - name: allowlist-seed
               mountPath: /etc/cds
               readOnly: true
-            {{- end }}
             {{- if .Values.cds.operatorKeys }}
             - name: operator-keys
               mountPath: /etc/cds-operator-keys
@@ -240,11 +234,9 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
-        {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
         - name: allowlist-seed
           configMap:
             name: {{ include "c8s.cdsName" . }}-allowlist-seed
-        {{- end }}
         {{- if .Values.cds.operatorKeys }}
         - name: operator-keys
           configMap:

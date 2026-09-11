@@ -168,7 +168,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
 	// Ahead of resolveDigests, which pins a component's image only while the
 	// effective values enable it.
-	setArgs = appendVolumedInstallArgs(setArgs, installVolumes, installCvmMode)
+	setArgs = appendVolumedInstallArgs(setArgs, installVolumes)
 	// --upstream derives a c8s-<id>.<ns>.svc.cluster.local address; the chart
 	// recognizes that headless-Service shape as mesh-wrapped and admits plaintext
 	// http. Empty means "not plumbed" so an operator's -f (or the chart's
@@ -227,8 +227,8 @@ func appendWebhookInstallArgs(setArgs []string, cmd *cobra.Command) []string {
 // int coerced; everything else stays a string); --set-string values stay
 // strings; --set-file values name a file whose content becomes the value
 // verbatim, mirroring helm. Any other flag is an error rather than a silently
-// mis-parsed value. Dotted keys nest; a trailing key[n] sets list element n
-// (see setNested) — the one indexed form the builder emits. This still does not
+// mis-parsed value. Dotted keys nest; key[n] selects list element n, including
+// maps within a list (such as containers[0].digest). This still does not
 // implement the rest of helm's --set grammar (escaped dots, nested indices)
 // because the builder never emits those.
 func valueArgsToTree(setArgs []string) (map[string]any, error) {
@@ -300,7 +300,7 @@ func setNested(m map[string]any, path []string, value any) error {
 	for i, seg := range path {
 		if i == len(path)-1 {
 			// A trailing key[n] sets element n of a list (helm --set list
-			// syntax), the one indexed form the builder emits (e.g.
+			// syntax), as used for scalar lists (e.g.
 			// cds.measurements[0]=…). setListElem grows the list as needed.
 			if key, idx, ok := parseListIndex(seg); ok {
 				return setListElem(m, strings.Join(path, "."), key, idx, value)
@@ -315,8 +315,28 @@ func setNested(m map[string]any, path []string, value any) error {
 			m[seg] = value
 			return nil
 		}
+		if key, idx, indexed := parseListIndex(seg); indexed {
+			list, ok := m[key].([]any)
+			if !ok && m[key] != nil {
+				return fmt.Errorf("value path %q conflicts with an existing non-list at %q", strings.Join(path, "."), key)
+			}
+			var child map[string]any
+			if idx < len(list) && list[idx] != nil {
+				child, ok = list[idx].(map[string]any)
+				if !ok {
+					return fmt.Errorf("value path %q conflicts with an existing scalar at %q", strings.Join(path, "."), seg)
+				}
+			} else {
+				child = map[string]any{}
+				if err := setListElem(m, strings.Join(path, "."), key, idx, child); err != nil {
+					return err
+				}
+			}
+			m = child
+			continue
+		}
 		if strings.ContainsRune(seg, '[') {
-			return fmt.Errorf("value path %q: list index is only supported on the final segment, not %q", strings.Join(path, "."), seg)
+			return fmt.Errorf("value path %q: segment %q is not a valid key or key[n] list index", strings.Join(path, "."), seg)
 		}
 		child, ok := m[seg].(map[string]any)
 		if !ok {

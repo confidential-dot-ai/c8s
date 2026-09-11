@@ -12,12 +12,8 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}/attestation-api.sock
 {{- end -}}
 
-{{- define "c8s.attestationApiHostSocket" -}}
-{{- if and .Values.attestationApi.enabled -}}true{{- end -}}
-{{- end -}}
-
 {{- define "c8s.attestationApiSocketVolume" -}}
-{{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+{{- if .Values.attestationApi.enabled }}
 - name: attestation-api-socket
   hostPath:
     path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
@@ -26,7 +22,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketMount" -}}
-{{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+{{- if .Values.attestationApi.enabled }}
 - name: attestation-api-socket
   mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
   readOnly: true

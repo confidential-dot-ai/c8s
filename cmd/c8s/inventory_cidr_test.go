@@ -11,7 +11,7 @@ import (
 // An explicit --node-cidr is taken as given: an operator with a separate node
 // network can express it as a range, which survives scale-up.
 func TestResolveInventoryCIDRsPrefersExplicit(t *testing.T) {
-	got, err := resolveInventoryCIDRs(t.Context(), []string{"10.0.1.0/24"}, "node")
+	got, err := resolveInventoryCIDRs(t.Context(), []string{"10.0.1.0/24"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 			return []byte(`{"items":[{"metadata":{"name":"a"},"spec":{"podCIDR":"10.244.0.0/24"},
 				"status":{"addresses":[{"type":"InternalIP","address":"10.0.1.4"}]}}]}`), nil
 		}
-		got, err := resolveInventoryCIDRs(t.Context(), nil, "node")
+		got, err := resolveInventoryCIDRs(t.Context(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,7 +48,7 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 			return []byte(`{"items":[{"metadata":{"name":"a"},"spec":{"podCIDR":"10.0.1.0/24"},
 				"status":{"addresses":[{"type":"InternalIP","address":"10.0.1.4"}]}}]}`), nil
 		}
-		_, err := resolveInventoryCIDRs(t.Context(), nil, "node")
+		_, err := resolveInventoryCIDRs(t.Context(), nil)
 		if err == nil {
 			t.Fatal("accepted a node address inside the pod range: the callback bound would admit pod IPs")
 		}
@@ -64,7 +64,7 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 			`{"items":[{"metadata":{"name":"a"},"status":{"addresses":[{"type":"InternalIP","address":"127.0.0.1"}]}}]}`,
 		} {
 			fetchNodeJSON = func(context.Context) ([]byte, error) { return []byte(body), nil }
-			if _, err := resolveInventoryCIDRs(t.Context(), nil, "node"); err == nil {
+			if _, err := resolveInventoryCIDRs(t.Context(), nil); err == nil {
 				t.Fatalf("accepted a node list with no routable InternalIP: %s", body)
 			}
 		}
@@ -75,7 +75,7 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 	// sandbox identity off.
 	t.Run("unreadable cluster fails and names the fix", func(t *testing.T) {
 		fetchNodeJSON = func(context.Context) ([]byte, error) { return nil, errNoCluster }
-		_, err := resolveInventoryCIDRs(t.Context(), nil, "node")
+		_, err := resolveInventoryCIDRs(t.Context(), nil)
 		if err == nil {
 			t.Fatal("install proceeded without checking the sandbox-digests bound")
 		}
@@ -86,7 +86,7 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 
 	t.Run("malformed JSON", func(t *testing.T) {
 		fetchNodeJSON = func(context.Context) ([]byte, error) { return []byte("not json"), nil }
-		if _, err := resolveInventoryCIDRs(t.Context(), nil, "node"); err == nil {
+		if _, err := resolveInventoryCIDRs(t.Context(), nil); err == nil {
 			t.Fatal("accepted malformed node JSON")
 		}
 	})

@@ -18,10 +18,8 @@ var rootCmd = &cobra.Command{
 the per-pod get-cert helpers, and the client-side CLI for installation,
 attestation, and day-2 operations.
 
-Typical bootstrap flow on a fresh cluster:
-
-    c8s install             # deploy operator + CRDs + component charts
-    kubectl apply -f cwl.yaml
+Use c8s install to deploy the operator and node services, then apply workloads
+annotated with confidential.ai/cw. CRDs are optional (--install-crds).
 
 See 'c8s <subcommand> --help' for details.`,
 	Version:       version.Version,

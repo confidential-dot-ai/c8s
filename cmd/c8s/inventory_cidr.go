@@ -13,7 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func resolveInventoryCIDRs(ctx context.Context, explicit []string, cvmMode string) ([]string, error) {
+func resolveInventoryCIDRs(ctx context.Context, explicit []string) ([]string, error) {
 	if len(explicit) > 0 {
 		return explicit, nil
 	}

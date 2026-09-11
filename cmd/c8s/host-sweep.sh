@@ -5,7 +5,6 @@ set -eu
 echo "==> c8s host sweep starting"
 
 CONTAINERD_DIR="/host${HOST_CONTAINERD_DIR}"
-NRI_CONTAINERD_DIR_HOST="/host${NRI_CONTAINERD_DIR}"
 config_changed=0
 sweep_failed=0
 
@@ -21,12 +20,12 @@ fi
 # the registration gone, no interruption can leave the fail-closed NRI
 # validator requiring a plugin whose binary is already deleted.
 
-# 2. The NRI image-policy's containerd registration: the standalone drop-in
+# The NRI image-policy's containerd registration: the standalone drop-in
 #    (rke2), or the sentinel-delimited block in config.toml (k8s patch mode).
 #    Mirrors the chart's files/scripts/uninstall.sh.
 if [ "$baked_node" = "0" ]; then
   for d in config-v3.toml.d config.toml.d; do
-    f="${NRI_CONTAINERD_DIR_HOST}/${d}/nri-image-policy.toml"
+    f="${CONTAINERD_DIR}/${d}/nri-image-policy.toml"
     if [ -f "$f" ]; then
       rm -f "$f"
       config_changed=1
@@ -35,7 +34,7 @@ if [ "$baked_node" = "0" ]; then
   done
   MARK_BEGIN='# BEGIN c8s-nri-image-policy (managed)'
   MARK_END='# END c8s-nri-image-policy (managed)'
-  main_config="${NRI_CONTAINERD_DIR_HOST}/config.toml"
+  main_config="${CONTAINERD_DIR}/config.toml"
   if [ -f "$main_config" ] && grep -qF "$MARK_BEGIN" "$main_config"; then
     awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
       $0==b { skip=1; next }
@@ -48,7 +47,7 @@ if [ "$baked_node" = "0" ]; then
   fi
 fi
 
-# 3. RKE2 containerd-prep leftovers: the sentinel-marked managed template
+# RKE2 containerd-prep leftovers: the sentinel-marked managed template
 #    (which would re-add the drop-in import on every RKE2 config regen) and
 #    the prep lock file. Only a sentinel-marked template is removed — an
 #    operator-owned template is never touched, and a legacy pre-sentinel
@@ -86,7 +85,7 @@ fi
 
 # == Phase 3: host artifacts =================================================
 
-# 7. The NRI plugin's host artifacts: the binary, its boot config, the health
+# The NRI plugin's host artifacts: the binary, its boot config, the health
 #    socket dir, and the allowlist cache. The rm -rf targets must carry the
 #    plugin's own directory name — the values come from the release and a
 #    bare parent dir (/var/run, /var/lib) is never deleted.
@@ -115,7 +114,7 @@ if [ "$baked_node" = "0" ]; then
   esac
 fi
 
-# 8. RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
+# RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
 #    interception (--keep-guard keeps the fail-closed filter chains and their
 #    ipsets by design), and a mesh pod that never ran preStop leaves
 #    everything — including the OUTPUT redirect that sends host-originated

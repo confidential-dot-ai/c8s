@@ -162,6 +162,9 @@ func TestUninstallSweepsNodeState(t *testing.T) {
 	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
 	}
+	if env["HOST_CONTAINERD_DIR"] != "/etc/containerd" {
+		t.Fatalf("sweep containerd directory = %q, want /etc/containerd", env["HOST_CONTAINERD_DIR"])
+	}
 	// ...and targets every linux node, not host-selected ones.
 	wantSelector := map[string]string{"kubernetes.io/os": "linux"}
 	if !reflect.DeepEqual(ds.Spec.Template.Spec.NodeSelector, wantSelector) {
@@ -171,17 +174,15 @@ func TestUninstallSweepsNodeState(t *testing.T) {
 
 // --host-sweep=false opts every release shape out of the host sweep.
 func TestUninstallHostSweepFalseSkipsSweep(t *testing.T) {
-	for _, hostEnabled := range []bool{true, false} {
-		values := hostReleaseValuesFile(t)
-		s := newUninstallStubs(t, values, "", false)
-		if err := runC8s(t, "uninstall", "--host-sweep=false"); err != nil {
-			t.Fatalf("uninstall (hostEnabled=%v): %v", hostEnabled, err)
-		}
-		calls := s.f.calls(t)
-		mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
-		mustNotContainPrefix(t, calls, "kubectl apply")
-		mustNotContainPrefix(t, calls, "kubectl rollout")
+	values := hostReleaseValuesFile(t)
+	s := newUninstallStubs(t, values, "", false)
+	if err := runC8s(t, "uninstall", "--host-sweep=false"); err != nil {
+		t.Fatalf("uninstall: %v", err)
 	}
+	calls := s.f.calls(t)
+	mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	mustNotContainPrefix(t, calls, "kubectl apply")
+	mustNotContainPrefix(t, calls, "kubectl rollout")
 }
 
 func TestUninstallSweepRolloutFailureKeepsDaemonSet(t *testing.T) {
@@ -280,6 +281,9 @@ func TestUninstallHostSweepOnlyUsesChartDefaults(t *testing.T) {
 	env := map[string]string{}
 	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
+	}
+	if env["HOST_CONTAINERD_DIR"] != "/etc/containerd" {
+		t.Fatalf("sweep containerd directory = %q, want /etc/containerd", env["HOST_CONTAINERD_DIR"])
 	}
 }
 

@@ -41,8 +41,6 @@ func TestOperatorKeysPreflight(t *testing.T) {
 		t.Fatalf("no keys + force: want warn and no error, got warn=%q err=%v", warn, err)
 	}
 	// -f supplied → operator owns cds.operatorKeys in their values file; no gate.
-	// This is the same hole podModeMeasurementsPreflight just lost; closing it
-	// here is a separate change (five exec tests install through it today).
 	if warn, err := operatorKeysPreflight("", []string{"custom.yaml"}, false); err != nil || warn != "" {
 		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
 	}
@@ -88,29 +86,6 @@ func TestResolveImageTag(t *testing.T) {
 	installImageTag = ""
 	if got := resolveImageTag(); got != fallbackImageTag {
 		t.Errorf("unset: got %q, want the fallback tag %q", got, fallbackImageTag)
-	}
-}
-
-func TestLabelSelector(t *testing.T) {
-	tests := []struct {
-		name string
-		sel  map[string]any
-		want string
-		ok   bool
-	}{
-		{name: "chart default", sel: map[string]any{"confidential.ai/sev-snp": "true"}, want: "confidential.ai/sev-snp=true", ok: true},
-		{name: "multiple pairs sorted", sel: map[string]any{"b": "2", "a": "1"}, want: "a=1,b=2", ok: true},
-		{name: "empty map is the opt-out", sel: map[string]any{}, ok: false},
-		{name: "nil map is the opt-out", sel: nil, ok: false},
-		{name: "non-string value skips", sel: map[string]any{"a": true}, ok: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := labelSelector(tt.sel)
-			if ok != tt.ok || got != tt.want {
-				t.Fatalf("labelSelector(%v) = (%q, %t), want (%q, %t)", tt.sel, got, ok, tt.want, tt.ok)
-			}
-		})
 	}
 }
 
@@ -215,9 +190,8 @@ func TestAppendSingleNodeInstallArgsDisabledIsNoOp(t *testing.T) {
 }
 
 func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
-	// --single-node must null both the selector (drops the role=cds pin and
-	// collapses the installer split) and the tolerations (the dedicated-node
-	// taint is meaningless without a dedicated node).
+	// --single-node clears the role=cds selector and its tolerations:
+	// the dedicated-node taint is meaningless without a dedicated node.
 	got := appendSingleNodeInstallArgs([]string{"upgrade"}, true)
 	assertArgsEqual(t, got, []string{
 		"upgrade",
@@ -227,15 +201,13 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 }
 
 func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
-	got := appendVolumedInstallArgs([]string{"upgrade"}, false, "node")
+	got := appendVolumedInstallArgs([]string{"upgrade"}, false)
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
 func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks"} {
-		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
-		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
-	}
+	got := appendVolumedInstallArgs([]string{"upgrade"}, true)
+	assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
 }
 
 func TestParseWorkloadRef(t *testing.T) {
@@ -764,7 +736,7 @@ func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 	if err == nil {
 		t.Fatal("mixed cluster: want error, got nil")
 	}
-	for _, want := range []string{"nriImagePolicy.distro", "nriImagePolicy.distro", "rke2-node", "vanilla-node"} {
+	for _, want := range []string{"nriImagePolicy.distro", "rke2-node", "vanilla-node"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q (should name the fix and both node sets)", err.Error(), want)
 		}
@@ -789,7 +761,6 @@ func TestValuesFilesSetDistro(t *testing.T) {
 		want bool
 	}{
 		{"nri distro set", "nriImagePolicy:\n  distro: rke2\n", true},
-		{"NRI distro set", "nriImagePolicy:\n  distro: rke2\n", true},
 		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
 		{"distro key absent under section", "nriImagePolicy:\n  enabled: true\n", false},
 		{"empty distro string is not a choice", "nriImagePolicy:\n  distro: \"\"\n", false},
@@ -1267,7 +1238,7 @@ func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 		t.Errorf("wrapped error must preserve the cause, got: %v", err)
 	}
 	// The hint must be self-contained (end users don't have the repo, so no
-	// docs/ paths) and steer to the guest-image knob for guest-image tags.
+	// docs/ paths) and explain how to check the component tag.
 	for _, want := range []string{"lockstep"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error must mention %q, got: %v", want, err)
@@ -1929,7 +1900,7 @@ func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
 
 	installRTMRs = []string{"0=" + r1}
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
-		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")
+		t.Fatal("RTMR[0] pin accepted; only RTMR[1] and RTMR[2] are supported")
 	}
 }
 

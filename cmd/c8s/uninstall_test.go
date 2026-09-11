@@ -91,9 +91,8 @@ func chartValuesTree(t *testing.T, doc string) map[string]any {
 	return tree
 }
 
-// A -f release can diverge the two distros; the NRI sweep must target the
-// NRI installer's containerd dir, not host's.
-func TestNriConfigFromValuesDivergentDistro(t *testing.T) {
+// The sweep uses the release's NRI distro and host-path overrides.
+func TestHostConfigFromValuesUsesNRIPaths(t *testing.T) {
 	tree := chartValuesTree(t, `
 nriImagePolicy:
   distro: k8s
@@ -108,8 +107,8 @@ nriImagePolicy:
 	if err != nil {
 		t.Fatalf("hostConfigFromValues: %v", err)
 	}
-	if cfg.NriContainerdDir != "/etc/containerd" {
-		t.Errorf("NriContainerdDir = %q, want /etc/containerd (nriImagePolicy.distro)", cfg.NriContainerdDir)
+	if cfg.ContainerdConfigDir != "/etc/containerd" {
+		t.Errorf("ContainerdConfigDir = %q, want /etc/containerd (nriImagePolicy.distro)", cfg.ContainerdConfigDir)
 	}
 	if cfg.NriPluginDir != "/custom/nri/plugins" {
 		t.Errorf("NriPluginDir = %q, want the values override", cfg.NriPluginDir)

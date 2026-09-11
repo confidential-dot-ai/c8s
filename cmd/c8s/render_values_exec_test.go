@@ -45,10 +45,7 @@ func TestRenderValuesEmitsComputedBundle(t *testing.T) {
 			t.Errorf("%s = %#v, want main", strings.Join(prefix, "."), got)
 		}
 	}
-	// --distro plumbs both component distro keys.
-	if got := treeAt(t, tree, "nriImagePolicy", "distro"); got != "rke2" {
-		t.Errorf("nriImagePolicy.distro = %#v, want rke2", got)
-	}
+	// --distro configures the NRI installer.
 	if got := treeAt(t, tree, "nriImagePolicy", "distro"); got != "rke2" {
 		t.Errorf("nriImagePolicy.distro = %#v, want rke2", got)
 	}

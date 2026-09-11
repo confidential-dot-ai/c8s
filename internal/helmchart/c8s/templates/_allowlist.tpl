@@ -98,7 +98,3 @@
 {{- end -}}
 {{ dict "schema" "c8s.allowlist/v1" "workloads" $workloads | toJson }}
 {{- end -}}
-
-{{- define "c8s.serveAllowlistSeed" -}}
-{{- or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node") -}}
-{{- end -}}

@@ -315,9 +315,9 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
-          {{- if or (eq (include "c8s.attestationApiHostSocket" .) "true") .Values.cds.measurementsConfig }}
+          {{- if or .Values.attestationApi.enabled .Values.cds.measurementsConfig }}
           volumeMounts:
-            {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+            {{- if .Values.attestationApi.enabled }}
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
             {{- end }}
             {{- if .Values.cds.measurementsConfig }}
@@ -398,7 +398,7 @@ spec:
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
         fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
-        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") (eq (include "c8s.attestationApiHostSocket" .) "true") }}
+        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") .Values.attestationApi.enabled }}
         # workloadclaims.InventorySocketGID: the inventory and attest-proxy
         # chgrp their sockets to this group so the non-root get-cert sidecar
         # (on the nginx uid) can connect. get-cert must stay on the nginx uid —

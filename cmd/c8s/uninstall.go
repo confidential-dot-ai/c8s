@@ -64,7 +64,6 @@ type hostUninstallConfig struct {
 	// NRI image-policy host paths (nriImagePolicy.*): where the chart's
 	// installer DaemonSet wrote the plugin, or where the node image baked it.
 	// The sweep distinguishes the two via a baked-only marker on the host.
-	NriContainerdDir   string // resolved from nriImagePolicy.containerd.configDir/.distro
 	NriPluginDir       string
 	NriPluginFilename  string
 	NriConfigDir       string
@@ -142,7 +141,7 @@ Baked node image components are preserved. Delete volume workloads first;
 		}
 
 		if sweep {
-			if err := runHostSweep(ctx, uninstallNamespace, uninstallRelease, cfg, uninstallHostSweepOnly); err != nil {
+			if err := runHostSweep(ctx, uninstallNamespace, uninstallRelease, cfg); err != nil {
 				return err
 			}
 		}
@@ -263,22 +262,13 @@ func hostConfigFromValues(tree map[string]any) (hostUninstallConfig, error) {
 
 // nriConfigFromValues fills the NRI image-policy host paths, defaulting to
 // the chart's values.yaml constants when a key is absent (an old or foreign
-// release). The containerd dir follows nriImagePolicy.*, not host.*: the CLI
-// sets both distros together at install, but a -f release can diverge them,
-// and the NRI installer targeted its own.
+// release). The containerd directory is resolved by hostConfigFromValues.
 func nriConfigFromValues(tree map[string]any, cfg hostUninstallConfig) hostUninstallConfig {
 	cfg.NriPluginDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.pluginDir", "/opt/nri/plugins")
 	cfg.NriPluginFilename = stringOrDefault(tree, "nriImagePolicy.pluginFilename", "10-nri-image-policy")
 	cfg.NriConfigDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.configDir", "/etc/nri/conf.d")
 	cfg.NriRuntimeDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.runtimeDir", "/var/run/nri-image-policy")
 	cfg.NriCacheDir = stringOrDefault(tree, "nriImagePolicy.hostPaths.cacheDir", "/var/lib/nri-image-policy")
-	distro := stringOrDefault(tree, "nriImagePolicy.distro", cfg.Distro)
-	override := stringOrDefault(tree, "nriImagePolicy.containerd.configDir", "")
-	dir, err := containerdConfigDirFor(override, distro)
-	if err != nil {
-		dir = cfg.ContainerdConfigDir
-	}
-	cfg.NriContainerdDir = dir
 	return cfg
 }
 
@@ -435,7 +425,7 @@ func forcedVolumePodsWarning(pods []string) string {
 		strings.Join(pods, "\n  "))
 }
 
-func runHostSweep(ctx context.Context, namespace, release string, cfg hostUninstallConfig, hostSweepOnly bool) error {
+func runHostSweep(ctx context.Context, namespace, release string, cfg hostUninstallConfig) error {
 	// Same for the mesh: it re-asserts its base-chain iptables jumps on a
 	// watchdog, so sweeping while a mesh pod still runs leaks the rules the
 	// sweep just deleted (helm --wait=false leaves pods terminating).
@@ -554,7 +544,6 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 							{Name: "HOST_CONTAINERD_DIR", Value: cfg.ContainerdConfigDir},
 							{Name: "RKE2_PREP", Value: strconv.FormatBool(cfg.Distro == "rke2")},
 							{Name: "RESTART_COMMAND", Value: hostRestartCommand(cfg.Distro)},
-							{Name: "NRI_CONTAINERD_DIR", Value: cfg.NriContainerdDir},
 							{Name: "NRI_PLUGIN_DIR", Value: cfg.NriPluginDir},
 							{Name: "NRI_PLUGIN_FILENAME", Value: cfg.NriPluginFilename},
 							{Name: "NRI_CONFIG_DIR", Value: cfg.NriConfigDir},
