@@ -8,7 +8,6 @@ Each file links to its reference below, and each reference links back to the fil
 | --- | --- | --- |
 | [Common](common/README.md) | [_helpers.tpl](../templates/_helpers.tpl) | Resource names, labels, integers, webhook namespace scope |
 | [Images](images/README.md) | [_images.tpl](../templates/_images.tpl) | Image references, guest artifact tags, pull secrets |
-| [Kata](kata/README.md) | [_kata.tpl](../templates/_kata.tpl) | Platform selection, runtime classes, containerd paths, readiness |
 | [Services](services/README.md) | [_services.tpl](../templates/_services.tpl) | Attestation and CDS endpoints, socket access, DNS resolver |
 | [Certificates](certificates/README.md) | [_certificates.tpl](../templates/_certificates.tpl) | Certificate sidecars, security context, DNS SAN pattern |
 | [Allowlist](allowlist/README.md) | [_allowlist.tpl](../templates/_allowlist.tpl) | Component inventory, local admission list, CDS seed |

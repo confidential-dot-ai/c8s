@@ -1,31 +1,10 @@
-# containerd-prep — run as a privileged initContainer on RKE2 nodes.
-#
-# kata-deploy (and the nri-image-policy installer) register their containerd
-# config as drop-in files. containerd loads a drop-in only if the main config
-# `imports` its directory; RKE2 does not add that import, and kata-deploy 3.30
-# deliberately refuses to edit the RKE2 template, so it bails unless the
-# import is already there. This prep adds it.
-#
-# It keys the drop-in directory and template names off the containerd config
-# *schema version* (version >= 3 -> config-v3.toml.*), exactly as kata-deploy
-# does internally — choosing them from the filename instead is the bug that
-# left the import pointing at the wrong directory.
-#
-# Env:
-#   HOST_CONTAINERD_DIR — host containerd config directory, bind-mounted at
-#                         /host<dir>
-#   BASE_DIRECTIVE      — literal RKE2 `{{ template "base" . }}` include,
-#                         used only when the template has to be created from
-#                         scratch
+#!/bin/sh
 set -eu
 
 DIR="/host${HOST_CONTAINERD_DIR}"
 [ -d "$DIR" ] || { echo "ERROR: $DIR is not mounted" >&2; exit 1; }
 echo "==> c8s containerd-prep starting (${HOST_CONTAINERD_DIR})"
 
-# kata-deploy and the nri-image-policy installer each run this prep; their
-# DaemonSet pods can land on a node together. Serialise on a host lock file
-# so two preps never rewrite config.toml / the template at the same time.
 exec 9>"$DIR/.c8s-containerd-prep.lock"
 flock 9
 
@@ -83,11 +62,6 @@ remove_managed_tmpl() {
 
 case "$imports_count" in
   0)
-    # No imports in the rendered config. Add to the live config (so
-    # kata-deploy / nri-image-policy see it now) and to a durable template
-    # (so it survives RKE2 regenerating config.toml). Since the base does
-    # not emit an `imports` line on this version, our template's prepend
-    # will not collide.
     { printf 'imports = ["%s"]\n\n' "$glob"; cat "$main_config"; } > "${main_config}.c8s-tmp"
     mv -f "${main_config}.c8s-tmp" "$main_config"
     echo "  $(basename "$main_config"): drop-in import added"
@@ -130,30 +104,5 @@ esac
 # Always make sure the drop-in dir exists so the installers can write to it.
 mkdir -p "$DIR/${dropin_name}"
 
-# Widen the CRI pod-annotation passthrough for the kata runtimes.
-#
-# containerd copies a pod annotation into the sandbox OCI spec only if it
-# matches this runtime's pod_annotations globs, and kata-deploy hardcodes
-# ["io.katacontainers.*"] (tools/packaging/kata-deploy/binary/src/runtime/
-# containerd.rs). kata-qemu-scratch-wrapper.sh reads
-# confidential.ai/c8s-volumes off that spec to decide which encrypted volume
-# devices to attach, so without this the annotation never reaches the wrapper
-# and a pod's volumes are silently never attached — the guest daemon then
-# answers "volume device is not present on this node".
-#
-# A separate file rather than an edit of kata-deploy.toml: kata-deploy rewrites
-# its own drop-in on every DaemonSet restart. containerd merges drop-ins in
-# lexical order with later files overriding, so the zz- prefix is what makes
-# this win.
-kata_annotations="$DIR/${dropin_name}/zz-c8s-kata-annotations.toml"
-{
-  echo "# Managed by c8s containerd-prep. See internal/helmchart/c8s/files/scripts/containerd-prep.sh."
-  for rt in kata-qemu-snp kata-qemu-nvidia-gpu-snp kata-qemu-tdx kata-qemu-nvidia-gpu-tdx; do
-    echo "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.${rt}]"
-    echo 'pod_annotations = ["io.katacontainers.*", "confidential.ai/*"]'
-  done
-} > "${kata_annotations}.c8s-tmp"
-mv -f "${kata_annotations}.c8s-tmp" "${kata_annotations}"
-echo "  $(basename "${kata_annotations}"): pod_annotations widened to confidential.ai/*"
 
 echo "==> c8s containerd-prep done"

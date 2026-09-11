@@ -1,9 +1,5 @@
 # Releases
 
-c8s is one versioned release unit. A root `vX.Y.Z` tag versions the CLI,
-component images, measured node image, Kata guest image, and Helm chart
-together. Maintainers do not calculate or push release tags manually.
-
 ## Automatic versioning
 
 After every build and retag job in the `Docker` workflow succeeds for a push to
@@ -46,17 +42,16 @@ Release publication stays inside the successful main-push `Docker` run:
    `GITHUB_TOKEN`.
 6. The verified manifests are promoted to `vX.Y.Z`, `X.Y.Z`, the moving `X.Y`
    compatibility tag, `latest` when this is the newest stable release, and the
-   commit's short-SHA tag used by the measured Kata build. The same job
+   commit's short-SHA tag. The same job
    publishes chart `X.Y.Z`. Normal branch builds update `main`, never `latest`.
-7. Completion of the original Docker run starts the existing measured node,
-   Kata guest, and e2e workflows. The node workflow builds both TDX/SNP formats,
+7. Completion of the original Docker run starts the existing measured node
+   and e2e workflows. The node workflow builds both TDX/SNP formats,
    then promotes their exact commit manifests to
    `rke2-{tdx,snp}[-cdi]-vX.Y.Z` only after every matrix leg succeeds. It does
    not publish a bare `vX.Y.Z` because that would not identify a platform and
    format.
-8. The Kata job adds the matching `vX.Y.Z` aliases without rebuilding a second
-   time for a tag event. Existing stable node and Kata aliases are verified by
-   digest and never silently moved by a retry or manual rebuild.
+8. Existing stable node aliases are verified by digest and never silently
+   moved by a retry or manual rebuild.
 
 For the first stable release, the measured node aliases are therefore
 `rke2-tdx-v0.1.0`, `rke2-tdx-cdi-v0.1.0`, `rke2-snp-v0.1.0`, and
@@ -64,12 +59,6 @@ For the first stable release, the measured node aliases are therefore
 `ghcr.io/confidential-dot-ai/node-guest-base`. There is deliberately no moving
 `v0.1` alias for a measured image; operators pin the exact release whose
 measurement they allowlist.
-
-GitHub intentionally does not start new workflows for the tag created with
-`GITHUB_TOKEN`. That is part of this design: component and chart publication is
-explicit in the originating run, while the existing node/Kata workflows consume
-that run's successful `workflow_run` completion. No OAuth App, GitHub App,
-personal access token, or long-lived release credential is required.
 
 ## One-time GitHub setup
 

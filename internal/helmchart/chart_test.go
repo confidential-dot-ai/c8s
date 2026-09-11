@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/controller"
-	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
@@ -197,12 +195,10 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		"--ca-watch-interval=1m",
 	)
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		t.Fatalf("c8s-cert restartPolicy = %v, want Always (single long-lived sidecar so its pidns anchors shareProcessNamespace under kata)", cert.RestartPolicy)
+		t.Fatalf("c8s-cert restartPolicy = %v, want Always", cert.RestartPolicy)
 	}
-	// nginx is gated by the c8s-cert-wait init container, not an exec
-	// startupProbe on the sidecar — the locked kata guest denies exec.
 	if cert.StartupProbe != nil {
-		t.Fatalf("c8s-cert must NOT carry a startupProbe (exec is denied on locked kata guests); got %+v", cert.StartupProbe)
+		t.Fatalf("c8s-cert must NOT carry a startupProbe; got %+v", cert.StartupProbe)
 	}
 	wait := tlsLBGetCertContainer(t, out, "c8s-cert-wait")
 	if got := strings.Join(wait.Command, " "); !strings.Contains(got, "probe-file") || !strings.Contains(got, "--wait") || !strings.Contains(got, "/tls/cert.pem") {
@@ -1695,30 +1691,6 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
-// On a cluster that is neither kata nor node-baked, host nri-image-policy is the
-// only image-admission enforcement, so disabling it must be rejected — otherwise
-// confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (pod/aks behave the same). kata and cvmMode=node
-// carry their own admission and are exempt (enforce_host_components requires nri
-// off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
-func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
-		"--set", "nriImagePolicy.enabled=false",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with nriImagePolicy disabled on a non-kata, non-node cluster, want failure\n%s", out)
-	}
-	if kind := parseValidationErrorKind(out); kind != "require_host_image_policy" {
-		t.Fatalf("validation error kind = %q, want require_host_image_policy\n%s", kind, out)
-	}
-}
-
-// The require_host_image_policy guard exempts cvmMode=node: the node image bakes
-// its own fail-closed nri-image-policy, so nri off there is not an unenforced
-// cluster (unlike gke/aks — TestChartRejectsImagePolicyOffOnNonKata). This is the
-// exact shape `c8s install --cvm-mode=node` produces; the served seed under it is
-// TestChartServesAllowlistSeedInNodeMode.
 func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
@@ -1737,21 +1709,6 @@ func TestChartRejectsPlaintextNRIAllowlist(t *testing.T) {
 		t.Fatalf("helm template succeeded, want plaintext NRI allowlist failure\n%s", out)
 	}
 	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the allowlist over RA-TLS`)
-}
-
-// Off kata and node mode the host DaemonSet is the only evidence source, so
-// disabling it must fail like disabling the image policy does.
-func TestChartRejectsAttestationApiOffOnNonKata(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
-		"--set", "attestationApi.enabled=false",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with attestationApi disabled on a non-kata, non-node cluster, want failure\n%s", out)
-	}
-	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
-		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
-	}
 }
 
 // parseValidationErrorKind extracts kind=<id> from helm's stderr when the
@@ -1849,22 +1806,6 @@ func renderedPodSpecs(t *testing.T, manifest string) []renderedWorkload {
 		return false
 	})
 	return out
-}
-
-// kataEnforcementExpressions returns the joined CEL validation expressions of
-// the c8s-kata-enforcement policy; the runtime-class allowlist lives there.
-func kataEnforcementExpressions(t *testing.T, manifest string) string {
-	t.Helper()
-	var policy admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, manifest, "ValidatingAdmissionPolicy", "c8s-kata-enforcement", &policy) {
-		t.Fatalf("missing c8s-kata-enforcement ValidatingAdmissionPolicy\n%s", manifest)
-	}
-	var sb strings.Builder
-	for _, v := range policy.Spec.Validations {
-		sb.WriteString(v.Expression)
-		sb.WriteString("\n")
-	}
-	return sb.String()
 }
 
 // findKey returns a dotted path to the first occurrence of key anywhere in a
@@ -2072,13 +2013,13 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	for _, mode := range []string{"bogus", "baremetal"} {
+	for _, mode := range []string{"bogus", "baremetal", "pod"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
 			if err == nil {
 				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 			}
-			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of node, gke, aks (got %q)`, mode))
 		})
 	}
 }
@@ -2188,7 +2129,7 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 // socket URL and the socket-directory mount are asserted per shape.
 func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
-	for _, mode := range []string{"pod", "gke", "aks"} {
+	for _, mode := range []string{"gke", "aks"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
 			if err != nil {
@@ -2551,16 +2492,7 @@ func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
 			// TEE the host reads them.
 			name: "acme without a confidential runtime",
 			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=gke"},
-			want: "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (kata.enabled=true or attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held",
-		},
-		{
-			// The guest passthrough list exempts only tcp:8443, so the
-			// HTTP-01 challenge could never reach nginx.
-			name: "acme under kata",
-			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme",
-				"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest},
-			want: "VALIDATION_ERROR kind=tlslb_acme_kata_port: tlsLb.publicTLS.mode=acme cannot render under kata.enabled: the guest exempts only tcp:8443 from the inbound mesh redirect (C8S_MESH_INBOUND_PASSTHROUGH), so the HTTP-01 challenge on :80 never reaches nginx. Use the node-CVM shape (attestationApi.cvmMode=node)",
+			want: "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held",
 		},
 		{
 			name: "acme with a wildcard san",
@@ -2585,11 +2517,6 @@ func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
 	}
 }
 
-// assertTLSLBReadyzProbe pins the readiness gate's routing invariant in every
-// shape: the probe goes through nginx over HTTPS on the named `https` port —
-// never at the sidecar's own port, which is loopback-only and, under kata,
-// redirected into the guest's mutual-RA-TLS proxy that rejects the certless
-// kubelet prober — and nginx exact-matches /readyz onto the sidecar.
 func assertTLSLBReadyzProbe(t *testing.T, out string) {
 	t.Helper()
 	rp := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest").ReadinessProbe
@@ -2640,11 +2567,6 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 		t.Fatal("c8s-cert init container missing")
 	}
 	assertContainerArgs(t, cert, "--workload-claims")
-	for _, a := range cert.Args {
-		if a == "--workload-claims-guest" {
-			t.Fatal("node-CVM get-cert must use the socket, not the guest loopback")
-		}
-	}
 	var mount *corev1.VolumeMount
 	for i, m := range cert.VolumeMounts {
 		if m.Name == "workload-claims" {
@@ -2669,34 +2591,6 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 		t.Fatalf("workload-claims hostPath volume missing or wrong, got %+v", dep.Spec.Template.Spec.Volumes)
 	}
 
-	// Kata: the guest serves the inventory on loopback — guest flag, no mount.
-	out, err = helmTemplateKata(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template with expectedWorkload under kata: %v\n%s", err, out)
-	}
-	cert, ok = findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
-	if !ok {
-		t.Fatal("c8s-cert init container missing under kata")
-	}
-	assertContainerArgs(t, cert, "--workload-claims", "--workload-claims-guest")
-	for _, m := range cert.VolumeMounts {
-		if m.Name == "workload-claims" {
-			t.Fatal("kata get-cert must not mount the node socket")
-		}
-	}
-	assertContainerArgs(t, renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"), "--host=127.0.0.1")
-	// The probe shape is the whole reason this gate is reachable under kata:
-	// the guest exempts only the nginx port from the inbound mesh redirect.
-	assertTLSLBReadyzProbe(t, out)
-	dep = renderedDeployment(t, out, "c8s-tls-lb")
-	for _, v := range dep.Spec.Template.Spec.Volumes {
-		if v.Name == "workload-claims" {
-			t.Fatal("kata pod must not carry the node inventory hostPath volume")
-		}
-	}
-	if sc := dep.Spec.Template.Spec.SecurityContext; sc != nil && len(sc.SupplementalGroups) != 0 {
-		t.Fatalf("kata pod needs no inventory socket group, got %+v", sc.SupplementalGroups)
-	}
 }
 
 // TestChartTLSLBReadinessGateGuards pins the render-time guards around the
@@ -2723,15 +2617,6 @@ func TestChartTLSLBReadinessGateGuards(t *testing.T) {
 			name: "gate without the sidecar it gates",
 			args: append(append([]string{}, gate...), append(noHostPort, "--set", "tlsLb.attest.enabled=false")...),
 			want: "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload",
-		},
-		{
-			// The probe and every external client reach nginx only on the one
-			// port the guest exempts from the inbound mesh redirect.
-			name: "kata with a non-exempt nginx port",
-			args: []string{"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest,
-				"--set", "tlsLb.nginx.httpsPort=9443"},
-			want: "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: 9443",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2951,62 +2836,6 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	}
 }
 
-// TestTLSLBProbesAvoidMTLSHandshakeUnderKata: under kata the RA-TLS mesh moves
-// into the guest, so the pod's serving port is fronted by the in-guest inbound
-// proxy that expects mutual attested TLS. The kubelet prober presents no
-// attested client cert, so an httpGet probe is rejected at the handshake ("tls:
-// certificate required") and the container CrashLoopBackOffs on failed probes.
-// The chart must fall back to a tcpSocket probe under kata (same pattern and
-// rationale as cds.yaml); the base shape — where the host-side mesh excludes
-// kubelet's UID and it reaches nginx directly — keeps the richer httpGet
-// /healthz check.
-func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
-	type namedProbe struct {
-		name  string
-		probe *corev1.Probe
-	}
-
-	base, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, base)
-	}
-	nginx := renderedDeploymentContainer(t, base, "c8s-tls-lb", "nginx")
-	for _, p := range []namedProbe{
-		{"readiness", nginx.ReadinessProbe},
-		{"liveness", nginx.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.HTTPGet == nil {
-			t.Fatalf("base shape: tls-lb %s probe should be httpGet; got %+v", p.name, p.probe)
-		}
-		if got := p.probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
-			t.Errorf("base shape: tls-lb %s probe scheme = %q, want HTTPS", p.name, got)
-		}
-		if got := p.probe.HTTPGet.Path; got != "/healthz" {
-			t.Errorf("base shape: tls-lb %s probe path = %q, want /healthz", p.name, got)
-		}
-	}
-
-	kata, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template --cvm-mode=pod: %v\n%s", err, kata)
-	}
-	nginx = renderedDeploymentContainer(t, kata, "c8s-tls-lb", "nginx")
-	for _, p := range []namedProbe{
-		{"readiness", nginx.ReadinessProbe},
-		{"liveness", nginx.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.TCPSocket == nil {
-			t.Fatalf("kata shape: tls-lb %s probe should be tcpSocket (an httpGet hits the in-guest mTLS handshake); got %+v", p.name, p.probe)
-		}
-		if got := p.probe.TCPSocket.Port.String(); got != "https" {
-			t.Errorf("kata shape: tls-lb %s probe tcpSocket port = %q, want https", p.name, got)
-		}
-		if p.probe.HTTPGet != nil {
-			t.Errorf("kata shape: tls-lb %s probe must not be httpGet under kata", p.name)
-		}
-	}
-}
-
 // TestChartDefaultTLSLBUpstreamIsWorkloadDirect pins the default front-door
 // path: tls-lb proxies straight to the workload over plain HTTP at the app
 // layer (the node mesh wraps pod-IP hops in attested mTLS), with no
@@ -3068,11 +2897,6 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 		want string
 	}{
 		{
-			name: "rke2 via kata.distro",
-			args: []string{"--set-string", "kata.distro=rke2"},
-			want: "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local",
-		},
-		{
 			name: "rke2 via nriImagePolicy.distro",
 			args: []string{"--set-string", "nriImagePolicy.distro=rke2"},
 			want: "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local",
@@ -3080,7 +2904,7 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 		{
 			name: "explicit resolver wins over distro",
 			args: []string{
-				"--set-string", "kata.distro=rke2",
+				"--set-string", "nriImagePolicy.distro=rke2",
 				"--set-string", "tlsLb.nginx.resolver=my-dns.dns-ns.svc.cluster.local",
 			},
 			want: "my-dns.dns-ns.svc.cluster.local",
@@ -4259,382 +4083,11 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	}
 }
 
-// --- Kata runtime installation and enforcement -------------------------
-
-// TestChartKataDisabledByDefault: the default render must carry no kata
-// resources, so installs that don't ask for kata are unchanged.
-func TestChartKataDisabledByDefault(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy") {
-		t.Fatalf("kata-deploy DaemonSet rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu") {
-		t.Fatalf("kata RuntimeClass rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Fatalf("kata ValidatingAdmissionPolicy rendered without kata enforcement\n%s", out)
-	}
-}
-
-// TestChartKataEnabledRendersDeployStack: kata.enabled renders the
-// kata-deploy DaemonSet and the platform's RuntimeClasses — on the default
-// (SNP) platform the two non-confidential classes plus the SNP pair; the TDX
-// classes must NOT render (one CPU TEE per cluster).
-func TestChartKataEnabledRendersDeployStack(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, rc := range []string{"kata-qemu", "kata-clh", "kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		if !renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Fatalf("kata.enabled missing RuntimeClass %q\n%s", rc, out)
-		}
-	}
-	for _, rc := range []string{"kata-qemu-tdx", "kata-qemu-tdx-nvidia"} {
-		if renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Fatalf("TDX RuntimeClass %q rendered on an SNP install — only the declared platform's classes ship\n%s", rc, out)
-		}
-	}
-
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	if !ds.Spec.Template.Spec.HostPID {
-		t.Errorf("kata-deploy DaemonSet must set hostPID: true (kata-deploy nsenters PID 1)")
-	}
-	c, ok := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if !ok {
-		t.Fatalf("kata-deploy DaemonSet missing kube-kata container; have %v", containerNames(ds.Spec.Template.Spec.Containers))
-	}
-	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Errorf("kube-kata container must run privileged (it installs a runtime onto the host); got %+v", c.SecurityContext)
-	}
-
-	// kata is enforcing: there is no kata-without-enforcement shape, so the
-	// stack and the enforcement policy must arrive together.
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Errorf("kata.enabled must render the enforcement policy — kata is enforcing")
-	}
-	if !slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
-		t.Errorf("operator must get --kata-enforce under kata.enabled — kata is enforcing")
-	}
-	// The webhook injects the platform's confidential classes; the operator
-	// must be told which platform the chart rendered for.
-	if !slices.Contains(renderedOperatorArgs(t, out), "--hardware-platform=sev-snp") {
-		t.Errorf("operator must get --hardware-platform=sev-snp on a default kata install; args: %v", renderedOperatorArgs(t, out))
-	}
-	// The enforcement allowlist is platform-scoped too: a TDX class name must
-	// not be admissible on an SNP install.
-	expr := kataEnforcementExpressions(t, out)
-	if strings.Contains(expr, "'kata-qemu-tdx'") || strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept TDX classes on an SNP install\n%s", expr)
-	}
-}
-
 // rcScheduling captures the scheduling block of a rendered RuntimeClass.
 type rcScheduling struct {
 	Scheduling struct {
 		NodeSelector map[string]string `json:"nodeSelector"`
 	} `json:"scheduling"`
-}
-
-// TestChartKataSnpRuntimeClassesCarryNodeSelector: the confidential classes
-// must select SNP-labelled nodes (kata.snpNodeSelector). Without the selector
-// a confidential pod scheduled onto a non-SNP TEE host (e.g. Intel TDX) does
-// not fail cleanly — kata's confidential_guest auto-detects the host TEE and
-// QEMU aborts in an unbounded crash-loop; with it the pod stays Pending with a
-// clear scheduling message. kata-qemu / kata-clh work on any kata node and
-// must stay unrestricted.
-func TestChartKataSnpRuntimeClassesCarryNodeSelector(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, name := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if got := rc.Scheduling.NodeSelector["confidential.ai/sev-snp"]; got != "true" {
-			t.Errorf("%s scheduling.nodeSelector[confidential.ai/sev-snp] = %q, want \"true\"", name, got)
-		}
-	}
-	for _, name := range []string{"kata-qemu", "kata-clh"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if len(rc.Scheduling.NodeSelector) != 0 {
-			t.Errorf("%s must carry no scheduling.nodeSelector (it runs on any kata node), got %v", name, rc.Scheduling.NodeSelector)
-		}
-	}
-}
-
-// kata.snpNodeSelector={} is the documented opt-out: the confidential classes
-// render with no scheduling block (unrestricted scheduling, e.g. a uniformly
-// SNP cluster that wants no capability label).
-func TestChartKataSnpNodeSelectorClearable(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.snpNodeSelector=null")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, name := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if len(rc.Scheduling.NodeSelector) != 0 {
-			t.Errorf("%s scheduling.nodeSelector = %v, want none with kata.snpNodeSelector cleared", name, rc.Scheduling.NodeSelector)
-		}
-	}
-}
-
-// TestChartGpuAbsentWithoutKata: with kata disabled (the chart default) none of
-// the confidential-GPU stack renders — the whole GPU stack is part of the kata
-// stack, gated on kata.enabled.
-func TestChartGpuAbsentWithoutKata(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu-snp-nvidia") {
-		t.Errorf("GPU RuntimeClass rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-image-puller-nvidia") {
-		t.Errorf("GPU image puller rendered without kata.enabled")
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-sandbox-device-plugin") {
-		t.Errorf("sandbox device plugin rendered without kata.enabled")
-	}
-}
-
-// TestChartKataRendersGpuStack: a plain --cvm-mode=pod install (no GPU flag) ships the
-// confidential-GPU stack — the GPU RuntimeClass (handler kata-qemu-nvidia-gpu-snp),
-// the GPU shim in SHIMS_X86_64, the enforcement allowlist entry, the GPU image
-// puller, and the privileged digest-pinned sandbox device plugin. GPU is part of
-// every kata install; there is no separate toggle.
-func TestChartKataRendersGpuStack(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-
-	// RuntimeClass name follows the c8s convention; handler is the kata shim.
-	var rc struct {
-		Handler string `yaml:"handler"`
-	}
-	if !findDoc(t, out, "RuntimeClass", "kata-qemu-snp-nvidia", &rc) {
-		t.Fatalf("a kata install must render RuntimeClass kata-qemu-snp-nvidia\n%s", out)
-	}
-	if rc.Handler != "kata-qemu-nvidia-gpu-snp" {
-		t.Errorf("kata-qemu-snp-nvidia handler = %q, want kata-qemu-nvidia-gpu-snp", rc.Handler)
-	}
-
-	// GPU shim registered with kata-deploy.
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	kube, _ := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if v := envValue(kube.Env, "SHIMS_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-snp") {
-		t.Errorf("SHIMS_X86_64 = %q must register qemu-nvidia-gpu-snp", v)
-	}
-
-	// Enforcement allowlist accepts the class.
-	if expr := kataEnforcementExpressions(t, out); !strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-snp-nvidia\n%s", expr)
-	}
-
-	// GPU image puller: pulls the -nvidia tag and patches the GPU config.
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "TAG"); got != "main-nvidia" {
-		t.Errorf("GPU puller TAG = %q, want main-nvidia", got)
-	}
-	if got := envValue(pc.Env, "SHIM_NAME"); got != "qemu-nvidia-gpu-snp" {
-		t.Errorf("GPU puller SHIM_NAME = %q, want qemu-nvidia-gpu-snp", got)
-	}
-	if got := envValue(pc.Env, "GPU_PCIE_ROOT_PORT"); got != "8" {
-		t.Errorf("GPU puller GPU_PCIE_ROOT_PORT = %q, want 8", got)
-	}
-
-	// Sandbox device plugin: privileged, digest-pinned, advertises GPUs.
-	plugin := renderedDaemonSet(t, out, "c8s-kata-deploy-sandbox-device-plugin")
-	dp, ok := findContainer(plugin.Spec.Template.Spec.Containers, "nvidia-sandbox-device-plugin")
-	if !ok {
-		t.Fatalf("sandbox device plugin missing its container")
-	}
-	if dp.SecurityContext == nil || dp.SecurityContext.Privileged == nil || !*dp.SecurityContext.Privileged {
-		t.Errorf("sandbox device plugin must run privileged (it mounts host /dev/vfio)")
-	}
-	if !strings.Contains(dp.Image, "@sha256:") {
-		t.Errorf("sandbox device plugin image %q must be digest-pinned", dp.Image)
-	}
-}
-
-// TestChartKataRendersGpuStackTdx: under attestationApi.teeDevices.tdxGuest
-// the TDX classes render (and the SNP ones do NOT — one CPU TEE per cluster),
-// the TDX shims register with kata-deploy, the enforcement allowlist accepts
-// the TDX pair only, the GPU puller targets the qemu-nvidia-gpu-tdx shim
-// (mirroring the non-GPU puller's qemu-tdx switch), and the operator is told
-// the platform so webhook injection matches.
-func TestChartKataRendersGpuStackTdx(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set", "attestationApi.teeDevices.tdxGuest=true",
-		"--set", "attestationApi.teeDevices.sevGuest=false",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-
-	var rc struct {
-		Handler    string `yaml:"handler"`
-		Scheduling struct {
-			NodeSelector map[string]string `yaml:"nodeSelector"`
-		} `yaml:"scheduling"`
-	}
-	if !findDoc(t, out, "RuntimeClass", "kata-qemu-tdx-nvidia", &rc) {
-		t.Fatalf("a kata install must render RuntimeClass kata-qemu-tdx-nvidia\n%s", out)
-	}
-	if rc.Handler != "kata-qemu-nvidia-gpu-tdx" {
-		t.Errorf("kata-qemu-tdx-nvidia handler = %q, want kata-qemu-nvidia-gpu-tdx", rc.Handler)
-	}
-	if got := rc.Scheduling.NodeSelector["confidential.ai/tdx"]; got != "true" {
-		t.Errorf("kata-qemu-tdx-nvidia nodeSelector[confidential.ai/tdx] = %q, want \"true\" (same guard as kata-qemu-tdx)", got)
-	}
-
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	kube, _ := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if v := envValue(kube.Env, "SHIMS_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-tdx") {
-		t.Errorf("SHIMS_X86_64 = %q must register qemu-nvidia-gpu-tdx", v)
-	}
-	if v := envValue(kube.Env, "SNAPSHOTTER_HANDLER_MAPPING_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-tdx:nydus") {
-		t.Errorf("SNAPSHOTTER_HANDLER_MAPPING_X86_64 = %q must route qemu-nvidia-gpu-tdx through nydus", v)
-	}
-
-	expr := kataEnforcementExpressions(t, out)
-	if !strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx-nvidia\n%s", expr)
-	}
-
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "SHIM_NAME"); got != "qemu-nvidia-gpu-tdx" {
-		t.Errorf("GPU puller SHIM_NAME = %q, want qemu-nvidia-gpu-tdx on a TDX cluster", got)
-	}
-
-	// One CPU TEE per cluster: the SNP classes must not render on TDX, the
-	// SNP shims must not register, and the allowlist must not accept them.
-	for _, rc := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		if renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Errorf("SNP RuntimeClass %q rendered on a TDX install — only the declared platform's classes ship", rc)
-		}
-	}
-	if v := envValue(kube.Env, "SHIMS_X86_64"); strings.Contains(v, "-snp") {
-		t.Errorf("SHIMS_X86_64 = %q must not register SNP shims on a TDX install", v)
-	}
-	if strings.Contains(expr, "'kata-qemu-snp'") || strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept SNP classes on a TDX install\n%s", expr)
-	}
-	if !strings.Contains(expr, "'kata-qemu-tdx'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx on a TDX install\n%s", expr)
-	}
-
-	// Webhook injection follows the platform.
-	if !slices.Contains(renderedOperatorArgs(t, out), "--hardware-platform=tdx") {
-		t.Errorf("operator must get --hardware-platform=tdx on a TDX kata install; args: %v", renderedOperatorArgs(t, out))
-	}
-}
-
-// TestChartKataSandboxDevicePluginOptOut: the privileged sandbox device plugin
-// (the only nvcr.io-pulled, host-/dev/vfio-mounting GPU component) can be opted
-// out via kata.gpu.sandboxDevicePlugin.enabled while the rest of the GPU stack
-// (runtime class, shim, puller) still ships.
-func TestChartKataSandboxDevicePluginOptOut(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.gpu.sandboxDevicePlugin.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-sandbox-device-plugin") {
-		t.Errorf("sandbox device plugin rendered with sandboxDevicePlugin.enabled=false")
-	}
-	if !renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu-snp-nvidia") {
-		t.Errorf("the rest of the GPU stack must still render with the device plugin opted out")
-	}
-}
-
-// TestChartKataDistroSelectsContainerdConfigDir: the kata.distro value must
-// pick the right host containerd config dir for kata-deploy to bind.
-func TestChartKataDistroSelectsContainerdConfigDir(t *testing.T) {
-	for _, tc := range []struct {
-		distro string
-		want   string
-	}{
-		{"k8s", "/etc/containerd"},
-		{"rke2", "/var/lib/rancher/rke2/agent/etc/containerd"},
-	} {
-		t.Run(tc.distro, func(t *testing.T) {
-			out, err := helmTemplateKata(t, "--set-string", "kata.distro="+tc.distro)
-			if err != nil {
-				t.Fatalf("helm template: %v\n%s", err, out)
-			}
-			ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-			if got := hostPathVolume(t, ds, "containerd-conf"); got != tc.want {
-				t.Fatalf("distro %q: containerd-conf hostPath = %q, want %q", tc.distro, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestChartKataRejectsUnknownDistro(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set-string", "kata.distro=openshift")
-	if err == nil {
-		t.Fatalf("helm template succeeded for an unknown kata.distro, want failure\n%s", out)
-	}
-}
-
-// TestChartKataContainerdPrepInitContainer: on rke2 the kata-deploy DaemonSet
-// must carry a containerd-prep initContainer that wires up the drop-in import
-// before kube-kata runs; on k8s kata-deploy edits containerd directly, so the
-// prep must be absent.
-func TestChartKataContainerdPrepInitContainer(t *testing.T) {
-	t.Run("rke2", func(t *testing.T) {
-		out, err := helmTemplateKata(t, "--set-string", "kata.distro=rke2")
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-		prep, ok := findContainer(ds.Spec.Template.Spec.InitContainers, "containerd-prep")
-		if !ok {
-			t.Fatalf("rke2: kata-deploy DaemonSet missing containerd-prep initContainer; have %v",
-				containerNames(ds.Spec.Template.Spec.InitContainers))
-		}
-		if prep.SecurityContext == nil || prep.SecurityContext.Privileged == nil || !*prep.SecurityContext.Privileged {
-			t.Errorf("containerd-prep must run privileged (it edits the host containerd config)")
-		}
-		env := initContainerEnv(t, ds, "containerd-prep")
-		if got := env["HOST_CONTAINERD_DIR"]; got != "/var/lib/rancher/rke2/agent/etc/containerd" {
-			t.Errorf("HOST_CONTAINERD_DIR = %q, want the rke2 containerd dir", got)
-		}
-		if got := env["BASE_DIRECTIVE"]; got != `{{ template "base" . }}` {
-			t.Errorf("BASE_DIRECTIVE = %q, want the literal RKE2 base include", got)
-		}
-	})
-
-	t.Run("k8s", func(t *testing.T) {
-		out, err := helmTemplateKata(t, "--set-string", "kata.distro=k8s")
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-		if _, ok := findContainer(ds.Spec.Template.Spec.InitContainers, "containerd-prep"); ok {
-			t.Fatalf("k8s: kata-deploy must not carry a containerd-prep initContainer")
-		}
-	})
 }
 
 // TestChartCwLabelIntegrityPolicyRendersByDefault: the cw-label
@@ -4695,128 +4148,7 @@ func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
 	}
 }
 
-// helmTemplateKata renders the chart in the shape `c8s install --cvm-mode=pod`
-// produces. kata is enforcing, so the host-side components whose function
-// moves into the kata-guest-base image are switched off (the chart validates
-// they are off — see TestChartKataRejectsHostSideComponents).
-// testImageDigest is a syntactically valid digest for renders that only need
-// `image` to be pinned.
 const testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-
-func helmTemplateKata(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-	return helmTemplate(t, append([]string{
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-		// The guest admits only digest-pinned references, so kata.enabled
-		// requires one for the injected sidecars (kind=kata_image_digest).
-		"--set-string", "image.digest=" + testImageDigest,
-	}, args...)...)
-}
-
-// Contract with the `c8s uninstall` running-pod guard (cmd/c8s/uninstall.go,
-// filterKataPods): it skips the release's own kata pods by release namespace +
-// app.kubernetes.io/instance, so every kata-pinned pod template must carry that
-// label or a clean uninstall is refused again.
-func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	var pinned []string
-	iterateManifests(t, out, func(doc []byte) bool {
-		var obj struct {
-			docMeta
-			Spec struct {
-				Template corev1.PodTemplateSpec `json:"template"`
-			} `json:"spec"`
-		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
-			return false
-		}
-		rc := obj.Spec.Template.Spec.RuntimeClassName
-		if rc == nil || !strings.HasPrefix(*rc, "kata-") {
-			return false
-		}
-		pinned = append(pinned, obj.Metadata.Name)
-		if got := obj.Spec.Template.Labels["app.kubernetes.io/instance"]; got != "c8s" {
-			t.Errorf("%s pod template: app.kubernetes.io/instance = %q, want the release name", obj.Metadata.Name, got)
-		}
-		return false
-	})
-	slices.Sort(pinned)
-	if want := []string{"c8s-cds", "c8s-tls-lb"}; !reflect.DeepEqual(pinned, want) {
-		t.Errorf("kata-pinned workloads = %v, want %v", pinned, want)
-	}
-}
-
-// Contract with KataGuestReadyReconciler (internal/controller): it lists the
-// puller pods by this label pair and mirrors their readiness into
-// webhook.GuestReadyNodeLabel. If the rendered label drifts, the list matches
-// nothing, the label is never set, and every confidential pod stays Pending.
-func TestChartKataImagePullerCarriesControllerSelector(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller")
-	if got := ds.Spec.Template.Labels[controller.ComponentLabel]; got != controller.KataImagePullerComponent {
-		t.Fatalf("puller pod template: %s = %q, want %q", controller.ComponentLabel, got, controller.KataImagePullerComponent)
-	}
-}
-
-// The check stats the pulled artifacts across the /host bind mount, so
-// kubelet's 1s default probe timeout would drop the guest-ready label off a
-// healthy node under load.
-func TestChartKataImagePullerProbeTimeout(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, ds := range []string{"c8s-kata-deploy-image-puller", "c8s-kata-deploy-image-puller-nvidia"} {
-		probe := renderedDaemonSetContainer(t, out, ds, "reconcile").ReadinessProbe
-		if probe == nil || probe.Exec == nil {
-			t.Fatalf("%s: want an exec readiness probe, got %+v", ds, probe)
-		}
-		if probe.TimeoutSeconds != 5 {
-			t.Errorf("%s: readiness timeoutSeconds = %d, want 5", ds, probe.TimeoutSeconds)
-		}
-	}
-}
-
-func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
-	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
-	if hasHostIPEnv(proxy) {
-		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
-	}
-}
-
-// TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the
-// ValidatingAdmissionPolicy + binding and flips the operator's --kata-enforce
-// flag — the two halves of enforcement must move together, and kata is
-// enforcing by definition.
-func TestChartKataRendersPolicyAndOperatorFlag(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Fatalf("kata enforcement missing ValidatingAdmissionPolicy\n%s", out)
-	}
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicyBinding", "c8s-kata-enforcement") {
-		t.Fatalf("kata enforcement missing ValidatingAdmissionPolicyBinding\n%s", out)
-	}
-	if !slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
-		t.Fatalf("operator missing --kata-enforce=true with enforcement on\n%s", out)
-	}
-}
 
 // On node-CVM the operator gets the host-dir mount source, from which the
 // webhook derives the get-cert workload-claims injection.
@@ -4837,105 +4169,14 @@ func TestChartWorkloadClaimsOperatorFlags(t *testing.T) {
 	}
 }
 
-// pcie_root_port=0 disables VFIO cold-plug: a GPU pod would boot as a
-// confidential VM with no device and the only symptom is a missing
-// /dev/nvidia* in-guest. The chart must refuse the render instead of
-// shipping that silently (the puller script double-checks at run time).
-func TestChartKataRejectsZeroPcieRootPort(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.gpu.guestImage.pcieRootPort=0")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata.gpu.guestImage.pcieRootPort=0, want failure\n%s", out)
-	}
-	if msg := helmFailMessage(t, out); !strings.Contains(msg, "kind=gpu_pcie_root_port") {
-		t.Errorf("fail message %q missing the gpu_pcie_root_port marker", msg)
-	}
-}
-
-// kata is enforcing: every workload is a kata CVM, where ratls routing,
-// attestation, and image admission run inside the kata-guest-base image. The
-// chart must refuse to deploy the host-side versions alongside — they would be
-// dead weight at best and a second, unattested enforcement path at worst.
-// The webhook injects the c8s sidecars into every confidential pod off `image`,
-// and they run inside the guest, which admits only digest-pinned references. A
-// tag renders sidecars the guest refuses at CreateContainer, so catch it at
-// render rather than as a pod that never starts.
-func TestChartKataRequiresImageDigest(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-		"--set-string", "image.tag=dev",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata.enabled and a tag-only image, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=kata_image_digest") {
-		t.Errorf("fail message %q missing the kata_image_digest marker", msg)
-	}
-}
-
-func TestChartKataRejectsHostSideComponents(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata and host-side components enabled, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=enforce_host_components") {
-		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
-	}
-	for _, want := range []string{"ratlsMesh.enabled", "attestationApi.enabled", "nriImagePolicy.enabled"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("fail message %q should name %s", msg, want)
-		}
-	}
-}
-
-// The kata shape (what `c8s install --cvm-mode=pod` renders) must drop the host-side
-// DaemonSets entirely — their in-guest counterparts ship in kata-guest-base.
-func TestChartKataShapeDropsHostSideComponents(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
-		t.Errorf("kata shape still renders the host attestation-api DaemonSet")
-	}
-	for _, component := range []string{"ratls-mesh", "nri-image-policy"} {
-		if renderedManifestHasLabel(t, out, "app.kubernetes.io/name", component) {
-			t.Errorf("kata shape still renders %s manifests", component)
-		}
-	}
-}
-
-// tls-lb lives in the release namespace, which the kata-enforcement webhook
-// deliberately excludes — so the chart itself must pin the confidential
-// RuntimeClass on it under kata, exactly like cds.yaml. kata-qemu-snp
-// specifically: its get-cert containers dial the in-guest attestation-api on
-// loopback (c8s.attestationApiURL), which only exists inside an SNP guest.
-func TestChartKataPinsRuntimeClassOnTLSLB(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	dep := renderedDeployment(t, out, "c8s-tls-lb")
-	rc := dep.Spec.Template.Spec.RuntimeClassName
-	if rc == nil || *rc != "kata-qemu-snp" {
-		t.Errorf("c8s-tls-lb runtimeClassName = %v, want kata-qemu-snp", rc)
-	}
-}
-
-// Without kata the same Deployment must carry no RuntimeClass — runc is the
-// only runtime on a plain cluster.
-func TestChartNoRuntimeClassOnTLSLBWithoutKata(t *testing.T) {
+func TestChartNoRuntimeClassOnTLSLB(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	dep := renderedDeployment(t, out, "c8s-tls-lb")
 	if rc := dep.Spec.Template.Spec.RuntimeClassName; rc != nil {
-		t.Errorf("c8s-tls-lb runtimeClassName = %q, want unset without kata", *rc)
+		t.Errorf("c8s-tls-lb runtimeClassName = %q, want unset", *rc)
 	}
 }
 
@@ -5564,15 +4805,12 @@ func TestChartTLSLBHostPort(t *testing.T) {
 	})
 }
 
-// TestChartNoTeeProxyRemnants sweeps the default and kata renders for any
-// leftover tee-proxy wiring after the component's removal.
 func TestChartNoTeeProxyRemnants(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		render func(t *testing.T, args ...string) (string, error)
 	}{
 		{"default", helmTemplate},
-		{"kata", helmTemplateKata},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := tc.render(t)
@@ -5798,10 +5036,6 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
-		// nri-image-policy is mandatory on a non-kata render
-		// (require_host_image_policy); pin its digest + floor so the render is
-		// valid. Output is scoped to the tls-lb templates below, so its
-		// manifests do not appear here.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
@@ -6420,13 +5654,6 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	}
 }
 
-// TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
-// --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
-// the plugin) and kata is off, yet the baked plugin still pulls the live
-// allowlist from CDS. If the seed is not served, CDS starts empty and every
-// un-baked component (operator, ratls-mesh, tls-lb's nginx) is denied until an
-// operator hand-runs `c8s allowlist add`. Regression for that deadlock: the seed
-// ConfigMap must render, be mounted, and carry the deployed digests.
 func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	const (
 		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
@@ -6710,33 +5937,6 @@ func TestChartWiresCDSAllowlistSeedFlagAndVolume(t *testing.T) {
 	}
 }
 
-// Under kata the host NRI plugin is off, but admission is the in-guest
-// policy-monitor fed from CDS's served allowlist, so the seed must still render.
-// Otherwise adopted --workload-ref entries (in bootstrapAllowlist.workloads)
-// never reach CDS and the in-guest monitor denies those images.
-func TestChartRendersCDSSeedUnderKata(t *testing.T) {
-	const (
-		wlDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
-		wlRepo   = "example.test/vllm-router"
-	)
-	out, err := helmTemplateKata(t, anyArgvEntryArgs("vllm-router", wlDigest, wlRepo+"@"+wlDigest)...)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-	if err != nil {
-		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
-	}
-	if got, want := seedLabel(seed, wlDigest), wlRepo+"@"+wlDigest; got != want {
-		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Workloads)
-	}
-	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
-	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
-		t.Errorf("cds missing --allowlist-seed flag under kata\nargs: %v", cds.Args)
-	}
-}
-
 // The CDS image must be admittable by digest in the floor/seed; without
 // cds.image.digest the image policy would deny CDS on its own node. The chart
 // fails the render with a structured marker rather than shipping that deadlock.
@@ -6817,9 +6017,6 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
-		// nri-image-policy is mandatory on a non-kata render
-		// (require_host_image_policy); pin its digest + floor. The render is
-		// scoped to the tls-lb ConfigMap, so nri manifests do not appear.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest="+baseNRIDigest,
@@ -7011,149 +6208,6 @@ func TestChartDefaultRendersNoPullSecretRefs(t *testing.T) {
 		}
 		return false
 	})
-}
-
-// pullerDockercfgSecret returns the Secret name the kata-image-puller's
-// dockercfg projected volume references, or "" when the volume is absent
-// (anonymous oras pull). Fails the test if the puller DaemonSet is missing.
-func pullerDockercfgSecret(t *testing.T, helmOut string) string {
-	t.Helper()
-	name := ""
-	found := false
-	iterateManifests(t, helmOut, func(doc []byte) bool {
-		var ds appsv1.DaemonSet
-		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
-			return false
-		}
-		found = true
-		for _, v := range ds.Spec.Template.Spec.Volumes {
-			if v.Name != "dockercfg" || v.Projected == nil {
-				continue
-			}
-			for _, s := range v.Projected.Sources {
-				if s.Secret != nil {
-					name = s.Secret.Name
-				}
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
-	}
-	return name
-}
-
-// The puller's in-pod `oras pull` ignores kubelet imagePullSecrets, so the
-// install-time pull secret must also feed its dockercfg mount — otherwise
-// `c8s install --image-pull-secret` would cover every kubelet pull but leave
-// the kata-guest-base fetch anonymous (401 against a private registry).
-func TestChartImagePullSecretFeedsKataImagePuller(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set-string", "imagePullSecret=ghcr-secret")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "ghcr-secret" {
-		t.Errorf("puller dockercfg secret = %q, want ghcr-secret", got)
-	}
-}
-
-// An explicit pullerAuthSecret wins over the imagePullSecret default — the
-// guest-base artifact may need a different credential than the c8s images.
-func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set-string", "imagePullSecret=ghcr-secret",
-		"--set-string", "kata.guestImage.pullerAuthSecret=other-creds")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "other-creds" {
-		t.Errorf("puller dockercfg secret = %q, want other-creds", got)
-	}
-}
-
-// pullerEnv returns the value of the named env var on the kata-image-puller's
-// container. Fails the test if the puller DaemonSet is missing.
-func pullerEnv(t *testing.T, helmOut, name string) string {
-	t.Helper()
-	val := ""
-	found := false
-	iterateManifests(t, helmOut, func(doc []byte) bool {
-		var ds appsv1.DaemonSet
-		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
-			return false
-		}
-		found = true
-		for _, c := range ds.Spec.Template.Spec.Containers {
-			for _, e := range c.Env {
-				if e.Name == name {
-					val = e.Value
-				}
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
-	}
-	return val
-}
-
-// kata.guestImage.debug must repoint the puller at the `<tag>-debug` artifact
-// — the variant whose guest policy allows host log/exec streams (published in
-// lockstep by the kata-guest-base workflow; `c8s install --cvm-mode=pod --debug` sets
-// the value). Default off: a plain kata install pulls the locked image.
-func TestChartKataGuestImageDebugSelectsDebugTag(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerEnv(t, out, "TAG"); got != "main" {
-		t.Errorf("default puller TAG = %q, want main (locked image)", got)
-	}
-
-	out, err = helmTemplateKata(t, "--set", "kata.guestImage.debug=true")
-	if err != nil {
-		t.Fatalf("helm template (debug): %v\n%s", err, out)
-	}
-	if got := pullerEnv(t, out, "TAG"); got != "main-debug" {
-		t.Errorf("debug puller TAG = %q, want main-debug", got)
-	}
-}
-
-// kata.guestImage.debug must vary the GPU guest tag in lockstep with the
-// non-GPU one: CI publishes `<tag>-nvidia` and `<tag>-nvidia-debug` together
-// (kata-guest-base.yml build job, build.sh Step 6) — see
-// c8s.kataGuestImageNvidiaTag.
-func TestChartKataGuestImageDebugDerivesNvidiaDebugTag(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.guestImage.debug=true")
-	if err != nil {
-		t.Fatalf("helm template (debug): %v\n%s", err, out)
-	}
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "TAG"); got != "main-nvidia-debug" {
-		t.Errorf("GPU puller TAG under debug = %q, want main-nvidia-debug (published in lockstep with main-nvidia)", got)
-	}
-	if got := envValue(pc.Env, "KATA_DEBUG"); got != "true" {
-		t.Errorf("GPU puller KATA_DEBUG under debug = %q, want true", got)
-	}
-}
-
-// With neither value set the pull stays anonymous: no dockercfg volume at all
-// (the default shape — the published artifacts are public).
-func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "" {
-		t.Errorf("puller dockercfg secret = %q, want none (anonymous pull)", got)
-	}
 }
 
 // tlsLbUpstreamAddress returns the catch-all upstream address from the
@@ -7674,129 +6728,6 @@ func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
 	}
 	if hostDir != socketDir {
 		t.Errorf("the operator mounts %q into cw pods but volumed serves in %q", hostDir, socketDir)
-	}
-}
-
-// The one install shape granting the operator node RBAC. Asserted exactly
-// here: TestChartOperatorRBACIsScoped's ban never renders this branch.
-func TestChartOperatorNodeRBACOnlyUnderKataGuestReadyGate(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	var role rbacv1.ClusterRole
-	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
-		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
-	}
-	got := operatorVerbsFor(role, "", "nodes")
-	want := []string{"get", "list", "watch", "patch"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("operator nodes verbs under kata = %v, want %v", got, want)
-	}
-
-	// No puller, no controller: the grant and the gate must both go with it.
-	out, err = helmTemplateKata(t, "--set", "kata.guestImage.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
-		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
-	}
-	if got := operatorVerbsFor(role, "", "nodes"); got != nil {
-		t.Fatalf("operator keeps nodes verbs %v with the puller disabled", got)
-	}
-	if strings.Contains(out, "kata-guest-ready-gate=true") {
-		t.Fatal("operator still told to enforce the guest-ready gate with no puller to set the label")
-	}
-}
-
-// Pods pinning a kata RuntimeClass bypass the injecting webhook.
-func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	seen := map[string]bool{}
-	iterateManifests(t, out, func(doc []byte) bool {
-		var obj struct {
-			docMeta
-			Spec struct {
-				Template corev1.PodTemplateSpec `json:"template"`
-			} `json:"spec"`
-		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
-			return false
-		}
-		spec := obj.Spec.Template.Spec
-		if spec.RuntimeClassName == nil || !strings.HasPrefix(*spec.RuntimeClassName, "kata-") {
-			return false
-		}
-		if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil ||
-			spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-			t.Errorf("%s %s pins %s but has no required node affinity", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
-			return false
-		}
-		for _, term := range spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
-			for _, e := range term.MatchExpressions {
-				if e.Key == webhook.GuestReadyNodeLabel {
-					seen[obj.Metadata.Name] = true
-				}
-			}
-		}
-		if !seen[obj.Metadata.Name] {
-			t.Errorf("%s %s pins %s without the guest-ready gate", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
-		}
-		return false
-	})
-	for _, name := range []string{"c8s-cds", "c8s-tls-lb"} {
-		if !seen[name] {
-			t.Errorf("%s missing the guest-ready node affinity", name)
-		}
-	}
-}
-
-// The host volumed DaemonSet is replaced under kata by `volumed --guest` inside
-// the guest, which is where the fetcher posts. Leaving the host one enabled
-// deploys a privileged DaemonSet nothing calls, so the chart refuses it for the
-// same reason as the other host-side components.
-func TestChartKataRejectsHostVolumed(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "volumed.enabled=true")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata and host volumed enabled, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=enforce_host_components") {
-		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
-	}
-	if !strings.Contains(msg, "volumed.enabled") {
-		t.Errorf("fail message %q should name volumed.enabled", msg)
-	}
-}
-
-// The host qemu wrapper needs one source of truth: the puller ConfigMap ships a
-// copy, and kata-guest-base scripts/ holds the canonical file because it lives
-// alongside the guest tooling it is coupled to. A silent drift would be a
-// launch-behaviour drift the launch measurement can't catch (the wrapper runs
-// on the host outside every attested boundary).
-func TestKataQemuWrapperCopiesMatch(t *testing.T) {
-	// Both paths are repo-relative; the chart test package sits under
-	// internal/helmchart, so climb two levels to reach the repo root.
-	const (
-		chart  = "c8s/files/scripts/kata-qemu-scratch-wrapper.sh"
-		source = "../../kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh"
-	)
-	chartBytes, err := os.ReadFile(chart)
-	if err != nil {
-		t.Fatalf("read %s: %v", chart, err)
-	}
-	sourceBytes, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatalf("read %s: %v", source, err)
-	}
-	if !slices.Equal(chartBytes, sourceBytes) {
-		t.Fatalf("wrapper drift: %s and %s must be byte-identical\n"+
-			"the puller ConfigMap uses the chart copy; the guest-base tree is the source of truth\n"+
-			"fix: cp %s %s", chart, source, source, chart)
 	}
 }
 

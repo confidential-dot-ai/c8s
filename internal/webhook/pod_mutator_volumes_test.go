@@ -182,18 +182,18 @@ func TestReservedVolumePrefixMustBeMemoryBacked(t *testing.T) {
 				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/exfil"},
 			},
 		}}
-		if err := rejectReservedVolumeVolume(pod, false); err == nil {
+		if err := rejectReservedVolumeVolume(pod); err == nil {
 			t.Errorf("%s: a hostPath under the reserved prefix was accepted", name)
 		}
 	}
 
 	// The shape the webhook itself injects is fine, as is omitting it.
 	pod := podWithApp()
-	pod.Spec.Volumes = []corev1.Volume{openedVolume("weights", false)}
-	if err := rejectReservedVolumeVolume(pod, false); err != nil {
+	pod.Spec.Volumes = []corev1.Volume{openedVolume("weights")}
+	if err := rejectReservedVolumeVolume(pod); err != nil {
 		t.Errorf("the injected shape was rejected: %v", err)
 	}
-	if err := rejectReservedVolumeVolume(podWithApp(), false); err != nil {
+	if err := rejectReservedVolumeVolume(podWithApp()); err != nil {
 		t.Errorf("an absent volume was rejected: %v", err)
 	}
 }
@@ -302,46 +302,21 @@ func TestHandleRejectsVolumesWithoutAnyDaemon(t *testing.T) {
 	}
 }
 
-// Under kata volumed runs inside the guest on loopback, so a volumes pod is
-// serviceable with nothing mounted.
-func TestHandleAdmitsVolumesUnderKataGuest(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-
-	if resp := handleVolumesPod(t, cfg); !resp.Allowed {
-		t.Fatalf("Handle denied a volumes pod the in-guest daemon can serve: %v", resp.Result)
-	}
-}
-
 // The placeholder's medium is load-bearing and differs by shape: a default
 // emptyDir becomes a disk.img block device under shared_fs="none", and a
 // memory-backed one is unreachable to volumed's RESOLVE_NO_XDEV on node-CVM.
 func TestOpenedVolumeMediumFollowsTheShape(t *testing.T) {
-	if got := openedVolume("weights", false).EmptyDir.Medium; got != corev1.StorageMediumDefault {
+	if got := openedVolume("weights").EmptyDir.Medium; got != corev1.StorageMediumDefault {
 		t.Errorf("node-CVM medium = %q, want default", got)
-	}
-	if got := openedVolume("weights", true).EmptyDir.Medium; got != corev1.StorageMediumMemory {
-		t.Errorf("kata medium = %q, want Memory", got)
 	}
 	// And the reserved-volume guard must expect the same shape it injects,
 	// or the webhook would reject its own output on re-admission.
-	for _, guest := range []bool{false, true} {
+	{
 		pod := podWithApp()
-		pod.Spec.Volumes = []corev1.Volume{openedVolume("weights", guest)}
-		if err := rejectReservedVolumeVolume(pod, guest); err != nil {
-			t.Errorf("guest=%v: the injected shape was rejected: %v", guest, err)
+		pod.Spec.Volumes = []corev1.Volume{openedVolume("weights")}
+		if err := rejectReservedVolumeVolume(pod); err != nil {
+			t.Errorf("the injected shape was rejected: %v", err)
 		}
-	}
-}
-
-// The fetcher must be told to use the guest endpoints, not merely admitted.
-func TestVolumeContainerSelectsGuestEndpointsUnderKata(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-	inj := &injection{Volumes: volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}, Dir: "/models"}}
-
-	if args := volumeContainer(inj, cfg).Args; !slices.Contains(args, "--workload-claims-guest") {
-		t.Fatalf("get-volume args %v omit --workload-claims-guest under kata", args)
 	}
 }
 

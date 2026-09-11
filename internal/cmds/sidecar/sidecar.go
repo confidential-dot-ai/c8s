@@ -34,11 +34,6 @@ type Config struct {
 	CertPath string
 	KeyPath  string
 
-	// WorkloadClaimsGuest selects the kata shape: the inventory (and any
-	// node-local daemons) are inside the guest, reached on guest loopback
-	// rather than over sockets a kata guest cannot mount.
-	WorkloadClaimsGuest bool
-
 	Attempts         int
 	RetryInterval    time.Duration
 	RequestTimeout   time.Duration
@@ -50,9 +45,6 @@ type Config struct {
 // control-plane value cannot redirect the redemption to a rogue inventory
 // (docs/getcert-workload-binding.md, Corner 5).
 func (c Config) Endpoint() string {
-	if c.WorkloadClaimsGuest {
-		return workloadclaims.GuestInventoryEndpoint()
-	}
 	return workloadclaims.InventoryEndpoint()
 }
 
@@ -72,7 +64,6 @@ func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.DurationVar(&cfg.RetryInterval, "retry-interval", 5*time.Second, "wait between attempts")
 	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, "per-request timeout against CDS")
 	f.DurationVar(&cfg.InventoryTimeout, "inventory-timeout", 5*time.Second, "timeout for redeeming a sandbox token from the node's admission inventory")
-	f.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 }
 
 // Validate checks the shared half of a config and canonicalises the CDS URL.
@@ -100,14 +91,12 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParsePins decodes --measurements and --rtmrs, refusing an empty measurement
-// pin inside a kata guest and warning outside one.
 func (c *Config) ParsePins() (ratls.Pins, error) {
 	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), c.WorkloadClaimsGuest,
+	if err := cmdsutil.CheckCDSPinned(len(measurements),
 		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
 		return ratls.Pins{}, err
 	}

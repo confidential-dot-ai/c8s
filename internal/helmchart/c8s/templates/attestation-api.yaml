@@ -56,7 +56,7 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationApi.port }}
           securityContext:
-            {{- if has .Values.attestationApi.cvmMode (list "pod" "node" "gke" "aks") }}
+            {{- if has .Values.attestationApi.cvmMode (list "node" "gke" "aks") }}
             # All modes need privileged. A hostPath device mount does NOT add a
             # device-cgroup rule, so open(/dev/sev-guest|/dev/tdx-guest|/dev/tpm0)
             # is EPERM from an unprivileged container regardless of SYS_RAWIO
@@ -76,7 +76,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
             {{- else }}
-{{ fail (printf "attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
+{{ fail (printf "attestationApi.cvmMode must be one of node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
           # The API's health signal is the attest-proxy's exec probe: the API
           # binds pod loopback, which kubelet cannot dial.
@@ -89,17 +89,6 @@ spec:
               mountPath: /dev/sev-guest
             {{- end }}
             {{- if .Values.attestationApi.teeDevices.tdxGuest }}
-            # Intel TDX quote generation. On a bare-metal TDX host,
-            # /dev/tdx-guest DOES NOT EXIST — that's a guest-side device
-            # only present inside a TDX VM. The host path is the kernel
-            # ConfigFS TSM interface at /sys/kernel/config/tsm/report,
-            # populated by CONFIG_TSM_REPORTS. Mount /sys/kernel/config so
-            # attestation-api (built with `tdx_quote_method = "auto"`, or
-            # explicit "configfs") can read report attributes to request
-            # TDX quotes through QGS. When attestation-api runs INSIDE a
-            # kata-guest-base image (Phase 7), the guest kernel exposes
-            # /dev/tdx-guest natively — the in-guest binary sees it
-            # through its own devfs, no hostPath needed there.
             - name: tdx-tsm-configfs
               mountPath: /sys/kernel/config
             {{- end }}

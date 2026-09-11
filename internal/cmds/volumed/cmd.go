@@ -32,21 +32,6 @@ type config struct {
 	socketGID    int
 	reapInterval time.Duration
 	maxMounts    int
-	// guest runs the in-guest shape: serve on guest loopback, mount into
-	// kata's ephemeral directory, and let the VM's lifetime do the reaping.
-	guest          bool
-	guestEphemeral string
-}
-
-// Run is the cobra-driven entry point invoked from cmd/volumed/main.go, the
-// standalone binary baked into the kata guest rootfs. runDaemon installs its
-// own signal handling, so this only dispatches. Mirrors the shape of
-// internal/cmds/policymonitor.Run.
-func Run(args []string) error {
-	cmd := NewCmd()
-	cmd.SetArgs(args)
-	cmd.SilenceErrors = true
-	return cmd.Execute()
 }
 
 // NewCmd returns the `c8s volumed` command.
@@ -62,13 +47,8 @@ flow and hands it to this daemon, which opens the device and mounts the result
 into that pod and no other — read-only under dm-verity for an immutable volume,
 read-write ext4 for a mutable one.
 
-It runs in one of two shapes. On node-CVM it is a privileged node daemon: it
-resolves the calling pod from kernel peer credentials and mounts into that pod's
-kubelet directory. With --guest it runs inside a kata guest, which holds exactly
-one pod, so it serves on guest loopback and mounts into kata's ephemeral
-directory instead.
-
-Either way it runs privileged — opening a device and mounting into a pod's
+It runs as a privileged node daemon, resolves the calling pod from kernel peer
+credentials, and mounts into its kubelet directory. It runs privileged — opening a device and mounting into a pod's
 directory needs it — and where a volume is mounted is never driven by what a
 caller says about itself.`,
 		Args:         cobra.NoArgs,
@@ -84,10 +64,6 @@ caller says about itself.`,
 	f.StringVar(&cfg.cgroupRoot, "cgroup-root", DefaultCgroupRoot, "cgroup mount, where a pod's slice going away is what triggers teardown")
 	f.DurationVar(&cfg.reapInterval, "reap-interval", DefaultReapInterval, "how often to tear down volumes whose pod has gone")
 	f.IntVar(&cfg.maxMounts, "max-mounts", DefaultMaxMounts, "maximum volumes open on this node at once")
-	f.BoolVar(&cfg.guest, "guest", false,
-		"run inside a kata guest: serve on guest loopback, mount into kata's ephemeral directory, and resolve every caller to the guest's single pod")
-	f.StringVar(&cfg.guestEphemeral, "guest-ephemeral-dir", DefaultGuestEphemeralRoot,
-		"where kata-agent materializes memory-backed emptyDir volumes inside the guest (--guest only)")
 	return cmd
 }
 
@@ -101,9 +77,6 @@ func runDaemon(ctx context.Context, cfg config) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if cfg.guest {
-		return runGuest(ctx, cfg)
-	}
 	return runNode(ctx, cfg)
 }
 
@@ -151,26 +124,6 @@ func runNode(ctx context.Context, cfg config) error {
 	return srv.Serve(ctx, l)
 }
 
-// runGuest serves the in-guest shape. No reaper: the volume dies with the VM
-// that holds it, so there is no surviving daemon to reap for.
-func runGuest(ctx context.Context, cfg config) error {
-	srv := &Server{
-		Identity: GuestIdentity{},
-		Opener:   &Opener{Ops: SystemOps{}, Targets: GuestTargets{Root: cfg.guestEphemeral}, MaxMounts: cfg.maxMounts},
-		Devices:  SerialDevices{},
-		Logger:   slog.Default(),
-	}
-
-	l, err := net.Listen("tcp", GuestAddr())
-	if err != nil {
-		return fmt.Errorf("volumed: listen on %s: %w", GuestAddr(), err)
-	}
-	defer l.Close()
-
-	slog.Info("serving volume opens", "addr", GuestAddr(), "ephemeral_dir", cfg.guestEphemeral)
-	return srv.Serve(ctx, l)
-}
-
 // listen creates the socket, replacing a stale one left by a previous run and
 // group-owning it to gid so the non-root fetcher sidecar can connect.
 //
@@ -183,14 +136,6 @@ func listen(dir string, gid int) (net.Listener, error) {
 func validate(cfg config) error {
 	if cfg.maxMounts <= 0 {
 		return fmt.Errorf("--max-mounts must be positive")
-	}
-	// The guest shape has no socket, no kubelet and no reaper, so requiring
-	// their flags would mean carrying values nothing reads.
-	if cfg.guest {
-		if cfg.guestEphemeral == "" {
-			return fmt.Errorf("--guest-ephemeral-dir is required with --guest")
-		}
-		return nil
 	}
 	switch {
 	case cfg.socketDir == "":

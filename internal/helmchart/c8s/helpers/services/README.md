@@ -7,7 +7,6 @@ Source: [templates/_services.tpl](../../templates/_services.tpl).
 
 | Values | Endpoint |
 | --- | --- |
-| `kata.enabled` | Guest loopback, `http://127.0.0.1:<port>` |
 | Otherwise, `attestationApi.enabled` | Node-local `unix://<runtimeDir>/attestation-api.sock` |
 | Otherwise | Node-baked service, `http://$(HOST_IP):<port>` |
 

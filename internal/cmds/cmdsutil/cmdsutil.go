@@ -39,9 +39,6 @@ func ValidateHTTPURL(flagName, u string) error {
 	return nil
 }
 
-// ValidateAttestationAPIURL returns an error if u is not an attestation-api
-// URL: http(s):// for a network endpoint, or unix:// plus an absolute socket
-// path for the node-local socket the chart wires in every non-kata mode.
 func ValidateAttestationAPIURL(flagName, u string) error {
 	if socket, ok := strings.CutPrefix(u, "unix://"); ok {
 		if !path.IsAbs(socket) {
@@ -100,21 +97,9 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	srv.Shutdown(shutdownCtx)
 }
 
-// CheckCDSPinned reports whether a sidecar may talk to CDS with the launch
-// measurements it was given.
-//
-// An empty set accepts any RA-TLS-attested CDS, so dropping the flag is enough
-// to point a sidecar at a CDS the host runs — and under kata the host writes
-// the argv. Refuse there. Outside kata "no pinning" is a supported development
-// shape (`c8s install --measurements` documents empty as UNSAFE), so it stays a
-// warning. Shared by get-cert, get-secret and get-volume: three copies of this
-// decision would be three chances to drift.
-func CheckCDSPinned(measurementCount int, insideGuest bool, warn string) error {
+func CheckCDSPinned(measurementCount int, warn string) error {
 	if measurementCount > 0 {
 		return nil
-	}
-	if insideGuest {
-		return errors.New("--measurements is empty: refusing to reach an unpinned CDS from inside a kata guest, where the host writes this argv")
 	}
 	slog.Warn(warn)
 	return nil

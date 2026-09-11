@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"context"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"path/filepath"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -109,8 +109,6 @@ func TestNewCmdHasTheSidecarFlags(t *testing.T) {
 	}
 }
 
-// A kata guest mounts nothing, so requiring --socket-dir there would refuse
-// every volume the in-guest daemon can serve.
 func TestValidateSocketDirOnlyRequiredOnNodeCVM(t *testing.T) {
 	cfg := validConfig()
 	cfg.SocketDir = ""
@@ -118,12 +116,6 @@ func TestValidateSocketDirOnlyRequiredOnNodeCVM(t *testing.T) {
 		t.Error("node-CVM accepted a config with no socket dir")
 	}
 
-	guest := validConfig()
-	guest.SocketDir = ""
-	guest.WorkloadClaimsGuest = true
-	if err := validate(&guest); err != nil {
-		t.Errorf("guest shape rejected for want of a socket dir: %v", err)
-	}
 }
 
 // The daemon endpoint is compiled in both shapes: the flag picks which, never
@@ -133,9 +125,6 @@ func TestDaemonClientSelectsCompiledShape(t *testing.T) {
 	_, base := daemonClient(config{SocketDir: "/run/c8s/workload-claims"})
 	if base != "http://volumed" {
 		t.Errorf("node-CVM base = %q, want the unix-transport placeholder", base)
-	}
-	if _, guestBase := daemonClient(config{Config: sidecar.Config{WorkloadClaimsGuest: true}}); guestBase != volumed.GuestEndpoint() {
-		t.Errorf("guest base = %q, want the compiled %q", guestBase, volumed.GuestEndpoint())
 	}
 }
 

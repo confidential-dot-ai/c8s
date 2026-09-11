@@ -105,22 +105,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   `--node-cidr <range>` instead: CDS then uses the static range and the chart
   grants no node access. (docs/ratls.md, "Sandbox identity".)
 
-  **Under `--cvm-mode=pod` the inventory is inside each kata guest** and answers
-  on the guest's pod IP, so `c8s install` pins `cds.sandboxInventoryCIDRs` to the
-  cluster's **pod range(s)** (read from `spec.podCIDRs`) instead of leaving CDS
-  to derive node host routes. The address bound is not what separates a
-  workload from its guest's inventory there — both share the guest's IP; the
-  RA-TLS handshake CDS runs against the inventory endpoint is, since only the
-  guest's own attested mesh identity can present that leaf. A CNI that runs its
-  own IPAM leaves `spec.podCIDR` empty; the install then fails and asks for
-  `--node-cidr <pod-cidr>` explicitly.
-- `image.tag` or `image.digest`, `attestationApi.image.tag` or
-  `attestationApi.image.digest`, and `cds.image.tag` or
-  `cds.image.digest` are required; the CLI passes its build version when
-  running `c8s install`. Unstamped local builds report version `dev`, and the
-  install CLI maps that to the `main` branch tag because CI does not publish
-  `dev` (CI publishes `main` and `latest` for every image on the default
-  branch).
+Component images require a tag or digest. The install CLI uses its build
+version, or `main` for an unstamped development build.
 
 This means a default platform install creates the operator, CRDs, RBAC,
 webhook, attestation-api, and CDS. It does not mutate
@@ -150,92 +136,35 @@ c8s install \
   --upstream vllm-router
 ```
 
-The ref syntax is `<cw-id>=<namespace>/<kind>/<name>[:<port>]`, where kind is any
-resource exposing a pod template at `spec.template` (`deployment`,
-`statefulset`, `daemonset`, or an operator CRD such as `<kind>.<group>`); the
-optional `:<port>` is the tls-lb upstream port, needed on the ref `--upstream`
-selects. After Helm reports the c8s release ready, the CLI patches each workload
-pod template with `confidential.ai/cw: <id>`. Those rollouts go through the
-webhook, and the workload-service reconciler creates the `c8s-<id>` headless
-Services. `--upstream vllm-router` points tls-lb at
-`c8s-vllm-router.vllm.svc.cluster.local:8000` (its `<cw-id>` must be one of the
-adopted refs, carrying a `:<port>`). With `--resolve-digests=true`, install resolves adopted workload
-images into `nriImagePolicy.bootstrapAllowlist.workloads` entries admitting them
-under any command and args, so image admission (the host NRI plugin, or the
-in-guest policy-monitor under `--cvm-mode=pod`) allows those rollouts.
+The ref syntax is `<cw-id>=<namespace>/<kind>/<name>[:<port>]`. The upstream
+ref must include a port. After Helm reports the release ready, install patches
+the workload template with `confidential.ai/cw`; the controller then creates its
+`c8s-<id>` headless Service. With digest resolution enabled, install adds the
+adopted images to the bootstrap allowlist so NRI permits the rollout.
 
 `c8s install --install-crds=false` passes Helm's `--skip-crds`; CRDs are
 advisory and not required for pod injection. That path also disables the
 CRD-backed status mirror controller; if CRDs are absent at runtime, the
 operator skips that controller rather than failing startup.
 
-## Kata runtime installation and enforcement
-
-`c8s install --cvm-mode=pod` additionally installs the Kata Containers runtime onto
-the cluster: the embedded chart renders the upstream `kata-deploy` DaemonSet
-(which installs QEMU, the kata runtime, and the `containerd-shim-kata-v2`
-shim onto every node) and the `kata-qemu` / `kata-clh` / `kata-qemu-snp` /
-`kata-qemu-tdx` RuntimeClass objects. The host containerd config path (`k8s` vs `rke2`
-layout) is detected from the cluster's kubelet versions.
-
-`--cvm-mode=pod` is **enforcing** — there is no kata-without-enforcement shape:
-
-- the operator's pod webhook injects a `runtimeClassName` into workload pods
-  that don't request one — `kata-qemu`, or `kata-qemu-snp` for pods annotated
-  `confidential.ai/cw`;
-- a `ValidatingAdmissionPolicy` rejects workload pods that request a non-kata
-  `runtimeClassName`;
-- the host-side ratls-mesh, attestation-api, and nri-image-policy are
-  disabled — their function runs inside the kata-guest-base VM image.
-
-The Kata layer skips host-namespace pods and system namespaces. The separate
-default `deny-host-namespaces` policy still rejects host namespaces outside trusted
-platform namespaces. The Kata stack is off by default — a plain `c8s install`
-is unchanged.
-
-See [`docs/kata.md`](kata.md) for the design (why it wraps upstream
-kata-deploy), the threat model, distro support, the one-shot bootstrap-window
-caveat, and the SEV-SNP-host / GPU constraints.
-
 ## Uninstall
 
 `c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
 release (operator, CDS, attestation-api, ratls-mesh, tls-lb, the
-webhook configuration, RuntimeClasses, and the enforcement policy). The
+webhook configuration and admission policies). The
 `MutatingWebhookConfiguration` is release-tracked, so it is deleted with the
 release — a `failurePolicy: Fail` webhook cannot outlive the operator Service
 and block pod creation cluster-wide.
 
-It then **sweeps the host-side artifacts** that the chart's hooks and the
-`kata-deploy` preStop cleanup cannot guarantee — on every release shape, since
-leftovers may come from a previous install of a different shape. The swept set
-(NRI image-policy plugin, ratls-mesh netfilter state, nydus unit, kata payload
-and guest images, RKE2 containerd-prep template, node labels) is in
-[`docs/kata.md`](kata.md#uninstalling). The host paths are read from the
-release's computed values *before* deletion, so install-time `-f` overrides are
-honored.
+Cleanup removes chart-installed NRI policy and mesh network state while
+preserving baked node image components. Use `--host-sweep=false` to skip that
+cleanup, or `--host-sweep-only` to recover after a release was already deleted.
+Delete workloads holding encrypted volumes before uninstalling; `--force`
+bypasses that guard and may leave device mappings behind.
 
-Guardrails:
-
-- Uninstall **refuses to run while pods with a kata RuntimeClass are still
-  scheduled** — pulling the runtime out from under a confidential workload kills
-  it without cleanup. Delete those workloads first, or pass `--force` (the kata
-  VMs keep running unmanaged but cannot restart). The release's own
-  chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) are excluded by
-  release namespace + `app.kubernetes.io/instance`, and the refusal reports how
-  many it skipped; see [`docs/kata.md`](kata.md#uninstalling).
-- `--host-sweep-only` runs only the host sweep, for a cluster whose release a
-  bare `helm uninstall` already removed but whose nodes still carry artifacts;
-  it uses the chart defaults and the distro detected from the cluster.
-- `--delete-crds` and `--delete-namespace` are **off by default** and
-  destructive: the former deletes the `ConfidentialWorkload` CRD and every
-  `ConfidentialWorkload` object with it; the latter deletes the release
-  namespace and everything left in it.
-
-Requires the `helm` and `kubectl` CLIs on `PATH`. See
-[`docs/install-flows.md`](install-flows.md#uninstall-flow) for the uninstall
-sequence and [`docs/kata.md`](kata.md#uninstalling) for the host sweep in
-full.
+`--delete-crds` and `--delete-namespace` default to false. They delete the
+corresponding CRD and its objects, or the release namespace and its remaining
+contents. Uninstall requires `helm` and `kubectl` on PATH.
 
 ## Chart-managed CDS
 
@@ -374,10 +303,7 @@ HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
 report; no container runtime is needed.
 
 ```bash
-# CDS's RA-TLS endpoint answers unattested clients. Under kata the baked guest
-# env exempts the front-door port from the in-guest mesh redirect
-# (C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 — see docs/kata.md), so a plain
-# port-forward reaches it:
+# Reach the CDS front-door port:
 kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
 
 c8s cds verify https://localhost:8443 --measurements <sha384-launch-digest>
@@ -386,22 +312,11 @@ c8s cds verify https://localhost:8443 --measurements <sha384-launch-digest>
 c8s cds verify https://localhost:8443 --measurements-file digests.txt -o json
 ```
 
+Pin the node image launch measurement with `--measurements`; leaving it unset
+accepts any genuine TEE and prints an UNSAFE warning.
+
 PKI/SAN mismatch when dialing localhost or a pod IP is fine — `verify` trusts
 the attestation embedded in the serving cert, not the certificate chain.
-
-The launch digest(s) to pin are the same values discussed under measurement
-pinning (kata guest digest via `sev-snp-measure`, or the node CVM digest). They
-are enforced client-side against the report's launch measurement; with no
-`--measurements` the command still runs but prints an UNSAFE warning — any
-genuine TEE is accepted.
-
-`--init-data <sha256-hex>` pins the guest's init-data document: the kata shim
-commits `sha256(document)` at launch, and a verdict pinned this way fails
-unless the evidence commits exactly that digest. The document renders
-deterministically from the pod's role and CDS measurement set (`pkg/initdata`),
-so the digest comes from the same pipeline that chose those measurements. With
-no `--init-data` the committed digest is still shown on SNP/TDX, labelled as
-compared against nothing.
 
 On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
 guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
@@ -446,8 +361,7 @@ and `verify` derives the bare operator-key seed,
 — one register, one expected value — and `--operator-pkey` carries the same
 `--image-manifest` requirement. Note its scope: it pins the **bare** seed,
 i.e. a node with no per-workload RTMR[3] extends on top. That is what every
-node reports today, because the workload measurer ships only inside the kata
-guest image; `c8s get-kubeconfig` is the command that also folds
+node reports today image; `c8s get-kubeconfig` is the command that also folds
 `--workload-image` extends into the expected register. Supplying any of these
 flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
 has no runtime measurement registers.
@@ -489,16 +403,6 @@ belongs to is not proven). JSON renders these as
 `verified` fails closed while scripts can still tell partial from failure.
 
 Caveats the output surfaces:
-
-- **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
-  certificate key, not a per-request nonce, so it proves "this key was born in a
-  TEE with this measurement" but not "freshly now" (`fresh: false`).
-- **Reachability under kata.** Reach each component on its public/host address,
-  not the in-cluster ClusterIP — the ClusterIP path goes through the mesh and
-  demands an attested client cert (`tls: certificate required`). CDS's RA-TLS
-  endpoint and the tls-lb's nginx serving port both answer unattested clients on
-  their public address (the tls-lb serves `/v1/discovery` there with no client
-  cert), so `c8s cds verify` and `c8s verify <lb>` work without any mesh changes.
 
 ### Trust gate: `c8s get-kubeconfig`
 
@@ -634,26 +538,6 @@ CA alone, world-readable, for applications that take the trust anchor as a
 separate file (`mysqld --ssl-ca`, clients doing `VERIFY_CA` against peers on
 the mesh). File names are overridable per pod with `confidential.ai/c8s-cert-file`,
 `confidential.ai/c8s-key-file`, and `confidential.ai/c8s-ca-file`.
-
-`tls.key` is written `0640` owned by the get-cert user (UID/GID 65532, the pod's
-`fsGroup`). An image whose entrypoint starts as root and then drops to a
-service user (`gosu`, `su`) loses supplementary groups and can no longer read
-it; either run the container as UID 65532, or have the entrypoint copy the
-key into a directory the service user owns before dropping privileges.
-The `c8s-cert-wait` init container (`/c8s probe-file --wait /etc/c8s/certs/tls.crt`)
-gates the application containers on the initial cert being written: it blocks
-until the cert exists, then exits, and normal init-completion ordering holds the
-workload until then — fail-closed. It is a plain init container rather than a
-`startupProbe` on the sidecar because the locked `kata-qemu-snp` guest denies
-`ExecProcessRequest` by design, so an exec probe could never pass there and the
-workload would hang in `Init`; a container blocking on its own is a
-`CreateContainerRequest` the guest allows. Renewals rewrite the file on disk;
-application-level TLS reload remains the workload's responsibility unless the
-pod opts into one of the c8s reload annotations.
-
-The sidecar is long-lived rather than a run-once init container because under
-kata it doubles as the pidns anchor for `shareProcessNamespace` — see
-`docs/kata.md` for the underlying constraint.
 
 Platform-owned workloads can specialize the same webhook behavior with typed
 c8s annotations for the cert volume, cert/key filenames, renewal interval,
@@ -843,13 +727,6 @@ webhook:
 
 Set `webhook.certVolume.fsGroup` to `-1` to disable pod `fsGroup` mutation.
 The webhook preserves an existing pod `fsGroup`.
-
-For Kata deployments that require UID 0 inside the guest, set
-`webhook.getCert.runAsUser=0`, `webhook.getCert.runAsGroup=0`, and
-`webhook.getCert.runAsNonRoot=false`. The install CLI exposes those as
-`--webhook-get-cert-run-as-user`, `--webhook-get-cert-run-as-group`, and
-`--webhook-get-cert-run-as-non-root=false`. The renewal interval is exposed as
-`--webhook-get-cert-renew-interval`.
 
 The injected get-cert containers also use a locked-down security context:
 

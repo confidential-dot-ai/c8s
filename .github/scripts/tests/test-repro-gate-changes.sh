@@ -34,71 +34,21 @@ set_paths() {
 }
 
 expect_result() {
-  local want_image=$1 want_kernel=$2 actual expected
+  local expected="image=$1" actual
   actual=$(bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths")
-  expected=$(printf 'image=%s\nkernel_snapshot=%s' "$want_image" "$want_kernel")
-  [ "$actual" = "$expected" ] || {
-    printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
-    fail "classification differs"
-  }
+  [[ "$actual" == "$expected" ]] || fail "expected $expected, got $actual"
 }
-
 reset_case
-set_paths docs/development.md
-expect_result false false
-
+set_paths README.md
+expect_result false
 reset_case
-set_paths node-guest-image/mkosi.conf
-expect_result true false
-
+set_paths node-guest-image/kernel/c8s.config
+expect_result true
 reset_case
-set_paths kata-guest-base/kernel/container.config
-expect_result false true
-
+set_paths .github/scripts/pin-manifest.sh
+expect_result true
 reset_case
-set_paths .github/actions/setup-mkosi/action.yml
-expect_result true true
-
-reset_case
-jq '.builds["node-image"].confos_ref = "1111111111111111111111111111111111111111"' \
-  "$base_manifest" >"$current_manifest"
-set_paths .github/build-pins.json
-expect_result true false
-
-reset_case
-jq '.builds["kernel-snapshot"].confos_ref = "2222222222222222222222222222222222222222"' \
-  "$base_manifest" >"$current_manifest"
-set_paths .github/build-pins.json
-expect_result false true
-
-reset_case
-jq '.builds["kata-guest"].attestation_rs_ref = "3333333333333333333333333333333333333333"' \
-  "$base_manifest" >"$current_manifest"
-set_paths .github/build-pins.json
-expect_result false false
-
-reset_case
-jq '.builds["kata-guest"].confos_ref = "4444444444444444444444444444444444444444"' \
-  "$base_manifest" >"$current_manifest"
-set_paths .github/build-pins.json
-if bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths" \
-  >"$test_dir/unexpected.stdout" 2>"$test_dir/unexpected.stderr"; then
-  fail "kata-guest confos change without a snapshot-lineage change unexpectedly passed"
-fi
-grep -q 'must advance kernel-snapshot.confos_ref' "$test_dir/unexpected.stderr" ||
-  fail "kata-guest confos mismatch did not explain the required snapshot-lineage change"
-
-reset_case
-printf 'not-json\n' >"$current_manifest"
-if bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths" \
-  >"$test_dir/unexpected.stdout" 2>"$test_dir/unexpected.stderr"; then
-  fail "malformed current manifest unexpectedly passed"
-fi
-
-echo "repro gate change-classification tests passed"
-
-for path in kata-guest-base/scripts/build-kernel.sh .github/actions/build-guest-kernel/action.yml; do
-  reset_case
-  set_paths "$path"
-  expect_result false true
-done
+jq '.builds["node-image"].confos_ref = "2222222222222222222222222222222222222222"' "$current_manifest" >"$current_manifest.next"
+mv "$current_manifest.next" "$current_manifest"
+expect_result true
+echo "repro-gate-changes tests passed"

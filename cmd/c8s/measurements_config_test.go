@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -132,26 +131,6 @@ func TestInstallPinsFailsClosed(t *testing.T) {
 	withInstallFlags(t, filepath.Join(t.TempDir(), "absent.json"), nil, nil)
 	if _, _, _, err := installPins(); err == nil {
 		t.Fatal("a missing config produced pins")
-	}
-}
-
-// The pod-mode preflight must count a config as a pin, or a correctly pinned
-// install would be refused for lacking --measurements.
-func TestPodModePreflightAcceptsAConfig(t *testing.T) {
-	path := writePinConfig(t, `{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"00`+pinDigestA+`"}]}`)
-	withInstallFlags(t, path, nil, nil)
-
-	args := installPinnedMeasurementArgs()
-	if !slices.Contains(args, path) {
-		t.Fatalf("pinned args = %v, want the config path", args)
-	}
-	if _, err := podModeMeasurementsPreflight("pod", args, nil, false); err != nil {
-		t.Errorf("preflight refused a config-pinned pod install: %v", err)
-	}
-	// And an unpinned pod install is still refused.
-	withInstallFlags(t, "", nil, nil)
-	if _, err := podModeMeasurementsPreflight("pod", installPinnedMeasurementArgs(), nil, false); err == nil {
-		t.Error("preflight accepted an unpinned pod install")
 	}
 }
 

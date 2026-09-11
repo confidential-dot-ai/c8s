@@ -15,6 +15,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"strings"
+
 )
 
 func TestProxyPreservesAuthorizedRequests(t *testing.T) {

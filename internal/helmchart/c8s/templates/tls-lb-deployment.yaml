@@ -4,14 +4,7 @@
 Recreate, silently defeating the operator's opt-out. */ -}}
 {{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
 {{- end -}}
-{{- if and .Values.kata.enabled (ne (int .Values.tlsLb.nginx.httpsPort) 8443) -}}
-{{- /* The guest bakes C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 (a guest-wide
-default in cloudinit.env, not a chart value) and redirects every other inbound
-port into the mutual-RA-TLS proxy. On any other port the front door answers
-certless clients — external TLS and the kubelet prober alike — with
-"certificate required". */ -}}
-{{- fail (printf "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: %v" .Values.tlsLb.nginx.httpsPort) -}}
-{{- end -}}
+
 {{- if .Values.tlsLb.attest.expectedWorkload -}}
 {{- if not .Values.tlsLb.attest.enabled -}}
 {{- /* The gate *is* the cds-attest sidecar's /readyz. Without the sidecar
@@ -74,18 +67,8 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
-      {{- if .Values.kata.enabled }}
-      # Chart-managed mesh component: the webhook excludes the release
-      # namespace, so the chart pins the RuntimeClass directly (same pattern as
-      # cds.yaml). kata-qemu-snp specifically: the get-cert init containers dial
-      # the in-guest attestation-api on loopback under kata
-      # (c8s.attestationApiURL), which only exists inside an SNP guest — and
-      # tls-lb terminates client TLS with mesh-issued keys, so its plaintext
-      # must stay inside the TEE boundary.
-      runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
-      {{- end }}
+
       {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
-      {{- include "c8s.kataGuestReadyAffinity" . | nindent 6 }}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
       initContainers:
@@ -112,11 +95,6 @@ spec:
             - --challenge-port={{ include "tls-lb.acmeChallengePort" . }}
             - --http-port={{ include "tls-lb.acmeHTTPPort" . }}
             - --cert-dir={{ include "tls-lb.acmeCertDir" . }}
-          # nginx's config names the acme cert files, so nginx must not start
-          # before the bootstrap placeholder exists; regular containers wait
-          # for a native sidecar's startup probe. Probing cert.pem suffices:
-          # the sidecar writes key before cert. Exec probes are fine here:
-          # acme mode never renders under kata (no ExecProcessRequest denial).
           startupProbe:
             exec:
               command: ["/c8s", "probe-file", "{{ include "tls-lb.acmeCertDir" . }}/cert.pem"]
@@ -162,26 +140,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- if .Values.kata.enabled }}
-          # Under kata the RA-TLS mesh moves into the guest, which redirects
-          # inbound TCP into a proxy expecting mutual attested TLS — but the
-          # guest exempts exactly this port (C8S_MESH_INBOUND_PASSTHROUGH=
-          # tcp:8443, pinned by the render guard above), so the certless kubelet
-          # prober does reach nginx. A TCP accept is kept as the liveness and
-          # readiness signal here because nginx's own /healthz says nothing the
-          # accept does not; the cds-attest gate below is what needs a real
-          # request, and it takes the httpGet path. Same shape as cds.yaml.
-          readinessProbe:
-            tcpSocket:
-              port: https
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            tcpSocket:
-              port: https
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          {{- else }}
+
           readinessProbe:
             httpGet:
               path: /healthz
@@ -196,7 +155,7 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 30
-          {{- end }}
+
           volumeMounts:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
@@ -290,20 +249,6 @@ spec:
             {{- . | nindent 12 }}
           {{- end }}
           {{- if .Values.tlsLb.attest.expectedWorkload }}
-          # Workload-verified ingress gate (docs/getcert-workload-binding.md):
-          # ready only while the installed mesh identity leaf is a usable
-          # credential carrying a matched-workload stamp naming
-          # expectedWorkload, so ingress withholds traffic while the committed
-          # identity is unnamed (initial deploy, or after a foreign admission
-          # unnames the next renewal).
-          #
-          # Probed through nginx (location = /readyz), not the sidecar's own
-          # port: the sidecar listens on loopback, and under kata the guest
-          # redirects every inbound port except the nginx one into the mutual
-          # RA-TLS proxy, which rejects the certless kubelet prober. Scheme
-          # HTTPS on the nginx port works in both shapes — nginx sets no
-          # ssl_verify_client and kubelet skips certificate verification on
-          # HTTPS probes.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -428,11 +373,6 @@ spec:
             medium: Memory
             sizeLimit: 1Mi
         {{- end }}
-        # medium: Memory is load-bearing under kata-qemu-snp with
-        # shared_fs="none": a default (disk-backed) emptyDir gets provisioned
-        # through kata-agent's CDH secure-storage path inside the guest and
-        # fails CreateContainer ("[CDH] [ERROR]: Secure Mount failed").
-        # tmpfs-backed emptyDirs are mounted directly by the guest kernel.
         - name: nginx-cache
           emptyDir:
             medium: Memory

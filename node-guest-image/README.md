@@ -1,8 +1,7 @@
 # node-guest-image
 
 The c8s node image (`node-guest-base`, `rke2[-cdi]-*` tags), defined in THIS repo
-and built by [confidential-os-builder] acting purely as a builder — the same
-ownership split `kata-guest-base/` already has with confos as a pinned tool.
+and built by [confidential-os-builder] acting purely as a pinned builder.
 Tracking issue: [#264].
 
 Layout:
@@ -31,8 +30,7 @@ Layout:
   boots and attests, but operator flows fail closed pending an SNP
   binding design.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
-  `c8s-dev.config`), passed via `--kernel-config-fragment` exactly like
-  kata-guest-base's `container.config`. confos's `required`/`hardening`
+  `c8s-dev.config`), passed via `--kernel-config-fragment`. confos's `required`/`hardening`
   baselines stay in confos: a fragment request that conflicts with them
   fails the build (see the balloon catch in #263).
 - `build` — drop-in replacement for confos's `bin/build-c8s`: same env

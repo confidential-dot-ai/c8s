@@ -40,22 +40,8 @@ The quota bounds one entry, not the store: enough entries one path apiece still
 reach the ceiling. What it buys is that the refusal lands on the entry that
 caused it rather than on the next one to ask.
 
-**kata is supported, with two caveats.** The fetcher redeems its sandbox token
-from whichever inventory its shape has: the mounted nri-image-policy socket on
-node-CVM, or `policy-monitor` on the guest's loopback `127.0.0.1:8401` under
-kata, where nothing is mounted. The webhook selects the shape with
-`--workload-claims-guest` and rejects `confidential.ai/c8s-secrets` only when
-the operator has neither — a pod whose fetcher would CrashLoop while the
-workload blocked forever on a file that never lands.
-
 The two caveats are weaker guarantees, not broken ones, and both are properties
 of the guest rather than of secret release:
-
-- the kata sandbox ID comes from a host-written CRI annotation, so the sandbox a
-  token names is asserted by the host rather than read from the kernel as it is
-  on node-CVM;
-- argv enforcement in the guest is watch-and-kill rather than synchronous, so a
-  container running a non-admitted argv is killed rather than refused.
 
 A deployment whose threat model cannot accept either should stay on node-CVM.
 
@@ -128,11 +114,6 @@ A request carries:
 | client certificate | the pod's mesh leaf, mTLS. Its CDS-stamped sandbox ID is the identity |
 | `X-C8s-Challenge` | base64 of the challenge, consumed before anything else happens |
 | `Authorization: SandboxToken <base64>` | the inventory-signed token, in a header so it is bounded and never logged |
-
-The token is obtained from the admission inventory at `POST /sandbox` — the
-node's on node-CVM, the guest's own under kata — bound to the leaf's key and
-that challenge, the same route and the same envelope `get-cert` uses at
-issuance.
 
 **`POST` never carries a value.** CDS generates it, so no caller chooses what
 another caller will later read. On a path that already exists it answers `409`

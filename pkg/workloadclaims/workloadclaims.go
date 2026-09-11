@@ -1,20 +1,3 @@
-// Package workloadclaims implements the admission-inventory API: the component
-// that admitted a pod's containers (nri-image-policy on node-CVM,
-// policy-monitor in a kata guest) is the arbiter of both what runs in a pod
-// sandbox and which sandbox a process belongs to.
-//
-// It serves two disjoint surfaces (docs/ratls.md, "Sandbox identity"):
-//
-//   - a node-local token route, where get-cert redeems its identity for a
-//     signed sandbox token naming its own sandbox — nothing the caller sends
-//     names the pod. On node-CVM that is a Unix socket, whose kernel peer
-//     credentials bind the caller; inside a kata guest it is guest loopback,
-//     where the single-pod guest boundary does;
-//   - a network endpoint over mutually-attested RA-TLS, where CDS asks which
-//     image digests a named sandbox is currently running.
-//
-// Keeping them apart bounds each: the socket cannot enumerate other sandboxes,
-// and the network endpoint cannot mint identity.
 package workloadclaims
 
 import (
@@ -29,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -52,18 +34,6 @@ type InventoryIdentity struct {
 	PublicKey []byte `json:"public_key"`
 }
 
-// SocketName is the fixed filename of the inventory's Unix socket, and
-// SidecarSocketDir is where the socket directory is presented inside the
-// c8s-cert sidecar. Both are compiled constants, not deployment values:
-// get-cert dials InventoryEndpoint (built from them) as a baked path, so the
-// control plane cannot redirect the fetch to a rogue inventory
-// (docs/getcert-workload-binding.md Corner 5). The inventory (nri-image-policy on
-// node-CVM, policy-monitor in the kata guest) creates its socket as SocketName
-// under its configured directory, and its NRI plugin bind-mounts that directory
-// at SidecarSocketDir into the SidecarContainers of an injected pod — an OCI
-// mount below the pod spec, so no hostPath volume ever appears to PodSecurity.
-// node-CVM only: a kata guest serves the token route on loopback instead
-// (GuestTokenPort), with nothing to mount.
 const (
 	SocketName       = "workload-claims.sock"
 	SidecarSocketDir = "/run/c8s/workload-claims"
@@ -90,14 +60,6 @@ func IsSidecarContainer(name string) bool {
 	return name == CertContainerName || name == SecretContainerName || name == VolumeContainerName
 }
 
-// GuestTokenPort is the in-guest loopback port policy-monitor serves the token
-// route on under kata, alongside the attestation-service on 8400. A kata guest
-// holds exactly one pod and its containers share the guest's network namespace,
-// so loopback reaches the inventory without a shared filesystem — the same
-// transport the in-guest attestation-service already uses. Peer credentials are
-// not needed there: with one pod per guest there is no caller to disambiguate.
-const GuestTokenPort = 8401
-
 // InventoryEndpoint is get-cert's compiled inventory endpoint on node-CVM: the
 // in-sidecar Unix socket path, whose peer credentials bind the caller to its
 // pod.
@@ -115,14 +77,6 @@ func RequireSidecarSocketDir() error {
 		return fmt.Errorf("inventory socket directory: %w (not mounted; is nri-image-policy current on this node?)", err)
 	}
 	return nil
-}
-
-// GuestInventoryEndpoint is get-cert's compiled inventory endpoint inside a kata
-// guest. Like InventoryEndpoint it is fixed at build time: the control plane
-// selects which of the two shapes applies, never an address, so the worst a
-// wrong selection does is fail closed against a port nothing serves.
-func GuestInventoryEndpoint() string {
-	return "http://127.0.0.1:" + strconv.Itoa(GuestTokenPort)
 }
 
 // InventorySocketGID owns the inventory's Unix socket. The inventory runs as root, but
@@ -194,32 +148,6 @@ type SandboxTokenRequest struct {
 type SandboxDigestsResponse struct {
 	Digests    []string           `json:"digests"`
 	Containers []SandboxContainer `json:"containers,omitempty"`
-	// AllowlistRefresh is the inventory's enforcement posture. Absent from an
-	// inventory that predates the field, and from one with nothing to report.
-	AllowlistRefresh *AllowlistRefresh `json:"allowlist_refresh,omitempty"`
-}
-
-// AllowlistRefresh reports whether an inventory's image allowlist still tracks
-// CDS, or has fallen back to whatever it started with. It is the one channel
-// carrying that state out of a kata guest, whose journal the operator cannot
-// read — kubectl logs on locked-guest pods is empty.
-//
-// Diagnostic only: no issuance or release decision reads it, so a guest cannot
-// widen its own admission by lying here.
-type AllowlistRefresh struct {
-	Enabled bool `json:"enabled"`
-	// Reason explains a disabled refresh.
-	Reason string `json:"reason,omitempty"`
-	// Entries is the allowlist size actually being enforced.
-	Entries int `json:"entries"`
-}
-
-// AllowlistRefreshReporter is the optional half of SandboxResolver: an
-// inventory that can describe its refresh posture. ok=false means it has
-// nothing to report, which stays off the wire rather than serializing as a
-// disabled refresh.
-type AllowlistRefreshReporter interface {
-	AllowlistRefresh() (AllowlistRefresh, bool)
 }
 
 // SandboxContainer is one admitted container: the bytes, and what they were
@@ -231,17 +159,6 @@ type SandboxContainer struct {
 	Argv []string `json:"argv,omitempty"`
 }
 
-// SandboxResolver is the surface an inventory implements — nri-image-policy on
-// node-CVM (runtime sandbox state from NRI pod events) and policy-monitor in
-// the kata guest (the guest's single pod). ServeTokens uses SandboxForPeer;
-// ServeDigests uses DigestsForSandbox. get-cert treats a missing SandboxPath
-// as "no sandbox ID" (ErrSandboxUnsupported).
-//
-// peer carries the kernel-pinned caller identity (SO_PEERCRED PID plus an
-// SO_PEERPIDFD liveness pin) — the caller never names its own pod. The
-// node-CVM resolver binds peer.PID() to a pod and rechecks peer.IsAlive()
-// after its /proc read to reject PID reuse; the kata resolver ignores it,
-// since the guest holds exactly one pod and no disambiguation is needed.
 type SandboxResolver interface {
 	// SandboxForPeer returns the pod sandbox ID of the calling process,
 	// bound by kernel peer credentials exactly like ContainersForPeer.
@@ -276,30 +193,11 @@ func PeerFromConn(c net.Conn) Peer { return peerFrom(c) }
 // PKIX public key.
 const maxSandboxRequestBytes = 64 << 10
 
-// ServeTokens runs the token route on l until ctx is done — a unix listener on
-// node-CVM, a guest-loopback listener under kata. It serves POST SandboxPath
-// only, and l must stay node- or guest-local: on the socket the caller is bound
-// by kernel peer credentials, and in the guest by the single-pod boundary.
-// Errors from the resolver are returned as 500s — get-cert fails closed on them.
-//
-// The route is registered whatever state signers is in, because under kata the
-// listener has to claim 127.0.0.1:8401 before any workload container starts —
-// containers share the guest's network namespace, so a listener bound late is
-// one a workload can bind first and answer as. What the signer's state changes
-// is the answer: see SignerHolder.
-func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signers *SignerHolder) error {
+func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signer *SandboxTokenSigner) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
-		signer, state := signers.current()
-		switch state {
-		case signerUnsupported:
-			// No CDS to attest the signing key against, and an unverifiable
-			// token is worse than none. Terminal, so the caller is told to
-			// stop asking rather than to wait.
+		if signer == nil {
 			http.Error(w, "inventory serves no sandbox tokens", http.StatusNotFound)
-			return
-		case signerPending:
-			http.Error(w, "sandbox-token signer not installed yet", http.StatusServiceUnavailable)
 			return
 		}
 		var req SandboxTokenRequest
@@ -364,11 +262,6 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver,
 			digests = []string{}
 		}
 		resp := SandboxDigestsResponse{Digests: digests, Containers: containers}
-		if rr, ok := resolver.(AllowlistRefreshReporter); ok {
-			if refresh, reported := rr.AllowlistRefresh(); reported {
-				resp.AllowlistRefresh = &refresh
-			}
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -405,11 +298,6 @@ func serveUntil(ctx context.Context, l net.Listener, mux *http.ServeMux) error {
 	return nil
 }
 
-// inventoryDo performs a request against the inventory at endpoint, which must
-// be one of the two compiled endpoints: the node-CVM unix socket (whose peer
-// credentials bind the caller) or the kata guest's loopback address (where the
-// guest boundary does). Anything else is refused, so no control-plane value can
-// redirect the request (docs/getcert-workload-binding.md, Corner 5).
 func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Reader, timeout time.Duration) (*http.Response, error) {
 	base := "http://inventory.invalid"
 	transport := &http.Transport{}
@@ -422,10 +310,8 @@ func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Re
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", path)
 		}
-	case endpoint == GuestInventoryEndpoint():
-		base = endpoint
 	default:
-		return nil, fmt.Errorf("workloadclaims: endpoint must be the compiled unix socket or guest loopback, got %q", endpoint)
+		return nil, fmt.Errorf("workloadclaims: endpoint must be the unix socket, got %q", endpoint)
 	}
 	// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose.
 	client := &http.Client{Timeout: timeout, Transport: transport}

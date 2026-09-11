@@ -29,15 +29,6 @@ const cwChainName = "RATLS-MESH-CW"
 // non-pod destinations is out of scope here.
 const cwEgressChainName = "RATLS-MESH-CW-EGRESS"
 
-// guestFilterOutputChain and guestFilterInputChain are the in-guest filter
-// chains that drop non-TCP which the NAT redirects do not carry (see
-// buildInGuestFailClosedRules). Guarded by the same fail-closed posture as
-// the host cw egress guard; the guest's own kernel is the trust boundary here.
-const (
-	guestFilterOutputChain = "RATLS-MESH-GUEST-OUT"
-	guestFilterInputChain  = "RATLS-MESH-GUEST-IN"
-)
-
 const (
 	podIPSetName4      = "RATLS-MESH-PODS"
 	podIPSetName6      = "RATLS-MESH-PODS6"
@@ -50,12 +41,6 @@ const (
 // ipSetTmpSuffix names the transient set used for the atomic swap-restore.
 const ipSetTmpSuffix = "-TMP"
 
-// managedIPSetNames is the single source of truth for the ipsets this process
-// owns. reconcileLiveSetMaxElem and runIptablesCleanup derive their name lists
-// (and the -TMP swap variants) from it, so adding a set is one edit here.
-// These names (and the chain/jump names below) are a fixed contract with the
-// uninstall host sweep (cmd/c8s/kata-sweep.sh), pinned there by
-// TestKataSweepScriptMeshNetfilterNames.
 var managedIPSetNames = []string{
 	podIPSetName4, podIPSetName6,
 	localPodIPSetName4, localPodIPSetName6,
@@ -65,23 +50,13 @@ var managedIPSetNames = []string{
 // essentialICMPv6Types are the ICMPv6 types IPv6 needs to operate (RFC 4890):
 // 1-4 error/PMTU reporting, 128/129 echo, 130-132 Multicast Listener, 133-137
 // NDP (RS/RA/NS/NA) and redirect. The fail-closed egress guards RETURN these
-// and drop every other non-TCP from a cw pod / guest workload.
+// and drop every other non-TCP from a cw pod.
 var essentialICMPv6Types = []int{1, 2, 3, 4, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137}
 
 // defaultProxyUID is the UID under which the ratls-mesh sidecar proxy runs.
 // Traffic from this UID is excluded from iptables redirect to avoid loops.
 // This follows the Istio/Envoy convention of UID 1337.
 const defaultProxyUID = 1337
-
-// cgroup paths for the in-guest processes whose egress must not be
-// redirected into the mesh: the proxy itself (loop-prevention) and the
-// attestation-service (which must reach AMD KDS over plain TCP/HTTPS).
-// They are matched by systemd slice cgroup path, not by UID, so a workload
-// that happens to run as UID 1337 or 0 is not silently exempted.
-const (
-	meshProxyCgroupPath          = "/system.slice/ratls-mesh.service"
-	attestationServiceCgroupPath = "/system.slice/attestation-service.service"
-)
 
 const defaultIPSetMaxElem = 262144
 

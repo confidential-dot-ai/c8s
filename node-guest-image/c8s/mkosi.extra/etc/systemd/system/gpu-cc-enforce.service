@@ -1,6 +1,3 @@
-# Fail the boot when a passed-through NVIDIA GPU is not in CC mode. The kata
-# GPU guest has the same gate (nvidia-gpu-ready); confos's nvidia-cc-ready
-# deliberately tolerates non-CC launches, which the c8s node must not.
 [Unit]
 Description=Refuse to start the node unless every NVIDIA GPU is in confidential-compute mode
 # nvidia-cc-ready is where the driver is proven up and the ready state set;

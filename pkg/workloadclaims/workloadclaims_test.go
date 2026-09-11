@@ -22,8 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"unicode/utf8"
-
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -68,7 +66,7 @@ func serveTokens(t *testing.T, resolver SandboxResolver, signer *SandboxTokenSig
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = ServeTokens(ctx, l, resolver, NewSignerHolder(signer)) }()
+	go func() { _ = ServeTokens(ctx, l, resolver, signer) }()
 	return sock
 }
 
@@ -187,7 +185,7 @@ func TestTokenRouteLoopbackHasNoPeerPID(t *testing.T) {
 	resolver := &fakeResolver{pid: -1, sandboxID: "sandbox-1"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = ServeTokens(ctx, l, resolver, NewSignerHolder(testSigner(t))) }()
+	go func() { _ = ServeTokens(ctx, l, resolver, testSigner(t)) }()
 
 	requester := testRequesterKey(t)
 	pubDER, err := x509.MarshalPKIXPublicKey(&requester.PublicKey)
@@ -392,77 +390,6 @@ func TestSandboxDigestsRoute(t *testing.T) {
 	}
 }
 
-// refreshResolver is a fakeResolver that also reports a refresh posture.
-type refreshResolver struct {
-	fakeResolver
-	refresh  AllowlistRefresh
-	reported bool
-}
-
-func (r *refreshResolver) AllowlistRefresh() (AllowlistRefresh, bool) {
-	return r.refresh, r.reported
-}
-
-// A guest enforcing a frozen allowlist must say so on the one channel that
-// leaves it: its journal is unreadable, so without this the state is invisible.
-func TestSandboxDigestsReportsFrozenAllowlist(t *testing.T) {
-	resolver := &refreshResolver{
-		fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
-		refresh:      AllowlistRefresh{Enabled: false, Reason: "no measurement pinned", Entries: 3},
-		reported:     true,
-	}
-	status, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	var out SandboxDigestsResponse
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatal(err)
-	}
-	if out.AllowlistRefresh == nil {
-		t.Fatal("allowlist_refresh absent; the frozen state never leaves the guest")
-	}
-	if out.AllowlistRefresh.Enabled || out.AllowlistRefresh.Reason != "no measurement pinned" || out.AllowlistRefresh.Entries != 3 {
-		t.Fatalf("allowlist_refresh = %+v", *out.AllowlistRefresh)
-	}
-}
-
-// An inventory with nothing to report must leave the field off the wire, so
-// "cannot say" never serializes as "refresh disabled".
-func TestSandboxDigestsOmitsUnreportedRefresh(t *testing.T) {
-	for name, resolver := range map[string]SandboxResolver{
-		"no reporter":    &fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
-		"reports absent": &refreshResolver{fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
-			if strings.Contains(body, "allowlist_refresh") {
-				t.Fatalf("body = %q, want no allowlist_refresh field", body)
-			}
-		})
-	}
-}
-
-// The reason crosses a trust boundary from an inventory the client may not pin,
-// so it must not be able to forge log lines or blow up a record.
-func TestSafeReasonBoundsRemoteString(t *testing.T) {
-	if got := safeReason("clean reason"); got != "clean reason" {
-		t.Fatalf("safeReason mangled a clean string: %q", got)
-	}
-	if got := safeReason("a\nlevel=ERROR msg=forged\rb\x00c"); strings.ContainsAny(got, "\n\r\x00") {
-		t.Fatalf("control characters survived: %q", got)
-	}
-	long := safeReason(strings.Repeat("é", 5000))
-	if n := len([]rune(long)); n != maxReasonLen+1 {
-		t.Fatalf("truncated to %d runes, want %d plus ellipsis", n, maxReasonLen)
-	}
-	if !utf8.ValidString(long) {
-		t.Fatalf("truncation split a rune: %q", long)
-	}
-}
-
-// The digests endpoint must not mint tokens: it answers for any sandbox and is
-// reachable over the network, so identity issuance there would be unbound.
 func TestDigestsEndpointDoesNotServeTokens(t *testing.T) {
 	sock := serveDigestsOnUnix(t, &fakeResolver{sandboxID: "sandbox-1"})
 	requester := testRequesterKey(t)
@@ -867,29 +794,6 @@ func TestServeTokensRejectsMalformedRequests(t *testing.T) {
 	}
 }
 
-// The kata guest reaches its inventory on loopback, which is the second of the
-// two compiled endpoints inventoryDo accepts. Nothing else is dialable, so no
-// control-plane value can redirect the request.
-func TestGuestInventoryEndpointIsDialable(t *testing.T) {
-	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoaTest(GuestTokenPort)))
-	if err != nil {
-		t.Skipf("guest token port %d unavailable here: %v", GuestTokenPort, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = ServeTokens(ctx, l, &fakeResolver{sandboxID: "sandbox-1"}, NewSignerHolder(testSigner(t))) }()
-
-	requester := testRequesterKey(t)
-	token, err := FetchSandboxToken(ctx, GuestInventoryEndpoint(), 5*time.Second, &requester.PublicKey, testNonce)
-	if err != nil {
-		t.Fatalf("guest loopback fetch: %v", err)
-	}
-	sandbox, err := token.Verify(testSignerKeyFor(t, token), &requester.PublicKey, testNonce)
-	if err == nil && sandbox.SandboxID != "sandbox-1" {
-		t.Fatalf("sandbox = %q", sandbox.SandboxID)
-	}
-}
-
 // testSignerKeyFor is a stand-in: the guest test only needs a key to drive
 // Verify's signature branch, not a real inventory identity.
 func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
@@ -944,78 +848,5 @@ func TestSandboxContainerKeyIsInjective(t *testing.T) {
 	// nil and empty argv are the same admission (json omits an empty list).
 	if (SandboxContainer{Digest: digest}).Key() != (SandboxContainer{Digest: digest, Argv: []string{}}).Key() {
 		t.Fatal("nil and empty argv must key alike")
-	}
-}
-
-// serveTokensWithHolder runs the token route against a holder the test drives,
-// so the pending window can be exercised the way a booting guest hits it.
-func serveTokensWithHolder(t *testing.T, resolver SandboxResolver, signers *SignerHolder) string {
-	t.Helper()
-	sock := filepath.Join(t.TempDir(), "wc.sock")
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = ServeTokens(ctx, l, resolver, signers) }()
-	return sock
-}
-
-// The route exists before its signer does, because under kata the listener has
-// to claim the port before any workload container could. "Not yet" must be
-// distinguishable from "never": issuing without a sandbox ID binds the sandbox
-// in CDS's ledger first-write-wins, so a caller that gives up early is stuck
-// with that binding.
-func TestPendingSignerIsRetryableNotUnsupported(t *testing.T) {
-	signers := NewPendingSignerHolder()
-	sock := serveTokensWithHolder(t, &fakeResolver{sandboxID: "sandbox-1"}, signers)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
-	if !errors.Is(err, ErrSandboxNotReady) {
-		t.Fatalf("err = %v, want ErrSandboxNotReady while the signer is pending", err)
-	}
-
-	// Once installed, the same route answers without the caller reconnecting
-	// to anything new.
-	signers.Set(testSigner(t))
-	token, err := FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
-	if err != nil {
-		t.Fatalf("after Set: %v", err)
-	}
-	if len(token.Token) == 0 {
-		t.Fatal("empty token after the signer was installed")
-	}
-}
-
-// A deployment that issues no tokens at all keeps answering 404, so a caller
-// proceeds without a sandbox ID instead of waiting for a signer that is not
-// coming. This is the node-CVM posture and must not change.
-func TestDisabledSignerStaysUnsupported(t *testing.T) {
-	signers := NewPendingSignerHolder()
-	signers.Disable()
-	sock := serveTokensWithHolder(t, &fakeResolver{sandboxID: "sandbox-1"}, signers)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
-	if !errors.Is(err, ErrSandboxUnsupported) {
-		t.Fatalf("err = %v, want ErrSandboxUnsupported for a disabled signer", err)
-	}
-}
-
-// NewSignerHolder(nil) is the node-CVM construction path: no signer configured
-// means unsupported, never pending.
-func TestNilSignerHolderIsUnsupported(t *testing.T) {
-	if h := NewSignerHolder(nil); h.Ready() {
-		t.Fatal("nil signer reported ready")
-	} else if _, state := h.current(); state != signerUnsupported {
-		t.Fatalf("state = %v, want signerUnsupported", state)
 	}
 }

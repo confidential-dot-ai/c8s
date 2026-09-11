@@ -7,10 +7,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 )
 
 // Config is the get-kubeconfig client configuration.

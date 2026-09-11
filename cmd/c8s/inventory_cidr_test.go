@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -91,66 +90,6 @@ func TestResolveInventoryCIDRsPreflightsCluster(t *testing.T) {
 			t.Fatal("accepted malformed node JSON")
 		}
 	})
-}
-
-// Under --cvm-mode=pod the inventory answers from inside each kata guest on
-// the guest's pod IP, so the callback is pinned to the pod range(s) rather
-// than left to CDS's live node-host derivation (which would refuse every
-// sandbox token).
-func TestResolveInventoryCIDRsPodModeUsesPodRanges(t *testing.T) {
-	prev := fetchNodeJSON
-	t.Cleanup(func() { fetchNodeJSON = prev })
-
-	fetchNodeJSON = func(context.Context) ([]byte, error) {
-		return []byte(`{"items":[
-			{"metadata":{"name":"a"},"spec":{"podCIDR":"10.42.0.0/24","podCIDRs":["10.42.0.0/24","fd00:42::/64"]},
-			 "status":{"addresses":[{"type":"InternalIP","address":"10.0.1.4"}]}},
-			{"metadata":{"name":"b"},"spec":{"podCIDR":"10.42.1.0/24","podCIDRs":["10.42.1.0/24"]},
-			 "status":{"addresses":[{"type":"InternalIP","address":"10.0.1.5"}]}}
-		]}`), nil
-	}
-	got, err := resolveInventoryCIDRs(t.Context(), nil, "pod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"10.42.0.0/24", "fd00:42::/64", "10.42.1.0/24"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("cidrs = %v, want the pod ranges %v, not node host routes", got, want)
-	}
-
-	// The same cluster under node mode still renders nothing (live bound).
-	got, err = resolveInventoryCIDRs(t.Context(), nil, "node")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Fatalf("node mode cidrs = %v, want nil", got)
-	}
-
-	// A CNI with its own IPAM leaves podCIDR empty: fail closed and name the flag.
-	fetchNodeJSON = func(context.Context) ([]byte, error) {
-		return []byte(`{"items":[{"metadata":{"name":"a"},"status":{"addresses":[
-			{"type":"InternalIP","address":"10.0.1.4"}]}}]}`), nil
-	}
-	_, err = resolveInventoryCIDRs(t.Context(), nil, "pod")
-	if err == nil {
-		t.Fatal("pod mode with no podCIDR proceeded with the callback bounded to nothing useful")
-	}
-	if !strings.Contains(err.Error(), "--node-cidr") {
-		t.Fatalf("error = %v, want it to name the flag that fixes it", err)
-	}
-
-	// An unreadable cluster fails in pod mode too.
-	fetchNodeJSON = func(context.Context) ([]byte, error) { return nil, errNoCluster }
-	if _, err := resolveInventoryCIDRs(t.Context(), nil, "pod"); err == nil {
-		t.Fatal("pod mode install proceeded without reading the pod ranges")
-	}
-
-	// Explicit --node-cidr wins in pod mode too.
-	got, err = resolveInventoryCIDRs(t.Context(), []string{"10.42.0.0/16"}, "pod")
-	if err != nil || !slices.Equal(got, []string{"10.42.0.0/16"}) {
-		t.Fatalf("explicit pod-mode cidrs = %v err=%v, want the operator's value untouched", got, err)
-	}
 }
 
 var errNoCluster = errTestCluster("no cluster")

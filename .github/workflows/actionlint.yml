@@ -70,6 +70,4 @@ jobs:
             .github/scripts/repro-gate-changes \
             .github/scripts/tests/test-pin-manifest.sh \
             .github/scripts/tests/test-repro-gate-changes.sh \
-            kata-guest-base/scripts/ci/publish-release-aliases.sh \
-            kata-guest-base/scripts/build-kernel.sh \
-            .github/scripts/tests/test-build-guest-kernel.sh
+            cmd/c8s/host-sweep.sh

@@ -1,9 +1,7 @@
 {{/* Services helpers. See ../helpers/services/README.md. */}}
 
 {{- define "c8s.attestationApiURL" -}}
-{{- if .Values.kata.enabled -}}
-http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if .Values.attestationApi.enabled -}}
+{{- if .Values.attestationApi.enabled -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
@@ -15,7 +13,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiHostSocket" -}}
-{{- if and .Values.attestationApi.enabled (not .Values.kata.enabled) -}}true{{- end -}}
+{{- if and .Values.attestationApi.enabled -}}true{{- end -}}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketVolume" -}}
@@ -36,7 +34,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+{{- if and (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:
@@ -83,7 +81,7 @@ cache_max_entries = 1024
 {{- define "c8s.tlsLb.resolver" -}}
 {{- if .Values.tlsLb.nginx.resolver -}}
 {{- .Values.tlsLb.nginx.resolver -}}
-{{- else if or (eq .Values.kata.distro "rke2") (eq .Values.nriImagePolicy.distro "rke2") -}}
+{{- else if eq .Values.nriImagePolicy.distro "rke2" -}}
 rke2-coredns-rke2-coredns.kube-system.svc.cluster.local
 {{- else -}}
 kube-dns.kube-system.svc.cluster.local

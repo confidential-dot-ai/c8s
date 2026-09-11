@@ -69,7 +69,6 @@ type config struct {
 	DiscoveryMeshCAURL     string
 	DiscoveryPublicTLSMode string
 	WorkloadClaims         bool
-	WorkloadClaimsGuest    bool
 	WorkloadClaimsTimeout  time.Duration
 	UnnamedRenewInterval   time.Duration
 }
@@ -141,8 +140,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds, webpki, or acme)")
-	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM, policy-monitor in the kata guest (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
-	flags.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
+	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
 	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory request")
 	flags.DurationVar(&cfg.UnnamedRenewInterval, "unnamed-renew-interval", 30*time.Second, "With --workload-claims and --renew-interval, renew this often (plus jitter) while the installed leaf carries no matched-workload stamp, so a pod picks up its name at the first post-completion renewal instead of waiting a full interval; settles to --renew-interval once named, and backs off toward it for a pod that stays unnamed. Poll timing never changes the match decision. 0 disables the fast poll")
 
@@ -189,7 +187,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), cfg.WorkloadClaimsGuest,
+	if err := cmdsutil.CheckCDSPinned(len(measurements),
 		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
 		return nil, err
 	}
@@ -218,7 +216,7 @@ func run(cfg config) error {
 	// not injected at container creation and no in-process wait can produce
 	// it, while the retry loop below would idle forever behind
 	// --continue-on-initial-error (see workloadclaims.RequireSidecarSocketDir).
-	if cfg.WorkloadClaims && !cfg.WorkloadClaimsGuest {
+	if cfg.WorkloadClaims {
 		if err := workloadclaims.RequireSidecarSocketDir(); err != nil {
 			return err
 		}
@@ -605,9 +603,6 @@ func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, no
 		return nil, nil
 	}
 	endpoint := inventoryEndpoint()
-	if cfg.WorkloadClaimsGuest {
-		endpoint = workloadclaims.GuestInventoryEndpoint()
-	}
 	token, err := workloadclaims.FetchSandboxToken(ctx, endpoint, cfg.WorkloadClaimsTimeout, pub, nonce)
 	switch {
 	case errors.Is(err, workloadclaims.ErrSandboxUnsupported):

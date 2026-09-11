@@ -89,9 +89,7 @@ type mount struct {
 
 // Opener opens volumes and remembers what it has open.
 type Opener struct {
-	Ops DeviceOps
-	// Targets resolves where a volume is mounted: kubelet's pod directory on
-	// node-CVM, the guest's ephemeral directory under kata.
+	Ops     DeviceOps
 	Targets Targets
 	// MaxMounts caps live volumes; zero means DefaultMaxMounts.
 	MaxMounts int

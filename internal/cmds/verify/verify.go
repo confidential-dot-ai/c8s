@@ -3,7 +3,6 @@ package verify
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -27,9 +26,10 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/attestation-go/remote"
+	"crypto/sha256"
+
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -205,7 +205,7 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
-	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
@@ -648,8 +648,8 @@ func parseInitDataPin(flag string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--init-data is not hex: %v", err)
 	}
-	if len(digest) != initdata.DigestSize {
-		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), initdata.DigestSize)
+	if len(digest) != sha256.Size {
+		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), sha256.Size)
 	}
 	return digest, nil
 }

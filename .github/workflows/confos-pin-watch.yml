@@ -1,18 +1,3 @@
-# Watches the confos / attestation-rs source pins the measured builds ride
-# and opens bump PRs when upstream main moves — never merges: each bump
-# rolls a measurement, so a human owns the merge. The mkosi ref is not
-# watched independently: it is scraped from the target confos commit's own
-# base.yml, which keeps MinimumVersion= and the installed mkosi in lockstep
-# by construction. The canonical data lives in .github/build-pins.json;
-# .github/scripts/pin-manifest.sh validates the full schema before updating it.
-#
-# One matrix leg per measurement domain, so each roll is its own PR:
-#   node-image: node rootfs / RTMR + SNP digests
-#   kata-guest: kata guest + kernel-snapshot lineage
-#
-# Authentication prefers a short-lived, repository-scoped GitHub App token.
-# Checkout, push, and gh use one credential; an unconfigured App falls back to
-# GITHUB_TOKEN, while invalid configured credentials fail before checkout.
 name: confos pin watch
 
 on:
@@ -36,7 +21,6 @@ jobs:
       matrix:
         include:
           - domain: node-image
-          - domain: kata-guest
     steps:
       - name: Create pin-watch GitHub App token
         id: pin-watch-app-token

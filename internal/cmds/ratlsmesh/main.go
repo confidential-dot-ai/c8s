@@ -87,8 +87,6 @@ func newRatlsMeshCommand() *cobra.Command {
 	bindProxyFlags(cmd.Flags(), &cfg)
 	cmd.AddCommand(newIptablesSyncCommand())
 	cmd.AddCommand(newIptablesCleanupCommand())
-	cmd.AddCommand(newInGuestCommand())
-	cmd.AddCommand(newReadinessCheckCommand())
 	return cmd
 }
 
@@ -661,20 +659,13 @@ func effectiveCDSCAURL(certMode, cdsURL string) string {
 func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
 	case "auto":
-		// Probe the guest device tree. Kata's confidential runtimes
-		// pass the TEE device through as /dev/{tdx_guest,sev-guest};
-		// attestation-rs's own is_available() does the same check.
-		// Prefer TDX over SNP for the (theoretical) mixed case — an
-		// operator setting --platform=auto wants a working guest,
-		// and choosing arbitrarily is the sanest tiebreaker for a
-		// shape we don't ship today.
 		if _, err := os.Stat("/dev/tdx_guest"); err == nil {
 			return ratls.TEETypeTDX, nil
 		}
 		if _, err := os.Stat("/dev/sev-guest"); err == nil {
 			return ratls.TEETypeSEVSNP, nil
 		}
-		return "", fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
+		return "", fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the node does not expose a TEE device")
 	case "":
 		return "", fmt.Errorf("--platform is required")
 	}

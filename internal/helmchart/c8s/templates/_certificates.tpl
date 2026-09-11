@@ -37,11 +37,6 @@
     {{- with .extraMounts }}
     {{- . | nindent 4 }}
     {{- end }}
-  # The workload is gated on the initial cert by the c8s-cert-wait init
-  # container below, not a startupProbe here: a native sidecar is "started"
-  # the moment its process launches, and an exec startupProbe is denied by the
-  # locked kata-qemu-snp guest (ExecProcessRequest := false), so it could never
-  # pass there and the workload would hang in Init forever.
   securityContext:
     {{- include "c8s.getCertSecurityContext" . | nindent 4 }}
 # c8s-cert-wait gates the workload on the initial cert without an exec probe.

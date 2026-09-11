@@ -1,9 +1,6 @@
 # Build output
 build/
 
-# Local scratch: temporary kata bring-up scripts (see .local-kata/README.md).
-# Not for source control or CI.
-.local-kata/
 
 # Stray root-level binaries from `go build ./cmd/<name>` without -o build/
 # (Makefile targets land artifacts in build/; anything matching a cmd/
@@ -39,7 +36,5 @@ coverage.txt
 *.pem
 *.key
 
-kata-guest-base/.build/
 
 # confos fragment-build output; the committed drift baseline stays separate.
-kata-guest-base/kernel/config-x86_64-container.snapshot

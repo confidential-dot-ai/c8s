@@ -96,15 +96,7 @@ spec:
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
-      {{- if .Values.kata.enabled }}
-      # Run the trust root inside a confidential VM. Its mesh CA
-      # key lives only in SEV-SNP-encrypted guest memory, and peers verify cds's
-      # RA-TLS serving cert against the guest launch measurement. Pinned directly
-      # (not via the confidential.ai/cw webhook path) because get-cert would dial
-      # cds — cds fetching a leaf from itself is a bootstrap cycle. See
-      # docs/install-flows.md ("Why CDS doesn't use cw for its runtimeClass").
-      runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
-      {{- end }}
+
       serviceAccountName: {{ include "c8s.cdsName" . }}
       # The live node-list bound needs the API token; static CIDRs do not.
       automountServiceAccountToken: {{ empty .Values.cds.sandboxInventoryCIDRs }}
@@ -121,19 +113,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
-      {{- include "c8s.kataGuestReadyAffinity" . | nindent 6 }}
       securityContext:
-      {{- if .Values.kata.enabled }}
-        # In a kata-qemu-snp guest with shared_fs="none", the kubelet fsGroup
-        # chown lands on a host emptyDir the guest never mounts, so the agent
-        # creates a fresh root-owned /data inside the guest and UID 65532 cannot
-        # write allowlist.db. Run as in-guest root — safe, since the SNP VM is the
-        # trust boundary and cds is its sole workload.
-        runAsUser: 0
-        runAsNonRoot: false
-      {{- else }}
+
 {{ toYaml .Values.podSecurityContext | indent 8 }}
-      {{- end }}
+
       containers:
         - name: cds
           image: {{ include "c8s.cdsImage" . }}
@@ -203,21 +186,7 @@ spec:
           ports:
             - name: https
               containerPort: {{ .Values.cds.port }}
-          {{- if .Values.kata.enabled }}
-          # In-guest cds serves mutual RA-TLS: the kubelet prober presents no
-          # attested client cert, so an httpGet handshake is rejected. The port
-          # only opens once cds has provisioned its RA-TLS serving cert (which
-          # needs a healthy in-guest attestation-service), so an open socket is
-          # the correct "attested and serving" signal.
-          readinessProbe:
-            tcpSocket:
-              port: https
-            initialDelaySeconds: 3
-          livenessProbe:
-            tcpSocket:
-              port: https
-            periodSeconds: 30
-          {{- else }}
+
           readinessProbe:
             httpGet:
               path: /readyz
@@ -230,7 +199,7 @@ spec:
               port: https
               scheme: HTTPS
             periodSeconds: 30
-          {{- end }}
+
           resources:
 {{ toYaml .Values.cds.resources | indent 12 }}
           volumeMounts:
@@ -255,13 +224,10 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-          {{- if .Values.kata.enabled }}
-            runAsUser: 0
-            runAsNonRoot: false
-          {{- else }}
+
             runAsNonRoot: true
             runAsUser: 65532
-          {{- end }}
+
             capabilities:
               drop:
                 - ALL
@@ -299,20 +265,9 @@ metadata:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: cds
 spec:
-  {{- if .Values.kata.enabled }}
-  # Headless under kata so cluster DNS returns the cds pod IP, not a Service
-  # ClusterIP. The in-guest ratls-mesh's outbound proxy reads the workload's
-  # SO_ORIGINAL_DST and dials <that-ip>:15006 (the peer mesh's inbound
-  # listener); a Service ClusterIP has no port-15006 endpoint, so the dial
-  # times out (see ratls_mesh_tls_dial_failures_total). A pod IP routes
-  # straight to the peer VM, where PREROUTING redirects port 15006 to the
-  # local mesh inbound. NodePort is unused under kata anyway — install --cvm-mode=pod
-  # disables nriImagePolicy, the only consumer of cds NodePort.
-  type: ClusterIP
-  clusterIP: None
-  {{- else }}
+
   type: {{ .Values.cds.service.type }}
-  {{- end }}
+
   selector:
     app.kubernetes.io/name: c8s-operator
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -321,6 +276,6 @@ spec:
     - name: http
       port: {{ .Values.cds.port }}
       targetPort: https
-      {{- if and (not .Values.kata.enabled) (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
+      {{- if and (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
       nodePort: {{ .Values.cds.service.nodePort }}
       {{- end }}

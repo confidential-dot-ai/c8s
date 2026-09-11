@@ -66,9 +66,7 @@ func TestSetupManagerStatusMirrorDiscovery(t *testing.T) {
 	}
 }
 
-// The webhook must register whenever get-cert injection is wanted, even with
-// kata enforcement off.
-func TestSetupManagerWebhookRegistersWithoutKata(t *testing.T) {
+func TestSetupManagerWebhookRegisters(t *testing.T) {
 	mgr := newTestManager(t)
 	opts := Options{
 		DisableStatusMirror: true,
