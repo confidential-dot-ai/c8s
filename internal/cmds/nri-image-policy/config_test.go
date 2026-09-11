@@ -18,7 +18,7 @@ import (
 func validConfig() config {
 	return config{
 		Allowlist: allowlistConfig{
-			Floor: anyAllowlist(map[string]string{
+			Base: anyAllowlist(map[string]string{
 				"sha256:0000000000000000000000000000000000000000000000000000000000000001": "test-installer",
 			}),
 			Pull: pullConfig{
@@ -34,13 +34,13 @@ func validConfig() config {
 	}
 }
 
-// floorYAML renders an allowlist.floor config block: one any-argv entry.
-func floorYAML(digest, image string) string {
+// baseYAML renders an allowlist.base config block: one any-argv entry.
+func baseYAML(digest, image string) string {
 	return fmt.Sprintf(`
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
-      floor-entry:
+      base-entry:
         label: %q
         containers:
           - digest: %q
@@ -122,30 +122,30 @@ func TestValidate_PullRejectsUnsupportedScheme(t *testing.T) {
 	}
 }
 
-func TestValidate_FloorRequiredWithPull(t *testing.T) {
+func TestValidate_BaseRequiredWithPull(t *testing.T) {
 	cfg := validConfig()
-	cfg.Allowlist.Floor = nil
+	cfg.Allowlist.Base = nil
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when pull is configured but the floor is empty")
+		t.Fatal("expected error when pull is configured but the base allowlist is empty")
 	}
 }
 
-// A malformed floor fails at load: the digest type validates on decode, and
-// the document's own validation catches a bad policy or schema.
-func TestLoadConfig_RejectsMalformedFloor(t *testing.T) {
+// A malformed base allowlist fails at load: the digest type validates on
+// decode, and the document's own validation catches a bad policy or schema.
+func TestLoadConfig_RejectsMalformedBase(t *testing.T) {
 	good := "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 	for _, tc := range []struct {
-		name  string
-		floor string
+		name string
+		base string
 	}{
-		{"non-hex digest", floorYAML("sha256:not-hex", "installer")},
-		{"non-sha256 digest", floorYAML("sha512:"+good[7:], "installer")},
-		{"short digest", floorYAML(good[:len(good)-1], "installer")},
-		{"unknown argv policy", strings.Replace(floorYAML(good, "installer"), "policy: any", "policy: anu", 1)},
-		{"unknown schema", strings.Replace(floorYAML(good, "installer"), "c8s.allowlist/v1", "c8s.allowlist/v2", 1)},
+		{"non-hex digest", baseYAML("sha256:not-hex", "installer")},
+		{"non-sha256 digest", baseYAML("sha512:"+good[7:], "installer")},
+		{"short digest", baseYAML(good[:len(good)-1], "installer")},
+		{"unknown argv policy", strings.Replace(baseYAML(good, "installer"), "policy: any", "policy: anu", 1)},
+		{"unknown schema", strings.Replace(baseYAML(good, "installer"), "c8s.allowlist/v1", "c8s.allowlist/v2", 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := "allowlist:" + tc.floor + `
+			body := "allowlist:" + tc.base + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -170,7 +170,7 @@ func TestValidate_InvalidMode(t *testing.T) {
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
+	yaml := "allowlist:" + baseYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -202,7 +202,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 // exempt_namespaces is parsed into the policy config alongside the snapshot
 // path the plugin persists its captured digest set to.
 func TestLoadConfig_ExemptNamespacesParsed(t *testing.T) {
-	body := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
+	body := "allowlist:" + baseYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -270,7 +270,7 @@ func TestAllowlistEnabled_WithURL(t *testing.T) {
 func TestAllowlistEnabled_WithoutURL(t *testing.T) {
 	cfg := validConfig()
 	cfg.Allowlist.Pull.URL = ""
-	cfg.Allowlist.Floor = nil
+	cfg.Allowlist.Base = nil
 	if cfg.AllowlistEnabled() {
 		t.Fatal("expected allowlist to be disabled")
 	}
@@ -434,7 +434,7 @@ func TestLoadConfig_UnixAttestationAPIURL(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
-	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
+	yaml := "allowlist:" + baseYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: unix://` + sock + `
@@ -458,7 +458,7 @@ func TestLoadConfig_UnixAttestationAPIURL(t *testing.T) {
 }
 
 func TestLoadConfig_WithLabelRules(t *testing.T) {
-	yaml := "allowlist:" + floorYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
+	yaml := "allowlist:" + baseYAML("sha256:0000000000000000000000000000000000000000000000000000000000000001", "installer") + `
   pull:
     url: https://127.0.0.1:30808
     attestation_api_url: http://localhost:30840
@@ -542,26 +542,26 @@ func TestLabelOperator(t *testing.T) {
 // TDX node, and the resulting error names the evidence platform rather than this
 // setting, so the cause sits several hops from the symptom.
 func TestConfigPlatform(t *testing.T) {
-	floor := "allowlist:" + floorYAML(
+	base := "allowlist:" + baseYAML(
 		"sha256:0000000000000000000000000000000000000000000000000000000000000000",
 		"example.com/img@sha256:0000000000000000000000000000000000000000000000000000000000000000")
 
 	t.Run("defaults to snp so existing SNP deployments are unchanged", func(t *testing.T) {
-		cfg := writeAndLoad(t, floor)
+		cfg := writeAndLoad(t, base)
 		if got := cfg.NormalizedPlatform(); got != "sev-snp" {
 			t.Errorf("NormalizedPlatform() = %q, want sev-snp", got)
 		}
 	})
 
 	t.Run("tdx is carried through", func(t *testing.T) {
-		cfg := writeAndLoad(t, "platform: tdx\n"+floor)
+		cfg := writeAndLoad(t, "platform: tdx\n"+base)
 		if got := cfg.NormalizedPlatform(); got != "tdx" {
 			t.Errorf("NormalizedPlatform() = %q, want tdx", got)
 		}
 	})
 
 	t.Run("az-tdx normalizes onto tdx, matching CDS", func(t *testing.T) {
-		cfg := writeAndLoad(t, "platform: az-tdx\n"+floor)
+		cfg := writeAndLoad(t, "platform: az-tdx\n"+base)
 		if got := cfg.NormalizedPlatform(); got != "tdx" {
 			t.Errorf("NormalizedPlatform() = %q, want tdx", got)
 		}
@@ -569,7 +569,7 @@ func TestConfigPlatform(t *testing.T) {
 
 	t.Run("an unknown platform is refused at load", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "c.yaml")
-		if err := os.WriteFile(path, []byte("platform: nitro\n"+floor), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("platform: nitro\n"+base), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, err := loadConfig(path)

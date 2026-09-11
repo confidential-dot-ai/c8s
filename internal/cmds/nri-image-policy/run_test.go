@@ -179,7 +179,7 @@ func runWithDeadline(t *testing.T, timeout time.Duration, args []string) error {
 	}
 }
 
-// baseConfigYAML is a minimal valid config: static floor only, a containerd
+// baseConfigYAML is a minimal valid config: a static base allowlist only, a containerd
 // socket nobody listens on (resolution is lazy), and a health server on a
 // private unix socket. In the test environment the NRI socket does not exist,
 // so a full Run always ends with the plugin failing to register.
@@ -192,7 +192,7 @@ plugin:
 containerd:
   socket: %s/ctr.sock
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       image-a-000000000000:
@@ -246,7 +246,7 @@ plugin:
 containerd:
   socket: %s/ctr.sock
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       image-a-000000000000:
@@ -279,7 +279,7 @@ plugin:
 containerd:
   socket: %s/ctr.sock
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       image-a-000000000000:
@@ -304,7 +304,7 @@ logging:
 }
 
 // A plugin death during the initial pull is fatal (errPluginDied), not a
-// degrade-to-floor condition.
+// degrade-to-base condition.
 func TestRun_PluginDeathDuringInitialPullIsFatal(t *testing.T) {
 	t.Setenv("NRI_PLUGIN_NAME", "")
 	origDelay, origRetries := allowlistApiInitialDelay, allowlistApiMaxRetries
@@ -323,7 +323,7 @@ plugin:
 containerd:
   socket: %s/ctr.sock
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       image-a-000000000000:
@@ -386,7 +386,7 @@ plugin:
 containerd:
   socket: %s/ctr.sock
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       image-a-000000000000:
@@ -572,7 +572,7 @@ func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 // a kill that could not be delivered must count as failed, not killed.
 func TestCheckExisting_CountsFailedKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
-		Allowlist: allowlistConfig{Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
+		Allowlist: allowlistConfig{Base: anyAllowlist(map[string]string{pushDigestA: "image-a"})},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
 	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)

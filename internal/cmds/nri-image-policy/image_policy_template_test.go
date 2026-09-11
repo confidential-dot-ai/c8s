@@ -37,10 +37,10 @@ func renderNodeImagePolicy(t *testing.T) string {
 	return out
 }
 
-func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
+func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 	rendered := renderNodeImagePolicy(t)
 	if strings.Contains(rendered, "exempt_namespaces") {
-		t.Fatal("exempt_namespaces must not return: admission keys on the digest floor alone")
+		t.Fatal("exempt_namespaces must not return: admission keys on the base allowlist alone")
 	}
 
 	path := filepath.Join(t.TempDir(), "image-policy.yaml")
@@ -52,13 +52,13 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		t.Fatalf("the rendered node-image boot config does not load: %v", err)
 	}
 
-	// The full RKE2 system floor: every digest systemfloor derives from the
+	// The full RKE2 system set: every digest systemfloor derives from the
 	// pinned airgap bundles and baked manifests. A regen for an RKE2 pin bump
 	// rewrites these — update the pins with it. Pinning the whole set, not a
 	// boot-critical subset, makes a dropped or corrupted entry fail here
 	// instead of at node boot. The local-path helper's busybox is NOT here:
 	// systemfloor drops it (-exclude-ref) and the chart seeds it argv-pinned.
-	floor := map[string]string{
+	systemImages := map[string]string{
 		"sha256:8026310fc44d985bf7c02434ad11d5f826a1aa1567606eea121b24ba9b3b0590": "docker.io/rancher/hardened-addon-resizer:1.8.23-build20260819",
 		"sha256:c9b9b027e4d2cf1731311f9714f4aa633d37d7b0a72c9d3e6fc7a0594350d27c": "docker.io/rancher/hardened-cluster-autoscaler:v1.10.3-build20260819",
 		"sha256:0d26512c90d935db3180f47a7a716e3dfac0847ec29076fb5487e535125a86a8": "docker.io/rancher/hardened-cni-plugins:v1.9.1-build20260717",
@@ -87,37 +87,37 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		"sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77": "nvcr.io/nvidia/k8s-device-plugin:v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
 		"sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f": "rancher/local-path-provisioner:v0.0.36@sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f",
 	}
-	// The floor carries one any-argv entry per admitted image; index it by
-	// digest for the lookups below.
-	floorEntries := map[string]string{}
-	for _, w := range cfg.Allowlist.Floor.Workloads {
+	// The base allowlist carries one any-argv entry per admitted image;
+	// index it by digest for the lookups below.
+	baseEntries := map[string]string{}
+	for _, w := range cfg.Allowlist.Base.Workloads {
 		for _, d := range w.Digests() {
-			floorEntries[d.String()] = w.Label
+			baseEntries[d.String()] = w.Label
 		}
 	}
-	for digest, ref := range floor {
-		if _, ok := floorEntries[digest]; !ok {
-			t.Errorf("%s (%s) missing from the baked floor — the node cannot boot its system components", ref, digest)
+	for digest, ref := range systemImages {
+		if _, ok := baseEntries[digest]; !ok {
+			t.Errorf("%s (%s) missing from the baked base allowlist — the node cannot boot its system components", ref, digest)
 		}
 	}
 
-	// The floor is the generated system set plus the rendered CDS token.
+	// The base allowlist is the generated system set plus the rendered CDS token.
 	// The exact count catches an entry a regen adds or drops.
-	if want := len(floor) + 1; len(cfg.Allowlist.Floor.Workloads) != want {
-		t.Errorf("baked floor has %d entries, want %d (%d system floor + cds)",
-			len(cfg.Allowlist.Floor.Workloads), want, len(floor))
+	if want := len(systemImages) + 1; len(cfg.Allowlist.Base.Workloads) != want {
+		t.Errorf("baked base allowlist has %d entries, want %d (%d system images + cds)",
+			len(cfg.Allowlist.Base.Workloads), want, len(systemImages))
 	}
-	for digest := range floorEntries {
-		if strings.Contains(floorEntries[digest], "busybox") {
-			t.Errorf("busybox %s must not return to the digest-only floor; it is seeded argv-pinned", digest)
+	for digest := range baseEntries {
+		if strings.Contains(baseEntries[digest], "busybox") {
+			t.Errorf("busybox %s must not return to the permissive base allowlist; it is seeded argv-pinned", digest)
 		}
 	}
 
-	// Every floor entry must be a digest the store admits under any argv.
-	store := newPolicyStore(cfg.Allowlist.Floor)
-	for d := range floorEntries {
-		if !store.floorAdmits(d, nil) {
-			t.Errorf("floor entry %q is not admitted by digest alone", d)
+	// Every base entry must be a digest the store admits under any argv.
+	store := newPolicyStore(cfg.Allowlist.Base)
+	for d := range baseEntries {
+		if !store.baseAdmits(d, nil) {
+			t.Errorf("base entry %q is not admitted by digest alone", d)
 		}
 	}
 }

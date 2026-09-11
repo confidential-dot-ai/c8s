@@ -213,7 +213,7 @@ echo "==> nri-image-policy installer finished; plugin healthy: $health"
 
 {{/*
 Pins script for a node-as-CVM (--cvm-mode=bare-metal), where the node image bakes the
-plugin binary, its containerd registration and the boot config — floor included,
+plugin binary, its containerd registration and the boot config — base included,
 whose RKE2 system digests only the image build resolves. This release's CDS pins
 are the one thing that config cannot carry, so the installer patches those two
 keys into it and restarts containerd when they change.
@@ -241,7 +241,7 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.floor is the boot floor for CDS and
+runs pull mode (polls CDS); allowlist.base is the boot base for CDS and
 any-argv bootstrap digests. Argv-pinned images are admitted by the served seed.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
@@ -275,9 +275,9 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-  floor:
-    {{- $floor := include "c8s.floorWorkloads" $root | fromJson -}}
-    {{- dict "schema" "c8s.allowlist/v1" "workloads" $floor | toYaml | nindent 4 }}
+  base:
+    {{- $base := include "c8s.baseWorkloads" $root | fromJson -}}
+    {{- dict "schema" "c8s.allowlist/v1" "workloads" $base | toYaml | nindent 4 }}
 containerd:
   socket: {{ include "nri-image-policy.containerdSocket" $root | quote }}
   namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}

@@ -66,10 +66,10 @@
 {{ $digests | toJson }}
 {{- end -}}
 
-{{/* The plugin boot floor, as allowlist workloads: every digest the floor
+{{/* The plugin boot base, as allowlist workloads: every digest the base
      admits under any command line, keyed by its DigestEntryName. The boot
      config excludes argv-pinned images, which are admitted by the served seed. */ -}}
-{{- define "c8s.floorWorkloads" -}}
+{{- define "c8s.baseWorkloads" -}}
 {{- $workloads := dict -}}
 {{- $pinnedDigests := include "c8s.argvPinnedDigests" . | fromJsonArray -}}
 {{- range $digest, $image := (merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson)) -}}

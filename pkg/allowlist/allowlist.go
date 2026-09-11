@@ -46,7 +46,7 @@ const (
 )
 
 // The yaml tags mirror the json ones so a document embeds in a YAML config
-// (the NRI plugin's boot floor) in the same shape it has on the wire.
+// (the NRI plugin's base allowlist) in the same shape it has on the wire.
 //
 // Allowlist is the complete image allowlist.
 type Allowlist struct {
