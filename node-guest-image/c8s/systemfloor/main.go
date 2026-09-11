@@ -1,5 +1,5 @@
-// Command systemfloor regenerates the RKE2 system-image floor in
-// image-policy.yaml.in: the allowlist.floor workloads that admit the node's
+// Command systemfloor regenerates the RKE2 system-image entries in
+// image-policy.yaml.in: the allowlist.base workloads that admit the node's
 // baked system components (rke2 static pods, Cilium, CoreDNS,
 // local-path-storage) under any command line.
 //
@@ -8,7 +8,7 @@
 // tarballs and the import rebuilds each manifest, so the digest only exists
 // in the store. This tool runs the same code the daemon's import does
 // (images/archive.ImportIndex, vendored with the c8s module) against a
-// scratch content store, so the floor matches what the plugin resolves at
+// scratch content store, so the entries match what the plugin resolves at
 // runtime.
 //
 //	systemfloor -bundle rke2-images-core.linux-amd64.tar.zst \
@@ -16,7 +16,7 @@
 //	    -manifest .../server/manifests/local-path-storage.yaml \
 //	    -manifest .../server/manifests/nvidia-device-plugin.yaml
 //
-// prints the floor block. With -template pointing at image-policy.yaml.in,
+// prints the block. With -template pointing at image-policy.yaml.in,
 // -check reports drift and -write rewrites the block between the BEGIN/END
 // markers in place.
 package main
@@ -45,7 +45,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// entry is one floor line: a digest admitted under an image reference.
+// entry is one base workload: a digest admitted under an image reference.
 type entry struct {
 	digest string
 	ref    string
@@ -130,16 +130,16 @@ func manifestEntries(path string) ([]entry, error) {
 	return out, nil
 }
 
-// render formats the entries as allowlist.floor workloads at the template's
+// render formats the entries as allowlist.base workloads at the template's
 // indent: one any-argv entry per digest, named the way pkg/allowlist
 // DigestEntryName names it, sorted by image reference.
 func render(entries []entry) (string, error) {
-	type floorEntry struct {
+	type baseEntry struct {
 		name   string
 		digest string
 		ref    string
 	}
-	floor := make([]floorEntry, 0, len(entries))
+	base := make([]baseEntry, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if seen[e.digest] {
@@ -150,17 +150,17 @@ func render(entries []entry) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", e.ref, err)
 		}
-		floor = append(floor, floorEntry{name: allowlist.DigestEntryName(d, e.ref), digest: e.digest, ref: e.ref})
+		base = append(base, baseEntry{name: allowlist.DigestEntryName(d, e.ref), digest: e.digest, ref: e.ref})
 	}
-	sort.Slice(floor, func(i, j int) bool {
-		if floor[i].ref != floor[j].ref {
-			return floor[i].ref < floor[j].ref
+	sort.Slice(base, func(i, j int) bool {
+		if base[i].ref != base[j].ref {
+			return base[i].ref < base[j].ref
 		}
-		return floor[i].name < floor[j].name
+		return base[i].name < base[j].name
 	})
 
 	var b strings.Builder
-	for _, f := range floor {
+	for _, f := range base {
 		fmt.Fprintf(&b, `      %s:
         label: %q
         containers:
@@ -174,8 +174,8 @@ func render(entries []entry) (string, error) {
 }
 
 const (
-	beginMarker = "# BEGIN rke2 system floor"
-	endMarker   = "# END rke2 system floor"
+	beginMarker = "# BEGIN rke2 system images"
+	endMarker   = "# END rke2 system images"
 )
 
 // splice returns the template with the lines between the marker lines
@@ -274,7 +274,7 @@ func run(args []string, stdout io.Writer) error {
 	switch {
 	case check:
 		if updated != string(data) {
-			return fmt.Errorf("%s: system floor is stale; regenerate with systemfloor -write", templatePath)
+			return fmt.Errorf("%s: system images are stale; regenerate with systemfloor -write", templatePath)
 		}
 	case write:
 		if err := os.WriteFile(templatePath, []byte(updated), 0o644); err != nil {

@@ -135,10 +135,10 @@ jobs:
           echo "$CORE_SHA256  core.tar.zst" | sha256sum -c -
           echo "$CILIUM_SHA256  cilium.tar.zst" | sha256sum -c -
 
-      - name: The baked floor matches the pinned bundles
-        # systemfloor re-derives the floor block from the pinned
+      - name: The baked base allowlist matches the pinned bundles
+        # systemfloor re-derives the system block from the pinned
         # bundles; -check fails when image-policy.yaml.in is stale, so an RKE2
-        # pin bump without a floor regen cannot merge and wedge node boot.
+        # pin bump without a regen cannot merge and wedge node boot.
         run: |
           set -euo pipefail
           manifests=node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests

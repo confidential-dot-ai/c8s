@@ -85,10 +85,11 @@
 {{ $digests | toJson }}
 {{- end -}}
 
-{{/* The plugin boot floor, as allowlist workloads: every digest the floor
-     admits under any command line, keyed by its DigestEntryName. The boot
-     config (nri-image-policy.bootConfig) adds the installer self-entry. */ -}}
-{{- define "c8s.floorWorkloads" -}}
+{{/* The plugin's base allowlist, as workloads: every digest the base
+     allowlist admits under any command line, keyed by its DigestEntryName. The
+     boot config (nri-image-policy.bootConfig) adds the installer
+     self-entry. */ -}}
+{{- define "c8s.baseWorkloads" -}}
 {{- $workloads := dict -}}
 {{- range $digest, $image := (merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson)) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
