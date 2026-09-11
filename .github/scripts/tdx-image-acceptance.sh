@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Exact-image evidence is supplied by the trusted publisher in this workflow run.
 set -euo pipefail
+# The launcher runner reaches the outer cluster with in-cluster credentials.
+# kubectl only falls back to those when the flag-merged config equals its
+# built-in default, and --request-timeout breaks that equality, so it would
+# dial localhost:8080 instead. Bound each call with coreutils timeout.
 
 fail() { echo "tdx-image-acceptance: $*" >&2; exit 1; }
 
@@ -82,9 +86,9 @@ case ${1:-} in
     [[ $# == 7 ]] || fail 'usage: start-import EVIDENCE SOURCE_SHA RUN_ID VM NAMESPACE REPOSITORY'
     validate "$2" "$3" "$4"
     identity "$5" "$6" "$4" "$7"
-    object=$(kubectl --request-timeout=30s -n "$6" get pvc "$5-root" -o json)
+    object=$(timeout 30 kubectl -n "$6" get pvc "$5-root" -o json)
     owned_root "$object" "$5" "$4" "$7" || fail 'refusing an unowned root PVC'
-    binder=$(kubectl --request-timeout=30s -n "$6" get pod "$5-binder" -o json)
+    binder=$(timeout 30 kubectl -n "$6" get pod "$5-binder" -o json)
     owned_root "$binder" "$5" "$4" "$7" binder || fail 'refusing an unowned binder Pod'
     node=$(jq -er '.spec.nodeName | select(type == "string" and length > 0)' <<<"$binder")
     jq -e --arg node "$node" '.status.phase == "Bound" and
@@ -94,7 +98,7 @@ case ${1:-} in
       any(.status.conditions[]; .type == "PodScheduled" and .status == "True")' <<<"$binder" >/dev/null ||
       fail 'TDX binder is not scheduled'
     image=$(jq -r .image "$2/acceptance.json")
-    kubectl --request-timeout=30s -n "$6" annotate pvc "$5-root" \
+    timeout 30 kubectl -n "$6" annotate pvc "$5-root" \
       cdi.kubevirt.io/storage.import.source=registry \
       "cdi.kubevirt.io/storage.import.endpoint=docker://$image" \
       cdi.kubevirt.io/storage.contentType=kubevirt --overwrite=false
@@ -108,7 +112,7 @@ case ${1:-} in
     while (( SECONDS < deadline )); do
       remaining=$((deadline - SECONDS))
       request_timeout=$((remaining < 30 ? remaining : 30))
-      object=$(kubectl --request-timeout="${request_timeout}s" -n "$3" get pvc "$2-root" -o json)
+      object=$(timeout "$request_timeout" kubectl -n "$3" get pvc "$2-root" -o json)
       owned_root "$object" "$2" "$4" "$5" || fail 'refusing an unowned root PVC'
       phase=$(jq -r '.metadata.annotations["cdi.kubevirt.io/storage.pod.phase"] // "Pending"' <<<"$object")
       case $phase in
@@ -133,15 +137,15 @@ case ${1:-} in
     else
       bash "$0" cleanup-binder "$2" "$3" "$4" "$5"
     fi
-    object=$(kubectl --request-timeout=30s -n "$3" get "$resource" "$2-$kind" --ignore-not-found -o json)
+    object=$(timeout 30 kubectl -n "$3" get "$resource" "$2-$kind" --ignore-not-found -o json)
     [[ -n $object ]] || exit 0
     owned_root "$object" "$2" "$4" "$5" "$kind" || fail 'refusing to delete an unowned acceptance resource'
-    kubectl --request-timeout=30s -n "$3" delete "$resource" "$2-$kind" --ignore-not-found --wait=true --timeout=120s
+    timeout 130 kubectl -n "$3" delete "$resource" "$2-$kind" --ignore-not-found --wait=true --timeout=120s
     ;;
   reap)
     [[ $# == 4 ]] || fail 'usage: reap NAMESPACE CURRENT_RUN_ID REPOSITORY'
     [[ $3 =~ ^[0-9]+$ ]] || fail 'invalid current run'
-    roots=$(kubectl --request-timeout=30s -n "$2" get pvc \
+    roots=$(timeout 30 kubectl -n "$2" get pvc \
       -l ci.confidential.ai/resource=acceptance-root -o json)
     now=$(date -u +%s)
     while IFS= read -r object; do
@@ -152,7 +156,7 @@ case ${1:-} in
       owned_root "$object" "$vm" "$run" "$4" || continue
       # Root imports can outlive a cancelled run before its VM even exists.
       # Never delete a PVC while any matching VM is still present.
-      existing=$(kubectl --request-timeout=30s -n "$2" get vm "$vm" --ignore-not-found -o name) || continue
+      existing=$(timeout 30 kubectl -n "$2" get vm "$vm" --ignore-not-found -o name) || continue
       [[ -z $existing ]] || continue
       status=$(gh api "repos/$4/actions/runs/$run" --jq .status 2>/dev/null || true)
       created=$(jq -r .metadata.creationTimestamp <<<"$object")
