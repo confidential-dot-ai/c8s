@@ -280,9 +280,10 @@ for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
 
-The guest-baked seed remains a flat `sha256_digests` list — it is measured into
-the SNP launch digest, and keeping it digest-only means a policy change never
-requires a guest-image rebuild.
+In `node` mode, the image contains the NRI plugin's measured boot-time
+`allowlist.always_allow` floor. Install updates its CDS measurement pins while
+preserving that floor. Dynamic workload policies come from CDS; changing the
+image's baked floor requires rebuilding the node image.
 
 ## CLI
 

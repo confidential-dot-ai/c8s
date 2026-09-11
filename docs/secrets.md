@@ -161,9 +161,8 @@ serves at `GET /ca` over the attested connection and refuses unless it is one
 you pinned.
 
 `--measurements` alone does not cover this. It proves the peer is an attested
-build at a pinned launch measurement — but every confidential pod boots the
-same guest image, so that measurement is a property of the shape, not of the
-role. The mesh CA key is generated per CDS, so it is what tells your CDS from
+node image at a pinned launch measurement. Other nodes can boot the same
+image, so the measurement identifies software rather than the CDS instance. The mesh CA key is generated per CDS, so it is what tells your CDS from
 another one at the same measurement, and it is the anchor your workloads
 already trust.
 

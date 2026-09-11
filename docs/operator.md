@@ -83,7 +83,8 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-- The chart renders webhook, attestation-api, and CDS together.
+- The chart renders the webhook and CDS. GKE/AKS installs also deploy the
+  attestation API; `node` installs use the node image's evidence service.
 - The webhook is wired to the chart-managed CDS Service.
 - CDS verifies evidence and signs workload CSRs in one process.
 - allowlist admin uses operator-signed JWTs through CDS; the chart does not render a
@@ -108,17 +109,21 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 Component images require a tag or digest. The install CLI uses its build
 version, or `main` for an unstamped development build.
 
-This means a default platform install creates the operator, CRDs, RBAC,
-webhook, attestation-api, and CDS. It does not mutate
+A default platform install creates the operator, advisory CRDs, RBAC,
+webhook, CDS, mesh, and tls-lb. In `node` mode, attestation-api and NRI are
+baked into the node image. Install does not mutate
 application workloads until those workloads opt in with
 `confidential.ai/cw`.
 
 Install with the CLI. Adopt a running workload as a CW and front it behind
 tls-lb with `--upstream` (see [Existing workload adoption](#existing-workload-adoption)
-and [tls-lb upstream](#tls-lb-upstream)):
+and [tls-lb upstream](#tls-lb-upstream)). Set `C8S_NODE_MEASUREMENT` from
+your trusted node image manifest and generate `operator.pub` as shown in
+the [quickstart](QUICKSTART.md):
 
 ```bash
-c8s install \
+c8s install --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator.pub --measurements "$C8S_NODE_MEASUREMENT" \
   --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```
@@ -130,7 +135,8 @@ serving engine as another, giving each its own confidential workload identity
 without any GitOps overlay wiring:
 
 ```bash
-c8s install \
+c8s install --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator.pub --measurements "$C8S_NODE_MEASUREMENT" \
   --workload-ref vllm-router=vllm/deployment/vllm-deployment-router:8000 \
   --workload-ref vllm-engine=vllm/deployment/<serving-engine-deployment> \
   --upstream vllm-router
@@ -252,30 +258,35 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
-The same restart that re-bootstraps the mesh CA also resets the **served
-allowlist**. CDS seeds its store from the install seed at startup, then serves
+The **served allowlist** survives only as long as its backing store. CDS
+seeds its store from the install seed at startup, then serves
 whatever an operator writes with `c8s allowlist add` or `apply`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
-the install seed — workloads pulling those images are denied roughly one worker
+replacement pod (after a drain, upgrade, or reschedule) drops operator-added
+entries back to the install seed — workloads pulling those images are denied roughly one worker
 poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
-chart-seeded component entries are unaffected — they are re-seeded and, unlike
-dynamic entries, are also admitted from the plugin's `always_allow` and the
-guest's baked seed. The restart also resets the allowlist version counter, and
-every enforcer ignores a served version at or below the one it last applied
-(`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
-or guest that had applied version N stays on that policy until the restarted
-CDS counts past N again, or the plugin or guest itself restarts.
+(an RWO PVC); otherwise re-apply the entries after the pod is replaced.
+A container restart within the same pod retains its `emptyDir`. Chart-seeded entries are
+restored from the seed. The NRI plugin also retains its local `always_allow`
+floor, which is baked into the node image in `node` mode and chart-rendered
+for managed-node installs.
+
+Losing the store resets its allowlist version counter. An NRI plugin that
+already applied version N keeps that policy until CDS counts past N or the
+plugin restarts; see [Refresh and anti-rollback](allowlist-and-capabilities.md#refresh-and-anti-rollback).
 
 ## Attestation-api
 
-The attestation-api DaemonSet binds pod loopback and is served to on-node
+In `node` mode, install uses the evidence service baked into the node image.
+Chart consumers reach it through their own node's `HOST_IP`.
+
+For chart-managed GKE/AKS installs, the attestation-api DaemonSet binds pod
+loopback and is served to on-node
 consumers by its attest-proxy sidecar over a Unix socket in
 `nriImagePolicy.hostPaths.runtimeDir`; no Service renders.
 
-Two operational notes:
+Two operational notes for the chart-managed API:
 
 - **Upgrading from a release that rendered the attestation-api Service
   deletes it.** Already-running cw pods keep their old

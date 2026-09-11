@@ -27,8 +27,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: nginx
-          # Confidential workloads reference images by digest: the guest pulls
-          # this reference and admits it against the allowlist, and a tag names
+          # Confidential workloads reference images by digest: the node pulls
+          # this reference and NRI checks the allowlist, while a tag names
           # whatever the registry serves at pull time. Bump with
           # `c8s allowlist inspect-image nginxinc/nginx-unprivileged:<tag>`.
           image: nginxinc/nginx-unprivileged@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 # 1.27-alpine

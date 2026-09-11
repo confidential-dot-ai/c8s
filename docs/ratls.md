@@ -634,21 +634,17 @@ The node CVM contains the attestation service, NRI inventory, workloads, and
 mesh. Attestation identifies the measured node; sandbox tokens bind certificates
 to the admitted workloads running on that node.
 
-### Node-as-CVM (base layout on CVM nodes)
+### Node-as-CVM
 
 The whole Kubernetes node is one confidential VM; pods are ordinary runc
-containers inside it. (This is the base component layout — `c8s install` with
-`--cvm-mode node|gke|aks` wiring the right TEE device — deployed onto nodes
-that are themselves CVMs. Base on non-CVM nodes has the same layout and no
-confidentiality.)
+containers inside it. The supported modes are `node`, `gke`, and `aks`.
 
-- **Evidence source:** the per-node attestation-api DaemonSet mounts the host
-  TEE interface (`/dev/sev-guest`; TSM ConfigFS reports on TDX hosts; vTPM on
-  AKS). The API binds pod loopback and its attest-proxy sidecar serves it on a
-  node-local Unix socket, so `/attest` is reachable only by on-node callers
-  and always produces evidence for the *caller's own node* — nothing
-  routable can request evidence, and `/verify` verdicts never cross a node
-  boundary.
+- **Evidence source:** in `node` mode, the measured image supplies the
+  attestation service and chart consumers reach it at their own node's
+  `HOST_IP`. GKE/AKS installs deploy an attestation-api DaemonSet with native
+  TEE device access or the Azure vTPM. That API binds pod loopback, and its
+  attest-proxy exposes a node-local Unix socket to consumers. Both paths
+  obtain evidence from the confidential node hosting the workload.
 - **RA-TLS endpoints:** ratls-mesh runs as a host-network DaemonSet
   (outbound :15001, inbound :15006). iptables/ipset interception DNATs
   pod-to-pod TCP through it; the node-to-node leg is attested mTLS; the final
@@ -671,7 +667,7 @@ confidentiality.)
 | CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, keys 0640 with fsGroup) — inside the node TEE | mesh CA, after challenge–attest–certify | workload's own listeners; tls-lb upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
 | tls-lb public leaf | tls-lb pod volume — get-cert init container (mode `cds`) or the `c8s acme` sidecar's Memory-medium emptyDir (mode `acme`) — or an operator-supplied `publicTLS` Secret (mode `webpki`, host-visible) | mesh CA (`cds`), ACME CA (`acme`), or external CA (`webpki`) | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
-| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
+| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy process memory; CDS process memory for the client side | itself — attestation bound to the node's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:
 

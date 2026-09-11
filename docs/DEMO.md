@@ -10,21 +10,25 @@ This demo shows confidential-workload injection, not the public front door, so
 it installs with tls-lb disabled. To also expose a workload through tls-lb, give
 it an upstream instead (see [tls-lb upstream](operator.md#tls-lb-upstream)).
 
+Generate `operator-pub.pem` and set `C8S_NODE_MEASUREMENT` from the trusted
+node image manifest as described in the [quickstart](QUICKSTART.md). Label a
+CDS node `role=cds`, or add `--single-node` for a one-node cluster.
+
 ```sh
 c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
-  --operator-keys operator-pub.pem -f - <<'EOF'
+  --operator-keys operator-pub.pem --measurements "$C8S_NODE_MEASUREMENT" -f - <<'EOF'
 tlsLb:
   enabled: false
 EOF
 ```
 
-`--cvm-mode` is required (`pod`, `node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`node`, `gke`, or `aks` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to
 install with writes disabled).
 
-## 2. Apply optional CRD object
+## 2. Deploy an annotated workload
 
 CRDs are advisory. This object is useful for status display and review:
 
@@ -54,17 +58,16 @@ kubectl -n demo apply -f samples/nginx-confidential-pod.yaml
 The pod template annotation `confidential.ai/cw: demo-nginx` is the security
 opt-in. The `ConfidentialWorkload` object is not required for injection.
 
-## 4. Inspect the result
+## 3. Inspect the result
 
 ```sh
 kubectl -n demo get pods
 kubectl -n demo describe pod -l app=demo-nginx
-kubectl get cwl -A
 ```
 
 Expected injected pieces:
 
-- an init container and renewal sidecar running `c8s get-cert`;
+- a native `c8s get-cert` sidecar and a `c8s-cert-wait` init gate;
 - an in-memory `c8s-certs` volume;
 - workload containers mounting `/etc/c8s/certs`;
 - no injected credential Secret references.
@@ -73,6 +76,5 @@ Expected injected pieces:
 
 ```sh
 kubectl delete namespace demo
-kubectl delete -f samples/confidentialworkload.yaml
 c8s uninstall
 ```

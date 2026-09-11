@@ -60,8 +60,8 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   workload is behind a key, not just whether it is a genuine TEE.
 
 - **RA-TLS mesh.** A transparent L4 proxy wraps traffic between workloads in
-  mutual TLS rooted in hardware attestation. Plaintext never crosses the pod
-  boundary.
+  mutual TLS rooted in hardware attestation. The mesh and pods share the
+  confidential node boundary.
 
 - **Confidential GPUs.** NVIDIA GPUs attached to confidential nodes on
   SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
@@ -100,7 +100,6 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 ## Architecture
 
 The unit of trust and attestation is the confidential node.
-c8s supports both answers.
 
 ### Node-as-CVM
 
@@ -148,6 +147,10 @@ domain; provision separate nodes for tenants that do not trust each other.
 
 ### Install
 
+Set `C8S_NODE_MEASUREMENT` to the trusted SNP launch digest from your node
+image manifest before running the example below. For TDX, use the image
+measurement and RTMR pins described in [install flows](docs/install-flows.md).
+
 ```sh
 # Build and install the c8s CLI
 git clone https://github.com/confidential-dot-ai/c8s
@@ -164,7 +167,7 @@ openssl ec -in operator.key -pubout -out operator.pub
 # Install the platform (node-as-CVM) and point the bundled TLS load balancer
 # at your workload
 c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
-  --operator-keys operator.pub \
+  --operator-keys operator.pub --measurements "$C8S_NODE_MEASUREMENT" \
   --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```

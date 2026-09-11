@@ -41,6 +41,9 @@ contexts: [{name: dead, context: {cluster: dead, user: dead}}]
 current-context: dead
 EOF
 export KUBECONFIG="$work/kubeconfig"
+# Synthetic SNP pin for syntax checks; no live cluster or attestation is used.
+C8S_NODE_MEASUREMENT="$(printf 'a%.0s' {1..96})"
+export C8S_NODE_MEASUREMENT
 
 # Extract c8s command units from the fenced sh blocks of the docs: a unit
 # starts at a line beginning "c8s ", continues over trailing-\ lines, and
