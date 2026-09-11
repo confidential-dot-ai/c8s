@@ -43,7 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       confos-release: ${{ steps.release.outputs.release }}
-      confos-ref: ${{ steps.pins.outputs.confos }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -88,10 +87,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve this checkout's node-image pin
+        id: pins
+        run: |
+          bash .github/scripts/pin-manifest.sh export \
+            --manifest .github/build-pins.json \
+            --domain node-image \
+            --format github-output >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/confidential-os-builder
-          ref: ${{ needs.lint.outputs.confos-ref }}
+          ref: ${{ steps.pins.outputs.confos }}
           path: confos
           persist-credentials: false
 
