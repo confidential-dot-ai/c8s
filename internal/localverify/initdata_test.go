@@ -32,6 +32,9 @@ func TestVerify_InitDataPinMatchesEvidence(t *testing.T) {
 	}
 }
 
+// The relying-party refusal the issue asks for: evidence whose init-data
+// digest differs from the pin is rejected by the verifier, not merely
+// reported. The SNP HOST_DATA binding fails closed, naming the field.
 func TestVerify_InitDataPinMismatchIsRefused(t *testing.T) {
 	mismatched := bytes.Repeat([]byte{0xab}, 32)
 

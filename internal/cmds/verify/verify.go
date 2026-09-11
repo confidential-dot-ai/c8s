@@ -455,7 +455,10 @@ func applyChainAnchorPolicy(oc *Outcome, cfg config, ev *evidence) {
 	demoteToPartial(oc, "the mesh chain anchor: the leaf chains to a CA the responder committed into its own attestation transcript — the evidence binds those CA bytes, but the anchor is responder-chosen, so which deployment this endpoint belongs to is not proven (pass --mesh-ca to pin it)")
 }
 
-// applyInitDataNote describes the init-data binding only after policy checks pass.
+// applyInitDataNote records what --init-data bound to, on the FINAL verdict:
+// it runs after applyVerdictPolicies (which can fail the verdict past
+// newOutcome) and skips a hard failure (oc.Error set) — the gate renderText
+// also applies.
 func applyInitDataNote(oc *Outcome, result *teetypes.VerificationResult, plan *verifyPlan) {
 	if oc.Error != "" {
 		return

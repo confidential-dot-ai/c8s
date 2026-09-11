@@ -1108,6 +1108,8 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	installAttestEnabled = true
 	t.Cleanup(func() { installAttestEnabled = prevAttest })
 
+	// Two orthogonal axes: pod/node deployment shape and SNP/TDX hardware.
+	// Both deployment shapes use the native device for the selected hardware.
 	build := func(mode, platform, sevGuest, tdxGuest string) []string {
 		out := []string{
 			"upgrade",

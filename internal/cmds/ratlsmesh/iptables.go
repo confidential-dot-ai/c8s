@@ -101,10 +101,17 @@ const (
 	iptablesFamilyIPv6 iptablesFamily = "ipv6"
 )
 
-// buildPodIPSetRules redirects host-originated pod traffic via OUTPUT and
-// DNATs pod-veth traffic to this node's outbound listener via PREROUTING.
-// nodeIPsByFamily must contain canonical, validated IPs of the matching family.
-// Families without a local IP receive no PREROUTING rule.
+// buildPodIPSetRules computes NAT rules that send pod TCP traffic through the
+// mesh. OUTPUT REDIRECT covers host-originated packets to pod IPs and uses
+// owner matching to skip the proxy's own UID. PREROUTING covers pod-veth
+// traffic and DNATs to this node's outbound listener at nodeIPsByFamily[f]
+// for each family with a same-family node IP. DNAT to the node-local listener
+// follows the same path pods can reach directly. A family without a same-family
+// node IP gets no PREROUTING rule; there is no REDIRECT fallback.
+//
+// INVARIANT: each value in nodeIPsByFamily is a canonical, validated IP
+// literal of the matching family. Callers must verify (parseNodeIPs in
+// pod_ipsets_linux.go).
 func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32, nodeIPsByFamily map[iptablesFamily]string) []iptablesRule {
 	portStr := strconv.Itoa(outboundPort)
 	uidStr := strconv.Itoa(uid)

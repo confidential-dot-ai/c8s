@@ -38,7 +38,9 @@ func MakeSNPRATLSAttestFunc(client Client, attestationApiURL string) func(contex
 	}
 }
 
-// TEETypeForPlatform maps native SNP or TDX evidence to its RA-TLS TEE type.
+// TEETypeForPlatform maps an attestation-api platform string to the RA-TLS
+// extension's TEEType: native SNP is SEV-SNP and native TDX is TDX. The RA-TLS extension records only the family; the
+// per-variant evidence shape is auto-detected by ratls.UnmarshalExtension.
 func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
 	switch ratls.NormalizePlatform(platform) {
 	case "sev-snp":
@@ -79,8 +81,23 @@ func (c Client) AttestationExtension(ctx context.Context, attestationApiURL stri
 	return att.MarshalExtension()
 }
 
-// RATLSEvidence embeds a raw SNP report or a TDX evidence envelope in a
-// certificate. The TDX event log is stripped to keep the certificate small.
+// RATLSEvidence returns the payload to embed in an RA-TLS certificate
+// extension. Two shapes exist by design:
+//
+//   - Bare-metal SNP: raw SNP report bytes (extractable offline from an SNP
+//     verifier). Kept as raw bytes for wire-compat + so bare-metal callers
+//     don't need a running attestation-api at verify time.
+//   - TDX: the attestation-api evidence
+//     envelope. Verification forwards the envelope back to a local
+//     attestation-api /verify — the source of truth for the quote's
+//     signature + REPORTDATA match. Keeping a second in-process quote
+//     parser in Go would silently drift from attestation-rs.
+//
+// For TDX, cc_eventlog is stripped from the envelope before embedding —
+// see stripTDXEventlog for why.
+//
+// UnmarshalExtension auto-detects the envelope form (JSON leading '{')
+// vs raw report bytes, so the two shapes coexist behind the same OID.
 func RATLSEvidence(resp types.AttestResponse) (string, error) {
 	if _, err := TEETypeForPlatform(resp.Platform); err != nil {
 		return "", err

@@ -1581,6 +1581,9 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
+// On a render that is neither Kata nor node-baked, host nri-image-policy is
+// the only image-admission enforcement, so disabling it must be rejected.
+// Kata carries in-guest admission and cvmMode=node carries its baked plugin.
 func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=pod",
@@ -1594,6 +1597,10 @@ func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
 	}
 }
 
+// The require_host_image_policy guard exempts cvmMode=node: the node image
+// bakes its own fail-closed nri-image-policy, so disabling the chart copy
+// does not remove enforcement. TestChartServesAllowlistSeedInNodeMode covers
+// the seed served to the baked plugin.
 func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
@@ -1901,6 +1908,13 @@ func TestChartIntValueRejectsNonInteger(t *testing.T) {
 	}
 }
 
+// TestChartAttestationApiPrivileged proves every cvmMode renders privileged:
+// true. A hostPath device mount does not add a device-cgroup rule, so open() on
+// the TEE device (/dev/sev-guest, /dev/tdx-guest) is EPERM from an unprivileged
+// container regardless of SYS_RAWIO (cgroup v2 eBPF device controller).
+// TODO: revert to
+// least-privilege once SNP attest goes through the TSM configfs report
+// interface.
 func TestChartAttestationApiPrivileged(t *testing.T) {
 	for _, tc := range []struct {
 		mode string
@@ -1933,6 +1947,8 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 	}
 }
 
+// TestChartAttestationApiInvalidCvmMode proves an unrecognized cvmMode fails
+// the render loudly rather than silently falling through to least-privilege.
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 	for _, mode := range []string{"bogus", "baremetal", "aks", "gke"} {
 		t.Run(mode, func(t *testing.T) {
@@ -2045,7 +2061,7 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 }
 
 // TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
-// not leak into the other cvmModes: pod dial the on-node Unix socket
+// not leak into pod mode: pod components dial the on-node Unix socket
 // and render no HOST_IP env anywhere. The consumers that must carry both the
 // socket URL and the socket-directory mount are asserted per shape.
 func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {

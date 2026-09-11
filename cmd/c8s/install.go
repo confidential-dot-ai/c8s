@@ -1323,6 +1323,13 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 		}
 
+		// The install always ships pods that exceed the restricted pod-security
+		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
+		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
+		// attestation-api needs privileged device access.
+		// --cvm-mode=pod adds kata-deploy on top. No supported shape fits restricted, so
+		// the namespace is always labelled privileged (a CIS-hardened cluster, e.g.
+		// RKE2 with profile: cis, would otherwise reject those pods at admission).
 		if err := applyNamespace(cmd.Context(), installNamespace); err != nil {
 			return err
 		}
@@ -1540,8 +1547,41 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 	)
 }
 
-// appendCvmModeInstallArgs wires native SNP or TDX devices for pod and node CVMs.
-// Node images bake attestation-api and image policy; pod mode uses the Kata guest.
+// appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
+// values. The chart re-validates, so the allowed check is a fast typo guard
+// before shelling to helm.
+//
+// cvm-mode selects which TEE device gets mounted (it does NOT vary the privilege
+// level — all modes render privileged: true, since a hostPath device mount alone
+// does not grant device-cgroup access):
+//
+//	pod, node → native /dev/sev-guest (SEV-SNP) by default, or
+//	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
+//
+// pod and node are distinct deployment targets that happen to share the
+// native-TEE-device wiring (they are NOT aliases):
+//
+//	pod  → per-pod confidential VMs via the Kata runtime: every workload pod is
+//	       a kata CVM. appendKataInstallArgs turns on the kata stack and turns
+//	       off host-side attestation-api/nri/ratls-mesh (served by the in-guest
+//	       counterparts baked into kata-guest-base). The device is still mounted
+//	       for the host-side attestation-api that kata-guest-base derives from.
+//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
+//	       self-managed) are themselves confidential VMs. Pods run as ordinary
+//	       processes attested via the node's own quote. Cloud-agnostic. The node
+//	       image bakes attestation-api and nri-image-policy. The chart disables
+//	       its attestation-api copy and uses the baked NRI installer to update
+//	       CDS pins. ratlsMesh is not baked and stays on.
+//
+// `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
+// orthogonal axes. Both pod and node pair with either SEV-SNP
+// (--hardware-platform sev-snp) or Intel TDX (--hardware-platform tdx).
+//
+// Mixed-hardware inside a single cluster (some SNP hosts, some TDX hosts) is
+// out of scope for now — a cluster is one hardware platform. Mixed support
+// would want the attestation-api DaemonSet split per-platform with per-node
+// label selectors, and ratlsmesh's `--platform` similarly per-node.
+// Follow-up work.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
@@ -1560,14 +1600,22 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		"--set", "attestationApi.teeDevices.sevGuest="+sevGuest,
 		"--set", "attestationApi.teeDevices.tdxGuest="+tdxGuest,
 	)
-	// Propagate the CPU TEE to CDS and mesh certificate generation.
+	// Propagate the CPU TEE to every component that names its RA-TLS platform.
+	// These default to SNP in the chart; on a TDX cluster CDS (which self-warms
+	// its serving cert via the attestation-api and is non-privileged, so it
+	// cannot probe /dev/tdx_guest to auto-detect) and the ratls-mesh must be
+	// told `tdx` explicitly, or CDS tries to parse the TDX quote as an SNP report.
+	// cds.ratlsPlatform uses `snp`/`tdx`; ratlsMesh.platform uses `sev-snp`/`tdx`.
 	if hardwarePlatform == "tdx" {
 		helmArgs = append(helmArgs,
 			"--set-string", "cds.ratlsPlatform=tdx",
 			"--set-string", "ratlsMesh.platform=tdx",
 		)
 	}
-	// Select native evidence for the optional attestation sidecar.
+	// The tls-lb attestation sidecar is on by default; --attest=false omits it.
+	// It passes this platform straight to the attestation-api as the evidence
+	// request. generation is AMD-only (Genoa/Milan/...), so the TDX override
+	// blanks it rather than ship the chart-default AMD codename.
 	switch {
 	case !installAttestEnabled:
 		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")

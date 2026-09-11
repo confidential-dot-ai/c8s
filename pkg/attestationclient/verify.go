@@ -88,7 +88,9 @@ func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 
 // EvidencePolicy is the verification policy for [Client.VerifyEvidence].
 type EvidencePolicy struct {
-	// ExpectedReportData is SHA-384 in bytes 0–47, padded to native REPORTDATA.
+	// ExpectedReportData is the full 64-byte REPORTDATA the evidence must
+	// bind (SHA-384 in bytes 0-47, zero-padded). Native SNP and TDX verifiers
+	// zero-pad whatever is sent and compare all 64 bytes.
 	ExpectedReportData [64]byte
 
 	// AllowDebug controls whether debug-mode guests are accepted.
@@ -187,7 +189,8 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	return resp, nil
 }
 
-// TDXPlatform reports whether a native TDX evidence tag carries RTMRs.
+// TDXPlatform reports whether platform names TDX-shaped evidence, i.e. carries
+// runtime measurement registers an RTMR pin can be enforced against.
 func TDXPlatform(platform string) bool {
 	return teetypes.NormalizePlatform(platform) == teetypes.PlatformTDX
 }

@@ -92,6 +92,10 @@ type Attestation struct {
 	// instead of fetching it from AMD KDS when present.
 	CertChain []byte
 
+	// embedded is the parsed attestation-api envelope when Report carries a
+	// full evidence envelope (e.g. TDX). Populated by
+	// UnmarshalExtension; nil means Report holds a raw bare-metal SNP report,
+	// which verifyReport wraps in the "snp" envelope for /verify.
 	embedded *types.AttestationEvidence
 }
 
@@ -150,6 +154,13 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 		CertChain: raw.CertChain,
 	}
 
+	// Auto-detect the JSON evidence envelope. SEV-SNP may carry either a
+	// full envelope or raw report bytes, so probe
+	// first and only normalize the raw SNP report shape when no envelope is
+	// present; verification wraps the raw report in the "snp" envelope for
+	// attestation-api /verify. TDX has no raw-bytes shape (no in-process Go
+	// parser is carried; see verifyReport in verify.go), so an envelope
+	// is required.
 	embedded, err := parseEmbeddedEvidence(raw.Report)
 	if err != nil {
 		return nil, err
@@ -170,7 +181,12 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 	return att, nil
 }
 
-// EmbeddedEvidence returns the parsed JSON envelope, if the certificate carries one.
+// EmbeddedEvidence returns the parsed attestation-api envelope (platform +
+// platform-specific evidence) embedded in the certificate, and true, when the
+// Report carries a JSON envelope rather than a raw hardware report (e.g. TDX,
+// where verification forwards the envelope to the attestation-api). It returns
+// false when the Report holds a raw hardware report, which verification wraps
+// in the "snp" envelope before forwarding.
 func (a *Attestation) EmbeddedEvidence() (types.AttestationEvidence, bool) {
 	if a.embedded == nil {
 		return types.AttestationEvidence{}, false
@@ -182,7 +198,12 @@ func (a *Attestation) EmbeddedEvidence() (types.AttestationEvidence, bool) {
 // AMD SEV-SNP ATTESTATION_REPORT.
 const snpReportDataOffset = 0x50
 
-// ReportData returns the binding field of a raw SNP report.
+// ReportData returns the 64-byte REPORTDATA the attestation report commits, and
+// true, for shapes c8s parses in-process (a raw SEV-SNP report). It returns
+// (nil, false) for JSON-envelope evidence (such as TDX), which c8s deliberately
+// does not parse in-process (see verifyReport) — for those the REPORTDATA
+// binding is proven by the attestation-api. Lets a caller fail fast when a
+// report does not bind an expected REPORTDATA, without an attestation-api call.
 func (a *Attestation) ReportData() ([]byte, bool) {
 	if a.embedded != nil || a.TEEType != TEETypeSEVSNP || len(a.Report) < snpReportDataOffset+64 {
 		return nil, false

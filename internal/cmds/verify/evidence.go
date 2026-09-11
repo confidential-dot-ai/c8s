@@ -38,13 +38,19 @@ const attestationPath = "/.well-known/c8s/attest-pq"
 // nonceSize is the verifier challenge length (bytes) for the endpoint flow.
 const nonceSize = 32
 
-// evidence carries native SNP/TDX evidence and the metadata used to explain
-// its verification verdict.
+// evidence is normalized attestation evidence ready for verification, plus the
+// metadata needed to explain the result to a human. platform + rawEvidence are
+// the self-describing evidence envelope ({platform, evidence}) forwarded
+// verbatim to the verifier, so SEV-SNP and TDX both pass through in
+// their own shape.
 type evidence struct {
+	// platform is the evidence-envelope platform discriminator (snp or tdx).
 	platform string
 	// rawEvidence is the platform-specific evidence object, forwarded verbatim.
 	rawEvidence json.RawMessage
-	// erd is the unpadded freshness anchor; native verifiers pad to REPORTDATA.
+	// erd is the expected freshness anchor — the exact bytes the producer bound,
+	// unpadded (48-byte SHA-384 for c8s bindings). Hardware-report verifiers
+	// zero-pad it to the 64-byte REPORTDATA field.
 	erd []byte
 	// fresh is true when erd binds a caller-supplied nonce, so a passing
 	// verification proves the evidence was produced for THIS check (not replayed).
@@ -515,7 +521,9 @@ func verifyCommittedChain(leaf, ca *x509.Certificate) error {
 	return nil
 }
 
-// keyAnchor extracts the SHA-384 binding from the padded REPORTDATA.
+// keyAnchor extracts the unpadded SHA-384 anchor from ReportDataForKey's
+// zero-padded 64-byte REPORTDATA — the form producers bind (see
+// attestclient.MakeSNPRATLSAttestFunc).
 func keyAnchor(rd [64]byte) []byte { return rd[:sha512.Size384] }
 
 // gatherFromFile loads evidence from a saved PEM certificate or attestation

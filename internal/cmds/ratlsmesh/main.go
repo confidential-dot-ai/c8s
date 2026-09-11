@@ -604,6 +604,8 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 			return "", fmt.Errorf("decode report data hex: %w", err)
 		}
 
+		// Strip SNP REPORTDATA zero-padding before sending to the attestation
+		// service. The native verifier restores the padding server-side.
 		reportDataBytes = reportDataBytes[:sha512.Size384]
 
 		resp, err := client.GenerateEvidence(attestationApiURL, reportDataBytes)

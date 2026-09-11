@@ -270,6 +270,10 @@ func TestVerifyEvidence_InitDataUnpinnedIsLabelled(t *testing.T) {
 	}
 }
 
+// applyInitDataNote is the single source of truth for the init-data fields: a
+// plan carrying --init-data takes the pinned note, an unpinned plan the
+// unpinned one, and a hard failure (oc.Error set) carries neither — the gate
+// that keeps JSON and text from disagreeing.
 func TestApplyInitDataNote(t *testing.T) {
 	result := &teetypes.VerificationResult{
 		SignatureValid: true,

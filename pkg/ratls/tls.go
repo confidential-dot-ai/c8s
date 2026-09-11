@@ -949,8 +949,11 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 	}
 }
 
-// NormalizePlatform canonicalizes native SNP/TDX names; unknown values remain
-// unchanged except for case and whitespace so validation can reject them.
+// NormalizePlatform maps native platform names (including the "snp" alias)
+// to the two canonical RA-TLS values: "sev-snp" and "tdx". Unknown values
+// pass through lowercased/trimmed so ValidatePlatform can reject them with a
+// clear error. Call it to canonicalize a value for display or comparison;
+// the package entry points normalize their own input.
 func NormalizePlatform(platform string) string {
 	p := teetypes.NormalizePlatform(platform)
 	if string(p) == string(teetypes.FamilySNP) {

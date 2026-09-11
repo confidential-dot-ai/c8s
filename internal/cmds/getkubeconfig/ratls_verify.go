@@ -124,6 +124,7 @@ func (exp snpMeasuredPolicy) verifyCertificate(leaf *x509.Certificate) error {
 	if err != nil {
 		return fmt.Errorf("ratls: %w", err)
 	}
+	// Native SNP HOSTDATA is the operator-key binding checked on this path.
 	if platform != string(teetypes.PlatformSNP) {
 		return fmt.Errorf("ratls: serving cert platform is %q: the SNP trust gate pins launch-time HOSTDATA, which only bare-metal snp launches carry as the operator-key binding", platform)
 	}

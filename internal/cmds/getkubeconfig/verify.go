@@ -130,6 +130,8 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy)
 	if err := json.Unmarshal(envelopeJSON, &env); err != nil {
 		return nil, fmt.Errorf("parse evidence envelope: %w", err)
 	}
+	// The policy's platform comes from the manifest; the node must be that
+	// platform. Native SNP HOSTDATA carries the operator-key binding.
 	if env.Platform != exp.platform() {
 		return nil, fmt.Errorf("node platform is %q but --image-manifest pins %q: credential release requires the node to be the platform the manifest describes", env.Platform, exp.platform())
 	}

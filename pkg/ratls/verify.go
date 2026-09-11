@@ -264,6 +264,9 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 	evidence := att.embedded
 	switch att.TEEType {
 	case TEETypeSEVSNP:
+		// Envelope platforms (TDX) embed their evidence in the
+		// extension directly; bare-metal SNP carries the raw report,
+		// which is wrapped in the "snp" evidence envelope here.
 		if evidence == nil {
 			var err error
 			if evidence, err = snpEvidence(att.Report); err != nil {

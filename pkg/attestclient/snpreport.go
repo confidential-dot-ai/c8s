@@ -8,6 +8,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
+// snpReportEnvelope holds the fields we care about inside the inner evidence
+// blob returned by the attestation-api. Bare-metal SNP carries the raw
+// report under attestation_report (standard base64).
 type snpReportEnvelope struct {
 	AttestationReport string `json:"attestation_report"`
 }
