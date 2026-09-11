@@ -564,13 +564,14 @@ than let you discover them:
   the set in one pod to match a single workload entry.
 
 - **`mounts` and `env` allowlist policy is not enforced under
-  `--cvm-mode=node`.** The only enforcer running there, the host NRI
-  image-policy plugin, observes digest and argv only, so an `exact` `mounts`
-  or `env` policy is vacuously satisfied and admits every container. A leaf
-  certificate and workload receipt still derive from digest and argv only, so
-  a bind mount or environment variable added at the Deployment stays
-  invisible to a relying party. See [docs/allowlist-and-capabilities.md, "Node
-  mode: not enforced"](docs/allowlist-and-capabilities.md#node-mode-not-enforced).
+  `--cvm-mode=node`.** The host NRI image-policy plugin is the only
+  container-start enforcer in this mode. Its allowlist check supplies digest
+  and argv only. An `exact` `mounts` or `env` policy therefore does not narrow
+  admission: a container that passes digest and argv policy also passes these
+  unobserved constraints. The CDS matched-workload decision also has no mount
+  or environment observation, so a relying party cannot detect such a change
+  from that identity. See [docs/allowlist-and-capabilities.md, "Node mode: not
+  enforced"](docs/allowlist-and-capabilities.md#node-mode-not-enforced).
 
 - **Secrets and encrypted volumes under pod-as-CVM carry weaker guarantees
   than on a node.** Both work — the injected fetchers redeem their sandbox
