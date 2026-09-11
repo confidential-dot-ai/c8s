@@ -147,7 +147,8 @@ jobs:
             -bundle core.tar.zst \
             -bundle cilium.tar.zst \
             -manifest "$manifests/local-path-storage.yaml" \
-            -manifest "$manifests/nvidia-device-plugin.yaml"
+            -manifest "$manifests/nvidia-device-plugin.yaml" \
+            -exclude-ref busybox
 
   gpu-label:
     name: gpu-node-label logic

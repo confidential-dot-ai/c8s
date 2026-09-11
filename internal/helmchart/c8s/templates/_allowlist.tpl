@@ -19,7 +19,7 @@
    gate a no-op, deriving even disabled components that carry a digest. */ -}}
 {{- $enabled := true -}}
 {{- if $c.enabledPath -}}{{- $enabled = eq (include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath)) "true" -}}{{- end -}}
-{{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt) -}}
+{{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt "argvPinned" (get $c "argvPinned" | default false)) -}}
 {{- end -}}
 {{ $out | toJson }}
 {{- end -}}
@@ -29,7 +29,7 @@
 {{- if .Values.nriImagePolicy.bootstrapAllowlist.deriveComponents -}}
 {{- range $c := (include "c8s.components" . | fromJsonArray) -}}
 {{- $img := get $c "image" -}}
-{{- if and (get $c "enabled") (get $img "digest") -}}
+{{- if and (get $c "enabled") (not (get $c "argvPinned")) (get $img "digest") -}}
 {{- $_ := set $digests (get $img "digest") (printf "%s@%s" (get $img "repository") (get $img "digest")) -}}
 {{- end -}}
 {{- end -}}
@@ -50,21 +50,6 @@
 {{- if $lbImg.digest -}}
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}
 {{- end -}}
-{{- end -}}
-
-{{- /* containerd-prep init-container images (rke2-only): the host NRI plugin
-       checks every container node-wide, so its own busybox prep
-       image must be in the floor or a DaemonSet re-roll self-deadlocks on
-       "image not in allowlist: busybox". Only seeded when the plugin enforces,
-       and under .baked the installer runs no prep container. */}}
-{{- if .Values.nriImagePolicy.enabled -}}
-{{- if and (eq .Values.nriImagePolicy.distro "rke2") (not .Values.nriImagePolicy.baked) -}}
-{{- $prep := .Values.nriImagePolicy.containerdPrep.image -}}
-{{- if $prep.digest -}}
-{{- $_ := set $digests $prep.digest (printf "%s@%s" $prep.repository $prep.digest) -}}
-{{- end -}}
-{{- end -}}
-
 {{- end -}}
 {{ $digests | toJson }}
 {{- end -}}
@@ -91,12 +76,81 @@
 {{- printf "%s-%s" $base (.digest | trimPrefix "sha256:" | lower | trunc 12) -}}
 {{- end -}}
 
+{{/* See ../helpers/allowlist/README.md#argv-pinned-entries for the seed contract. */}}
+{{- define "c8s.argvPinnedEntries" -}}
+{{- $entries := dict -}}
+{{- if .Values.nriImagePolicy.enabled -}}
+{{- $img := .Values.nriImagePolicy.image -}}
+{{- $digest := required "nriImagePolicy.image.digest is required (the installer is admitted argv-pinned; a tag cannot be pinned)" $img.digest -}}
+{{- $ref := printf "%s@%s" $img.repository $digest -}}
+{{- $script := include "nri-image-policy.installScript" (dict "root" . "bootConfig" (include "nri-image-policy.bootConfig" (dict "root" .))) -}}
+{{- if .Values.nriImagePolicy.baked -}}
+{{- $script = include "nri-image-policy.pinsScript" (dict "root" .) -}}
+{{- end -}}
+{{- $sh := dict "policy" "exact" "argv" (list "/bin/sh" "-c") -}}
+{{- $containers := list -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $script ""))))) -}}
+{{- if .Values.nriImagePolicy.uninstall.enabled -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" (.Files.Get "files/scripts/uninstall.sh") ""))))) -}}
+{{- end -}}
+{{- $containers = append $containers (dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list "sleep infinity"))) -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $ref) -}}
+{{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" $containers) -}}
+{{- $prepScript := .Files.Get "files/scripts/containerd-prep.sh" -}}
+{{- $prepDigests := dict -}}
+{{- if and (eq .Values.nriImagePolicy.distro "rke2") (not .Values.nriImagePolicy.baked) -}}
+{{- with .Values.nriImagePolicy.containerdPrep.image -}}
+{{- if .digest -}}{{- $_ := set $prepDigests .digest (printf "%s@%s" .repository .digest) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $digest, $ref := $prepDigests -}}
+{{- $container := dict "digest" $digest "image" $ref "command" $sh "args" (dict "policy" "exact" "argv" (list (printf "%s\n" (regexReplaceAll "\n+$" $prepScript "")))) -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $ref) -}}
+{{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" (list $container)) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq .Values.attestationApi.cvmMode "node" -}}
+{{- $img := .Values.rke2.localPathHelper.image -}}
+{{- if $img.digest -}}
+{{- $ref := printf "%s@%s" $img.repository $img.digest -}}
+{{- $containers := list -}}
+{{- range $path := list "/script/setup" "/script/teardown" -}}
+{{- $containers = append $containers (dict "digest" $img.digest "image" $ref "command" (dict "policy" "exact" "argv" (list "/bin/sh" $path)) "args" (dict "policy" "any")) -}}
+{{- end -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $img.digest "image" $ref) -}}
+{{- $_ := set $entries $name (dict "label" $ref "initContainers" list "containers" $containers) -}}
+{{- end -}}
+{{- end -}}
+{{ $entries | toJson }}
+{{- end -}}
+
+{{/* Values-only to avoid boot-config recursion; see ../helpers/allowlist/README.md#argv-pinned-entries. */}}
+{{- define "c8s.argvPinnedDigests" -}}
+{{- $digests := list -}}
+{{- if and .Values.nriImagePolicy.enabled .Values.nriImagePolicy.image.digest -}}
+{{- $digests = append $digests .Values.nriImagePolicy.image.digest -}}
+{{- if and (eq .Values.nriImagePolicy.distro "rke2") (not .Values.nriImagePolicy.baked) .Values.nriImagePolicy.containerdPrep.image.digest -}}
+{{- $digests = append $digests .Values.nriImagePolicy.containerdPrep.image.digest -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq .Values.attestationApi.cvmMode "node") .Values.rke2.localPathHelper.image.digest -}}
+{{- $digests = append $digests .Values.rke2.localPathHelper.image.digest -}}
+{{- end -}}
+{{ $digests | toJson }}
+{{- end -}}
+
 {{- define "c8s.allowlistSeedJSON" -}}
 {{- $workloads := dict -}}
+{{- $pinnedDigests := include "c8s.argvPinnedDigests" . | fromJsonArray -}}
 {{- range $digest, $image := (include "c8s.imageAllowlist" . | fromJson) -}}
+{{- if not (has $digest $pinnedDigests) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
 {{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
 {{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $entry := (include "c8s.argvPinnedEntries" . | fromJson) -}}
+{{- $_ := set $workloads $name $entry -}}
 {{- end -}}
 {{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
 {{- $_ := set $workloads $name $entry -}}

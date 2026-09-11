@@ -25,7 +25,10 @@
 #     -template node-guest-image/c8s/image-policy.yaml.in \
 #     -bundle <core bundle> -bundle <cilium bundle> \
 #     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml \
-#     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/nvidia-device-plugin.yaml
+#     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/nvidia-device-plugin.yaml \
+#     -exclude-ref busybox
+# -exclude-ref omits busybox from the node's baked always_allow list;
+# the chart supplies its argv-pinned entry through the served allowlist.
 # After a bump, re-verify on first boot that the rendered containerd
 # config.toml has exactly ONE `imports` line — see the baked
 # config-v3.toml.tmpl in this profile's mkosi.extra for why.
@@ -134,13 +137,11 @@ render_nri_floor() {
     [ -f "$tmpl" ] || { echo "c8s sync: FATAL floor template $tmpl missing" >&2; exit 1; }
     mkdir -p "$(dirname "$dst")"
     sed \
-        -e "s|@NRI_DIGEST@|${NRI_DIGEST}|g" \
-        -e "s|@NRI_IMAGE@|${NRI_IMAGE}|g" \
         -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
         -e "s|@CDS_IMAGE@|${CDS_REPO}@${CDS_DIGEST}|g" \
         -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
-    echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
+    echo "c8s sync: NRI floor rendered (cds ${CDS_DIGEST})"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and

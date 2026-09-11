@@ -241,8 +241,9 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.always_allow is the floor that pins the
-install image + CDS digest so chart upgrades can roll.
+runs pull mode (polls CDS); allowlist.always_allow is the digest-only boot
+floor (CDS + any-argv bootstrap digests), so a roll admits the new images
+before the first pull lands.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
@@ -275,15 +276,15 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-{{- /* Self-allow the installer image first (load-bearing when
-       bootstrapAllowlist.deriveComponents=false, where c8s.alwaysAllow omits
-       it), then add the rest — skipping the installer digest so the map has no
-       duplicate key (the plugin loads this with yaml.v3, which rejects dups). */ -}}
-{{- $selfDigest := required "image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest }}
+{{- /* always_allow is digest-only admission, so it must never carry an
+       argv-pinned image (the installer itself, the busybox prep/helper
+       images): those are admitted by the served argv-pinned entries, whose
+       pull this config bootstraps. The CDS self-entry keeps the map non-empty
+       (the plugin validates it when pull.url is set). */ -}}
+{{- $pinnedDigests := include "c8s.argvPinnedDigests" $root | fromJsonArray }}
   always_allow:
-    {{ $selfDigest | quote }}: {{ printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest | quote }}
 {{- range $digest, $image := (include "c8s.alwaysAllow" $root | fromJson) }}
-{{- if ne $digest $selfDigest }}
+{{- if not (has $digest $pinnedDigests) }}
     {{ $digest | quote }}: {{ $image | quote }}
 {{- end }}
 {{- end }}

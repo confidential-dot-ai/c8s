@@ -33,7 +33,8 @@ probe() {
 digest=""
 cleanup() {
   kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  [ -n "$digest" ] && al remove "$digest" >/dev/null 2>&1
+  # `allowlist add` names the entry "<basename>-<first 12 hex of digest>".
+  [ -n "$digest" ] && al delete "busybox-$(printf '%s' "${digest#sha256:}" | cut -c1-12)" >/dev/null 2>&1
   return 0
 }
 trap cleanup EXIT

@@ -22,11 +22,11 @@ The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
 An image that may run **however it is invoked** — the standalone and injected
-c8s components (cds, get-cert, the operator, ratls-mesh, nri-image-policy, the
-tls-lb, the containerd-prep helper), whose argv is per-pod — is an entry whose
-container `command` and `args` are both `any`. Nothing distinguishes such an
-entry from any other: it is matched, stamped and diffed like the rest, and the
-same digest may also appear elsewhere under a narrower policy — see [union
+c8s components (cds, get-cert, the operator, ratls-mesh, the tls-lb), whose
+argv is per-pod — is an entry whose container `command` and `args` are both
+`any`. Nothing distinguishes such an entry from any other: it is matched,
+stamped and diffed like the rest, and the same digest may also appear
+elsewhere under a narrower policy — see [union
 semantics](#a-digest-may-run-many-ways).
 
 ### Document shape
@@ -292,8 +292,8 @@ up before CDS is reachable.
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
-digests (`c8s.imageAllowlist`) plus any `bootstrapAllowlist.workloads`. Each
-component digest becomes one entry named `<image basename>-<first 12 hex of
+digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
+unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
 digest>` with a single container under `command: any, args: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
 rendered seed. Operator entries admitting a digest under any command and args
@@ -307,6 +307,11 @@ apply` survives a restart, while a deleted entry returns on the next CDS start
 for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
+
+Busybox and the NRI installer provide general-purpose shells, so the chart
+admits their configured invocations through argv-pinned entries and excludes
+those digests from the local floors. Their first startup may wait for the
+plugin's first successful policy pull and kubelet retry.
 
 ## CLI
 

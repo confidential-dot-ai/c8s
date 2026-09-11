@@ -35,6 +35,10 @@ c8sComponents:
   - valuePath: nriImagePolicy.image
     enabledPath: nriImagePolicy.enabled
     cdsExempt: false
+    ## Seeded argv-pinned by the chart (the installer runs pinned shell
+    ## scripts), never as an any-argv entry. Exempt from
+    ## deriveComponents derivation and the uncovered_component_digest guard.
+    argvPinned: true
   - valuePath: volumed.image
     enabledPath: volumed.enabled
     cdsExempt: false
@@ -575,6 +579,20 @@ ratlsMesh:
     enabled: false
     monitoringNamespace: monitoring
 
+## rke2 system workloads the seed admits argv-pinned rather than by digest
+## alone. Only meaningful on cvmMode=node, where the node image bakes RKE2 and
+## its local-path provisioner; other lanes do not run these pods.
+rke2:
+  # local-path-provisioner helper pods: the node image's baked manifest runs
+  # busybox as `/bin/sh /script/{setup,teardown}` with per-PVC flags. The seed
+  # pins exactly those two command prefixes — a busybox floor entry would
+  # admit any command line on any pod. The digest must match the node image's
+  # baked local-path-storage.yaml (a repo test pins the pair in lockstep).
+  localPathHelper:
+    image:
+      repository: busybox
+      digest: "sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+
 nriImagePolicy:
   ## Host-side NRI image admission: the installer DaemonSet. Its enabled state is
   ## bound to the cvmMode shape, not free: it MUST be true on gke/aks, where host NRI is the only allowlist gate
@@ -610,8 +628,10 @@ nriImagePolicy:
 
   # RKE2-only containerd-prep initContainer. Runs privileged with the host
   # containerd config directory mounted to wire up the drop-in import before
-  # the installer writes its NRI drop-in. Digest-pin this image because it runs
-  # as root on every selected node.
+  # the installer writes its NRI drop-in. The seed admits it argv-pinned
+  # (the prep script verbatim), never by digest alone — a busybox floor
+  # entry would admit any command line on any pod. Digest-pin this image
+  # because it runs as root on every selected node.
   containerdPrep:
     image:
       repository: busybox
@@ -728,10 +748,12 @@ nriImagePolicy:
     # deriveComponents: a demo convenience (off by default, like
     # `c8s install --resolve-digests`, which turns it on). When true, the c8s
     # component images this chart installs (operator, cds, attestation-api,
-    # ratls-mesh, nri-image-policy) are seeded and admitted whenever their
-    # image.digest is set, so a digest-pinned install self-allows the c8s
-    # images without an entry for each. It never covers the non-c8s system
-    # images, so production installs pin the full set in `workloads` instead.
+    # ratls-mesh) are seeded and admitted whenever their image.digest is set,
+    # so a digest-pinned install self-allows the c8s images without an entry
+    # for each. It never covers the non-c8s system images, so production
+    # installs pin the full set in `workloads` instead. nri-image-policy is
+    # not derived: the chart seeds it argv-pinned, and a same-named entry
+    # under `workloads` is the way to replace the pin whole.
     deriveComponents: false
     # workloads: named entries; keys are the pkg/allowlist Workload JSON fields
     # (label, initContainers, containers, digest, image, command, args, mounts,
