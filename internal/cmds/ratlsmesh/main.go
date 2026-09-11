@@ -493,6 +493,7 @@ type iptablesSyncConfig struct {
 	ipsetMaxElem            int
 	cwInboundPassthrough    string
 	readyFile               string
+	readyAddr               string
 	metricsFile             string
 	logLevel                string
 }
@@ -520,13 +521,18 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")
 	fs.StringVar(&cfg.cwInboundPassthrough, "cw-inbound-passthrough", formatCWPassthrough(defaultCWPassthrough), "comma-separated proto:source-port replies exempted from the always-on cw inbound guard (which drops FORWARD-path traffic to confidential.ai/cw pods). Each entry matches only a destination port in 32768-60999 and, for TCP, a reply segment shape. Empty = strict drop-all; DNS is the default")
 	fs.StringVar(&cfg.readyFile, "ready-file", "", "path to write after initial ipset and iptables sync succeeds")
+	fs.StringVar(&cfg.readyAddr, "ready-addr", "", "host:port serving GET /readyz, 200 once the initial sync succeeded (empty disables it). The DaemonSet's startup probe uses it: a locked node image denies exec probes")
 	fs.StringVar(&cfg.metricsFile, "iptables-metrics-file", defaultIptablesMetricsFile, "shared file where iptables-sync publishes counters (empty disables)")
 	fs.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	return cmd
 }
 
 func newIptablesCleanupCommand() *cobra.Command {
-	var keepGuard bool
+	var (
+		keepGuard   bool
+		onShutdown  bool
+		settleDelay time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "iptables-cleanup",
 		Short: "Remove iptables NAT rules and ipsets created by the mesh",
@@ -535,18 +541,42 @@ func newIptablesCleanupCommand() *cobra.Command {
 With --keep-guard the fail-closed guard (RATLS-MESH-CW and
 RATLS-MESH-CW-EGRESS filter chains, their FORWARD jumps, and the cw pod
 ipsets) is left in place while the traffic-interception NAT rules are
-removed. The daemonset preStop hook uses this so a terminating mesh keeps
+removed. The daemonset's cleanup sidecar uses this so a terminating mesh keeps
 the guard live: unmeshed inbound and non-TCP egress are still dropped; TCP
 to non-pod destinations was never meshed. A full teardown (no
---keep-guard) also removes the guard.`,
+--keep-guard) also removes the guard.
+
+With --on-shutdown the command instead idles until SIGTERM and cleans up
+then. That is how the DaemonSet's cleanup sidecar runs it: a locked node
+image denies every runc exec, so a lifecycle exec hook would never run.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runIptablesCleanup(keepGuard)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !onShutdown {
+				return runIptablesCleanup(keepGuard)
+			}
+			if settleDelay < 0 {
+				return fmt.Errorf("--settle-delay must not be negative, got %s", settleDelay)
+			}
+			// Native sidecars stop in reverse init order, so this SIGTERM
+			// arrives after the proxy has drained — the ordering the preStop
+			// hook used to give.
+			<-cmd.Context().Done()
+			if err := runIptablesCleanup(keepGuard); err != nil {
+				return err
+			}
+			// Stay alive briefly so the pod's last flows finish against the
+			// cleaned-up rules rather than a half-torn-down netns.
+			time.Sleep(settleDelay)
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&keepGuard, "keep-guard", false,
 		"keep the fail-closed filter guard (cw chains + cw ipsets) while removing interception")
+	cmd.Flags().BoolVar(&onShutdown, "on-shutdown", false,
+		"idle until SIGTERM, then clean up (the DaemonSet sidecar's mode)")
+	cmd.Flags().DurationVar(&settleDelay, "settle-delay", 0,
+		"with --on-shutdown, how long to stay alive after cleanup")
 	return cmd
 }
 

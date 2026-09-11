@@ -325,6 +325,10 @@ attestationApi:
   ## the attest-proxy sidecar serves it on a hostPath Unix socket in
   ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
   proxy:
+    ## Port the proxy serves GET /healthz on for the kubelet's probes. The
+    ## body is "ok" or an error — never evidence — but it is reachable from
+    ## other pods, so keep it off the ports other components use.
+    healthPort: 8401
     resources:
       requests:
         cpu: 10m
@@ -424,6 +428,9 @@ ratlsMesh:
     outbound: 15001
     inbound: 15006
     health: 15021
+    ## iptables-sync's readiness endpoint, bound to node loopback only (the
+    ## DaemonSet is hostNetwork). The mesh proxy's start is gated on it.
+    iptablesReady: 15022
 
   # UID for the ratls-mesh process (iptables excludes this UID)
   uid: 1337

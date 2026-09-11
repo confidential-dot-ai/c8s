@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -144,6 +146,10 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err := resetReadyFile(cfg.readyFile); err != nil {
 		return err
 	}
+	ready, err := serveReadiness(ctx, cfg.readyAddr, logger)
+	if err != nil {
+		return err
+	}
 	clientset, err := newKubeClientset(cfg.kubeconfig)
 	if err != nil {
 		return err
@@ -193,6 +199,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 			return fmt.Errorf("write ready file: %w", err)
 		}
 	}
+	ready.Store(true)
 	logger.Info("iptables sync ready",
 		"resync_period", cfg.resyncPeriod.String(),
 		"watchdog_period", cfg.watchdogPeriod.String())
@@ -275,6 +282,45 @@ func resetReadyFile(path string) error {
 		return fmt.Errorf("remove stale ready file %q: %w", path, err)
 	}
 	return nil
+}
+
+// serveReadiness starts the startup probe's endpoint and returns the flag the
+// caller sets once interception is installed. The main proxy container is
+// gated on this probe (native sidecars start in order), so until it flips no
+// pod traffic can leave the node unintercepted. Empty addr disables the
+// endpoint and returns a flag nobody reads.
+//
+// It binds before the informer work so the probe answers 503 while the sync is
+// still coming up, rather than failing to connect.
+func readinessHandler(ready *atomic.Bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "the initial ipset and iptables sync has not completed", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, "ready")
+	})
+	return mux
+}
+
+func serveReadiness(ctx context.Context, addr string, logger *slog.Logger) (*atomic.Bool, error) {
+	var ready atomic.Bool
+	if addr == "" {
+		return &ready, nil
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("--ready-addr %q: %w", addr, err)
+	}
+	srv := &http.Server{Handler: readinessHandler(&ready), ReadHeaderTimeout: 5 * time.Second}
+	go cmdsutil.ShutdownOnDone(ctx, srv, 2*time.Second)
+	go func() {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("iptables sync readiness endpoint failed", "addr", addr, "error", err)
+		}
+	}()
+	return &ready, nil
 }
 
 func runJumpWatchdog(ctx context.Context, logger *slog.Logger, jumps []iptablesRule, interval time.Duration) {
