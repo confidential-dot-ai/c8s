@@ -5,14 +5,13 @@ Source: [templates/_certificates.tpl](../../templates/_certificates.tpl).
 
 `c8s.getCertContainers` renders the `c8s-cert` native sidecar and the
 `c8s-cert-wait` init container for chart-owned components. The sidecar obtains
-and renews a CDS-issued mesh certificate over RA-TLS. Its long-lived process
-anchors the shared PID namespace under Kata, allowing nginx reload by SIGHUP.
+and renews a CDS-issued mesh certificate over RA-TLS. Nginx reloads by SIGHUP in the shared PID namespace.
 `--key-out` loads an existing key across container restarts.
 
 The wait container gates workload startup on the certificate file using
-`/c8s probe-file`. This uses the guest's allowed container-creation path;
-locked guests deny the exec RPC an exec startup probe would require. Keep the
-`/c8s` command aligned with the binary location in `cmd/c8s/Dockerfile`.
+`/c8s probe-file`. Init-container completion holds the workload until its
+certificate exists. Keep the `/c8s` command aligned with the binary location
+in `cmd/c8s/Dockerfile`.
 
 The helper takes a dict with these fields:
 

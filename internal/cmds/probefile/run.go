@@ -7,10 +7,7 @@
 //     kubelet exec probe.
 //   - --wait: block until the path passes (or --timeout elapses), for use as
 //     the entrypoint of a plain init container that gates a workload on the
-//     initial cert. The locked kata-qemu-snp guest denies ExecProcessRequest,
-//     so an exec probe can never pass there; a container waiting on its own is
-//     CreateContainerRequest, which the guest allows. See
-//     internal/webhook/pod_mutator.go (certWaitContainer).
+//     initial cert. See internal/webhook/pod_mutator.go (certWaitContainer).
 package probefile
 
 import (
@@ -39,7 +36,7 @@ non-empty, and non-zero otherwise.
 With --wait it blocks until <path> passes the check (or --timeout elapses),
 so it can be the entrypoint of an init container that gates a workload on a
 file another container writes — the exec-free equivalent of a startup probe,
-needed on locked kata guests where exec probes are denied by policy.
+used to gate workload startup until its certificate is available.
 
 The non-empty check rules out passing on a half-written file. Writers of files
 probed this way should still use atomic rename (write to a temp file and

@@ -140,12 +140,6 @@ func TestLintShadowedEntry(t *testing.T) {
 		t.Fatalf("a distinguishable entry was reported: %v", got)
 	}
 
-	// A wide entry that pins mounts does not admit everything, so it shadows nothing.
-	mounted := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"exact","destinations":["/etc/hosts"]}}]}`
-	if got := errs(`"seeded":` + mounted + `,"api":` + narrow); len(got) != 0 {
-		t.Fatalf("a mount-pinned entry was reported as shadowing: %v", got)
-	}
-
 	// Two any-argv entries of the same shape are the indistinguishable case,
 	// reported once, not as a shadow in each direction as well.
 	if got := errs(`"a":` + wide + `,"b":` + wide); len(got) != 1 || !strings.Contains(got[0], "declare the same containers") {
@@ -314,35 +308,5 @@ func TestWorkloadApplyDoesNotDoubleReportInFileCollision(t *testing.T) {
 	}
 	if len(ambiguityErrors(lintOffline(incoming))) != 1 {
 		t.Fatal("the file lint should have reported it")
-	}
-}
-
-// A mounts or env policy is enforced only by the in-guest policy-monitor. On a
-// node-as-CVM deployment the host NRI plugin is the only enforcer and reports
-// neither field, so the policy admits every container — silently, at write,
-// install and deny time. lint is the one place that can say so.
-func TestLintWarnsOnUnobservedMountAndEnvPolicy(t *testing.T) {
-	const ctr = `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/x"]},"args":{"policy":"exact","argv":["--serve"]},` +
-		`"mounts":{"policy":"exact","destinations":["/config"]},"env":{"policy":"exact","names":["PATH"]}}`
-	f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+ctr+`]}}}`)
-
-	out, _, err := runCmd("lint", f)
-	if err != nil {
-		t.Fatalf("lint: %v", err)
-	}
-	for _, want := range []string{"constrains mounts and env", "policy-monitor", "--cvm-mode=pod"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("lint output %q missing %q", out, want)
-		}
-	}
-
-	// The warning is about the deployment, not the document: under pod mode the
-	// enforcer does observe both fields, so the same file is clean.
-	out, _, err = runCmd("lint", "--cvm-mode=pod", f)
-	if err != nil {
-		t.Fatalf("lint --cvm-mode=pod: %v", err)
-	}
-	if out != "ok: no findings\n" {
-		t.Fatalf("lint --cvm-mode=pod output = %q, want no findings", out)
 	}
 }

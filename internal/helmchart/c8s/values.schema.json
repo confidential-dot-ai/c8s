@@ -564,7 +564,6 @@
     "hostNamespacePolicy": {},
     "webhook": {},
     "attestationApi": {},
-    "kata": {},
     "ratlsMesh": {},
     "podSecurityContext": {},
     "teeProxy": {

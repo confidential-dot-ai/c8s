@@ -15,9 +15,7 @@ import (
 
 // cdsUpgrade swaps the server cert manager's provider from self-signed to
 // CDS-issued, retrying with backoff until it succeeds, then upgrades the
-// client manager once and flips the cert-mode gauge. Shared by the host and
-// in-guest runs, which differ only in how the provider was built and in
-// logPrefix ("cds" vs "in-guest cds").
+// client manager once and flips the cert-mode gauge.
 type cdsUpgrade struct {
 	logger    *slog.Logger
 	logPrefix string

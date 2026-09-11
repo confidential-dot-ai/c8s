@@ -105,9 +105,9 @@ func resetCLIState(t *testing.T) {
 		uninstallNamespace, uninstallRelease                                         string
 		installValues, installWorkloadRefs, installMeasurements                      []string
 		installInventoryCIDRs                                                        []string
-		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug       bool
+		installWait, installCRDs, installGetCertRunAsNonRoot                         bool
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled bool
-		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce    bool
+		uninstallWait, uninstallHostSweep, uninstallHostSweepOnly, uninstallForce    bool
 		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes                bool
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup        int64
 		installGetCertRenewInterval                                                  time.Duration
@@ -118,9 +118,9 @@ func resetCLIState(t *testing.T) {
 		uninstallNamespace, uninstallRelease,
 		slices.Clone(installValues), slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements),
 		slices.Clone(installInventoryCIDRs),
-		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug,
+		installWait, installCRDs, installGetCertRunAsNonRoot,
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled,
-		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce,
+		uninstallWait, uninstallHostSweep, uninstallHostSweepOnly, uninstallForce,
 		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes,
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup,
 		installGetCertRenewInterval,
@@ -132,9 +132,9 @@ func resetCLIState(t *testing.T) {
 		uninstallNamespace, uninstallRelease = saved.uninstallNamespace, saved.uninstallRelease
 		installValues, installWorkloadRefs, installMeasurements = saved.installValues, saved.installWorkloadRefs, saved.installMeasurements
 		installInventoryCIDRs = saved.installInventoryCIDRs
-		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug = saved.installWait, saved.installCRDs, saved.installGetCertRunAsNonRoot, saved.installKataDebug
+		installWait, installCRDs, installGetCertRunAsNonRoot = saved.installWait, saved.installCRDs, saved.installGetCertRunAsNonRoot
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled = saved.installSingleNode, saved.installForce, saved.installResolveDigests, saved.installAttestEnabled
-		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce = saved.uninstallWait, saved.uninstallKataSweep, saved.uninstallHostSweepOnly, saved.uninstallForce
+		uninstallWait, uninstallHostSweep, uninstallHostSweepOnly, uninstallForce = saved.uninstallWait, saved.uninstallHostSweep, saved.uninstallHostSweepOnly, saved.uninstallForce
 		uninstallDeleteCRDs, uninstallDeleteNamespace = saved.uninstallDeleteCRDs, saved.uninstallDeleteNamespace
 		installVolumes = saved.installVolumes
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup = saved.installCertFSGroup, saved.installGetCertRunAsUser, saved.installGetCertRunAsGroup
@@ -146,14 +146,14 @@ func resetCLIState(t *testing.T) {
 	installCertFSGroup = 65532
 	installGetCertRenewInterval = 6 * time.Hour
 	installGetCertRunAsUser, installGetCertRunAsGroup, installGetCertRunAsNonRoot = 65532, 65532, true
-	installKataDebug, installCvmMode, installHardwarePlatform = false, "", "sev-snp"
+	installCvmMode, installHardwarePlatform = "", "sev-snp"
 	installSingleNode, installImagePullSecret, installImageTag = false, "", ""
 	installVolumes = false
 	installOperatorKeys, installForce = "", false
 	installUpstream, installWorkloadRefs = "", nil
 	installResolveDigests, installAttestEnabled, installMeasurements = true, true, nil
 	uninstallNamespace, uninstallRelease = "c8s-system", "c8s"
-	uninstallWait, uninstallKataSweep, uninstallHostSweepOnly = true, true, false
+	uninstallWait, uninstallHostSweep, uninstallHostSweepOnly = true, true, false
 	uninstallForce, uninstallDeleteCRDs, uninstallDeleteNamespace = false, false, false
 	renderValuesDistro = ""
 }

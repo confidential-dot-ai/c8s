@@ -37,9 +37,7 @@ type config struct {
 	sidecar.Config
 
 	Volumes []volumeRequest
-	// SocketDir holds volumed's socket, as this pod sees it. Unused under
-	// WorkloadClaimsGuest, where volumed is in the guest and there is no
-	// filesystem shared with it.
+	// SocketDir holds the node's volumed socket, as this pod sees it.
 	SocketDir string
 }
 
@@ -210,17 +208,9 @@ func openOne(ctx context.Context, cfg config, daemon *http.Client, daemonBase, n
 	return nil
 }
 
-// daemonClient reaches volumed and returns the base URL to post to: the socket
-// directory NRI-mounted into this sidecar on node-CVM, or the guest's compiled
-// loopback address under kata, where volumed is in this VM and there is no
-// shared filesystem. Both are compiled; the flag selects a shape, not an
-// address.
+// daemonClient reaches volumed through the socket directory NRI-mounted into
+// this sidecar and returns the base URL to post to.
 func daemonClient(cfg config) (*http.Client, string) {
-	if cfg.WorkloadClaimsGuest {
-		// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose on
-		// the key blob's trip to the daemon.
-		return &http.Client{Transport: &http.Transport{}}, volumed.GuestEndpoint()
-	}
 	sock := filepath.Join(cfg.SocketDir, volumed.SocketName)
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -244,9 +234,7 @@ func validate(cfg *config) error {
 		}
 		seen[v.Name] = true
 	}
-	// Under kata volumed is in the guest on a compiled loopback address, so
-	// there is no socket directory to require.
-	if cfg.SocketDir == "" && !cfg.WorkloadClaimsGuest {
+	if cfg.SocketDir == "" {
 		return fmt.Errorf("--socket-dir is required")
 	}
 	return nil

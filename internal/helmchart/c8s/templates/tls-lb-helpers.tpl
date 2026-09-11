@@ -448,9 +448,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 The validated public front-door mode: cds | webpki | acme. Fails the render on
 a mode/values mismatch: webpki needs the Secret and is the only mode that may
-carry one; acme needs a TEE-held key (kata or node-CVM), a reachable :80
-challenge (the kata guest exempts only tcp:8443 from the inbound mesh
-redirect, so no acme under kata), and HTTP-01-issuable sanList entries.
+carry one; acme needs a TEE-held key (node-CVM), a reachable :80
+challenge, and HTTP-01-issuable sanList entries.
 */}}
 {{- define "tls-lb.publicTLSMode" -}}
 {{- $mode := printf "%v" .Values.tlsLb.publicTLS.mode -}}
@@ -464,12 +463,10 @@ redirect, so no acme under kata), and HTTP-01-issuable sanList entries.
 {{- fail (printf "tlsLb.publicTLS.secretName is set but tlsLb.publicTLS.mode is %q; set mode=webpki to serve the Secret, or clear secretName" $mode) -}}
 {{- end -}}
 {{- if eq $mode "acme" -}}
-{{- if not (or .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
-{{- fail "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (kata.enabled=true or attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
+{{- if not (eq .Values.attestationApi.cvmMode "node") -}}
+{{- fail "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
 {{- end -}}
-{{- if .Values.kata.enabled -}}
-{{- fail "VALIDATION_ERROR kind=tlslb_acme_kata_port: tlsLb.publicTLS.mode=acme cannot render under kata.enabled: the guest exempts only tcp:8443 from the inbound mesh redirect (C8S_MESH_INBOUND_PASSTHROUGH), so the HTTP-01 challenge on :80 never reaches nginx. Use the node-CVM shape (attestationApi.cvmMode=node)" -}}
-{{- end -}}
+
 {{- range $s := (include "tls-lb.sanList" . | fromJsonArray) -}}
 {{- if contains "*" $s -}}
 {{- fail (printf "tlsLb.publicTLS.mode=acme cannot issue for wildcard san %q: HTTP-01 forbids wildcards" $s) -}}
@@ -545,28 +542,24 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 
 {{/*
 "true" when the tls-lb pod must mount the node inventory's socket directory:
-the readiness gate is on and this is the node-CVM shape. Under kata the
-in-guest policy-monitor serves the inventory on loopback, so nothing is
-mounted and the pod needs no socket group either.
+the readiness gate is on and this is the node-CVM shape.
 
-The non-kata arm mirrors the operator's own inventory condition
+The condition mirrors the operator's own inventory condition
 (operator.yaml): the directory exists only where an installer put it, and a
 `type: Directory` hostPath naming a path nothing created wedges the pod in
 ContainerCreating. validations.yaml (kind=require_host_image_policy) makes that
-arm true in every renderable non-kata shape today; the condition is spelled out
+condition true in every renderable shape today; the condition is spelled out
 anyway so the two consumers of the socket stay on one rule.
 */}}
 {{- define "tls-lb.mountInventorySocket" -}}
-{{- if and .Values.tlsLb.attest.expectedWorkload (not .Values.kata.enabled) (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+{{- if and .Values.tlsLb.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
 true
 {{- end -}}
 {{- end -}}
 
 {{/*
 c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
-and renews it on a ticker, SIGHUP-ing nginx after each renewal. Long-lived so
-its PID namespace can anchor shareProcessNamespace under kata (see
-c8s.getCertContainers). Caller nindents into the Pod spec's initContainers
+and renews it on a ticker, SIGHUP-ing nginx after each renewal. Caller nindents into the Pod spec's initContainers
 list.
 */}}
 {{- define "tls-lb.getCertContainers" -}}
@@ -574,25 +567,23 @@ list.
 {{- if .Values.tlsLb.discovery.enabled -}}
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
-{{- if eq (include "c8s.attestationApiHostSocket" .) "true" -}}
+{{- if .Values.attestationApi.enabled -}}
 {{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
 {{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
 {{- if .Values.tlsLb.attest.expectedWorkload -}}
+
 {{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
        stamp on the mesh leaf, which only exists when get-cert redeems a
        sandbox token from the inventory — so wire the claims flow whenever
        the gate is enabled (the deployment fails the render if the gate is
        set without the sidecar it gates). Node-CVM mounts the inventory
        socket directory at get-cert's compiled path
-       (workloadclaims.SidecarSocketDir); the kata guest serves it on
-       loopback instead, nothing to mount. The deployment adds the hostPath
+       (workloadclaims.SidecarSocketDir). The deployment adds the hostPath
        volume and the socket's supplemental group
        (workloadclaims.InventorySocketGID) on the same condition. */ -}}
 {{- $extraArgs = append $extraArgs "--workload-claims" -}}
-{{- if .Values.kata.enabled -}}
-{{- $extraArgs = append $extraArgs "--workload-claims-guest" -}}
-{{- else if eq (include "tls-lb.mountInventorySocket" .) "true" -}}
+{{- if eq (include "tls-lb.mountInventorySocket" .) "true" -}}
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
 {{- end -}}
 {{- end -}}

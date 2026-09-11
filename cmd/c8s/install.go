@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -48,16 +49,14 @@ var (
 	installGetCertRunAsUser     int64
 	installGetCertRunAsGroup    int64
 	installGetCertRunAsNonRoot  bool
-
-	installKataDebug        bool
-	installCvmMode          string
-	installHardwarePlatform string
-	installSingleNode       bool
-	installVolumes          bool
-	installImagePullSecret  string
-	installImageTag         string
-	installOperatorKeys     string
-	installForce            bool
+	installCvmMode              string
+	installHardwarePlatform     string
+	installSingleNode           bool
+	installVolumes              bool
+	installImagePullSecret      string
+	installImageTag             string
+	installOperatorKeys         string
+	installForce                bool
 
 	installUpstream     string
 	installWorkloadRefs []string
@@ -80,22 +79,18 @@ const (
 	flagUpstream         = "upstream"
 )
 
-// allowedCvmModes is the --cvm-mode enum. pod is per-pod confidential VMs via
-// the Kata runtime (what --kata used to select before this replaced it); node/gke/aks are host-shaped
+// allowedCvmModes is the --cvm-mode enum: node/gke/aks are node-as-CVM
 // deployments. There is no default: the shape must be stated explicitly.
-var allowedCvmModes = []string{"pod", "node", "gke", "aks"}
+var allowedCvmModes = []string{"node", "gke", "aks"}
 
 // hostedCvmModes are the lanes whose platform pods belong to the cluster
 // provider rather than to c8s, so they are absent from the allowlist the
 // install derives. cvmMode=node is not one: its baked floor already carries the
 // system digests.
-var hostedCvmModes = []string{"pod", "gke", "aks"}
+var hostedCvmModes = []string{"gke", "aks"}
 
 // platformExemptNamespace is the namespace those provider pods run in.
 const platformExemptNamespace = "kube-system"
-
-// cvmModeIsPod reports whether the mode selects the Kata per-pod-CVM stack.
-func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
 
 // c8sComponent maps a chart image to the helm value keys --resolve-digests
 // pins. valuePrefix is the values path whose image the chart renders;
@@ -171,30 +166,6 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall", nil
 }
 
-// podModeMeasurementsPreflight enforces that a pod-mode install without a
-// pinned CDS measurement is a deliberate choice. Under --cvm-mode=pod the
-// injected get-cert runs inside a kata guest whose argv the host writes, so it
-// refuses to dial an unpinned CDS ("--measurements is empty: refusing to reach
-// an unpinned CDS from inside a kata guest"): CDS and tls-lb come up, but no
-// confidential.ai/cw pod ever gets a leaf, and the refusal is only visible in an
-// init container's log inside a locked guest. Requiring --force here surfaces
-// that before the install. Satisfied by --measurements or by a -f values file
-// that sets a non-empty cds.measurements. It returns a warning to print when
-// --force lets it pass.
-func podModeMeasurementsPreflight(cvmMode string, measurements []string, valuesFiles []string, force bool) (warn string, err error) {
-	if !cvmModeIsPod(cvmMode) || len(measurements) > 0 {
-		return "", nil
-	}
-	set, err := valuesFilesSetMeasurements(valuesFiles)
-	if err != nil || set {
-		return "", err
-	}
-	if !force {
-		return "", fmt.Errorf("--cvm-mode=pod without a pinned CDS measurement: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), set a non-empty cds.measurements in a -f values file, or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
-	}
-	return "installing --cvm-mode=pod with no --measurements: CDS and tls-lb will run, but no confidential.ai/cw workload can obtain a certificate until you reinstall with --measurements", nil
-}
-
 // tdxRTMRPinWarning is the "MRTD does not confer code identity" warning for a
 // TDX install that pins no RTMRs: measurement pinning then covers the TDVF
 // firmware only, and a host can boot it with a substituted kernel and rootfs.
@@ -211,7 +182,7 @@ func tdxRTMRPinWarning(hardwarePlatform string, rtmrs, valuesFiles []string) (st
 }
 
 // valuesFilesSetRTMRs reports whether any -f values file pins TDX RTMRs
-// (cds.rtmrs), mirroring valuesFilesSetMeasurements.
+// (cds.rtmrs).
 func valuesFilesSetRTMRs(files []string) (bool, error) {
 	for _, f := range files {
 		tree, err := decodeValuesFile(f)
@@ -416,100 +387,6 @@ func podBindsHostPort(p corev1.Pod, port int32) bool {
 		}
 	}
 	return false
-}
-
-// preflightTDXNodes fails fast when --hardware-platform=tdx but no node carries
-// the confidential.ai/tdx=true label — the label the kata-qemu-tdx*
-// RuntimeClass nodeSelectors expect (kata.tdxNodeSelector default). On the
-// default pod (kata) path the install applies it itself right before this check
-// (autoLabelTEENodes, trusting --hardware-platform), so a failure there means
-// no node matched the kata node selector at all; with -f, or outside --cvm-mode=pod
-// (e.g. --cvm-mode=node), the operator owns the label. Without a labelled
-// node, TDX pods would sit Pending until timeout with an opaque scheduler
-// error.
-//
-// Runs regardless of -f: the label requirement is a fact about the cluster,
-// not a values choice, and every TDX install needs it. Note the label says
-// nothing about qgsd or its vsock bridge being up — quote generation failing
-// on a labelled-but-unready host surfaces at attestation time, not here.
-const tdxHostLabelKey = "confidential.ai/tdx"
-
-func preflightTDXNodes(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
-		"-l", tdxHostLabelKey+"=true", "-o", "name").Output()
-	if err != nil {
-		return fmt.Errorf("kubectl get nodes -l %s=true: %w", tdxHostLabelKey, err)
-	}
-	if strings.TrimSpace(string(out)) == "" {
-		return fmt.Errorf("--hardware-platform=tdx but no node is labelled %s=true. A default `c8s install --cvm-mode=pod` labels every kata-targeted node automatically, so either no node matched the kata node selector, or this is a -f/non-pod install where labels are yours to manage. A TDX node also needs /dev/tdx_guest available, qgsd (Intel DCAP Quote Generation Service) running, and a socat unix→vsock bridge so kata's QGS-over-vsock path reaches qgsd. To label a host yourself:\n\n    kubectl label node <node> %s=true",
-			tdxHostLabelKey, tdxHostLabelKey)
-	}
-	return nil
-}
-
-// preflightTEENodes fails fast (before the helm install) when a --cvm-mode=pod
-// install would schedule confidential pods that can never start: the
-// platform's confidential RuntimeClasses select platform-labelled nodes
-// (kata.snpNodeSelector / kata.tdxNodeSelector), and the chart-managed CDS
-// and tls-lb both pin the platform's CPU class — with no labelled
-// node the whole release sits Pending and `helm --wait` blocks for the full
-// timeout before failing opaquely. (Why a wrong-TEE node cannot run these
-// pods: kata-qemu-snp on a non-SNP host is a QEMU crash-loop.)
-//
-// Read-only, and it reads the EFFECTIVE selector (chart defaults + -f +
-// computed --set), so it runs on every --cvm-mode=pod install including -f
-// ones: whoever owns the label, an unlabelled cluster is broken the same way.
-// autoLabelled only picks the remedy the error names.
-func preflightTEENodes(ctx context.Context, values map[string]any, hardwarePlatform string, autoLabelled bool) error {
-	selKey, otherPlatform := teeSelectorKey(hardwarePlatform), "tdx"
-	if hardwarePlatform == "tdx" {
-		otherPlatform = "sev-snp"
-	}
-	sel, _ := nestedMap(values, "kata", selKey)
-	selector, ok := labelSelector(sel)
-	if !ok {
-		// Empty/cleared selector means unrestricted confidential scheduling —
-		// nothing to preflight (and the chart renders no scheduling block).
-		return nil
-	}
-
-	labeled, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
-		"-l", selector, "-o", "name").Output()
-	if err != nil {
-		return fmt.Errorf("kubectl get nodes -l %s: %w", selector, err)
-	}
-	if strings.TrimSpace(string(labeled)) == "" {
-		why := fmt.Sprintf("the install labels every kata-targeted node from --hardware-platform=%s, so no node matched the kata node selector — check the cluster has schedulable Linux nodes, and on a %s cluster pass --hardware-platform=%s instead", hardwarePlatform, otherPlatform, otherPlatform)
-		if !autoLabelled {
-			why = fmt.Sprintf("a -f values file sets kata.%s, so the install left node labelling to you", selKey)
-		}
-		return fmt.Errorf("no node is labelled %s: %s. Without a labelled node no confidential pod can schedule, including the chart's own CDS and tls-lb, and `helm --wait` blocks until it times out. To label a host: kubectl label node <node> %s", selector, why, strings.ReplaceAll(selector, ",", " "))
-	}
-	return nil
-}
-
-// labelSelector flattens a decoded values map into a kubectl -l selector
-// ("k=v,k2=v2", keys sorted for determinism). ok=false for an empty map or a
-// non-string value — an empty kata.snpNodeSelector is the documented opt-out,
-// and a malformed one is the chart's to reject, not the preflight's.
-func labelSelector(sel map[string]any) (string, bool) {
-	if len(sel) == 0 {
-		return "", false
-	}
-	keys := make([]string, 0, len(sel))
-	for k := range sel {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	pairs := make([]string, 0, len(keys))
-	for _, k := range keys {
-		v, ok := sel[k].(string)
-		if !ok {
-			return "", false
-		}
-		pairs = append(pairs, k+"="+v)
-	}
-	return strings.Join(pairs, ","), true
 }
 
 // policyModeFailClosed is the image-policy mode that denies. In `audit` the
@@ -830,13 +707,12 @@ func classifyDistroNodes(lines []string) (rke2, other []string) {
 // chooseDistro maps the node classification to a distro value: any RKE2 node
 // (and no upstream ones) selects rke2; otherwise k8s, which also covers an
 // empty or unclassifiable node list — the chart default and the only safe
-// guess. A mixed cluster has no single right answer — kata-deploy and
-// nri-image-policy patch a distro-specific containerd path on every selected
-// node — so it demands an explicit per-component choice via -f instead of
-// guessing.
+// guess. A mixed cluster has no single right answer: nri-image-policy patches
+// a distro-specific containerd path on every selected node, so it demands an
+// explicit choice via -f instead of guessing.
 func chooseDistro(rke2Nodes, otherNodes []string) (string, error) {
 	if len(rke2Nodes) > 0 && len(otherNodes) > 0 {
-		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set kata.distro / nriImagePolicy.distro and restrict the install with kata.nodeSelector / nriImagePolicy.nodeSelector via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
+		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set nriImagePolicy.distro and restrict the install with nriImagePolicy.nodeSelector via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
 	}
 	if len(rke2Nodes) > 0 {
 		return "rke2", nil
@@ -909,53 +785,17 @@ func decodeValuesFile(path string) (map[string]any, error) {
 }
 
 // valuesFilesSetDistro reports whether any -f values file explicitly sets
-// kata.distro or nriImagePolicy.distro. When one does, that file owns the host
-// containerd layout and cluster auto-detection must stand aside; when none
-// does, detection still applies even though other values were supplied.
+// nriImagePolicy.distro. When one does, that file owns the host containerd
+// layout and cluster auto-detection must stand aside; when none does,
+// detection still applies even though other values were supplied.
 func valuesFilesSetDistro(files []string) (bool, error) {
 	for _, f := range files {
 		tree, err := decodeValuesFile(f)
 		if err != nil {
 			return false, err
 		}
-		for _, path := range []string{"kata.distro", "nriImagePolicy.distro"} {
+		for _, path := range []string{"nriImagePolicy.distro"} {
 			if v, err := stringAtPath(tree, path); err == nil && v != "" {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
-// valuesFilesSetGuestImageTag reports whether any -f values file names the
-// kata-guest-base tag itself. That file then owns the guest axis, and the
-// install leaves it alone — the same "a -f that actually sets the key owns it"
-// rule valuesFilesSetDistro applies to the containerd layout.
-func valuesFilesSetGuestImageTag(files []string) (bool, error) {
-	for _, f := range files {
-		tree, err := decodeValuesFile(f)
-		if err != nil {
-			return false, err
-		}
-		if v, err := stringAtPath(tree, "kata.guestImage.tag"); err == nil && v != "" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// valuesFilesSetMeasurements reports whether any -f values file pins a CDS
-// launch measurement. cds.measurements is the one the injected get-cert reads,
-// so it alone decides whether a pod-mode install is pinned; ratlsMesh.measurements
-// travels with it but does not substitute for it.
-func valuesFilesSetMeasurements(files []string) (bool, error) {
-	for _, f := range files {
-		tree, err := decodeValuesFile(f)
-		if err != nil {
-			return false, err
-		}
-		if v, ok := valueAtPath(tree, "cds.measurements"); ok {
-			if list, isList := v.([]any); isList && len(list) > 0 {
 				return true, nil
 			}
 		}
@@ -1038,25 +878,13 @@ var installCmd = &cobra.Command{
   - the CDS trust root (attestation, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, and tls-lb components
 
-Under --cvm-mode=pod the install is ENFORCING: every workload pod runs as a kata VM
-(injected and validated at admission), and the host-side ratls-mesh,
-attestation-api, and nri-image-policy are replaced by their in-guest
-counterparts baked into the kata-guest-base image.
-
---debug (with --cvm-mode=pod) selects the kata-guest-base DEBUG image variant, whose
-baked guest policy allows the host log/exec stream RPCs so 'kubectl logs' and
-'kubectl exec' work against kata pods. Container I/O then crosses the TEE
-boundary in plaintext, and the debug image's SNP launch measurement differs
-from the locked one (attestation pinned to the locked value rejects it).
-Development only.
-
 The host distro (k8s vs rke2) is detected from the cluster's kubelet versions;
-override kata.distro / nriImagePolicy.distro via -f for a layout detection
-cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
+override nriImagePolicy.distro via -f for a layout detection
+cannot see. On RKE2 the nri-image-policy DaemonSets carry a
 containerd-prep initContainer that wires up the drop-in import; no node
 preparation is required beyond a running cluster.
 
-On the hosted lanes (--cvm-mode=pod/gke/aks) the provider's kube-system pods are
+On the hosted lanes (--cvm-mode=gke/aks) the provider's kube-system pods are
 not on the c8s allowlist, so the install renders
 nriImagePolicy.policy.exemptNamespaces=[kube-system], admitting them by the
 digests they run at the plugin's first connect. A -f file that sets that key
@@ -1076,15 +904,12 @@ render guards then require those values.
 When the c8s images live in a registry that requires authentication, create a
 kubernetes.io/dockerconfigjson Secret in the release namespace and pass
 --image-pull-secret <name>: the chart wires it into every component's
-imagePullSecrets, so pods authenticate from first start. Under --cvm-mode=pod the
-same Secret also authenticates the kata-image-puller's in-pod oras pull of
-the kata-guest-base artifact (override: kata.guestImage.pullerAuthSecret).
+imagePullSecrets, so pods authenticate from first start.
 This is the cluster-side (kubelet) credential; digest resolution runs locally
 via crane and uses your local docker login.
 
 --volumes deploys volumed, the node agent that opens a pod's encrypted volumes
-into its mount namespace (docs/volumes.md). Under --cvm-mode=pod it deploys
-nothing: volumed runs inside each guest, baked into the kata-guest-base image.
+into its mount namespace (docs/volumes.md).
 
 To adopt already-running workloads, pass --workload-ref <id>=<namespace>/<kind>/<name>[:<port>].
 The release namespace is excluded from workload injection, so adopted workloads
@@ -1096,7 +921,7 @@ tls-lb routes its catch-all to that adopted workload's headless Service
 (c8s-<id>.<ns>.svc.cluster.local:<port>). With --resolve-digests, install also
 resolves adopted workload images into nriImagePolicy.bootstrapAllowlist.workloads
 entries admitting them under any command and args, so image admission (the host
-NRI plugin, or the in-guest policy-monitor under --cvm-mode=pod) allows those
+NRI plugin) allows those
 rollouts.
 
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
@@ -1106,9 +931,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if err := validateHardwarePlatform(installHardwarePlatform); err != nil {
-			return err
-		}
-		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
 		// Substitute any "-f -" before anything reads installValues, so the
@@ -1130,11 +952,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
-			return err
-		} else if warn != "" {
-			fmt.Fprintln(os.Stderr, "warning: "+warn)
-		}
-		if warn, err := podModeMeasurementsPreflight(installCvmMode, installPinnedMeasurementArgs(), installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1176,11 +993,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return fmt.Errorf("read chart components: %w", err)
 		}
 		imageTag := resolveImageTag()
-		// kata-deploy and nri-image-policy must bind the host's containerd
+		// nri-image-policy must bind the host's containerd
 		// layout in every install mode, so the distro is detected from the
 		// cluster's kubelet versions and plumbed; letting the chart default
 		// (k8s) stand would silently mis-target RKE2. Detection is suppressed
-		// only when a -f file actually sets kata.distro / nriImagePolicy.distro
+		// only when a -f file actually sets nriImagePolicy.distro
 		// (that file then owns the layout) — not merely because some -f is
 		// present. buildValueArgs skips the distro when it is empty.
 		distro := ""
@@ -1195,19 +1012,13 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
 		}
-		if installKataDebug {
-			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
-		}
-		if installVolumes && cvmModeIsPod(installCvmMode) {
-			fmt.Fprintln(os.Stdout, "+ encrypted volumes: served by `volumed --guest` inside each kata guest; no host DaemonSet is deployed")
-		}
 		// The sandbox-digests callback dials node addresses and nothing else.
 		// Resolve here, where the cluster is reachable, that CDS can bound
 		// it — a default install must not quietly ship with sandbox identity
 		// disabled. Must run before buildValueArgs, which folds an explicit
-		// --node-cidr (or the pod range(s) under --cvm-mode=pod) into the
+		// --node-cidr into the
 		// computed values.
-		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs, installCvmMode)
+		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
 		if err != nil {
 			return err
 		}
@@ -1234,7 +1045,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		defer os.Remove(computedValues)
-		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait, cvmModeIsPod(installCvmMode))
+		helmArgs := buildInstallHelmArgs(chartPath, computedValues, installValues, installCRDs, installWait)
 
 		// Fail fast on the default path if the CDS node is unlabelled, before
 		// mutating the cluster. Skipped when -f is supplied: a custom values
@@ -1288,54 +1099,22 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
 
-		// --cvm-mode=pod: label every kata-targeted node for the declared
-		// --hardware-platform (see autoLabelTEENodes), then fail fast if
-		// confidential pods still have nowhere to schedule. Labelling mutates
-		// the cluster, so it runs after the read-only preflights above, and
-		// stands aside — loudly — only when a -f file sets the platform's own
-		// selector; the preflight runs either way. NOT skipped under
-		// --single-node: a one-node cluster needs the label too. A `-f` values
-		// file no longer disables TEE node labelling.
-		if cvmModeIsPod(installCvmMode) {
-			selectorInValues, err := valuesFilesSetTEESelector(installValues, installHardwarePlatform)
-			if err != nil {
-				return err
-			}
-			if selectorInValues {
-				reportTEELabelSkip(os.Stdout, values, installHardwarePlatform)
-			} else if err := autoLabelTEENodes(cmd.Context(), values, installHardwarePlatform); err != nil {
-				return err
-			}
-			if err := preflightTEENodes(cmd.Context(), values, installHardwarePlatform, !selectorInValues); err != nil {
-				return err
-			}
-		}
-
-		// Fail fast when --hardware-platform=tdx but no node carries the TDX
-		// label. Under --cvm-mode=node the attestationApi DaemonSet needs at
-		// least one TDX-capable node. Checks a fact about the cluster, not
-		// the values, so it runs with -f too — but under --cvm-mode=pod the
-		// block above already checked the effective tdxNodeSelector (which
-		// may be customized or cleared), so skip the fixed-key check there.
-		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !cvmModeIsPod(installCvmMode) {
-			if err := preflightTDXNodes(cmd.Context()); err != nil {
-				return err
-			}
-		}
-
 		// The install always ships pods that exceed the restricted pod-security
 		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
 		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
 		// attestation-api needs SYS_RAWIO (node/gke) or privileged (aks).
-		// --cvm-mode=pod adds kata-deploy on top. No supported shape fits restricted, so
+		// No supported shape fits restricted, so
 		// the namespace is always labelled privileged (a CIS-hardened cluster, e.g.
 		// RKE2 with profile: cis, would otherwise reject those pods at admission).
 		if err := applyNamespace(cmd.Context(), installNamespace); err != nil {
 			return err
 		}
 
-		if err := runHelmWithKataHeal(cmd.Context(), os.Stdout, os.Stderr, helmArgs, installNamespace, cvmModeIsPod(installCvmMode), installWait); err != nil {
-			return err
+		fmt.Fprintf(os.Stdout, "+ helm %s\n", strings.Join(helmArgs, " "))
+		hc := exec.CommandContext(cmd.Context(), "helm", helmArgs...)
+		hc.Stdout, hc.Stderr = os.Stdout, os.Stderr
+		if err := hc.Run(); err != nil {
+			return fmt.Errorf("helm install failed: %w", err)
 		}
 		for _, adoption := range adoptions {
 			if err := patchAdoptedWorkload(cmd.Context(), adoption.ref, adoption.cwID); err != nil {
@@ -1450,12 +1229,8 @@ func defaultInstallImageTag(buildVersion string) string {
 // load-bearing: the operator's -f files come first and the computed values file
 // LAST, so the CLI's computed values win on the keys they set (helm merges -f
 // last-wins) — matching the prior "--set beats -f" precedence. --skip-crds is a
-// helm invocation flag (not a value), emitted iff CRDs are skipped. A pod-mode (kata)
-// install waits 10m instead of 5m: on a node without a prior kata install,
-// kata-deploy downloads the multi-GB kata-static payload inside the --wait
-// window, and 5m routinely left the release `failed` with the cluster
-// converging fine underneath.
-func buildInstallHelmArgs(chartPath, computedValues string, valueFiles []string, installCRDs, wait, kata bool) []string {
+// helm invocation flag (not a value), emitted iff CRDs are skipped.
+func buildInstallHelmArgs(chartPath, computedValues string, valueFiles []string, installCRDs, wait bool) []string {
 	helmArgs := []string{
 		"upgrade", "--install", installRelease, chartPath,
 		"--namespace", installNamespace,
@@ -1469,9 +1244,6 @@ func buildInstallHelmArgs(chartPath, computedValues string, valueFiles []string,
 	helmArgs = append(helmArgs, "-f", computedValues)
 	if wait {
 		timeout := "--timeout=5m"
-		if kata {
-			timeout = "--timeout=10m"
-		}
 		helmArgs = append(helmArgs, "--wait", timeout)
 	}
 	return helmArgs
@@ -1535,14 +1307,11 @@ func appendInstallCRDArgs(setArgs []string, installCRDs bool) []string {
 }
 
 // appendDistroInstallArgs translates the detected host distro into the
-// per-component values. Both targets are always set — each install shape uses
-// exactly one of them (nri-image-policy on the host shape, kata-deploy under
-// --cvm-mode=pod) and both must bind the containerd config layout the host distro
-// uses; the unused one is inert. No enum guard: the value comes from
+// nri-image-policy containerd layout. No enum guard: the value comes from
 // chooseDistro, and the chart re-validates anyway.
 func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 	return append(helmArgs,
-		"--set-string", "kata.distro="+distro,
+
 		"--set-string", "nriImagePolicy.distro="+distro,
 	)
 }
@@ -1555,18 +1324,13 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // level — all modes render privileged: true, since a hostPath device mount alone
 // does not grant device-cgroup access):
 //
-//	pod, node, gke → native /dev/sev-guest (SEV-SNP) by default, or
+//	node, gke      → native /dev/sev-guest (SEV-SNP) by default, or
 //	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
 //	aks            → vTPM /dev/tpm0
 //
-// pod, node, and gke are distinct deployment targets that happen to share the
+// node and gke are distinct deployment targets that happen to share the
 // native-TEE-device wiring (they are NOT aliases):
 //
-//	pod  → per-pod confidential VMs via the Kata runtime: every workload pod is
-//	       a kata CVM. appendKataInstallArgs turns on the kata stack and turns
-//	       off host-side attestation-api/nri/ratls-mesh (served by the in-guest
-//	       counterparts baked into kata-guest-base). The device is still mounted
-//	       for the host-side attestation-api that kata-guest-base derives from.
 //	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
 //	       self-managed) are themselves confidential VMs. Pods run as ordinary
 //	       processes attested via the node's own quote. Cloud-agnostic. The node
@@ -1617,8 +1381,8 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	//        wraps either an SNP report (az-snp) or a TD quote (az-tdx). AKS
 	//        exposes no /dev/sev-guest or /dev/tdx_guest to the guest, so the
 	//        vTPM is the only evidence source for both SNP and TDX aks nodes.
-	//   pod/node/gke + --hardware-platform sev-snp: native /dev/sev-guest
-	//   pod/node/gke + --hardware-platform tdx:     native /dev/tdx-guest
+	//   node/gke + --hardware-platform sev-snp: native /dev/sev-guest
+	//   node/gke + --hardware-platform tdx:     native /dev/tdx-guest
 	sevGuest, tdxGuest, tpm := "false", "false", "false"
 	switch {
 	case cvmMode == "aks":
@@ -1680,7 +1444,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// node: the node image bakes host attestation-api and nri-image-policy;
 	// re-rendering them duplicates the baked pair and the baked fail-closed NRI
 	// floor denies the chart copies' own images. ratlsMesh stays: it is not
-	// baked (unlike kata-guest-base). The NRI installer does stay on, in its
+	// baked. The NRI installer does stay on, in its
 	// baked form — the pins below are the one thing an image built before this
 	// release cannot carry, and the installer is the only path that reaches the
 	// baked plugin's config.
@@ -1710,10 +1474,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	helmArgs = append(helmArgs, pinArgs...)
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
-	// is the node image's M. In pod mode those components are per-pod kata
-	// guests, so the value is instead the kata-guest-base launch digest for the
-	// pod shape CDS runs in — compute it with `c8s kata measure`, not from the
-	// node image's manifest.json.
+	// is the node image's M.
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
@@ -1740,15 +1501,9 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	return helmArgs, nil
 }
 
-// validateDebugFlag rejects --debug outside --cvm-mode=pod: the flag selects the
-// kata-guest-base debug image, which only exists under the kata stack, so a
-// bare --debug is meaningless and almost certainly a mistaken expectation
-// (e.g. hoping for verbose install output). Checked first in RunE, before
-// anything touches the cluster.
 // validateCvmMode enforces that --cvm-mode is set and is a known shape. There
-// is no default: an unstated deployment shape silently mismatching the cluster
-// (baked vs chart-provided attestation stack, kata vs plain runtime) is exactly
-// the failure this makes impossible.
+// is no default: an unstated deployment shape could silently mismatch the
+// cluster's baked versus chart-provided attestation stack.
 func validateCvmMode(cvmMode string) error {
 	if cvmMode == "" {
 		return fmt.Errorf("--%s is required; one of %s", flagCvmMode, strings.Join(allowedCvmModes, ", "))
@@ -1762,8 +1517,8 @@ func validateCvmMode(cvmMode string) error {
 // allowedPlatforms is what --hardware-platform takes: the canonical family
 // names, which is also what the operator and the chart consume. The alias
 // spellings teetypes.ParseFamily accepts are deliberately not taken here —
-// node labelling and runtime-class selection compare this value as written.
-var allowedPlatforms = []string{webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX}
+// node labelling compares this value as written.
+var allowedPlatforms = []string{string(teetypes.FamilySNP), string(teetypes.FamilyTDX)}
 
 // validateHardwarePlatform enforces that --hardware-platform is set and known,
 // exactly like its sibling --cvm-mode. install checks it first in RunE, before
@@ -1777,66 +1532,6 @@ func validateHardwarePlatform(hardwarePlatform string) error {
 		return fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
 	}
 	return nil
-}
-
-// validateDebugFlag rejects --debug outside --cvm-mode=pod: the flag selects the
-// kata-guest-base debug image, which only exists under the pod (kata) stack.
-func validateDebugFlag(cvmMode string, debug bool) error {
-	if debug && !cvmModeIsPod(cvmMode) {
-		return fmt.Errorf("--debug selects the kata-guest-base debug image, which only exists under --%s=pod; set --%s=pod or drop --debug", flagCvmMode, flagCvmMode)
-	}
-	return nil
-}
-
-// appendKataInstallArgs translates --cvm-mode=pod into helm --set values. kata is
-// enforcing — there is no kata-without-enforcement shape: the chart renders
-// the runtime stack, the runtimeClass-injecting webhook behavior, and the
-// ValidatingAdmissionPolicy together off kata.enabled.
-//
-// It also turns off the host-side ratls-mesh, attestation-api, and
-// nri-image-policy: under kata every workload runs as a kata CVM, where their
-// function is served by the in-guest counterparts baked into kata-guest-base
-// (in-VM ratls routing, in-guest attestation-api on loopback, in-guest
-// policy-monitor image admission). The chart fails the render if they are
-// left enabled alongside kata.enabled (see validations.yaml).
-//
-// debug selects the kata-guest-base debug image variant (--debug; the chart
-// derives the `<tag>-debug` artifact tag). The confidential-GPU stack (runtime
-// class, shim, GPU image puller, sandbox device plugin) ships with every kata
-// install — it renders off kata.enabled, so there is no GPU flag here. RunE
-// rejects --debug outside --cvm-mode=pod before args are built; everything here still
-// keys on kata so a call-order change cannot emit a debug value for a non-kata
-// install.
-//
-// guestTag pins the kata-guest-base artifact to the same tag the component
-// images resolve at.
-//
-// INVARIANT: the guest's baked bootstrap allowlist admits the component digests
-// this install resolves. The seed is fixed when the guest is built, so it names
-// the components of exactly one commit; letting the two axes resolve from
-// different tags admits a guest whose seed predates the components, and
-// policy-monitor then SIGKILLs the injected get-cert — the install never
-// converges and says only "Broken pipe". Empty leaves the chart default, which
-// is what a -f file owning kata.guestImage.tag wants.
-func appendKataInstallArgs(helmArgs []string, cvmMode string, debug bool, guestTag string) []string {
-	if !cvmModeIsPod(cvmMode) {
-		return helmArgs
-	}
-	helmArgs = append(helmArgs,
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-	)
-	if debug {
-		helmArgs = append(helmArgs, "--set", "kata.guestImage.debug=true")
-	}
-	if guestTag != "" {
-		// --set-string for the same reason component tags use it: an all-digit
-		// or zero-padded tag would otherwise be int-coerced.
-		helmArgs = append(helmArgs, "--set-string", "kata.guestImage.tag="+guestTag)
-	}
-	return helmArgs
 }
 
 // preflightImagePullSecret reads the Secret --image-pull-secret names (absent
@@ -1909,7 +1604,7 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 	}
 	if _, err := crane.Digest(ctx, repo+":"+tag); err != nil {
 		if crane.IsNotFound(err) {
-			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
+			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo), err)
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not verify operator image %s:%s exists (%v); continuing\n", repo, tag, err)
 	}
@@ -1933,12 +1628,9 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 }
 
 // appendVolumedInstallArgs turns on the node agent that opens encrypted volumes
-// (docs/volumes.md) for --volumes. Nothing is emitted under --cvm-mode=pod:
-// there volumed runs inside the guest from the kata-guest-base image, and the
-// chart's enforce_host_components validation rejects the host DaemonSet
-// alongside kata.
-func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []string {
-	if !volumes || cvmModeIsPod(cvmMode) {
+// (docs/volumes.md) for --volumes.
+func appendVolumedInstallArgs(setArgs []string, volumes bool) []string {
+	if !volumes {
 		return setArgs
 	}
 	return append(setArgs, "--set", "volumed.enabled=true")
@@ -2309,13 +2001,11 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 // tagCouplingHint explains a missing component image in terms of the c8s
 // publish model, so the operator lands on the right knob instead of retrying
 // tags. The c8s component images (operator, cds, …) publish in lockstep
-// (docker.yml) and the chart+operator ship as a unit; a tag that exists only
-// for some other artifact — e.g. a kata-guest-base guest-image tag like
-// branch-<name> — is not an install tag, and falling back to a mismatched
-// component tag is worse than failing (an operator predating the chart's
-// webhook features silently mis-injects).
-func tagCouplingHint(repo, tag string) string {
-	return fmt.Sprintf("the c8s component images publish in lockstep, so each must exist at the install tag; a mismatched older operator would silently lack webhook features the chart expects. If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. If %s is released on its own cadence rather than with c8s, give its c8sComponents entry a pinnedDigest. Verify with: crane ls %s", tag, tag, repo, repo)
+// (docker.yml) and the chart+operator ship as a unit. Falling back to a
+// mismatched component tag is worse than failing: an operator predating the
+// chart's webhook features silently mis-injects.
+func tagCouplingHint(repo string) string {
+	return fmt.Sprintf("the c8s component images publish in lockstep, so each must exist at the install tag; a mismatched older operator would silently lack webhook features the chart expects. If %s is released on its own cadence rather than with c8s, give its c8sComponents entry a pinnedDigest. Verify with: crane ls %s", repo, repo)
 }
 
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
@@ -2464,7 +2154,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 			digest, err = resolve(repo + ":" + tag)
 			if err != nil {
 				if crane.IsNotFound(err) {
-					return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
+					return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo), err)
 				}
 				return nil, err
 			}
@@ -2495,21 +2185,31 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
-	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory. Under --cvm-mode=pod volumes are served by the in-guest volumed baked into kata-guest-base, so nothing is deployed")
+	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod confidential VMs via the Kata runtime — every workload pod is a kata CVM, host-side attestation-api/nri/ratls-mesh served by the in-guest counterparts), node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant. Only pod isolates workloads from each other")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant")
 	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Under --cvm-mode=aks the CPU TEE rides the Azure vTPM: sev-snp selects az-snp and tdx selects az-tdx (no guest device needed — the report comes from /dev/tpm0)")
-	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value")
 	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), --cvm-mode=pod without --measurements (no cw workload can start), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), and a fail-closed image policy that would deny the cluster's own platform pods (they do not come back after the containerd restart)")
 	rootCmd.AddCommand(installCmd)
+}
+
+// withStderr appends the stderr an exec failure captured (Cmd.Output records
+// it on ExitError when Cmd.Stderr is unset), so kubectl's own reason reaches
+// the operator instead of a bare "exit status 1".
+func withStderr(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return err
 }

@@ -8,17 +8,7 @@ import (
 
 func measurementHex() string { return strings.Repeat(hex.EncodeToString([]byte{0xab}), 48) }
 
-// Empty measurements accept any RA-TLS-attested CDS, so dropping the flag is
-// how a host points a sidecar at a CDS it runs. Under kata it writes the argv.
-func TestParsePinsRefusesAnUnpinnedCDSInsideAKataGuest(t *testing.T) {
-	cfg := Config{WorkloadClaimsGuest: true}
-	if _, err := cfg.ParsePins(); err == nil || !strings.Contains(err.Error(), "--measurements is empty") {
-		t.Fatalf("error = %v, want a refusal to use an unpinned CDS", err)
-	}
-}
-
-// Outside kata "no pinning" is a supported development shape.
-func TestParsePinsWarnsOutsideAKataGuest(t *testing.T) {
+func TestParsePinsWarnsWithoutMeasurements(t *testing.T) {
 	cfg := Config{}
 	got, err := cfg.ParsePins()
 	if err != nil {
@@ -29,8 +19,8 @@ func TestParsePinsWarnsOutsideAKataGuest(t *testing.T) {
 	}
 }
 
-func TestParsePinsAcceptsAPinnedCDSInsideAKataGuest(t *testing.T) {
-	cfg := Config{Measurements: []string{measurementHex()}, WorkloadClaimsGuest: true}
+func TestParsePinsAcceptsAPinnedCDS(t *testing.T) {
+	cfg := Config{Measurements: []string{measurementHex()}}
 	got, err := cfg.ParsePins()
 	if err != nil {
 		t.Fatalf("ParsePins: %v", err)

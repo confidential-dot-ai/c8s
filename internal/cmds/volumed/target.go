@@ -16,13 +16,6 @@ import (
 // UID, never from anything the caller sends.
 const emptyDirSubdir = "volumes/kubernetes.io~empty-dir"
 
-// DefaultGuestEphemeralRoot is where kata-agent materializes a memory-backed
-// emptyDir inside the guest (kata's `defaultEphemeralPath`). The webhook pins
-// `medium: Memory` under kata so a volume's mount point lands here: with
-// shared_fs="none" the shim turns a default-medium emptyDir into a disk.img
-// block device instead.
-const DefaultGuestEphemeralRoot = "/run/kata-containers/sandbox/ephemeral"
-
 // KubeVolumePrefix precedes a volume's name in the Kubernetes volume the
 // webhook injects, and so in the directory this mounts into. The webhook
 // reserves the whole prefix; both sides must spell it the same.
@@ -36,9 +29,8 @@ var (
 	volumeNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 )
 
-// Targets resolves the directory a volume must be mounted at. Two shapes: the
-// node-CVM one, where kubelet owns the pod's emptyDir, and the kata guest one,
-// where kata-agent materializes it inside the VM and there is no kubelet.
+// Targets resolves the directory a volume must be mounted at, where kubelet
+// owns the pod's emptyDir.
 type Targets interface {
 	Dir(podUID, volumeName string) (*os.File, error)
 }
@@ -69,38 +61,6 @@ func (k KubeletTargets) root() string {
 		return k.Root
 	}
 	return DefaultKubeletRoot
-}
-
-// GuestTargets resolves under the kata guest's ephemeral storage directory.
-//
-// The pod UID plays no part: a kata guest holds exactly one pod, so there is no
-// other pod's directory to be confused with — the same reason the guest's token
-// route needs no peer credentials.
-type GuestTargets struct {
-	// Root is the guest ephemeral directory; empty means
-	// DefaultGuestEphemeralRoot.
-	Root string
-}
-
-// Dir opens the mount target for the guest's single pod.
-//
-// Unlike the kubelet shape this cannot pass RESOLVE_NO_XDEV: kata-agent
-// materializes the memory-backed emptyDir as a tmpfs mounted *at* the volume
-// directory, so refusing to cross a mount point would fail every open with
-// EXDEV. What the flag would guard against does not arise here — the workload
-// holds no CAP_SYS_ADMIN in the sandbox mount namespace this resolves in, so it
-// cannot mount over the target. RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS, which
-// are what stop the workload redirecting the mount using the emptyDir contents
-// it does own, still apply.
-func (g GuestTargets) Dir(_, volumeName string) (*os.File, error) {
-	return resolveBeneath(g.root(), volumeName, 0)
-}
-
-func (g GuestTargets) root() string {
-	if g.Root != "" {
-		return g.Root
-	}
-	return DefaultGuestEphemeralRoot
 }
 
 // resolveBeneath opens volumeName directly beneath base, with extraResolve

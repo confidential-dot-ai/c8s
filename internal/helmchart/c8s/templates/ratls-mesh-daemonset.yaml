@@ -75,7 +75,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+        {{- if .Values.attestationApi.enabled }}
         # workloadclaims.InventorySocketGID: the attest-proxy's socket is
         # group-owned by it; the mesh runs as uid 1337 and needs the group to
         # connect.

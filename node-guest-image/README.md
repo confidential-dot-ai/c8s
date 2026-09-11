@@ -1,8 +1,7 @@
 # node-guest-image
 
 The c8s node image (`node-guest-base`, `rke2[-cdi]-*` tags), defined in THIS repo
-and built by [confidential-os-builder] acting purely as a builder — the same
-ownership split `kata-guest-base/` already has with confos as a pinned tool.
+and built by [confidential-os-builder] acting purely as a builder.
 Tracking issue: [#264].
 
 Layout:
@@ -31,8 +30,8 @@ Layout:
   boots and attests, but operator flows fail closed pending an SNP
   binding design.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
-  `c8s-dev.config`), passed via `--kernel-config-fragment` exactly like
-  kata-guest-base's `container.config`. confos's `required`/`hardening`
+  `c8s-dev.config`), passed via `--kernel-config-fragment`.
+  confos's `required`/`hardening`
   baselines stay in confos: a fragment request that conflicts with them
   fails the build (see the balloon catch in #263).
 - `build` — drop-in replacement for confos's `bin/build-c8s`: same env
@@ -253,6 +252,84 @@ run and the second rewrites a 1. This one also covers the GPU-less
 composition (`attest` + `c8s`, no `gpu`), where that unit is absent. The same
 split applies to `99-c8s-bpf.conf`: the c8s profile owns the runtime locks its
 own kernel fragment makes necessary.
+
+## Component pins
+
+Every external input is pinned by immutable reference. Moving any pin
+moves `root_hash` and the launch measurement — bump deliberately, in a
+reviewed commit.
+
+`.github/build-pins.json` is the canonical source for the measured workflows'
+confos, attestation-rs, and mkosi pins. They validate and export the selected
+domain through `.github/scripts/pin-manifest.sh`; automated pin-watch PRs
+therefore change the manifest rather than workflow files.
+
+`mkosi.sync` resolves the NRI floor from the mutable registry tag `C8S_REF`
+at build time. The floor digests are recorded in the rendered
+`image-policy.yaml`, so a mismatch is diagnosable, but a rebuild after those
+tags move will not match.
+
+## Physical host prerequisites
+
+### TDX
+
+- `qgsd` running on the host — the Intel DCAP Quote Generation Service
+  that signs the TDREPORT into a full TDX quote. Talks over vsock.
+- Intel PCS API key in `/etc/sgx_default_qcnl.conf` — DCAP fetches
+  TCB collateral from Intel PCS during verify.
+- **The platform registered with Intel**, so PCS can serve its PCK
+  certificate. A CPU whose platform manifest was never uploaded gets no
+  PCK cert, and every quote then fails inside qgsd with
+  `[QPL] No certificate data for this platform` (`0xe011`). Cloud TDX hosts
+  arrive registered; bare metal often
+  does not, and the MPA agent (`sgx-ra-service`) only registers when
+  the BIOS has "SGX Auto MP Registration" enabled. Without touching the
+  BIOS, register indirectly once (`sgx-pck-id-retrieval-tool`):
+
+  ```
+  PCKIDRetrievalTool -f pckid.csv
+  awk -F, '{print $6}' pckid.csv | tr -d '\r\n' | xxd -r -p > manifest.bin
+  curl -sS -X POST https://api.trustedservices.intel.com/sgx/registration/v1/platform \
+    -H 'Content-Type: application/octet-stream' --data-binary @manifest.bin
+  # HTTP 201 = registered; restart qgsd afterwards
+  ```
+
+  Registration is permanent for the platform (survives reinstalls).
+
+Two host-kernel gotchas seen on bare metal: if `dmesg` shows
+`virt/tdx: initialization failed: Hibernation support is enabled`, add
+`nohibernate` to the kernel command line (TDX and S3/hibernation are
+mutually exclusive), and make sure `kvm_intel.tdx=1` is set (module
+option or command line) — `cat /sys/module/kvm_intel/parameters/tdx`
+must print `Y`, or QEMU refuses to launch TDs.
+
+### GPU passthrough
+
+Per the install constraints, the GPU **host** setup is not done by c8s.
+Provision it with your host-provisioning system before installing c8s:
+
+- **vfio-pci binding** of the GPUs (`vfio-pci.ids=10de:...` on the host cmdline,
+  nvidia/nouveau blacklisted).
+- **GPU confidential-compute (CC) mode** set in GPU firmware (`nvidia_gpu_tools.py
+  --set-cc-mode=on`). A CC-mode/runtime mismatch panics the in-guest driver
+  (`conf_compute.c:162` — "CPU does not support confidential compute").
+- **BAR resize** on Blackwell (default → 8 GiB), before kubelet. Two mechanisms
+  exist and each fails on one Blackwell part: prefer the kernel sysfs path
+  (unbind → `echo 13 > resource2_resize` → rebind — the one that works on
+  B200), fall back to `setpci` + remove/rescan (needed on `preserve_config`
+  hosts like RTX PRO 6000, but a **silent no-op on B200**: the control
+  register accepts the write while the device keeps decoding the old window —
+  always verify with `lspci`).
+- **Runtime PM pinned off** for every passthrough GPU
+  (`echo on > /sys/bus/pci/devices/<bdf>/power/control`). An idle vfio-bound
+  B200 gets runtime-PM autosuspended into D3cold and does not survive the
+  resume (observed on kernel 7.0.9): BAR0 reads `0xFF`, the guest driver
+  reports "GPU has fallen off the bus". Note
+  `nvidia_gpu_tools.py` resets `power/control` to `auto` on every run, so
+  host provisioning must re-apply the pin after any gpu-admin-tools
+  invocation. Recovery for a bricked GPU: force D0 →
+  `--reset-with-sbr` → D3→D0 power-control cycle; FLR alone is insufficient.
+- On SEV-SNP hosts, `kvm_amd.sev_snp=1` and an IOMMU on the host cmdline.
 
 ## Troubleshooting
 

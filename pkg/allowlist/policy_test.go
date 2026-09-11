@@ -108,10 +108,8 @@ func TestDigestIndex_AdmitsListedDigestWhateverItRuns(t *testing.T) {
 			t.Errorf("AdmitsDigest(%s) = false, want true", d)
 		}
 		if !idx.AdmitsContainer(RunningContainer{
-			Digest:     d,
-			Argv:       []string{"/bin/sh", "-c", "anything"},
-			BindMounts: []string{"/host"},
-			EnvNames:   []string{"TOKEN"},
+			Digest: d,
+			Argv:   []string{"/bin/sh", "-c", "anything"},
 		}) {
 			t.Errorf("AdmitsContainer(%s) = false, want a digest-alone admission", d)
 		}

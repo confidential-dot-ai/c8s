@@ -51,17 +51,6 @@ cat >"$source_manifest" <<'EOF'
       "attestation_rs_ref": "2222222222222222222222222222222222222222",
       "mkosi_ref": "3333333333333333333333333333333333333333",
       "mkosi_version": "v27"
-    },
-    "kata-guest": {
-      "confos_ref": "4444444444444444444444444444444444444444",
-      "attestation_rs_ref": "5555555555555555555555555555555555555555",
-      "mkosi_ref": "6666666666666666666666666666666666666666",
-      "mkosi_version": "v26"
-    },
-    "kernel-snapshot": {
-      "confos_ref": "8888888888888888888888888888888888888888",
-      "mkosi_ref": "6666666666666666666666666666666666666666",
-      "mkosi_version": "v26"
     }
   }
 }
@@ -76,45 +65,21 @@ grep -Eq '^CONFOS_REF=[0-9a-f]{40}$' <<<"$exported" ||
 pass
 
 exported=$(bash "$script" export --manifest "$source_manifest" \
-  --domain kernel-snapshot --format github-output \
+  --domain node-image --format github-output \
   --confos-override refs/heads/measurement-check)
 grep -Fxq 'confos=refs/heads/measurement-check' <<<"$exported" ||
   fail "safe confos override was not exported"
-if grep -q '^attest=' <<<"$exported"; then
-  fail "kernel export unexpectedly contains an attestation pin"
-fi
 expect_failure bash "$script" export --manifest "$source_manifest" \
   --domain node-image --format github-env \
   --confos-override $'main\nINJECTED=value'
 pass
 
 node_fixture=$(new_fixture node)
-kata_before=$(jq -c '.builds["kata-guest"]' "$node_fixture")
-kernel_before=$(jq -c '.builds["kernel-snapshot"]' "$node_fixture")
 bash "$script" update --manifest "$node_fixture" --domain node-image \
   --confos "$new_confos" --attest "$new_attest" \
   --mkosi-sha "$new_mkosi" --mkosi-ver v28 >/dev/null
 [[ $(jq -r '.builds["node-image"].attestation_rs_ref' "$node_fixture") == \
   "$new_attest" ]] || fail "node attestation pin did not update"
-[[ $(jq -c '.builds["kata-guest"]' "$node_fixture") == "$kata_before" ]] ||
-  fail "node update changed kata pins"
-[[ $(jq -c '.builds["kernel-snapshot"]' "$node_fixture") == "$kernel_before" ]] ||
-  fail "node update changed kernel pins"
-pass
-
-kata_fixture=$(new_fixture kata)
-node_before=$(jq -c '.builds["node-image"]' "$kata_fixture")
-bash "$script" update --manifest "$kata_fixture" --domain kata-guest \
-  --confos "$new_confos" --attest "$new_attest" \
-  --mkosi-sha "$new_mkosi" --mkosi-ver v28 >/dev/null
-[[ $(jq -r '.builds["kata-guest"].confos_ref' "$kata_fixture") == \
-  "$new_confos" ]] || fail "kata confos pin did not update"
-[[ $(jq -r '.builds["kernel-snapshot"].confos_ref' "$kata_fixture") == \
-  "$new_confos" ]] || fail "kernel confos pin did not follow kata"
-[[ $(jq -r '.builds["kernel-snapshot"].mkosi_ref' "$kata_fixture") == \
-  "$new_mkosi" ]] || fail "kernel mkosi pin did not follow kata"
-[[ $(jq -c '.builds["node-image"]' "$kata_fixture") == "$node_before" ]] ||
-  fail "kata update changed node pins"
 pass
 
 no_drift_fixture=$(new_fixture no-drift)
@@ -162,13 +127,6 @@ sed "1,/\"confos_ref\": \"$existing_node_confos\"/s/\"confos_ref\": \"$existing_
   "$nested_duplicate" >"$nested_duplicate.next"
 mv "$nested_duplicate.next" "$nested_duplicate"
 expect_failure bash "$script" validate --manifest "$nested_duplicate"
-pass
-
-divergent=$(new_fixture divergent)
-jq '.builds["kernel-snapshot"].mkosi_ref = "7777777777777777777777777777777777777777"' \
-  "$divergent" >"$divergent.next"
-mv "$divergent.next" "$divergent"
-expect_failure bash "$script" validate --manifest "$divergent"
 pass
 
 mode_fixture=$(new_fixture mode)

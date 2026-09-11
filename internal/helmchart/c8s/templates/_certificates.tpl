@@ -38,16 +38,13 @@
     {{- . | nindent 4 }}
     {{- end }}
   # The workload is gated on the initial cert by the c8s-cert-wait init
-  # container below, not a startupProbe here: a native sidecar is "started"
-  # the moment its process launches, and an exec startupProbe is denied by the
-  # locked kata-qemu-snp guest (ExecProcessRequest := false), so it could never
-  # pass there and the workload would hang in Init forever.
+  # container below, not a startupProbe here.
   securityContext:
     {{- include "c8s.getCertSecurityContext" . | nindent 4 }}
 # c8s-cert-wait gates the workload on the initial cert without an exec probe.
-# A plain (run-once) init container that blocks on the cert file is a
-# CreateContainerRequest the locked guest allows, and normal init-completion
-# ordering holds the workload until the attested cert exists — fail-closed.
+# A plain (run-once) init container blocks on the cert file, and normal
+# init-completion ordering holds the workload until the attested cert exists —
+# fail-closed.
 # The `/c8s` path is the binary location from cmd/c8s/Dockerfile; command
 # bypasses the ENTRYPOINT so the full path must match.
 - name: c8s-cert-wait

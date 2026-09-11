@@ -22,7 +22,7 @@ usage:
   pin-manifest.sh validate --manifest PATH
   pin-manifest.sh export --manifest PATH --domain DOMAIN
       --format github-env|github-output [--confos-override REF]
-  pin-manifest.sh update --manifest PATH --domain node-image|kata-guest
+  pin-manifest.sh update --manifest PATH --domain node-image
       --confos SHA --attest SHA --mkosi-sha SHA --mkosi-ver VERSION
 EOF
   exit 2
@@ -78,7 +78,7 @@ validate_manifest() {
     (. | exact_keys(["schema_version", "builds"]))
     and (.schema_version == 1)
     and (.builds |
-      exact_keys(["node-image", "kata-guest", "kernel-snapshot"]))
+      exact_keys(["node-image"]))
     and (.builds["node-image"] |
       exact_keys([
         "confos_ref", "attestation_rs_ref", "mkosi_ref", "mkosi_version"
@@ -87,27 +87,6 @@ validate_manifest() {
       and (.attestation_rs_ref | sha)
       and (.mkosi_ref | sha)
       and (.mkosi_version | version))
-    and (.builds["kata-guest"] |
-      exact_keys([
-        "confos_ref", "attestation_rs_ref", "mkosi_ref", "mkosi_version"
-      ])
-      and (.confos_ref | sha)
-      and (.attestation_rs_ref | sha)
-      and (.mkosi_ref | sha)
-      and (.mkosi_version | version))
-    and (.builds["kernel-snapshot"] |
-      exact_keys(["confos_ref", "mkosi_ref", "mkosi_version"])
-      and (.confos_ref | sha)
-      and (.mkosi_ref | sha)
-      and (.mkosi_version | version))
-    and (
-      .builds["kata-guest"].mkosi_ref
-      == .builds["kernel-snapshot"].mkosi_ref
-    )
-    and (
-      .builds["kata-guest"].mkosi_version
-      == .builds["kernel-snapshot"].mkosi_version
-    )
   ' "$manifest" >/dev/null; then
     die "manifest schema or pin invariant is invalid: $manifest"
   fi
@@ -121,14 +100,7 @@ validate_manifest() {
       ["builds", "node-image", "confos_ref"],
       ["builds", "node-image", "attestation_rs_ref"],
       ["builds", "node-image", "mkosi_ref"],
-      ["builds", "node-image", "mkosi_version"],
-      ["builds", "kata-guest", "confos_ref"],
-      ["builds", "kata-guest", "attestation_rs_ref"],
-      ["builds", "kata-guest", "mkosi_ref"],
-      ["builds", "kata-guest", "mkosi_version"],
-      ["builds", "kernel-snapshot", "confos_ref"],
-      ["builds", "kernel-snapshot", "mkosi_ref"],
-      ["builds", "kernel-snapshot", "mkosi_version"]
+      ["builds", "node-image", "mkosi_version"]
     ] as $allowed
     | [.[] | select(length == 2) | .[0]] as $paths
     | (($paths | length) == ($paths | unique | length))
@@ -146,7 +118,7 @@ export_pins() {
   local confos attest mkosi mkosi_version
 
   case "$domain" in
-    node-image | kata-guest | kernel-snapshot) ;;
+    node-image) ;;
     *) die "unknown export domain: $domain" ;;
   esac
   case "$format" in
@@ -181,7 +153,7 @@ update_manifest() {
   local manifest=$1 domain=$2 confos=$3 attest=$4 mkosi=$5 mkosi_version=$6
 
   case "$domain" in
-    node-image | kata-guest) ;;
+    node-image) ;;
     *) die "unknown update domain: $domain" ;;
   esac
   require_sha "$confos" "--confos"
@@ -204,23 +176,6 @@ update_manifest() {
       echo "no-drift"
       return
     fi
-  elif jq -e \
-    --arg confos "$confos" --arg attest "$attest" \
-    --arg mkosi "$mkosi" --arg version "$mkosi_version" '
-      .builds["kata-guest"] == {
-        confos_ref: $confos,
-        attestation_rs_ref: $attest,
-        mkosi_ref: $mkosi,
-        mkosi_version: $version
-      }
-      and .builds["kernel-snapshot"] == {
-        confos_ref: $confos,
-        mkosi_ref: $mkosi,
-        mkosi_version: $version
-      }
-    ' "$manifest" >/dev/null; then
-    echo "no-drift"
-    return
   fi
 
   tmp_path=$(mktemp "${manifest}.tmp.XXXXXX")
@@ -232,22 +187,6 @@ update_manifest() {
         .builds["node-image"] = {
           confos_ref: $confos,
           attestation_rs_ref: $attest,
-          mkosi_ref: $mkosi,
-          mkosi_version: $version
-        }
-      ' "$manifest" >"$tmp_path"
-  else
-    jq \
-      --arg confos "$confos" --arg attest "$attest" \
-      --arg mkosi "$mkosi" --arg version "$mkosi_version" '
-        .builds["kata-guest"] = {
-          confos_ref: $confos,
-          attestation_rs_ref: $attest,
-          mkosi_ref: $mkosi,
-          mkosi_version: $version
-        }
-        | .builds["kernel-snapshot"] = {
-          confos_ref: $confos,
           mkosi_ref: $mkosi,
           mkosi_version: $version
         }

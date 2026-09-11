@@ -130,7 +130,7 @@ The product is trust in artifacts; our own supply chain has to clear the same ba
   SHOULD use protected environments, so a compromised PR can't publish.
 - Commit signing: MUST on every repo (contribution provenance for the CLA).
 - TCB components — anything whose hash lands in an attestation measurement (IGVM,
-  guest kernels, kata artifacts, runtime images) — SHOULD build reproducibly from
+  guest kernels, runtime images) — SHOULD build reproducibly from
   tagged source. For us, binary identity *is* the security claim.
 
 ## 8. Reliability

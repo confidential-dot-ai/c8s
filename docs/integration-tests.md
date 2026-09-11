@@ -84,7 +84,7 @@ a port-forward).
 ## Deliberately out of scope
 
 No TEE properties are asserted: hardware verification, measurements that mean
-anything, kata guests, encrypted volumes (volumed needs device-mapper control
+anything, encrypted volumes (volumed needs device-mapper control
 of the node kernel), `get-kubeconfig` (SNP-gated), and the
 `c8s allowlist`/`c8s verify` CLIs (in-process hardware verification, above).
 The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those.

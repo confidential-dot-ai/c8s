@@ -15,9 +15,8 @@ readable by whoever operates the machine underneath it. Confidential computing
 closes that gap. Modern CPUs (AMD SEV-SNP, Intel TDX) can run a virtual
 machine whose memory is encrypted with keys held by the hardware, measure
 exactly what booted into it, and sign that measurement so a remote party can
-verify it. The infrastructure operator, the hypervisor, and the Kubernetes
-control plane no longer need to be trusted: they schedule the workload, but
-they cannot see inside it.
+verify it. The infrastructure operator and hypervisor cannot see inside the VM. The
+measured node kernel and its Kubernetes runtime are inside the trust boundary.
 
 c8s applies that model to Kubernetes end to end, following five principles at
 every layer:
@@ -34,8 +33,7 @@ every layer:
    external destinations is neither redirected nor dropped (it leaves the
    node plaintext). Non-TCP and unmeshed inbound fail closed rather than
    flowing in the clear. The exceptions are cluster DNS (UDP/53 to the
-   cluster DNS server, the sanctioned name-resolution path) and the in-guest
-   attestation service's plain HTTPS to AMD KDS.
+   cluster DNS server, the sanctioned name-resolution path).
 
 c8s is built by [Confidential AI](https://confidential.ai) as the substrate
 for private AI: inference, fine-tuning, training, and agents where the
@@ -65,28 +63,21 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   mutual TLS rooted in hardware attestation. Plaintext never crosses the pod
   boundary.
 
-- **Two confidential shapes.** Run the whole node as one confidential VM
-  (node-as-CVM), or run every pod as its own confidential VM (pod-as-CVM, via
-  Kata Containers). See [Architecture](#architecture).
+- **Node-as-CVM.** Run the whole node as one confidential VM. Supported modes
+  are `node`, `gke`, and `aks`. See [Architecture](#architecture).
 
-- **Measured boot end to end.** Node images boot via IGVM with dm-verity;
-  confidential pods boot a sealed guest image whose launch digest covers the
-  entire in-guest security stack.
+- **Measured boot end to end.** Node images boot via IGVM with dm-verity.
 
 - **Container image and command-line allowlisting.** Every container is
   enforced against a CDS-served allowlist of named workload entries, each
   pinning the image digests a workload runs and the command line each may run
-  with — and, in the guest, the bind-mount destinations and environment
-  variable names. Enforced by an
-  NRI plugin on the host under node-as-CVM, and by an in-guest
-  `policy-monitor` under pod-as-CVM, where the host cannot tamper with it.
+  with. Enforced by an NRI plugin on the node inside the CVM.
 
 - **Attestation-gated secrets.** CDS releases an application secret only once
   a pod's running containers resolve to a single allowlist entry carrying a
   grant for that path. An injected sidecar writes the values to a
-  memory-backed volume every container mounts read-only. Works in both
-  shapes: the sidecar redeems its sandbox token from the node's admission
-  inventory, or from the in-guest `policy-monitor` under pod-as-CVM.
+  memory-backed volume every container mounts read-only. The sidecar redeems
+  its sandbox token from the node's admission inventory.
 
 - **Encrypted volumes.** Data too large to be a secret — model weights, in
   practice — encrypted at rest on host-visible storage (dm-crypt) and opened
@@ -94,14 +85,13 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   mutable volumes are writable ext4. The key travels as a secret
   through the release path above, so possession of the volume implies nothing
   without attestation. On node-as-CVM the `volumed` node agent ships
-  disabled — `c8s install --volumes` deploys it; under pod-as-CVM `volumed`
-  runs inside each guest, baked into the measured image.
+  disabled — `c8s install --volumes` deploys it.
 
 - **Fail-closed admission.** A mutating webhook injects certificate sidecars
-  and Kata RuntimeClasses; a ValidatingAdmissionPolicy rejects anything that
-  escapes injection. The bootstrap ordering fails closed, never open.
+  and workload labels; admission policies protect label integrity and deny
+  tenant host-namespace access. The bootstrap ordering fails closed, never open.
 
-- **Confidential GPUs.** NVIDIA GPU passthrough into confidential pods on
+- **Confidential GPUs.** NVIDIA GPUs attached to confidential nodes on
   SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
   NVIDIA GPU and NVSwitch evidence; it is not wired into the c8s certificate
   flow end to end, see [Known gaps](#known-gaps-and-open-items).
@@ -117,8 +107,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 
 ## Architecture
 
-The most consequential choice in c8s is the unit of trust and attestation.
-c8s supports both answers.
+The unit of trust and attestation is the confidential node.
 
 ### Node-as-CVM
 
@@ -152,50 +141,6 @@ virtualization (for example Azure AKS).
   the cloud or bare-metal operator sees only ciphertext
 ```
 
-### Pod-as-CVM
-
-Each pod is its own confidential VM (via the Kata `kata-qemu-snp` or
-`kata-qemu-tdx` runtime). The node is just a launchpad and is fully
-adversarial. Every pod carries its own launch digest, so each workload
-proves its exact state to a verifier independently, and tenants on the same
-node are isolated from each other by hardware memory encryption. The
-security services each pod relies on (attestation, mesh, image policy) are
-baked into the measured guest image, out of the host's reach.
-
-```text
-                              POD-AS-CVM
-               every pod carries its own launch digest
-
-════════════ TEE boundary (per-pod SEV-SNP / TDX encrypted memory) ═══════════
-
-  ┌────── kata-qemu-snp/tdx CVM ──────┐  ┌────── kata-qemu-snp/tdx CVM ──────┐
-  │ CDS                               │  │ workload                          │
-  │   RA-TLS serving cert             │  │   + get-cert sidecar              │
-  │   (SNP / TDX evidence)            │  │   (leaf cert from CDS)            │
-  │                                   │  │                                   │
-  │ baked into the measured image:    │  │ baked into the measured image:    │
-  │   attestation-service, ratls-mesh │  │   attestation-service, ratls-mesh │
-  │   policy-monitor                  │  │   policy-monitor                  │
-  └───────────────────────────────────┘  └───────────────────────────────────┘
-
-══════════════════════════════════════════════════════════════════════════════
-
-  HOST (adversarial)
-  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐  ┌─────────────┐
-  │ c8s operator │  │ kata-deploy │  │ kata-image-puller │  │ containerd  │
-  │ + webhook    │  │             │  │                   │  │ + kata shim │
-  └──────────────┘  └─────────────┘  └───────────────────┘  └─────────────┘
-```
-
-In short: node-as-CVM is the all-or-nothing model (verify the node once,
-trust everything on it, one tenant per node), pod-as-CVM is the
-mutual-distrust model (the
-platform and the workloads do not trust each other, and each pod attests
-independently). The full comparison, including density, latency, and platform
-support, is in the
-[docs](https://confidential.ai/docs/c8s/concepts/trust-boundaries) and
-[docs/install-flows.md](docs/install-flows.md).
-
 ## Quickstart
 
 Install c8s onto an existing cluster. The full walkthrough is
@@ -206,9 +151,7 @@ provisioning guides is at
 ### Prerequisites
 
 - A Kubernetes cluster (vanilla or RKE2) with platform-admin permissions.
-- Nodes with the TEE hardware for your chosen shape: an AMD SEV-SNP or Intel
-  TDX host for pod-as-CVM, or SEV-SNP / TDX confidential VMs as nodes for
-  node-as-CVM
+- SEV-SNP / TDX confidential VMs as nodes for node-as-CVM
   (see the [first-cluster tutorial](https://confidential.ai/docs/c8s/tutorials/first-confidential-cluster)).
   Node kernels must be recent enough for the TEE (AMD SEV-SNP ≥ 6.11, Intel TDX
   ≥ 6.16), which also satisfies the Linux ≥ 6.5 `SO_PEERPIDFD` the admission
@@ -240,7 +183,7 @@ c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
 ```
 
 `--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
-node-as-CVM shapes, `pod` is pod-as-CVM. `--hardware-platform` is required the
+node-as-CVM shapes. `--hardware-platform` is required the
 same way: `sev-snp` or `tdx`. An unstated shape would silently mismatch the
 cluster it lands on, so the install refuses to guess.
 
@@ -268,25 +211,6 @@ The webhook injects `c8s get-cert` as a native sidecar, which fetches an
 attestation-bound certificate from CDS and renews it. Certificates land in
 `/etc/c8s/certs`.
 
-### Pod-as-CVM
-
-`--cvm-mode=pod` installs the Kata runtime and enforces it: every in-scope workload
-pod becomes a confidential VM, and non-Kata pods are rejected at admission. Pin the
-kata guest launch digest(s) from `c8s kata measure` — one per pod shape you run —
-because an in-guest `get-cert` refuses to reach a CDS no measurement pins, so an
-unpinned pod-mode install leaves workloads dead at init:
-
-```sh
-c8s install --cvm-mode=pod --hardware-platform=sev-snp --namespace c8s-system \
-  --operator-keys operator.pub \
-  --measurements <cds-guest-digest>,<workload-guest-digest> \
-  --workload-ref vllm=vllm/deployment/serving:8000 \
-  --upstream vllm
-```
-
-See [docs/kata.md](docs/kata.md) for the runtime details and
-[docs/DEMO.md](docs/DEMO.md) for a minimal demo flow.
-
 ### Production notes
 
 - **Pin measurements.** The chart's RA-TLS handshakes accept any TEE-attested
@@ -300,10 +224,6 @@ See [docs/kata.md](docs/kata.md) for the runtime details and
   [Managing the allowlist](#managing-the-image-allowlist).
 
 ### A note on QEMU
-
-- **Pod-as-CVM needs no host QEMU.** kata-deploy ships the kata-static
-  payload, which bundles the TEE-capable QEMU builds that `kata-qemu-snp`
-  and `kata-qemu-tdx` use. Do not point Kata at a distro QEMU.
 
 - **Node-as-CVM needs QEMU 10.1 or newer, built with `--enable-igvm`.**
   Booting a measured node image via IGVM requires upstream QEMU's IGVM
@@ -338,8 +258,7 @@ attestation and reports the operator keys it pins.
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
 | [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing the image and argv allowlist on the host; also the node's admission inventory | [allowlist](docs/allowlist-and-capabilities.md) |
-| [`cmd/policy-monitor`](cmd/policy-monitor/) | The same enforcement and inventory in-guest, baked into the pod-as-CVM image | [image policy](docs/kata-image-policy.md) |
-| [`cmd/volumed`](cmd/volumed/) | Encrypted-volume agent — opens volumes into a pod's mount namespace, as a node DaemonSet or in-guest (`--guest`) under pod-as-CVM | [volumes](docs/volumes.md) |
+| [`internal/cmds/volumed`](internal/cmds/volumed/) | Encrypted-volume agent — opens volumes into a pod's mount namespace as a node DaemonSet | [volumes](docs/volumes.md) |
 
 ## Libraries
 
@@ -361,14 +280,13 @@ attestation and reports the operator keys it pins.
 
 ```text
 api/               CRD types
-cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy,
-                   policy-monitor, volumed, rtmr3-measurer (cmd/cds is only
+cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy
+                   (cmd/cds is only
                    the Dockerfile for the `c8s cds` subcommand,
                    internal/cmds/cds)
 internal/          Operator, webhook, attestation, mesh CA, secret store,
                    embedded Helm chart
 pkg/               Public Go libraries (see Libraries above)
-kata-guest-base/   Confidential guest image recipe for pod-as-CVM
 node-guest-image/  The node-image definition for node-as-CVM (new home;
                    phase 0 — nothing consumes it from here yet)
 docs/              Design and operator docs
@@ -405,8 +323,8 @@ make clean
 
 ## Managing the image allowlist
 
-CDS serves the image-digest allowlist that `nri-image-policy` (host) and
-`policy-monitor` (in-guest) enforce on every node. The `c8s allowlist`
+CDS serves the image-digest allowlist that `nri-image-policy` enforces on
+every node. The `c8s allowlist`
 command reads and mutates it. By default, tls-lb publishes the complete
 `/allowlist` API and verifies CDS's attestation before forwarding requests.
 When tls-lb uses the chart default CDS-issued public certificate
@@ -563,15 +481,6 @@ than let you discover them:
   *together* — every running image must be allowlisted, but no gate requires
   the set in one pod to match a single workload entry.
 
-- **Secrets and encrypted volumes under pod-as-CVM carry weaker guarantees
-  than on a node.** Both work — the injected fetchers redeem their sandbox
-  token from the in-guest `policy-monitor` over loopback, and `volumed
-  --guest` opens devices inside the pod's own CVM — but the sandbox ID a
-  release is gated on is a host-written CRI annotation there, not a value the
-  kernel read, and the allowlist enforcement it consults is in-guest software
-  rather than a host hook. A deployment whose threat model cannot accept
-  either should stay on node-as-CVM.
-
 - **Init containers cannot consume a released secret.** The secret volume is
   mounted into every container in the pod, but CDS releases only once *every*
   main container is running — that is when the sandbox matches a whole
@@ -581,17 +490,6 @@ than let you discover them:
   containers, which must wait for the file rather than read it at startup. The
   injected fetcher is a native sidecar for this reason: it is the one entry in
   `initContainers` that keeps running alongside the workload.
-
-- **`c8s allowlist` writes reach running confidential pods only under a
-  pinned CDS measurement.** In-guest `policy-monitor` refuses to refresh from
-  CDS unless the pod's launch-committed init-data document pins the CDS
-  launch digest (SNP `HOST_DATA`, TDX `MRCONFIGID`). Installs with no pinned
-  measurements, and the chart-managed pods in the release namespace (which
-  get no init-data), enforce only the seed baked into the measured guest
-  image — admitting a new workload image there means rebuilding it. The
-  gating is deliberately fail-closed — "any attested TEE" is not good enough
-  here, because the host can boot its own CVM from the same guest image and
-  serve an allowlist of its choosing.
 
 - **Encrypted volumes are attached at node boot, and a force-deleted volume
   pod leaks its dm stack.** A volume reaches a node-as-CVM node as a block
@@ -605,21 +503,8 @@ than let you discover them:
   mappings on start, so restarting it does not recover them. See
   [docs/volumes.md](docs/volumes.md).
 
-- **Root workloads are intercepted but cannot egress to non-mesh peers.**
-  In-guest egress exemptions are scoped to the attestation service and the
-  mesh proxy by systemd cgroup (a root workload is in no exemption cgroup),
-  so TCP from a root tenant is redirected into the mesh (which fails for
-  non-mesh destinations) and non-TCP is dropped. Run workloads as non-root
-  so legitimate traffic is mesh-routed.
-
-- **Pod-as-CVM picks one CPU TEE per install.** Both SEV-SNP and TDX are
-  supported, but `--hardware-platform` selects one for the whole cluster;
-  mixed SNP+TDX clusters are not. Pod-as-CVM is also unavailable on Azure,
-  which does not expose nested virtualization.
-
 - **GPU attestation is not wired end to end.** GPU passthrough into
-  confidential pods works, and both the kata GPU guest and the node CVM fail
-  closed on a non-CC GPU.
+  confidential nodes works, and the node CVM fails closed on a non-CC GPU.
   [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
   verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
   CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
@@ -647,9 +532,6 @@ The direction of travel:
   `c8s volume create` encrypts on the operator's machine, which means the key
   is generated outside the TEE and escrowed to a local file.
 
-- **IGVM support for Kata.** Move the per-pod runtime's measured boot to
-  IGVM, unifying pod-as-CVM and node-as-CVM on one measured-boot format.
-
 - **Encrypted RDMA.** Encrypted GPU-to-GPU and node-to-node RDMA for
   confidential multi-node training and inference.
 
@@ -658,14 +540,9 @@ The direction of travel:
 c8s exists because a lot of excellent open work came before it, and we want
 to be loud about that:
 
-- [Kata Containers](https://github.com/kata-containers/kata-containers) is
-  the foundation of our pod-as-CVM shape: the runtime, kata-deploy, and the
-  guest tooling are outstanding engineering, and the maintainers have built
-  something genuinely rare: VMs with the operational feel of containers.
-
 - [Confidential Containers](https://github.com/confidential-containers)
-  pioneered the confidential pod model that c8s builds on, including the
-  guest-pull design that keeps container images out of the host's hands.
+  helped establish the foundations of confidential container workloads
+  that informed c8s's development.
 
 - The [Confidential Computing Consortium](https://confidentialcomputing.io/)
   and the wider ecosystem (the AMD SEV-SNP and Intel TDX stacks, the IGVM

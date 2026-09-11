@@ -195,7 +195,7 @@ func setCvmModeForTest(t *testing.T, mode string) {
 
 // buildValueArgs must assume nothing the operator did not pass — like install,
 // an unset --distro (distro == "") emits no distro keys, leaving the chart
-// default to stand; a set --distro plumbs both component distro keys.
+// default to stand; a set --distro configures the NRI installer.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
@@ -212,8 +212,8 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if slices.ContainsFunc(args, func(a string) bool {
-		return a == "kata.distro=" || a == "nriImagePolicy.distro=" ||
-			a == "kata.distro=k8s" || a == "nriImagePolicy.distro=k8s"
+		return a == "nriImagePolicy.distro=" ||
+			a == "nriImagePolicy.distro=k8s"
 	}) {
 		t.Fatalf("unset distro should emit no distro keys, got %v", args)
 	}
@@ -222,8 +222,8 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !slices.Contains(args, "nriImagePolicy.distro=rke2") || !slices.Contains(args, "kata.distro=rke2") {
-		t.Fatalf("set distro should plumb both component keys, got %v", args)
+	if !slices.Contains(args, "nriImagePolicy.distro=rke2") {
+		t.Fatalf("set distro should plumb the NRI component key, got %v", args)
 	}
 }
 
@@ -253,12 +253,10 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	}
 }
 
-// When digests are resolved, the bundle must pin by digest only — emitting .tag
-// too is redundant and contradicts the chart's digest-XOR-tag convention (kata
-// helpers fail the render on both). The injected resolver mirrors the real
-// appendResolvedDigestArgs (repository + digest + deriveComponents) so the test
-// also confirms allowlist derivation survives to the tree, and keeps crane off
-// PATH.
+// When digests are resolved, the bundle must pin by digest only: emitting .tag
+// too is redundant. The injected resolver mirrors appendResolvedDigestArgs
+// (repository + digest + deriveComponents), so the test also confirms allowlist
+// derivation survives to the tree and keeps crane off PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
@@ -366,12 +364,12 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 
 	prev := struct {
-		crds, singleNode, debug, resolveDigests   bool
+		crds, singleNode, resolveDigests          bool
 		secret, cvm, plat, upstream, operatorKeys string
 		workloadRefs, measurements                []string
-	}{installCRDs, installSingleNode, installKataDebug, installResolveDigests, installImagePullSecret, installCvmMode, installHardwarePlatform, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements)}
+	}{installCRDs, installSingleNode, installResolveDigests, installImagePullSecret, installCvmMode, installHardwarePlatform, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements)}
 	defer func() {
-		installCRDs, installSingleNode, installKataDebug, installResolveDigests = prev.crds, prev.singleNode, prev.debug, prev.resolveDigests
+		installCRDs, installSingleNode, installResolveDigests = prev.crds, prev.singleNode, prev.resolveDigests
 		installImagePullSecret, installCvmMode = prev.secret, prev.cvm
 		installHardwarePlatform = prev.plat
 		installUpstream = prev.upstream
@@ -382,11 +380,9 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	// Drive every value-producing toggle. --install-crds=false exercises the
 	// non-default CRD path; --resolve-digests=false keeps crane off PATH (the
 	// digest-arg shape is covered separately via buildDigestArgs below).
-	// --cvm-mode=pod --debug exercises the kata stack args. --measurements
-	// (node mode — it is rejected in pod mode) exercises the one indexed key[i]=
-	// form the builder emits; asserted in a second pass below.
-	installCRDs, installSingleNode, installKataDebug, installResolveDigests = false, true, true, false
-	installImagePullSecret, installCvmMode = "regcred", "pod"
+	// --measurements exercises the indexed key[i]= form in a second pass below.
+	installCRDs, installSingleNode, installResolveDigests = false, true, false
+	installImagePullSecret, installCvmMode = "regcred", "node"
 	installHardwarePlatform = "sev-snp"
 	installWorkloadRefs = []string{"infer=workloads/deployment/vllm:8000"}
 	installUpstream = "infer"
@@ -433,7 +429,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 
 	// Second pass: node mode with --measurements exercises the indexed key[i]=
-	// form (rejected in pod mode above). Its args must also stay within the
+	// form. Its args must also stay within the
 	// grammar and round-trip to a list.
 	installCvmMode = "node"
 	installMeasurements = []string{strings.Repeat("ab", 48)}
@@ -521,76 +517,4 @@ func TestCoerceTypedVsString(t *testing.T) {
 			t.Errorf("coerce(%q, typed=%v) = %#v, want %#v", tt.raw, tt.typed, got, tt.want)
 		}
 	}
-}
-
-// The guest axis is pinned to the component tag under --cvm-mode=pod, and a -f
-// file that names kata.guestImage.tag owns it instead. An unreadable -f must
-// abort the render rather than fall through to the pinning branch, which would
-// overwrite a tag the operator did set.
-func TestBuildValueArgsGuestImageTagPinning(t *testing.T) {
-	prev := installResolveDigests
-	installResolveDigests = false
-	defer func() { installResolveDigests = prev }()
-	prevValues := installValues
-	defer func() { installValues = prevValues }()
-
-	dir := t.TempDir()
-	pinned := filepath.Join(dir, "pinned.yaml")
-	if err := os.WriteFile(pinned, []byte("kata:\n  guestImage:\n    tag: v9.9.9\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	newCmd := func(mode string) *cobra.Command {
-		cmd := &cobra.Command{}
-		cmd.Flags().String(flagCvmMode, mode, "")
-		return cmd
-	}
-
-	t.Run("pod mode pins the guest to the component tag", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
-		installValues = nil
-		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !slices.Contains(args, "kata.guestImage.tag=v0.1.10") {
-			t.Fatalf("pod mode should pin the guest tag to the component tag, got %v", args)
-		}
-	})
-
-	t.Run("a -f that sets the tag owns the axis", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
-		installValues = []string{pinned}
-		args, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if slices.ContainsFunc(args, func(a string) bool {
-			return strings.HasPrefix(a, "kata.guestImage.tag=")
-		}) {
-			t.Fatalf("a -f owning kata.guestImage.tag must not be overwritten, got %v", args)
-		}
-	})
-
-	t.Run("node mode emits no guest tag", func(t *testing.T) {
-		setCvmModeForTest(t, "node")
-		installValues = nil
-		args, err := buildValueArgs(context.Background(), newCmd("node"), "", nil, "v0.1.10", "", appendResolvedDigestArgs)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if slices.ContainsFunc(args, func(a string) bool {
-			return strings.HasPrefix(a, "kata.guestImage.tag=")
-		}) {
-			t.Fatalf("non-pod mode has no guest axis, got %v", args)
-		}
-	})
-
-	t.Run("an unreadable -f aborts the render", func(t *testing.T) {
-		setCvmModeForTest(t, "pod")
-		installValues = []string{filepath.Join(dir, "absent.yaml")}
-		if _, err := buildValueArgs(context.Background(), newCmd("pod"), "", nil, "v0.1.10", "", appendResolvedDigestArgs); err == nil {
-			t.Fatal("unreadable values file: want error, got nil")
-		}
-	})
 }

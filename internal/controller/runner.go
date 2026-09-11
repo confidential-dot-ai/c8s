@@ -82,31 +82,10 @@ type Options struct {
 	// the reconciler, and the webhook config agree.
 	ExcludeNamespaces []string
 
-	// KataEnforce makes the pod webhook inject a kata runtimeClassName into
-	// in-scope workload pods that do not request one. Independent of
-	// GetCertImage — the webhook registers when either is set. The injected
-	// classes are fixed in the webhook; HardwarePlatform picks which
-	// confidential (CPU, GPU) pair, and a pod requesting an nvidia.com/*
-	// resource gets the GPU one, which ships with every kata install.
-	KataEnforce bool
-
-	// HardwarePlatform is the CPU TEE the confidential kata classes target
-	// (webhook.HardwarePlatformSNP or ...TDX; the operator command validates).
-	HardwarePlatform string
-
-	// KataGuestReadyGate runs the kata-guest-ready node-label controller and
-	// makes the webhook require that label. Only valid where the
-	// kata-image-puller is deployed — see webhook.Config.
-	KataGuestReadyGate bool
-
 	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy inventory
 	// socket directory: that plugin NRI-mounts it into c8s-cert and the webhook
 	// injects the get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
 	WorkloadClaimsHostDir string
-
-	// WorkloadClaimsGuest selects the kata shape: the inventory is reached on
-	// the guest's loopback address, so no socket is mounted.
-	WorkloadClaimsGuest bool
 }
 
 var scheme = runtime.NewScheme()
@@ -227,8 +206,8 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 	// Headless-Service provisioning: one Service per annotated workload so
 	// in-cluster clients (tls-lb) can dial pod IPs by DNS and get the
 	// node mesh's attested mTLS — the mesh cannot intercept Service VIPs.
-	// Gated on get-cert injection (not kata-only mode): without it no pod
-	// ever carries the cw label the Service selects on.
+	// Gated on get-cert injection: without it no pod carries the cw label
+	// the Service selects on.
 	if opts.GetCertImage != "" {
 		for _, kind := range workloadServiceKinds {
 			if err := (&WorkloadServiceReconciler{
@@ -243,22 +222,8 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 		}
 	}
 
-	// Must run wherever the webhook injects the matching nodeAffinity, or
-	// nothing ever sets the label and confidential pods never schedule.
-	if opts.KataGuestReadyGate {
-		if err := (&KataGuestReadyReconciler{
-			Client:    mgr.GetClient(),
-			Namespace: opts.LeaderElectionNS,
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("setup kata-guest-ready reconciler: %w", err)
-		}
-		logger.Info("kata guest-readiness scheduling gate enabled", "label", webhook.GuestReadyNodeLabel)
-	}
-
-	// Admission webhook — injects get-cert containers into annotated pods, and
-	// (when kata enforcement is on) a kata runtimeClassName into workload
-	// pods. Registers when either job is wanted.
-	if opts.GetCertImage != "" || opts.KataEnforce {
+	// Admission webhook — injects get-cert containers into annotated pods.
+	if opts.GetCertImage != "" {
 		if err := bootstrapWebhookPKI(ctx, mgr, opts); err != nil {
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
@@ -273,27 +238,19 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
 			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),
 			GetCertRunAsNonRoot:   ptr.To(opts.GetCertRunAsNonRoot),
-			KataEnforce:           opts.KataEnforce,
-			HardwarePlatform:      opts.HardwarePlatform,
-			KataGuestReadyGate:    opts.KataGuestReadyGate,
 			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
-			WorkloadClaimsGuest:   opts.WorkloadClaimsGuest,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}
 		logger.Info("pod-injection webhook enabled",
 			"image", opts.GetCertImage,
-			"cds_url", opts.CDSURL,
-			"kata_enforce", opts.KataEnforce,
-			"hardware_platform", opts.HardwarePlatform)
+			"cds_url", opts.CDSURL)
 
 		// One-shot startup sweep: delete cw-annotated pods that were admitted
 		// while the webhook was down (so never injected) and let their owners
-		// recreate them through admission. Runs whenever the webhook does
-		// (get-cert or kata), since both stamp the injected marker and a missed
-		// kata runtimeClassName can only be fixed by re-admission. Leader-only
-		// runnable. failurePolicy=Fail means a recreated pod that races a
-		// not-yet-ready webhook is retried, not let through. Uses a direct
+		// recreate them through admission. Runs whenever the webhook does.
+		// Leader-only runnable. failurePolicy=Fail means a recreated pod that
+		// races a not-yet-ready webhook is retried, not let through. Uses a direct
 		// client, not the manager cache: a single cluster-wide List + targeted
 		// Deletes at startup must not pin a cluster-wide pod informer for the
 		// operator's lifetime.

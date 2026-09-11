@@ -16,10 +16,6 @@
 {{- printf "%s-cds" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "c8s.kataName" -}}
-{{- printf "%s-kata-deploy" .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
 {{- define "c8s.volumedName" -}}
 {{- printf "%s-volumed" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

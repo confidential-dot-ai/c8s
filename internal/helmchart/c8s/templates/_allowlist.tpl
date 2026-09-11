@@ -51,8 +51,9 @@
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}
 {{- end -}}
 {{- end -}}
+
 {{- /* containerd-prep init-container images (rke2-only): the host NRI plugin
-       checks every container node-wide, so its own and kata's busybox prep
+       checks every container node-wide, so its own busybox prep
        image must be in the floor or a DaemonSet re-roll self-deadlocks on
        "image not in allowlist: busybox". Only seeded when the plugin enforces,
        and under .baked the installer runs no prep container. */}}
@@ -63,12 +64,7 @@
 {{- $_ := set $digests $prep.digest (printf "%s@%s" $prep.repository $prep.digest) -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.kata.enabled (eq .Values.kata.distro "rke2") -}}
-{{- $kprep := .Values.kata.containerdPrep.image -}}
-{{- if $kprep.digest -}}
-{{- $_ := set $digests $kprep.digest (printf "%s@%s" $kprep.repository $kprep.digest) -}}
-{{- end -}}
-{{- end -}}
+
 {{- end -}}
 {{ $digests | toJson }}
 {{- end -}}
@@ -106,8 +102,4 @@
 {{- $_ := set $workloads $name $entry -}}
 {{- end -}}
 {{ dict "schema" "c8s.allowlist/v1" "workloads" $workloads | toJson }}
-{{- end -}}
-
-{{- define "c8s.serveAllowlistSeed" -}}
-{{- or .Values.nriImagePolicy.enabled .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node") -}}
 {{- end -}}

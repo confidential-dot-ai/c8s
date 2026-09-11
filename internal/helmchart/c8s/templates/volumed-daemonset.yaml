@@ -8,8 +8,8 @@
 
   THREAT MODEL: privileged, hostPID, and a writable bind of the kubelet
   directory. That is inherent to opening a device and mounting into another
-  pod's directory — it is a host-side operator component, outside the guest TEE
-  boundary. Which pod a mount lands in comes from the caller's kernel peer
+  pod's directory. The agent runs inside the node CVM's trust boundary.
+  Which pod a mount lands in comes from the caller's kernel peer
   credentials, never from the request.
 */}}
 apiVersion: apps/v1

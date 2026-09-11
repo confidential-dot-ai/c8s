@@ -66,25 +66,6 @@ func TestIptablesSyncFlagDefaults(t *testing.T) {
 	}
 }
 
-func TestReadinessCheckFlagDefaults(t *testing.T) {
-	fs := newReadinessCheckCommand().Flags()
-	for _, tc := range []struct {
-		flag string
-		want string
-	}{
-		{"retry-wait", "2s"},
-		{"timeout", "3s"},
-	} {
-		f := fs.Lookup(tc.flag)
-		if f == nil {
-			t.Fatalf("flag --%s not registered", tc.flag)
-		}
-		if f.DefValue != tc.want {
-			t.Errorf("--%s default = %q, want %q", tc.flag, f.DefValue, tc.want)
-		}
-	}
-}
-
 // --platform=auto must fail closed when neither TEE guest device exists,
 // rather than silently picking a platform.
 func TestRatlsTEETypeAutoWithoutGuestDevices(t *testing.T) {

@@ -7,14 +7,12 @@ Source: [templates/_services.tpl](../../templates/_services.tpl).
 
 | Values | Endpoint |
 | --- | --- |
-| `kata.enabled` | Guest loopback, `http://127.0.0.1:<port>` |
-| Otherwise, `attestationApi.enabled` | Node-local `unix://<runtimeDir>/attestation-api.sock` |
-| Otherwise | Node-baked service, `http://$(HOST_IP):<port>` |
+| `attestationApi.enabled=true` | Node-local `unix://<runtimeDir>/attestation-api.sock` |
+| `attestationApi.enabled=false` (node mode only) | Node-baked service, `http://$(HOST_IP):<port>` |
 
 The chart-managed attestation API binds pod loopback. Its attest-proxy exposes
 the node-local socket in `nriImagePolicy.hostPaths.runtimeDir`.
-`c8s.attestationApiHostSocket` selects this mode, and the socket volume/mount
-helpers expose the directory at its host path with a read-only mount and
+When `attestationApi.enabled=true`, the socket volume/mount helpers expose the directory at its host path with a read-only mount and
 `DirectoryOrCreate` hostPath. The webhook rebases the socket path for injected
 get-cert sidecars, and nri-image-policy NRI-mounts the directory read-only into
 those sidecars.
@@ -29,7 +27,7 @@ with the placeholder intact, so its own container must leave `HOST_IP` unset.
 to it. `c8s.nriCDSURL` uses `nriImagePolicy.cds.url` when supplied, otherwise
 `https://127.0.0.1:<cds.service.nodePort>` for the host plugin.
 
-`c8s.tlsLb.resolver` honors `tlsLb.nginx.resolver`. Otherwise either distro value
-being `rke2` selects `rke2-coredns-rke2-coredns.kube-system.svc.cluster.local`;
+`c8s.tlsLb.resolver` honors `tlsLb.nginx.resolver`. Otherwise `nriImagePolicy.distro=rke2`
+selects `rke2-coredns-rke2-coredns.kube-system.svc.cluster.local`;
 the default is `kube-dns.kube-system.svc.cluster.local`. Nginx must resolve this
 name at startup.

@@ -9,16 +9,11 @@
 #
 # The workflow_dispatch fan-out is what makes the manual rebuild work: a
 # dispatch has no before/after diff, so docker.yml skips paths-filter and every
-# per-component flag arrives empty here. Build all of them so the downstream
-# Kata guest base can resolve every component's
-# :<short-sha>.
+# per-component flag arrives empty here. Build all of them.
 #
 # Components NOT included are emitted as a parallel `retag_matrix` so the
 # `retag-unchanged` job in docker.yml can copy each one's current `:main`
-# manifest under `:<short-sha>`. Downstream (kata-guest-base/scripts/fetch.sh)
-# resolves every component by `:<short-sha>` to pin the bootstrap allowlist,
-# and that lookup must succeed for every component on every push — even when
-# this run's filter rebuilt only a subset.
+# manifest under `:<short-sha>` — even when this run's filter rebuilt only a subset.
 #
 # Inputs (env), each "true"/"false" from the dorny/paths-filter step:
 #   SHARED             shared-core || shared-cmdsutil || shared-root

@@ -5,7 +5,7 @@
 # tags :rke2-{tdx,snp}[-cdi] / :rke2-{tdx,snp}[-cdi]-<sha>. Stable releases
 # also receive :rke2-{tdx,snp}[-cdi]-vX.Y.Z in c8s-image-publish.yml. The
 # pre-matrix :rke2[-cdi]* tags are frozen (TDX builds up to the rename).
-# (named to match kata-guest-base; pre-flip images stay frozen under c8s-base)
+# (pre-flip images stay frozen under c8s-base)
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
 on:
@@ -158,7 +158,7 @@ jobs:
        (github.event.workflow_run.event == 'push' ||
         github.event.workflow_run.event == 'workflow_dispatch') &&
        github.event.workflow_run.head_branch == 'main')
-    # 16-core hosted larger runner (same as kernel-snapshot/kata-guest-base);
+    # 16-core hosted larger runner;
     # scales to 100 concurrent jobs, 600G disk.
     runs-on: the-machine
     timeout-minutes: 180
@@ -535,8 +535,7 @@ jobs:
 
       - name: Upload resolved kernel snapshot (gate)
         # The lineage lockfile these inputs resolve to, so a fragment PR can
-        # commit it without a local Linux builder (confos#66;
-        # kernel-snapshot.yml is the kata lineage's equivalent). One cell —
+        # commit it without a local Linux builder (confos#66). One cell —
         # the snapshot is per-KERNEL_FLAVOR, not per-platform or per-leg. A
         # cache-restored copy is equally valid: the exact key hashes the
         # fragments, so the cached snapshot was resolved from these same

@@ -217,93 +217,6 @@ esac`
 	})
 }
 
-func TestPreflightTDXNodesExec(t *testing.T) {
-	t.Run("labelled node passes", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "echo node/node-a")
-		if err := preflightTDXNodes(context.Background()); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		mustContainLine(t, f.calls(t), "kubectl get nodes -l confidential.ai/tdx=true -o name")
-	})
-	t.Run("no labelled node fails", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "")
-		err := preflightTDXNodes(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "kubectl label node <node> "+tdxHostLabelKey+"=true") {
-			t.Fatalf("want the label command in the error, got %v", err)
-		}
-	})
-	t.Run("kubectl failure surfaces", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "exit 1")
-		if err := preflightTDXNodes(context.Background()); err == nil {
-			t.Fatal("want error when kubectl fails")
-		}
-	})
-}
-
-func TestPreflightTEENodesExec(t *testing.T) {
-	values := map[string]any{"kata": map[string]any{
-		"snpNodeSelector": map[string]any{"confidential.ai/sev-snp": "true"},
-		"tdxNodeSelector": map[string]any{"confidential.ai/tdx": "true"},
-	}}
-
-	t.Run("snp checks the snp selector", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "echo node/node-a")
-		if err := preflightTEENodes(context.Background(), values, "sev-snp", true); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		mustContainLine(t, f.calls(t), "kubectl get nodes -l confidential.ai/sev-snp=true -o name")
-	})
-
-	t.Run("tdx checks the tdx selector", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "echo node/node-a")
-		if err := preflightTEENodes(context.Background(), values, "tdx", true); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		mustContainLine(t, f.calls(t), "kubectl get nodes -l confidential.ai/tdx=true -o name")
-	})
-
-	t.Run("no labelled node names the other platform", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "")
-		err := preflightTEENodes(context.Background(), values, "tdx", true)
-		if err == nil {
-			t.Fatal("want error when no node is labelled")
-		}
-		for _, want := range []string{"confidential.ai/tdx=true", "--hardware-platform=sev-snp"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q missing %q", err, want)
-			}
-		}
-	})
-
-	t.Run("user-supplied selector blames the values file", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "")
-		err := preflightTEENodes(context.Background(), values, "sev-snp", false)
-		if err == nil {
-			t.Fatal("want error when no node is labelled")
-		}
-		if !strings.Contains(err.Error(), "-f values file sets kata.snpNodeSelector") {
-			t.Errorf("error %q does not blame the -f selector", err)
-		}
-	})
-
-	t.Run("cleared selector skips", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "kubectl", "")
-		cleared := map[string]any{"kata": map[string]any{"snpNodeSelector": map[string]any{}}}
-		if err := preflightTEENodes(context.Background(), cleared, "sev-snp", true); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		mustNotContainPrefix(t, f.calls(t), "kubectl")
-	})
-}
-
 func TestDetectDistroExec(t *testing.T) {
 	t.Run("rke2 kubelet suffix selects rke2", func(t *testing.T) {
 		f := newFakeBin(t)
@@ -874,8 +787,8 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 	if got := treeAt(t, tree, "image", "digest"); got != testDigest {
 		t.Errorf("image.digest = %#v, want %s", got, testDigest)
 	}
-	if got := treeAt(t, tree, "kata", "distro"); got != "k8s" {
-		t.Errorf("kata.distro = %#v, want the detected k8s", got)
+	if got := treeAt(t, tree, "nriImagePolicy", "distro"); got != "k8s" {
+		t.Errorf("nriImagePolicy.distro = %#v, want the detected k8s", got)
 	}
 
 	// The namespace applied before helm must admit privileged pods.
@@ -924,26 +837,6 @@ func TestInstallVolumesEnablesTheNodeAgent(t *testing.T) {
 	}
 }
 
-// Under --cvm-mode=pod the daemon is inside the guest, so --volumes must leave
-// the host DaemonSet alone — enabling it there fails the chart render
-// (enforce_host_components).
-func TestInstallVolumesPodModeLeavesHostDaemonSetOff(t *testing.T) {
-	s := newInstallStubs(t, "", false)
-	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-	stdout := captureStdout(t, func() {
-		if err := runC8s(t, "install", "--cvm-mode=pod", "--wait=false", "--force", "--resolve-digests=false", "--volumes"); err != nil {
-			t.Fatalf("install: %v", err)
-		}
-	})
-	volumed, _ := readYAMLTree(t, s.computed)["volumed"].(map[string]any)
-	if got, ok := volumed["enabled"]; ok {
-		t.Errorf("computed values enable the host volumed DaemonSet under --cvm-mode=pod: %#v", got)
-	}
-	if !strings.Contains(stdout, "volumed --guest") {
-		t.Errorf("stdout does not say where volumes are served:\n%s", stdout)
-	}
-}
-
 func TestInstallFailsFastWhenCDSNodeUnlabelled(t *testing.T) {
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, `"get nodes -l role=cds -o name") : ;;
@@ -989,67 +882,6 @@ func TestInstallAbortsOnTLSLBHostPortConflict(t *testing.T) {
 		t.Fatalf("want the tls-lb host-port conflict, got %v", err)
 	}
 	mustNotContainPrefix(t, s.f.calls(t), "helm upgrade")
-}
-
-func TestInstallPodModeLabelsAndPreflightsTEENodes(t *testing.T) {
-	s := newInstallStubs(t, "", false)
-	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-	if err := runC8s(t, "install", "--cvm-mode=pod", "--wait=false", "--force", "--resolve-digests=false"); err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	calls := s.f.calls(t)
-	// Conflict check against the other platform's label, then the bulk label,
-	// then the platform preflight, all before helm.
-	hi := lineIndex(calls, "helm upgrade ")
-	if hi < 0 {
-		t.Fatal("helm upgrade did not run")
-	}
-	for _, line := range []string{
-		"kubectl get nodes -l " + tdxHostLabelKey + " -o name",
-		"kubectl label nodes -l kubernetes.io/os=linux confidential.ai/sev-snp=true --overwrite",
-		"kubectl get nodes -l confidential.ai/sev-snp=true -o name",
-	} {
-		if i := lineIndex(calls, line); i < 0 || i > hi {
-			t.Errorf("%q must run before helm upgrade (index %d vs %d):\n%s", line, i, hi, strings.Join(calls, "\n"))
-		}
-	}
-	tree := readYAMLTree(t, s.computed)
-	if got := treeAt(t, tree, "kata", "enabled"); got != true {
-		t.Errorf("kata.enabled = %#v, want true", got)
-	}
-	if got := treeAt(t, tree, "ratlsMesh", "enabled"); got != false {
-		t.Errorf("ratlsMesh.enabled = %#v, want false (in-guest counterpart)", got)
-	}
-}
-
-func TestInstallTDXPreflightPerMode(t *testing.T) {
-	t.Run("node mode with no TDX node aborts", func(t *testing.T) {
-		s := newInstallStubs(t, "", false)
-		s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-		err := runC8s(t, "install", "--cvm-mode=node", "--hardware-platform=tdx", "--wait=false", "--force", "--resolve-digests=false")
-		if err == nil || !strings.Contains(err.Error(), tdxHostLabelKey) {
-			t.Fatalf("want the TDX node preflight failure, got %v", err)
-		}
-		mustContainLine(t, s.f.calls(t), "kubectl get nodes -l "+tdxHostLabelKey+"=true -o name")
-		mustNotContainPrefix(t, s.f.calls(t), "helm upgrade")
-	})
-
-	t.Run("aks rides the vTPM and skips the TDX node check", func(t *testing.T) {
-		s := newInstallStubs(t, "", false)
-		s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
-		if err := runC8s(t, "install", "--cvm-mode=aks", "--hardware-platform=tdx", "--wait=false", "--force", "--resolve-digests=false"); err != nil {
-			t.Fatalf("install: %v", err)
-		}
-		calls := s.f.calls(t)
-		mustNotContainPrefix(t, calls, "kubectl get nodes -l "+tdxHostLabelKey+"=true")
-		if lineIndex(calls, "helm upgrade ") < 0 {
-			t.Fatal("helm upgrade did not run")
-		}
-		tree := readYAMLTree(t, s.computed)
-		if got := treeAt(t, tree, "attestationApi", "teeDevices", "tpm"); got != true {
-			t.Errorf("teeDevices.tpm = %#v, want true on aks", got)
-		}
-	})
 }
 
 func TestInstallAdoptsWorkloadAfterHelm(t *testing.T) {
@@ -1154,7 +986,7 @@ esac`)
 // effectiveValues must read it, and helm must receive the piped bytes as a
 // -f file ahead of the computed values.
 func TestInstallValuesFromStdin(t *testing.T) {
-	payload := "volumed:\n  enabled: true\nkata:\n  distro: rke2\n"
+	payload := "volumed:\n  enabled: true\nnriImagePolicy:\n  distro: rke2\n"
 
 	s := newInstallStubs(t, "", false)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
@@ -1170,7 +1002,7 @@ func TestInstallValuesFromStdin(t *testing.T) {
 	}
 	calls := s.f.calls(t)
 
-	// The piped kata.distro owns the distro, so detection never runs.
+	// The piped nriImagePolicy.distro owns the distro, so detection never runs.
 	mustNotContainPrefix(t, calls, "kubectl get nodes -o jsonpath")
 
 	// The piped volumed.enabled=true is visible to the digest resolver, which
@@ -1228,7 +1060,6 @@ func TestInstallFlagValidationPrecedesExec(t *testing.T) {
 		want string
 	}{
 		{"missing cvm mode", []string{"install"}, "--cvm-mode is required"},
-		{"debug outside pod mode", []string{"install", "--cvm-mode=node", "--debug"}, "--debug selects the kata-guest-base debug image"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

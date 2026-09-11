@@ -17,23 +17,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 )
 
-// kataReleaseValuesFile writes the computed-values JSON `helm get values --all`
-// returns for a release, shaped like the chart's kata block.
-func kataReleaseValuesFile(t *testing.T, kataEnabled bool, guestPath, gpuPath string) string {
+func hostReleaseValuesFile(t *testing.T) string {
 	t.Helper()
-	tree := map[string]any{
-		"kata": map[string]any{
-			"enabled":             kataEnabled,
-			"distro":              "k8s",
-			"containerdConfigDir": "",
-			"nodeSelector":        map[string]any{},
-			"containerdPrep": map[string]any{
-				"image": map[string]any{"repository": "busybox", "tag": "", "digest": testDigest},
-			},
-			"guestImage": map[string]any{"hostPath": guestPath},
-			"gpu":        map[string]any{"guestImage": map[string]any{"hostPath": gpuPath}},
-		},
-	}
+	tree := map[string]any{"nriImagePolicy": map[string]any{
+		"enabled": true, "distro": "k8s",
+		"containerdPrep": map[string]any{"image": map[string]any{"repository": "busybox", "digest": testDigest}},
+	}}
 	data, err := json.Marshal(tree)
 	if err != nil {
 		t.Fatal(err)
@@ -142,24 +131,20 @@ esac`)
 }
 
 func TestUninstallRejectsMalformedReleaseValues(t *testing.T) {
-	// A kata block without distro/guestImage cannot parameterize the sweep.
 	path := filepath.Join(t.TempDir(), "values.json")
-	if err := os.WriteFile(path, []byte(`{"kata":{"enabled":true}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"nriImagePolicy":{"enabled":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s := newUninstallStubs(t, path, "", false)
 	err := runC8s(t, "uninstall")
-	if err == nil || !strings.Contains(err.Error(), "read kata config") {
-		t.Fatalf("want a kata-config error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "read host config") {
+		t.Fatalf("want a host-config error, got %v", err)
 	}
 	mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
 }
 
-// A non-kata release still sweeps: the host state (NRI plugin, mesh
-// netfilter, guest-image leftovers) may be a previous shape's leftover the
-// release's own values cannot see.
-func TestUninstallNonKataStillSweeps(t *testing.T) {
-	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "/var/lib/c8s/kata-images-nvidia")
+func TestUninstallSweepsNodeState(t *testing.T) {
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, "", false)
 	if err := runC8s(t, "uninstall"); err != nil {
 		t.Fatalf("uninstall: %v", err)
@@ -167,178 +152,43 @@ func TestUninstallNonKataStillSweeps(t *testing.T) {
 	calls := s.f.calls(t)
 	hi := lineIndex(calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
 	ai := lineIndex(calls, "kubectl apply -f -")
-	ri := lineIndex(calls, "kubectl rollout status daemonset/c8s-kata-sweep -n c8s-system --timeout=5m")
-	di := lineIndex(calls, "kubectl delete daemonset c8s-kata-sweep -n c8s-system --ignore-not-found")
+	ri := lineIndex(calls, "kubectl rollout status daemonset/c8s-host-sweep -n c8s-system --timeout=5m")
+	di := lineIndex(calls, "kubectl delete daemonset c8s-host-sweep -n c8s-system --ignore-not-found")
 	if hi < 0 || ai < hi || ri < ai || di < ri {
 		t.Fatalf("sweep order wrong (helm=%d apply=%d rollout=%d delete=%d):\n%s", hi, ai, ri, di, strings.Join(calls, "\n"))
 	}
-	// The sweep is parameterized from the non-kata release's values...
 	ds := appliedDaemonSet(t, s.applied)
 	env := map[string]string{}
 	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
 	}
-	if env["GUEST_IMAGE_DIR"] != "/var/lib/c8s/kata-images" || env["GUEST_IMAGE_DIR_NVIDIA"] != "/var/lib/c8s/kata-images-nvidia" {
-		t.Errorf("sweep env guest dirs = %q / %q, want the release values", env["GUEST_IMAGE_DIR"], env["GUEST_IMAGE_DIR_NVIDIA"])
+	if env["HOST_CONTAINERD_DIR"] != "/etc/containerd" {
+		t.Fatalf("sweep containerd directory = %q, want /etc/containerd", env["HOST_CONTAINERD_DIR"])
 	}
-	// ...and targets every linux node, not kata-selected ones.
+	// ...and targets every linux node, not host-selected ones.
 	wantSelector := map[string]string{"kubernetes.io/os": "linux"}
 	if !reflect.DeepEqual(ds.Spec.Template.Spec.NodeSelector, wantSelector) {
 		t.Errorf("nodeSelector = %v, want %v", ds.Spec.Template.Spec.NodeSelector, wantSelector)
 	}
 }
 
-// --kata-sweep=false opts every release shape out of the host sweep.
-func TestUninstallKataSweepFalseSkipsSweep(t *testing.T) {
-	for _, kataEnabled := range []bool{true, false} {
-		values := kataReleaseValuesFile(t, kataEnabled, "/var/lib/c8s/kata-images", "")
-		s := newUninstallStubs(t, values, "", false)
-		if err := runC8s(t, "uninstall", "--kata-sweep=false"); err != nil {
-			t.Fatalf("uninstall (kataEnabled=%v): %v", kataEnabled, err)
-		}
-		calls := s.f.calls(t)
-		mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
-		mustNotContainPrefix(t, calls, "kubectl apply")
-		mustNotContainPrefix(t, calls, "kubectl rollout")
-	}
-}
-
-// The kata-pods guard stays gated on kata: a non-kata release sweeps even
-// with kata pods still running (nothing it removes is their runtime).
-func TestUninstallNonKataIgnoresRunningKataPods(t *testing.T) {
-	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
-	running := `*runtimeClassName*) /usr/bin/printf 'default\tinference-0\tkata-qemu-snp\tinference\n' ;;
-`
-	s := newUninstallStubs(t, values, running, false)
-	if err := runC8s(t, "uninstall"); err != nil {
-		t.Fatalf("uninstall: %v", err)
-	}
-	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
-}
-
-func TestUninstallRefusesWhileKataPodsRun(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
-	running := `*runtimeClassName*) /usr/bin/printf 'default\tinference-0\tkata-qemu-snp\tinference\n' ;;
-`
-
-	t.Run("refuses and names the pods", func(t *testing.T) {
-		s := newUninstallStubs(t, values, running, false)
-		err := runC8s(t, "uninstall")
-		if err == nil || !strings.Contains(err.Error(), "default/inference-0 (kata-qemu-snp)") {
-			t.Fatalf("want the running kata pod named, got %v", err)
-		}
-		mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
-	})
-
-	t.Run("--force proceeds", func(t *testing.T) {
-		s := newUninstallStubs(t, values, running, false)
-		if err := runC8s(t, "uninstall", "--force"); err != nil {
-			t.Fatalf("uninstall --force: %v", err)
-		}
-		mustContainLine(t, s.f.calls(t), "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
-	})
-
-	t.Run("pod listing failure surfaces", func(t *testing.T) {
-		s := newUninstallStubs(t, values, "*runtimeClassName*) exit 1 ;;\n", false)
-		if err := runC8s(t, "uninstall"); err == nil {
-			t.Fatal("want error when the kata pod listing fails")
-		}
-		mustNotContainPrefix(t, s.f.calls(t), "helm uninstall")
-	})
-}
-
-func TestUninstallKataSweepHappyPath(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "/var/lib/c8s/kata-images-nvidia")
+// --host-sweep=false opts every release shape out of the host sweep.
+func TestUninstallHostSweepFalseSkipsSweep(t *testing.T) {
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, "", false)
-	if err := runC8s(t, "uninstall"); err != nil {
+	if err := runC8s(t, "uninstall", "--host-sweep=false"); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	calls := s.f.calls(t)
-
-	// helm uninstall, kata-pod drain waits, sweep DaemonSet, rollout wait,
-	// then cleanup, in that order.
-	hi := lineIndex(calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
-	ai := lineIndex(calls, "kubectl apply -f -")
-	ri := lineIndex(calls, "kubectl rollout status daemonset/c8s-kata-sweep -n c8s-system --timeout=5m")
-	di := lineIndex(calls, "kubectl delete daemonset c8s-kata-sweep -n c8s-system --ignore-not-found")
-	if hi < 0 || ai < hi || ri < ai || di < ri {
-		t.Fatalf("sweep order wrong (helm=%d apply=%d rollout=%d delete=%d):\n%s", hi, ai, ri, di, strings.Join(calls, "\n"))
-	}
-	for _, component := range []string{"kata-deploy", "kata-image-puller", "kata-image-puller-nvidia"} {
-		mustContainLine(t, calls, "kubectl get pods -n c8s-system -l app.kubernetes.io/instance=c8s,app.kubernetes.io/component="+component+" -o name")
-	}
-	// No node carried a leftover label, so nothing is unlabelled.
-	mustNotContainPrefix(t, calls, "kubectl label")
-
-	// The sweep DaemonSet the cluster received, decoded and pinned.
-	ds := appliedDaemonSet(t, s.applied)
-	if ds.Name != "c8s-kata-sweep" || ds.Namespace != "c8s-system" {
-		t.Errorf("DaemonSet = %s/%s, want c8s-system/c8s-kata-sweep", ds.Namespace, ds.Name)
-	}
-	sweep := ds.Spec.Template.Spec.InitContainers[0]
-	if sweep.Image != "busybox@"+testDigest {
-		t.Errorf("sweep image = %q, want the digest-pinned containerd-prep image", sweep.Image)
-	}
-	env := map[string]string{}
-	for _, e := range sweep.Env {
-		env[e.Name] = e.Value
-	}
-	if env["GUEST_IMAGE_DIR"] != "/var/lib/c8s/kata-images" || env["GUEST_IMAGE_DIR_NVIDIA"] != "/var/lib/c8s/kata-images-nvidia" {
-		t.Errorf("sweep env = %v, want the release guest-image paths", env)
-	}
-}
-
-func TestUninstallSweepRemovesLeftoverNodeLabels(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
-	s := newUninstallStubs(t, values,
-		`"get nodes -l katacontainers.io/kata-runtime -o name") echo node/node-a ;;
-`, false)
-	if err := runC8s(t, "uninstall"); err != nil {
-		t.Fatalf("uninstall: %v", err)
-	}
-	mustContainLine(t, s.f.calls(t),
-		"kubectl label nodes -l katacontainers.io/kata-runtime katacontainers.io/kata-runtime-")
-	// The other label keys stayed empty and must not be touched.
-	mustNotContainPrefix(t, s.f.calls(t), "kubectl label nodes -l confidential.ai/sev-snp")
-}
-
-func TestUninstallSweepRefusesUnsafeGuestImagePaths(t *testing.T) {
-	t.Run("guest image path outside the c8s prefix", func(t *testing.T) {
-		values := kataReleaseValuesFile(t, true, "/opt/kata", "")
-		s := newUninstallStubs(t, values, "", false)
-		err := runC8s(t, "uninstall")
-		if err == nil || !strings.Contains(err.Error(), "/var/lib/c8s/") {
-			t.Fatalf("want the sweep-prefix refusal, got %v", err)
-		}
-		mustNotContainPrefix(t, s.f.calls(t), "kubectl apply")
-	})
-	t.Run("gpu guest image path outside the c8s prefix", func(t *testing.T) {
-		values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "/etc")
-		s := newUninstallStubs(t, values, "", false)
-		err := runC8s(t, "uninstall")
-		if err == nil || !strings.Contains(err.Error(), "kata.gpu.guestImage.hostPath") {
-			t.Fatalf("want the GPU path refusal, got %v", err)
-		}
-		mustNotContainPrefix(t, s.f.calls(t), "kubectl apply")
-	})
-	// A non-kata release never wrote the guest dirs, so a hostile custom
-	// path in its values is not a pre-flight error: the sweep script's own
-	// guard presence-gates the deletion instead of failing the uninstall
-	// over a dir c8s never created.
-	t.Run("non-kata release with an unsafe guest path still sweeps", func(t *testing.T) {
-		values := kataReleaseValuesFile(t, false, "/opt/kata", "")
-		s := newUninstallStubs(t, values, "", false)
-		if err := runC8s(t, "uninstall"); err != nil {
-			t.Fatalf("uninstall: %v", err)
-		}
-		mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
-	})
+	mustContainLine(t, calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	mustNotContainPrefix(t, calls, "kubectl apply")
+	mustNotContainPrefix(t, calls, "kubectl rollout")
 }
 
 func TestUninstallSweepRolloutFailureKeepsDaemonSet(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values,
-		`"rollout status daemonset/c8s-kata-sweep -n c8s-system --timeout=5m") exit 1 ;;
+		`"rollout status daemonset/c8s-host-sweep -n c8s-system --timeout=5m") exit 1 ;;
 `, false)
 	err := runC8s(t, "uninstall")
 	if err == nil || !strings.Contains(err.Error(), "did not complete") {
@@ -349,7 +199,7 @@ func TestUninstallSweepRolloutFailureKeepsDaemonSet(t *testing.T) {
 }
 
 func TestUninstallSweepNamespaceApplyFailure(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, `"apply -f -") exit 1 ;;
 `, false)
 	err := runC8s(t, "uninstall")
@@ -360,18 +210,18 @@ func TestUninstallSweepNamespaceApplyFailure(t *testing.T) {
 }
 
 func TestUninstallSweepWaitFailure(t *testing.T) {
-	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, `"get pods -n c8s-system -l "*) exit 1 ;;
 `, false)
 	err := runC8s(t, "uninstall")
-	if err == nil || !strings.Contains(err.Error(), "waiting for kata-deploy pods") {
+	if err == nil || !strings.Contains(err.Error(), "waiting for ratls-mesh pods") {
 		t.Fatalf("want the drain-wait failure, got %v", err)
 	}
 	mustNotContainPrefix(t, s.f.calls(t), "kubectl apply")
 }
 
 func TestUninstallHelmUninstallFailure(t *testing.T) {
-	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, "", true)
 	err := runC8s(t, "uninstall")
 	if err == nil || !strings.Contains(err.Error(), "helm uninstall failed") {
@@ -387,7 +237,7 @@ func TestUninstallHelmUninstallFailure(t *testing.T) {
 }
 
 func TestUninstallDeleteCRDsAndNamespace(t *testing.T) {
-	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 
 	t.Run("deletes on request", func(t *testing.T) {
 		s := newUninstallStubs(t, values, "", false)
@@ -401,7 +251,7 @@ func TestUninstallDeleteCRDsAndNamespace(t *testing.T) {
 			t.Fatalf("want crd and namespace deletes, got:\n%s", strings.Join(calls, "\n"))
 		}
 		// The sweep finishes before the CRD/namespace deletes.
-		si := lineIndex(calls, "kubectl delete daemonset c8s-kata-sweep -n c8s-system --ignore-not-found")
+		si := lineIndex(calls, "kubectl delete daemonset c8s-host-sweep -n c8s-system --ignore-not-found")
 		if si < 0 || si > ci || si > ni {
 			t.Fatalf("sweep cleanup must precede the deletes (sweep=%d crd=%d ns=%d):\n%s", si, ci, ni, strings.Join(calls, "\n"))
 		}
@@ -426,21 +276,20 @@ func TestUninstallHostSweepOnlyUsesChartDefaults(t *testing.T) {
 	}
 	calls := s.f.calls(t)
 	mustNotContainPrefix(t, calls, "helm uninstall")
-	mustContainLine(t, calls, "kubectl rollout status daemonset/c8s-kata-sweep -n c8s-system --timeout=5m")
+	mustContainLine(t, calls, "kubectl rollout status daemonset/c8s-host-sweep -n c8s-system --timeout=5m")
 	ds := appliedDaemonSet(t, s.applied)
 	env := map[string]string{}
 	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
 	}
-	// Chart defaults: both guest-image dirs under the c8s prefix.
-	if env["GUEST_IMAGE_DIR"] != "/var/lib/c8s/kata-images" || env["GUEST_IMAGE_DIR_NVIDIA"] != "/var/lib/c8s/kata-images-nvidia" {
-		t.Errorf("sweep env = %v, want the chart-default guest-image paths", env)
+	if env["HOST_CONTAINERD_DIR"] != "/etc/containerd" {
+		t.Fatalf("sweep containerd directory = %q, want /etc/containerd", env["HOST_CONTAINERD_DIR"])
 	}
 }
 
 func TestUninstallHostSweepOnlyRejectsSweepDisabled(t *testing.T) {
 	newUninstallStubs(t, "", "", false)
-	if err := runC8s(t, "uninstall", "--host-sweep-only", "--kata-sweep=false"); err == nil {
+	if err := runC8s(t, "uninstall", "--host-sweep-only", "--host-sweep=false"); err == nil {
 		t.Fatal("want the contradictory-flags error")
 	}
 }
@@ -448,7 +297,7 @@ func TestUninstallHostSweepOnlyRejectsSweepDisabled(t *testing.T) {
 func TestReleaseValuesExec(t *testing.T) {
 	t.Run("found release decodes", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "v.json")
-		if err := os.WriteFile(path, []byte(`{"kata":{"enabled":true}}`), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(`{"nriImagePolicy":{"enabled":true}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		f := newFakeBin(t)
@@ -457,9 +306,9 @@ func TestReleaseValuesExec(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("releaseValues = (found=%t, %v), want found", found, err)
 		}
-		kata, ok := tree["kata"].(map[string]any)
-		if !ok || kata["enabled"] != true {
-			t.Fatalf("tree = %#v, want kata.enabled true", tree)
+		host, ok := tree["nriImagePolicy"].(map[string]any)
+		if !ok || host["enabled"] != true {
+			t.Fatalf("tree = %#v, want nriImagePolicy.enabled true", tree)
 		}
 		mustContainLine(t, f.calls(t), "helm get values c8s --namespace ns --all --output json")
 	})
@@ -506,7 +355,7 @@ func TestWaitPodsGone(t *testing.T) {
 	t.Run("polls at the 5s interval until pods are gone", func(t *testing.T) {
 		f := newFakeBin(t)
 		state := filepath.Join(f.dir, "first-poll-done")
-		f.tool(t, "kubectl", `if [ ! -f '`+state+`' ]; then : > '`+state+`'; echo pod/kata-deploy-x; fi`)
+		f.tool(t, "kubectl", `if [ ! -f '`+state+`' ]; then : > '`+state+`'; echo pod/ratls-mesh-x; fi`)
 		start := time.Now()
 		if err := waitPodsGone(context.Background(), "ns", "a=b"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -532,7 +381,7 @@ func TestWaitPodsGone(t *testing.T) {
 // --all` returns for a release with the volume node agent deployed.
 func volumedReleaseValuesFile(t *testing.T) string {
 	t.Helper()
-	path := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	path := hostReleaseValuesFile(t)
 	tree := map[string]any{}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -602,7 +451,7 @@ func TestUninstallRefusesWhileVolumePodsRun(t *testing.T) {
 // A release that never deployed volumed has no mappings to strand, so the
 // guard must not query for them at all.
 func TestUninstallWithoutVolumedSkipsTheVolumeGuard(t *testing.T) {
-	values := kataReleaseValuesFile(t, false, "/var/lib/c8s/kata-images", "")
+	values := hostReleaseValuesFile(t)
 	s := newUninstallStubs(t, values, "", false)
 	if err := runC8s(t, "uninstall"); err != nil {
 		t.Fatalf("uninstall: %v", err)

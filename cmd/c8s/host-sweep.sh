@@ -3,15 +3,14 @@
 # every linux node (a short-lived kubectl-applied DaemonSet; see
 # cmd/c8s/uninstall.go).
 #
-# `helm uninstall` already drives the supported cleanup: the kata-deploy
-# preStop removes /opt/kata and deregisters the runtime, the chart's
+# `helm uninstall` already drives the supported cleanup: the chart's
 # pre-delete hooks remove the NRI plugin and volumed mappings, and the mesh's
 # preStop strips its traffic interception. Every one of those is best-effort:
 # hooks need a release healthy enough to run them, a preStop is bounded by
 # the pod's termination grace period (and the runtime restart it triggers can
 # kill the pod mid-cleanup), the mesh preStop deliberately keeps its
 # fail-closed guard, and none of them knows about the c8s-side artifacts
-# (pulled guest images, the RKE2 containerd-prep template). This sweep is the
+# (the RKE2 containerd-prep template). This sweep is the
 # idempotent last word and runs on every uninstall, whatever the release's
 # shape: leftovers may come from a previous install of a different shape,
 # which this release's values cannot see.
@@ -23,24 +22,18 @@
 # fail-closed image admission until reimage — so the NRI and template steps
 # below are skipped when the baked-only nri-node-ip.service unit exists.
 #
-# Fatal vs warn: containerd config removal, the runtime restart, the nydus
-# unit, and the guest-dir steps fail the sweep (the CLI then keeps the
+# Fatal vs warn: containerd config removal and the runtime restart
+# fail the sweep (the CLI then keeps the
 # DaemonSet so its logs survive). Per-object netfilter failures warn and
 # continue; a host with no iptables at all fails the sweep at the end, after
 # every other step ran.
 #
 # Env (all required unless noted; set by `c8s uninstall` from the release's
 # computed values):
-#   HOST_CONTAINERD_DIR    — host containerd config directory (kata.distro)
-#   GUEST_IMAGE_DIR        — dir the kata-image-puller pulled kata-guest-base
-#                            into (kata.guestImage.hostPath)
-#   GUEST_IMAGE_DIR_NVIDIA — GPU guest image dir (kata.gpu.guestImage.hostPath);
-#                            empty only for a pre-GPU release = skip
+#   HOST_CONTAINERD_DIR    — host containerd config directory (nriImagePolicy.distro)
 #   RKE2_PREP              — "true" when the install ran the RKE2 containerd-prep
 #                            initContainer whose template/lock this sweep owns
 #   RESTART_COMMAND        — host runtime restart, run detached via systemd-run
-#   NRI_CONTAINERD_DIR     — containerd config dir the NRI installer targeted
-#                            (nriImagePolicy.distro)
 #   NRI_PLUGIN_DIR         — NRI plugin directory (nriImagePolicy.hostPaths.pluginDir)
 #   NRI_PLUGIN_FILENAME    — plugin filename inside it (nriImagePolicy.pluginFilename)
 #   NRI_CONFIG_DIR         — plugin config dir (nriImagePolicy.hostPaths.configDir)
@@ -50,23 +43,7 @@ set -eu
 
 echo "==> c8s host sweep starting"
 
-# Independent guard mirroring cmd/c8s/uninstall.go's validateSweepPath: the
-# GUEST_IMAGE_DIR* values come from Helm release values and are deleted with
-# `rm -rf /host<dir>`, so a hostile or malformed value ("", "/", "..", "/host")
-# would otherwise destroy the mounted host filesystem. Refuse to sweep anything
-# that is not a dedicated c8s guest-image directory strictly under /var/lib/c8s.
-assert_safe_guest_dir() {
-  case "$1" in
-    */../* | *..) echo "refusing to sweep guest image dir containing '..': '$1'" >&2; exit 1 ;;
-  esac
-  case "$1" in
-    /var/lib/c8s/?*) : ;;
-    *) echo "refusing to sweep unsafe guest image dir (must be under /var/lib/c8s): '$1'" >&2; exit 1 ;;
-  esac
-}
-
 CONTAINERD_DIR="/host${HOST_CONTAINERD_DIR}"
-NRI_CONTAINERD_DIR_HOST="/host${NRI_CONTAINERD_DIR}"
 config_changed=0
 sweep_failed=0
 
@@ -82,30 +59,12 @@ fi
 # the registration gone, no interruption can leave the fail-closed NRI
 # validator requiring a plugin whose binary is already deleted.
 
-# 1. kata-deploy's containerd runtime drop-in. Still present only when the
-#    preStop cleanup was cut short — remove it from whichever schema-versioned
-#    drop-in dir it landed in; the restart below deregisters the runtimes.
-#    The `imports` line referencing the drop-in dir is left alone: with no
-#    matching files the glob is inert, kata-deploy owns that edit on k8s, and
-#    on RKE2 the next config regen drops it once the managed template (step 3)
-#    is gone.
-for d in config-v3.toml.d config.toml.d; do
-  for n in kata-deploy.toml zz-c8s-kata-annotations.toml; do
-    f="${CONTAINERD_DIR}/${d}/${n}"
-    if [ -f "$f" ]; then
-      rm -f "$f"
-      config_changed=1
-      echo "containerd drop-in removed: $f"
-    fi
-  done
-done
-
-# 2. The NRI image-policy's containerd registration: the standalone drop-in
+# The NRI image-policy's containerd registration: the standalone drop-in
 #    (rke2), or the sentinel-delimited block in config.toml (k8s patch mode).
 #    Mirrors the chart's files/scripts/uninstall.sh.
 if [ "$baked_node" = "0" ]; then
   for d in config-v3.toml.d config.toml.d; do
-    f="${NRI_CONTAINERD_DIR_HOST}/${d}/nri-image-policy.toml"
+    f="${CONTAINERD_DIR}/${d}/nri-image-policy.toml"
     if [ -f "$f" ]; then
       rm -f "$f"
       config_changed=1
@@ -114,7 +73,7 @@ if [ "$baked_node" = "0" ]; then
   done
   MARK_BEGIN='# BEGIN c8s-nri-image-policy (managed)'
   MARK_END='# END c8s-nri-image-policy (managed)'
-  main_config="${NRI_CONTAINERD_DIR_HOST}/config.toml"
+  main_config="${CONTAINERD_DIR}/config.toml"
   if [ -f "$main_config" ] && grep -qF "$MARK_BEGIN" "$main_config"; then
     awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
       $0==b { skip=1; next }
@@ -127,7 +86,7 @@ if [ "$baked_node" = "0" ]; then
   fi
 fi
 
-# 3. RKE2 containerd-prep leftovers: the sentinel-marked managed template
+# RKE2 containerd-prep leftovers: the sentinel-marked managed template
 #    (which would re-add the drop-in import on every RKE2 config regen) and
 #    the prep lock file. Only a sentinel-marked template is removed — an
 #    operator-owned template is never touched, and a legacy pre-sentinel
@@ -165,138 +124,7 @@ fi
 
 # == Phase 3: host artifacts =================================================
 
-# 4. nydus-for-kata-tee: kata-deploy's EXPERIMENTAL_SETUP_SNAPSHOTTER
-#    installs this host unit; its own cleanup removes it only when the
-#    preStop completes. Stop it while its binary under /opt/kata still
-#    exists. /var/lib/nydus-for-kata-tee stays on purpose: containerd's
-#    meta.db keeps nydus snapshot records, and wiping the backend behind
-#    them makes the next install's pulls fail with "target snapshot already
-#    exists" (see kata-deploy's uninstall_nydus_snapshotter).
-NYDUS_UNIT=/host/etc/systemd/system/nydus-for-kata-tee.service
-if [ -f "$NYDUS_UNIT" ]; then
-  nsenter -t 1 -m -u -i -n -p -- systemctl disable --now nydus-for-kata-tee.service
-  rm -f "$NYDUS_UNIT"
-  nsenter -t 1 -m -u -i -n -p -- systemctl daemon-reload
-  echo "nydus-for-kata-tee.service removed"
-else
-  echo "nydus-for-kata-tee.service already absent"
-fi
-
-# 5. The kata-static payload (runtime, shim, QEMU/CLH, guest kernel + images)
-#    and the per-shim symlinks kata-deploy installs beside it. /opt/kata also
-#    carries the image-puller's <cfg>.upstream snapshot, so that goes too.
-if [ -d /host/opt/kata ]; then
-  rm -rf /host/opt/kata
-  echo "/opt/kata removed"
-else
-  echo "/opt/kata already absent"
-fi
-rm -f /host/usr/local/bin/containerd-shim-kata-*-v2
-
-# 6. The guest image dirs (multi-GB; nothing else cleans them up). Presence-
-#    gated: a non-kata release never wrote these, so an absent custom path is
-#    a no-op while an existing unsafe one still fails closed. Before each rm,
-#    unmount the mounts of loop devices bound to files under the dir (wherever
-#    the mountpoint lives), detach those loops, and unmount anything mounted
-#    at or beneath the dir — otherwise the rm unlinks files a loop still pins
-#    and the space is never reclaimed. Runs host-side: loop backing_file
-#    paths render against the reader's mount namespace.
-# shellcheck disable=SC2016
-detach_guest_dir_script='
-set -u
-dir="$GUEST_DIR"
-fail=0
-
-for bf in /sys/block/loop*/loop/backing_file; do
-  [ -f "$bf" ] || continue
-  backing=$(cat "$bf" 2>/dev/null) || continue
-  case "$backing" in
-    "$dir"/*) ;;
-    *) continue ;;
-  esac
-  lo=${bf#/sys/block/}
-  lo=${lo%%/*}
-  dev="/dev/$lo"
-  # Unmount this device (and its partitions) wherever it is mounted: losetup
-  # -d on a mounted loop reports success but only defers via autoclear.
-  mps=$(
-    while read -r src mp _; do
-      case "$src" in
-        "$dev" | "$dev"p[0-9]*) echo "$mp" ;;
-      esac
-    done < /proc/self/mounts | sort -r
-  )
-  echo "$mps" | while read -r mp; do
-    [ -n "$mp" ] || continue
-    umount "$mp" 2>/dev/null && echo "unmounted: $mp" || echo "warning: umount failed: $mp ($dev)" >&2
-  done
-  if losetup -d "$dev" 2>/dev/null; then
-    echo "loop device detached: $dev ($backing)"
-  else
-    echo "warning: could not detach $dev ($backing)" >&2
-  fi
-done
-
-# Anything mounted at or beneath the dir itself: rm -rf crosses mountpoints,
-# so a mount left behind would redirect the delete outside the validated
-# tree. Any source, not just the loops above.
-mps=$(
-  while read -r _ mp _; do
-    case "$mp" in
-      "$dir" | "$dir"/*) echo "$mp" ;;
-    esac
-  done < /proc/self/mounts | sort -r
-)
-echo "$mps" | while read -r mp; do
-  [ -n "$mp" ] || continue
-  umount "$mp" 2>/dev/null && echo "unmounted: $mp" || echo "warning: umount failed: $mp" >&2
-done
-
-while read -r _ mp _; do
-  case "$mp" in
-    "$dir" | "$dir"/*) echo "still mounted: $mp" >&2; fail=1 ;;
-  esac
-done < /proc/self/mounts
-for bf in /sys/block/loop*/loop/backing_file; do
-  [ -f "$bf" ] || continue
-  backing=$(cat "$bf" 2>/dev/null) || continue
-  lo=${bf#/sys/block/}
-  lo=${lo%%/*}
-  case "$backing" in
-    "$dir"/*" (deleted)")
-      # Already unlinked; the loop pins space until reboot and cannot be
-      # detached (losetup -d answers ENOENT). Nothing left to protect.
-      echo "note: /dev/$lo holds an already-deleted file; space frees on reboot" ;;
-    "$dir"/*) echo "still bound: /dev/$lo ($backing)" >&2; fail=1 ;;
-  esac
-done
-
-[ "$fail" = "0" ]
-'
-
-sweep_guest_dir() {
-  dir="${1%/}"
-  if [ ! -d "/host${dir}" ]; then
-    echo "guest image dir already absent: ${dir}"
-    return 0
-  fi
-  assert_safe_guest_dir "$dir"
-  if GUEST_DIR="$dir" nsenter -t 1 -m -- sh -c "$detach_guest_dir_script"; then
-    rm -rf "/host${dir}"
-    echo "guest image dir removed: ${dir}"
-  else
-    echo "ERROR: ${dir} is still pinned (see above); leaving it in place" >&2
-    sweep_failed=1
-  fi
-}
-
-sweep_guest_dir "${GUEST_IMAGE_DIR}"
-GUEST_IMAGE_DIR_NVIDIA="${GUEST_IMAGE_DIR_NVIDIA:-}"
-if [ -n "${GUEST_IMAGE_DIR_NVIDIA}" ]; then
-  sweep_guest_dir "${GUEST_IMAGE_DIR_NVIDIA}"
-fi
-
-# 7. The NRI plugin's host artifacts: the binary, its boot config, the health
+# The NRI plugin's host artifacts: the binary, its boot config, the health
 #    socket dir, and the allowlist cache. The rm -rf targets must carry the
 #    plugin's own directory name — the values come from the release and a
 #    bare parent dir (/var/run, /var/lib) is never deleted.
@@ -325,7 +153,7 @@ if [ "$baked_node" = "0" ]; then
   esac
 fi
 
-# 8. RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
+# RATLS-MESH netfilter state. The mesh's preStop removes only the traffic
 #    interception (--keep-guard keeps the fail-closed filter chains and their
 #    ipsets by design), and a mesh pod that never ran preStop leaves
 #    everything — including the OUTPUT redirect that sends host-originated
@@ -355,7 +183,7 @@ clean_family() {
   while "$B" -t nat -D PREROUTING -j RATLS-MESH-PREROUTING 2>/dev/null; do :; done
   while "$B" -t filter -D FORWARD -j RATLS-MESH-CW 2>/dev/null; do :; done
   while "$B" -t filter -D FORWARD -j RATLS-MESH-CW-EGRESS 2>/dev/null; do :; done
-  for spec in nat:RATLS-MESH nat:RATLS-MESH-PREROUTING filter:RATLS-MESH-CW filter:RATLS-MESH-CW-EGRESS filter:RATLS-MESH-GUEST-IN filter:RATLS-MESH-GUEST-OUT
+  for spec in nat:RATLS-MESH nat:RATLS-MESH-PREROUTING filter:RATLS-MESH-CW filter:RATLS-MESH-CW-EGRESS
   do
     t=${spec%%:*}
     c=${spec#*:}

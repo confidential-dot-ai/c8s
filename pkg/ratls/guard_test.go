@@ -1,4 +1,4 @@
-package initdata
+package ratls
 
 import (
 	"go/ast"

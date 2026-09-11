@@ -19,9 +19,9 @@ seeded independently.
 `c8s.imageAllowlist` returns a digest-to-image-reference map containing enabled,
 digest-pinned components when `bootstrapAllowlist.deriveComponents` is true,
 plus the CDS self-entry, enabled tls-lb nginx, and applicable RKE2 containerd-prep
-images. Nginx is independently versioned and derives from its own image values.
+image. Nginx is independently versioned and derives from its own image values.
 Prep entries apply when NRI enforcement is enabled: the NRI prep image requires
-an unbaked RKE2 installer, and Kata's prep image requires Kata on RKE2.
+an unbaked RKE2 installer.
 
 `c8s.anyArgvDigests` extracts workload digests whose command and args policies
 are both `any`. `c8s.alwaysAllow` merges these with `c8s.imageAllowlist` for the
@@ -37,7 +37,3 @@ Keep this naming rule aligned with `pkg/allowlist.DigestEntryName`.
 digest, with command and args policies set to `any`, followed by
 `bootstrapAllowlist.workloads`. A supplied workload replaces the entire derived
 entry of the same name. The document must satisfy `pkg/allowlist.ParseJSON`.
-
-`c8s.serveAllowlistSeed` enables the seed ConfigMap, flag, and mount whenever the
-chart NRI plugin, Kata guest policy monitor, or node CVM mode consumes the served
-allowlist. The node mode also covers the baked host plugin.

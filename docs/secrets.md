@@ -40,24 +40,10 @@ The quota bounds one entry, not the store: enough entries one path apiece still
 reach the ceiling. What it buys is that the refusal lands on the entry that
 caused it rather than on the next one to ask.
 
-**kata is supported, with two caveats.** The fetcher redeems its sandbox token
-from whichever inventory its shape has: the mounted nri-image-policy socket on
-node-CVM, or `policy-monitor` on the guest's loopback `127.0.0.1:8401` under
-kata, where nothing is mounted. The webhook selects the shape with
-`--workload-claims-guest` and rejects `confidential.ai/c8s-secrets` only when
-the operator has neither — a pod whose fetcher would CrashLoop while the
-workload blocked forever on a file that never lands.
-
-The two caveats are weaker guarantees, not broken ones, and both are properties
-of the guest rather than of secret release:
-
-- the kata sandbox ID comes from a host-written CRI annotation, so the sandbox a
-  token names is asserted by the host rather than read from the kernel as it is
-  on node-CVM;
-- argv enforcement in the guest is watch-and-kill rather than synchronous, so a
-  container running a non-admitted argv is killed rather than refused.
-
-A deployment whose threat model cannot accept either should stay on node-CVM.
+The fetcher redeems its sandbox token from the mounted nri-image-policy
+socket. The webhook rejects `confidential.ai/c8s-secrets` when the operator
+has no inventory socket configured, rather than admitting a pod whose fetcher
+would CrashLoop while the workload waits for a file that never lands.
 
 ## Asking for a secret
 
@@ -130,7 +116,7 @@ A request carries:
 | `Authorization: SandboxToken <base64>` | the inventory-signed token, in a header so it is bounded and never logged |
 
 The token is obtained from the admission inventory at `POST /sandbox` — the
-node's on node-CVM, the guest's own under kata — bound to the leaf's key and
+node's inventory — bound to the leaf's key and
 that challenge, the same route and the same envelope `get-cert` uses at
 issuance.
 
@@ -180,9 +166,8 @@ serves at `GET /ca` over the attested connection and refuses unless it is one
 you pinned.
 
 `--measurements` alone does not cover this. It proves the peer is an attested
-build at a pinned launch measurement — but every confidential pod boots the
-same guest image, so that measurement is a property of the shape, not of the
-role. The mesh CA key is generated per CDS, so it is what tells your CDS from
+build at a pinned launch measurement — but nodes can boot the same image,
+so that measurement does not identify a particular CDS instance. The mesh CA key is generated per CDS, so it is what tells your CDS from
 another one at the same measurement, and it is the anchor your workloads
 already trust.
 

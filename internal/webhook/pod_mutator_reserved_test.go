@@ -3,7 +3,6 @@ package webhook
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 
@@ -170,12 +169,11 @@ func handleSecretsPod(t *testing.T, cfg Config) admission.Response {
 }
 
 // TestHandleRejectsSecretsWithoutAnyInventory covers the shape no fetcher can
-// serve: no mounted socket and not the kata guest, so there is no inventory to
-// redeem a sandbox token at. Injecting anyway produces a Running pod whose
-// fetcher CrashLoops while the workload blocks forever on a file that never
-// lands — fail at admission instead.
+// serve: no mounted socket means no inventory to redeem a sandbox token at.
+// Injecting anyway produces a Running pod whose fetcher CrashLoops while the
+// workload blocks forever on a file that never lands — fail at admission instead.
 func TestHandleRejectsSecretsWithoutAnyInventory(t *testing.T) {
-	cfg := secretsConfig() // neither WorkloadClaimsHostDir nor WorkloadClaimsGuest
+	cfg := secretsConfig() // WorkloadClaimsHostDir is unset
 
 	resp := handleSecretsPod(t, cfg)
 	if resp.Allowed {
@@ -194,41 +192,5 @@ func TestHandleAdmitsSecretsWithInventorySocket(t *testing.T) {
 
 	if resp := handleSecretsPod(t, cfg); !resp.Allowed {
 		t.Fatalf("Handle denied a serviceable secrets pod: %v", resp.Result)
-	}
-}
-
-// Under kata the inventory is policy-monitor on guest loopback, so a secrets
-// pod is serviceable with nothing mounted.
-func TestHandleAdmitsSecretsUnderKataGuest(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-
-	if resp := handleSecretsPod(t, cfg); !resp.Allowed {
-		t.Fatalf("Handle denied a secrets pod the guest inventory can serve: %v", resp.Result)
-	}
-}
-
-// The fetcher must be told to use the guest endpoint, not merely admitted: the
-// node-CVM socket it would otherwise dial cannot exist in a kata guest.
-func TestSecretContainerSelectsGuestInventoryUnderKata(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-	inj := &injection{Secrets: secretsSpec{Specs: []string{"DB=/api/db"}, Dir: "/run/c8s/secrets"}}
-
-	args := secretContainer(inj, cfg).Args
-	if !slices.Contains(args, "--workload-claims-guest") {
-		t.Fatalf("get-secret args %v omit --workload-claims-guest under kata", args)
-	}
-}
-
-// And must not be told to under node-CVM, where the guest port serves nothing.
-func TestSecretContainerKeepsSocketInventoryOnNodeCVM(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsHostDir = "/run/c8s/nri"
-	inj := &injection{Secrets: secretsSpec{Specs: []string{"DB=/api/db"}, Dir: "/run/c8s/secrets"}}
-
-	args := secretContainer(inj, cfg).Args
-	if slices.Contains(args, "--workload-claims-guest") {
-		t.Fatalf("get-secret args %v select the guest inventory on node-CVM", args)
 	}
 }

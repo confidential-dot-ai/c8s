@@ -21,9 +21,6 @@ jobs:
       - name: Test repro-gate change classification
         run: bash .github/scripts/tests/test-repro-gate-changes.sh
 
-      - name: Test shared guest kernel build
-        run: bash .github/scripts/tests/test-build-guest-kernel.sh
-
       - name: Install actionlint (checksum-pinned)
         env:
           # SHA256 from the v1.7.12 release's checksums.txt (linux_amd64).
@@ -69,7 +66,4 @@ jobs:
             .github/scripts/pin-manifest.sh \
             .github/scripts/repro-gate-changes \
             .github/scripts/tests/test-pin-manifest.sh \
-            .github/scripts/tests/test-repro-gate-changes.sh \
-            kata-guest-base/scripts/ci/publish-release-aliases.sh \
-            kata-guest-base/scripts/build-kernel.sh \
-            .github/scripts/tests/test-build-guest-kernel.sh
+            .github/scripts/tests/test-repro-gate-changes.sh

@@ -30,11 +30,7 @@ webhooks:
     timeoutSeconds: 5
     reinvocationPolicy: IfNeeded
     # get-cert injection is opt-in (confidential.ai/cw), so an un-annotated pod
-    # is a no-op regardless of namespace. The exclusion matters for kata
-    # enforcement, which forces a runtimeClassName onto any in-scope pod with
-    # no annotation: without it, --kata-enforce would try to run c8s's own
-    # control plane (operator, cds, attestation-api, tls-lb are not
-    # hostNetwork) as kata VMs. The reinject sweep excludes the same set.
+    # is a no-op regardless of namespace. The reinject sweep excludes the same set.
     namespaceSelector:
       matchExpressions:
         {{- include "c8s.webhookExcludedNamespaces" . | nindent 8 }}

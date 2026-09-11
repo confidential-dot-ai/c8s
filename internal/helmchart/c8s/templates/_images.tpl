@@ -30,58 +30,6 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "c8s.kataDeployImage" -}}
-{{- if and .Values.kata.image.digest .Values.kata.image.tag -}}
-{{ fail "kata.image.tag and kata.image.digest are mutually exclusive — set one, not both (digest wins silently otherwise, which surprises operators bumping versions)" }}
-{{- else if .Values.kata.image.digest -}}
-{{ .Values.kata.image.repository }}@{{ .Values.kata.image.digest }}
-{{- else if .Values.kata.image.tag -}}
-{{ .Values.kata.image.repository }}:{{ .Values.kata.image.tag }}
-{{- else -}}
-{{ fail "kata.image.tag or kata.image.digest must be set" }}
-{{- end -}}
-{{- end -}}
-
-{{- define "c8s.kataContainerdPrepImage" -}}
-{{- $img := .Values.kata.containerdPrep.image -}}
-{{- if and $img.digest $img.tag -}}
-{{ fail "kata.containerdPrep.image.tag and kata.containerdPrep.image.digest are mutually exclusive — set one, not both" }}
-{{- else if $img.digest -}}
-{{ $img.repository }}@{{ $img.digest }}
-{{- else if $img.tag -}}
-{{ $img.repository }}:{{ $img.tag }}
-{{- else -}}
-{{ fail "kata.containerdPrep.image.tag or kata.containerdPrep.image.digest must be set" }}
-{{- end -}}
-{{- end -}}
-
-{{- define "c8s.kataGuestImageTag" -}}
-{{- if .Values.kata.guestImage.debug -}}
-{{- printf "%s-debug" .Values.kata.guestImage.tag -}}
-{{- else -}}
-{{- .Values.kata.guestImage.tag -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "c8s.kataGuestImageNvidiaTag" -}}
-{{- if .Values.kata.guestImage.debug -}}
-{{- printf "%s-nvidia-debug" .Values.kata.guestImage.tag -}}
-{{- else -}}
-{{- printf "%s-nvidia" .Values.kata.guestImage.tag -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "c8s.kataSandboxDevicePluginImage" -}}
-{{- $img := .Values.kata.gpu.sandboxDevicePlugin.image -}}
-{{- if $img.digest -}}
-{{ $img.repository }}@{{ $img.digest }}
-{{- else if $img.tag -}}
-{{ $img.repository }}:{{ $img.tag }}
-{{- else -}}
-{{ fail "kata.gpu.sandboxDevicePlugin.image.tag or .digest must be set" }}
-{{- end -}}
-{{- end -}}
-
 {{- define "c8s.imagePullSecrets" -}}
 {{- $secrets := .local | default .root.Values.imagePullSecrets | default list -}}
 {{- with .root.Values.imagePullSecret -}}

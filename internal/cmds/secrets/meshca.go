@@ -11,10 +11,9 @@ import (
 )
 
 // errMeshCARequired is the refusal an operator gets for a write that names no
-// mesh CA. RA-TLS proves the peer is a TEE running a pinned build; under
-// pod-as-CVM every confidential pod boots the same guest image, so a launch
-// measurement does not distinguish CDS from anything else at that shape. The
-// mesh CA key is what does: it is generated per CDS, and it is the anchor
+// mesh CA. RA-TLS proves the peer is a TEE running a pinned build; a launch
+// measurement does not distinguish instances running the same node image.
+// The mesh CA key is generated per CDS and is the anchor that
 // `c8s verify --mesh-ca` and every workload already hold.
 var errMeshCARequired = fmt.Errorf(
 	"refusing to write a secret to a CDS whose mesh CA is not pinned: --measurements proves the peer is an attested build, " +
