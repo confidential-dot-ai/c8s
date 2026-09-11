@@ -40,8 +40,10 @@ Layout:
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
   The locked image runs the kubelet with `enable-debugging-handlers=false`,
   so `kubectl exec`, `attach`, `port-forward`, and `logs` fail for every
-  kubeconfig holder; `C8S_DEV=1` turns them back on (with the serial
-  autologin), at a different measurement.
+  kubeconfig holder, and routes every ordinary pod through the measured
+  runtime wrapper, which denies `runc exec` outright — see
+  [Post-start exec](#post-start-exec). `C8S_DEV=1` turns both back on (with
+  the serial autologin), at a different measurement.
 
 ## Launch requirements
 
@@ -265,6 +267,22 @@ For manual image builds, dispatch `c8s-image-manual.yml` (Actions name:
 `gate` inputs. It builds through the same reusable builder but cannot call
 exact acceptance or promote stable aliases. `tdx-metal-e2e.yml` remains
 manually dispatchable for staged-stack regression and `keep_cvm` debugging.
+
+### Post-start exec
+
+The kubelet setting above closes the kubelet's HTTP API. It does not close CRI
+`ExecSync`, which is how exec probes and lifecycle exec hooks start a process
+in a running container, nor a direct call to containerd. The locked image
+points the containerd runc handler's `BinaryName` at `/usr/local/bin/c8s-runc`
+(`mkosi.extra/.../config-v3.toml.d/10-c8s-runc.toml`), a measured wrapper that
+denies `runc exec` and passes every other verb to RKE2's runc. All of those
+paths end in that one call, so all of them fail.
+
+The consequences for anything running on such a node: an exec probe never
+passes and a `preStop` exec hook never runs. c8s's own components use HTTP
+probes and SIGTERM handling instead. See
+[docs/node-exec-mode.md](../docs/node-exec-mode.md) for the wrapper, the build
+gate that proves no handler escapes it, and what to do in a new component.
 
 ## Refreshing measurements
 
