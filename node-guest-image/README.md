@@ -100,12 +100,13 @@ sudo make test-node-guest-image-immutable-root
 sudo make test-node-guest-image-immutable-root CONFOS_DIR=/path/to/confidential-os-builder
 ```
 
-The test requires Python 3 and util-linux with mount namespace and overlay
-support. It stages the actual base, GPU, attestation and c8s profile extra
-trees, then executes the pinned base finalizer and initrd unchanged in a
-private mount namespace and chroot. Real overlays must permit c8s state
-writes and atomic NRI floor replacement while `/usr`, `/opt/nri` and
-undeclared `/etc` paths stay read-only and the lower image stays unchanged.
+The Bash test requires GNU coreutils/findutils, grep, cmp, and util-linux
+with mount namespace and overlay support. It stages the actual base, GPU,
+attestation and c8s profile extra trees, then executes the pinned base
+finalizer and initrd unchanged in a private mount namespace and chroot.
+Real overlays must permit c8s state writes and atomic NRI floor replacement
+while `/usr`, `/opt/nri` and undeclared `/etc` paths stay read-only and the
+lower image stays unchanged.
 A missing declared directory must stop boot before `switch_root`. Sync-created
 CNI/NRI directories are fixture inputs; the invariant gate separately checks
 that `mkosi.sync` creates them. Each case unmounts its fixture before cleanup.
