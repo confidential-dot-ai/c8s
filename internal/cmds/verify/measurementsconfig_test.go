@@ -21,7 +21,7 @@ const (
 
 func mcSet(t *testing.T, entries string) refvalues.ReferenceValues {
 	t.Helper()
-	s, err := refvalues.ParseServed([]byte(`{"schema_version":"1","tee":"sev-snp","measurements":[` + entries + `]}`))
+	s, err := refvalues.ParseRendered([]byte(`{"schema_version":"1","tee":"sev-snp","measurements":[` + entries + `]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestCheckServedMeasurementsNeverPassesUnchecked(t *testing.T) {
 // A target on the other platform is a policy error, not a per-image diff.
 func TestCheckServedMeasurementsReportsPlatformMismatch(t *testing.T) {
 	want := mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`)
-	served, err := refvalues.ParseServed([]byte(
+	served, err := refvalues.ParseRendered([]byte(
 		`{"schema_version":"1","tee":"tdx","measurements":[{"name":"a","mrtd":"00` + mcDigestA + `"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestCheckServedMeasurementsReportsPlatformMismatch(t *testing.T) {
 // refuse a server whose certificate is not the one that was attested — that
 // binding is what stops a substituted endpoint answering for CDS.
 func TestFetchServedMeasurementsBindsToTheAttestedCert(t *testing.T) {
-	doc, err := refvalues.Serve(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
+	doc, err := refvalues.Render(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -134,7 +134,7 @@ func run(cfg config) error {
 		served = refvalues.FromFlags(measurementBytes(measurements), rtmrPins)
 	}
 	served.Family = servedFamily(cfg.ratlsPlatform)
-	measurementsDoc, err := refvalues.Serve(served)
+	measurementsDoc, err := refvalues.Render(served)
 	if err != nil {
 		return fmt.Errorf("render /measurements document: %w", err)
 	}

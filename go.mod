@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	filippo.io/mlkem768 v0.0.0-20260214141301-2e7bebc7d88d
 	github.com/cenkalti/backoff/v5 v5.0.3
-	github.com/confidential-dot-ai/attestation-go v0.6.1-0.20260910140957-ea2ced0d719c
+	github.com/confidential-dot-ai/attestation-go v0.6.1-0.20260911105501-9e9bdb12dff5
 	github.com/containerd/containerd/api v1.11.1
 	github.com/containerd/containerd/v2 v2.3.5
 	github.com/containerd/errdefs v1.0.0

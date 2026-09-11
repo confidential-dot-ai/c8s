@@ -46,7 +46,7 @@ func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA2
 	if err != nil {
 		return refvalues.ReferenceValues{}, fmt.Errorf("read /measurements: %w", err)
 	}
-	return refvalues.ParseServed(body)
+	return refvalues.ParseRendered(body)
 }
 
 // checkServedMeasurements compares the served set against the operator's file.

@@ -499,7 +499,7 @@ func TestHandleMeasurements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := refvalues.Serve(set)
+	doc, err := refvalues.Render(set)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	served, err := refvalues.ParseServed(w.Body.Bytes())
+	served, err := refvalues.ParseRendered(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("served body does not parse: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestHandleMeasurements(t *testing.T) {
 		t.Errorf("served set = %+v, want the one pinned image", served)
 	}
 
-	empty, err := refvalues.Serve(refvalues.ReferenceValues{Family: teetypes.FamilySNP})
+	empty, err := refvalues.Render(refvalues.ReferenceValues{Family: teetypes.FamilySNP})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("empty set status = %d, want 200 (not a 404)", w.Code)
 	}
-	servedEmpty, err := refvalues.ParseServed(w.Body.Bytes())
+	servedEmpty, err := refvalues.ParseRendered(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("empty served body does not parse: %v", err)
 	}
