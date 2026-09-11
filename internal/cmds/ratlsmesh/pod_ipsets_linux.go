@@ -626,7 +626,7 @@ func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[i
 				if (fam == iptablesFamilyIPv4) != (ip.To4() != nil) {
 					continue
 				}
-				if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+				if isExcludedNodeAddress(ip) {
 					continue
 				}
 				ones, _ := a.mask.Size()
@@ -650,7 +650,9 @@ func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[i
 				}
 				continue
 			}
-			if c.ones > best.ones || (c.ones == best.ones && c.iface < best.iface) {
+			hasLongerPrefix := c.ones > best.ones
+			winsInterfaceNameTie := c.ones == best.ones && c.iface < best.iface
+			if hasLongerPrefix || winsInterfaceNameTie {
 				best = c
 			}
 		}
@@ -660,6 +662,10 @@ func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[i
 		out[fam] = best.ip.String()
 	}
 	return out, nil
+}
+
+func isExcludedNodeAddress(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast()
 }
 
 // isHostUsableIPv6 reports whether ip (prefix length ones) is a host-style

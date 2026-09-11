@@ -4,6 +4,8 @@
 #
 # Inputs (env):
 #   CONFOS_REF   pinned confos ref the workflow resolved; names the pass line.
+#   EXPECT_IMMUTABLE_ROOT  1 once CONFOS_REF carries confos's immutable root
+#                (state.d in its initrd); makes its absence an error.
 
 set -euo pipefail
 
@@ -145,6 +147,80 @@ if ! grep -qF '"$SCRATCH_DEV" scratch' confos/mkosi/initrd/mkosi.extra/init; the
   exit 1
 fi
 
+# confos's root is immutable; the profile declares the directories it
+# writes at runtime in usr/lib/confai/state.d, one path per line, read the
+# way the confos initrd reads them (whole line = one path, CR stripped,
+# leading slash tolerated). Each must exist in the built image or the
+# initrd refuses to boot: accepted if baked under mkosi.extra or created
+# under mkosi.sync's stage tree.
+state_confs=$(ls "$ngi"/c8s/mkosi.extra/usr/lib/confai/state.d/*.conf 2>/dev/null || true)
+if [ -z "$state_confs" ]; then
+  echo "::error::no state.d/*.conf under $ngi/c8s/mkosi.extra/usr/lib/confai — the immutable root needs the profile's writable dirs declared"
+  exit 1
+fi
+state_dirs=""
+while read -r d || [ -n "$d" ]; do
+  d="${d%$'\r'}"; d="${d#/}"
+  case "$d" in "" | \#*) continue ;; esac
+  if [ ! -d "$ngi/c8s/mkosi.extra/$d" ] && ! grep -qE "\"\\\$STAGE_DIR/$d(/|\")" "$ngi/c8s/mkosi.sync"; then
+    echo "::error::state.d declares '$d', which is neither baked under $ngi/c8s/mkosi.extra nor created under mkosi.sync's \$STAGE_DIR; the confos initrd refuses to boot an image whose state.d names a missing dir"
+    exit 1
+  fi
+  state_dirs="$state_dirs $d"
+done < <(cat $state_confs)
+
+# Every runtime write outside confos's own state dirs must sit under a
+# declared entry or it surfaces as EROFS mid-boot. Writers are gathered
+# mechanically: absolute /etc|/opt|/usr|/srv|/boot literals on write lines
+# in the profile's scripts (and the tests' FRAG* mirrors), tmpfiles.d
+# create/write entries, and hostPath / local-path "paths" in the baked
+# manifests. Reads that share a line with a write verb can trip this; that
+# is the cheap side to err on.
+covered() {
+  case "$1" in /var|/var/*|/home|/home/*|/root|/root/*|/tmp|/tmp/*|/run|/run/*) return 0 ;; esac
+  for d in $state_dirs; do case "$1" in "/$d"|"/$d"/*) return 0 ;; esac; done
+  return 1
+}
+writes=$( {
+  # Numeric descriptor duplication does not write a filesystem path. Remove
+  # only that token; keep other redirects and write verbs on the same line.
+  sed -E 's/[0-9]*[<>]&[0-9]+([[:space:];|&()]|$)/\1/g' \
+      "$ngi"/c8s/mkosi.extra/usr/local/bin/*.sh "$ngi"/tests/lib.sh \
+    | grep -E '(>|tee |mkdir |install |cp |mv |touch |rm |^FRAG[A-Z]*=)' \
+    | grep -vE '^[[:space:]]*#' | grep -oE '/(etc|opt|usr|srv|boot)/[A-Za-z0-9_./-]+' || true
+  grep -hE '^[dDfFwLpc]\+? ' "$ngi"/c8s/mkosi.extra/etc/tmpfiles.d/*.conf \
+    | awk '{print $2}' | grep -E '^/(etc|opt|usr|srv|boot)/' || true
+  grep -hoE '(path: *|"paths":\[")/(etc|opt|usr|srv|boot)/[A-Za-z0-9_./-]+' \
+       "$ngi"/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/*.yaml \
+    | grep -oE '/(etc|opt|usr|srv|boot)/.*' || true
+} | sort -u )
+for w in $writes; do
+  if ! covered "$w"; then
+    echo "::error::$w is written at runtime (scripts / tmpfiles.d / baked manifests) but no state.d entry ($state_dirs) makes it writable under the immutable root"
+    exit 1
+  fi
+done
+
+# confos side. The parser this lint mirrors is pinned like the dm name
+# above. Until CONFOS_REF carries the immutable root the declaration is
+# inert (warning only); the bump PR sets EXPECT_IMMUTABLE_ROOT=1 in
+# node-guest-image-lint.yml so a later confos drop of state.d fails here
+# instead of reading as "older confos".
+init=confos/mkosi/initrd/mkosi.extra/init
+if grep -qF '/usr/lib/confai/state.d' "$init"; then
+  for pin in '[ -d "/sysroot/$dir" ]' 'while read -r dir || [ -n "$dir" ]'; do
+    if ! grep -qF "$pin" "$init"; then
+      echo "::error::confos initrd changed how it reads state.d (missing: $pin); update this lint's parser to match, then re-pin"
+      exit 1
+    fi
+  done
+elif [ "${EXPECT_IMMUTABLE_ROOT:-0}" = 1 ]; then
+  echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
+  exit 1
+else
+  echo "::warning::confos at CONFOS_REF $CONFOS_REF predates the immutable root (no state.d in its initrd): the state.d declaration is inert until the ref is bumped — then set EXPECT_IMMUTABLE_ROOT=1 in node-guest-image-lint.yml"
+fi
+
 # The scratch floor is prose in the README and a sector count in the gate;
 # a bump must touch both.
 if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh" \
@@ -158,6 +234,8 @@ fi
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
 vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
+cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
 if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
   echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
@@ -184,6 +262,25 @@ if ! grep -q '^    - Deny$' "$vap"; then
   echo "::error::$vap binding must deny, not warn or audit"
   exit 1
 fi
+if [ ! -x "$psa_gate" ]; then
+  echo "::error::$psa_gate must be executable"
+  exit 1
+fi
+if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
+  echo "::error::$cred_release must keep credential release behind the measured PodSecurity readiness gate"
+  exit 1
+fi
+for required in \
+  'get validatingadmissionpolicy "$policy"' \
+  'get validatingadmissionpolicybinding "$policy"' \
+  '--as="$probe_user" create --dry-run=server' \
+  'probe_namespace restricted' \
+  'probe_namespace privileged'; do
+  if ! grep -qF -- "$required" "$psa_gate"; then
+    echo "::error::$psa_gate is missing required live admission probe: $required"
+    exit 1
+  fi
+done
 
 # Check requested and resolved settings, including CONFIG_LSM and duplicates.
 # The build uses the same checker on its .config; apparmor-enforce.service

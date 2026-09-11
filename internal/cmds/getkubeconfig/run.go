@@ -104,7 +104,7 @@ func Run(ctx context.Context, cfg Config) error {
 		relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
 		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
 		cancel2()
-		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !time.Now().Before(releaseDeadline) {
+		if !shouldRetryCredentialRelease(err, releaseDeadline) {
 			break
 		}
 		fmt.Fprintln(os.Stderr, "cred-release not listening yet; retrying")
@@ -125,6 +125,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
 	return nil
+}
+
+func shouldRetryCredentialRelease(err error, deadline time.Time) bool {
+	return err != nil && errors.Is(err, syscall.ECONNREFUSED) && time.Now().Before(deadline)
 }
 
 // publicKeyPEMFromPrivate derives the PKIX PEM public key from an ECDSA

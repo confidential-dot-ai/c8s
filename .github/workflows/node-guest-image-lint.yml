@@ -26,6 +26,7 @@ on:
       - ".github/actions/tdx-metal-e2e/**"
       # The invariants gate body; a script-only change must run the gate.
       - ".github/scripts/node-guest-image-invariants.sh"
+      - ".github/scripts/tests/test-node-guest-image-invariants.sh"
       - ".github/scripts/tdx-image-acceptance.sh"
       - ".github/scripts/tests/test-tdx-image-acceptance.sh"
       - ".github/workflows/c8s-image.yml"
@@ -61,8 +62,13 @@ jobs:
 
       - name: node-guest-image invariants
         env:
+          # Flip to "1" in the PR that bumps CONFOS_REF past confos#120
+          # (immutable root); until then the state.d declaration is inert.
+          EXPECT_IMMUTABLE_ROOT: "0"
           CONFOS_REF: ${{ steps.pins.outputs.confos }}
-        run: .github/scripts/node-guest-image-invariants.sh
+        run: |
+          .github/scripts/node-guest-image-invariants.sh
+          bash .github/scripts/tests/test-node-guest-image-invariants.sh
 
       - name: Resolve the confos base release
         id: release
@@ -198,6 +204,15 @@ jobs:
         env:
           CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
         run: bash node-guest-image/tests/apparmor-kernel-test.sh
+
+  psa-ready:
+    name: PodSecurity credential-release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the exact production-script harness
+        run: make test-node-guest-image-psa-ready
 
   rke2-role:
     name: rke2-role dispatch (script)

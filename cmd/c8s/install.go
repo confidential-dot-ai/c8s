@@ -44,7 +44,6 @@ var (
 	installCRDs      bool
 
 	installCertFSGroup          int64
-	installCertKeyMode          string
 	installGetCertRenewInterval time.Duration
 	installGetCertRunAsUser     int64
 	installGetCertRunAsGroup    int64
@@ -593,7 +592,7 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	seen := map[string]bool{}
 	var lines []string
 	for _, p := range pods {
-		if !platformPod(p) || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		if !platformPod(p) || isTerminalPod(p) {
 			continue
 		}
 		for _, st := range podContainerStatuses(p) {
@@ -609,6 +608,10 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	}
 	slices.Sort(lines)
 	return lines
+}
+
+func isTerminalPod(p corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
 
 // deniedPlatformImages lists the platform-pod images the policy would deny.
@@ -1032,7 +1035,7 @@ var installCmd = &cobra.Command{
   - the ConfidentialWorkload CRD
   - the mutating admission webhook configuration
   - the attestation-api DaemonSet (per-node /attest + /verify)
-  - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
+  - the CDS trust root (attestation, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, and tls-lb components
 
 Under --cvm-mode=pod the install is ENFORCING: every workload pod runs as a kata VM
@@ -2483,7 +2486,6 @@ func init() {
 	installCmd.Flags().BoolVar(&installWait, "wait", true, "wait for the release to become ready (helm --wait)")
 	installCmd.Flags().BoolVar(&installCRDs, "install-crds", true, "install chart CRDs (false passes helm --skip-crds)")
 	installCmd.Flags().Int64Var(&installCertFSGroup, "webhook-cert-fs-group", 65532, "fsGroup for injected certificate volume")
-	installCmd.Flags().StringVar(&installCertKeyMode, "webhook-cert-key-mode", "0640", "octal mode for injected tls.key")
 	installCmd.Flags().DurationVar(&installGetCertRenewInterval, "webhook-get-cert-renew-interval", 6*time.Hour, "renewal interval for injected workload certificates")
 	installCmd.Flags().Int64Var(&installGetCertRunAsUser, "webhook-get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")

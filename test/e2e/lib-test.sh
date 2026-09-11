@@ -21,7 +21,7 @@ cw_namespace c8s-test
 [[ ${calls[0]} == 'create namespace c8s-test' ]] || fail "namespace must be created, not adopted"
 cw_namespace_owned c8s-test || fail "created namespace not owned"
 if cw_namespace_owned another; then fail "unrelated namespace claimed"; fi
-[[ ${calls[1]} == 'label namespace c8s-test pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged' ]] || fail "wrong exemption labels"
+[[ ${calls[1]} == 'label namespace c8s-test pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted' ]] || fail "wrong Restricted labels"
 
 calls=()
 create_status=1

@@ -219,8 +219,8 @@ func TestTDXLifecycleDoesNotAcquireWorkflowSource(t *testing.T) {
 		if strings.HasPrefix(step.Uses, "actions/checkout@") || strings.HasPrefix(step.Uses, "actions/download-artifact@") {
 			t.Errorf("%s acquires source/evidence inside the shared lifecycle", step.Name)
 		}
-		// The paired CLI clone is product test setup, not workflow-source trust
-		// resolution. Main ancestry and workflow outputs belong to the wrapper.
+		// Main ancestry and workflow checkout belong to the wrapper. The
+		// lifecycle must reuse that verified source in exact-image mode.
 		for _, sourceOperation := range []string{"git merge-base", "refs/remotes/origin/main", "needs.source.outputs"} {
 			if strings.Contains(step.Run, sourceOperation) {
 				t.Errorf("%s resolves workflow source in shared action", step.Name)

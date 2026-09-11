@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -48,20 +50,17 @@ type policySnapshot struct {
 // The always_allow digests are checked ahead of every snapshot, so a failed or
 // withheld pull never drops them.
 type policyStore struct {
-	alwaysAllow map[string]struct{} // canonical digests admitted by digest alone
+	alwaysAllow *allowlist.Index // digests admitted by digest alone
 	snap        atomic.Pointer[policySnapshot]
 }
 
 // newPolicyStore seeds the store with an empty snapshot (version 0) so admission
 // enforces always_allow alone before the first pull lands and after any pull
-// failure.
+// failure. Config validation has already rejected a malformed digest, so
+// DigestIndex's warnings cannot fire here.
 func newPolicyStore(alwaysAllow map[string]string) *policyStore {
-	s := &policyStore{alwaysAllow: make(map[string]struct{}, len(alwaysAllow))}
-	for d := range alwaysAllow {
-		if pd, err := types.ParseDigest(d); err == nil {
-			s.alwaysAllow[pd.String()] = struct{}{}
-		}
-	}
+	idx, _ := allowlist.DigestIndex(slices.Collect(maps.Keys(alwaysAllow)))
+	s := &policyStore{alwaysAllow: idx}
 	s.snap.Store(&policySnapshot{index: (&allowlist.Allowlist{}).BuildIndex()})
 	return s
 }
@@ -78,12 +77,7 @@ func (s *policyStore) alwaysAllows(digest string) bool {
 	if s == nil {
 		return false
 	}
-	pd, err := types.ParseDigest(digest)
-	if err != nil {
-		return false
-	}
-	_, ok := s.alwaysAllow[pd.String()]
-	return ok
+	return s.alwaysAllow.AdmitsDigest(digest)
 }
 
 // apply installs the pulled document at version, unless version is below the
@@ -742,7 +736,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			return nil, nil, err
 		}
 		p.recordUncheckedForInventory(ctr, imageRef)
-		return nil, nil, nil
+		return p.socketDirAdjustment(pod, ctr), nil, nil
 	}
 
 	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
@@ -751,7 +745,36 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	p.recordForInventory(ctx, ctr, imageRef)
-	return nil, nil, nil
+	return p.socketDirAdjustment(pod, ctr), nil, nil
+}
+
+// socketDirAdjustment bind-mounts the inventory's socket directory, read-only,
+// at workloadclaims.SidecarSocketDir into the webhook-injected sidecars of an
+// injected pod — the OCI-level replacement for a pod-spec hostPath volume,
+// which PodSecurity baseline and restricted would reject. nil for every other
+// container, and whenever the inventory is disabled.
+//
+// The annotation+name gate scopes the mount; it is NOT a security boundary.
+// Both are tenant-forgeable, so every socket in the directory must stay safe
+// against any on-node caller (peer-credential binding, RO mount).
+func (p *plugin) socketDirAdjustment(pod *api.PodSandbox, ctr *api.Container) *api.ContainerAdjustment {
+	if p.inventory == nil {
+		return nil
+	}
+	if pod.GetAnnotations()[workloadclaims.AnnotationInjected] != "true" {
+		return nil
+	}
+	if !workloadclaims.IsSidecarContainer(ctr.GetName()) {
+		return nil
+	}
+	adjust := &api.ContainerAdjustment{}
+	adjust.AddMount(&api.Mount{
+		Destination: workloadclaims.SidecarSocketDir,
+		Type:        "bind",
+		Source:      p.cfg.WorkloadClaims.SocketDir,
+		Options:     []string{"rbind", "ro", "rprivate", "nosuid", "nodev", "noexec"},
+	})
+	return adjust
 }
 
 // extractDigest returns the canonical "sha256:<64hex>" digest from an image

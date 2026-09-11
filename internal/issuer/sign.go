@@ -38,9 +38,9 @@ type SignCSRParams struct {
 // serial number used.
 //
 // THREAT MODEL: this is the unguarded signing primitive at the root of the
-// mesh trust chain. The caller MUST upstream-validate: (1) the EAR JWT
-// signature and issuer claim, (2) the CSR public key matches the TEE-attested
-// key in the EAR, (3) the launch measurement is in the policy allowlist,
+// mesh trust chain. The caller MUST upstream-validate: (1) the TEE evidence
+// and its freshness challenge, (2) REPORTDATA binds the CSR public key to
+// that challenge, (3) the launch measurement is in the policy allowlist,
 // (4) DNS/IP SANs satisfy the per-deployment SAN policy, (5) the TTL is
 // clamped to a policy maximum. Skipping any of these lets an attacker who
 // controls the CSR mint a CA-signed leaf for any subject they choose.

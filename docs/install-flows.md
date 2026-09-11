@@ -77,7 +77,7 @@ not a cluster resource.
 |---|:--:|:--:|---|
 | c8s operator (webhook + controllers) | ✓ | ✓ | host (runc; always webhook-exempt) |
 | MWC `pod-injector` | ✓ | ✓ | cluster (release-tracked resource) |
-| **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
+| **CDS** (Certificate Distribution Service: verify + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
 | attestation-service | ✓ host | ✗ (in-VM) | host DaemonSet in base; baked into the guest image under kata |
 | ratls-mesh | ✓ host | ✗ (in-VM) | host DaemonSet in base; in-VM routing under kata |
 | nri-image-policy | ✓ host | ✗ (in-VM) | host NRI plugin in base; in-guest `policy-monitor` under kata (fed from CDS's served allowlist) |
@@ -163,7 +163,7 @@ sequenceDiagram
     participant Op as operator pod
     participant Pods as workloads
 
-    CLI->>K: kubectl apply Namespace (labelled pod-security=privileged in every mode)
+    CLI->>K: kubectl apply release Namespace (pod-security=privileged for platform components)
     CLI->>Helm: helm upgrade --install --wait
     Note over Helm: normal resources (kind-order)
     Helm->>K: create operator Deployment, kata-deploy, CDS, ...
@@ -245,8 +245,10 @@ sync):
   would map into the guest) plus `kube-system`, `kube-public`,
   `kube-node-lease`, and `webhook.extraExcluded`.
 - **host-namespace pods** (`hostNetwork`/`hostPID`/`hostIPC`) — a VM cannot
-  share the host's namespaces. This is how `kata-deploy` (which sets
-  `hostPID`+`hostNetwork`) is left as runc.
+  share the host's namespaces, so the Kata layer leaves them as runc. The
+  separate `deny-host-namespaces` policy rejects this shape outside trusted platform
+  namespaces; this exemption is what lets `kata-deploy` (which sets
+  `hostPID`+`hostNetwork`) run in the excluded release namespace.
 
 > **Why CDS doesn't use `cw` for its runtimeClass.** It must be a
 > CVM, but it must *not* get a get-cert sidecar: that sidecar dials CDS,

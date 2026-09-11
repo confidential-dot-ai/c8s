@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -22,19 +22,19 @@ import (
 
 // anyAllowlist builds an allowlist with one any-argv entry per digest, named
 // "w-" plus the first 12 hex digits of the digest.
-func anyAllowlist(t *testing.T, digests map[string]string) *allowlistpkg.Allowlist {
+func anyAllowlist(t *testing.T, digests map[string]string) *allowlist.Allowlist {
 	t.Helper()
-	al := &allowlistpkg.Allowlist{Schema: allowlistpkg.Schema, Workloads: map[string]allowlistpkg.Workload{}}
+	al := &allowlist.Allowlist{Schema: allowlist.Schema, Workloads: map[string]allowlist.Workload{}}
 	for d, image := range digests {
 		digest, err := types.ParseDigest(d)
 		if err != nil {
 			t.Fatal(err)
 		}
-		al.Workloads["w-"+digest.Hex()[:12]] = allowlistpkg.Workload{Label: image, Containers: []allowlistpkg.Container{{
+		al.Workloads["w-"+digest.Hex()[:12]] = allowlist.Workload{Label: image, Containers: []allowlist.Container{{
 			Digest:  digest,
 			Image:   image,
-			Command: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
-			Args:    allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
+			Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+			Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 		}}}
 	}
 	return al
@@ -69,8 +69,8 @@ func testLogger(t *testing.T) *slog.Logger {
 	return logger
 }
 
-// newSeededAllowlist builds an *allowlist with a single seed digest.
-func newSeededAllowlist(t *testing.T, seed string) *allowlist {
+// newSeededAllowlist builds a seed index holding a single digest.
+func newSeededAllowlist(t *testing.T, seed string) *allowlist.Index {
 	t.Helper()
 	dir := t.TempDir()
 	body, err := json.Marshal(bootstrapAllowlistFile{Sha256Digests: []string{seed}})
@@ -131,13 +131,13 @@ func TestRefreshOnce_InstallsServedDocument(t *testing.T) {
 		t.Fatal("pull did not land")
 	}
 
-	if a.Size() != 1 || !a.Contains(seed) {
+	if a.Size() != 1 || !a.AdmitsDigest(seed) {
 		t.Fatalf("seed changed by a pull: size %d", a.Size())
 	}
 	if overlay.version != 2 {
 		t.Errorf("overlay version = %d, want 2", overlay.version)
 	}
-	if !overlay.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: pulled, Argv: []string{"/anything"}}) {
+	if !overlay.index().AdmitsContainer(allowlist.RunningContainer{Digest: pulled, Argv: []string{"/anything"}}) {
 		t.Error("pulled digest not admitted by the overlay")
 	}
 }
@@ -167,7 +167,7 @@ func TestRefreshOnce_RolledBackVersionIgnored(t *testing.T) {
 		t.Fatalf("overlay version after rollback = %d, want 5 (unchanged)", overlay.version)
 	}
 	// Nothing the rolled-back document adds is admitted, by the seed or the overlay.
-	if a.Contains(pulled) || overlay.index().AdmitsDigest(pulled) {
+	if a.AdmitsDigest(pulled) || overlay.index().AdmitsDigest(pulled) {
 		t.Error("a rolled-back document must not admit its digests")
 	}
 }
@@ -189,7 +189,7 @@ func TestRefreshOnce_CDSErrorKeepsAllowlist(t *testing.T) {
 	if a.Size() != 1 {
 		t.Fatalf("size after failed refresh = %d, want 1 (seed preserved)", a.Size())
 	}
-	if !a.Contains(seed) {
+	if !a.AdmitsDigest(seed) {
 		t.Error("seed dropped after CDS failure")
 	}
 }

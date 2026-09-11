@@ -75,7 +75,6 @@ spec:
             - --exclude-namespaces={{ . }}
             {{- end }}
             - --cert-fs-group={{ include "c8s.int" .Values.webhook.certVolume.fsGroup }}
-            - --cert-key-mode={{ .Values.webhook.certVolume.keyMode }}
             - --get-cert-renew-interval={{ .Values.webhook.getCert.renewInterval }}
             - --get-cert-run-as-user={{ include "c8s.int" .Values.webhook.getCert.runAsUser }}
             - --get-cert-run-as-group={{ include "c8s.int" .Values.webhook.getCert.runAsGroup }}
@@ -89,9 +88,10 @@ spec:
             {{- end }}
             {{- /* Workload-digest claims (docs/ratls.md): get-cert
                    redeems a sandbox token from the node's inventory over a
-                   compiled endpoint: the nri-image-policy socket mounted into
-                   c8s-cert on node-CVM, or guest loopback under kata, where
-                   policy-monitor is in the same guest and nothing is mounted. */}}
+                   compiled endpoint: the nri-image-policy socket that plugin
+                   NRI-mounts into c8s-cert on node-CVM, or guest loopback under
+                   kata, where policy-monitor is in the same guest and nothing
+                   is mounted. */}}
             {{- if .Values.kata.enabled }}
             - --workload-claims-guest
             {{- else if or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node") }}

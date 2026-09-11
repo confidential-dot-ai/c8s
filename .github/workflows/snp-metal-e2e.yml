@@ -75,15 +75,29 @@ jobs:
           # Under the post-merge trigger (workflow_run off Docker) this resolves
           # to $SHORT on the first probe. Anonymous pulls — the packages are public.
           resolve_tag(){
-            local comp=$1 tok code
-            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
+            local comp=$1 tok code sha attempt
+            tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
             for sha in $(git -C c8s log --format=%h --abbrev=7 -50); do
-              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-                "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
-              [ "$code" = "200" ] && { echo "$sha"; return; }
+              # Only a 404 means "no image for this commit", and only that walks to the
+              # parent. A 429, 5xx or timeout on the head sha used to walk too, so one
+              # ghcr hiccup silently tested the previous commit's image under the head's
+              # chart, with no warning until 50 misses. Retry those, then refuse.
+              for attempt in 1 2 3 4; do
+                code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+                  "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
+                case "$code" in
+                  200) echo "$sha"; return 0 ;;
+                  404) break ;;
+                  *)   sleep $((attempt * 3)) ;;
+                esac
+              done
+              if [ "$code" != "404" ]; then
+                echo "::error::ghcr answered ${code} for ${comp}:${sha} on 4 attempts; refusing to fall back to an older image" >&2
+                return 1
+              fi
             done
-            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)" >&2
+            echo "::warning::no sha tag found for ${comp} in the last 50 commits: falling back to :main (racy)" >&2
             echo main
           }
           # PLATFORM digest (linux/amd64), not the index digest: the NRI allowlist
@@ -114,15 +128,26 @@ jobs:
           # never tracked and get-cert dies with "caller cgroup names no tracked
           # container". Pin it like cds and nri already are.
           OPDIG=$(resolve_digest c8s-operator "$OPTAG")
-          # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
-          # c8s-ancestry walk can never find its tags (learned the hard way:
-          # InvalidImageName, run 29473241754). :main is the canonical pointer the
-          # c8s-integration fleet uses; accepted race until c8s pins a digest.
-          # aa_ref lets a caller PIN it (tag or sha-<short>) — floating :main drifts
-          # (e.g. attestation-rs enforce-VMPL0/reject-debug-policy landed on :main and
-          # broke this dev-sandbox CVM while the boot image was unchanged).
-          AATAG="${{ inputs.aa_ref || 'main' }}"
-          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
+          # attestation-api is versioned by attestation-rs, not c8s, so a c8s-ancestry
+          # walk can never find its tags (InvalidImageName, run 29473241754). The chart
+          # under test pins the image built from the attestation-rs commit in
+          # build-pins.json as c8sComponents[].pinnedDigest; only `c8s install` reads
+          # that field and this lane applies raw values, so read it here and install
+          # the same image the installer would. Until this the lane floated on :main,
+          # which drifted under an unchanged boot image (enforce-VMPL0 landed on :main
+          # and broke this CVM). aa_ref still overrides with a tag or sha-<short>.
+          AATAG="${{ inputs.aa_ref || '' }}"
+          AADIG=""
+          if [ -z "$AATAG" ]; then
+            helm show values c8s/internal/helmchart/c8s > /tmp/chart-values.yaml
+            AAPIN=$(yq '.c8sComponents[] | select(.valuePath == "attestationApi.image") | .pinnedDigest // ""' /tmp/chart-values.yaml)
+            if ! printf '%s' "$AAPIN" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::c8s $SHORT declares no sha256 attestationApi pinnedDigest (got '${AAPIN}'); pass aa_ref to test a specific attestation-api image"
+              exit 1
+            fi
+            AADIG=$(resolve_digest attestation-api "$AAPIN")   # platform digest of the pinned index
+          fi
+          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=${AADIG:-$AATAG} (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
@@ -163,6 +188,7 @@ jobs:
           attestationApi:
             image:
               tag: "$AATAG"
+              digest: "$AADIG"
             # cvmMode=node (what we ship on metal), but this node image
             # predates the baked host attestation-api — so the chart's own
             # DaemonSet + attest-proxy sidecar supplies the node-local
@@ -225,6 +251,10 @@ jobs:
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
+          # The lane's claim is "a cert is issued only against the pinned launch
+          # digest". An empty or malformed MEAS used to install the chart with
+          # measurements: [] and still reach PAYLOAD_OK. Refuse before the apply.
+          [ "\$MMARK" = MEAS_ENFORCED ] || { say "FAIL_MEAS_UNAVAILABLE len=\${#MEAS}"; exit 0; }
           NODEIP=\$(\$K get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
           { printf '%s' "\$NODEIP" | grep -qE '^[0-9.]+\$'; } || { say FAIL_NODEIP; exit 0; }
           say "NODE_CIDR \$NODEIP/32"
@@ -256,6 +286,7 @@ jobs:
             \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'
             \$K -n c8s-system logs deploy/c8s-cds --tail=15 2>&1 | sed 's/^/@@CDSLOG /;s/\$/@@/'
             \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
+            say FAIL_CDS_NOT_READY; exit 0
           fi
           if [ "\$CDSOK" = "1" ]; then
             # Gate on the POLICY plane, not just CDS. The injected c8s-cert sidecar
@@ -283,7 +314,6 @@ jobs:
             # Under MEAS_ENFORCED the cert is only issued if the node attests the pinned measurement, so this is the enforcement test.
             bash "\$E2E/cw-workload.sh" && { WOK=1; say WORKLOAD_OK; } || FAILED="\$FAILED cw-workload"
             bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
-            if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
             if [ "\$WOK" != "1" ]; then
               \$K -n c8s-e2e-cw describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
               \$K -n c8s-e2e-cw logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
@@ -300,6 +330,9 @@ jobs:
               \$K get nodes -o jsonpath='{range .items[*]}{.metadata.name} internalIP={.status.addresses[?(@.type=="InternalIP")].address} podCIDR={.spec.podCIDR}{"\\n"}{end}' 2>&1 \\
                 | sed 's/^/@@NODEADDR /;s/\$/@@/'
             fi
+            # Verdict LAST: the host tears the VM down on the first FAIL_ marker,
+            # which used to cut off the CWDESC/CERTLOG/CDSBOUND lines above.
+            if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
           fi
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -10 | sed 's/^/@@EV /;s/\$/@@/'
           PAYLOAD

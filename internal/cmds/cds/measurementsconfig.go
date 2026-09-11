@@ -33,13 +33,7 @@ func resolveMeasurementsConfig(cfg *config) (measurements.ReferenceValues, error
 	}
 	cfg.measurements = set.HexDigests()
 
-	common, uniform := set.CommonRTMRs()
-	if !uniform {
-		// Gates keyed on a single register set cannot express per-image
-		// tuples; say so rather than appearing to pin them.
-		slog.Warn("measurements config pins different registers per image: /attest matches whole images, but gates that take one register set (/attest-key) are digest-only",
-			"images", len(set.Entries))
-	}
+	common, _ := set.CommonRTMRs()
 	for _, idx := range sortedIndices(common) {
 		cfg.rtmrs = append(cfg.rtmrs, fmt.Sprintf("%d=%x", idx, common[idx]))
 	}

@@ -1,0 +1,119 @@
+name: Build guest kernel
+description: Build and cache the confos guest kernel and capture its resolved config.
+inputs:
+  confos-ref:
+    description: Pinned confos revision used by the kernel cache.
+    required: true
+  mkosi-ref:
+    description: Pinned mkosi revision used by the tools cache.
+    required: true
+  check-snapshot:
+    description: Fail on resolved config drift before building the rootfs.
+    default: '0'
+outputs:
+  snapshot-sha256:
+    description: SHA256 of the resolved kernel config.
+    value: ${{ steps.snapshot.outputs.sha256 }}
+runs:
+  using: composite
+  steps:
+    - name: Restore confos build
+      id: confos-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: confidential-os-builder/target/release/confos
+        key: ${{ runner.os }}-confos-${{ hashFiles('confidential-os-builder/Cargo.lock', 'confidential-os-builder/src/**', 'confidential-os-builder/crates/**') }}
+
+    - name: Build confos
+      id: build-confos
+      if: steps.confos-cache.outputs.cache-hit != 'true'
+      working-directory: confidential-os-builder
+      shell: bash
+      run: cargo build --release
+
+    - name: Save confos build
+      if: steps.confos-cache.outputs.cache-hit != 'true' && steps.build-confos.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: confidential-os-builder/target/release/confos
+        key: ${{ steps.confos-cache.outputs.cache-primary-key }}
+
+    - name: Restore kernel-builder tools tree
+      id: tools-tree-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/confos-tools-tree.tar.zst
+        key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf', 'confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**') }}
+
+    - name: Unpack kernel-builder tools tree
+      if: steps.tools-tree-cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
+          -xpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
+          -C confidential-os-builder/mkosi/kernel-builder
+
+    - name: Restore guest kernel build
+      id: kernel-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          confidential-os-builder/output/kernel
+          c8s/kata-guest-base/kernel/config-x86_64-container.snapshot
+        key: ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+        restore-keys: |
+          ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-
+
+    - name: Build guest kernel and check snapshot
+      id: snapshot
+      shell: bash
+      env:
+        CHECK_SNAPSHOT: ${{ inputs.check-snapshot }}
+      run: |
+        sudo rm -rf c8s/kata-guest-base/output
+        bash c8s/kata-guest-base/scripts/build-kernel.sh confidential-os-builder c8s/kata-guest-base
+        sha=$(sha256sum c8s/kata-guest-base/kernel/config-x86_64.snapshot | awk '{print $1}')
+        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+    - name: Pack kernel-builder tools tree
+      id: tools-tree-tar
+      if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        if [[ -f confidential-os-builder/mkosi/kernel-builder/mkosi.output/.confos-tools-stamp ]]; then
+          sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
+            -cpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
+            -C confidential-os-builder/mkosi/kernel-builder mkosi.output
+          echo "exists=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "exists=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Save kernel-builder tools tree
+      if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/confos-tools-tree.tar.zst
+        key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
+
+    - name: Check guest kernel output
+      id: kernel-out
+      if: always()
+      shell: bash
+      run: |
+        if [[ -f confidential-os-builder/output/kernel/vmlinuz &&
+              -f confidential-os-builder/output/kernel/manifest.json &&
+              -f c8s/kata-guest-base/kernel/config-x86_64-container.snapshot ]]; then
+          echo "complete=true" >> "${GITHUB_OUTPUT}"
+        else
+          echo "complete=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Save guest kernel build
+      if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          confidential-os-builder/output/kernel
+          c8s/kata-guest-base/kernel/config-x86_64-container.snapshot
+        key: ${{ runner.os }}-kata-kernel-v4-${{ inputs.confos-ref }}-mkosi-${{ inputs.mkosi-ref }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}

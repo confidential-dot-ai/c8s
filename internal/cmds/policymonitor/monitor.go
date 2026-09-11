@@ -53,7 +53,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
-	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -84,13 +84,13 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	logger.Info("allowlist loaded", "entries", a.Size())
 
 	m := &monitor{
-		cfg:       cfg,
-		logger:    logger,
-		allowlist: a,
-		overlay:   &policyOverlay{},
-		refresh:   &refreshState{reason: reasonNotYetStarted},
-		killer:    newCgroupKiller(cfg.CgroupRoot),
-		ready:     notifyReady,
+		cfg:     cfg,
+		logger:  logger,
+		seed:    a,
+		overlay: &policyOverlay{},
+		refresh: &refreshState{reason: reasonNotYetStarted},
+		killer:  newCgroupKiller(cfg.CgroupRoot),
+		ready:   notifyReady,
 		// The bundle directory appears when the guest pull STARTS and
 		// config.json is written only once it finishes, so the wait is a
 		// registry fetch. configReadDeadline is just how long to poll
@@ -180,9 +180,9 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 type monitor struct {
 	cfg                   *Config
 	logger                *slog.Logger
-	allowlist             *allowlist     // baked seed: digest set measured into the guest
-	overlay               *policyOverlay // latest CDS pull's workload policy
-	refresh               *refreshState  // whether the allowlist still tracks CDS
+	seed                  *allowlist.Index // baked seed: digest set measured into the guest
+	overlay               *policyOverlay   // latest CDS pull's workload policy
+	refresh               *refreshState    // whether the allowlist still tracks CDS
 	killer                containerKiller
 	inventory             *admissionInventory          // sandbox identity + digests (docs/ratls.md); always set
 	signers               *workloadclaims.SignerHolder // token signer, installed once the pod network resolves
@@ -205,11 +205,11 @@ type monitor struct {
 // replaced by the single refresh goroutine.
 type policyOverlay struct {
 	mu      sync.RWMutex
-	idx     *allowlistpkg.Index
+	idx     *allowlist.Index
 	version uint64
 }
 
-func (o *policyOverlay) index() *allowlistpkg.Index {
+func (o *policyOverlay) index() *allowlist.Index {
 	if o == nil {
 		return nil
 	}
@@ -228,7 +228,7 @@ func (o *policyOverlay) index() *allowlistpkg.Index {
 // trusted whatever its version, then state re-syncs from CDS. A guest reboot is a
 // fresh CVM, so this resets every boot; a reboot-durable guarantee needs an
 // attested freshness/monotonic-counter mechanism, out of scope here.
-func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
+func (o *policyOverlay) apply(al *allowlist.Allowlist, version uint64) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.idx != nil && version <= o.version {
@@ -244,14 +244,8 @@ func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
 // — digest, argv, bind-mount destinations and env names. With no overlay (CDS
 // refresh disabled, or no successful pull yet) only the baked seed admits —
 // behavior from t=0.
-func (m *monitor) admits(rc allowlistpkg.RunningContainer) bool {
-	if m.allowlist.Contains(rc.Digest) {
-		return true
-	}
-	if idx := m.overlay.index(); idx != nil {
-		return idx.AdmitsContainer(rc)
-	}
-	return false
+func (m *monitor) admits(rc allowlist.RunningContainer) bool {
+	return m.seed.AdmitsDigest(rc.Digest) || m.overlay.index().AdmitsContainer(rc)
 }
 
 func (m *monitor) run(ctx context.Context) error {
@@ -554,7 +548,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 
 	// What the container actually runs, as the allowlist describes it. The
 	// baked seed ignores all of it; a served entry is gated on the whole set.
-	rc := allowlistpkg.RunningContainer{
+	rc := allowlist.RunningContainer{
 		Digest:     digest,
 		BindMounts: bindMountDestinations(spec.Mounts),
 	}
@@ -609,7 +603,7 @@ func (m *monitor) frozenAttrs() []any {
 	if reason == "" {
 		return nil
 	}
-	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
+	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.seed.Size()}
 }
 
 // kill resolves the denied container's cgroup and terminates it as a unit,

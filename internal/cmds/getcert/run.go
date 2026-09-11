@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,7 +53,6 @@ type config struct {
 	CAOutPath              string
 	KeyPath                string
 	KeyOutPath             string
-	KeyMode                string
 	SAN                    string
 	Verbose                bool
 	RenewInterval          time.Duration
@@ -127,8 +125,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
-	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM (reused on restart if already present); must be on a memory-backed filesystem")
-	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
+	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM with mode 0600 (0640 in shared setgid directories; key reused on restart); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
@@ -215,6 +212,15 @@ func run(cfg config) error {
 
 	if err := validateConfig(cfg); err != nil {
 		return err
+	}
+	// Fail fast, never retry: a missing socket directory means the mount was
+	// not injected at container creation and no in-process wait can produce
+	// it, while the retry loop below would idle forever behind
+	// --continue-on-initial-error (see workloadclaims.RequireSidecarSocketDir).
+	if cfg.WorkloadClaims && !cfg.WorkloadClaimsGuest {
+		if err := workloadclaims.RequireSidecarSocketDir(); err != nil {
+			return err
+		}
 	}
 
 	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
@@ -338,7 +344,7 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				// close to expiry. Sleeping out --renew-interval here would
 				// leave the workload serving a dead certificate.
 				failures++
-				if leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter) {
+				if shouldRestartAfterRenewalFailures(leaf, failures) {
 					// The installed leaf is dead and renewal from this process
 					// keeps failing, so retrying in-process serves an expired
 					// certificate indefinitely. Exit instead: as a native
@@ -484,6 +490,10 @@ func renewalRetryInterval(cfg config, leaf *x509.Certificate, failures int) time
 		delay *= 2
 	}
 	return min(delay, ceiling)
+}
+
+func shouldRestartAfterRenewalFailures(leaf *x509.Certificate, failures int) bool {
+	return leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter)
 }
 
 // isNamedLeaf reports whether the installed leaf carries a valid
@@ -887,14 +897,26 @@ func servedCAStale(ctx context.Context, client attestclient.Client, caOutPath st
 	return false, nil
 }
 
+// privateKeyMode returns 0640 for setgid directories, 0600 otherwise.
+func privateKeyMode(path string) (os.FileMode, error) {
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeSetgid != 0 {
+		return 0640, nil
+	}
+	return 0600, nil
+}
+
 // writeOutputs writes the certificate, key, and optional discovery metadata.
 func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult) error {
 	if cfg.KeyOutPath != "" {
-		keyMode, err := parseFileMode(cfg.KeyMode)
+		mode, err := privateKeyMode(cfg.KeyOutPath)
 		if err != nil {
-			return fmt.Errorf("--key-mode: %w", err)
+			return fmt.Errorf("determine key permissions for %s: %w", cfg.KeyOutPath, err)
 		}
-		if err := fileutil.WriteAtomic(cfg.KeyOutPath, keyPEM, keyMode); err != nil {
+		if err := fileutil.WriteAtomic(cfg.KeyOutPath, keyPEM, mode); err != nil {
 			return fmt.Errorf("failed to write key to %s: %w", cfg.KeyOutPath, err)
 		}
 		slog.Info("private key written", "path", cfg.KeyOutPath)
@@ -1019,18 +1041,4 @@ func reloadWatchChanged(previous map[string]fileSnapshot, paths []string) (bool,
 		}
 	}
 	return false, next, nil
-}
-
-func parseFileMode(mode string) (os.FileMode, error) {
-	if mode == "" {
-		return 0, fmt.Errorf("must not be empty")
-	}
-	parsed, err := strconv.ParseUint(mode, 8, 32)
-	if err != nil {
-		return 0, fmt.Errorf("%q is not an octal mode: %w", mode, err)
-	}
-	if parsed&^uint64(0777) != 0 {
-		return 0, fmt.Errorf("%q sets bits outside file permissions", mode)
-	}
-	return os.FileMode(parsed), nil
 }

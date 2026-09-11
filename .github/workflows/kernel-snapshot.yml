@@ -14,13 +14,6 @@ name: Kernel config snapshot
 #                       gate calls this, diffs the artifact against the committed
 #                       lockfile, and fails on drift.
 #
-# DUPLICATION (deliberate, temporary): the confos setup + cache steps below
-# mirror kata-guest-base.yml. The two SHARE cache keys (confos build, mkosi
-# tools tree, the kata-kernel-v3 kernel cache), so a run here warms the cache
-# kata-guest-base uses and vice-versa. The end state is kata-guest-base.yml
-# calling this workflow for its kernel (vmlinuz as an artifact + SKIP_KERNEL=1),
-# which removes the duplication — deferred to its own PR so the production
-# measured-boot image build isn't refactored here.
 
 on:
   workflow_dispatch:
@@ -53,7 +46,7 @@ jobs:
     # a user-namespaced GitHub-hosted runner.
     runs-on: the-machine
     outputs:
-      snapshot_sha256: ${{ steps.snapshot.outputs.sha256 }}
+      snapshot_sha256: ${{ steps.kernel.outputs.snapshot-sha256 }}
     steps:
       # c8s -> ./c8s and confidential-os-builder -> ./confidential-os-builder,
       # mirroring kata-guest-base.yml so the cache keys (which hashFiles these
@@ -101,79 +94,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y systemd-container
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
 
-      # --- confos binary (shared cache with kata-guest-base.yml) --------------
-      - name: Restore confos build
-        id: confos-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Build guest kernel
+        id: kernel
+        uses: ./c8s/.github/actions/build-guest-kernel
         with:
-          path: confidential-os-builder/target/release/confos
-          key: ${{ runner.os }}-confos-${{ hashFiles('confidential-os-builder/Cargo.lock', 'confidential-os-builder/src/**', 'confidential-os-builder/crates/**') }}
-
-      - name: Build confos
-        id: build-confos
-        if: steps.confos-cache.outputs.cache-hit != 'true'
-        working-directory: confidential-os-builder
-        run: cargo build --release
-
-      - name: Save confos build
-        if: steps.confos-cache.outputs.cache-hit != 'true' && steps.build-confos.outcome == 'success'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: confidential-os-builder/target/release/confos
-          key: ${{ steps.confos-cache.outputs.cache-primary-key }}
-
-      # --- mkosi kernel-builder tools tree (shared cache; the 58-min part) ---
-      # Hit here means Step 0a short-circuits (confos checks its .confos-tools-stamp
-      # against the mkosi.conf hash). See kata-guest-base.yml for the full rationale.
-      - name: Restore kernel-builder tools tree
-        id: tools-tree-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ runner.os }}-confos-tools-tree-mkosi-${{ steps.pins.outputs.mkosi }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
-
-      - name: Unpack kernel-builder tools tree
-        if: steps.tools-tree-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
-            -xpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
-            -C confidential-os-builder/mkosi/kernel-builder
-
-      # --- guest kernel output (shared kata-kernel-v3 cache) ----------------
-      - name: Restore guest kernel build
-        id: kernel-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            confidential-os-builder/output/kernel
-            confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
-          restore-keys: |
-            ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-
-
-      # Resolve + compile the kernel and capture the snapshot. Mirrors
-      # build.sh Step 1 (`cd confidential-os-builder && confos kernel --kernel-config-fragment
-      # <c8s fragment>`), then copies confos's resolved snapshot to the in-repo
-      # path build.sh writes it to, so the uploaded artifact is identical to
-      # what a full kata-guest-base build would commit. confos escalates to sudo
-      # internally for mkosi/nspawn, exactly as under build.sh.
-      - name: Build confos kernel + capture snapshot
-        id: snapshot
-        run: |
-          set -euo pipefail
-          frag="${GITHUB_WORKSPACE}/c8s/kata-guest-base/kernel/container.config"
-          [[ -f "${frag}" ]] || { echo "::error::kernel fragment missing: ${frag}"; exit 1; }
-          [[ -x confidential-os-builder/target/release/confos ]] || { echo "::error::confos binary missing"; exit 1; }
-          ( cd confidential-os-builder && ./target/release/confos kernel --kernel-config-fragment "${frag}" )
-          src="confidential-os-builder/kernel/config-x86_64.snapshot"
-          [[ -f "${src}" ]] || { echo "::error::confos did not write ${src}"; exit 1; }
-          dest="c8s/kata-guest-base/kernel/config-x86_64.snapshot"
-          install -m 0644 "${src}" "${dest}"
-          sha="$(sha256sum "${dest}" | awk '{print $1}')"
-          echo "sha256=${sha}" >> "${GITHUB_OUTPUT}"
-          echo "resolved kernel-config snapshot sha256: ${sha}"
+          confos-ref: ${{ steps.pins.outputs.confos }}
+          mkosi-ref: ${{ steps.pins.outputs.mkosi }}
 
       - name: Upload kernel-config snapshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -182,45 +110,3 @@ jobs:
           path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
           if-no-files-found: error
           overwrite: true
-
-      # --- bank the caches (shared keys + the completeness guard) ------------
-      - name: Pack kernel-builder tools tree
-        id: tools-tree-tar
-        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true'
-        run: |
-          if [[ -f confidential-os-builder/mkosi/kernel-builder/mkosi.output/.confos-tools-stamp ]]; then
-            sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
-              -cpf "${RUNNER_TEMP}/confos-tools-tree.tar.zst" \
-              -C confidential-os-builder/mkosi/kernel-builder mkosi.output
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Save kernel-builder tools tree
-        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/confos-tools-tree.tar.zst
-          key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
-
-      # Same completeness guard as kata-guest-base.yml: never bank a kernel
-      # cache without vmlinuz + manifest, or it poisons the shared key.
-      - name: Check guest kernel output
-        id: kernel-out
-        if: always()
-        run: |
-          if [[ -f confidential-os-builder/output/kernel/vmlinuz && -f confidential-os-builder/output/kernel/manifest.json ]]; then
-            echo "complete=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "complete=false" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Save guest kernel build
-        if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            confidential-os-builder/output/kernel
-            confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v3-${{ steps.pins.outputs.confos }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}

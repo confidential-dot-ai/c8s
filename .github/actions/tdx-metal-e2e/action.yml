@@ -165,6 +165,12 @@ runs:
         [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
         echo "$k=$v" >> "$GITHUB_ENV"
       done
+      # Optional manifest tag when the digest-to-tag lookup cannot derive it.
+      # Keep the ConfigMap fallback alongside the required image tuple.
+      v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.imageTag}' 2>/dev/null)
+      if [ -n "$v" ]; then
+        echo "imageTag=$v" >> "$GITHUB_ENV"
+      fi
       # An explicit input overrides the pin, but say so loudly: the floor is
       # fail-closed, so an unpaired ref is the likeliest cause of a red run.
       if [ -n "$C8S_REF_OVERRIDE" ]; then
@@ -385,6 +391,9 @@ runs:
       done
 
   - name: build the c8s CLI at the paired ref
+    env:
+      EXACT_IMAGE: ${{ inputs.exact_image == 'true' }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
     shell: bash
     run: |
       set -euo pipefail
@@ -410,11 +419,23 @@ runs:
           | tail -40 | sed 's/^/wire /'
         echo "::endgroup::"
       }
-      retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
-        || { clone_diag; exit 1; }
-      git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
-      echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
-      retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
+      if [ "$EXACT_IMAGE" = true ]; then
+        # The wrapper verified main ancestry and checked out this full SHA.
+        # Reuse it: a tag can shadow the short ref used for OCI image tags.
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid exact-image source SHA"; exit 1; }
+        [ "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA" ] \
+          || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
+        C8S_SOURCE_DIR=$GITHUB_WORKSPACE
+      else
+        retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
+          || { clone_diag; exit 1; }
+        git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+        C8S_SOURCE_DIR=/tmp/c8s-src
+      fi
+      export C8S_SOURCE_DIR
+      echo "C8S_SOURCE_DIR=$C8S_SOURCE_DIR" >> "$GITHUB_ENV"
+      echo "c8s ref sha: $(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)"
+      retry '( cd "$C8S_SOURCE_DIR" && go install ./cmd/c8s )'
       # An unstamped build reports "dev", which is exactly why --image-tag
       # is passed explicitly at install rather than trusting build metadata.
       c8s --version || true
@@ -520,7 +541,7 @@ runs:
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
-      bash /tmp/c8s-src/test/e2e/components-ready.sh
+      bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
 
   - name: assert the image floor denies, then opens to a signed write
     # tls-lb fronts /allowlist on hostPort 443, and node mode puts CDS in
@@ -532,7 +553,7 @@ runs:
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
       export C8S_MEASUREMENTS="$mrtd"
       export C8S_OPERATOR_KEY=/tmp/op.key
-      bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
+      bash "$C8S_SOURCE_DIR/test/e2e/allowlist-enforcement.sh"
 
   - name: assert a confidential workload runs with an injected cert
     shell: bash
@@ -542,7 +563,7 @@ runs:
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
       export C8S_MEASUREMENTS="$mrtd"
       export C8S_OPERATOR_KEY=/tmp/op.key
-      bash /tmp/c8s-src/test/e2e/cw-workload.sh
+      bash "$C8S_SOURCE_DIR/test/e2e/cw-workload.sh"
 
   - name: summary
     if: always()

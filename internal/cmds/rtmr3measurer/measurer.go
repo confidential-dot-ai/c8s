@@ -1,13 +1,14 @@
 //go:build linux
 
 // Package rtmr3measurer is the in-VM workload measurer: it scans kata-agent's
-// container bundles under /run/kata-containers and extends TDX RTMR[3] with
-// each deployed workload's image digest, binding WHICH container ran into the
+// container bundles under /run/kata-containers and extends the guest's runtime
+// measurement register with each deployed workload's image digest, binding
+// WHICH container ran into the
 // guest's attestation — dynamically, for any image, with no baked allowlist.
 // It is the measurement-only counterpart to policy-monitor (allowlist
 // enforcement); either or both may run.
 //
-// The extend convention is pinned by pkg/runtimemeasure — verifiers MUST build on that
+// The extend convention is pinned by the runtimemeasure package — verifiers MUST build on that
 // package. Each distinct image is extended exactly once; the dedup log is
 // persisted to tmpfs so a daemon restart cannot re-extend the append-only
 // register. Design and rationale: docs/kata-guest-base.md
@@ -26,14 +27,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
-// rtmr3Sysfs is the kernel TSM node backing extendSysfs/readRegisterSysfs.
-// A var (not const) only so tests can point it at a temp file.
-var rtmr3Sysfs = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
+// register is the guest's runtime measurement register. A var (not const) only
+// so tests can point it at a temp file.
+var register = runtimemeasure.TDXRegister(runtimemeasure.DefaultTDXRegisterPath)
 
 const (
 	watchDir = "/run/kata-containers"
@@ -60,8 +62,8 @@ type measurer struct {
 	watchDir  string
 	statePath string
 
-	extend       func(event [runtimemeasure.Size]byte) error // TDX sysfs write
-	readRegister func() ([runtimemeasure.Size]byte, error)   // TDX sysfs read
+	extend       func(event [runtimemeasure.Size]byte) error
+	readRegister func() ([runtimemeasure.Size]byte, error)
 
 	// seenCids: cids already decided, so config.json isn't re-read every
 	// scan; pruned as container dirs disappear. measuredDigests is the
@@ -82,8 +84,8 @@ func newMeasurer(logger *slog.Logger) *measurer {
 		logger:             logger,
 		watchDir:           watchDir,
 		statePath:          statePath,
-		extend:             extendSysfs,
-		readRegister:       readRegisterSysfs,
+		extend:             extendRegister,
+		readRegister:       readRegister,
 		seenCids:           map[string]struct{}{},
 		measuredDigests:    map[string]struct{}{},
 		configReadDeadline: 2 * time.Second,
@@ -95,7 +97,7 @@ func newMeasurer(logger *slog.Logger) *measurer {
 func Run(_ []string) error {
 	m := newMeasurer(slog.Default())
 	m.logger.Info("rtmr3-measurer starting",
-		"watch_dir", m.watchDir, "state", m.statePath, "sysfs", rtmr3Sysfs)
+		"watch_dir", m.watchDir, "state", m.statePath)
 	if err := m.loadState(); err != nil {
 		return err
 	}
@@ -312,24 +314,19 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 	}
 }
 
-// extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
-// RTMR3 = SHA384(RTMR3 ‖ event). Needs mainline >= 6.16.
-func extendSysfs(event [runtimemeasure.Size]byte) error {
-	if err := os.WriteFile(rtmr3Sysfs, event[:], 0); err != nil {
-		return fmt.Errorf("write %s: %w", rtmr3Sysfs, err)
-	}
-	return nil
+// extendRegister folds one event into the guest's runtime measurement register.
+// The register itself, and the fact that a missing node is an error rather than
+// a silent success, are runtimemeasure's business.
+func extendRegister(event [runtimemeasure.Size]byte) error {
+	return register.Extend(event[:])
 }
 
-// readRegisterSysfs reads the current RTMR[3] value from the same node.
-func readRegisterSysfs() ([runtimemeasure.Size]byte, error) {
+// readRegister reads the register back, for the restart repair in loadState.
+func readRegister() ([runtimemeasure.Size]byte, error) {
 	var reg [runtimemeasure.Size]byte
-	b, err := os.ReadFile(rtmr3Sysfs)
+	b, err := register.Extension()
 	if err != nil {
 		return reg, err
-	}
-	if len(b) != runtimemeasure.Size {
-		return reg, fmt.Errorf("read %s: got %d bytes, want %d", rtmr3Sysfs, len(b), runtimemeasure.Size)
 	}
 	copy(reg[:], b)
 	return reg, nil

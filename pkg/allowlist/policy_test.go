@@ -1,6 +1,9 @@
 package allowlist
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIndex_AnyArgvEntryAdmitsAnyArgv(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"cds":{"containers":[
@@ -89,5 +92,48 @@ func TestIndex_UnknownDigestDenied(t *testing.T) {
 		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if idx.AdmitsDigest(digestB) || idx.AdmitsContainer(RunningContainer{Digest: digestB, Argv: nil}) {
 		t.Fatal("unknown digest must be denied")
+	}
+}
+
+func TestDigestIndex_AdmitsListedDigestWhateverItRuns(t *testing.T) {
+	idx, warnings := DigestIndex([]string{digestA, strings.ToUpper(digestB[7:]), "ghcr.io/acme/app@" + digestC})
+	if len(warnings) != 0 {
+		t.Fatalf("DigestIndex warnings = %v, want none", warnings)
+	}
+	if idx.Size() != 3 {
+		t.Fatalf("Size() = %d, want 3", idx.Size())
+	}
+	for _, d := range []string{digestA, digestB, digestC} {
+		if !idx.AdmitsDigest(d) {
+			t.Errorf("AdmitsDigest(%s) = false, want true", d)
+		}
+		if !idx.AdmitsContainer(RunningContainer{
+			Digest:     d,
+			Argv:       []string{"/bin/sh", "-c", "anything"},
+			BindMounts: []string{"/host"},
+			EnvNames:   []string{"TOKEN"},
+		}) {
+			t.Errorf("AdmitsContainer(%s) = false, want a digest-alone admission", d)
+		}
+	}
+}
+
+func TestDigestIndex_SkipsMalformedAndWarns(t *testing.T) {
+	idx, warnings := DigestIndex([]string{digestA, "not-a-digest", "", "ghcr.io/acme/app:v1"})
+	if idx.Size() != 1 {
+		t.Fatalf("Size() = %d, want 1", idx.Size())
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warnings = %v, want one per malformed entry", warnings)
+	}
+	if idx.AdmitsDigest(digestB) {
+		t.Error("an unlisted digest must not be admitted")
+	}
+}
+
+func TestIndex_NilAdmitsNothing(t *testing.T) {
+	var idx *Index
+	if idx.AdmitsDigest(digestA) || idx.AdmitsContainer(RunningContainer{Digest: digestA}) || idx.Size() != 0 {
+		t.Fatal("a nil *Index must admit nothing and report size 0")
 	}
 }

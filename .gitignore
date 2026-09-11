@@ -40,3 +40,6 @@ coverage.txt
 *.key
 
 kata-guest-base/.build/
+
+# confos fragment-build output; the committed drift baseline stays separate.
+kata-guest-base/kernel/config-x86_64-container.snapshot

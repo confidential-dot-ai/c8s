@@ -333,11 +333,15 @@ func runEditor(path string) error {
 
 func sanitizeFileName(name string) string {
 	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+		if isSafeFileNameRune(r) {
 			return r
 		}
 		return '_'
 	}, name)
+}
+
+func isSafeFileNameRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
 }
 
 func confirm(cmd *cobra.Command, prompt string) bool {

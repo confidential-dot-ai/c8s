@@ -21,7 +21,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
@@ -29,7 +28,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -60,10 +58,6 @@ func run(cfg config) error {
 		return err
 	}
 	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
-
-	// EAR JWT validation reads the clock-skew leeway from this package-level
-	// var; set it before any /sign-csr request can be served.
-	issuer.JWTClockSkew = time.Duration(cfg.jwtClockSkew) * time.Second
 
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
@@ -127,7 +121,7 @@ func run(cfg config) error {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
 	if len(rtmrPins) > 0 {
-		slog.Info("TDX RTMR pinning enabled for /attest and /attest-key", "count", len(rtmrPins))
+		slog.Info("TDX RTMR pinning enabled for /attest", "count", len(rtmrPins))
 	} else if len(measurements) > 0 {
 		slog.Warn("--rtmrs empty: on TDX the measurement allowlist pins TDVF firmware only (MRTD); the guest kernel and rootfs are not pinned. SNP is unaffected.")
 	}
@@ -152,25 +146,6 @@ func run(cfg config) error {
 	cnPattern, err := compilePattern("--allowed-cn-pattern", cfg.allowedCNPattern)
 	if err != nil {
 		return err
-	}
-
-	earKeyPEM, err := earsigner.Generate()
-	if err != nil {
-		return fmt.Errorf("generate token-signing key: %w", err)
-	}
-	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
-	if err != nil {
-		return fmt.Errorf("create EAR issuer: %w", err)
-	}
-
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: cfg.rotationInterval,
-		Overlap:  cfg.rotationOverlap,
-		Jitter:   cfg.rotationJitter,
-		Logger:   slog.Default(),
-	}, earKeyPEM, earIssuer.SwapKey)
-	if err != nil {
-		return fmt.Errorf("create EAR key rotator: %w", err)
 	}
 
 	asClient := attestationclient.NewClient(cfg.attestationApiURL)
@@ -199,20 +174,10 @@ func run(cfg config) error {
 		AllowedCNPattern: cnPattern,
 	}
 
-	// /attest-key issues a TEE-attested EAR for a caller-generated key (no CSR,
-	// no certificate). Shares the challenge store, attestation-api, and EAR
-	// issuer with /attest.
-	attestKeyHandler := attestation.Handler{
-		Challenges:        &challengeStore,
-		AttestationClient: asClient,
-		EarIssuer:         earIssuer,
-		RTMRs:             rtmrPins,
-	}
-
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
 	// admitted a pod what the pod is running (docs/ratls.md, "Sandbox
 	// identity"). Pins the same measurement allowlist as /attest, so the
-	// inventory answering is held to the standard its EAR already met.
+	// inventory answering is held to the standard its RA-TLS certificate already met.
 	//
 	// Needs an RA-TLS identity of its own, since inventories require a client
 	// certificate; without --ratls-platform there is none, and a request
@@ -316,26 +281,12 @@ func run(cfg config) error {
 			InventoryHosts:    inventoryHosts,
 			SandboxBindings:   sandboxBindings,
 		},
-		SignCSRHandler: SignCSRHandler{
-			CA:             mesh,
-			CAChainPEM:     caChainPEM,
-			MaxTTL:         cfg.maxTTL,
-			KeyProvider:    rotator,
-			ExpectedIssuer: cfg.expectedIssuer,
-			RequestTimeout: cfg.requestTimeout,
-			Measurements:   measurements,
-			Policy:         policy,
-			SANValidation:  cfg.sanValidation,
-		},
 		AllowlistHandler: allowlist.Handler{
 			Store:             &allowlistStore,
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
-		AttestKeyHandler:  attestKeyHandler,
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:         earIssuer,
-		JWKSFunc:          rotator.JWKSetJSON,
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
 		MeasurementsDoc:   measurementsDoc,
@@ -346,9 +297,6 @@ func run(cfg config) error {
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
-	}
-	if cfg.rotationInterval > 0 {
-		go rotator.Run(ctx)
 	}
 	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 	go challengeLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
@@ -515,9 +463,6 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.maxHeaderBytes < 0 {
 		return fmt.Errorf("--max-header-bytes must be non-negative")
-	}
-	if cfg.maxTTL <= 0 {
-		return fmt.Errorf("--max-ttl must be positive")
 	}
 	// Not "0 disables": this is the stale-identity bound for a named leaf, and
 	// 0 is the disable idiom elsewhere in the chart, so a zero here would read

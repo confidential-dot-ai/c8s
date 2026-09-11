@@ -85,10 +85,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
-- CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one
-  process; EAR validation and signing share that process, so there is no
-  internal Service hop or JWKS fetch between them.
-- allowlist admin is EAR-authorized through CDS; the chart does not render a
+- CDS verifies evidence and signs workload CSRs in one process.
+- allowlist admin uses operator-signed JWTs through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
 - Sandbox identity needs the node addresses CDS may dial for a pod's admission
@@ -190,8 +188,10 @@ layout) is detected from the cluster's kubelet versions.
 - the host-side ratls-mesh, attestation-api, and nri-image-policy are
   disabled — their function runs inside the kata-guest-base VM image.
 
-Host-namespace pods and system namespaces are exempt. The Kata stack is off
-by default — a plain `c8s install` is unchanged.
+The Kata layer skips host-namespace pods and system namespaces. The separate
+default `deny-host-namespaces` policy still rejects host namespaces outside trusted
+platform namespaces. The Kata stack is off by default — a plain `c8s install`
+is unchanged.
 
 See [`docs/kata.md`](kata.md) for the design (why it wraps upstream
 kata-deploy), the threat model, distro support, the one-shot bootstrap-window
@@ -256,11 +256,10 @@ which binds the token to the actual HTTP method, parsed URL path (including
 any base URL prefix), and an owned copy of the body.
 
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
-those flows comes from EAR validation, measurement allowlists, and CA
-continuity checks rather than WebPKI on the Service hop.
+those flows comes from authenticated certificate issuance and CA continuity
+checks.
 
-CDS verifies EAR JWTs against its own in-process signer; there is no JWKS
-fetch to a separate component. The chart does not render a CA private key into
+The chart does not render a CA private key into
 a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
 public-bundle PVC.
@@ -433,7 +432,7 @@ images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
 rootfs pins with it.
 
 `--rtmr 3=<sha384-hex>` can additionally pin the runtime register — the ordered
-operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
+operator-key/workload extend chain ([`runtimemeasure`](https://github.com/confidential-dot-ai/attestation-go/tree/main/runtimemeasure)) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
 anything and reproduce that chain. (`--expected-rtmr3` is the former spelling of
@@ -515,7 +514,7 @@ and again on the RA-TLS credential-release connection:
   build-artifact manifest carrying all three fields under its `tdx` object. A
   generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
-  (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
+  (`runtimemeasure.Seed` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are
   rejected). With no `--workload-image` the register must equal the bare seed;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
@@ -531,9 +530,15 @@ and again on the RA-TLS credential-release connection:
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
 node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
-that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC,
-and `cred-release.service` does not start serving until that binding exists,
-so a released credential is authorized the moment it is issued.
+that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC.
+RKE2 reconciles AddOns asynchronously, so `cred-release.service` keeps its
+listener closed until `psa-ready.sh` sees that binding plus the baked
+`confos-psa-level` policy and binding. The gate then uses a temporary,
+namespace-create-only synthetic principal for two server-side dry-runs: a
+Restricted namespace must be admitted and a privileged namespace must be
+denied by that exact policy and validation. A released credential is therefore
+both authorized and behind a live Restricted namespace floor the moment it is
+issued.
 `system:masters` is deliberately avoided because it bypasses authorization
 and admission webhooks and cannot be revoked through RBAC. The default group
 is only meaningful where such a binding exists: on a cluster that is not the
@@ -617,7 +622,6 @@ get-cert \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
   --ca-out=/etc/c8s/certs/ca.crt \
-  --key-mode=<webhook.certVolume.keyMode> \
   --renew-interval=<webhook.getCert.renewInterval> \
   --reload-nginx=<from annotation> \
   --continue-on-initial-error
@@ -818,9 +822,10 @@ guard, not this render guard.
 
 ## Certificate file permissions
 
-`get-cert` writes the private key with the mode passed by `--key-mode`. The
-webhook default is `0640`, and it sets `fsGroup: 65532` on injected pods that
-do not already define an `fsGroup`. This lets application containers running
+`get-cert` writes private keys with mode `0640` (owner read/write, group read)
+in setgid directories and `0600` (owner read/write) elsewhere, on every write.
+The webhook sets `fsGroup: 65532` on injected pods that do not already
+define an `fsGroup`. This lets application containers running
 as a different non-root UID read `tls.key` through the shared group.
 
 Relevant values:
@@ -829,7 +834,6 @@ Relevant values:
 webhook:
   certVolume:
     fsGroup: 65532
-    keyMode: "0640"
   getCert:
     renewInterval: 2h
     runAsUser: 65532
