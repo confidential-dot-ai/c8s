@@ -62,6 +62,13 @@ type AttestHandler struct {
 	// so a digest from one image cannot be paired with another's registers.
 	ImagePins []remote.ImagePin
 
+	// InitData pins the launch-time init-data (SNP HOST_DATA / TDX
+	// MRCONFIGID) a caller's evidence must carry, on top of the image pins:
+	// the launchdata commitment of the node ISO, so a launch of a pinned
+	// image with a different deployment config is not issued a leaf. Empty =
+	// no init-data pinning.
+	InitData []byte
+
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
 	// subject — see THREAT MODEL on issuer.CA.SignCSR.
@@ -191,7 +198,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verifyReq := remote.NewVerifyRequest(req.Evidence, &remote.VerifyParams{
-		ExpectedReportData: expectedReportData[:sha512.Size384],
+		ExpectedReportData:   expectedReportData[:sha512.Size384],
+		ExpectedInitDataHash: h.InitData,
 	}, false)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
@@ -586,6 +594,8 @@ func classifyVerifyError(err error) (int, string, string) {
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
 	case errors.Is(err, remote.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
+	case errors.Is(err, remote.ErrInitDataMismatch):
+		return http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch-time init-data not allowed"
 	}
 	var apiErr *remote.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
