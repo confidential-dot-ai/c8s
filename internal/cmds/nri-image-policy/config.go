@@ -69,7 +69,14 @@ type workloadClaimsConfig struct {
 // Pull is the runtime-update source: every plugin polls CDS.
 type allowlistConfig struct {
 	Base *allowlist.Allowlist `yaml:"base"`
-	Pull pullConfig           `yaml:"pull"`
+	// NodeTCB marks the base allowlist as this node's trusted computing base:
+	// its digests are the only ones exempt from the sandbox policy
+	// (policy.sandbox). Only a MEASURED boot config may set it — the chart
+	// leaves it unset, because a chart-rendered base is chosen by the same
+	// cluster admin the policy defends against. It is a boot-config key, not
+	// an allowlist field: a CDS-served document has no way to express it.
+	NodeTCB bool       `yaml:"node_tcb"`
+	Pull    pullConfig `yaml:"pull"`
 }
 
 // pullConfig configures the CDS polling source.
@@ -103,6 +110,12 @@ type policyConfig struct {
 	EnforceExisting       bool        `yaml:"enforce_existing"`        // kill non-allowlisted containers on startup
 	DenyMissingAnnotation bool        `yaml:"deny_missing_annotation"` // deny containers without image annotation
 	LabelRules            []labelRule `yaml:"label_rules"`
+
+	// Sandbox is the host-privilege policy applied to every container the
+	// base allowlist does not admit: enforce denies, audit records the
+	// observation and admits, off does not observe. A parsed config defaults to
+	// enforce; see sandbox.go and docs/allowlist-and-capabilities.md.
+	Sandbox sandboxMode `yaml:"sandbox"`
 
 	// ExemptNamespaces admits a namespace's containers by the digests captured
 	// running in it at first admission, not by a name the control plane picks.
@@ -186,6 +199,7 @@ func parseConfig(data []byte) (*config, error) {
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
 			DenyMissingAnnotation: true,
+			Sandbox:               SandboxEnforce,
 		},
 		Logging: loggingConfig{
 			Level: "info",
@@ -250,6 +264,19 @@ func (c *config) baseEnabled() bool {
 	return c.Allowlist.Base != nil && len(c.Allowlist.Base.Workloads) > 0
 }
 
+// sandboxMode is the effective host-privilege policy. Empty means the config
+// was built in code rather than parsed (tests, callers constructing a literal),
+// where the policy was never chosen: parseConfig defaults it to enforce.
+func (c *config) sandboxMode() sandboxMode {
+	if c.Policy.Sandbox == "" {
+		return SandboxOff
+	}
+	return c.Policy.Sandbox
+}
+
+// sandboxObserved reports whether the host-privilege observation runs at all.
+func (c *config) sandboxObserved() bool { return c.sandboxMode() != SandboxOff }
+
 // AllowlistEnabled reports whether any digest-based enforcement is active.
 func (c *config) AllowlistEnabled() bool {
 	return c.PullEnabled() || c.baseEnabled()
@@ -301,6 +328,19 @@ func (c *config) Validate() error {
 	}
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
+	}
+	switch c.Policy.Sandbox {
+	case SandboxEnforce, SandboxAudit, SandboxOff:
+	case "":
+		c.Policy.Sandbox = SandboxEnforce
+	default:
+		return fmt.Errorf("policy.sandbox must be '%s', '%s' or '%s'", SandboxEnforce, SandboxAudit, SandboxOff)
+	}
+	// The marker grants the base an exemption, so an empty base makes it a
+	// statement about nothing — and a config that carries it without one is
+	// more likely a key in the wrong section than an intent.
+	if c.Allowlist.NodeTCB && !c.baseEnabled() {
+		return fmt.Errorf("allowlist.node_tcb needs a non-empty allowlist.base: it exempts the base's digests from the sandbox policy")
 	}
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
 		return fmt.Errorf("workload_claims.socket_dir requires allowlist.base or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")

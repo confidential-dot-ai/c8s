@@ -285,6 +285,12 @@ policy:
   mode: {{ $root.Values.nriImagePolicy.policy.mode | quote }}
   enforce_existing: {{ $root.Values.nriImagePolicy.policy.enforceExisting }}
   deny_missing_annotation: {{ $root.Values.nriImagePolicy.policy.denyMissingAnnotation }}
+  {{/* Off on every lane this template serves. The sandbox policy defends a node
+       TCB against the cluster admin, which needs a measured base allowlist to exempt;
+       the base above is rendered from chart values, so the same admin chooses
+       it. cvmMode=node runs the node image's baked config instead, where the
+       base is measured — see node-guest-image/c8s/image-policy.yaml.in. */}}
+  sandbox: "off"
 {{- if $root.Values.nriImagePolicy.policy.exemptNamespaces }}
   exempt_namespaces:
 {{- range $root.Values.nriImagePolicy.policy.exemptNamespaces }}
