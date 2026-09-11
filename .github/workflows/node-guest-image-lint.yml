@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       confos-release: ${{ steps.release.outputs.release }}
+      confos-ref: ${{ steps.pins.outputs.confos }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -62,9 +63,8 @@ jobs:
 
       - name: node-guest-image invariants
         env:
-          # Flip to "1" in the PR that bumps CONFOS_REF past confos#120
-          # (immutable root); until then the state.d declaration is inert.
-          EXPECT_IMMUTABLE_ROOT: "0"
+          # The node-image pin must support the measured writable-state list.
+          EXPECT_IMMUTABLE_ROOT: "1"
           CONFOS_REF: ${{ steps.pins.outputs.confos }}
         run: |
           .github/scripts/node-guest-image-invariants.sh
@@ -78,6 +78,30 @@ jobs:
           rel=$(sed -n 's/^Release=[[:space:]]*//p' "$conf" | head -1)
           [ -n "$rel" ] || { echo "::error::no Release= in $conf"; exit 1; }
           echo "release=$rel" >> "$GITHUB_OUTPUT"
+
+  immutable-root:
+    name: immutable root and c8s writable state
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: confidential-dot-ai/confidential-os-builder
+          ref: ${{ needs.lint.outputs.confos-ref }}
+          path: confos
+          persist-credentials: false
+
+      - name: Exercise the pinned initrd with the c8s state declarations
+        # Real mounts in a private namespace and disposable chroot; the
+        # production init is unchanged, with hardware setup and handoff shimmed.
+        run: sudo make test-node-guest-image-immutable-root
+
+      - name: Check the immutable-root harness
+        run: shellcheck node-guest-image/tests/immutable-root-test.sh
 
   cloud-init-disabled:
     name: cloud-init cannot run in the node image
