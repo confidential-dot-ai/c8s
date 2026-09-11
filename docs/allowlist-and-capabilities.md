@@ -17,8 +17,9 @@ into attestation).
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
 policy (`command`, `args`) permitted for those bytes, optionally to the
-environment values it may launch with (`env`), and the entry as a whole may
-carry a secret-store grant (`secrets`).
+environment values it may launch with (`env`) and the bind-mount destinations it
+may run with (`mounts`), and the entry as a whole may carry a secret-store grant
+(`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -181,6 +182,95 @@ The NRI plugin enforces env after cumulative NRI adjustments, and the admission
 inventory carries an environment fingerprint for CDS workload matching and
 secret release.
 
+## Mount policy (`mounts`)
+
+A digest pins the bytes and `command`/`args` pin what runs them, but neither
+says anything about what the node lays *over* those bytes at start-up. A volume
+bound over `/etc/ld.so.preload`, `/etc/ld.so.conf.d/`, an interpreter's site
+directory or a dotfile the shell reads runs operator-supplied bytes as code
+inside a reviewed image, and every digest still reports as admitted. Client-side
+verification does not catch it: the pod keeps its genuine identity.
+
+`mounts` constrains **bind** mounts only. The rest of a mount table names
+filesystem types (`proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`, `cgroup`) and
+carries nothing in, so pinning it would only make an operator restate the OCI
+base set to say nothing.
+
+```json
+"mounts": { "policy": "exact", "destinations": ["/etc/hosts", "/config"] }
+```
+
+`exact` requires every observed bind destination to appear in `destinations`:
+what the pod's `volumeMounts` declare, plus the handful the node always adds
+(`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/dev/termination-log`,
+`/dev/shm`, the serviceaccount token). `any` is the default when the field is
+absent — unlike argv, which defaults to `deny`, because a container always
+carries a mount table it never declared and a `deny` default would refuse every
+real pod. That makes the field opt-in: a digest with no policy is constrained
+exactly as much as it was before.
+
+### Sandboxed mounts (node-as-CVM)
+
+Destination containment alone still trusts the operator's choice of *what*
+lands at a destination. Add `"sandboxed": true` to an `exact` policy and the
+node enforcer classifies each bind mount by the path the node staged its source
+at, then applies one rule per class:
+
+```json
+"mounts": {
+  "policy": "exact",
+  "sandboxed": true,
+  "destinations": ["/mnt/c8s-data/config", "/var/cache/nginx"],
+  "reviews": { "/mnt/c8s-data/config": "yaml the app parses; loads no modules" }
+}
+```
+
+| Class | Source the node staged it at | Rule |
+|---|---|---|
+| platform | the kubelet's per-pod `etc-hosts` and termination log, containerd's per-sandbox `hostname`, `resolv.conf` and `shm`, the serviceaccount projection at its own destination | admitted, listed or not |
+| `emptyDir` | `<kubelet root>/pods/<uid>/volumes/kubernetes.io~empty-dir/` | destination must be listed |
+| data | every other kubelet volume plugin — configMap, secret, projected, CSI, local — and volume subpaths | destination must be listed, lie under `/mnt/c8s-data/`, and carry a `reviews` string |
+| host | a hostPath volume, or any source the enforcer cannot attribute | refused |
+
+The data prefix is the point of the rule, and it is what takes the destinations
+above off the table. At a listed destination the bytes are untrusted application
+input, and one prefix is cheaper to reason about than a denylist of loader
+paths: no executable, library, loader configuration or interpreter module path
+lives under `/mnt/c8s-data/`.
+
+The `reviews` string says *why* bytes at that destination cannot name code — no
+configuration that loads modules, plugins or scripts, no dotfile a loader or
+interpreter reads. The reviewer decides that, not the schema; the string makes
+the decision auditable, and its absence is what refuses operator content at a
+destination. `lint` refuses a review outside the prefix and a prefix
+destination with no review.
+
+Two limits worth stating:
+
+- **hostPath is refused outright**, including for c8s's own measured platform
+  containers. Pinning a host source to a node-TCB rule attaches at
+  `floorPinsHostMount` in `internal/cmds/nri-image-policy/mounts.go`; nothing is
+  floor until that marker lands.
+- **The kubelet root is the constant `/var/lib/kubelet`** (RKE2's default; the
+  node image sets no `root-dir` kubelet-arg). A node that moved it would
+  classify every mount as host and refuse every sandboxed entry — fail-closed,
+  and bounded by the fact that only entries carrying the marker are affected.
+
+The marker is a field rather than a fourth `policy` value so a node image that
+predates it keeps parsing the served document — it ignores the field and applies
+plain containment — instead of failing every pull. An enforcer that reports
+destinations without saying who staged them gets that same containment check.
+
+A sealed `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH` or `NODE_PATH` that names a
+directory under the prefix undoes all of it: the reviewed exact command would
+then resolve to a file the operator wrote. `lint` refuses that too.
+
+The c8s chart's own pods mount ConfigMaps and host paths outside the prefix
+(attestation-api at `/etc/attestation-api`, the router's acme directory, the
+node-agent host mounts). Their entries carry no `mounts` policy at all, which
+means `any`, so observing the mount table changes nothing for them and a fresh
+`helm install` is unaffected. Moving those volumes under `/mnt/c8s-data/` and
+deriving sandboxed entries for the chart is separate work.
 
 ## Secret grants (`secrets`)
 
@@ -215,10 +305,11 @@ install still setting the per-container `paths` field needs
 Two independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), per container. Resolves the image
-   digest and checks the effective argv at creation, validates env after
-   cumulative NRI adjustments, and rechecks the final OCI spec before start.
-   Fail-closed before the allowlist first loads; the plugin runs inside the
-   node CVM and is the primary admission gate.
+   digest and checks the effective argv at creation, then rechecks the final
+   OCI spec before start — where the mount table and the environment are the
+   persisted ones, after every NRI and CDI edit. Fail-closed before the
+   allowlist first loads; the plugin runs inside the node CVM and is the
+   primary admission gate.
 
 2. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
@@ -237,15 +328,15 @@ Two independent points enforce, at different strengths:
 
 ### What each layer can and cannot promise
 
-Per-container digest+argv admission holds at both points. **Combinations**
+Per-container digest, argv, mount and env admission holds at both points. **Combinations**
 ("only this image set may run together") are **not enforced anywhere today**.
 NRI sees containers one at a time and cannot detect a
 *missing* container, so they cannot enforce a combination; CDS sees the whole
 reported set but only at issuance, which lands mid-lifecycle when that set is
 still a subset of the declared one, so it checks membership rather than
 composition ([getcert-workload-binding.md](getcert-workload-binding.md),
-Corner 4). The honest guarantee is therefore: **per-container digest + argv
-everywhere; no combination gating.**
+Corner 4). The honest guarantee is therefore: **per-container digest, argv,
+mounts and env everywhere; no combination gating.**
 
 Combination gating wants a point where the pod is complete and the decision is
 worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
@@ -389,8 +480,10 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 (both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry — an `any`-policy
 entry for a digest silently makes every narrower entry for it unenforced at the
-per-container gate — and tag-form labels (which can move under the operator).
-`--online` cross-checks digests against the registry with
+per-container gate — tag-form labels (which can move under the operator), a
+[sandboxed mount policy](#sandboxed-mounts-node-as-cvm) whose destinations no
+enforcer can admit, and a sealed search path reaching the sandboxed data
+prefix. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an

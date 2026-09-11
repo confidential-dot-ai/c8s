@@ -818,7 +818,7 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 
 	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args or env policy") {
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args, mount or env policy") {
 		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
 	}
 
@@ -1581,5 +1581,108 @@ func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 		BindMounts: []string{"/injected"},
 	}) {
 		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
+	}
+}
+
+// --- mount policy: the plugin observes the CRI mount table ---
+
+// sandboxedMountAllowlist pins wlDigest to a sandboxed mount policy: one
+// reviewed data destination and one emptyDir destination.
+func sandboxedMountAllowlist(t *testing.T, wlDigest string) *allowlist.Allowlist {
+	t.Helper()
+	al := &allowlist.Allowlist{Schema: allowlist.Schema, Workloads: map[string]allowlist.Workload{}}
+	al.Workloads["w"] = allowlist.Workload{Containers: []allowlist.Container{{
+		Digest:  mustDigest(t, wlDigest),
+		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Mounts: allowlist.MountPolicy{
+			Policy:       allowlist.PolicyExact,
+			Sandboxed:    true,
+			Destinations: []string{"/mnt/c8s-data/config", "/var/cache/nginx"},
+			Reviews:      map[string]string{"/mnt/c8s-data/config": "yaml the app parses; loads no modules"},
+		},
+	}}}
+	return al
+}
+
+func bindMount(destination, source string) *api.Mount {
+	return &api.Mount{Destination: destination, Source: source, Type: "bind", Options: []string{"rbind", "ro"}}
+}
+
+func TestCheckContainer_SandboxedMountPolicy(t *testing.T) {
+	const uid = "/var/lib/kubelet/pods/0b30e735"
+	platform := []*api.Mount{
+		{Destination: "/proc", Type: "proc", Source: "proc"},
+		bindMount("/etc/hosts", uid+"/etc-hosts"),
+		bindMount("/dev/termination-log", uid+"/containers/app/f8c2"),
+		bindMount(serviceAccountDestination, uid+"/volumes/kubernetes.io~projected/kube-api-access-x"),
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mounts []*api.Mount
+		want   imageVerdict
+	}{
+		{"platform mounts need no entry", platform, verdictAllow},
+		{"reviewed configMap under the data prefix", append(platform,
+			bindMount("/mnt/c8s-data/config", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictAllow},
+		{"emptyDir at a listed destination", append(platform,
+			bindMount("/var/cache/nginx", uid+"/volumes/kubernetes.io~empty-dir/cache")), verdictAllow},
+		{"configMap over the loader preload file", append(platform,
+			bindMount("/etc/ld.so.preload", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictDeny},
+		{"configMap outside the data prefix", append(platform,
+			bindMount("/etc/ld.so.conf.d", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictDeny},
+		{"emptyDir at an unlisted destination", append(platform,
+			bindMount("/usr/local/lib", uid+"/volumes/kubernetes.io~empty-dir/cache")), verdictDeny},
+		{"hostPath", append(platform, bindMount("/mnt/c8s-data/config", "/etc")), verdictDeny},
+		{"source under no staging directory", append(platform,
+			bindMount("/mnt/c8s-data/config", "/srv/payload")), verdictDeny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newCachedPlugin(&config{
+				Allowlist: allowlistConfig{Pull: pullConfig{URL: "https://cds"}},
+				Policy:    policyConfig{Mode: ModeFailClosed},
+			}, sandboxedMountAllowlist(t, pushDigestB))
+			pod := makePod("default", "pod")
+			ctr := makeCtrWithImage(pod.Id, "app", "registry/repo@"+pushDigestB)
+			ctr.Mounts = tc.mounts
+
+			verdict, reason := p.checkContainer(context.Background(), p.cfg, pod, ctr, ctr.Annotations[annotationImageName])
+			if verdict != tc.want {
+				t.Fatalf("checkContainer() = %d (reason=%q), want %d", verdict, reason, tc.want)
+			}
+			if verdict == verdictDeny && !strings.Contains(reason, "mount or env policy") {
+				t.Errorf("a mount denial should name the mount policy, got %q", reason)
+			}
+
+			// CreateContainer runs before other NRI plugins and CDI injection,
+			// so the mount table it sees is not the one the container starts
+			// with. The preliminary phase checks digest and argv only.
+			if verdict, reason := p.checkContainerPhase(context.Background(), p.cfg, pod, ctr, ctr.Annotations[annotationImageName], false); verdict != verdictAllow {
+				t.Errorf("the preliminary phase denied on mounts: %d (reason=%q)", verdict, reason)
+			}
+		})
+	}
+}
+
+// The chart's own entries carry no mount policy: they mount ConfigMaps and host
+// paths outside the data prefix, and `helm install` has to keep working on a
+// fresh node. An absent policy means any, so observing the mount table changes
+// nothing for them.
+func TestCheckContainer_AbsentMountPolicyAdmitsChartMounts(t *testing.T) {
+	p, _ := newCachedPlugin(&config{
+		Allowlist: allowlistConfig{Pull: pullConfig{URL: "https://cds"}},
+		Policy:    policyConfig{Mode: ModeFailClosed},
+	}, anyAllowlist(map[string]string{pushDigestA: "attestation-api"}))
+	pod := makePod("c8s-system", "attestation-api")
+	ctr := makeCtrWithImage(pod.Id, "attestation-api", "registry/repo@"+pushDigestA)
+	ctr.Mounts = []*api.Mount{
+		bindMount("/etc/attestation-api", "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/config"),
+		bindMount("/dev/tpmrm0", "/dev/tpmrm0"),
+		bindMount("/host", "/"),
+	}
+
+	if verdict, reason := p.checkContainer(context.Background(), p.cfg, pod, ctr, ctr.Annotations[annotationImageName]); verdict != verdictAllow {
+		t.Fatalf("checkContainer() = %d (reason=%q), want allow", verdict, reason)
 	}
 }

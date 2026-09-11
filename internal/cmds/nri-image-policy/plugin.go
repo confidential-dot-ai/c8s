@@ -359,10 +359,14 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	if len(env) > 0 {
 		observed = env[0]
 	}
-	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, true)
+	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, nil, true)
 }
 
-func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, final bool) (imageVerdict, string) {
+// mounts is the container's classified bind-mount table (observeMounts). Like
+// the environment it is read only in the final phase, where the spec is the
+// persisted one: CreateContainer runs before other plugins and CDI injection,
+// so a mount table observed there is not the one the container starts with.
+func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, mounts []allowlist.ObservedMount, final bool) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
 		"pod", podName,
@@ -432,22 +436,22 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 
 	// The base allowlist admits what its entries admit — the chart's are any-argv, so
 	// their digests run anything. Served entries are matched against the final
-	// OCI argv and environment; mounts remain unobserved on this backend.
-	rc := allowlist.RunningContainer{Digest: digest, Argv: argv, Env: observed}
+	// OCI argv, mount table and environment.
+	rc := allowlist.RunningContainer{Digest: digest, Argv: argv, Mounts: mounts, Env: observed}
 	admitted := snap.index.AdmitsProcess(rc)
 	if final {
 		admitted = snap.index.AdmitsContainer(rc)
 	}
 	if !p.policy.baseAdmits(digest, argv) && !admitted {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
-		// event, so it names only the image — argv can carry credentials and
-		// stays in the node-local log.
+		// event, so it names only the image — argv and mount sources can carry
+		// credentials and node topology, and stay in the node-local log.
 		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
 		if listed := snap.index.AdmitsDigest(digest); listed {
 			reason = "launch_not_admitted"
-			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args or env policy", imageRef)
+			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args, mount or env policy", imageRef)
 		}
-		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
+		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason, "mounts", mountObservation(mounts))
 		p.audit.Log(audit.Event{
 			Action:    "deny",
 			Reason:    reason,
@@ -473,8 +477,9 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 }
 
 // checkContainer runs the label rules and the image allowlist over a
-// container. Only the image digest (answered by the containerd content
-// store) admits; label rules can only deny.
+// container. Only the allowlist admits — the image digest answered by the
+// containerd content store, plus the effective argv, the classified bind-mount
+// table and the environment fingerprint; label rules can only deny.
 //
 // A denial in an exempt namespace is downgraded to skip when the container's
 // digest was captured running in that namespace (the frozen snapshot), and only
@@ -493,7 +498,7 @@ func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *a
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, final)
+		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, observeMounts(ctr), final)
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
