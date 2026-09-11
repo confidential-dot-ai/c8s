@@ -120,6 +120,7 @@ type proxyConfig struct {
 	measurements              string
 	rtmrs                     string
 	measurementsConfig        string
+	cdsMeasurementsConfig     string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -128,6 +129,8 @@ type proxyConfig struct {
 	caPollInterval            time.Duration
 	cdsMeasurements           string
 	cdsRTMRs                  string
+	initData                  string
+	cdsInitData               string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
@@ -166,7 +169,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
-	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image is accepted in both roles: as a mesh peer, and as the CDS this proxy dials — CDS is not scoped to a subset, so any listed image may serve it. Cannot be combined with --measurements, --rtmrs, --cds-measurements or --cds-rtmrs")
+	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image is accepted as a mesh peer, and — unless --cds-measurements-config scopes it — as the CDS this proxy dials. Cannot be combined with --measurements or --rtmrs")
+	fs.StringVar(&c.cdsMeasurementsConfig, "cds-measurements-config", "", "path to a measurements config pinning the CDS this proxy dials, scoping CDS to those images instead of every --measurements-config entry. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -175,6 +179,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.StringVar(&c.cdsRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents SNP evidence. Empty = launch-digest pinning only")
+	fs.StringVar(&c.initData, "init-data", "", "comma-separated hex launch-time init-data values (SNP HOST_DATA, 64 hex; TDX MRCONFIGID, 96 hex) mesh peers must carry — the launchdata commitments of the node ISOs. Empty = no init-data pinning")
+	fs.StringVar(&c.cdsInitData, "cds-init-data", "", "comma-separated hex launch-time init-data values that CDS's RA-TLS peer cert must carry — the launchdata commitment of the CDS node's ISO. Empty = no init-data pinning")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
@@ -232,7 +238,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 
 	// Resolve before the flat fields are read: every gate below reads them,
 	// so a config-mode start must fill them first.
-	pins, err := resolveMeasurementsConfig(c)
+	peerPins, cdsPins, err := resolveMeasurementsConfig(c)
 	if err != nil {
 		return err
 	}
@@ -241,7 +247,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	meshPolicy.Entries = pins.Entries
+	meshPolicy.Entries = peerPins.Entries
+	if meshPolicy.InitData, err = ratls.ParseHexInitData(c.initData); err != nil {
+		return fmt.Errorf("--init-data: %w", err)
+	}
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
@@ -277,8 +286,19 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := checkTEEMatchesPlatform(pins, teeType); err != nil {
-		return err
+	// Resolve --platform=auto to the probed TEE before the TLS configs read
+	// c.platform; see the in-guest normalization for the failure mode.
+	switch teeType {
+	case ratls.TEETypeTDX:
+		c.platform = "tdx"
+	case ratls.TEETypeSEVSNP:
+		c.platform = "sev-snp"
+	}
+	if err := checkTEEMatchesPlatform(peerPins, teeType); err != nil {
+		return fmt.Errorf("peer measurements (--measurements-config): %w", err)
+	}
+	if err := checkTEEMatchesPlatform(cdsPins, teeType); err != nil {
+		return fmt.Errorf("CDS measurements (--cds-measurements-config): %w", err)
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
 	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
@@ -288,6 +308,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	cdsInitData, err := ratls.ParseHexInitData(c.cdsInitData)
+	if err != nil {
+		return fmt.Errorf("--cds-init-data: %w", err)
 	}
 	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
@@ -320,7 +344,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
-		CDSEntries:        pins.Entries,
+		CDSEntries:        cdsPins.Entries,
+		CDSInitData:       cdsInitData,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)
@@ -656,6 +681,9 @@ func effectiveCDSCAURL(certMode, cdsURL string) string {
 	return strings.TrimRight(cdsURL, "/") + "/ca"
 }
 
+// teeDeviceStat is a var so tests can fake the TEE device probe.
+var teeDeviceStat = os.Stat
+
 func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
 	case "sev-snp":
@@ -670,10 +698,10 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 		// operator setting --platform=auto wants a working guest,
 		// and choosing arbitrarily is the sanest tiebreaker for a
 		// shape we don't ship today.
-		if _, err := os.Stat("/dev/tdx_guest"); err == nil {
+		if _, err := teeDeviceStat("/dev/tdx_guest"); err == nil {
 			return ratls.TEETypeTDX, nil
 		}
-		if _, err := os.Stat("/dev/sev-guest"); err == nil {
+		if _, err := teeDeviceStat("/dev/sev-guest"); err == nil {
 			return ratls.TEETypeSEVSNP, nil
 		}
 		return 0, fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")

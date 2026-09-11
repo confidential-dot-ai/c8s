@@ -172,14 +172,10 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		return nil, nil, err
 	}
 	return ratls.NewServerTLSConfig(&ratls.ServerConfig{
-		Platform:   ratls.NormalizePlatform(platform),
-		AttestFunc: attestFunc,
-		CertTTL:    certTTL,
-		ClientPolicy: &ratls.VerifyPolicy{
-			Measurements:      cdsPins.Measurements,
-			RTMRs:             cdsPins.RTMRs,
-			AttestationApiURL: attestationApiURL,
-		},
+		Platform:     ratls.NormalizePlatform(platform),
+		AttestFunc:   attestFunc,
+		CertTTL:      certTTL,
+		ClientPolicy: cdsPins.VerifyPolicy(attestationApiURL),
 	})
 }
 
@@ -252,11 +248,7 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy: &ratls.VerifyPolicy{
-			Measurements:      pins.Measurements,
-			RTMRs:             pins.RTMRs,
-			AttestationApiURL: attestationApiURL,
-		},
+		Policy:     pins.VerifyPolicy(attestationApiURL),
 		Platform:   ratls.NormalizePlatform(platform),
 		AttestFunc: attestFunc,
 	})

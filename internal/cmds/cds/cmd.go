@@ -47,6 +47,7 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.caCertValidity, "ca-cert-validity", 8760*time.Hour, "validity period of the in-memory mesh CA certificate")
 	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest (empty = no pinning, UNSAFE)")
 	flags.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image may call /attest; the same file pins CDS itself for the components that dial it, so any listed image may serve as CDS. Cannot be combined with --measurements or --rtmrs")
+	flags.StringSliceVar(&cfg.nodeInitData, "node-init-data", nil, "hex launch-time init-data value(s) (SNP HOST_DATA / TDX MRCONFIGID) a node's evidence must carry to call /attest or serve a sandbox inventory — the launchdata commitments of the node ISOs; repeatable/comma-separated. Empty = no init-data pinning: any launch of a listed image is accepted")
 	flags.StringSliceVar(&cfg.rtmrs, "rtmrs", nil, "TDX RTMR pins <index>=<sha384-hex> required of TDX callers on /attest (repeatable; RTMR[1] pins the guest kernel, RTMR[2] the command line carrying the dm-verity root hash). SNP evidence is unaffected. Empty = no RTMR pinning: on TDX the reference values then cover TDVF firmware only, UNSAFE")
 
 	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "operator JWT clock skew tolerance in seconds")
@@ -117,6 +118,7 @@ type config struct {
 	caCertValidity      time.Duration
 	measurements        []string
 	measurementsConfig  string
+	nodeInitData        []string
 	rtmrs               []string
 	jwtClockSkew        int64
 	certTTL             time.Duration

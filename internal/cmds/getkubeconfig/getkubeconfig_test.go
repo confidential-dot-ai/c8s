@@ -18,7 +18,7 @@ import (
 // RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), via the shared convention.
 func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 	pub := []byte("-----BEGIN PUBLIC KEY-----\nMFk...\n-----END PUBLIC KEY-----\n")
-	exp, err := policyFor(writeTestManifest(t, tdxManifest()), pub, nil)
+	exp, err := policyFor(writeTestManifest(t, tdxManifest()), pub, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

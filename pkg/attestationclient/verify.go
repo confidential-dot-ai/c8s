@@ -39,6 +39,11 @@ var (
 	// malformed, or does not match the value the policy pins.
 	ErrRTMRNotAllowed = errors.New("attestationclient: RTMR not allowed")
 
+	// ErrInitDataNotAllowed: the report's launch-time init-data field (SNP
+	// HOST_DATA / TDX MRCONFIGID) is absent or matches none of the pinned
+	// values while some are pinned.
+	ErrInitDataNotAllowed = errors.New("attestationclient: init-data not allowed")
+
 	// ErrUnsupportedPlatform: [Client.VerifyEvidence] has no verification
 	// rules for the envelope's platform and fails closed.
 	ErrUnsupportedPlatform = errors.New("attestationclient: unsupported platform for evidence verification")
@@ -124,6 +129,16 @@ type EvidencePolicy struct {
 	// shape. RTMR[3] is extended by in-guest software and cannot speak to guest
 	// identity — a substituted guest extends it with whatever it likes.
 	RTMRs map[int][]byte
+
+	// InitData pins the launch-time init-data field the launcher committed
+	// (SNP HOST_DATA, 32 bytes; TDX MRCONFIGID, 48 bytes): the evidence must
+	// carry one of the listed values. A node image that takes its deployment
+	// config from a launchdata ISO commits the config's digest here, so this
+	// is what separates one launch of an image from another — the same image
+	// with a different role, allowlist or operator key has a different value.
+	// Compared raw, so a pin sized for the other platform never matches.
+	// Empty pins nothing.
+	InitData [][]byte
 }
 
 // VerifyEvidence verifies an attestation evidence envelope against policy via
@@ -167,15 +182,41 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 // it sees exactly the decisions it always made.
 func enforcePins(resp types.VerifyResponse, policy EvidencePolicy, platform string) error {
 	if len(policy.Entries) > 0 {
-		return EnforceEntries(resp, policy.Entries, platform)
+		if err := EnforceEntries(resp, policy.Entries, platform); err != nil {
+			return err
+		}
+	} else {
+		if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+			return err
+		}
+		if TDXPlatform(platform) {
+			if err := EnforceRTMRs(resp, policy.RTMRs); err != nil {
+				return err
+			}
+		}
 	}
-	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
-		return err
+	return EnforceInitData(resp, policy.InitData)
+}
+
+// EnforceInitData requires the reported init-data (SNP HOST_DATA / TDX
+// MRCONFIGID) to byte-equal one of the pinned values. Pinned but not
+// reported is a refusal: evidence without the field cannot show which launch
+// it came from. Exported for the CDS issuance gate, which verifies evidence
+// via [Client.VerifyEnforced] rather than [Client.VerifyEvidence].
+func EnforceInitData(resp types.VerifyResponse, pinned [][]byte) error {
+	if len(pinned) == 0 {
+		return nil
 	}
-	if TDXPlatform(platform) {
-		return EnforceRTMRs(resp, policy.RTMRs)
+	got := []byte(resp.Result.Claims.InitData)
+	if len(got) == 0 {
+		return fmt.Errorf("%w: init-data pinned but not reported", ErrInitDataNotAllowed)
 	}
-	return nil
+	for _, want := range pinned {
+		if bytes.Equal(got, want) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: init-data does not match any pinned value", ErrInitDataNotAllowed)
 }
 
 func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {

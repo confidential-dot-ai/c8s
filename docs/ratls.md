@@ -335,6 +335,21 @@ What it does **not** guarantee:
   not silently drop `--min-tcb-*` on TDX the way the mesh policy does: an
   SNP-shaped floor against TDX evidence is a policy failure naming the
   platform, and on SNP the floor is re-checked against the verified claims.
+- **Which launch of an image, unless init-data is pinned.** A launch digest
+  names an image, and a host can launch that image any number of times with
+  any configuration it likes. A node image that takes its deployment config
+  from a launch-attached bundle commits the bundle's digest into the report's
+  init-data field (SNP `HOST_DATA`, TDX `MRCONFIGID`), so that field is what
+  separates the operator's launch from the host's: role, allowlist seed and
+  operator key are all inside it. The init-data pin enforces it in-cluster:
+  `cds --node-init-data` requires one of the listed values of every `/attest`
+  caller and every inventory it dials, and `--cds-init-data` (ratls-mesh,
+  get-cert, allowlist-proxy; `allowlist.pull.cds_init_data` for
+  nri-image-policy, set with `set-cds-pins --cds-init-data`) requires CDS's
+  own launch to be the pinned one. `ratls-mesh --init-data` does the same for
+  mesh peers. Values are compared raw — 32 bytes on SNP, 48 on TDX — and a
+  pinned field the evidence does not report is a refusal. Left empty, the
+  image pins alone accept any launch of a listed image.
 - **Workload-granular identity beyond the TEE boundary.** The unit of
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS

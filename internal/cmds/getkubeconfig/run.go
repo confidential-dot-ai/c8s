@@ -7,16 +7,17 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 )
 
 // Config is the get-kubeconfig client configuration.
 type Config struct {
 	// AttestURL is the guest attestation-api /attest endpoint (e.g.
-	// http://<node>:8400/attest) used for the RTMR[3] trust gate.
+	// http://<node>:8400/attest) used for the measured-identity gate.
 	AttestURL string
 	// ReleaseBaseURL is the cred-release endpoint base (e.g. https://<node>:8443).
 	ReleaseBaseURL string
@@ -24,17 +25,19 @@ type Config struct {
 	// (e.g. https://<node>:6443).
 	APIServerURL string
 	// OperatorKeyPath is the operator ECDSA PRIVATE key (PEM). Its public half
-	// was bound into the node's RTMR[3] at launch.
+	// is bound directly or through the launchdata commitment.
 	OperatorKeyPath string
-	// ImageManifestPath is the build-artifact manifest carrying the expected
-	// guest image's full TDX tuple (mrtd, rtmr1, rtmr2). Required: without it
-	// the gate would rest on RTMR[3] alone, which the untrusted host can
-	// reproduce under any image it likes by staging the same operator key.
+	// ImageManifestPath pins the expected image: a TDX tuple or SNP per-SMP measurements.
 	ImageManifestPath string
 	// WorkloadImages are the digest-pinned image refs the node's measurer is
 	// expected to have extended into RTMR[3], in first-extend order. Empty
-	// means the register must equal the bare operator-key seed.
+	// means the bare operator-key seed, or zero under launchdata.
 	WorkloadImages []string
+	// LaunchDataDir is the operator's copy of the node's launchdata ISO
+	// contents. When set, the binding gate expects the launchdata commitment
+	// (SNP HOSTDATA / TDX MRCONFIGID) instead of the bare operator key, and
+	// the key must match the dir's operator-pubkey file.
+	LaunchDataDir string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -51,7 +54,7 @@ type Config struct {
 	ReleaseWait time.Duration
 }
 
-// Run executes the client flow: attest + RTMR[3] gate, then CSR -> cred-release
+// Run executes the client flow: measured-identity gate, then CSR -> cred-release
 // -> kubeconfig.
 func Run(ctx context.Context, cfg Config) error {
 	keyPEM, err := os.ReadFile(cfg.OperatorKeyPath)
@@ -62,16 +65,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("derive operator public key: %w", err)
 	}
-	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages)
+	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages, cfg.LaunchDataDir)
 	if err != nil {
 		return err
 	}
 
-	// 1. Trust gate: attest the node and enforce the full measured identity —
-	//    the image tuple (MRTD, RTMR[1], RTMR[2]) from the manifest plus the
-	//    RTMR[3] chain seeded by THIS key and extended by the expected
-	//    workload images — with no host trust and not TOFU. Everything
-	//    downstream depends on it.
+	// 1. Verify the image, operator binding, and expected workload measurements.
 	attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	if err := attestAndVerify(attestCtx, cfg.AttestURL, exp); err != nil {
 		cancel()
@@ -123,7 +122,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
+	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image and operator binding verified\n", cfg.OutPath, cfg.ContextName)
 	return nil
 }
 

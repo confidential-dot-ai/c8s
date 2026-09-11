@@ -35,6 +35,7 @@ type config struct {
 	port               int
 	cdsURL             string
 	cdsMeasurements    []string
+	cdsInitData        []string
 	cdsRTMRs           []string
 	attestationAPIURL  string
 	requestTimeout     time.Duration
@@ -59,6 +60,7 @@ func NewCmd() *cobra.Command {
 	f.IntVarP(&cfg.port, "port", "p", 8801, "listen port")
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
+	f.StringSliceVar(&cfg.cdsInitData, "cds-init-data", nil, "hex launch-time init-data value(s) (SNP HOST_DATA / TDX MRCONFIGID) CDS's RA-TLS cert must carry — the launchdata commitment of the CDS node's ISO; repeatable/comma-separated, empty = no init-data pinning")
 	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Any listed image may serve as CDS. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
@@ -147,7 +149,11 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Entries}, cfg.attestationAPIURL)
+	initData, err := ratls.ParseHexInitDataList(cfg.cdsInitData)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-init-data: %w", err)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Entries, InitData: initData}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

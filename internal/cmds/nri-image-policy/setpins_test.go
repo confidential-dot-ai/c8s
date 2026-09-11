@@ -184,6 +184,46 @@ func TestSetCDSPinsWritesRTMRsInIndexOrder(t *testing.T) {
 	}
 }
 
+// The launch pin rides beside the image pins: written on set, cleared on a
+// set without it, and a second identical set is a no-op.
+func TestSetCDSPinsWritesInitData(t *testing.T) {
+	path := writeConfig(t, bakedConfig)
+	hostData := strings.Repeat("aa", 32)
+	mrconfigID := strings.Repeat("bb", 48)
+	if got := setPins(t, path, "--cds-measurements", pinA, "--cds-init-data", strings.ToUpper(hostData)+","+mrconfigID); got != pinsUpdated {
+		t.Fatalf("outcome = %q, want %q", got, pinsUpdated)
+	}
+	cfg, err := parseConfig(readFile(t, path))
+	if err != nil {
+		t.Fatalf("patched config does not load: %v", err)
+	}
+	if got := cfg.Allowlist.Pull.CDSInitData; len(got) != 2 || got[0] != hostData || got[1] != mrconfigID {
+		t.Errorf("cds_init_data = %v, want [%s %s]", got, hostData, mrconfigID)
+	}
+	if got := setPins(t, path, "--cds-measurements", pinA, "--cds-init-data", hostData+","+mrconfigID); got != pinsUnchanged {
+		t.Errorf("identical pins reported %q, want %q", got, pinsUnchanged)
+	}
+	if got := setPins(t, path, "--cds-measurements", pinA); got != pinsUpdated {
+		t.Fatalf("clearing outcome = %q, want %q", got, pinsUpdated)
+	}
+	cfg, err = parseConfig(readFile(t, path))
+	if err != nil {
+		t.Fatalf("patched config does not load: %v", err)
+	}
+	if len(cfg.Allowlist.Pull.CDSInitData) != 0 {
+		t.Errorf("cds_init_data = %v, want empty", cfg.Allowlist.Pull.CDSInitData)
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
+}
+
 // An install that drops its pins clears them rather than leaving the previous
 // release's set in force.
 func TestSetCDSPinsClearsPins(t *testing.T) {
@@ -217,6 +257,7 @@ func TestSetCDSPinsRejectsBadInputWithoutTouchingTheFile(t *testing.T) {
 		"measurement is not hex":   {bakedConfig, []string{"--cds-measurements", "nothex"}},
 		"measurement wrong length": {bakedConfig, []string{"--cds-measurements", "aabb"}},
 		"rtmr index 0":             {bakedConfig, []string{"--cds-rtmrs", "0=" + pinA}},
+		"init-data wrong width":    {bakedConfig, []string{"--cds-init-data", strings.Repeat("aa", 31)}},
 		"no pull section": {strings.Replace(bakedConfig, "  pull:", "  nopull:", 1),
 			[]string{"--cds-measurements", pinA}},
 		"config already invalid": {strings.Replace(bakedConfig, `url: "https://`, `url: "http://`, 1),

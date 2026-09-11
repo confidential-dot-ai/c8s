@@ -349,6 +349,18 @@ func validConfig() config {
 	}
 }
 
+func TestNewHandlerRejectsBadInitDataPin(t *testing.T) {
+	_, err := newHandler(config{
+		cdsURL:            "https://c8s-cds:8443",
+		cdsInitData:       []string{"zz"},
+		attestationAPIURL: "http://attestation-api:8400",
+		requestTimeout:    time.Second,
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "--cds-init-data") {
+		t.Fatalf("error = %v, want an init-data parse failure naming the flag", err)
+	}
+}
+
 func TestNewHandlerRejectsBadRTMRPin(t *testing.T) {
 	_, err := newHandler(config{
 		cdsURL:            "https://c8s-cds:8443",

@@ -89,6 +89,14 @@ func TestValidate_PullRejectsInvalidCDSMeasurement(t *testing.T) {
 	}
 }
 
+func TestValidate_PullRejectsInvalidCDSInitData(t *testing.T) {
+	cfg := validConfig()
+	cfg.Allowlist.Pull.CDSInitData = []string{"aabb"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cds_init_data") {
+		t.Fatalf("err = %v, want a cds_init_data validation failure", err)
+	}
+}
+
 func TestValidate_PullRejectsPlaintextScheme(t *testing.T) {
 	cfg := validConfig()
 	cfg.Allowlist.Pull.URL = "http://localhost:8080"

@@ -86,6 +86,11 @@ type Config struct {
 	// CDSMeasurements and CDSRTMRs.
 	CDSEntries []measurements.Entry
 
+	// CDSInitData pins the CDS node's launch-time init-data (SNP HOST_DATA /
+	// TDX MRCONFIGID), telling the CDS launch apart from any other launch of
+	// the same image. Empty pins nothing.
+	CDSInitData [][]byte
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -111,7 +116,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Entries: cfg.CDSEntries, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Entries: cfg.CDSEntries, InitData: cfg.CDSInitData, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc
