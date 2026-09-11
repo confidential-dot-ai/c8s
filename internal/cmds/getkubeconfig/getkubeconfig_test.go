@@ -13,9 +13,10 @@ import (
 	"testing"
 )
 
-// TestPolicyForSeedMatchesGuestConvention checks the client computes the same
+// TestPolicyForSeedMatchesGuestConvention checks the gate accepts the same
 // bare-seed value the guest measures at launch:
-// RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), via the shared convention.
+// RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), derived here by hand rather
+// than through the library the gate itself uses.
 func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 	pub := []byte("-----BEGIN PUBLIC KEY-----\nMFk...\n-----END PUBLIC KEY-----\n")
 	exp, err := policyFor(writeTestManifest(t, tdxManifest()), pub, nil)
@@ -23,12 +24,12 @@ func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tdx := requireTDXPolicy(t, exp)
-
 	keyDigest := sha512.Sum384(pub)
 	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	if hex.EncodeToString(tdx.rtmr3[:]) != hex.EncodeToString(want[:]) {
-		t.Errorf("expected RTMR[3] = %x, want %x", tdx.rtmr3, want)
+	res := verifiedResultFor(exp)
+	res.Claims.PlatformData["rtmr_3"] = hex.EncodeToString(want[:])
+	if err := exp.checkIdentity(res); err != nil {
+		t.Errorf("a node reporting the hand-derived seed RTMR[3] %x was refused: %v", want, err)
 	}
 }
 

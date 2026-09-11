@@ -143,10 +143,11 @@ Then diff it against `c8s kata measure --vcpus N --json | jq -r .cmdline`.
 
 ## Verifying against a real cluster
 
-The SNP implementation reproduces both live measurements in the table above
-from the artifacts on the node, and `pkg/snpmeasure`'s unit tests check it
-against `sev-snp-measure`'s own published vectors using that project's 4 KiB
-OVMF fixture — so CI validates the algorithm without a multi-GB guest image.
+The SNP implementation reproduces both live measurements in the preceding
+table from the artifacts on the node, and `attestation-go`'s `launchmeasure/snp`
+unit tests check it against `sev-snp-measure`'s own published vectors using that
+project's 4 KiB OVMF fixture — so CI validates the algorithm without a multi-GB
+guest image.
 The end-to-end check against the real image is manual:
 
 ```console
@@ -178,8 +179,8 @@ ones named by TDVF's metadata section table, and only the BFV carries the
 `MR_EXTEND` attribute. The TD HOB — which is where the vCPU count and guest RAM
 size live — is page-added but never content-extended, so its contents never
 reach MRTD. The guest kernel, initrd and command line are measured by TDVF into
-**RTMR[0..2]**, which `pkg/ratls.VerifyPolicy` does not pin (see the comment on
-`Measurements`, and `attestation-go`'s `ExpectedLaunchDigest` → `MrTd` mapping).
+**RTMR[0..2]**, which `pkg/ratls.VerifyPolicy` pins only through `Policy.RTMRs` (see the
+comment on `remote.Policy.Measurements`, and `attestation-go`'s `ExpectedLaunchDigest` → `MrTd` mapping).
 
 Confirmed on live hardware. Two `kata-qemu-tdx` pods on the same node, booting
 the same TDVF, differing only in vCPU shape:
@@ -202,7 +203,7 @@ is the only thing that moves it.
 
 ### Implementation
 
-`pkg/tdxmeasure` is a thin wrapper over
+`attestation-go`'s `launchmeasure/tdx` is a thin wrapper over
 [`github.com/google/gce-tcb-verifier/tdx`](https://github.com/google/gce-tcb-verifier)
 `MRTD()` rather than a local reimplementation of the Intel TDX Module Base
 Architecture Specification. That library is the only maintained Go
@@ -218,23 +219,25 @@ for kata/QEMU**:
 | `LaunchOptionsDefaultTDHOBBug("")` | `2815d6db…` — models a Google hypervisor bug ❌ |
 | `DisableUnacceptedMemory = true` | `2815d6db…` — changes the TD HOB ❌ |
 
-`pkg/tdxmeasure.launchOptions()` pins the correct one, and
+`launchmeasure/tdx`'s `launchOptions()` pins the correct one, and
 `TestOtherLaunchOptionsAreWrong` fails if upstream ever makes the others
 equivalent. **Risk accepted:** a change to the library's default `LaunchOptions`
-would silently move the pinned measurement. `TestMRTDMatchesHardware` is the
-tripwire — it asserts the hardware-captured digest, so a dependency bump that
-moves the value fails the build rather than shipping a wrong pin.
+would silently move the pinned measurement. `TestMRTDMatchesHardware` in
+attestation-go asserts the hardware-captured digest, and attestation-go's CI
+fetches the validated TDVF so that test cannot skip. A dependency bump that
+moves the value fails there instead of shipping a wrong pin.
 
 ### Re-validating against hardware
 
-The 4 MiB TDVF is not committed. CI's TDX MRTD tripwire job fetches the
-pinned TDVF out of the kata-static release the nodes' kata-deploy installs,
-sha256-checks it against the pin next to its URL in `.github/workflows/ci.yml`,
-and runs the `pkg/tdxmeasure` tests with `C8S_TDVF` set, failing if any test
-skips. Elsewhere the hardware check runs only where the firmware exists (a TDX
-node, or `C8S_TDVF=/path/to/OVMF.inteltdx.fd`), skipping if the TDVF is not
-the sha256 the expected digest was captured from. The CLI wiring is covered in
-CI with a synthetic TDVF.
+Two pins, two checks. attestation-go pins the TDVF build its hardware-captured
+MRTD was taken from, and proves the predictor reproduces that MRTD. c8s pins the
+kata release its nodes boot: CI's TDX MRTD tripwire job
+(`.github/workflows/ci.yml`) fetches the TDVF out of that kata-static release,
+sha256-checks it against the pin next to its URL, runs `c8s kata measure
+--platform tdx` on it, and fails if the result differs from `WANT_MRTD` in the
+same job. A kata bump that moves the MRTD therefore fails in c8s; fix it by
+updating the URL, the sha256 and `WANT_MRTD` together. The CLI wiring is covered
+in CI with a synthetic TDVF.
 
 To re-capture the expected MRTD after a kata-static bump, read it from a live
 pod's own attestation report. The in-guest attestation-service listens on

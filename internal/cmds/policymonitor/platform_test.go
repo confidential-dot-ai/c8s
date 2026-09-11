@@ -7,7 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // TestDetectGuestPlatformFollowsAttestationAPI pins that the sandbox-digests
@@ -15,9 +16,9 @@ import (
 // assuming SEV-SNP: on a TDX guest the SNP assumption stamps a TDX envelope
 // under the SNP TEE type and CDS refuses every sandbox token.
 func TestDetectGuestPlatformFollowsAttestationAPI(t *testing.T) {
-	for _, platform := range []string{string(types.PlatformSnp), string(types.PlatformTdx)} {
-		t.Run(platform, func(t *testing.T) {
-			var gotReq types.AttestRequest
+	for _, platform := range []teetypes.PlatformType{teetypes.PlatformSNP, teetypes.PlatformTDX} {
+		t.Run(string(platform), func(t *testing.T) {
+			var gotReq remote.AttestRequest
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/attest" {
 					http.NotFound(w, r)
@@ -26,7 +27,7 @@ func TestDetectGuestPlatformFollowsAttestationAPI(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
 					t.Errorf("decode attest request: %v", err)
 				}
-				_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: platform, Evidence: json.RawMessage(`{}`)})
+				_ = json.NewEncoder(w).Encode(remote.AttestResponse{Platform: platform, Evidence: json.RawMessage(`{}`)})
 			}))
 			defer srv.Close()
 
@@ -34,11 +35,11 @@ func TestDetectGuestPlatformFollowsAttestationAPI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("detectGuestPlatform: %v", err)
 			}
-			if got != platform {
+			if got != string(platform) {
 				t.Fatalf("platform = %q, want %q", got, platform)
 			}
-			if gotReq.Platform != types.PlatformAuto {
-				t.Fatalf("probe requested platform %q, want %q (let the attestation-api detect it)", gotReq.Platform, types.PlatformAuto)
+			if gotReq.Platform != remote.PlatformAuto {
+				t.Fatalf("probe requested platform %q, want %q (let the attestation-api detect it)", gotReq.Platform, remote.PlatformAuto)
 			}
 		})
 	}
@@ -46,7 +47,7 @@ func TestDetectGuestPlatformFollowsAttestationAPI(t *testing.T) {
 
 func TestDetectGuestPlatformRejectsEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{Evidence: json.RawMessage(`{}`)})
+		_ = json.NewEncoder(w).Encode(remote.AttestResponse{Evidence: json.RawMessage(`{}`)})
 	}))
 	defer srv.Close()
 	if _, err := detectGuestPlatform(context.Background(), srv.URL); err == nil {

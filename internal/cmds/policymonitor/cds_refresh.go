@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -38,7 +39,7 @@ import (
 // setup) disable refresh but never crash the monitor — the baked seed
 // still enforces.
 func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist.Index, overlay *policyOverlay, state *refreshState) {
-	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
+	measurements, err := refvalues.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
 		disableRefresh(logger, state, reasonBadMeasurements, a, "error", err)
 		return
@@ -50,7 +51,7 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 		disableRefresh(logger, state, reasonNoMeasurements, a)
 		return
 	}
-	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
 	if err != nil {
 		disableRefresh(logger, state, reasonBadMeasurements, a, "error", err)
 		return

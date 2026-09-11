@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
@@ -118,7 +119,7 @@ type evidence struct {
 // genuinely unknown platform, so a wrong guess fails closed.
 func platformOrDefault(p string) string {
 	if p == "" {
-		return string(types.PlatformSnp)
+		return string(teetypes.PlatformSNP)
 	}
 	return p
 }

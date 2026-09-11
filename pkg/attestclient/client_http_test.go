@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -223,19 +224,19 @@ func TestGenerateEvidenceSuccess(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Fatalf("path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if string(req.ReportData.Bytes()) != "report-data" {
-			t.Fatalf("report data = %q", req.ReportData.Bytes())
+		if string(req.ReportData) != "report-data" {
+			t.Fatalf("report data = %q", req.ReportData)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"platform":"snp","evidence":{"q":1}}`))
 	}))
 	defer srv.Close()
 
-	// httpClient is shared by GenerateEvidence's inner attestationclient.
+	// httpClient is shared by GenerateEvidence's inner remote.
 	c := NewClientWithHTTP("http://cds.invalid", srv.Client())
 	resp, err := c.GenerateEvidence(srv.URL, []byte("report-data"))
 	if err != nil {
@@ -402,7 +403,7 @@ func TestMakeSNPRATLSAttestFuncSuccess(t *testing.T) {
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: "snp", Evidence: evidenceJSON})
+		_ = json.NewEncoder(w).Encode(remote.AttestResponse{Platform: "snp", Evidence: evidenceJSON})
 	}))
 	defer api.Close()
 

@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -130,7 +130,7 @@ func main() {
 	}
 
 	store := newChallengeStore()
-	verifier := attestationclient.NewClient(attestationAPIURL)
+	verifier := remote.NewClient(attestationAPIURL)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /authenticate", func(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +167,7 @@ func main() {
 	}
 }
 
-func handleAttest(store *challengeStore, verifier attestationclient.Client) http.HandlerFunc {
+func handleAttest(store *challengeStore, verifier remote.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req types.AttestRequestBody
 		dec := json.NewDecoder(r.Body)
@@ -211,8 +211,10 @@ func handleAttest(store *challengeStore, verifier attestationclient.Client) http
 			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
 			return
 		}
-		reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-		verifyResp, err := verifier.VerifyEnforced(r.Context(), types.VerifyReportData(req.Evidence, reportData))
+		verifyReq := remote.NewVerifyRequest(req.Evidence, &remote.VerifyParams{
+			ExpectedReportData: expectedReportData[:sha512.Size384],
+		}, false)
+		verifyResp, err := verifier.VerifyEnforced(r.Context(), verifyReq)
 		if err != nil {
 			status, code, msg := classifyVerifyError(err)
 			slog.Warn("attestation verification failed", "status", status, "error", err, "remote_addr", r.RemoteAddr)
@@ -270,19 +272,19 @@ func handleAttest(store *challengeStore, verifier attestationclient.Client) http
 // transport or 5xx outage.
 func classifyVerifyError(err error) (int, string, string) {
 	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+	case errors.Is(err, remote.ErrSignatureInvalid):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+	case errors.Is(err, remote.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
 	}
-	var apiErr *attestationclient.APIError
+	var apiErr *remote.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
 	}
 	// The api answers its own refusals in the JSON envelope, so a non-JSON body
 	// names the request rather than the evidence, and only where there is a
 	// body to have named it.
-	var unexpected *attestationclient.UnexpectedError
+	var unexpected *remote.UnexpectedError
 	if errors.As(err, &unexpected) && rejectsRequest(unexpected.Status) && unexpected.Text != "" {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation-api rejected the request"
 	}

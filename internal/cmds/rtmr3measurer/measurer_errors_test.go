@@ -3,84 +3,11 @@
 package rtmr3measurer
 
 import (
-	"bytes"
-	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
-
-// Malformed and duplicate log lines are tolerated: skipped/deduped, never
-// treated as measured digests.
-func TestLoadStateSkipsMalformedAndDuplicateLines(t *testing.T) {
-	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
-	log := "sha256:" + hexA + "\n" +
-		"not-a-digest\n" +
-		"sha256:tooshort\n" +
-		"\n" +
-		"sha256:" + hexA + "\n" // duplicate
-	if err := os.WriteFile(state, []byte(log), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tdx := &fakeTDX{reg: runtimemeasure.FromDigests([]string{"sha256:" + hexA})}
-
-	m := newTestMeasurer(t, watch, state, tdx)
-	if len(m.measuredOrder) != 1 || m.measuredOrder[0] != "sha256:"+hexA {
-		t.Fatalf("measuredOrder = %v, want exactly [sha256:%s]", m.measuredOrder, hexA)
-	}
-	if tdx.extends != 0 {
-		t.Fatalf("extends = %d, want 0 (register already matches the log)", tdx.extends)
-	}
-}
-
-// An unreadable register at startup must not block: the log stays the dedup
-// truth and nothing is extended.
-func TestLoadStateRegisterReadFailureKeepsLogAsTruth(t *testing.T) {
-	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
-	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tdx := &fakeTDX{}
-
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.watchDir = watch
-	m.statePath = state
-	m.extend = tdx.extend
-	m.readRegister = func() ([runtimemeasure.Size]byte, error) {
-		return [runtimemeasure.Size]byte{}, errors.New("sysfs read failed")
-	}
-	if err := m.loadState(); err != nil {
-		t.Fatalf("loadState: %v (register read failure must not be fatal)", err)
-	}
-	if tdx.extends != 0 {
-		t.Fatalf("extends = %d, want 0", tdx.extends)
-	}
-	if _, ok := m.measuredDigests["sha256:"+hexA]; !ok {
-		t.Fatal("logged digest must stay deduped when the register is unreadable")
-	}
-}
-
-// A repair extend that itself fails is fatal: the process must not run with a
-// log/register mismatch it knows how to fix but couldn't.
-func TestLoadStateRepairExtendFailureIsFatal(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "measured")
-	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tdx := &fakeTDX{fail: errors.New("sysfs write failed")} // register at boot value
-
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.statePath = state
-	m.extend = tdx.extend
-	m.readRegister = tdx.read
-	if err := m.loadState(); err == nil {
-		t.Fatal("loadState = nil, want error when the repair extend fails")
-	}
-}
 
 // An unreadable watch dir warns (throttled) instead of spinning silently, and
 // the failure counter resets once the dir is back.
@@ -126,32 +53,6 @@ func TestScanOnceIgnoresNonContainerEntries(t *testing.T) {
 	}
 }
 
-// If the digest cannot be recorded, it must NOT be extended: the log leading
-// the register is repairable, the register leading the log is not.
-func TestRecordFailureBlocksExtend(t *testing.T) {
-	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
-	if err := os.Mkdir(state, 0o755); err != nil { // OpenFile O_WRONLY on a dir fails
-		t.Fatal(err)
-	}
-	tdx := &fakeTDX{}
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.watchDir = watch
-	m.statePath = state
-	m.extend = tdx.extend
-	m.readRegister = tdx.read
-	m.configReadDeadline = 100 * time.Millisecond
-	m.configReadInterval = 5 * time.Millisecond
-
-	writeWorkload(t, watch, cid1, hexA)
-	m.scanOnce()
-	if tdx.extends != 0 {
-		t.Fatalf("extends = %d, want 0 (unrecorded digest must not be extended)", tdx.extends)
-	}
-	if len(m.measuredOrder) != 0 {
-		t.Fatalf("measuredOrder = %v, want empty", m.measuredOrder)
-	}
-}
-
 // A config.json that stays invalid JSON past the deadline is retried next
 // scan (cid not marked seen); one that never appears behaves the same.
 func TestReadConfigInvalidJSONAndMissingFile(t *testing.T) {
@@ -184,94 +85,5 @@ func TestReadConfigInvalidJSONAndMissingFile(t *testing.T) {
 	m.scanOnce()
 	if tdx.extends != 1 {
 		t.Fatalf("extends = %d, want 1 once config.json turns valid", tdx.extends)
-	}
-}
-
-// unrecordLast trims the in-memory order even when the log rewrite fails, and
-// only logs the rewrite error.
-func TestUnrecordLastRewriteFailureIsLoggedNotFatal(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: chmod 0500 does not block writes, so the rewrite-failure path is not exercised")
-	}
-	dir := t.TempDir()
-	state := filepath.Join(dir, "measured")
-	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.statePath = state
-	m.measuredOrder = []string{"sha256:" + hexA}
-
-	if err := os.Chmod(dir, 0o500); err != nil { // .tmp WriteFile fails
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	m.unrecordLast("sha256:" + hexA)
-	if len(m.measuredOrder) != 0 {
-		t.Fatalf("measuredOrder = %v, want empty even when the rewrite fails", m.measuredOrder)
-	}
-}
-
-func TestUnrecordLastRenameFailureCleansUpTemp(t *testing.T) {
-	dir := t.TempDir()
-	state := filepath.Join(dir, "measured")
-	if err := os.Mkdir(state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(state, "keep")
-	if err := os.WriteFile(marker, []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	m := newMeasurer(slog.New(slog.NewTextHandler(&logs, nil)))
-	m.statePath = state
-	m.measuredOrder = []string{"sha256:" + hexA}
-	m.unrecordLast("sha256:" + hexA)
-	if len(m.measuredOrder) != 0 {
-		t.Fatalf("measuredOrder = %v, want empty", m.measuredOrder)
-	}
-	if !bytes.Contains(logs.Bytes(), []byte("rewrite measured-digest log failed")) {
-		t.Fatalf("rewrite failure was not logged: %s", logs.String())
-	}
-	if got, err := os.ReadFile(marker); err != nil || string(got) != "original" {
-		t.Fatalf("failed rewrite changed destination: %q, %v", got, err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "measured" {
-		t.Fatalf("failed rewrite left temporary files: %v", entries)
-	}
-}
-
-// The adapters, pointed at a temp file standing in for the TSM node. Register
-// semantics (widths, a missing node) are covered in attestation-go; this checks
-// only that the measurer is wired to the register it thinks it is.
-func TestExtendAndReadRegister(t *testing.T) {
-	orig := register
-	t.Cleanup(func() { register = orig })
-
-	node := filepath.Join(t.TempDir(), "rtmr3:sha384")
-	if err := os.WriteFile(node, make([]byte, runtimemeasure.Size), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	register = runtimemeasure.TDXRegister(node)
-
-	event := runtimemeasure.Event("sha256:" + hexA)
-	if err := extendRegister(event); err != nil {
-		t.Fatalf("extendRegister: %v", err)
-	}
-	got, err := readRegister()
-	if err != nil {
-		t.Fatalf("readRegister: %v", err)
-	}
-	if !bytes.Equal(got[:], event[:]) {
-		t.Fatal("readRegister did not return the written event bytes")
 	}
 }

@@ -679,8 +679,8 @@ func TestInGuestVerifyPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inGuestVerifyPins: %v", err)
 	}
-	if len(policy.Measurements) != 1 || len(policy.RTMRs) != 1 {
-		t.Fatalf("mesh policy = %d measurements, %d rtmrs; want 1 and 1", len(policy.Measurements), len(policy.RTMRs))
+	if len(policy.Policy.Measurements) != 1 || len(policy.Policy.RTMRs) != 1 {
+		t.Fatalf("mesh policy = %d measurements, %d rtmrs; want 1 and 1", len(policy.Policy.Measurements), len(policy.Policy.RTMRs))
 	}
 	if policy.AttestationApiURL != c.attestationServiceURL {
 		t.Fatalf("policy attestation-api = %q, want %q", policy.AttestationApiURL, c.attestationServiceURL)
@@ -703,8 +703,8 @@ func TestInGuestVerifyPinsUnpinnedTDXWarnsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inGuestVerifyPins: %v", err)
 	}
-	if len(policy.RTMRs) != 0 || len(cdsPins.RTMRs) != 0 {
-		t.Fatalf("unset RTMR envs produced pins: mesh=%v cds=%v", policy.RTMRs, cdsPins.RTMRs)
+	if len(policy.Policy.RTMRs) != 0 || len(cdsPins.RTMRs) != 0 {
+		t.Fatalf("unset RTMR envs produced pins: mesh=%v cds=%v", policy.Policy.RTMRs, cdsPins.RTMRs)
 	}
 }
 

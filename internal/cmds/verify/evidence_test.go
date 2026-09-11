@@ -47,7 +47,7 @@ func attestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)

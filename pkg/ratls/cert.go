@@ -12,6 +12,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
+// DefaultCertTTL is the default certificate lifetime used by both
+// [CertOptions] and [ServerConfig] when no TTL is specified.
+const DefaultCertTTL = 24 * time.Hour
+
 // CertOptions configures RA-TLS certificate generation.
 type CertOptions struct {
 	// Subject for the certificate. If empty, a default is used.
@@ -69,7 +73,7 @@ func CreateAttestedCert(key *ecdsa.PrivateKey, att *Attestation, opts *CertOptio
 		opts = &CertOptions{}
 	}
 
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		return nil, err
 	}

@@ -55,7 +55,7 @@ func newMeshRuntime(cfg *ratls.ServerConfig, logger *slog.Logger, sessionCacheSi
 		clientTLS.ClientSessionCache = tls.NewLRUClientSessionCache(sessionCacheSize)
 	}
 	m := newMetrics()
-	if len(cfg.ClientPolicy.Measurements) > 0 {
+	if len(cfg.ClientPolicy.Policy.Measurements) > 0 {
 		m.measurementPinning.Set(1)
 	}
 	wrapVerify := func(orig func([][]byte, [][]*x509.Certificate) error) func([][]byte, [][]*x509.Certificate) error {

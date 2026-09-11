@@ -16,10 +16,9 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -70,8 +69,8 @@ func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetype
 	if err != nil {
 		return nil, fmt.Errorf("attest self: %w", err)
 	}
-	verified, err := attestationclient.NewClient(attestationAPIURL).VerifyEvidence(ctx,
-		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+	verified, err := remote.NewClient(attestationAPIURL).VerifyEvidence(ctx,
+		resp.Envelope(), remote.Policy{ExpectedReportData: reportData[:sha512.Size384]})
 	if err != nil {
 		return nil, fmt.Errorf("verify self-report: %w", err)
 	}

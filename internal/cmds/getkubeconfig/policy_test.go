@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 type recordingPolicy struct {
@@ -43,7 +42,7 @@ func TestMeasuredPolicyCommonGates(t *testing.T) {
 		t.Fatalf("validated envelope did not propagate platform refusal: %v", err)
 	}
 
-	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx"})
+	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx"})
 	cert.Signature[0] ^= 0xff
 	if err := verifyServerCert(cert, p); err == nil || errors.Is(err, p.err) || p.calls != 1 {
 		t.Fatalf("invalid certificate body reached platform verifier: %v", err)

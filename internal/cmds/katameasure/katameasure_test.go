@@ -455,7 +455,7 @@ func TestNewCmdWiring(t *testing.T) {
 
 // writeTDVF builds a minimal well-formed TDVF image so the CLI path can be
 // exercised without the 4 MiB real firmware. The digest it produces is pinned
-// in pkg/tdxmeasure; here only the wiring matters.
+// in attestation-go's launchmeasure/tdx; here only the wiring matters.
 func writeTDVF(t *testing.T) string {
 	t.Helper()
 	const (

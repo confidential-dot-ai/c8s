@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	filippo.io/mlkem768 v0.0.0-20260214141301-2e7bebc7d88d
 	github.com/cenkalti/backoff/v5 v5.0.3
-	github.com/confidential-dot-ai/attestation-go v0.6.0
+	github.com/confidential-dot-ai/attestation-go v0.7.0
 	github.com/containerd/containerd/api v1.11.1
 	github.com/containerd/containerd/v2 v2.3.5
 	github.com/containerd/errdefs v1.0.0
@@ -18,7 +18,6 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/cel-go v0.31.0
-	github.com/google/gce-tcb-verifier v0.3.1
 	github.com/google/go-sev-guest v0.15.0
 	github.com/klauspost/compress v1.20.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -27,7 +26,6 @@ require (
 	github.com/prometheus/common v0.71.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/virtee/sev-snp-measure-go v0.0.0-20260408174629-fd0cc4c95d62
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.56.0
 	golang.org/x/sys v0.48.0
@@ -88,6 +86,7 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.27.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
+	github.com/google/gce-tcb-verifier v0.3.1 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/go-tdx-guest v0.3.2-0.20250814004405-ffb0869e6f4d // indirect
 	github.com/google/logger v1.1.2 // indirect
@@ -124,6 +123,7 @@ require (
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
+	github.com/virtee/sev-snp-measure-go v0.0.0-20260408174629-fd0cc4c95d62 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opencensus.io v0.24.0 // indirect

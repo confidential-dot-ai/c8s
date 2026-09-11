@@ -7,8 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 // installPins resolves the pins install fans into the chart, from either the
@@ -18,11 +17,11 @@ import (
 // operator's initdata — keep pinning exactly what they pin today.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
 	if installMeasurementsConfig == "" {
-		digests, err = ratls.ParseHexMeasurementsList(installMeasurements)
+		digests, err = refvalues.ParseHexMeasurementsList(installMeasurements)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("--measurements: %w", err)
 		}
-		rtmrs, err = ratls.ParseRTMRPins(installRTMRs)
+		rtmrs, err = refvalues.ParseRTMRPins(installRTMRs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("--rtmrs: %w", err)
 		}
@@ -38,7 +37,7 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("--measurements-config: %w", err)
 	}
-	set, err := measurements.Load(path)
+	set, err := refvalues.Load(path)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -47,7 +46,7 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 		// The flat values carry one register set, so images that disagree can
 		// only be fanned out as digests.
 		slog.Warn("measurements config pins different registers per image: components matching whole images keep them, the flat values are digest-only",
-			"images", len(set.Entries))
+			"images", len(set.Images))
 	}
 	// The chart takes the file's content; helm reads the same path this
 	// command just validated.

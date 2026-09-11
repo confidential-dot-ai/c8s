@@ -12,7 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -184,12 +185,28 @@ func parseConfig(data []byte) (*config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	// The pin parsers take one spelling of a digest, and this file is
+	// hand-editable: fold the case an operator typed rather than refusing a
+	// config the node has been booting with.
+	cfg.Allowlist.Pull.CDSMeasurements = foldHexPins(cfg.Allowlist.Pull.CDSMeasurements)
+	cfg.Allowlist.Pull.CDSRTMRs = foldHexPins(cfg.Allowlist.Pull.CDSRTMRs)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// foldHexPins lowercases each pin, leaving blanks and the "<index>=" prefix of
+// an RTMR pin untouched: both halves are hex or digits, which fold to
+// themselves.
+func foldHexPins(vals []string) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = strings.ToLower(v)
+	}
+	return out
 }
 
 // NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
@@ -199,9 +216,14 @@ func parseConfig(data []byte) (*config, error) {
 // literal and validate it directly.
 func (c *config) NormalizedPlatform() string {
 	if strings.TrimSpace(c.Platform) == "" {
-		return ratls.NormalizePlatform(string(types.PlatformSnp))
+		return teetypes.FamilySNP.String()
 	}
-	return ratls.NormalizePlatform(c.Platform)
+	family, err := teetypes.ParseFamily(c.Platform)
+	if err != nil {
+		// Validate reports it; return the input so its message can quote it.
+		return c.Platform
+	}
+	return family.String()
 }
 
 // PullEnabled reports whether the plugin should poll a remote CDS.
@@ -218,7 +240,7 @@ func (c *config) Validate() error {
 	// produces a peer-attestation failure on the CDS side that names the
 	// evidence platform, not this setting, so the cause is several hops from
 	// the symptom.
-	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
+	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
 	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
@@ -248,10 +270,10 @@ func (c *config) Validate() error {
 		if c.Allowlist.Pull.AttestationApiURL == "" {
 			return fmt.Errorf("allowlist.pull.attestation_api_url must be set")
 		}
-		if _, err := ratls.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
+		if _, err := refvalues.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_measurements: %w", err)
 		}
-		if _, err := ratls.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
+		if _, err := refvalues.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
 		}
 	}

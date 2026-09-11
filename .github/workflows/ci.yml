@@ -234,10 +234,13 @@ jobs:
     name: TDX MRTD tripwire
     runs-on: ubuntu-latest
     env:
-      # The TDVF the nodes boot, from the kata-static payload kata-deploy installs
-      # (values.yaml kata.digest). Bump with that pin and with wantTDVFSHA/wantMRTD.
+      # The TDVF the nodes boot, from the kata-static payload kata-deploy
+      # installs (values.yaml kata.digest), and the MRTD it produces, captured
+      # from live kata-qemu-tdx guests. Bump the three together with the kata
+      # pin.
       TDVF_URL: https://github.com/kata-containers/kata-containers/releases/download/3.30.0/kata-static-3.30.0-amd64.tar.zst
       TDVF_SHA256: 2af9e5e974c0dc201163d1fd419f234cc4b6e64e99425ce6619e9a077fb0c0b6
+      WANT_MRTD: c78e2b8b2f66207f3807d8d999f51e04f5eab8f7aa02614a86ddd81b61f4e79c5d7616664fcb190b8eaae2e26d60b12a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -253,19 +256,15 @@ jobs:
           curl -fsSL "$TDVF_URL" | zstd -d | tar -xO --occurrence=1 ./opt/kata/share/ovmf/OVMF.inteltdx.fd > tdvf.fd || true
           echo "$TDVF_SHA256  tdvf.fd" | sha256sum -c -
 
-      # With C8S_TDVF present nothing in this package may skip: a skip means
-      # the tripwire did not run, so it fails the job rather than reading green.
-      - name: Test pkg/tdxmeasure, failing on any skip
-        env:
-          C8S_TDVF: ${{ github.workspace }}/tdvf.fd
+      # attestation-go tests the predictor. c8s owns the kata pin: the TDVF its
+      # nodes boot must still produce the MRTD operators pin, so a kata bump
+      # that moves the MRTD fails here.
+      - name: Measure the pinned TDVF with c8s kata measure
         run: |
-          go test -count=1 -json ./pkg/tdxmeasure/... | tee tdxmeasure.json
-          if grep '"Action":"skip"' tdxmeasure.json; then
-            echo "::error::pkg/tdxmeasure test skipped — the MRTD tripwire must run (TDVF missing or sha mismatch)" >&2
-            exit 1
-          fi
-          if ! grep -q '"Action":"pass".*"Test":"TestMRTDMatchesHardware"' tdxmeasure.json; then
-            echo "::error::TestMRTDMatchesHardware did not run green — the tripwire is disarmed" >&2
+          got=$(go run ./cmd/c8s kata measure --platform tdx --firmware tdvf.fd)
+          echo "MRTD: $got"
+          if [ "$got" != "$WANT_MRTD" ]; then
+            echo "::error::MRTD of the pinned TDVF is $got, want $WANT_MRTD — the kata pin and WANT_MRTD moved apart" >&2
             exit 1
           fi
 

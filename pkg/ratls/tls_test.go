@@ -20,7 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 )
 
 // fakeAttestFunc returns an AttestFunc that parses hex-encoded REPORTDATA
@@ -424,36 +425,6 @@ func TestTDXPlatformAcceptedAtConfigTime(t *testing.T) {
 	}
 }
 
-func TestParseTEEType(t *testing.T) {
-	tests := []struct {
-		input string
-		want  TEEType
-		err   bool
-	}{
-		{"sev-snp", TEETypeSEVSNP, false},
-		{"tdx", TEETypeTDX, false},
-		// Aliases resolve here, so a caller can pass the platform string its
-		// own config carries without pre-normalizing.
-		{"snp", TEETypeSEVSNP, false},
-		{"az-snp", TEETypeSEVSNP, false},
-		{"gcp-snp", TEETypeSEVSNP, false},
-		{"az-tdx", TEETypeTDX, false},
-		{"gcp-tdx", TEETypeTDX, false},
-		{"SEV-SNP", TEETypeSEVSNP, false},
-		{"", 0, true},
-		{"unknown", 0, true},
-	}
-	for _, tt := range tests {
-		got, err := parseTEEType(tt.input)
-		if (err != nil) != tt.err {
-			t.Errorf("parseTEEType(%q) error = %v, wantErr %v", tt.input, err, tt.err)
-		}
-		if got != tt.want {
-			t.Errorf("parseTEEType(%q) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestConcurrentCertProvisioning(t *testing.T) {
 	var callCount atomic.Int32
 	cfg := testServerConfig()
@@ -797,12 +768,12 @@ func TestDualVerifyPeerCallback_RATLSSelfSigned(t *testing.T) {
 	_, _, ratlsCert := testAttestedCert(t, &CertOptions{TTL: 1 * time.Hour})
 
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 
 	_, caCert := generateCACert(t)
 	verifyFunc := dualVerifyPeerCallback(
-		&VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}},
+		&VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: [][]byte{measurement}}},
 		newSharedCACerts([]*x509.Certificate{caCert}),
 	)
 
@@ -1034,8 +1005,8 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 	caKey, caCert := generateCACert(t)
 	shared := newSharedCACerts([]*x509.Certificate{caCert})
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 
 	// caSignedLeaf builds a CA-signed leaf over key, optionally carrying the
 	// RA-TLS .1.1 evidence extension.
@@ -1069,21 +1040,21 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 	// A CA-signed leaf carrying evidence bound to its own key (the shape the
 	// issuer produces by copying the requester's .1.1 extension).
 	key, att := testKeyAndAttestation(t)
-	ext, err := att.MarshalExtension()
+	ext, err := MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
 	leafWithEvidence := caSignedLeaf(t, key, &ext)
 
 	t.Run("accepts CA leaf with re-verifiable evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL(), RequireCAEvidence: true, Policy: remote.Policy{Measurements: [][]byte{measurement}}}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{leafWithEvidence}, nil); err != nil {
 			t.Fatalf("valid CA leaf with embedded evidence rejected: %v", err)
 		}
 	})
 
 	t.Run("rejects CA leaf without embedded evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL(), RequireCAEvidence: true, Policy: remote.Policy{Measurements: [][]byte{measurement}}}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{caSignedLeaf(t, freshKey(t), nil)}, nil); err == nil {
 			t.Fatal("CA leaf without embedded evidence accepted in production mode")
 		}
@@ -1091,14 +1062,14 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 
 	t.Run("rejects CA leaf whose measurement is not pinned", func(t *testing.T) {
 		other := bytes.Repeat([]byte{0x99}, SNPMeasurementSize)
-		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{other}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL(), RequireCAEvidence: true, Policy: remote.Policy{Measurements: [][]byte{other}}}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{leafWithEvidence}, nil); err == nil {
 			t.Fatal("CA leaf with an unpinned launch measurement accepted in production mode")
 		}
 	})
 
 	t.Run("legacy mode still accepts CA leaf without evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: stub.URL} // RequireCAEvidence: false
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL()} // RequireCAEvidence: false
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{caSignedLeaf(t, freshKey(t), nil)}, nil); err != nil {
 			t.Fatalf("legacy CA-only mode rejected a CA-signed leaf: %v", err)
 		}
@@ -1477,9 +1448,9 @@ func TestClientTLSConfigWithoutCACertStaysRATLSOnly(t *testing.T) {
 
 func TestVerifyPeerCallback(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
-	cb := verifyPeerCallback(&VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}})
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
+	cb := verifyPeerCallback(&VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: [][]byte{measurement}}})
 
 	_, _, attested := testAttestedCert(t, nil)
 	plain := generateSimpleCert(t)

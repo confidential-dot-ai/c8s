@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -67,11 +68,11 @@ func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Fatalf("attestation-api path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode attestation request: %v", err)
 		}
-		attestationApiSawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		attestationApiSawReportData = append([]byte(nil), req.ReportData...)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"platform":"snp","evidence":{"quote":"abc"}}`)
 	}))

@@ -23,10 +23,12 @@ import (
 // engine consumes it on the SNP path only, and silently drops it on TDX.
 func verifyInProcess(ctx context.Context, ev *evidence, policy *ratls.VerifyPolicy, initDataHash []byte, minTCB *teetypes.SnpTcb) (*teetypes.VerificationResult, error) {
 	res, err := localverify.Verify(ctx, ev.platform, ev.rawEvidence, localverify.Params{
-		ExpectedReportData:   ev.erd,
-		ExpectedInitDataHash: initDataHash,
-		AllowDebug:           policy.AllowDebug,
-		MinTCB:               minTCB,
+		VerifyParams: teetypes.VerifyParams{
+			ExpectedReportData:   ev.erd,
+			ExpectedInitDataHash: initDataHash,
+			AllowDebug:           policy.Policy.AllowDebug,
+			MinTCB:               minTCB,
+		},
 	})
 	if err != nil {
 		var ce *localverify.CollateralError

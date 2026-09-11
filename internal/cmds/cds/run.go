@@ -18,6 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
@@ -25,10 +28,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -57,7 +58,10 @@ func run(cfg config) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
+	// Empty stays empty: it selects the plain-HTTP path below.
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil {
+		cfg.ratlsPlatform = family.String()
+	}
 
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
@@ -116,7 +120,7 @@ func run(cfg config) error {
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
-	rtmrPins, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	rtmrPins, err := refvalues.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
@@ -131,10 +135,10 @@ func run(cfg config) error {
 	// from disk: re-reading would attest the file rather than the policy.
 	served := pinned
 	if served.Empty() {
-		served = measurementspkg.FromFlags(measurementBytes(measurements), rtmrPins)
+		served = refvalues.FromFlags(measurementBytes(measurements), rtmrPins)
 	}
-	served.TEE = servedTEE(cfg.ratlsPlatform)
-	measurementsDoc, err := measurementspkg.Serve(served)
+	served.Family = servedFamily(cfg.ratlsPlatform)
+	measurementsDoc, err := refvalues.Render(served)
 	if err != nil {
 		return fmt.Errorf("render /measurements document: %w", err)
 	}
@@ -148,7 +152,7 @@ func run(cfg config) error {
 		return err
 	}
 
-	asClient := attestationclient.NewClient(cfg.attestationApiURL)
+	asClient := remote.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
 	// A separate pool for /secrets: sharing one would make a nonce minted for
 	// issuance redeemable against a secret, and vice versa.
@@ -207,7 +211,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Entries},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Images: pinned.Images},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -272,7 +276,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
-			Entries:           pinned.Entries,
+			ImagePins:         pinned.Images,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

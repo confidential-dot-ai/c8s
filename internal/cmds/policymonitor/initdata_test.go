@@ -19,15 +19,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // hostDataVerdict passes verification and reports hostData as the HOST_DATA claim.
-func hostDataVerdict(hostData []byte) testattest.Verdict {
-	v := testattest.PassingVerdict("")
+func hostDataVerdict(hostData []byte) mockapi.Verdict {
+	v := mockapi.PassingVerdict("")
 	v.Claims.InitData = hostData
 	return v
 }
@@ -42,11 +43,23 @@ func attesterServing(t *testing.T, hostData []byte) string {
 	return attesterWithVerdict(t, hostDataVerdict(hostData))
 }
 
-func attesterWithVerdict(t *testing.T, v testattest.Verdict) string {
+func attesterWithVerdict(t *testing.T, v mockapi.Verdict) string {
 	t.Helper()
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	stub.SetVerdict(v)
-	return stub.URL
+	return stub.URL()
+}
+
+// tdxAttesterWithVerdict is attesterWithVerdict on a TDX node, where the
+// init-data claim is the 48-byte MRCONFIGID rather than SNP's 32-byte
+// HOST_DATA. The anchor is read family-first, so which one the stub reports
+// decides which width is legal.
+func tdxAttesterWithVerdict(t *testing.T, v mockapi.Verdict) string {
+	t.Helper()
+	stub := mockapi.New(t)
+	stub.SetPlatform(teetypes.PlatformTDX)
+	stub.SetVerdict(v)
+	return stub.URL()
 }
 
 // scriptedVerifier is an in-guest attestation-api whose /attest comes from the
@@ -55,7 +68,7 @@ func attesterWithVerdict(t *testing.T, v testattest.Verdict) string {
 // counted here because a refused one never reaches the stub.
 type scriptedVerifier struct {
 	url      string
-	attester *testattest.Stub
+	attester *mockapi.Stub
 
 	mu    sync.Mutex
 	calls int
@@ -63,10 +76,10 @@ type scriptedVerifier struct {
 
 func newScriptedVerifier(t *testing.T, status, failures int) *scriptedVerifier {
 	t.Helper()
-	v := &scriptedVerifier{attester: testattest.New(t)}
+	v := &scriptedVerifier{attester: mockapi.New(t)}
 	v.attester.SetVerdict(hostDataVerdict(testHostData()))
 
-	target, err := url.Parse(v.attester.URL)
+	target, err := url.Parse(v.attester.URL())
 	if err != nil {
 		t.Fatalf("parse stub URL: %v", err)
 	}
@@ -345,11 +358,11 @@ func TestVerifiedSelfHostDataRejectsUnverifiedReport(t *testing.T) {
 		setup func(*testing.T) string
 		want  error
 	}{
-		{"signature invalid on a 200 (defense in depth)", refusing(func(v *testattest.Verdict) { v.SignatureValid = false }), attestationclient.ErrSignatureInvalid},
-		{"report data unchecked", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = nil }), attestationclient.ErrReportDataMismatch},
-		{"report data mismatch on a 200 (defense in depth)", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = &no }), attestationclient.ErrReportDataMismatch},
-		{"launch digest malformed", refusing(func(v *testattest.Verdict) { v.Claims.LaunchDigest = "not-hex" }), attestationclient.ErrInvalidLaunchDigest},
-		{"platform with no verification rules", unsupportedPlatformAttester, attestationclient.ErrUnsupportedPlatform},
+		{"signature invalid on a 200 (defense in depth)", refusing(func(v *mockapi.Verdict) { v.SignatureValid = false }), remote.ErrSignatureInvalid},
+		{"report data unchecked", refusing(func(v *mockapi.Verdict) { v.ReportDataMatch = nil }), remote.ErrReportDataMismatch},
+		{"report data mismatch on a 200 (defense in depth)", refusing(func(v *mockapi.Verdict) { v.ReportDataMatch = &no }), remote.ErrReportDataMismatch},
+		{"launch digest malformed", refusing(func(v *mockapi.Verdict) { v.Claims.LaunchDigest = "not-hex" }), remote.ErrInvalidLaunchDigest},
+		{"platform with no verification rules", unsupportedPlatformAttester, remote.ErrUnsupportedPlatform},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: tc.setup(t)})
@@ -368,7 +381,7 @@ func TestVerifiedSelfHostDataRejectsUnverifiedReport(t *testing.T) {
 
 // refusing builds an attester whose /verify answers a passing verdict with
 // reject applied.
-func refusing(reject func(*testattest.Verdict)) func(*testing.T) string {
+func refusing(reject func(*mockapi.Verdict)) func(*testing.T) string {
 	return func(t *testing.T) string {
 		v := hostDataVerdict(testHostData())
 		reject(&v)
@@ -380,10 +393,10 @@ func refusing(reject func(*testattest.Verdict)) func(*testing.T) string {
 // has no rules for, which is refused before any claim is read.
 func unsupportedPlatformAttester(t *testing.T) string {
 	t.Helper()
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	stub.SetVerdict(hostDataVerdict(testHostData()))
-	stub.SetPlatform(types.Platform("dstack"))
-	return stub.URL
+	stub.SetPlatform(teetypes.PlatformType("dstack"))
+	return stub.URL()
 }
 
 // A 422 refusal is terminal, not an outage.
@@ -424,29 +437,29 @@ func TestVerifiedSelfHostDataTreatsAVerifierOutageAsRetryable(t *testing.T) {
 // RTMR pin is sent), so the mapping is pinned directly.
 func TestClassifyVerifyError(t *testing.T) {
 	apiErr := func(status int) error {
-		return &attestationclient.APIError{Status: status, Response: types.ErrorResponse{Error: "verification_failed"}}
+		return &remote.APIError{Status: status, Response: remote.ErrorResponse{Error: "verification_failed"}}
 	}
 	for _, tc := range []struct {
 		name string
 		err  error
 		want error
 	}{
-		{"signature invalid", attestationclient.ErrSignatureInvalid, errAttestVerdict},
-		{"report data mismatch", attestationclient.ErrReportDataMismatch, errAttestVerdict},
-		{"measurement not allowed", attestationclient.ErrMeasurementNotAllowed, errAttestVerdict},
-		{"launch digest malformed", attestationclient.ErrInvalidLaunchDigest, errAttestVerdict},
-		{"rtmr not allowed", attestationclient.ErrRTMRNotAllowed, errAttestVerdict},
-		{"unsupported platform", attestationclient.ErrUnsupportedPlatform, errAttestVerdict},
+		{"signature invalid", remote.ErrSignatureInvalid, errAttestVerdict},
+		{"report data mismatch", remote.ErrReportDataMismatch, errAttestVerdict},
+		{"measurement not allowed", remote.ErrMeasurementNotAllowed, errAttestVerdict},
+		{"launch digest malformed", remote.ErrInvalidLaunchDigest, errAttestVerdict},
+		{"rtmr not allowed", remote.ErrRTMRNotAllowed, errAttestVerdict},
+		{"unsupported platform", remote.ErrUnsupportedPlatform, errAttestVerdict},
 		{"api 422", apiErr(http.StatusUnprocessableEntity), errAttestVerdict},
 		{"api 400", apiErr(http.StatusBadRequest), errAttestVerdict},
-		{"non-json 422", &attestationclient.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Expected request with `Content-Type: application/json`"}, errAttestVerdict},
-		{"non-json 408", &attestationclient.UnexpectedError{Status: http.StatusRequestTimeout}, errAttestUnavailable},
-		{"non-json 429", &attestationclient.UnexpectedError{Status: http.StatusTooManyRequests}, errAttestUnavailable},
-		{"non-json 503", &attestationclient.UnexpectedError{Status: http.StatusServiceUnavailable, Text: "<html>502 Bad Gateway</html>"}, errAttestUnavailable},
+		{"non-json 422", &remote.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Expected request with `Content-Type: application/json`"}, errAttestVerdict},
+		{"non-json 408", &remote.UnexpectedError{Status: http.StatusRequestTimeout}, errAttestUnavailable},
+		{"non-json 429", &remote.UnexpectedError{Status: http.StatusTooManyRequests}, errAttestUnavailable},
+		{"non-json 503", &remote.UnexpectedError{Status: http.StatusServiceUnavailable, Text: "<html>502 Bad Gateway</html>"}, errAttestUnavailable},
 		{"api 408", apiErr(http.StatusRequestTimeout), errAttestUnavailable},
 		{"api 429", apiErr(http.StatusTooManyRequests), errAttestUnavailable},
 		{"api 500", apiErr(http.StatusInternalServerError), errAttestUnavailable},
-		{"transport", &attestationclient.RequestError{Err: errors.New("connection refused")}, errAttestUnavailable},
+		{"transport", &remote.RequestError{Err: errors.New("connection refused")}, errAttestUnavailable},
 		{"deadline", context.DeadlineExceeded, errAttestUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -463,10 +476,10 @@ func TestClassifyVerifyError(t *testing.T) {
 // the value, not that one leg is derived from the other: when the anchor stops
 // being zero, this test must start asserting derivation.
 func TestVerifiedSelfHostDataBindsTheAnchorItRequested(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	stub.SetVerdict(hostDataVerdict(testHostData()))
 
-	if _, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: stub.URL}); err != nil {
+	if _, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: stub.URL()}); err != nil {
 		t.Fatalf("verifiedSelfHostData: %v", err)
 	}
 
@@ -474,16 +487,18 @@ func TestVerifiedSelfHostDataBindsTheAnchorItRequested(t *testing.T) {
 	if len(attested) != 1 || len(verified) != 1 {
 		t.Fatalf("attest requests = %d, verify requests = %d, want 1 each", len(attested), len(verified))
 	}
-	if verified[0].Params == nil || verified[0].Params.ExpectedReportData == nil {
+	if verified[0].Params == nil || len(verified[0].Params.ExpectedReportData) == 0 {
 		t.Fatal("the verifier was not asked to check any REPORTDATA binding")
 	}
 
-	if n := len(attested[0].ReportData.Bytes()); n != 48 {
+	if n := len(attested[0].ReportData); n != 48 {
 		t.Fatalf("attested report data = %d bytes, want the 48-byte anchor", n)
 	}
-	got := verified[0].Params.ExpectedReportData.Bytes()
-	if !bytes.Equal(got, make([]byte, 64)) {
-		t.Fatalf("expected_report_data = %x, want 64 zero bytes", got)
+	// Both legs carry the same 48-byte anchor: the service zero-extends it
+	// into the 64-byte hardware field before comparing.
+	got := verified[0].Params.ExpectedReportData
+	if !bytes.Equal(got, attested[0].ReportData) {
+		t.Fatalf("expected_report_data = %x, want the anchor the attester was given %x", got, attested[0].ReportData)
 	}
 }
 
@@ -496,16 +511,22 @@ func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		claim []byte
+		tdx   bool
 	}{
-		{"absent", nil},
-		{"tdx mrconfigid with a non-zero tail", bytes.Repeat([]byte{0xaa}, 48)},
-		{"neither width", make([]byte, 40)},
+		{name: "absent", claim: nil},
+		{name: "tdx mrconfigid with a non-zero tail", claim: bytes.Repeat([]byte{0xaa}, 48), tdx: true},
+		{name: "snp host_data at mrconfigid's width", claim: bytes.Repeat([]byte{0xaa}, 48)},
+		{name: "neither width", claim: make([]byte, 40)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := testattest.PassingVerdict("")
+			v := mockapi.PassingVerdict("")
 			v.Claims.InitData = tc.claim
+			attester := attesterWithVerdict
+			if tc.tdx {
+				attester = tdxAttesterWithVerdict
+			}
 
-			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attester(t, v)})
 			if !errors.Is(err, errNoHostDataAnchor) {
 				t.Fatalf("err = %v for claim %q, want errNoHostDataAnchor", err, tc.claim)
 			}
@@ -524,10 +545,10 @@ func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 
-	stub := testattest.New(t)
-	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
+	stub := mockapi.New(t)
+	stub.SetVerifyError(mockapi.VerificationFailed("report signature does not verify"))
 
-	measurements, err := resolveInitDataMeasurements(context.Background(), &Config{AttestationServiceURL: stub.URL})
+	measurements, err := resolveInitDataMeasurements(context.Background(), &Config{AttestationServiceURL: stub.URL()})
 	if !errors.Is(err, errAttestVerdict) {
 		t.Fatalf("err = %v, want the refusal classified as a terminal verdict", err)
 	}
@@ -700,10 +721,10 @@ func TestVerifiedSelfHostDataAcceptsZeroPaddedMRCONFIGID(t *testing.T) {
 	digest := initdata.Digest([]byte("doc"))
 	padded := make([]byte, 48)
 	copy(padded, digest[:])
-	v := testattest.PassingVerdict("")
+	v := mockapi.PassingVerdict("")
 	v.Claims.InitData = padded
 
-	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: tdxAttesterWithVerdict(t, v)})
 	if err != nil {
 		t.Fatalf("verifiedSelfHostData: %v", err)
 	}
@@ -718,7 +739,7 @@ func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 	shortInitDataWait(t, time.Minute, 10*time.Second)
 
 	// MRCONFIGID's width, but not carrying a zero-padded digest.
-	cfg := &Config{AttestationServiceURL: attesterServing(t, bytes.Repeat([]byte{0xaa}, 48))}
+	cfg := &Config{AttestationServiceURL: tdxAttesterWithVerdict(t, hostDataVerdict(bytes.Repeat([]byte{0xaa}, 48)))}
 	rec := &levelRecorder{}
 	start := time.Now()
 	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)

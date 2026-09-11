@@ -1,27 +1,15 @@
 package measurements
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/spf13/cobra"
 )
-
-// manifestSchemaVersion is the confos manifest this command reads. confos
-// rejects other versions rather than migrating, so pin the same one.
-const manifestSchemaVersion = 3
-
-type manifestHeader struct {
-	Version int `json:"version"`
-	Build   struct {
-		Platform string `json:"platform"`
-	} `json:"build"`
-}
 
 func newDeriveCmd() *cobra.Command {
 	var tee, out string
@@ -38,12 +26,12 @@ func newDeriveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			doc, err := measurements.Format(set)
+			doc, err := refvalues.Format(set)
 			if err != nil {
 				return err
 			}
 			// Round-trip so derive can only emit what every component loads.
-			if _, err := measurements.Parse(doc); err != nil {
+			if _, err := refvalues.Parse(doc); err != nil {
 				return fmt.Errorf("derived config is not valid: %w", err)
 			}
 			if out == "" {
@@ -58,34 +46,39 @@ func newDeriveCmd() *cobra.Command {
 	return cmd
 }
 
-func derive(inputs []string, tee string) (measurements.ReferenceValues, error) {
-	if tee != "" && tee != measurements.TEESNP && tee != measurements.TEETDX {
-		return measurements.ReferenceValues{}, fmt.Errorf("--tee %q, want %q or %q", tee, measurements.TEESNP, measurements.TEETDX)
+func derive(inputs []string, tee string) (refvalues.ReferenceValues, error) {
+	var want teetypes.Family
+	if tee != "" {
+		f, err := teetypes.ParseFamily(tee)
+		if err != nil {
+			return refvalues.ReferenceValues{}, fmt.Errorf("--tee %w", err)
+		}
+		want = f
 	}
-	var set measurements.ReferenceValues
+	var set refvalues.ReferenceValues
 	for _, in := range inputs {
 		path, name, err := resolveManifest(in)
 		if err != nil {
-			return measurements.ReferenceValues{}, err
+			return refvalues.ReferenceValues{}, err
 		}
-		platform, err := manifestPlatform(path, tee)
+		family, err := manifestFamily(path, want)
 		if err != nil {
-			return measurements.ReferenceValues{}, err
+			return refvalues.ReferenceValues{}, err
 		}
-		if set.TEE == "" {
-			set.TEE = platform
+		if set.Family == teetypes.FamilyUnknown {
+			set.Family = family
 		}
 		// One file describes one platform: a cluster mixing SNP and TDX
 		// images is not supported.
-		if platform != set.TEE {
-			return measurements.ReferenceValues{}, fmt.Errorf("%s is %s but an earlier input is %s; derive one config per platform", path, platform, set.TEE)
+		if family != set.Family {
+			return refvalues.ReferenceValues{}, fmt.Errorf("%s is %s but an earlier input is %s; derive one config per platform", path, family, set.Family)
 		}
-		entries, err := entriesFor(path, name, platform)
+		images, err := refvalues.FromImageManifest(path, name, family)
 		if err != nil {
-			return measurements.ReferenceValues{}, err
+			return refvalues.ReferenceValues{}, err
 		}
-		fmt.Fprintf(os.Stderr, "%s: %d %s entr%s from %s\n", name, len(entries), platform, plural(len(entries)), path)
-		set.Entries = append(set.Entries, entries...)
+		fmt.Fprintf(os.Stderr, "%s: %d %s entr%s from %s\n", name, len(images), family, plural(len(images)), path)
+		set.Images = append(set.Images, images...)
 	}
 	return set, nil
 }
@@ -115,67 +108,20 @@ func resolveManifest(in string) (path, name string, err error) {
 	return path, filepath.Base(filepath.Dir(abs)), nil
 }
 
-func manifestPlatform(path, tee string) (string, error) {
-	data, err := os.ReadFile(path)
+// manifestFamily resolves the one platform to derive from. A manifest built
+// for both carries two sets of values, so the caller has to say which the
+// cluster runs.
+func manifestFamily(path string, want teetypes.Family) (teetypes.Family, error) {
+	families, err := runtimemeasure.ManifestFamilies(path)
 	if err != nil {
-		return "", fmt.Errorf("read image manifest: %w", err)
+		return teetypes.FamilyUnknown, err
 	}
-	var h manifestHeader
-	if err := json.Unmarshal(data, &h); err != nil {
-		return "", fmt.Errorf("image manifest %s is not a JSON object: %w", path, err)
+	if len(families) == 1 {
+		return families[0], nil
 	}
-	if h.Version != manifestSchemaVersion {
-		return "", fmt.Errorf("image manifest %s is schema version %d, want %d — rebuild with the current confos", path, h.Version, manifestSchemaVersion)
+	if want == teetypes.FamilyUnknown {
+		return teetypes.FamilyUnknown, fmt.Errorf("image manifest %s is built for both platforms; pass --tee %s or --tee %s",
+			path, teetypes.FamilySNP, teetypes.FamilyTDX)
 	}
-	switch h.Build.Platform {
-	case "snp":
-		return measurements.TEESNP, nil
-	case "tdx":
-		return measurements.TEETDX, nil
-	case "multi":
-		if tee == "" {
-			return "", fmt.Errorf("image manifest %s is built for both platforms; pass --tee %s or --tee %s", path, measurements.TEESNP, measurements.TEETDX)
-		}
-		return tee, nil
-	default:
-		return "", fmt.Errorf("image manifest %s has platform %q, want snp, tdx or multi", path, h.Build.Platform)
-	}
-}
-
-func entriesFor(path, name, platform string) ([]measurements.Entry, error) {
-	if platform == measurements.TEESNP {
-		pins, err := runtimemeasure.LoadSNPImageManifest(path)
-		if err != nil {
-			return nil, err
-		}
-		smps := make([]int, 0, len(pins.BySMP))
-		for smp := range pins.BySMP {
-			smps = append(smps, smp)
-		}
-		sort.Ints(smps)
-		out := make([]measurements.Entry, 0, len(smps))
-		for _, smp := range smps {
-			d := pins.BySMP[smp]
-			out = append(out, measurements.Entry{
-				Name:   fmt.Sprintf("%s-smp%d", name, smp),
-				Digest: append([]byte(nil), d[:]...),
-			})
-		}
-		return out, nil
-	}
-
-	pins, err := runtimemeasure.LoadImageManifest(path)
-	if err != nil {
-		return nil, err
-	}
-	// RTMR[0] varies with the VM shape and RTMR[3] is extended at runtime, so
-	// an image pins only RTMR[1] and RTMR[2].
-	return []measurements.Entry{{
-		Name:   name,
-		Digest: append([]byte(nil), pins.MRTD[:]...),
-		RTMRs: map[int][]byte{
-			1: append([]byte(nil), pins.RTMR1[:]...),
-			2: append([]byte(nil), pins.RTMR2[:]...),
-		},
-	}}, nil
+	return want, nil
 }

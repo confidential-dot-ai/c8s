@@ -28,6 +28,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -295,7 +297,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return err
 	}
 	// Normalise c.platform so downstream `ratls.NewServerTLSConfig` /
-	// `NewClientTLSConfig` see a string `ratls.ValidatePlatform` accepts. When
+	// `NewClientTLSConfig` see a string `teetypes.ParseFamily` accepts. When
 	// the operator (or the baked cloudinit.env default) passes
 	// --platform=auto we've now resolved it to a concrete TEE via
 	// /dev/{tdx_guest,sev-guest} probing above; keep the ServerConfig
@@ -402,26 +404,25 @@ func (e guestMesh) start(ctx context.Context, r *meshRuntime) {
 // platform has been resolved to a concrete TEE: the TDX-only warnings key on
 // c.platform.
 func inGuestVerifyPins(c *inGuestConfig, logger *slog.Logger) (*ratls.VerifyPolicy, ratls.Pins, error) {
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := refvalues.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envCDSMeasurements, err)
 	}
-	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
 	if err != nil {
 		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envCDSRTMRs, err)
 	}
-	meshPolicyMeasurements, err := ratls.ParseHexMeasurements(c.meshMeasurements)
+	meshPolicyMeasurements, err := refvalues.ParseHexMeasurements(c.meshMeasurements)
 	if err != nil {
 		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envMeshMeasurements, err)
 	}
-	meshRTMRs, err := ratls.ParseRTMRPinsString(c.meshRTMRs)
+	meshRTMRs, err := refvalues.ParseRTMRPinsString(c.meshRTMRs)
 	if err != nil {
 		return nil, ratls.Pins{}, fmt.Errorf("%s: %w", envMeshRTMRs, err)
 	}
 
 	meshPolicy := &ratls.VerifyPolicy{
-		Measurements:      meshPolicyMeasurements,
-		RTMRs:             meshRTMRs,
+		Policy:            remote.Policy{Measurements: meshPolicyMeasurements, RTMRs: meshRTMRs},
 		AttestationApiURL: c.attestationServiceURL,
 	}
 	if len(meshPolicyMeasurements) == 0 {

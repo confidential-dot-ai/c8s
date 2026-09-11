@@ -23,10 +23,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -59,7 +59,7 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 		},
 		Attestation: types.AttestationDiscovery{
 			Challenge: base64.StdEncoding.EncodeToString(measurementChallenge),
-			Platform:  string(types.PlatformAzSnp),
+			Platform:  string(teetypes.PlatformAzSNP),
 			Evidence:  json.RawMessage(`{"hcl_report":"fake"}`),
 		},
 	})
@@ -104,7 +104,7 @@ func seededAllowlistHandler(t *testing.T) http.HandlerFunc {
 // contract for measurement (the pin itself is unit-tested in localverify).
 func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
-		if len(p.Measurements) > 0 && !attestationclient.MeasurementAllowed(measurement, p.Measurements) {
+		if len(p.Measurements) > 0 && !remote.MeasurementAllowed(measurement, p.Measurements) {
 			return nil, localverify.ErrMeasurementNotAllowed
 		}
 		match := true
@@ -174,8 +174,8 @@ func ratlsCDSServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{
-		TEEType: ratls.TEETypeSEVSNP,
-		Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+		Family: ratls.TEETypeSEVSNP,
+		Report: []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
 	}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestListDirectRATLS(t *testing.T) {
 	var sawVerify bool
 	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		sawVerify = true
-		if platform != string(types.PlatformAzSnp) {
+		if platform != string(teetypes.PlatformAzSNP) {
 			t.Fatalf("platform = %q, want az-snp", platform)
 		}
 		if len(p.ExpectedReportData) != sha512.Size384 {

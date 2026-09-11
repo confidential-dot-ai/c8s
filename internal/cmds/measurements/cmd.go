@@ -5,7 +5,7 @@ package measurements
 import (
 	"fmt"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/spf13/cobra"
 )
 
@@ -28,13 +28,13 @@ func newLintCmd() *cobra.Command {
 		Short: "Check a measurements config for problems",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			set, err := measurements.Load(args[0])
+			set, err := refvalues.Load(args[0])
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "ok: %s, %d image(s)\n", set.TEE, len(set.Entries))
-			for _, e := range set.Entries {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", e.Name, len(e.RTMRs))
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: %s, %d image(s)\n", set.Family, len(set.Images))
+			for _, img := range set.Images {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d register pin(s)\n", img.Name, len(img.RTMRs))
 			}
 			return nil
 		},

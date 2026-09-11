@@ -22,7 +22,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // ratlsServingCert mints a self-signed serving cert carrying an az-snp
@@ -33,15 +32,15 @@ func ratlsServingCert(t *testing.T, notBefore, notAfter time.Time) tls.Certifica
 	if err != nil {
 		t.Fatal(err)
 	}
-	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
+	embedded, err := json.Marshal(teetypes.AttestationEvidence{
+		Platform: teetypes.PlatformAzSNP,
 		Evidence: json.RawMessage(`{"hcl_report":"fake"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: embedded}
-	ext, err := att.MarshalExtension()
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: embedded}
+	ext, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +186,7 @@ func attestedTLSServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)

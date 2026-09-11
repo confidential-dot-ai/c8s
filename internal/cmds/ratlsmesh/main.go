@@ -25,6 +25,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -241,15 +243,15 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	meshPolicy.Entries = pins.Entries
-	if len(meshPolicy.Measurements) > 0 {
-		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
+	meshPolicy.Policy.Images = pins.Images
+	if len(meshPolicy.Policy.Measurements) > 0 {
+		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Policy.Measurements))
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
 	}
-	if len(meshPolicy.RTMRs) > 0 {
-		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.RTMRs))
-	} else if c.platform == "tdx" && len(meshPolicy.Measurements) > 0 {
+	if len(meshPolicy.Policy.RTMRs) > 0 {
+		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.RTMRs))
+	} else if c.platform == "tdx" && len(meshPolicy.Policy.Measurements) > 0 {
 		logger.Warn("no --rtmrs set: TDX measurement pinning covers TDVF firmware only (MRTD); peer guest kernel and rootfs are not pinned")
 	}
 
@@ -281,11 +283,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return err
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := refvalues.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	cdsRTMRs, err := ratls.ParseRTMRPinsString(c.cdsRTMRs)
+	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
@@ -320,7 +322,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
-		CDSEntries:        pins.Entries,
+		CDSImagePins:      pins.Images,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)
@@ -626,11 +628,11 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 // development only).
 func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
-	pins, err := ratls.ParseRTMRPinsString(rtmrs)
+	pins, err := refvalues.ParseRTMRPinsString(rtmrs)
 	if err != nil {
 		return nil, fmt.Errorf("--rtmrs: %w", err)
 	}
-	policy.RTMRs = pins
+	policy.Policy.RTMRs = pins
 	if measurements == "" {
 		return policy, nil
 	}
@@ -644,7 +646,7 @@ func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.Ver
 			return nil, fmt.Errorf("invalid measurement length: %q is %d bytes, want %d (SHA-384 measurement must be %d hex characters)",
 				h, len(b), ratls.SNPMeasurementSize, ratls.SNPMeasurementSize*2)
 		}
-		policy.Measurements = append(policy.Measurements, b)
+		policy.Policy.Measurements = append(policy.Policy.Measurements, b)
 	}
 	return policy, nil
 }
@@ -658,10 +660,6 @@ func effectiveCDSCAURL(certMode, cdsURL string) string {
 
 func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
-	case "sev-snp":
-		return ratls.TEETypeSEVSNP, nil
-	case "tdx":
-		return ratls.TEETypeTDX, nil
 	case "auto":
 		// Probe the guest device tree. Kata's confidential runtimes
 		// pass the TEE device through as /dev/{tdx_guest,sev-guest};
@@ -676,10 +674,13 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 		if _, err := os.Stat("/dev/sev-guest"); err == nil {
 			return ratls.TEETypeSEVSNP, nil
 		}
-		return 0, fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
+		return "", fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
 	case "":
-		return 0, fmt.Errorf("--platform is required")
-	default:
-		return 0, fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
+		return "", fmt.Errorf("--platform is required")
 	}
+	family, err := teetypes.ParseFamily(platform)
+	if err != nil {
+		return "", fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
+	}
+	return family, nil
 }

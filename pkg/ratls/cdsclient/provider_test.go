@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -27,20 +27,20 @@ import (
 
 // mockServers creates test HTTP servers simulating CDS, the attestation
 // service, and the in-process signer.
-func mockServers(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, caBundle ...*x509.Certificate) (cdsSrv, attestSvc, issuer *httptest.Server) {
+func mockServers(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, caBundle ...*x509.Certificate) (cdsSrv *httptest.Server, attestSvc *mockapi.Stub, issuer *httptest.Server) {
 	t.Helper()
 	return mockServersWithLeafValidity(t, caKey, caCert, time.Now(), time.Now().Add(1*time.Hour), caBundle...)
 }
 
 // mockServersWithLeafValidity is mockServers with a caller-chosen validity
 // window on the issued leaf, for tests probing the client's window checks.
-func mockServersWithLeafValidity(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, leafNotBefore, leafNotAfter time.Time, caBundle ...*x509.Certificate) (cdsSrv, attestSvc, issuer *httptest.Server) {
+func mockServersWithLeafValidity(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, leafNotBefore, leafNotAfter time.Time, caBundle ...*x509.Certificate) (cdsSrv *httptest.Server, attestSvc *mockapi.Stub, issuer *httptest.Server) {
 	t.Helper()
 	if len(caBundle) == 0 {
 		caBundle = []*x509.Certificate{caCert}
 	}
 
-	attestSvc = testattest.New(t).Server
+	attestSvc = mockapi.New(t)
 
 	// CDS: authenticate returns challenge, attest verifies and returns cert.
 	// These tests cover the cdsclient HTTP plumbing in isolation; the
@@ -249,7 +249,7 @@ func TestProviderProvision(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -318,7 +318,7 @@ func TestProviderRefreshCABundleAfterProvision(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -370,7 +370,7 @@ func TestProviderProvisionRejectsLeafOutsideValidityWindow(t *testing.T) {
 
 			p, err := NewProvider(&Config{
 				CDSURL:            cdsSrv.URL,
-				AttestationApiURL: attestSvc.URL,
+				AttestationApiURL: attestSvc.URL(),
 				CDSCAURL:          issuer.URL,
 				NodeIP:            "10.0.0.1",
 				TEEType:           ratls.TEETypeSEVSNP,
@@ -589,7 +589,7 @@ func TestProviderProvisionRetainsRotationParentCA(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -620,7 +620,7 @@ func TestProviderProvisionRetainsPreviouslyTrustedPublishedCA(t *testing.T) {
 
 	client := NewClient(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -653,7 +653,7 @@ func TestProviderProvisionDoesNotRetainUntrustedPublishedCA(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -685,7 +685,7 @@ func TestProviderProvisionRetainsMultiGenerationRotationParents(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -719,7 +719,7 @@ func TestProviderProvisionRejectsBundleWhoseFirstCADoesNotSignLeaf(t *testing.T)
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -738,7 +738,7 @@ func TestProviderProvisionRejectsBundleWhoseFirstCADoesNotSignLeaf(t *testing.T)
 func TestProviderProvisionRejectsLeafForDifferentKey(t *testing.T) {
 	caKey, caCert := testCA(t)
 
-	attestSvc := testattest.New(t)
+	attestSvc := mockapi.New(t)
 
 	cdsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -778,7 +778,7 @@ func TestProviderProvisionRejectsLeafForDifferentKey(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -805,7 +805,7 @@ func TestProviderProvisionDoesNotTrustAppendedPublicKeyCloneChain(t *testing.T) 
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -846,7 +846,7 @@ func TestProviderProvisionDoesNotTrustUnauthenticatedAlternateCA(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          publicIssuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -878,7 +878,7 @@ func TestProviderProvisionHonorsCanceledContext(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            cdsSrv.URL,
-		AttestationApiURL: attestSvc.URL,
+		AttestationApiURL: attestSvc.URL(),
 		CDSCAURL:          issuer.URL,
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -1032,8 +1032,8 @@ func TestNewProviderValidation(t *testing.T) {
 		{"missing CDSCAURL", func(c *Config) { c.CDSCAURL = "" }},
 		{"missing NodeIP", func(c *Config) { c.NodeIP = "" }},
 		{"invalid NodeIP", func(c *Config) { c.NodeIP = "not-an-ip" }},
-		{"missing TEEType", func(c *Config) { c.TEEType = 0 }},
-		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEEType(99) }},
+		{"missing TEEType", func(c *Config) { c.TEEType = "" }},
+		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEEType("nitro") }},
 	}
 
 	for _, tt := range tests {

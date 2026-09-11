@@ -63,8 +63,9 @@ can sign a report, and only code inside the TEE ever holds the private key.
 
 ## Anatomy of an RA-TLS certificate
 
-`pkg/ratls` builds certificates like this (`cert.go`, `extension.go`,
-`provider.go`):
+`pkg/ratls` builds certificates like this (`cert.go`, `provider.go`), over the
+extension format in
+[attestation-go/ratls](https://github.com/confidential-dot-ai/attestation-go/tree/main/ratls):
 
 1. **Key generation.** An ECDSA P-256 key pair is generated in process memory.
    It is never written to disk and never leaves the TEE.
@@ -95,26 +96,26 @@ The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 
 | OID | Extension | Stamped by |
 |---|---|---|
-| `…1.1` | RA-TLS attestation (`TEEAttestation`, above) — `extension.go` | the attesting component, on its own certificate and on its CSR |
+| `…1.1` | RA-TLS attestation (`TEEAttestation`) — format owned by attestation-go/ratls, OID assigned here in `pkg/ratls` | the attesting component, on its own certificate and on its CSR |
 | `…1.2` | SHA-256 audit digest of the issuance evidence — `pkg/certutil` | CDS, on every issued leaf |
 | `…1.4` | pod sandbox ID — `sandbox.go`, see [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key) | CDS, on a leaf whose requester presented a sandbox token |
 | `…1.5` | matched workload — `matchedworkload.go`, see [Matched workload](#matched-workload-which-allowlist-entry-is-behind-a-key) | CDS, on a leaf whose sandbox's high-water inventory uniquely matches one allowlist entry |
 
 `…1.3` was the config-claims extension; it is retired and not reusable.
 
-The `report` field carries one of two shapes, auto-detected on parse
-(`extension.go`):
+The `report` field carries one of two shapes, auto-detected on parse by
+attestation-go/ratls, which owns the wire format:
 
-- **Bare-metal SNP**: the raw 1184-byte `ATTESTATION_REPORT`. Kept raw so a
-  bare-metal report stays extractable by offline SNP verifiers.
-- **Everything else** (`az-snp`, `gcp-snp`, `tdx`, `az-tdx`): the attestation-api's
+- **Native SEV-SNP** (`snp`, `gcp-snp`): the raw 1184-byte `ATTESTATION_REPORT`,
+  kept raw so an offline SNP verifier can extract it.
+- **Everything else** (`az-snp`, `tdx`, `gcp-tdx`, `az-tdx`): the attestation-api's
   JSON evidence envelope, forwarded verbatim to `/verify` at handshake time. Both
   TDX shapes must use the envelope (c8s deliberately ships no in-process quote
-  parser — see `verify.go`): native `tdx` carries a bulky `cc_eventlog` that is
+  parser — see `verify.go`): the native ones carry a bulky `cc_eventlog` that is
   stripped before embedding, while Azure-vTPM `az-tdx` (the TD quote wrapped in the
   HCL report, alongside the vTPM quote) has no eventlog and is embedded as-is.
   Azure evidence wrapped in a Hyper-V HCL header is normalized back to the raw
-  report where needed (`snp_report.go`).
+  report where needed.
 
 Certificates live 24h by default and rotate in the background at 50% of TTL.
 While the current certificate is still inside its validity window it keeps
@@ -166,7 +167,7 @@ Step by step:
    handshakes reuse the cached certificate until rotation.
 2. **The client sends no PKI trust anchors.** `NewClientTLSConfig` sets
    `InsecureSkipVerify: true`; `VerifyPeerCertificate` does the work.
-3. **Extension extraction.** Missing extension → `ErrNotAttested`, connection
+3. **Extension extraction.** Missing extension → `ErrNoAttestation`, connection
    refused (unless the CA-chain path applies — see dual verification below).
 4. **Delegated verification.** The verifier computes the REPORTDATA it
    *expects* from the peer certificate's public key, then forwards evidence +
@@ -178,7 +179,7 @@ Step by step:
    attestation-api means no connection (fail closed).
 5. **Measurement policy.** The verified launch digest returned by the
    attestation-api is compared against the caller's allowlist
-   (`VerifyPolicy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
+   (`VerifyPolicy.Policy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
    **empty allowlist accepts any genuine TEE** — deliberate bootstrap
    ergonomics, loudly warned, and unsafe in production.
 6. **mTLS.** Servers configured with a `ClientPolicy` require a client
@@ -187,7 +188,8 @@ Step by step:
 Verification failures map to typed sentinels (`errors.go`):
 `ErrSignatureInvalid` (hardware chain), `ErrKeyBinding` (REPORTDATA mismatch —
 the key was not generated in that TEE), `ErrPolicyViolation` (measurement not
-allowlisted), `ErrNotAttested`, `ErrInvalidReport`, `ErrUnsupportedTEE`.
+allowlisted), `ErrNoAttestation`, `ErrInvalidReport`, `ErrUnsupportedTEE` — the
+last three re-exported from attestation-go/ratls.
 
 ## From self-signed to CA-issued: the CDS regime
 
@@ -323,8 +325,8 @@ What it does **not** guarantee:
   Left empty — the default, warned on a TDX install — the in-cluster pins
   confer **no guest-code identity**: any TD booting the pinned firmware is
   accepted. The RTMR pin is one register set for the whole fleet, not a
-  per-image tuple, and `MinTCBVersion` is still dropped on the TDX path
-  (GAP). Operator-side, `c8s verify --image-manifest` pins the full
+  per-image tuple (GAP). A `Policy.MinTcb` floor names SEV-SNP components, so
+  TDX evidence is refused outright rather than verified under no floor. Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
   `--measurements` rather than combining with it — and `--rtmr 3=`
   (or `--operator-pkey`, which derives the same value from the operator public
@@ -864,8 +866,8 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
 
 ## Reading order for the curious
 
-1. [`pkg/ratls/extension.go`](../pkg/ratls/extension.go) — the binding and the
-   extension format (start here).
+1. [attestation-go/ratls](https://github.com/confidential-dot-ai/attestation-go/tree/main/ratls)
+   — the key binding and the extension wire format (start here).
 2. [`pkg/ratls/tls.go`](../pkg/ratls/tls.go) + [`verify.go`](../pkg/ratls/verify.go)
    — handshake wiring, rotation, dual verification, delegated verification.
 3. [`pkg/attestclient/client.go`](../pkg/attestclient/client.go) — the CDS

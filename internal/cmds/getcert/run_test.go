@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -711,11 +713,11 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Errorf("attestation-api path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode attest request: %v", err)
 		}
-		sawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		sawReportData = append([]byte(nil), req.ReportData...)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"platform":"az-snp","evidence":{"quote":"abc"}}`)
 	}))
@@ -738,8 +740,8 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal extension: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %v, want SEV-SNP", att.TEEType)
+	if att.Family != ratls.TEETypeSEVSNP {
+		t.Fatalf("TEEType = %v, want SEV-SNP", att.Family)
 	}
 }
 
@@ -946,12 +948,11 @@ func startFakeServersRefusing(t *testing.T, issuedChain string, refusals int) (c
 			http.NotFound(w, r)
 			return
 		}
-		// snp evidence must carry attestation_report; the CSR extension
-		// build extracts the raw report bytes for the on-cert form.
-		fakeReport := base64.StdEncoding.EncodeToString([]byte("fake-snp-report"))
+		// snp evidence must carry a full-size attestation_report; the CSR
+		// extension build extracts the raw report bytes for the on-cert form.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"platform": "snp",
-			"evidence": json.RawMessage(`{"attestation_report":"` + fakeReport + `"}`),
+			"evidence": mockapi.FakeSNPEvidence(nil),
 		})
 	}))
 	t.Cleanup(att.Close)
@@ -1009,7 +1010,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 
 func TestObtainCertCDSError(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1059,7 +1060,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 	chain := testIssuedChainPEM(t)
 
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 
@@ -1102,7 +1103,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 
 func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	var calls int

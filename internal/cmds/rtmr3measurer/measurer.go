@@ -8,38 +8,30 @@
 // It is the measurement-only counterpart to policy-monitor (allowlist
 // enforcement); either or both may run.
 //
-// The extend convention is pinned by the runtimemeasure package — verifiers MUST build on that
-// package. Each distinct image is extended exactly once; the dedup log is
-// persisted to tmpfs so a daemon restart cannot re-extend the append-only
-// register. Design and rationale: docs/kata-guest-base.md
-// "Per-workload RTMR[3] measurement".
+// The extend convention and the exactly-once bookkeeping belong to the
+// runtimemeasure package, and a verifier must build on that package. Its
+// [runtimemeasure.Journal] keeps the extended set on tmpfs, so a daemon restart
+// cannot re-extend the append-only register. Design and rationale:
+// docs/kata-guest-base.md "Per-workload RTMR[3] measurement".
 package rtmr3measurer
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
-	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 )
 
-// register is the guest's runtime measurement register. A var (not const) only
-// so tests can point it at a temp file.
-var register = runtimemeasure.TDXRegister(runtimemeasure.DefaultTDXRegisterPath)
-
 const (
 	watchDir = "/run/kata-containers"
-	// statePath is the measured-digest log. /run is tmpfs: it survives a
+	// statePath is the measured-digest journal. /run is tmpfs: it survives a
 	// process restart and is wiped with the VM — the same lifetime as
 	// RTMR[3] itself. The /run/c8s dir is created by tmpfiles.d/c8s.conf.
 	statePath = "/run/c8s/rtmr3-measured"
@@ -47,9 +39,6 @@ const (
 	scanInterval     = 1 * time.Second
 	readDirWarnEvery = 60 // scans between repeated cannot-read-watch-dir warns
 )
-
-// Validates the sha256 hex recorded in the on-disk measurement log.
-var hex64Re = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type ociSpec struct {
 	Annotations map[string]string `json:"annotations"`
@@ -62,17 +51,16 @@ type measurer struct {
 	watchDir  string
 	statePath string
 
-	extend       func(event [runtimemeasure.Size]byte) error
-	readRegister func() ([runtimemeasure.Size]byte, error)
+	// reg is the guest's RTMR[3]; tests inject a temp-file register. journal
+	// holds the correctness-critical dedup — digests already extended, keyed
+	// on digest (not cid) so restarts and replicas of one image extend
+	// exactly once.
+	reg     runtimemeasure.Register
+	journal *runtimemeasure.Journal
 
 	// seenCids: cids already decided, so config.json isn't re-read every
-	// scan; pruned as container dirs disappear. measuredDigests is the
-	// correctness-critical dedup — digests already extended, keyed on digest
-	// (not cid) so restarts/replicas of one image extend exactly once — and
-	// mirrors the statePath log (measuredOrder is its line order).
-	seenCids        map[string]struct{}
-	measuredDigests map[string]struct{}
-	measuredOrder   []string
+	// scan; pruned as container dirs disappear.
+	seenCids map[string]struct{}
 
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
@@ -84,10 +72,7 @@ func newMeasurer(logger *slog.Logger) *measurer {
 		logger:             logger,
 		watchDir:           watchDir,
 		statePath:          statePath,
-		extend:             extendRegister,
-		readRegister:       readRegister,
 		seenCids:           map[string]struct{}{},
-		measuredDigests:    map[string]struct{}{},
 		configReadDeadline: 2 * time.Second,
 		configReadInterval: 50 * time.Millisecond,
 	}
@@ -98,7 +83,7 @@ func Run(_ []string) error {
 	m := newMeasurer(slog.Default())
 	m.logger.Info("rtmr3-measurer starting",
 		"watch_dir", m.watchDir, "state", m.statePath)
-	if err := m.loadState(); err != nil {
+	if err := m.open(); err != nil {
 		return err
 	}
 	// Poll, don't inotify: kata-agent mounts /run/kata-containers after this
@@ -110,63 +95,38 @@ func Run(_ []string) error {
 	}
 }
 
-// loadState reloads the measured-digest log after a daemon restart (RTMR[3]
-// keeps its extends; a fresh in-memory dedup would re-extend and corrupt it)
-// and repairs the one legal divergence: a crash after record() but before the
-// extend landed. The register is readable from the extend sysfs, so it
-// arbitrates which of the two happened.
-func (m *measurer) loadState() error {
-	if err := os.MkdirAll(filepath.Dir(m.statePath), 0o755); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
-	b, err := os.ReadFile(m.statePath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil // first start this boot
-	}
-	if err != nil {
-		return fmt.Errorf("read measured-digest log %s: %w", m.statePath, err)
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+// open resolves RTMR[3] and loads the journal over it. The kata guest VM's
+// register starts at zero — nothing seeds it before this daemon runs — so the
+// unseeded OpenJournal is the right one.
+//
+// A soft anomaly (a skipped malformed line, an unreadable register, a register
+// carrying extends the journal cannot account for) comes back alongside a
+// usable journal: log it and keep measuring, because giving up would leave the
+// guest measuring nothing for the rest of the boot. Only a nil journal is
+// fatal.
+func (m *measurer) open() error {
+	if m.reg == nil {
+		reg, err := runtimemeasure.Open(teetypes.PlatformTDX)
+		if err != nil {
+			return err
 		}
-		if !strings.HasPrefix(line, "sha256:") || !hex64Re.MatchString(strings.TrimPrefix(line, "sha256:")) {
-			m.logger.Warn("ignoring malformed measured-digest log line", "line", line)
-			continue
-		}
-		if _, dup := m.measuredDigests[line]; dup {
-			continue
-		}
-		m.measuredDigests[line] = struct{}{}
-		m.measuredOrder = append(m.measuredOrder, line)
+		m.reg = reg
 	}
-	if len(m.measuredOrder) == 0 {
-		return nil
+	journal, err := runtimemeasure.OpenJournal(m.statePath, m.reg)
+	if journal == nil {
+		return err
 	}
-	m.logger.Info("restart: reloaded measured-digest log", "count", len(m.measuredOrder))
-
-	reg, err := m.readRegister()
-	if err != nil {
-		m.logger.Warn("cannot read RTMR[3] to cross-check the reloaded log; keeping the log as dedup truth",
+	m.journal = journal
+	switch {
+	case errors.Is(err, runtimemeasure.ErrRegisterDiverged):
+		m.logger.Error("RTMR[3] does not match the measured-digest log; this VM's workload attestation will not verify",
 			"error", err)
-		return nil
+	case err != nil:
+		m.logger.Warn("measured-digest log anomaly; measuring continues", "error", err)
 	}
-	if reg == runtimemeasure.FromDigests(m.measuredOrder) {
-		return nil // register and log agree — clean restart
+	if n := len(journal.Digests()); n > 0 {
+		m.logger.Info("restart: reloaded measured-digest log", "count", n)
 	}
-	last := m.measuredOrder[len(m.measuredOrder)-1]
-	if reg == runtimemeasure.FromDigests(m.measuredOrder[:len(m.measuredOrder)-1]) {
-		// Crashed between record and extend: finish the recorded extend.
-		if err := m.extend(runtimemeasure.Event(last)); err != nil {
-			return fmt.Errorf("repair extend of recorded digest %s: %w", last, err)
-		}
-		m.logger.Info("repaired interrupted measurement", "digest", last)
-		return nil
-	}
-	// Matches neither fold: something else extended RTMR[3]. Never re-extend
-	// recorded digests — an extra extend is unrecoverable — just surface it.
-	m.logger.Error("RTMR[3] does not match the measured-digest log; this VM's workload attestation will not verify")
 	return nil
 }
 
@@ -192,7 +152,8 @@ func (m *measurer) scanOnce() {
 	}
 	// Prune decided cids whose dirs are gone (container removed) so the map
 	// cannot grow unbounded in a container-churning guest. Cids are never
-	// reused; measuredDigests intentionally mirrors the register instead.
+	// reused, and the durable dedup is the journal, which mirrors the
+	// register.
 	for cid := range m.seenCids {
 		if _, ok := present[cid]; !ok {
 			delete(m.seenCids, cid)
@@ -227,66 +188,14 @@ func (m *measurer) handle(dir string) {
 		m.logger.Warn("no image digest annotation; not measurable (pin the image by digest)", "cid", cid)
 		return
 	}
-	if _, done := m.measuredDigests[digest]; done {
+	switch extended, err := m.journal.MeasureOnce(digest); {
+	case err != nil:
+		m.logger.Error("extend RTMR[3] failed", "cid", cid, "digest", digest, "error", err)
+	case extended:
+		m.logger.Info("measured workload into RTMR[3]", "cid", cid, "digest", digest)
+	default:
 		m.logger.Info("image already measured into RTMR[3]; skipping duplicate (restart or replica)",
 			"cid", cid, "digest", digest)
-		return
-	}
-	m.measure(cid, digest)
-}
-
-// measure records the digest in the log, then extends. Record-first means a
-// crash between the two can only UNDER-extend — repaired from the register
-// readback at next start — never double-extend, which the append-only
-// register cannot recover from.
-func (m *measurer) measure(cid, digest string) {
-	if err := m.record(digest); err != nil {
-		m.logger.Error("record measured digest failed; not extending",
-			"cid", cid, "digest", digest, "error", err)
-		return
-	}
-	if err := m.extend(runtimemeasure.Event(digest)); err != nil {
-		// Roll the log back so it keeps matching the register and a later
-		// cid with this digest can retry.
-		m.unrecordLast(digest)
-		m.logger.Error("extend RTMR[3] failed", "cid", cid, "digest", digest, "error", err)
-		return
-	}
-	m.measuredDigests[digest] = struct{}{}
-	m.logger.Info("measured workload into RTMR[3]", "cid", cid, "digest", digest)
-}
-
-func (m *measurer) record(digest string) error {
-	f, err := os.OpenFile(m.statePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	_, werr := f.WriteString(digest + "\n")
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	if cerr != nil {
-		return cerr
-	}
-	m.measuredOrder = append(m.measuredOrder, digest)
-	return nil
-}
-
-// unrecordLast rewrites the log without the just-appended digest (atomic via
-// rename; a crash mid-rewrite leaves the recorded-but-not-extended shape the
-// startup repair resolves).
-func (m *measurer) unrecordLast(digest string) {
-	if n := len(m.measuredOrder); n > 0 && m.measuredOrder[n-1] == digest {
-		m.measuredOrder = m.measuredOrder[:n-1]
-	}
-	var sb strings.Builder
-	for _, d := range m.measuredOrder {
-		sb.WriteString(d)
-		sb.WriteByte('\n')
-	}
-	if err := fileutil.WriteAtomic(m.statePath, []byte(sb.String()), 0o600); err != nil {
-		m.logger.Error("rewrite measured-digest log failed", "error", err)
 	}
 }
 
@@ -312,22 +221,4 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 		}
 		time.Sleep(m.configReadInterval)
 	}
-}
-
-// extendRegister folds one event into the guest's runtime measurement register.
-// The register itself, and the fact that a missing node is an error rather than
-// a silent success, are runtimemeasure's business.
-func extendRegister(event [runtimemeasure.Size]byte) error {
-	return register.Extend(event[:])
-}
-
-// readRegister reads the register back, for the restart repair in loadState.
-func readRegister() ([runtimemeasure.Size]byte, error) {
-	var reg [runtimemeasure.Size]byte
-	b, err := register.Extension()
-	if err != nil {
-		return reg, err
-	}
-	copy(reg[:], b)
-	return reg, nil
 }

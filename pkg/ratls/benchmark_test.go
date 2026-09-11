@@ -34,8 +34,8 @@ func BenchmarkReportDataForKeyWithNonce(b *testing.B) {
 func BenchmarkCreateAttestedCert(b *testing.B) {
 	key, reportData, _ := GenerateKeyPair()
 	att := &Attestation{
-		TEEType: TEETypeSEVSNP,
-		Report:  fakeSNPReport(reportData),
+		Family: TEETypeSEVSNP,
+		Report: fakeSNPReport(reportData),
 	}
 	opts := &CertOptions{
 		TTL:      1 * time.Hour,
@@ -50,24 +50,24 @@ func BenchmarkCreateAttestedCert(b *testing.B) {
 func BenchmarkMarshalExtension(b *testing.B) {
 	reportData := [64]byte{1, 2, 3, 4}
 	att := &Attestation{
-		TEEType:   TEETypeSEVSNP,
+		Family:    TEETypeSEVSNP,
 		Report:    fakeSNPReport(reportData),
 		CertChain: []byte("fake-cert-chain-data"),
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		_, _ = att.MarshalExtension()
+		_, _ = MarshalExtension(att)
 	}
 }
 
 func BenchmarkUnmarshalExtension(b *testing.B) {
 	reportData := [64]byte{1, 2, 3, 4}
 	att := &Attestation{
-		TEEType:   TEETypeSEVSNP,
+		Family:    TEETypeSEVSNP,
 		Report:    fakeSNPReport(reportData),
 		CertChain: []byte("fake-cert-chain-data"),
 	}
-	ext, _ := att.MarshalExtension()
+	ext, _ := MarshalExtension(att)
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = UnmarshalExtension(ext.Value)

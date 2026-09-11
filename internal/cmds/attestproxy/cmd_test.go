@@ -11,8 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -64,7 +63,7 @@ func TestProxyForwardsOverSocket(t *testing.T) {
 	}))
 	sock := serveProxy(t, config{upstream: upstream, socketGID: 0})
 
-	if _, err := attestationclient.NewClient("unix://"+sock).Attest(context.Background(), types.AttestRequest{}); err != nil {
+	if _, err := remote.NewClient("unix://"+sock).Attest(context.Background(), remote.AttestRequest{}); err != nil {
 		t.Fatalf("Attest over proxy socket: %v", err)
 	}
 }
@@ -91,8 +90,8 @@ func TestProxySocketPermissions(t *testing.T) {
 func TestProxyReportsUpstreamDown(t *testing.T) {
 	// Nothing listens on the upstream; the proxy must answer 502, not hang.
 	sock := serveProxy(t, config{upstream: "http://127.0.0.1:1", socketGID: 0})
-	_, err := attestationclient.NewClient("unix://" + sock).Health(context.Background())
-	var unexpErr *attestationclient.UnexpectedError
+	_, err := remote.NewClient("unix://" + sock).Health(context.Background())
+	var unexpErr *remote.UnexpectedError
 	if err == nil {
 		t.Fatal("Health succeeded against a dead upstream")
 	}

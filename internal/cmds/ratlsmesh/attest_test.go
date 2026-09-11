@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 )
 
@@ -18,8 +18,8 @@ func TestMakeAttestFunc_ReportDataSize(t *testing.T) {
 	// (48-byte SHA-384 hash + 16 zero bytes). makeAttestFunc must send
 	// only the 48-byte hash to the attestation-api, NOT the full
 	// 64-byte padded array. Sending 64 bytes causes TPM_RC_SIZE on vTPMs.
-	stub := testattest.New(t)
-	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
+	stub := mockapi.New(t)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL())
 
 	// Build a 64-byte hex string (like SelfSignedProvider.Provision does).
 	var reportData [64]byte
@@ -35,7 +35,7 @@ func TestMakeAttestFunc_ReportDataSize(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("/attest calls = %d, want 1", len(reqs))
 	}
-	if got := len(reqs[0].ReportData.Bytes()); got != sha512.Size384 {
+	if got := len(reqs[0].ReportData); got != sha512.Size384 {
 		t.Errorf("attestation-api received %d bytes, want %d (SHA-384 hash only, no zero padding)", got, sha512.Size384)
 	}
 }
@@ -44,8 +44,8 @@ func TestMakeAttestFunc_ReportDataNotZeroPadded(t *testing.T) {
 	// Regression test: even when the SHA-384 hash contains trailing bytes
 	// that happen to be non-zero, the sent data must be exactly sha512.Size384
 	// bytes, no more and no less.
-	stub := testattest.New(t)
-	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
+	stub := mockapi.New(t)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL())
 
 	// Create report data where the hash fills all 48 bytes.
 	var reportData [64]byte
@@ -62,7 +62,7 @@ func TestMakeAttestFunc_ReportDataNotZeroPadded(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("/attest calls = %d, want 1", len(reqs))
 	}
-	receivedBytes := reqs[0].ReportData.Bytes()
+	receivedBytes := reqs[0].ReportData
 	if len(receivedBytes) != sha512.Size384 {
 		t.Fatalf("received %d bytes, want %d", len(receivedBytes), sha512.Size384)
 	}

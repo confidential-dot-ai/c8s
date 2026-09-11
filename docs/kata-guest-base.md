@@ -224,13 +224,16 @@ CVMs that command targets.
 **Dedup and restart safety.** RTMR[3] is hardware-append-only, so each
 DISTINCT image must extend exactly once: restarts and replicas (same
 image, new container id) are collapsed, else the register matches no
-golden value and the pod is unverifiable. The dedup log lives at
+golden value and the pod is unverifiable. That bookkeeping is
+`runtimemeasure.Journal`, one canonical digest per line at
 `/run/c8s/rtmr3-measured` — tmpfs, so it survives a daemon restart
 (`Restart=always`) but is wiped with the VM, exactly RTMR[3]'s
-lifetime. The daemon records a digest to the log *before* extending: a
-crash between the two can only under-extend, which startup repairs by
-reading the register back and comparing it against the log's fold
-(never the reverse — an extra extend is unrecoverable).
+lifetime. The journal records a digest *before* extending, so a crash
+between the two can only under-extend, which `OpenJournal` repairs by
+reading the register back and comparing it against the journal's fold
+(never the reverse — an extra extend is unrecoverable). A register that
+folds to neither is a divergence: the daemon logs it and stops
+extending rather than adding events no verifier accepts.
 
 **Scan, not inotify.** kata-agent sets up `/run/kata-containers` as its
 own mount after the daemon starts at boot; an inotify watch added early

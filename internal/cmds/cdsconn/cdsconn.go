@@ -22,10 +22,10 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // EnvOperatorKey supplies the operator private key when the flag is unset.
@@ -133,7 +133,7 @@ func (o *Options) loadMeasurements() ([][]byte, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	return ratls.ParseHexMeasurementsList(hexes)
+	return refvalues.ParseHexMeasurementsList(hexes)
 }
 
 // Signer builds the operator credential from the flag or the environment. The
