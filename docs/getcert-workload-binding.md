@@ -341,6 +341,11 @@ Two inventory behaviours that still matter here:
   empty one and its sandbox answers closed until some later record resolves
   that container — in practice the next `Synchronize` replay, not the deferred
   check, which replays only what `Synchronize` listed.
+  On the measured node image the same replay carries a second job: with
+  `policy.fatal_existing` the plugin separates its first registration since
+  boot, where no container may exist at all, from a restart, where the
+  containers it finds are re-checked and an unknown one powers the node off
+  instead of being killed. See `internal/cmds/nri-image-policy/bootgate.go`.
 - **A check that denies one of the containers.** The `c8s-cert` image sits in
   the plugin's base allowlist, so the check always admits it; a tenant app
   image does not, and a check running after the allowlist changed can deny one.

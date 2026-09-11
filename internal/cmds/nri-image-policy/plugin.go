@@ -131,6 +131,12 @@ type plugin struct {
 	// lifecycle callback over bookkeeping.
 	inventory *admissionInventory
 
+	// boot is the boot gate: nil unless policy.fatal_existing. See
+	// bootgate.go. bootRestart records that this registration is a plugin
+	// restart, which makes the startup check's denials fatal.
+	boot        *bootGate
+	bootRestart atomic.Bool
+
 	// Deferred check: pods/containers observed during Synchronize before
 	// the plugin is ready, replayed once the cache has a allowlist.
 	deferredMu   sync.Mutex
@@ -152,6 +158,7 @@ func newPlugin(
 		logger:     logger,
 		containerd: ctrd,
 	}
+	p.boot = newBootGate(cfg, logger)
 	if cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
 		if procRoot == "" {
@@ -626,6 +633,13 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 		}
 	}
 
+	// Ahead of every other decision: on a node image a container that already
+	// exists means admission was not in place when it started The
+	// call does not return when that is what happened.
+	if p.boot.check(ctx, p, pods, ctrs) {
+		p.bootRestart.Store(true)
+	}
+
 	// Load or capture the exempt-namespace snapshot from this connect-time set,
 	// before any container check reads it and regardless of readiness.
 	p.initExempt(ctx, pods, ctrs)
@@ -687,6 +701,12 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 		// enforce_existing off: the check only feeds the inventory.
 		if cfg.Policy.Mode == ModeAudit || !cfg.Policy.EnforceExisting {
 			continue
+		}
+		// A restart of the gated plugin found a running container the current
+		// allowlist does not admit. It has already run, so stopping it proves
+		// nothing about what it did. Does not return.
+		if p.escalateOnRestart() {
+			p.boot.fatalExisting(pod, ctr)
 		}
 
 		if err := p.containerd.StopContainer(ctx, ctr.GetId()); err != nil {
