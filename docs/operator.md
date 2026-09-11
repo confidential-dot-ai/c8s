@@ -306,8 +306,8 @@ poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
 (an RWO PVC); otherwise re-apply the entries after any CDS restart. The
 chart-seeded component entries are unaffected — they are re-seeded and, unlike
-dynamic entries, are also admitted from the plugin's boot floor. The restart also
-resets the allowlist version counter, and
+dynamic entries, are also admitted from the plugin's base allowlist. The restart
+also resets the allowlist version counter, and
 every enforcer ignores a served version at or below the one it last applied
 (`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
 that had applied version N stays on that policy until the restarted

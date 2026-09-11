@@ -62,14 +62,14 @@ type workloadClaimsConfig struct {
 
 // allowlistConfig groups the digest-source mechanisms.
 //
-// Floor is a static baseline in the allowlist document format, admitted ahead
-// of every pulled snapshot: the chart renders it with any-argv entries
-// (self-allowing the installer + the CDS digest, so a floor-rewrite roll
+// Base is a static baseline in the allowlist document format, admitted ahead
+// of every pulled snapshot: the chart renders it with permissive workloads
+// (self-allowing the installer + the CDS digest, so a base-rewrite roll
 // admits the new images without a network round-trip). Pull is the
 // runtime-update source: every plugin polls CDS.
 type allowlistConfig struct {
-	Floor *allowlist.Allowlist `yaml:"floor"`
-	Pull  pullConfig           `yaml:"pull"`
+	Base *allowlist.Allowlist `yaml:"base"`
+	Pull pullConfig           `yaml:"pull"`
 }
 
 // pullConfig configures the CDS polling source.
@@ -192,9 +192,9 @@ func parseConfig(data []byte) (*config, error) {
 	cfg.Allowlist.Pull.CDSMeasurements = foldHexPins(cfg.Allowlist.Pull.CDSMeasurements)
 	cfg.Allowlist.Pull.CDSRTMRs = foldHexPins(cfg.Allowlist.Pull.CDSRTMRs)
 
-	if cfg.Allowlist.Floor != nil {
-		if err := cfg.Allowlist.Floor.Normalize(); err != nil {
-			return nil, fmt.Errorf("allowlist.floor: %w", err)
+	if cfg.Allowlist.Base != nil {
+		if err := cfg.Allowlist.Base.Normalize(); err != nil {
+			return nil, fmt.Errorf("allowlist.base: %w", err)
 		}
 	}
 
@@ -236,14 +236,14 @@ func (c *config) NormalizedPlatform() string {
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
-// floorEnabled reports whether the boot floor carries any workload.
-func (c *config) floorEnabled() bool {
-	return c.Allowlist.Floor != nil && len(c.Allowlist.Floor.Workloads) > 0
+// baseEnabled reports whether the base allowlist carries any workload.
+func (c *config) baseEnabled() bool {
+	return c.Allowlist.Base != nil && len(c.Allowlist.Base.Workloads) > 0
 }
 
 // AllowlistEnabled reports whether any digest-based enforcement is active.
 func (c *config) AllowlistEnabled() bool {
-	return c.PullEnabled() || c.floorEnabled()
+	return c.PullEnabled() || c.baseEnabled()
 }
 
 // Validate checks the configuration for errors.
@@ -255,8 +255,8 @@ func (c *config) Validate() error {
 	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
 	}
-	if c.PullEnabled() && !c.floorEnabled() {
-		return fmt.Errorf("allowlist.floor must carry at least one workload when pull is configured (cold-boot baseline)")
+	if c.PullEnabled() && !c.baseEnabled() {
+		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")
 	}
 	if c.PullEnabled() {
 		if c.Allowlist.Pull.Timeout <= 0 {
@@ -285,13 +285,13 @@ func (c *config) Validate() error {
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {
-		return fmt.Errorf("set allowlist.floor (required when pull is enabled) or configure policy.label_rules")
+		return fmt.Errorf("set allowlist.base (required when pull is enabled) or configure policy.label_rules")
 	}
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
 	}
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
-		return fmt.Errorf("workload_claims.socket_dir requires allowlist.floor or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.base or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
 	}
 	if len(c.Policy.ExemptNamespaces) > 0 && c.Policy.ExemptSnapshotPath == "" {
 		return fmt.Errorf("policy.exempt_namespaces requires policy.exempt_snapshot_path: the captured digest set must persist across restarts")

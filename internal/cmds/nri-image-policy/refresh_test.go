@@ -60,11 +60,11 @@ func canonicalBody(t *testing.T, al *allowlist.Allowlist) []byte {
 	return b
 }
 
-// admitsDigest mirrors the plugin's admission order: the floor first, then the
-// served index.
+// admitsDigest mirrors the plugin's admission order: the base allowlist
+// first, then the served index.
 func admitsDigest(store *policyStore, digest string) bool {
 	snap := store.current()
-	return store.floorAdmits(digest, nil) || (snap != nil && snap.index.AdmitsDigest(digest))
+	return store.baseAdmits(digest, nil) || (snap != nil && snap.index.AdmitsDigest(digest))
 }
 
 func TestStartupSourceMode(t *testing.T) {
@@ -81,11 +81,11 @@ func TestStartupSourceMode(t *testing.T) {
 			want: "pull",
 		},
 		{
-			name: "floor only",
+			name: "base only",
 			cfg: &config{Allowlist: allowlistConfig{
-				Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"}),
+				Base: anyAllowlist(map[string]string{pushDigestA: "image-a"}),
 			}},
-			want: "floor",
+			want: "base",
 		},
 		{
 			name: "label rules only",
@@ -95,16 +95,16 @@ func TestStartupSourceMode(t *testing.T) {
 			want: "label_rules",
 		},
 		{
-			name: "floor and label rules",
+			name: "base and label rules",
 			cfg: &config{
 				Allowlist: allowlistConfig{
-					Floor: anyAllowlist(map[string]string{pushDigestA: "image-a"}),
+					Base: anyAllowlist(map[string]string{pushDigestA: "image-a"}),
 				},
 				Policy: policyConfig{
 					LabelRules: []labelRule{{Name: "require-tenant"}},
 				},
 			},
-			want: "floor+label_rules",
+			want: "base+label_rules",
 		},
 	}
 
@@ -326,7 +326,7 @@ func TestPullLoop5xxLeavesIndexUntouched(t *testing.T) {
 	<-done
 }
 
-func TestPullLoopKeepsTheFloorBesidePulled(t *testing.T) {
+func TestPullLoopKeepsTheBaseBesidePulled(t *testing.T) {
 	srv := httptest.NewServer(&flippingHandler{
 		versions: []string{"1"},
 		bodyByV:  map[string][]byte{"1": canonicalBody(t, anyAllowlist(map[string]string{pushDigestB: "pulled-image"}))},
@@ -360,7 +360,7 @@ func TestPullLoopKeepsTheFloorBesidePulled(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("floor entry lost after pull")
+		t.Fatal("base entry lost after pull")
 	}
 
 	cancel()
@@ -462,7 +462,7 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 		t.Fatal("store missing pulled entry")
 	}
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("store missing floor entry")
+		t.Fatal("store missing base entry")
 	}
 }
 
@@ -493,13 +493,13 @@ func TestPullInitialFailsAfterMaxRetries(t *testing.T) {
 		t.Fatal("expected error after max retries against a 5xx server")
 	}
 	// A fetch failure must NOT look like a dead plugin: run() degrades to
-	// the floor on a fetch failure but stays fatal on errPluginDied.
+	// the base allowlist on a fetch failure but stays fatal on errPluginDied.
 	if errors.Is(err, errPluginDied) {
 		t.Fatalf("fetch failure misclassified as errPluginDied: %v", err)
 	}
-	// The floor still enforces after the failure.
+	// The base allowlist still enforces after the failure.
 	if !admitsDigest(store, pushDigestA) {
-		t.Fatal("floor lost after failed initial pull")
+		t.Fatal("base allowlist lost after failed initial pull")
 	}
 }
 

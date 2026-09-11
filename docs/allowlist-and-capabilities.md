@@ -282,10 +282,10 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
-Each enforcer also carries a **local seed** that admits by digest alone ahead of
-the served document and is never touched by a pull: the host NRI plugin's
-`allowlist.floor` (an allowlist document baked into its boot config, chart-rendered
-from the chart's own component digests plus every
+Each enforcer also carries a **base enforcement allowlist** that admits by
+digest alone ahead of the served document and is never touched by a pull: the
+host NRI plugin's `allowlist.base` (an allowlist document baked into its boot
+config, chart-rendered from the chart's own component digests plus every
 `bootstrapAllowlist.workloads` container admitted under any command and args).
 That is what lets a node enforce at t=0 offline and bring the platform's own images
 up before CDS is reachable.
@@ -298,7 +298,7 @@ component digest becomes one entry named `<image basename>-<first 12 hex of
 digest>` with a single container under `command: any, args: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
 rendered seed. Operator entries admitting a digest under any command and args
-also feed the host plugin's boot floor; an entry that pins a command line
+also feed the host plugin's base allowlist; an entry that pins a command line
 is seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
@@ -338,7 +338,7 @@ same name (`<image basename>-<first 12 hex of digest>`), so a later chart bump
 that derives the digest adds nothing.
 
 Deleting a chart-seeded component entry does not lock its image out: the NRI
-plugin's boot floor still admits it. To block a
+plugin's base allowlist still admits it. To block a
 compromised component image, roll the chart with the bad digest replaced.
 
 ### Editing and applying

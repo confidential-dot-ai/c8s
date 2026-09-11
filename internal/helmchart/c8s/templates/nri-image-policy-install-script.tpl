@@ -241,7 +241,7 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.floor is the boot floor that pins the
+runs pull mode (polls CDS); allowlist.base is the base allowlist that pins the
 install image + CDS digest so chart upgrades can roll.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
@@ -275,16 +275,16 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-  floor:
+  base:
     {{- /* Self-allow the installer image (load-bearing when
-           bootstrapAllowlist.deriveComponents=false, where c8s.floorWorkloads
-           omits it), then merge the rest of the floor. */ -}}
+           bootstrapAllowlist.deriveComponents=false, where c8s.baseWorkloads
+           omits it), then merge the rest of the base allowlist. */ -}}
     {{- $selfDigest := required "image.digest is required (chart self-allow for installer rollouts)" $root.Values.nriImagePolicy.image.digest -}}
     {{- $selfImage := printf "%s@%s" $root.Values.nriImagePolicy.image.repository $selfDigest -}}
     {{- $selfContainer := dict "digest" $selfDigest "image" $selfImage "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
-    {{- $floor := include "c8s.floorWorkloads" $root | fromJson -}}
-    {{- $_ := set $floor (include "c8s.digestWorkloadName" (dict "digest" $selfDigest "image" $selfImage)) (dict "label" $selfImage "initContainers" list "containers" (list $selfContainer)) -}}
-    {{- dict "schema" "c8s.allowlist/v1" "workloads" $floor | toYaml | nindent 4 }}
+    {{- $base := include "c8s.baseWorkloads" $root | fromJson -}}
+    {{- $_ := set $base (include "c8s.digestWorkloadName" (dict "digest" $selfDigest "image" $selfImage)) (dict "label" $selfImage "initContainers" list "containers" (list $selfContainer)) -}}
+    {{- dict "schema" "c8s.allowlist/v1" "workloads" $base | toYaml | nindent 4 }}
 containerd:
   socket: {{ include "nri-image-policy.containerdSocket" $root | quote }}
   namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}

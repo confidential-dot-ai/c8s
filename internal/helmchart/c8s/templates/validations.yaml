@@ -48,14 +48,14 @@
 
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
 {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}
-{{- fail "VALIDATION_ERROR kind=cds_image_digest: nriImagePolicy.enabled requires cds.image.digest to be set. The CDS digest is pinned in every plugin's boot floor so image policy admits CDS on its own node. A floating tag cannot be admitted by digest. Pass --resolve-digests to c8s install, or set cds.image.digest via -f." -}}
+{{- fail "VALIDATION_ERROR kind=cds_image_digest: nriImagePolicy.enabled requires cds.image.digest to be set. The CDS digest is pinned in every plugin's base allowlist so image policy admits CDS on its own node. A floating tag cannot be admitted by digest. Pass --resolve-digests to c8s install, or set cds.image.digest via -f." -}}
 {{- end -}}
 {{- /*
   In fail-closed mode with deriveComponents off, every enabled c8s component
   that is digest-pinned must be admitted under any command and args by a
   bootstrapAllowlist.workloads entry — otherwise the NRI plugin would deny that
   component's pod on its own node. cds.image is exempt: it is always in
-  the floor via the seed self-entry, independent of derivation. This guard
+  the base allowlist via the seed self-entry, independent of derivation. This guard
   only applies in fail-closed mode (the default); audit mode creates every
   container, but with workloadClaims on a would-be denial still reaches
   /digests and costs its sandbox a certificate.

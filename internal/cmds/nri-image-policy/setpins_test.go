@@ -13,9 +13,9 @@ const (
 	pinB = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 )
 
-// bakedConfig mirrors the shape the node image ships: a floor whose digests
-// only the image build knows, and empty CDS pins.
-const bakedConfig = `# nri-image-policy boot config — the MEASURED boot-time floor.
+// bakedConfig mirrors the shape the node image ships: a base allowlist whose
+// digests only the image build knows, and empty CDS pins.
+const bakedConfig = `# nri-image-policy boot config — the MEASURED boot-time base allowlist.
 platform: "snp"
 
 plugin:
@@ -27,7 +27,7 @@ workload_claims:
   advertise_host: ""
 
 allowlist:
-  floor:
+  base:
     schema: c8s.allowlist/v1
     workloads:
       busybox-fd8d9aa63ba2:
@@ -99,9 +99,10 @@ func TestSetCDSPinsPreservesFileMode(t *testing.T) {
 	}
 }
 
-// The pins land and the baked floor — which the chart cannot re-render, because
-// only the image build resolves the RKE2 system digests — survives untouched.
-func TestSetCDSPinsKeepsTheBakedFloor(t *testing.T) {
+// The pins land and the baked base allowlist — which the chart cannot
+// re-render, because only the image build resolves the RKE2 system digests —
+// survives untouched.
+func TestSetCDSPinsKeepsTheBakedBase(t *testing.T) {
 	path := writeConfig(t, bakedConfig)
 
 	if got := setPins(t, path, "--cds-measurements", pinA+","+pinB); got != pinsUpdated {
@@ -119,13 +120,13 @@ func TestSetCDSPinsKeepsTheBakedFloor(t *testing.T) {
 	if got := cfg.Allowlist.Pull.CDSMeasurements; len(got) != 2 || got[0] != pinA || got[1] != pinB {
 		t.Errorf("cds_measurements = %v, want [%s %s]", got, pinA, pinB)
 	}
-	if len(cfg.Allowlist.Floor.Workloads) != 2 {
-		t.Errorf("floor = %v, want the 2 baked entries", cfg.Allowlist.Floor.Workloads)
+	if len(cfg.Allowlist.Base.Workloads) != 2 {
+		t.Errorf("base = %v, want the 2 baked entries", cfg.Allowlist.Base.Workloads)
 	}
 	if cfg.Platform != "snp" || cfg.WorkloadClaims.SocketDir != "/var/run/nri-image-policy" {
 		t.Errorf("patch disturbed unrelated keys: platform=%q socket_dir=%q", cfg.Platform, cfg.WorkloadClaims.SocketDir)
 	}
-	if !strings.Contains(string(data), "MEASURED boot-time floor") {
+	if !strings.Contains(string(data), "MEASURED boot-time base allowlist") {
 		t.Errorf("patch dropped the config's comments:\n%s", data)
 	}
 }

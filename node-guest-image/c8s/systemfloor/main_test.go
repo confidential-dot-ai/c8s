@@ -141,8 +141,8 @@ func TestRender_DedupesAliasedDigests(t *testing.T) {
 }
 
 // The rendered block must decode as an allowlist document whose entries admit
-// their digest under any argv — the shape the plugin's boot floor loads.
-func TestRender_ParsesAsFloorWorkloads(t *testing.T) {
+// their digest under any argv — the shape the plugin's base allowlist loads.
+func TestRender_ParsesAsBaseWorkloads(t *testing.T) {
 	digestA := "sha256:" + strings.Repeat("a", 64)
 	out, err := render([]entry{{digest: digestA, ref: "example.com/a:1"}})
 	if err != nil {
