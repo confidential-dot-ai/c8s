@@ -56,6 +56,7 @@ mkdir -p "$WORK"
 
 # Production pieces, installed exactly where the image puts them.
 for p in etc/systemd/system/rke2-role.service \
+         etc/systemd/system/apparmor-enforce.service \
          etc/systemd/system/rke2-server.service.d/20-role.conf \
          etc/systemd/system/rke2-agent.service.d/20-role.conf \
          etc/systemd/system/rke2-agent.service.d/no-modprobe.conf \
@@ -64,6 +65,27 @@ for p in etc/systemd/system/rke2-role.service \
     install -D -m644 "$EXTRA/$p" "/$p"
 done
 install -D -m755 "$EXTRA/usr/local/bin/rke2-role.sh" /usr/local/bin/rke2-role.sh
+
+# Exercise the production dependency/preset wiring without changing the
+# test host's AppArmor policy or letting FailureAction power it off. The
+# isolated apparmor-enforce-test.sh separately executes the unchanged probe.
+install -D -m644 /dev/stdin /etc/systemd/system/apparmor-enforce.service.d/test.conf <<'EOF'
+[Unit]
+FailureAction=none
+[Service]
+ExecStart=
+ExecStart=/bin/test ! -e /run/apparmor-enforce-test-fail
+EOF
+install -D -m644 /dev/stdin "$UNITDIR/apparmor.service" <<'EOF'
+[Unit]
+Description=fake stock AppArmor loader
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # Fake rke2 payloads in the tarball's unit dir: gating, not rke2, is under
 # test.
@@ -94,6 +116,7 @@ assert_role_won() {
     local win=$1 lose=rke2-agent
     if [[ $win == rke2-agent ]]; then lose=rke2-server; fi
     ok "dispatch active" active rke2-role
+    ok "AppArmor gate active" active apparmor-enforce
     ok "$win active" active "$win"
     ok "$lose not active" not_active "$lose"
     ok "$lose was condition-skipped" cond_skipped "$lose"
@@ -101,8 +124,9 @@ assert_role_won() {
 }
 
 scenario_reset() {
-    systemctl stop rke2-agent rke2-server rke2-role >/dev/null 2>&1 || true
+    systemctl stop rke2-agent rke2-server rke2-role apparmor-enforce >/dev/null 2>&1 || true
     systemctl reset-failed >/dev/null 2>&1 || true
+    rm -f /run/apparmor-enforce-test-fail
     release_disk
     rm -rf "$RUN" "$FRAGDIR"
     systemd-tmpfiles --create /etc/tmpfiles.d/confos-rke2.conf >/dev/null 2>&1 || true
@@ -110,10 +134,17 @@ scenario_reset() {
 
 # ---------------------------------------------------------------- bake parity
 CASE="preset"
-ok "preset applies to the role-gated trio" \
-   systemctl preset rke2-role.service rke2-server.service rke2-agent.service
-for u in rke2-role rke2-server rke2-agent; do
+systemctl enable apparmor.service >/dev/null 2>&1
+ok "preset applies to roles and AppArmor services" \
+   systemctl preset rke2-role.service rke2-server.service rke2-agent.service apparmor-enforce.service apparmor.service
+for u in rke2-role rke2-server rke2-agent apparmor-enforce; do
     ok "$u enabled by preset" systemctl is-enabled --quiet "$u.service"
+done
+ok "preset disables the stock AppArmor loader" \
+   test "$(systemctl is-enabled apparmor.service 2>/dev/null || true)" = disabled
+for role in server agent; do
+    ok "AppArmor is required by rke2-$role" \
+       test -L "/etc/systemd/system/rke2-$role.service.requires/apparmor-enforce.service"
 done
 CASE="tmpfiles"
 systemd-tmpfiles --create /etc/tmpfiles.d/confos-rke2.conf >/dev/null 2>&1 || true
@@ -154,6 +185,18 @@ ok "dispatch unit failed (visible)" unit_failed rke2-role
 ok "server not active" not_active rke2-server
 ok "agent not active" not_active rke2-agent
 ok "no verdict staged" bash -c "test ! -e $RUN/role-server && test ! -e $RUN/role-agent"
+
+# ---------------------------------------------------------------- boot: AppArmor failure
+for role in server agent; do
+    CASE="boot-$role-AppArmor-failure"
+    scenario_reset
+    "${role}_dir" "$WORK/d"; make_iso "$WORK/d"
+    touch /run/apparmor-enforce-test-fail
+    ok "failed AppArmor gate blocks boot" not boot_roles
+    ok "AppArmor failure visible" unit_failed apparmor-enforce
+    ok "server not active" not_active rke2-server
+    ok "agent not active" not_active rke2-agent
+done
 
 # ---------------------------------------------------------------- restart, same disk
 CASE="restart-same-disk"

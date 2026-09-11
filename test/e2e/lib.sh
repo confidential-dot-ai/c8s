@@ -8,14 +8,20 @@
 # the convention CI greps for, so keep both scripts on this one definition.
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# cw_namespace creates <ns> if missing and enforces the current Restricted
-# profile. Credential sidecars receive their claims socket through NRI, so
+# cw_namespace creates a new namespace with the current Restricted profile.
+# Refuse to adopt an existing namespace: callers may clean up only one they
+# created. Credential sidecars receive their claims socket through NRI, so
 # confidential workloads need no PodSecurity exemption.
 cw_namespace() {
-  kubectl create namespace "$1" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl label namespace "$1" --overwrite \
+  CW_NAMESPACE_CREATED=
+  kubectl create namespace "$1" >/dev/null || return
+  CW_NAMESPACE_CREATED=$1
+  kubectl label namespace "$1" \
     pod-security.kubernetes.io/enforce=restricted \
     pod-security.kubernetes.io/enforce-version=latest \
     pod-security.kubernetes.io/warn=restricted \
     pod-security.kubernetes.io/audit=restricted >/dev/null
 }
+
+# cw_namespace_owned lets cleanup check ownership without adopting old state.
+cw_namespace_owned() { [ "${CW_NAMESPACE_CREATED:-}" = "$1" ]; }

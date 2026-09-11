@@ -1,0 +1,101 @@
+# Automatic-only exact-image acceptance. Do not add dispatch-capable callers:
+# staged/manual testing belongs to tdx-metal-e2e.yml, which shares only the
+# lifecycle action, never this verified-source checkout boundary.
+name: TDX published-image acceptance
+on:
+  workflow_call:
+    inputs:
+      image_acceptance_artifact:
+        description: 'Immutable evidence from this publication run and attempt.'
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: tdx-metal-e2e
+  cancel-in-progress: false
+env:
+  NS: confai-images
+  REFS_CM: tdx-rke2-image-refs
+  VM: c8s-tdx-${{ github.run_id }}-${{ github.run_attempt }}
+jobs:
+  source:
+    # Exact-image mode executes the publisher's source commit on a launcher
+    # with cluster access. Enforce the trust boundary here, not just in the
+    # current caller, before allocating that runner.
+    # A hosted preflight proves Git ancestry without executing build-source code.
+    if: >-
+      inputs.image_acceptance_artifact != '' &&
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Fetch trusted main history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - name: Verify source provenance
+        id: source
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [ "${#SOURCE_SHA}" -eq 40 ]
+          case "$SOURCE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          printf 'sha=%s\n' "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: source
+    name: cvm (tdx-metal/rke2-node)
+    runs-on: cvm-launcher-tdx
+    timeout-minutes: 65
+    steps:
+      - name: Check out the trusted published build
+        if: >-
+          inputs.image_acceptance_artifact != '' &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.source.outputs.sha }}
+
+      - name: Download this publication's image acceptance evidence
+        if: inputs.image_acceptance_artifact != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.image_acceptance_artifact }}
+          path: ${{ runner.temp }}/tdx-image-acceptance
+
+      - name: Validate the exact image build and workflow identity
+        if: inputs.image_acceptance_artifact != ''
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          bash .github/scripts/tdx-image-acceptance.sh validate \
+            "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          cp "$RUNNER_TEMP/tdx-image-acceptance/manifest.json" /tmp/image-manifest.json
+          echo "rootPvc=$VM-root" >> "$GITHUB_ENV"
+
+      - name: Test the exact published image
+        uses: ./.github/actions/tdx-metal-e2e
+        with:
+          exact_image: 'true'

@@ -42,15 +42,25 @@ jobs:
         # new findings fail the gate.
         run: |
           set -euo pipefail
-          ./actionlint \
-            -ignore 'property "gate_intree" is not defined in object type' \
-            -ignore 'SC2006' \
-            -ignore 'SC2013' \
-            -ignore 'SC2015' \
-            -ignore 'SC2016' \
-            -ignore 'SC2034' \
-            -ignore 'SC2086' \
-            -ignore 'SC2129'
+          lint() {
+            ./actionlint \
+              -ignore 'property "gate_intree" is not defined in object type' \
+              -ignore 'SC2006' \
+              -ignore 'SC2013' \
+              -ignore 'SC2015' \
+              -ignore 'SC2016' \
+              -ignore 'SC2034' \
+              -ignore 'SC2086' \
+              -ignore 'SC2129' "$@"
+          }
+          lint
+          # Keep expression/shell coverage after extracting the TDX steps.
+          # yq and jq are supplied by the hosted Ubuntu runner image. Feed
+          # the unchanged composite steps to actionlint as a string-input job.
+          yq -o=json '.' .github/actions/tdx-metal-e2e/action.yml |
+            jq '{on:{workflow_call:{inputs:(.inputs|with_entries(.value.type="string"))}},
+                 jobs:{e2e:{"runs-on":"ubuntu-latest",steps:.runs.steps}}}' |
+            lint -stdin-filename .github/workflows/tdx-composite-lint.yml -
 
       - name: Shellcheck scripts
         run: |

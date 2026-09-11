@@ -22,7 +22,11 @@ restricted_overrides() {
   printf '{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"%s","image":"%s","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' "$name" "$image"
 }
 
-cleanup() { kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
+cleanup() {
+  if cw_namespace_owned "$ns"; then
+    kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
+}
 trap cleanup EXIT
 
 # expect_deny <description> <expected-substring> -- <command...>

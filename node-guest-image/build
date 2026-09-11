@@ -84,6 +84,12 @@ bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
     --module-signing-cert "$NGI_DIR/module-signing.crt" \
     --kernel-builder-package "$KB_PKGS"
+# Match confos-fetch-gpu's kernel tree lookup. Validate the actual resolved
+# config even on a cache hit, before staging modules or the image.
+KVER=$(sed -n 's/^LINUX_VERSION=//p' kernel/version)
+[[ -n "$KVER" ]] \
+    || { echo "node-guest-image/build: missing LINUX_VERSION in kernel/version" >&2; exit 1; }
+bash "$NGI_DIR/check-apparmor-config.sh" "output/kernel/build/linux-$KVER/.config"
 PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
 # Fingerprint-gated: the module build must rerun iff the kernel, the fetch
 # script (NVIDIA pins), or the signing cert changed. The kernel manifest

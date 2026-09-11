@@ -1,3 +1,4 @@
+# Automatic-only entrypoint. Manual builds use c8s-image-manual.yml.
 # Trusted production entrypoint for the reusable c8s image builder. Keeping the
 # write grant and production secrets here lets pull-request callers use the same
 # builder with a read-only token and no inherited secrets.
@@ -10,8 +11,7 @@ name: c8s-image
 # in the run name is what stops "my guest-image merge produced no image"
 # being the obvious-but-wrong reading of that list.
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && 'c8s-image (manual dispatch)'
-   || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+  ${{ (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
       && 'c8s-image BUILDS (main push)'
    || format('c8s-image skipped ({0} on {1}, not a main push)', github.event.workflow_run.event, github.event.workflow_run.head_branch) }}
 
@@ -21,28 +21,6 @@ on:
   workflow_run:
     workflows: ["Docker"]
     types: [completed]
-  workflow_dispatch:
-    inputs:
-      dev:
-        description: "Build the rke2-dev variant (serial root autologin, different measurement). Never ship."
-        required: false
-        type: boolean
-        default: false
-      c8s_ref:
-        description: "Bake c8s components from this published commit (short SHA) instead of the triggering commit. Rebuilds a release against the current CONFOS_REF; pushes only the :<variant>[-cdi]-<ref> tags, leaving the floating tags alone."
-        required: false
-        type: string
-        default: ""
-      confos_ref:
-        description: "Build with this confos commit instead of the pinned CONFOS_REF. For A/B measurement checks (pair with gate=true); a different confos can mean a different measurement."
-        required: false
-        type: string
-        default: ""
-      gate:
-        description: "Build only — skip the publish and upload manifest.json + roothash as a run artifact, for measurement comparison against a published build."
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -104,22 +82,29 @@ jobs:
 
   build-and-push:
     needs: release-context
-    if: |
-      always() &&
-      (needs.release-context.result == 'success' ||
-       needs.release-context.result == 'skipped')
     permissions:
       contents: read
       packages: write # Publish trusted floating and commit-scoped artifacts.
     uses: ./.github/workflows/c8s-image.yml
     with:
-      dev: ${{ inputs.dev || false }}
-      c8s_ref: ${{ inputs.c8s_ref || '' }}
-      confos_ref: ${{ inputs.confos_ref || '' }}
-      gate: ${{ inputs.gate || false }}
       release_tag: ${{ needs.release-context.outputs.tag }}
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
+
+  # Exact-image acceptance consumes this run's immutable publication evidence,
+  # never the independently maintained staged-image ConfigMap or root PVC.
+  verify-tdx-image:
+    name: Verify the published TDX image
+    needs: [release-context, build-and-push]
+    if: >-
+      needs.release-context.result == 'success' &&
+      needs.build-and-push.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/tdx-image-acceptance.yml
+    with:
+      image_acceptance_artifact: node-image-acceptance-rke2-tdx-${{ github.run_attempt }}
 
   # Wait for both TDX/SNP matrix legs, then preflight every exact alias before
   # creating any of them. Registry publication is not transactional, so a
