@@ -216,6 +216,11 @@ func TestTDXLifecycleDoesNotAcquireWorkflowSource(t *testing.T) {
 		if step.Run != "" && step.Shell != "bash" {
 			t.Errorf("%s must declare shell bash", step.Name)
 		}
+		// A request-timeout override disables client-go's implicit in-cluster
+		// config on ARC. External process timeouts preserve that fallback.
+		if strings.Contains(step.Run, "--request-timeout") {
+			t.Errorf("%s disables the launcher's in-cluster Kubernetes configuration", step.Name)
+		}
 		if strings.HasPrefix(step.Uses, "actions/checkout@") || strings.HasPrefix(step.Uses, "actions/download-artifact@") {
 			t.Errorf("%s acquires source/evidence inside the shared lifecycle", step.Name)
 		}

@@ -6,6 +6,11 @@ script="$test_dir/../tdx-image-acceptance.sh"
 fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/evidence" "$fixture/bin"
+# Keep the real timer and sleeper available after installing PATH fixtures.
+export FIXTURE_TIMEOUT
+FIXTURE_TIMEOUT=$(command -v timeout)
+export FIXTURE_SLEEP
+FIXTURE_SLEEP=$(command -v sleep)
 tests=0
 pass() { tests=$((tests + 1)); }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -93,6 +98,19 @@ cat > "$fixture/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURE_LOG"
+# The ARC launcher relies on client-go's implicit in-cluster configuration.
+# Any nonzero request-timeout overrides that fallback with localhost:8080.
+for arg in "$@"; do
+  case "$arg" in
+    --request-timeout|--request-timeout=*) echo 'in-cluster fallback disabled' >&2; exit 64 ;;
+  esac
+done
+if [[ ${FIXTURE_HANG:-0} == 1 ]]; then
+  printf '%s\n' started > "$FIXTURE_HANG_STARTED"
+  # Ignore TERM to prove the helper enforces its deadline without a grace wait.
+  trap '' TERM
+  exec "$FIXTURE_SLEEP" 30
+fi
 record_delete() {
   while [[ $# -gt 0 && $1 != delete ]]; do shift; done
   [[ $# -ge 3 ]] || exit 1
@@ -107,6 +125,11 @@ case " $* " in
   *' delete pod '*|*' delete pvc '*) record_delete "$@" ;;
   *) exit 1 ;;
 esac
+SH
+cat > "$fixture/bin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FIXTURE_TIMEOUT_LOG"
+exec "$FIXTURE_TIMEOUT" "$@"
 SH
 cat > "$fixture/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -128,6 +151,7 @@ export PATH="$fixture/bin:$PATH"
 export FIXTURE_LOG="$fixture/calls" FIXTURE_PVC="$fixture/pvc.json"
 export FIXTURE_DELETES="$fixture/deletes" FIXTURE_ROOTS="$fixture/roots.json"
 export FIXTURE_BINDER="$fixture/binder.json" FIXTURE_ANNOTATIONS="$fixture/annotations"
+export FIXTURE_TIMEOUT_LOG="$fixture/timeouts" FIXTURE_HANG_STARTED="$fixture/hang-started"
 : > "$FIXTURE_BINDER"
 : > "$FIXTURE_ANNOTATIONS"
 : > "$FIXTURE_DELETES"
@@ -139,6 +163,19 @@ reject bash "$script" wait "$vm" "$ns" "$run" "$repo"
 cp "$fixture/pvc-good.json" "$FIXTURE_PVC"
 reject bash "$script" wait "$vm" "$ns" "$run" "$repo" 1
 reject bash "$script" wait "$vm" "$ns" "$run" "$repo" 0
+# Run the production poll with a real blocked process and its one-second
+# deadline. The outer watchdog only prevents a broken timer hanging the suite.
+started=$SECONDS
+status=0
+"$FIXTURE_TIMEOUT" --kill-after=1s 5s env FIXTURE_HANG=1 \
+  bash "$script" wait "$vm" "$ns" "$run" "$repo" 1 \
+  >"$fixture/stdout" 2>"$fixture/stderr" || status=$?
+[[ -s $FIXTURE_HANG_STARTED ]] || fail 'hanging kubectl fixture was never invoked'
+[[ $status == 137 && $((SECONDS - started)) -lt 4 ]] ||
+  fail "poll did not enforce its one-second deadline (status=$status)"
+[[ ! -s $FIXTURE_ANNOTATIONS && ! -s $FIXTURE_DELETES ]] ||
+  fail 'timed-out poll mutated a resource'
+pass
 jq '.metadata.labels["ci.confidential.ai/run-id"] = "456"' "$fixture/pvc-good.json" > "$FIXTURE_PVC"
 reject bash "$script" wait "$vm" "$ns" "$run" "$repo"
 reject bash "$script" cleanup "$vm" "$ns" "$run" "$repo"
@@ -146,6 +183,8 @@ reject bash "$script" cleanup "$vm" "$ns" "$run" "$repo"
 cp "$fixture/pvc-good.json" "$FIXTURE_PVC"
 bash "$script" cleanup "$vm" "$ns" "$run" "$repo"
 expect_deletes "pvc/$vm-root"
+grep -Fxq -- "--signal=KILL 130s kubectl -n $ns delete pvc $vm-root --ignore-not-found --wait=true --timeout=120s" \
+  "$FIXTURE_TIMEOUT_LOG" || fail 'cleanup shortened its existing two-minute deletion wait'
 pass
 : > "$FIXTURE_PVC"
 bash "$script" cleanup "$vm" "$ns" "$run" "$repo"

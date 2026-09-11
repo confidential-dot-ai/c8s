@@ -211,8 +211,13 @@ source rejection, E2E routing and caller-isolation tests with
 That job imports the digest-pinned disk into its own 80Gi `local-path` PVC.
 A restricted scheduling pod selects a TDX node before CDI import starts;
 the pod has no service-account token or disk mount. Import has a 20-minute
-deadline, and cleanup checks ownership of the temporary pod and PVC. This
-requires working CDI, enough local disk space, and the launcher's existing
+deadline, and cleanup checks ownership of the temporary pod and PVC.
+The launcher uses its implicit in-cluster service-account configuration.
+GNU `timeout` bounds these acceptance calls externally because a
+`kubectl --request-timeout` override disables that fallback. Reads get at
+most 30 seconds within the import deadline; binder waits and cleanup deletes
+retain 120-second kubectl timeouts with a 130-second external process limit.
+This requires working CDI, enough local disk space, and the launcher's existing
 namespace-scoped Pod/PVC permissions; no shared image ConfigMap, root PVC,
 or cluster-wide RBAC is changed. The hardware path must still be exercised
 on the TDX runner; the local evidence/lifecycle fixtures are run with:

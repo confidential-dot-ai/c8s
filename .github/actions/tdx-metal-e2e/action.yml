@@ -146,8 +146,8 @@ runs:
       # different node. No cluster-scoped node-list authority is needed.
       bash .github/scripts/tdx-image-acceptance.sh binder \
         "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" | kubectl create -f -
-      kubectl --request-timeout=130s -n "$NS" wait --for=condition=PodScheduled "pod/$VM-binder" --timeout=120s
-      kubectl --request-timeout=130s -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$VM-root" --timeout=120s
+      timeout --signal=KILL 130s kubectl -n "$NS" wait --for=condition=PodScheduled "pod/$VM-binder" --timeout=120s
+      timeout --signal=KILL 130s kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$VM-root" --timeout=120s
       bash .github/scripts/tdx-image-acceptance.sh start-import \
         "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$VM" "$NS" "$GITHUB_REPOSITORY"
       bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
