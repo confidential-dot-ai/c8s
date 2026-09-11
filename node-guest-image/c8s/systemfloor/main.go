@@ -1,13 +1,14 @@
-// Command systemfloor regenerates the RKE2 system-image floor in
-// image-policy.yaml.in: the always_allow entries that admit the node's baked
-// system components (rke2 static pods, Cilium, CoreDNS, local-path-storage).
+// Command systemfloor regenerates the RKE2 system-image entries in
+// image-policy.yaml.in: the allowlist.base workloads that admit the node's
+// baked system components (rke2 static pods, Cilium, CoreDNS,
+// local-path-storage) under any command line.
 //
 // The digests are the ones containerd computes when it IMPORTS the airgap
 // bundles at rke2 boot, not the registry's: the bundles are docker-archive
 // tarballs and the import rebuilds each manifest, so the digest only exists
 // in the store. This tool runs the same code the daemon's import does
 // (images/archive.ImportIndex, vendored with the c8s module) against a
-// scratch content store, so the floor matches what the plugin resolves at
+// scratch content store, so the entries match what the plugin resolves at
 // runtime.
 //
 //	systemfloor -bundle rke2-images-core.linux-amd64.tar.zst \
@@ -15,9 +16,9 @@
 //	    -manifest .../server/manifests/local-path-storage.yaml \
 //	    -manifest .../server/manifests/nvidia-device-plugin.yaml
 //
-// prints the always_allow block. With -template pointing at
-// image-policy.yaml.in, -check reports drift and -write rewrites the block
-// between the BEGIN/END markers in place.
+// prints the block. With -template pointing at image-policy.yaml.in,
+// -check reports drift and -write rewrites the block between the BEGIN/END
+// markers in place.
 package main
 
 import (
@@ -39,9 +40,12 @@ import (
 	localcontent "github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/klauspost/compress/zstd"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// entry is one floor line: a digest admitted under an image reference.
+// entry is one base workload: a digest admitted under an image reference.
 type entry struct {
 	digest string
 	ref    string
@@ -126,34 +130,52 @@ func manifestEntries(path string) ([]entry, error) {
 	return out, nil
 }
 
-// render formats the entries as always_allow YAML lines at the template's
-// indent, one line per digest, sorted by image reference.
-func render(entries []entry) string {
-	byRef := make(map[string]string, len(entries))
+// render formats the entries as allowlist.base workloads at the template's
+// indent: one any-argv entry per digest, named the way pkg/allowlist
+// DigestEntryName names it, sorted by image reference.
+func render(entries []entry) (string, error) {
+	type baseEntry struct {
+		name   string
+		digest string
+		ref    string
+	}
+	base := make([]baseEntry, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if seen[e.digest] {
 			continue
 		}
 		seen[e.digest] = true
-		byRef[e.ref] = e.digest
+		d, err := types.ParseDigest(e.digest)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", e.ref, err)
+		}
+		base = append(base, baseEntry{name: allowlist.DigestEntryName(d, e.ref), digest: e.digest, ref: e.ref})
 	}
-	refs := make([]string, 0, len(byRef))
-	for r := range byRef {
-		refs = append(refs, r)
-	}
-	sort.Strings(refs)
+	sort.Slice(base, func(i, j int) bool {
+		if base[i].ref != base[j].ref {
+			return base[i].ref < base[j].ref
+		}
+		return base[i].name < base[j].name
+	})
 
 	var b strings.Builder
-	for _, r := range refs {
-		fmt.Fprintf(&b, "    %q: %q\n", byRef[r], r)
+	for _, f := range base {
+		fmt.Fprintf(&b, `      %s:
+        label: %q
+        containers:
+          - digest: %q
+            image: %q
+            command: {policy: any}
+            args: {policy: any}
+`, f.name, f.ref, f.digest, f.ref)
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 const (
-	beginMarker = "# BEGIN rke2 system floor"
-	endMarker   = "# END rke2 system floor"
+	beginMarker = "# BEGIN rke2 system images"
+	endMarker   = "# END rke2 system images"
 )
 
 // splice returns the template with the lines between the marker lines
@@ -231,7 +253,10 @@ func run(args []string, stdout io.Writer) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("no images found in the inputs")
 	}
-	block := render(entries)
+	block, err := render(entries)
+	if err != nil {
+		return err
+	}
 
 	if templatePath == "" {
 		_, err := io.WriteString(stdout, block)
@@ -249,7 +274,7 @@ func run(args []string, stdout io.Writer) error {
 	switch {
 	case check:
 		if updated != string(data) {
-			return fmt.Errorf("%s: system floor is stale; regenerate with systemfloor -write", templatePath)
+			return fmt.Errorf("%s: system images are stale; regenerate with systemfloor -write", templatePath)
 		}
 	case write:
 		if err := os.WriteFile(templatePath, []byte(updated), 0o644); err != nil {

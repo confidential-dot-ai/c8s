@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -39,7 +38,7 @@ const (
 
 // policySnapshot is an immutable admission view: an Index built from the
 // last-applied CDS pull, tagged with that pull's version (the ETag counter).
-// Swapped as a unit; policyStore checks always_allow ahead of it.
+// Swapped as a unit; policyStore checks the base allowlist ahead of it.
 type policySnapshot struct {
 	index   *allowlist.Index
 	version uint64
@@ -47,20 +46,21 @@ type policySnapshot struct {
 
 // policyStore holds the current admission snapshot. A single writer (the pull
 // loop) swaps it via apply; CreateContainer reads it concurrently via current.
-// The always_allow digests are checked ahead of every snapshot, so a failed or
-// withheld pull never drops them.
+// The base allowlist is checked ahead of every snapshot, so a failed or
+// withheld pull never drops it.
 type policyStore struct {
-	alwaysAllow *allowlist.Index // digests admitted by digest alone
-	snap        atomic.Pointer[policySnapshot]
+	base *allowlist.Index // the boot-time base allowlist document
+	snap atomic.Pointer[policySnapshot]
 }
 
 // newPolicyStore seeds the store with an empty snapshot (version 0) so admission
-// enforces always_allow alone before the first pull lands and after any pull
-// failure. Config validation has already rejected a malformed digest, so
-// DigestIndex's warnings cannot fire here.
-func newPolicyStore(alwaysAllow map[string]string) *policyStore {
-	idx, _ := allowlist.DigestIndex(slices.Collect(maps.Keys(alwaysAllow)))
-	s := &policyStore{alwaysAllow: idx}
+// enforces the base allowlist alone before the first pull lands and after any
+// pull failure. A nil base admits nothing.
+func newPolicyStore(base *allowlist.Allowlist) *policyStore {
+	if base == nil {
+		base = &allowlist.Allowlist{}
+	}
+	s := &policyStore{base: base.BuildIndex()}
 	s.snap.Store(&policySnapshot{index: (&allowlist.Allowlist{}).BuildIndex()})
 	return s
 }
@@ -72,12 +72,14 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
-// alwaysAllows reports whether the digest is admitted by digest alone.
-func (s *policyStore) alwaysAllows(digest string) bool {
+// baseAdmits reports whether the base allowlist admits the container. The
+// chart's base entries are any-argv, so their digests are admitted by digest
+// alone.
+func (s *policyStore) baseAdmits(digest string, argv []string) bool {
 	if s == nil {
 		return false
 	}
-	return s.alwaysAllow.AdmitsDigest(digest)
+	return s.base.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv})
 }
 
 // apply installs the pulled document at version, unless version is below the
@@ -345,9 +347,10 @@ func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName stri
 }
 
 // checkImage validates a container's image against the allowlist. argv is the
-// container's effective OCI process.args (NRI api.Container.Args): always_allow
-// digests are admitted regardless of it, served digests only when it satisfies
-// an entry's entrypoint/cmd policy. Returns the verdict and an error string.
+// container's effective OCI process.args (NRI api.Container.Args): any-argv
+// base digests are admitted regardless of it, served digests only when it
+// satisfies an entry's entrypoint/cmd policy. Returns the verdict and an error
+// string.
 func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
@@ -416,13 +419,14 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		return verdictDeny, fmt.Sprintf("no allowlist available for %s", imageRef)
 	}
 
-	// always_allow digests admit regardless of argv; served digests require
-	// the effective argv to satisfy some entry's entrypoint/cmd policy. Mount
-	// and env policy are left unobserved here: this plugin gates images on a
-	// node CVM, where it sees the CRI container rather than a guest's mount
-	// table, and an unobserved field is not a violation
+	// The base allowlist admits what its entries admit — the chart's are
+	// any-argv, so their digests run anything; served digests require the
+	// effective argv to satisfy some entry's entrypoint/cmd policy. Mount and
+	// env policy are left unobserved here: this plugin gates images on a node
+	// CVM, where it sees the CRI container rather than a guest's mount table,
+	// and an unobserved field is not a violation
 	// (allowlist.RunningContainer).
-	if !p.policy.alwaysAllows(digest) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	if !p.policy.baseAdmits(digest, argv) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.
@@ -704,8 +708,8 @@ func (p *plugin) RunDeferredCheck(ctx context.Context) {
 
 // admitWhileInitializing decides a container seen after NRI registration but
 // before the first allowlist fetch: audit mode passes, everything else takes
-// the ordinary check. always_allow admits ahead of the empty startup snapshot,
-// so bootstrap images are admitted and nothing else is.
+// the ordinary check. The base allowlist admits ahead of the empty startup
+// snapshot, so bootstrap images are admitted and nothing else is.
 func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) error {
 	log := p.logger.With(
 		"namespace", pod.GetNamespace(),

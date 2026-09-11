@@ -342,7 +342,7 @@ Two inventory behaviours that still matter here:
   that container — in practice the next `Synchronize` replay, not the deferred
   check, which replays only what `Synchronize` listed.
 - **A check that denies one of the containers.** The `c8s-cert` image sits in
-  the plugin's `always_allow` floor, so the check always admits it; a tenant app
+  the plugin's base allowlist, so the check always admits it; a tenant app
   image does not, and a check running after the allowlist changed can deny one.
   Recording is independent of that verdict, so both are tracked and the callback
   answers the full set — including the denied image, which CDS then refuses. The

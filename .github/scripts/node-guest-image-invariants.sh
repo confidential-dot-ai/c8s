@@ -58,15 +58,15 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI floor is a template whose always_allow entries are
-# @-tokens the sync fills with ref-resolved digests; a hardcoded
-# sha256 would bake a stale digest the fail-closed floor can't
-# reconcile with the ref. The marked block is exempt: systemfloor
-# generates it from the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI base allowlist is a template: its permissive workloads
+# carry @-token digests the sync fills with ref-resolved values; a hardcoded
+# sha256 would bake a stale digest the fail-closed plugin can't reconcile
+# with the ref. The marked block is exempt: systemfloor generates it from
+# the pinned RKE2 airgap bundles (see mkosi.sync).
 policy="$ngi/c8s/image-policy.yaml.in"
-[ -f "$policy" ] || { echo "::error::NRI floor template $policy not found"; exit 1; }
-if sed '/# BEGIN rke2 system floor/,/# END rke2 system floor/d' "$policy"               | grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:'; then
-  echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
+[ -f "$policy" ] || { echo "::error::NRI base-allowlist template $policy not found"; exit 1; }
+if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
+  echo "::error::$policy has a hardcoded digest outside the generated system images; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
   exit 1
 fi
 

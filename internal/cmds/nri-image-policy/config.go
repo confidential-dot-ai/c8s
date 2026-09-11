@@ -14,7 +14,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // config represents the plugin configuration.
@@ -62,13 +62,14 @@ type workloadClaimsConfig struct {
 
 // allowlistConfig groups the digest-source mechanisms.
 //
-// AlwaysAllow is a static baseline, always merged into the cache at
-// startup (the chart's floor: self-allows the installer + the CDS digest,
-// so a floor-rewrite roll admits the new images without a network round-trip).
-// Pull is the runtime-update source: every plugin polls CDS.
+// Base is a static baseline in the allowlist document format, admitted ahead
+// of every pulled snapshot: the chart renders it with permissive workloads
+// (self-allowing the installer + the CDS digest, so a base-rewrite roll
+// admits the new images without a network round-trip). Pull is the
+// runtime-update source: every plugin polls CDS.
 type allowlistConfig struct {
-	AlwaysAllow map[string]string `yaml:"always_allow"`
-	Pull        pullConfig        `yaml:"pull"`
+	Base *allowlist.Allowlist `yaml:"base"`
+	Pull pullConfig           `yaml:"pull"`
 }
 
 // pullConfig configures the CDS polling source.
@@ -191,6 +192,12 @@ func parseConfig(data []byte) (*config, error) {
 	cfg.Allowlist.Pull.CDSMeasurements = foldHexPins(cfg.Allowlist.Pull.CDSMeasurements)
 	cfg.Allowlist.Pull.CDSRTMRs = foldHexPins(cfg.Allowlist.Pull.CDSRTMRs)
 
+	if cfg.Allowlist.Base != nil {
+		if err := cfg.Allowlist.Base.Normalize(); err != nil {
+			return nil, fmt.Errorf("allowlist.base: %w", err)
+		}
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -229,9 +236,14 @@ func (c *config) NormalizedPlatform() string {
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
+// baseEnabled reports whether the base allowlist carries any workload.
+func (c *config) baseEnabled() bool {
+	return c.Allowlist.Base != nil && len(c.Allowlist.Base.Workloads) > 0
+}
+
 // AllowlistEnabled reports whether any digest-based enforcement is active.
 func (c *config) AllowlistEnabled() bool {
-	return c.PullEnabled() || len(c.Allowlist.AlwaysAllow) > 0
+	return c.PullEnabled() || c.baseEnabled()
 }
 
 // Validate checks the configuration for errors.
@@ -243,13 +255,8 @@ func (c *config) Validate() error {
 	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
 	}
-	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
-		return fmt.Errorf("allowlist.always_allow must be non-empty when pull is configured (cold-boot baseline)")
-	}
-	for d := range c.Allowlist.AlwaysAllow {
-		if _, err := types.ParseDigest(d); err != nil {
-			return fmt.Errorf("allowlist.always_allow: invalid digest %q (expected sha256:<64 hex chars>)", d)
-		}
+	if c.PullEnabled() && !c.baseEnabled() {
+		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")
 	}
 	if c.PullEnabled() {
 		if c.Allowlist.Pull.Timeout <= 0 {
@@ -278,13 +285,13 @@ func (c *config) Validate() error {
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {
-		return fmt.Errorf("set allowlist.always_allow (required when pull is enabled) or configure policy.label_rules")
+		return fmt.Errorf("set allowlist.base (required when pull is enabled) or configure policy.label_rules")
 	}
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
 	}
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
-		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.base or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
 	}
 	if len(c.Policy.ExemptNamespaces) > 0 && c.Policy.ExemptSnapshotPath == "" {
 		return fmt.Errorf("policy.exempt_namespaces requires policy.exempt_snapshot_path: the captured digest set must persist across restarts")

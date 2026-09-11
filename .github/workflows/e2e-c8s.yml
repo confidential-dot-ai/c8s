@@ -101,7 +101,7 @@ jobs:
       # WHY, and the earlier comment here had this WRONG. It claimed the image
       # bakes a floor "from its build ref, so installing any other ref gets that
       # ref's own components denied". That is not the mechanism. The measured
-      # always_allow in the node image (confidential-os-builder
+      # base allowlist in the node image (confidential-os-builder
       # mkosi/base/mkosi.profiles/c8s/image-policy.yaml.in) holds exactly TWO
       # entries, the nri-image-policy image and the cds image. It has never
       # contained the operator, ratls-mesh, tls-lb, get-cert or attestation-api
@@ -110,7 +110,7 @@ jobs:
       # THE ACTUAL BINDING IS A BOOTSTRAP ORDERING. CDS serves the allowlist that
       # admits everything else, so CDS itself has to be admitted first, and the
       # only thing that can admit it before it is running is that two-entry
-      # measured floor, which pins ONE cds digest: the node image's. Install a
+      # measured base allowlist, which pins ONE cds digest: the node image's. Install a
       # different ref and its cds image is a different digest, so it is denied at
       # container create in c8s-system, never serves a
       # seed, and helm --wait expires. Narrow in principle, since retag-unchanged

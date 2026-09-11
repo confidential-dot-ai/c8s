@@ -32,9 +32,8 @@ const (
 // leaving every other key as found.
 //
 // A node-as-CVM bakes the config into the measured image, and its
-// allowlist.always_allow floor carries the RKE2 system-image digests that only
-// the image build resolves — so the chart can patch that file but never
-// re-render it.
+// allowlist.base carries the RKE2 system-image digests that only the image
+// build resolves — so the chart can patch that file but never re-render it.
 func runSetCDSPins(stdout io.Writer, args []string) error {
 	fs := flag.NewFlagSet("nri-image-policy "+setCDSPinsVerb, flag.ContinueOnError)
 	path := fs.String("config", defaultConfigPath, "plugin config to patch in place")

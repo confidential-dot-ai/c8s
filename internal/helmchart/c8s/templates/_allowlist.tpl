@@ -81,8 +81,18 @@
 {{ $digests | toJson }}
 {{- end -}}
 
-{{- define "c8s.alwaysAllow" -}}
-{{ merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson) | toJson }}
+{{/* The plugin's base allowlist, as workloads: every digest the base
+     allowlist admits under any command line, keyed by its DigestEntryName. The
+     boot config (nri-image-policy.bootConfig) adds the installer
+     self-entry. */ -}}
+{{- define "c8s.baseWorkloads" -}}
+{{- $workloads := dict -}}
+{{- range $digest, $image := (merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson)) -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
+{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+{{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
+{{- end -}}
+{{ $workloads | toJson }}
 {{- end -}}
 
 {{- define "c8s.digestWorkloadName" -}}

@@ -121,8 +121,8 @@ jobs:
           NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
           # The operator image is ALSO the injected get-cert/c8s-cert sidecar image
           # (operator.yaml passes --get-cert-image={{ c8s.image }}). c8s.imageAllowlist
-          # only derives a component into always_allow when it has a digest, so an
-          # un-pinned operator leaves that sidecar out of the floor AND out of the CDS
+          # only derives a component into the base allowlist when it has a digest, so an
+          # un-pinned operator leaves that sidecar out of the base allowlist AND out of the CDS
           # seed. Under policy.mode=audit it is then denied-but-admitted, and the
           # workload-claims broker records only on the allow path, so the sidecar is
           # never tracked and get-cert dies with "caller cgroup names no tracked
@@ -212,7 +212,7 @@ jobs:
               # --resolve-digests` is what normally turns it on; this lane writes raw
               # values into a HelmChart CR, so it never did. Without it only cds and
               # tls-lb nginx get self-entries, so the OPERATOR image is absent from
-              # always_allow and from the CDS seed. That image is also the injected
+              # the base allowlist and from the CDS seed. That image is also the injected
               # c8s-cert sidecar, so under policy.mode=audit it is denied-but-admitted,
               # and the workload-claims broker records only on the ALLOW path. The
               # sidecar therefore runs untracked and its own get-cert call fails with

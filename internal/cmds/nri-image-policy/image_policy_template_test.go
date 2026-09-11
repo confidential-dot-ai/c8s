@@ -39,10 +39,10 @@ func renderNodeImagePolicy(t *testing.T) string {
 	return out
 }
 
-func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
+func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 	rendered := renderNodeImagePolicy(t)
 	if strings.Contains(rendered, "exempt_namespaces") {
-		t.Fatal("exempt_namespaces must not return: admission keys on the digest floor alone")
+		t.Fatal("exempt_namespaces must not return: admission keys on the base allowlist alone")
 	}
 
 	path := filepath.Join(t.TempDir(), "image-policy.yaml")
@@ -54,12 +54,12 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		t.Fatalf("the rendered node-image boot config does not load: %v", err)
 	}
 
-	// The full RKE2 system floor: every digest systemfloor derives from the
+	// The full RKE2 system set: every digest systemfloor derives from the
 	// pinned airgap bundles and baked manifests. A regen for an RKE2 pin bump
 	// rewrites these — update the pins with it. Pinning the whole set, not a
 	// boot-critical subset, makes a dropped or corrupted entry fail here
 	// instead of at node boot.
-	floor := map[string]string{
+	systemImages := map[string]string{
 		"sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d": "busybox:1.38.0@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d",
 		"sha256:2c0491ce30c82a6b480741f209f12f7c7e6de872c02385946c4a9ec875e679dc": "docker.io/rancher/hardened-addon-resizer:1.8.23-build20260206",
 		"sha256:12160ac4f0c2b72fe56933e387669aacba1d060184f90bd63b91b7fddc745e02": "docker.io/rancher/hardened-cluster-autoscaler:v1.10.3-build20260206",
@@ -90,25 +90,33 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		"sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77": "nvcr.io/nvidia/k8s-device-plugin:v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
 		"sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f": "rancher/local-path-provisioner:v0.0.36@sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f",
 	}
-	for digest, ref := range floor {
-		if _, ok := cfg.Allowlist.AlwaysAllow[digest]; !ok {
-			t.Errorf("%s (%s) missing from the baked floor — the node cannot boot its system components", ref, digest)
+	// The base allowlist carries one any-argv entry per admitted image;
+	// index it by digest for the lookups below.
+	baseEntries := map[string]string{}
+	for _, w := range cfg.Allowlist.Base.Workloads {
+		for _, d := range w.Digests() {
+			baseEntries[d.String()] = w.Label
+		}
+	}
+	for digest, ref := range systemImages {
+		if _, ok := baseEntries[digest]; !ok {
+			t.Errorf("%s (%s) missing from the baked base allowlist — the node cannot boot its system components", ref, digest)
 		}
 	}
 
-	// always_allow is the generated floor plus the two rendered tokens (the
-	// nri plugin self-allow and cds), so the exact count catches an entry a
-	// regen adds or drops.
-	if want := len(floor) + 2; len(cfg.Allowlist.AlwaysAllow) != want {
-		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + nri + cds)",
-			len(cfg.Allowlist.AlwaysAllow), want, len(floor))
+	// The base allowlist is the generated system set plus the two rendered
+	// tokens (the nri plugin self-allow and cds), so the exact count catches
+	// an entry a regen adds or drops.
+	if want := len(systemImages) + 2; len(cfg.Allowlist.Base.Workloads) != want {
+		t.Errorf("baked base allowlist has %d entries, want %d (%d system images + nri + cds)",
+			len(cfg.Allowlist.Base.Workloads), want, len(systemImages))
 	}
 
-	// Every floor key must be a digest the store admits as-is.
-	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
-	for d := range cfg.Allowlist.AlwaysAllow {
-		if !store.alwaysAllows(d) {
-			t.Errorf("floor key %q is not an admissible digest", d)
+	// Every base entry must be a digest the store admits under any argv.
+	store := newPolicyStore(cfg.Allowlist.Base)
+	for d := range baseEntries {
+		if !store.baseAdmits(d, nil) {
+			t.Errorf("base entry %q is not admitted by digest alone", d)
 		}
 	}
 }

@@ -12,13 +12,13 @@ import (
 	"github.com/containerd/nri/pkg/api"
 )
 
-// exemptPlugin builds a fail-closed floor plugin (floor admits pushDigestA)
+// exemptPlugin builds a fail-closed base plugin (base allowlist admits pushDigestA)
 // whose listed namespaces are admitted by a captured digest snapshot at
 // snapshotPath. The containerd stop hook is unset, so any kill panics by name.
 func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plugin {
 	t.Helper()
 	cfg := &config{
-		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "floor-image"}},
+		Allowlist: allowlistConfig{Base: anyAllowlist(map[string]string{pushDigestA: "base-image"})},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
@@ -29,7 +29,7 @@ func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plug
 	}
 	p := &plugin{
 		cfg:        cfg,
-		policy:     newPolicyStore(cfg.Allowlist.AlwaysAllow),
+		policy:     newPolicyStore(cfg.Allowlist.Base),
 		audit:      audit.NewLogger(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		containerd: &fakeContainerd{},
@@ -38,7 +38,7 @@ func exemptPlugin(t *testing.T, snapshotPath string, namespaces ...string) *plug
 	return p
 }
 
-// A non-floor image running in an exempt namespace when the plugin connects is
+// A non-base image running in an exempt namespace when the plugin connects is
 // captured, persisted, and admitted on a later create — without a kill, since
 // the running container is downgraded to skip during the same Synchronize.
 func TestExempt_CaptureAtSyncAdmitsLaterCreate(t *testing.T) {
@@ -65,7 +65,7 @@ func TestExempt_CaptureAtSyncAdmitsLaterCreate(t *testing.T) {
 	}
 }
 
-// A non-floor image never captured in an exempt namespace is denied there.
+// A non-base image never captured in an exempt namespace is denied there.
 func TestExempt_UncapturedDigestDeniedInExemptNamespace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snap.json")
 	p := exemptPlugin(t, path, "kube-system")
@@ -79,7 +79,7 @@ func TestExempt_UncapturedDigestDeniedInExemptNamespace(t *testing.T) {
 
 	uncaptured := makeCtrWithImage(pod.Id, "evil", "registry/repo@"+pushDigestB)
 	if _, _, err := p.CreateContainer(context.Background(), pod, uncaptured); err == nil {
-		t.Fatal("an uncaptured non-floor image in an exempt namespace must be denied")
+		t.Fatal("an uncaptured non-base image in an exempt namespace must be denied")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestExempt_CheckExistingDoesNotKillExemptNamespace(t *testing.T) {
 	p.SetReady()
 
 	pod := makePod("kube-system", "pod")
-	drifted := makeCtrWithImage(pod.Id, "drift", "registry/repo@"+pushDigestB) // not in snapshot, not floor
+	drifted := makeCtrWithImage(pod.Id, "drift", "registry/repo@"+pushDigestB) // not in snapshot, not base
 
 	// The unset stop hook panics if a kill is attempted.
 	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{drifted}); err != nil {
@@ -167,7 +167,7 @@ func TestExempt_EmptyCaptureNotPersisted(t *testing.T) {
 }
 
 // Without exempt namespaces the plugin is unchanged: no snapshot, and a
-// non-floor image in kube-system is still killed by enforce_existing.
+// non-base image in kube-system is still killed by enforce_existing.
 func TestExempt_NoExemptNamespacesIsNoop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snap.json")
 	p := exemptPlugin(t, path) // no namespaces
@@ -192,6 +192,6 @@ func TestExempt_NoExemptNamespacesIsNoop(t *testing.T) {
 		t.Fatal("p.exempt must stay nil without exempt namespaces")
 	}
 	if len(killed) != 1 || killed[0] != running.Id {
-		t.Fatalf("without an exemption a non-floor kube-system image is still killed, got %v", killed)
+		t.Fatalf("without an exemption a non-base kube-system image is still killed, got %v", killed)
 	}
 }
