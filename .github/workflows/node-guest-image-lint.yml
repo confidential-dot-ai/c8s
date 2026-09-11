@@ -32,6 +32,9 @@ on:
       - ".github/workflows/c8s-image.yml"
       - ".github/workflows/c8s-image-publish.yml"
       - ".github/workflows/c8s-image-manual.yml"
+      # The runtime wrapper the image's containerd config names: the gate
+      # pins its real-runtime path against mkosi.sync.
+      - "internal/cmds/c8srunc/**"
   workflow_dispatch:
 
 permissions:
@@ -195,6 +198,31 @@ jobs:
             -manifest "$manifests/local-path-storage.yaml" \
             -manifest "$manifests/nvidia-device-plugin.yaml" \
             -exclude-ref busybox
+
+  containerd-runtime-handlers:
+    name: every pod runtime reaches the measured wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - name: Render the effective containerd config and check its handlers
+        # containerdcheck renders the baked template with RKE2's own base
+        # template and merges the drop-ins containerd imports, so a handler
+        # that would reach an unwrapped runc fails here instead of shipping an
+        # image where `kubectl exec` works.
+        run: |
+          set -euo pipefail
+          dir=node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd
+          go run ./node-guest-image/c8s/containerdcheck -config-dir "$dir"
+          # The same check must fail when RKE2's runtime auto-detection finds
+          # another runtime on the node's PATH.
+          if go run ./node-guest-image/c8s/containerdcheck -config-dir "$dir" \
+               -extra-runtime crun=/usr/bin/crun 2>/dev/null; then
+            echo "::error::containerdcheck accepted an unwrapped auto-detected runtime"
+            exit 1
+          fi
 
   gpu-label:
     name: gpu-node-label logic
