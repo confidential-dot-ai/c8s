@@ -1680,6 +1680,10 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
+// The require_host_image_policy guard exempts cvmMode=node: the node image bakes
+// its own fail-closed nri-image-policy, so nri off there is not an unenforced
+// cluster. The served seed under this shape is covered by
+// TestChartServesAllowlistSeedInNodeMode.
 func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
@@ -2506,6 +2510,9 @@ func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
 	}
 }
 
+// assertTLSLBReadyzProbe pins the readiness gate's routing invariant: the probe
+// goes through nginx over HTTPS on the named `https` port, since the sidecar's
+// own port is loopback-only. Nginx exact-matches /readyz onto the sidecar.
 func assertTLSLBReadyzProbe(t *testing.T, out string) {
 	t.Helper()
 	rp := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest").ReadinessProbe
@@ -4785,6 +4792,8 @@ func TestChartTLSLBHostPort(t *testing.T) {
 	})
 }
 
+// TestChartNoTeeProxyRemnants sweeps the default render for any leftover
+// tee-proxy wiring after the component's removal.
 func TestChartNoTeeProxyRemnants(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -5634,6 +5643,12 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	}
 }
 
+// TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: even
+// with chart nriImagePolicy disabled, the baked plugin pulls the live allowlist
+// from CDS. If the seed is not served, CDS starts empty and every un-baked
+// component (operator, ratls-mesh, tls-lb's nginx) is denied until an operator
+// hand-runs `c8s allowlist add`. The seed ConfigMap must render, be mounted,
+// and carry the deployed digests.
 func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	const (
 		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"

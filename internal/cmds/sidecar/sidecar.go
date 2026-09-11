@@ -91,6 +91,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ParsePins decodes --measurements and --rtmrs, warning when measurements are unpinned.
 func (c *Config) ParsePins() (ratls.Pins, error) {
 	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {

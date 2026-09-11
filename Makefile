@@ -183,6 +183,8 @@ test-e2e-cw-workload:
 vet:
 	go vet ./...
 
+# --- Linting ---
+# Format-check tracked Go files only, excluding fetched sources and build trees.
 fmt:
 	@test -z "$$(git ls-files '*.go' | xargs gofmt -l)" || (echo "files need formatting:"; git ls-files '*.go' | xargs gofmt -l; exit 1)
 

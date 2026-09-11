@@ -1,6 +1,9 @@
 name: Docker
 
 on:
+  # Publish component images on every push to main. With no buildable source
+  # changes, the matrix skips builds and retag-unchanged aliases :main manifests
+  # to :<short-sha>, so each commit still has a complete component tag set.
   push:
     branches: [main]
   # PRs stay path-gated: a PR run builds and scans but publishes nothing (see the
@@ -20,6 +23,8 @@ on:
       - "internal/helmchart/c8s/**"
       - "Makefile"
       - ".github/workflows/docker.yml"
+  # Manual rebuild for a base-image refresh or registry re-push without a new
+  # commit. The matrix rebuilds every component at this commit's tags.
   workflow_dispatch:
 
 permissions:
@@ -48,6 +53,8 @@ jobs:
     outputs:
       matrix: ${{ steps.docker-matrix.outputs.matrix }}
       has_images: ${{ steps.docker-matrix.outputs.has_images }}
+      # retag-unchanged gates on these job outputs. An unmapped step output
+      # reads as empty downstream and silently skips the unchanged components.
       retag_matrix: ${{ steps.docker-matrix.outputs.retag_matrix }}
       has_retag: ${{ steps.docker-matrix.outputs.has_retag }}
     steps:
@@ -181,8 +188,12 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          # Publish on push and manual rebuild; PR runs load for the scan.
           push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           load: ${{ !(github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          # Apply all computed tags, including the short SHA. tags[0] is only
+          # the highest-priority human tag. The version-stamped all-component
+          # release build is the sole writer of latest.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Layer cache rides inside the pushed :main image (inline), not
@@ -206,6 +217,9 @@ jobs:
       - name: Inspect action SARIF report
         run: cat ${{ steps.container-scan.outputs.sarif }}
 
+  # Alias each unchanged component's :main manifest to :<short-sha>.
+  # oras tag changes only the tag index, with no layer upload or manifest
+  # rewrite, so the digest stays identical to the source manifest.
   retag-unchanged:
     name: Retag unchanged (${{ matrix.binary }})
     runs-on: ubuntu-latest
@@ -231,6 +245,11 @@ jobs:
       packages: write
       actions: read
     steps:
+      # Overlapping runs can otherwise retag stale :main images: a fast docs-only
+      # merge may finish before the preceding source merge publishes its build.
+      # Repository-monotonic run IDs identify earlier runs. Bounded wait, then warn.
+      # A workflow concurrency group would cancel pending middle merges in a burst,
+      # dropping their image publication entirely.
       - name: Wait out older in-flight Docker runs on main
         env:
           GH_TOKEN: ${{ github.token }}
@@ -272,6 +291,9 @@ jobs:
         run: |
           set -euo pipefail
           SHORT_SHA="${FULL_SHA:0:7}"
+          # A component never built on main has no source tag. Warn and skip so
+          # the other components can publish; a missing image still surfaces
+          # downstream as ImagePullBackOff.
           if ! oras manifest fetch "${IMAGE}:main" > /dev/null 2>&1; then
             echo "::warning::${IMAGE}:main does not exist; skipping retag for ${IMAGE}"
             exit 0

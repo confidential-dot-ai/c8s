@@ -26,6 +26,9 @@ MARK_END='# END c8s-nri-image-policy (managed)'
 # containerd/RKE2 always render the active config to config.toml.
 main_config="$CONTAINERD_DIR/config.toml"
 
+# 1. Remove the NRI containerd config (idempotent). In dropin mode, delete our
+# file from either schema-versioned directory; in patch mode, strip the
+# sentinel-delimited block. Leave the imports line owned by containerd-prep.
 config_changed=0
 if [ "${CONTAINERD_CONFIG_MODE}" = "dropin" ]; then
   for d in config-v3.toml.d config.toml.d; do

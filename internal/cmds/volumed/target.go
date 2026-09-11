@@ -29,6 +29,8 @@ var (
 	volumeNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 )
 
+// Targets resolves the directory a volume must be mounted at, where kubelet
+// owns the pod's emptyDir.
 type Targets interface {
 	Dir(podUID, volumeName string) (*os.File, error)
 }

@@ -833,6 +833,13 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	pod.Labels[LabelWorkload] = inj.WorkloadID
 }
 
+// certContainer is the workload's mesh-cert sidecar. It bootstraps the leaf
+// cert from CDS on startup and keeps it fresh on a --renew-interval, SIGHUP-ing
+// nginx after each renewal when --reload-nginx is on.
+//
+// --key-out is idempotent (load if a key already exists at the path, else
+// generate-and-write); a fresh key on every restart would invalidate every
+// cert CDS has previously issued for it.
 func certContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
@@ -890,6 +897,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 // rather than a silent Init hang.
 const certWaitTimeout = 3 * time.Minute
 
+// certWaitContainer gates the workload on the initial cert being written by the
+// c8s-cert sidecar. It is a plain (run-once) init container that blocks on the
+// cert file and exits 0 once it appears, so normal init-completion ordering
+// holds the workload until the attested cert exists — fail-closed. It must be
+// ordered after c8s-cert and before the workload; injectInitContainers does that.
 func certWaitContainer(inj *injection, cfg Config) corev1.Container {
 	return corev1.Container{
 		Name:            reservedCertWaitContainerName,
@@ -1159,6 +1171,10 @@ func volumeNames(specs []string) []string {
 	return out
 }
 
+// openedVolume is the mount point volumed mounts a decrypted volume over. It
+// holds nothing itself — the plaintext lives on the opened device mounted over
+// it. The default-medium placeholder must share the pod directory's filesystem,
+// because volumed resolves the target with RESOLVE_NO_XDEV.
 func openedVolume(name string) corev1.Volume {
 	src := &corev1.EmptyDirVolumeSource{}
 	return corev1.Volume{
@@ -1362,6 +1378,13 @@ func ensureSupplementalGroup(pod *corev1.Pod, gid int64) {
 	pod.Spec.SecurityContext.SupplementalGroups = append(pod.Spec.SecurityContext.SupplementalGroups, gid)
 }
 
+// injectInitContainers prepends the c8s-managed init containers, in the given
+// order, and drops any existing init container that collides with an injected
+// name. Injection is therefore idempotent (a reinvocation rebuilds the same
+// list) and a pre-declared c8s-cert/c8s-cert-wait cannot shed or shadow the
+// real ones — the operator-built containers always win. Order matters:
+// c8s-cert leads, then c8s-cert-wait gates the workload on the initial cert
+// (see certWaitContainer), then the pod's own init containers.
 func injectInitContainers(existing []corev1.Container, injected ...corev1.Container) []corev1.Container {
 	reserved := make(map[string]struct{}, len(injected))
 	for _, c := range injected {

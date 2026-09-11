@@ -144,6 +144,7 @@ webhook:
     ## paces off the installed leaf's own NotAfter, so a mis-set value here
     ## degrades to more frequent renewals rather than an expired certificate.
     renewInterval: 2h
+    ## Security defaults for the distroless nonroot get-cert image.
     runAsUser: 65532
     runAsGroup: 65532
     runAsNonRoot: true
@@ -155,6 +156,8 @@ webhook:
 ## The mesh CA key is generated inside the cds process and stays in memory
 ## only — it is never rendered into a Kubernetes Secret or volume.
 cds:
+  ## Pin the deployed image by digest in production to decouple it from a
+  ## floating tag's movement. This applies to every c8s .image.digest field.
   image:
     repository: ghcr.io/confidential-dot-ai/cds
     tag: ""
@@ -219,6 +222,10 @@ cds:
   namedCertTTL: 6h
   challengeTTL: 60s
   requestTimeout: 5s
+  # -- Max HTTP request body CDS accepts on /authenticate and /attest.
+  # Sized for an Intel TDX quote plus full cc_eventlog (~90 KB uncompressed;
+  # the eventlog alone can run 40–85 KB). A 64 KiB limit fits SEV-SNP evidence
+  # (~2 KiB) but rejects these TDX requests with HTTP 422, body too large.
   maxRequestSize: 262144
   # -- Max secret paths one allowlist entry may hold. Must stay below
   # cds.secretsMaxPaths; the chart refuses to render otherwise.
@@ -337,6 +344,15 @@ attestationApi:
     - az-tdx
     - gcp-snp
     - gcp-tdx
+  ## CVM platform shape — selects the TEE device via the install CLI:
+  ## node (chart default): self-managed confidential nodes; ordinary pod
+  ##   processes are attested via the node's own quote. Native SNP/TDX device.
+  ## gke: GKE managed confidential nodes, also exposing native TEE devices.
+  ## aks: Azure confidential nodes, attesting via the vTPM at /dev/tpm0.
+  ## All modes render privileged: true: a hostPath device mount alone does
+  ## not grant device-cgroup access, regardless of SYS_RAWIO.
+  ## The install CLI requires --cvm-mode explicitly; this chart default serves
+  ## GitOps/HelmRelease consumers that set values directly.
   cvmMode: node
   ## Unused while all modes render privileged: true (see cvmMode above). Retained
   ## for the planned least-privilege configfs path.

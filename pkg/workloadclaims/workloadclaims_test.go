@@ -390,6 +390,8 @@ func TestSandboxDigestsRoute(t *testing.T) {
 	}
 }
 
+// The digests endpoint must not mint tokens: it answers for any sandbox and is
+// reachable over the network, so identity issuance there would be unbound.
 func TestDigestsEndpointDoesNotServeTokens(t *testing.T) {
 	sock := serveDigestsOnUnix(t, &fakeResolver{sandboxID: "sandbox-1"})
 	requester := testRequesterKey(t)

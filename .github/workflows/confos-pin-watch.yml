@@ -1,3 +1,16 @@
+# Watches the confos / attestation-rs source pins the measured builds ride
+# and opens bump PRs when upstream main moves — never merges: each bump
+# rolls a measurement, so a human owns the merge. The mkosi ref is not
+# watched independently: it is scraped from the target confos commit's own
+# base.yml, which keeps MinimumVersion= and the installed mkosi in lockstep
+# by construction. The canonical data lives in .github/build-pins.json;
+# .github/scripts/pin-manifest.sh validates the full schema before updating it.
+#
+# The node-image domain covers node rootfs / RTMR + SNP digests.
+#
+# Authentication prefers a short-lived, repository-scoped GitHub App token.
+# Checkout, push, and gh use one credential; an unconfigured App falls back to
+# GITHUB_TOKEN, while invalid configured credentials fail before checkout.
 name: confos pin watch
 
 on:

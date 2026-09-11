@@ -253,6 +253,10 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	}
 }
 
+// When digests are resolved, the bundle must pin by digest only: emitting .tag
+// too is redundant. The injected resolver mirrors appendResolvedDigestArgs
+// (repository + digest + deriveComponents), so the test also confirms allowlist
+// derivation survives to the tree and keeps crane off PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")

@@ -168,6 +168,10 @@ func handleSecretsPod(t *testing.T, cfg Config) admission.Response {
 	})
 }
 
+// TestHandleRejectsSecretsWithoutAnyInventory covers the shape no fetcher can
+// serve: no mounted socket means no inventory to redeem a sandbox token at.
+// Injecting anyway produces a Running pod whose fetcher CrashLoops while the
+// workload blocks forever on a file that never lands — fail at admission instead.
 func TestHandleRejectsSecretsWithoutAnyInventory(t *testing.T) {
 	cfg := secretsConfig() // WorkloadClaimsHostDir is unset
 

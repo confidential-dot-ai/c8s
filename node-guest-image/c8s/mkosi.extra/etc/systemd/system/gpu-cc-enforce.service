@@ -1,3 +1,5 @@
+# Fail boot when a passed-through NVIDIA GPU is not in CC mode. Confos's
+# nvidia-cc-ready tolerates non-CC launches, which the c8s node must not.
 [Unit]
 Description=Refuse to start the node unless every NVIDIA GPU is in confidential-compute mode
 # nvidia-cc-ready is where the driver is proven up and the ready state set;

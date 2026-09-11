@@ -203,6 +203,11 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 
 	excluded := excludedNamespaceSet(opts.LeaderElectionNS, opts.ExcludeNamespaces)
 
+	// Headless-Service provisioning: one Service per annotated workload so
+	// in-cluster clients (tls-lb) can dial pod IPs by DNS and get the
+	// node mesh's attested mTLS — the mesh cannot intercept Service VIPs.
+	// Gated on get-cert injection: without it no pod carries the cw label
+	// the Service selects on.
 	if opts.GetCertImage != "" {
 		for _, kind := range workloadServiceKinds {
 			if err := (&WorkloadServiceReconciler{
@@ -242,6 +247,11 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			"image", opts.GetCertImage,
 			"cds_url", opts.CDSURL)
 
+		// One-shot startup sweep: delete cw-annotated pods admitted while the
+		// webhook was down and let their owners recreate them through admission.
+		// Leader-only; failurePolicy=Fail makes a recreated pod racing a not-yet-ready
+		// webhook retry. A direct client keeps this single List and targeted Deletes
+		// from pinning a cluster-wide pod informer for the operator's lifetime.
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 			return runReinjectSweep(ctx, mgr, excluded)
 		})); err != nil {

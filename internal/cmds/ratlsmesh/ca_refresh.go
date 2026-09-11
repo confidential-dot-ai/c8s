@@ -11,6 +11,12 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
+// caBundleRefresh polls CDS /ca and pushes each accepted bundle into the cert
+// managers, so mesh peers holding certs from a rotated CA still verify.
+//
+// It refreshes through the Provider the cdsUpgrade goroutine provisions with,
+// which owns the trust state the refresh continuity-checks against. Ticks
+// before the first successful provision fail closed and warn.
 type caBundleRefresh struct {
 	logger    *slog.Logger
 	logPrefix string

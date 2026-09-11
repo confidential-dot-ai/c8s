@@ -57,6 +57,8 @@ jobs:
             exit 1
           fi
 
+      # Repository-monotonic run IDs serialize release calculation without
+      # dropping a middle merge from the Docker publication chain.
       - name: Wait for older Docker runs on main
         env:
           GH_TOKEN: ${{ github.token }}

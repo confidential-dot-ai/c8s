@@ -2,6 +2,11 @@ package allowlist
 
 import "fmt"
 
+// RunningContainer is one container as an enforcer observes it: the image digest
+// and the effective argv it was told to run.
+//
+// A local type rather than the inventory's own keeps this package a pure
+// function of the allowlist — the caller converts.
 type RunningContainer struct {
 	Digest string
 	Argv   []string

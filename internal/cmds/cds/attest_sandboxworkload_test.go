@@ -144,6 +144,9 @@ func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 	}
 }
 
+// An inventory reporting an empty sandbox is fail-closed. "No containers" is
+// not "nothing to check": looping over it would pass the gate vacuously, and a
+// sandbox always runs at least the sidecar that is asking.
 func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, stub.URL())

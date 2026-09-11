@@ -78,6 +78,8 @@ const (
 	flagUpstream         = "upstream"
 )
 
+// allowedCvmModes is the --cvm-mode enum: node/gke/aks are node-as-CVM
+// deployments. There is no default: the shape must be stated explicitly.
 var allowedCvmModes = []string{"node", "gke", "aks"}
 
 // hostedCvmModes are the lanes whose platform pods belong to the cluster
@@ -701,6 +703,12 @@ func classifyDistroNodes(lines []string) (rke2, other []string) {
 	return
 }
 
+// chooseDistro maps the node classification to a distro value: any RKE2 node
+// (and no upstream ones) selects rke2; otherwise k8s, which also covers an
+// empty or unclassifiable node list — the chart default and the only safe
+// guess. A mixed cluster has no single right answer: nri-image-policy patches
+// a distro-specific containerd path on every selected node, so it demands an
+// explicit choice via -f instead of guessing.
 func chooseDistro(rke2Nodes, otherNodes []string) (string, error) {
 	if len(rke2Nodes) > 0 && len(otherNodes) > 0 {
 		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set nriImagePolicy.distro and restrict the install with nriImagePolicy.nodeSelector via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
@@ -775,6 +783,10 @@ func decodeValuesFile(path string) (map[string]any, error) {
 	return tree, nil
 }
 
+// valuesFilesSetDistro reports whether any -f values file explicitly sets
+// nriImagePolicy.distro. When one does, that file owns the host containerd
+// layout and cluster auto-detection must stand aside; when none does,
+// detection still applies even though other values were supplied.
 func valuesFilesSetDistro(files []string) (bool, error) {
 	for _, f := range files {
 		tree, err := decodeValuesFile(f)
@@ -979,6 +991,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return fmt.Errorf("read chart components: %w", err)
 		}
 		imageTag := resolveImageTag()
+		// Detect the host containerd layout so the chart's k8s default cannot
+		// silently mis-target RKE2. A -f file owns the layout only when it sets
+		// nriImagePolicy.distro; other supplied values do not suppress detection.
 		distro := ""
 		distroInValues, err := valuesFilesSetDistro(installValues)
 		if err != nil {
@@ -991,6 +1006,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
 		}
+		// Preflight that CDS can bound the sandbox-digests callback to node
+		// addresses. Do this before buildValueArgs folds in explicit --node-cidr;
+		// an install must not silently lose sandbox identity.
 		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
 		if err != nil {
 			return err
@@ -1072,6 +1090,8 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
 
+		// Platform services need privileges beyond restricted PodSecurity (root,
+		// host access and NET_ADMIN), so prepare the release namespace before Helm.
 		if err := applyNamespace(cmd.Context(), installNamespace); err != nil {
 			return err
 		}
@@ -1190,6 +1210,11 @@ func defaultInstallImageTag(buildVersion string) string {
 	return fallbackImageTag
 }
 
+// buildInstallHelmArgs assembles the `helm upgrade --install` argv. Ordering is
+// load-bearing: the operator's -f files come first and the computed values file
+// LAST, so the CLI's computed values win on the keys they set (helm merges -f
+// last-wins) — matching the prior "--set beats -f" precedence. --skip-crds is a
+// helm invocation flag (not a value), emitted iff CRDs are skipped.
 func buildInstallHelmArgs(chartPath, computedValues string, valueFiles []string, installCRDs, wait bool) []string {
 	helmArgs := []string{
 		"upgrade", "--install", installRelease, chartPath,
@@ -1266,6 +1291,9 @@ func appendInstallCRDArgs(setArgs []string, installCRDs bool) []string {
 	return append(setArgs, "--set", "statusMirror.enabled=false")
 }
 
+// appendDistroInstallArgs translates the detected host distro into the
+// nri-image-policy containerd layout. No enum guard: the value comes from
+// chooseDistro, and the chart re-validates anyway.
 func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 	return append(helmArgs,
 
@@ -1273,6 +1301,36 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 	)
 }
 
+// appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
+// values. The chart re-validates, so the allowed check is a fast typo guard
+// before shelling to helm.
+//
+// cvm-mode selects which TEE device gets mounted (it does NOT vary the privilege
+// level — all modes render privileged: true, since a hostPath device mount alone
+// does not grant device-cgroup access):
+//
+//	node, gke → native /dev/sev-guest (SEV-SNP), or /dev/tdx-guest (Intel TDX)
+//	asks       → vTPM /dev/tpm0
+//
+// node is generalized node-as-CVM: pods run as ordinary processes attested via
+// the node's own quote. The node image bakes attestation-api and nri-image-policy;
+// the NRI installer refreshes baked configuration, and ratlsMesh stays chart-managed.
+// gke targets Google's managed confidential VMs, which still expose native TEE
+// devices. A plain managed→vTPM mapping would mount the wrong device there.
+//
+// `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
+// orthogonal axes. AKS uses the Azure vTPM path regardless of CPU TEE: its HCL
+// report wraps an SNP report (az-snp) or a TD quote (az-tdx). Intel TDX on AKS
+// needs no /dev/tdx-guest — the TD quote comes from the vTPM — and the mesh/CDS
+// RA-TLS platform is set to tdx accordingly.
+//
+// Mixed hardware inside a single cluster is out of scope: support would need
+// per-platform attestation-api DaemonSets and per-node ratlsmesh --platform.
+//
+// AKS also opts the pod-injector webhook out of its admissionsenforcer controller,
+// which otherwise rewrites namespaceSelector and makes helm re-apply conflict.
+// The chart renders that annotation from attestationApi.cvmMode so GitOps installs
+// get it too; see internal/helmchart/c8s/templates/webhook.yaml.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
@@ -1347,6 +1405,8 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 			"--set-string", "tlsLb.attest.generation=",
 		)
 	}
+	// The node image bakes the API and NRI binary/floor. Keep the NRI installer
+	// to refresh baked configuration (including CDS pins); mesh remains chart-managed.
 	if cvmMode == "node" {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
@@ -1397,6 +1457,9 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	return helmArgs, nil
 }
 
+// validateCvmMode enforces that --cvm-mode is set and is a known shape. There
+// is no default: an unstated deployment shape could silently mismatch the
+// cluster's baked versus chart-provided attestation stack.
 func validateCvmMode(cvmMode string) error {
 	if cvmMode == "" {
 		return fmt.Errorf("--%s is required; one of %s", flagCvmMode, strings.Join(allowedCvmModes, ", "))
@@ -1519,6 +1582,8 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 	)
 }
 
+// appendVolumedInstallArgs turns on the node agent that opens encrypted volumes
+// (docs/volumes.md) for --volumes.
 func appendVolumedInstallArgs(setArgs []string, volumes bool) []string {
 	if !volumes {
 		return setArgs
@@ -1888,6 +1953,12 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 	return parsed, repo + "@" + parsed.String(), nil
 }
 
+// tagCouplingHint explains a missing component image in terms of the c8s
+// publish model, so the operator lands on the right knob instead of retrying
+// tags. The c8s component images (operator, cds, …) publish in lockstep
+// (docker.yml) and the chart+operator ship as a unit. Falling back to a
+// mismatched component tag is worse than failing: an operator predating the
+// chart's webhook features silently mis-injects.
 func tagCouplingHint(repo string) string {
 	return fmt.Sprintf("the c8s component images publish in lockstep; verify the component tag exists with: crane ls %s", repo)
 }

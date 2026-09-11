@@ -1,10 +1,24 @@
 #!/bin/sh
+# containerd-prep — run as a privileged initContainer on RKE2 nodes.
+#
+# The nri-image-policy installer registers its containerd config as a drop-in.
+# Containerd loads it only if the main config imports its directory. This prep
+# adds that import when the RKE2 base template does not already supply it.
+# Drop-in directory and template names follow the config schema version
+# (version >= 3 -> config-v3.toml.*), not the active config's filename.
+#
+# Env:
+#   HOST_CONTAINERD_DIR — host config directory, bind-mounted at /host<dir>
+#   BASE_DIRECTIVE      — literal RKE2 `{{ template "base" . }}` include,
+#                         used when creating a template from scratch
 set -eu
 
 DIR="/host${HOST_CONTAINERD_DIR}"
 [ -d "$DIR" ] || { echo "ERROR: $DIR is not mounted" >&2; exit 1; }
 echo "==> c8s containerd-prep starting (${HOST_CONTAINERD_DIR})"
 
+# Serialise on a host lock file so overlapping preps cannot rewrite the
+# config and its template at the same time.
 exec 9>"$DIR/.c8s-containerd-prep.lock"
 flock 9
 
@@ -61,6 +75,9 @@ remove_managed_tmpl() {
 }
 
 case "$imports_count" in
+  # Add the import to the live config for the installer and to a durable
+  # template so it survives RKE2 regeneration. This base has no imports line,
+  # so prepending one does not collide.
   0)
     { printf 'imports = ["%s"]\n\n' "$glob"; cat "$main_config"; } > "${main_config}.c8s-tmp"
     mv -f "${main_config}.c8s-tmp" "$main_config"

@@ -109,6 +109,8 @@ func TestTargetDirRefusesMissingVolumeDir(t *testing.T) {
 	}
 }
 
+// mountTmpfsAt mounts a tmpfs at dir, skipping when the test lacks the
+// privileges. The volume directory itself is a mount point.
 func mountTmpfsAt(t *testing.T, dir string) {
 	t.Helper()
 	if err := unix.Mount("tmpfs", dir, "tmpfs", 0, ""); err != nil {

@@ -95,6 +95,9 @@ spec:
             - --challenge-port={{ include "tls-lb.acmeChallengePort" . }}
             - --http-port={{ include "tls-lb.acmeHTTPPort" . }}
             - --cert-dir={{ include "tls-lb.acmeCertDir" . }}
+          # Nginx names the ACME cert files, so it must wait for the bootstrap
+          # placeholder. Regular containers wait for this native sidecar's
+          # startup probe; cert.pem suffices because the key is written first.
           startupProbe:
             exec:
               command: ["/c8s", "probe-file", "{{ include "tls-lb.acmeCertDir" . }}/cert.pem"]
@@ -248,6 +251,14 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
+          # Workload-verified ingress gate (docs/getcert-workload-binding.md):
+          # ready only while the installed mesh leaf is usable and carries a
+          # matched-workload stamp naming expectedWorkload. Withhold traffic
+          # while the committed identity is unnamed, including after a renewal
+          # loses its match.
+          # Probe through nginx's /readyz because the sidecar is loopback-only.
+          # Nginx does not require a client cert, and kubelet skips certificate
+          # verification for HTTPS probes.
           {{- if .Values.tlsLb.attest.expectedWorkload }}
           readinessProbe:
             httpGet:

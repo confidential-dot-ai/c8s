@@ -1227,6 +1227,8 @@ func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
 	}
 }
 
+// A missing tag (registry MANIFEST_UNKNOWN) must abort with the tag-coupling
+// guidance explaining the lockstep publish model while preserving the cause.
 func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 	notFound := errors.New(`crane digest "ghcr.io/confidential-dot-ai/c8s-operator:gpu-test": exit status 1: MANIFEST_UNKNOWN: manifest unknown`)
 	resolve := func(string) (string, error) { return "", notFound }
@@ -1279,6 +1281,9 @@ func TestBuildDigestArgsUsesPinnedDigestWithoutResolving(t *testing.T) {
 	}
 }
 
+// A pinned component that the effective config disables must not be pinned
+// either: the enabled check has to run first, or the install would carry a
+// floor entry for a DaemonSet it never renders.
 func TestBuildDigestArgsSkipsDisabledPinnedComponent(t *testing.T) {
 	comps := []c8sComponent{{
 		valuePrefix:  "attestationApi.image",

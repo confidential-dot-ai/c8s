@@ -89,7 +89,8 @@ type mount struct {
 
 // Opener opens volumes and remembers what it has open.
 type Opener struct {
-	Ops     DeviceOps
+	Ops DeviceOps
+	// Targets resolves the volume mount within kubelet's pod directory.
 	Targets Targets
 	// MaxMounts caps live volumes; zero means DefaultMaxMounts.
 	MaxMounts int

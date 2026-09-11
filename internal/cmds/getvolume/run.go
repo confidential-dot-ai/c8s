@@ -208,6 +208,8 @@ func openOne(ctx context.Context, cfg config, daemon *http.Client, daemonBase, n
 	return nil
 }
 
+// daemonClient reaches volumed through the socket directory NRI-mounted into
+// this sidecar and returns the base URL to post to.
 func daemonClient(cfg config) (*http.Client, string) {
 	sock := filepath.Join(cfg.SocketDir, volumed.SocketName)
 	return &http.Client{Transport: &http.Transport{

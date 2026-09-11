@@ -1,3 +1,34 @@
+#!/usr/bin/env bash
+# Build the canonical per-image Docker matrix consumed by docker.yml and the
+# all-components release rebuild in semver-tag.yml.
+#
+# A component image is included when ANY of:
+#   - this is a manual workflow_dispatch -> rebuild every image (no diff base)
+#   - shared code changed (SHARED=true)  -> pkg/**, root internal/**, go.mod, …
+#   - the component's own paths changed   (its <X>=true flag)
+#
+# The workflow_dispatch fan-out is what makes the manual rebuild work: a
+# dispatch has no before/after diff, so docker.yml skips paths-filter and every
+# per-component flag arrives empty here. Build all of them for a complete manual rebuild.
+#
+# Components NOT included are emitted as a parallel `retag_matrix` so the
+# `retag-unchanged` job in docker.yml can copy each one's current `:main`
+# manifest under `:<short-sha>`.
+#
+# Inputs (env), each "true"/"false" from the dorny/paths-filter step:
+#   SHARED             shared-core || shared-cmdsutil || shared-root
+#   C8S, CDS, GET_CERT, RATLS_MESH, NRI_IMAGE_POLICY, VOLUMED
+#   GITHUB_EVENT_NAME  the triggering event; "workflow_dispatch" fans out to all
+#                      (paths-filter is skipped on dispatch, so the flags above
+#                      are empty and this is the only signal to build them)
+#   GITHUB_OUTPUT      step output file; we append `matrix`, `has_images`,
+#                      `retag_matrix`, and `has_retag`.
+#
+# Output (GITHUB_OUTPUT):
+#   has_images=true|false
+#   matrix={"include":[{binary,image,dockerfile}, …]}
+#   has_retag=true|false
+#   retag_matrix={"include":[{binary,image}, …]}
 
 set -euo pipefail
 

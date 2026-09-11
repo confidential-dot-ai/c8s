@@ -39,6 +39,9 @@ func ValidateHTTPURL(flagName, u string) error {
 	return nil
 }
 
+// ValidateAttestationAPIURL returns an error if u is not an attestation-api
+// URL: http(s):// for a network endpoint, or unix:// plus an absolute socket
+// path for the node-local socket the chart wires.
 func ValidateAttestationAPIURL(flagName, u string) error {
 	if socket, ok := strings.CutPrefix(u, "unix://"); ok {
 		if !path.IsAbs(socket) {

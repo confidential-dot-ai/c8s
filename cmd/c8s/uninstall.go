@@ -112,6 +112,9 @@ Baked node image components are preserved. Delete volume workloads first;
 				return err
 			}
 		}
+		// Sweep host state even if it outlived the release that created it.
+		// Chart pre-delete hooks are the healthy-release first line;
+		// --host-sweep=false opts out of this additional cleanup.
 		sweep := uninstallHostSweep
 
 		// volumed goes with the release and is the only component that unmaps
@@ -169,6 +172,9 @@ func validateUninstallFlags(hostSweep, hostSweepOnly bool) error {
 	return nil
 }
 
+// buildHelmUninstallArgs assembles the helm uninstall invocation. --wait
+// holds helm until the release resources are actually gone, with the same
+// fixed timeout the install uses.
 func buildHelmUninstallArgs(release, namespace string, wait bool) []string {
 	helmArgs := []string{"uninstall", release, "--namespace", namespace}
 	if wait {

@@ -36,6 +36,21 @@ func validateOperatorKeysFile(path string) error {
 
 var renderValuesDistro string
 
+// renderValuesCmd emits the resolved Helm values an install would apply, as a
+// values.yaml, without touching a cluster. It runs the same value computation
+// as `c8s install`: resolve component image tags to registry digests (via crane),
+// map --cvm-mode to TEE devices, clear the CDS node selector for --single-node,
+// and enable NRI allowlist derivation. It writes stdout instead of running helm.
+//
+// This is the GitOps seam: a Flux HelmRelease (or any chart consumer) can
+// valuesFrom a bundle produced here instead of recomputing digests and device
+// mappings itself. There is no node-distro autodetection (pass --distro),
+// CDS-node / pull-secret preflight, or namespace apply.
+//
+// The output is the install-computed base, not a full per-cluster values file.
+// Consumers layer cluster overrides (dnsSanPatterns, tls-lb SAN/LB IP/CORS,
+// nodeSelectors) on top; the chart still derives internal settings such as the
+// AKS webhook annotation from attestationApi.cvmMode.
 var renderValuesCmd = &cobra.Command{
 	Use:   "render-values",
 	Short: "Print the resolved Helm values an install would apply (no cluster needed)",

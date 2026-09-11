@@ -80,6 +80,8 @@ func TestWorkloadClaims_PassesNoInitContainerNames(t *testing.T) {
 	}
 }
 
+// No host dir: the webhook injects neither the inventory flag nor a mount,
+// so get-cert issues claim-free.
 func TestWorkloadClaims_NoHostDirNoInventory(t *testing.T) {
 	pod := newInjectablePod()
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{

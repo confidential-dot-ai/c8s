@@ -13,6 +13,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
+// cdsUpgrade swaps the server cert manager's provider from self-signed to
+// CDS-issued, retrying with backoff until it succeeds, then upgrades the
+// client manager once and flips the cert-mode gauge.
 type cdsUpgrade struct {
 	logger    *slog.Logger
 	logPrefix string

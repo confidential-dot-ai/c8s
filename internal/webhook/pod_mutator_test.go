@@ -937,6 +937,7 @@ func runtimeClassPatch(t *testing.T, resp admission.Response) string {
 	return ""
 }
 
+// Get-cert injection must not touch runtimeClassName.
 func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -1103,6 +1104,8 @@ func TestCertWaitContainerTimeout(t *testing.T) {
 	}
 }
 
+// Get-cert spells the pin flag --cds-measurements and takes it comma-joined,
+// where the secret and volume fetchers take a repeatable --measurements.
 func TestCertContainerCarriesCDSMeasurements(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
