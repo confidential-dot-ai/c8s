@@ -934,17 +934,6 @@ func findContainer(containers []corev1.Container, name string) (corev1.Container
 	return corev1.Container{}, false
 }
 
-// envValue returns the value of the named env var on a container, or "" if it
-// is absent (or set via valueFrom rather than a literal value).
-func envValue(env []corev1.EnvVar, name string) string {
-	for _, e := range env {
-		if e.Name == name {
-			return e.Value
-		}
-	}
-	return ""
-}
-
 func containerNames(containers []corev1.Container) []string {
 	names := make([]string, 0, len(containers))
 	for _, c := range containers {
@@ -4083,13 +4072,6 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	}
 }
 
-// rcScheduling captures the scheduling block of a rendered RuntimeClass.
-type rcScheduling struct {
-	Scheduling struct {
-		NodeSelector map[string]string `json:"nodeSelector"`
-	} `json:"scheduling"`
-}
-
 // TestChartCwLabelIntegrityPolicyRendersByDefault: the cw-label
 // ValidatingAdmissionPolicy guards Service-membership identity and must ship
 // on by default, with the immutability (oldObject) check present and the
@@ -4147,8 +4129,6 @@ func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
 		t.Fatalf("cw-label-integrity policy rendered while disabled\n%s", out)
 	}
 }
-
-const testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
 // On node-CVM the operator gets the host-dir mount source, from which the
 // webhook derives the get-cert workload-claims injection.

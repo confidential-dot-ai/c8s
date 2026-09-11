@@ -51,8 +51,6 @@ var (
 // deletes it); --delete-crds removes it by name.
 const confidentialWorkloadCRD = "confidentialworkloads.confidential.ai"
 
-const chartInstanceLabel = "app.kubernetes.io/instance"
-
 // volumePodJSONPath dumps one "namespace\tname\tphase\tvolumes" line per pod,
 // where volumes is the webhook's volume-request annotation; jsonpath needs the
 // dots in an annotation key escaped.

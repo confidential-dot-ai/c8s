@@ -109,16 +109,6 @@ func TestTargetDirRefusesMissingVolumeDir(t *testing.T) {
 	}
 }
 
-// guestTree builds a guest ephemeral directory holding one volume.
-func guestTree(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "c8s-volume-weights"), 0o755); err != nil {
-		t.Fatalf("mkdir volume: %v", err)
-	}
-	return root
-}
-
 func mountTmpfsAt(t *testing.T, dir string) {
 	t.Helper()
 	if err := unix.Mount("tmpfs", dir, "tmpfs", 0, ""); err != nil {

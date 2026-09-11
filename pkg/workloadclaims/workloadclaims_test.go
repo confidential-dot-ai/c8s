@@ -794,13 +794,6 @@ func TestServeTokensRejectsMalformedRequests(t *testing.T) {
 	}
 }
 
-// testSignerKeyFor is a stand-in: the guest test only needs a key to drive
-// Verify's signature branch, not a real inventory identity.
-func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
-	t.Helper()
-	return testSigner(t).PublicKey()
-}
-
 // The high-water mark deduplicates on SandboxContainer.Key, so the key must be
 // injective over (digest, argv): two distinct admissions that collide onto one
 // key erase each other from the sandbox's record, and the erasure is invisible

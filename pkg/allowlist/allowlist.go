@@ -325,22 +325,6 @@ func normalizeContainers(workload, field string, cs []Container) error {
 	return nil
 }
 
-// sortedUnique makes a list a function of its content, so Canonical does not
-// churn on the order an operator happened to write.
-func sortedUnique(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // normalizeArgv validates an argv policy and canonicalizes an absent policy to
 // Deny, so a minimally-specified container is maximally restrictive.
 func normalizeArgv(p *ArgvPolicy) error {

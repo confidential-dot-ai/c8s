@@ -386,8 +386,6 @@ func podBindsHostPort(p corev1.Pod, port int32) bool {
 	return false
 }
 
-const tdxHostLabelKey = "confidential.ai/tdx"
-
 func labelSelector(sel map[string]any) (string, bool) {
 	if len(sel) == 0 {
 		return "", false
@@ -805,21 +803,6 @@ func valuesFilesSetDistro(files []string) (bool, error) {
 		}
 		for _, path := range []string{"nriImagePolicy.distro"} {
 			if v, err := stringAtPath(tree, path); err == nil && v != "" {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
-func valuesFilesSetMeasurements(files []string) (bool, error) {
-	for _, f := range files {
-		tree, err := decodeValuesFile(f)
-		if err != nil {
-			return false, err
-		}
-		if v, ok := valueAtPath(tree, "cds.measurements"); ok {
-			if list, isList := v.([]any); isList && len(list) > 0 {
 				return true, nil
 			}
 		}
