@@ -369,7 +369,7 @@ func mapVerifyError(platform string, err error) error {
 		return ErrSignatureInvalid
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed):
+	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed), errors.Is(err, attestationclient.ErrOperatorKeyNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, attestationclient.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

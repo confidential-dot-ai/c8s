@@ -64,6 +64,9 @@ type Options struct {
 	// sidecars additionally hold CDS to. Ignored for SNP evidence.
 	CDSRTMRs []string
 
+	// CDSMeasurementsConfigJSON retains the complete identity policy for injected clients.
+	CDSMeasurementsConfigJSON string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -264,22 +267,23 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
 		if err := webhook.Register(mgr, webhook.Config{
-			GetCertImage:          opts.GetCertImage,
-			CDSURL:                opts.CDSURL,
-			AttestationApiURL:     opts.AttestationApiURL,
-			CDSMeasurements:       opts.CDSMeasurements,
-			CDSRTMRs:              opts.CDSRTMRs,
-			CertFSGroup:           ptr.To(opts.CertFSGroup),
-			CertKeyMode:           opts.CertKeyMode,
-			CertRenewInterval:     opts.CertRenewInterval,
-			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot:   ptr.To(opts.GetCertRunAsNonRoot),
-			KataEnforce:           opts.KataEnforce,
-			HardwarePlatform:      opts.HardwarePlatform,
-			KataGuestReadyGate:    opts.KataGuestReadyGate,
-			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
-			WorkloadClaimsGuest:   opts.WorkloadClaimsGuest,
+			GetCertImage:              opts.GetCertImage,
+			CDSURL:                    opts.CDSURL,
+			AttestationApiURL:         opts.AttestationApiURL,
+			CDSMeasurements:           opts.CDSMeasurements,
+			CDSRTMRs:                  opts.CDSRTMRs,
+			CDSMeasurementsConfigJSON: opts.CDSMeasurementsConfigJSON,
+			CertFSGroup:               ptr.To(opts.CertFSGroup),
+			CertKeyMode:               opts.CertKeyMode,
+			CertRenewInterval:         opts.CertRenewInterval,
+			GetCertRunAsUser:          ptr.To(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:         ptr.To(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:       ptr.To(opts.GetCertRunAsNonRoot),
+			KataEnforce:               opts.KataEnforce,
+			HardwarePlatform:          opts.HardwarePlatform,
+			KataGuestReadyGate:        opts.KataGuestReadyGate,
+			WorkloadClaimsHostDir:     opts.WorkloadClaimsHostDir,
+			WorkloadClaimsGuest:       opts.WorkloadClaimsGuest,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

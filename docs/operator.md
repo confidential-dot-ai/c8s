@@ -21,7 +21,8 @@ The operator tree is built around these pieces:
   workload can fetch and renew a leaf certificate through CDS.
 
 The operator does not inject the RA-TLS mesh sidecar. Pod-to-pod mTLS remains
-the responsibility of the node-level `ratls-mesh` DaemonSet. The chart-managed
+the responsibility of node-level `ratls-mesh`, deployed as a DaemonSet by
+the chart or as systemd services by the measured node image. The chart-managed
 mesh excludes `kube-system` and its own release namespace as local traffic
 sources, so c8s control-plane agents (and, on kind/kubeadm-style clusters where
 the API server runs as a `kube-system` pod, in-cluster webhook callers) do not
@@ -83,45 +84,162 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-`c8s install` (including `--cvm-mode=node`) is for clusters that are **not**
-the c8s node image. The node image (`node-guest-image/`) bakes the chart
-install itself as a `HelmChart` AddOn applied at boot, targeting the same
-node-mode values `--cvm-mode=node --single-node` computes; `c8s install`
-detects that baked release (by its `confidential.ai/baked=true` label on
-`HelmChart c8s` in `kube-system`) and refuses, since a live install would
-fight the AddOn controller's own reconciliation and cannot supply the
-boot-only inputs (the operator key, the node's own measurement) that come
-from `opkeydata` and the node's attestation instead — see
-`node-guest-image/README.md`, "Chart install".
+`c8s install` (including `--cvm-mode=node`) is for chart-managed clusters.
+The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
+RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
+CRDs, webhook and admission policies are rendered from this same chart at
+**image build time**. RKE2 applies those manifests at boot; there is no c8s
+Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
+namespace carries `confidential.ai/baked=true`.
 
-### Launch-time values
+### Authenticated launch configuration
 
-Deployment configuration that `c8s install --values` would otherwise carry
-(tls-lb hostnames and CORS, `cds.dnsSanPatterns`, rate limits,
-image-policy exempt namespaces and bootstrap allowlist workloads, `volumed.enabled`, ...)
-can be supplied to the node image without a rebuild, via a `values.yaml`
-fragment on the `opkeydata` ISO next to the operator public key. Sign it with
-the operator private key before attaching the disk:
+A measured node uses one image for both `leader` and `follower`. Each boot
+requires an ISO labelled `opkeydata` containing exactly the launch inputs
+`pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
+with the operator. `pubkey` is bound to the guest by the platform: the measured
+initrd extends TDX RTMR[3], while an SNP launcher must set HOST_DATA to
+`SHA-256(pubkey)` over the exact PEM file bytes.
 
+The strict `c8s-launch/v1` document selects the role, cluster identity, node
+addresses, RKE2 join credentials, trusted role keys, image pins and TLS SAN.
+It accepts an optional `workloads` string containing a complete
+`c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
+service arguments or component toggles; volume support remains disabled.
+
+Use **distinct launch keys for leader and follower roles, and new keys for
+each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
+launch keys establish cluster separation during peer verification. Keep one
+leader key and one or more follower keys. A follower document must omit
+`rke2.serverToken` entirely, including an empty field; it receives only the
+agent token. Leader and agent tokens must differ and contain 64 lowercase
+hexadecimal characters each.
+
+The following creates launch bundles for one leader and one follower. Select
+the trusted `manifest.json` published with the exact node image and VM shape;
+set `LEADER_ADDRESS` to the leader's guest IPv4 address reachable by every node.
+The example uses Python 3 and writes YAML with numeric RTMR indices.
+
+```sh
+umask 077
+mkdir -p demo/leader demo/follower
+c8s keys new --out demo/leader.key --pub-out demo/leader/pubkey
+c8s keys new --out demo/follower.key --pub-out demo/follower/pubkey
+
+export NODE_PLATFORM=tdx       # tdx or snp
+export NODE_VCPUS=8            # SNP: select this exact manifest variant
+export LEADER_ADDRESS=10.0.0.10  # replace with the actual leader guest address
+python3 - manifest.json <<'PYTHON'
+import copy, json, os, secrets, sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+platform = os.environ["NODE_PLATFORM"]
+if platform == "tdx":
+    measured = manifest["tdx"]
+    image = {"platform": "tdx", "measurement": measured["mrtd"],
+             "rtmrs": {1: measured["rtmr1"], 2: measured["rtmr2"]}}
+elif platform == "snp":
+    variants = [v for v in manifest["snp_variants"]
+                if v["smp"] == int(os.environ["NODE_VCPUS"])]
+    assert len(variants) == 1, "select exactly one matching SNP vCPU variant"
+    image = {"platform": "snp",
+             "measurement": variants[0]["measurement"]["snp_launch_digest"]}
+else:
+    raise ValueError("NODE_PLATFORM must be tdx or snp")
+
+leader = {
+    "schemaVersion": "c8s-launch/v1",
+    "clusterID": "demo",
+    "role": "leader",
+    "image": image,
+    "node": {"name": "demo-leader"},
+    "rke2": {"serverToken": secrets.token_hex(32),
+             "agentToken": secrets.token_hex(32)},
+    "leader": {"address": os.environ["LEADER_ADDRESS"],
+               "operatorPublicKey": Path("demo/leader/pubkey").read_text()},
+    "followerOperatorPublicKeys": [Path("demo/follower/pubkey").read_text()],
+    "tlsSAN": "c8s.local",
+}
+follower = copy.deepcopy(leader)
+follower["role"] = "follower"
+follower["node"]["name"] = "demo-follower"
+del follower["rke2"]["serverToken"]
+for role, document in [("leader", leader), ("follower", follower)]:
+    lines = [f"{field}: {json.dumps(value)}" for field, value in document.items()
+             if field != "image"]
+    lines += ["image:", "  platform: " + image["platform"],
+              "  measurement: " + json.dumps(image["measurement"])]
+    if "rtmrs" in image:
+        # RTMR indices must be numeric YAML keys, not quoted JSON keys.
+        lines += ["  rtmrs:", *[f"    {i}: {json.dumps(digest)}"
+                                for i, digest in image["rtmrs"].items()]]
+    Path(f"demo/{role}/launch.yaml").write_text("\n".join(lines) + "\n")
+PYTHON
+
+c8s keys sign-launch --key demo/leader.key demo/leader/launch.yaml
+c8s keys sign-launch --key demo/follower.key demo/follower/launch.yaml
+xorriso -as mkisofs -V opkeydata -o demo/leader.iso demo/leader
+xorriso -as mkisofs -V opkeydata -o demo/follower.iso demo/follower
 ```
-c8s keys sign-values --key operator.key values.yaml
+
+Attach the corresponding ISO to each VM along with its required scratch
+disk, booting the **same image and supported VM shape** for both roles.
+The image is built separately for TDX and SNP; their image digests and
+measurements are different. SNP's launch digest also depends on vCPU count.
+Every `image.measurement` is 96 lowercase hexadecimal characters. TDX
+requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
+pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
+RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
+
+For a leader, `leader.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. A follower must
+always carry its leader's reachable IPv4 address. `node.ip` is optional
+(`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
+IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
+to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
+serves a CDS-issued certificate; arbitrary routes, public WebPKI configuration
+and CORS overrides are not launch settings in this image.
+
+For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
+
+```sh
+kubectl -n YOUR_NAMESPACE create secret generic demo-leader-launch \
+  --from-file=pubkey=demo/leader/pubkey \
+  --from-file=launch.yaml=demo/leader/launch.yaml \
+  --from-file=launch.yaml.sig=demo/leader/launch.yaml.sig
 ```
 
-writing `values.yaml.sig` next to it (ECDSA P-256 over SHA-256 of the file's
-exact bytes, ASN.1 DER, base64). The fragment itself carries exactly two
-top-level keys: `measurement` (the launch measurement of the image the
-fragment is signed for) and `values` (the subtree to merge in). At boot,
-`c8s launch-values render` verifies the signature under the operator key
-the guest already trusts (the one measured into its launch identity),
-requires `measurement` to equal this guest's own measurement — a fragment
-signed for one image cannot be replayed onto another — and rejects any path
-under `values` that is not on an explicit allowlist. The allowlist exists
-precisely because this disk is host-attached and otherwise untrusted: it
-covers configuration, never anything that could widen trust (an image,
-digest, or platform toggle) or override the boot-derived measurement pins
-and operator key. See `internal/cmds/launchvalues` for the exact list.
-A `values.yaml` present without a matching `values.yaml.sig` fails the boot
-rather than installing unsigned configuration.
+Reference that Secret in the VM's volume with
+`secret: {secretName: demo-leader-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the follower's files and a separate
+Secret. On SNP, the launcher must additionally commit the corresponding
+public-key hash as HOST_DATA; attaching the disk alone is insufficient.
+
+`c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
+and writes an ASN.1 DER signature encoded as one base64 line to
+`<file>.sig`. It does not overwrite an existing signature. Any later edit
+requires a new signature. At boot, `rke2-role.service` calls
+`c8s launch-config stage`, which authenticates those bytes before parsing,
+checks the complete software measurement and role-key relationship against
+verified self-attestation, then publishes the role marker last. Missing,
+unsigned or inconsistent input leaves RKE2 and role-dependent services down.
+Changing role or launch configuration requires a relaunch with a newly
+signed bundle and the corresponding role's hardware-bound public key.
+
+The verified files live in root-only `/run/confos/launch`. `peers.json`
+contains the software/key tuples for this cluster's leader and permitted
+followers; `cds.json` contains only its leader. Their shared measurement-file
+schema carries `operator_key` as the exact PEM string alongside each entry's
+image measurement and TDX RTMR tuple. This lets peers accept both roles while
+CDS clients require the authorized leader despite identical software images.
+The leader publishes only the CDS URL and leader policy to the public
+`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
+and private keys do not enter that ConfigMap. The operator forwards the full
+leader policy to injected workload helpers. NRI and host CDS clients use the
+same leader policy directly from the staged files.
+
+### Chart-managed defaults
 
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
@@ -364,6 +482,16 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
+For the measured node image, CDS stores its database at
+`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
+restarts, but a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the next boot; reapply any later
+operator changes. The CA signing key is in process memory and changes on a
+CDS process restart, so plan for certificate re-bootstrap. This image does
+not expose a persistent-volume switch in launch configuration.
+
+For chart-managed CDS:
+
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
 whatever an operator writes with `c8s allowlist add` or `apply`. With
@@ -580,7 +708,7 @@ is only meaningful where such a binding exists: on a cluster that is not the
 c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
 for a group that cluster already authorizes.
 
-Do not read the binding as a privilege boundary. On this single-node cluster
+Do not read the binding as a privilege boundary. In this node cluster
 `cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
 PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
 `kubectl` away. RBAC is used for revocability and policy, not containment; the
@@ -594,9 +722,11 @@ manifest is baked into the read-only root and everything RKE2 writes, the
 cluster state included, lives on the scratch disk, which is re-encrypted with
 a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
 are lost with it, so there is no in-guest switch that survives a restart, by
-design. To revoke durably, relaunch without `opkeydata`, or with a rotated
-operator key, so the old key can no longer obtain a certificate. A certificate
-already issued stays usable for the remainder of its one-hour TTL.
+design. To revoke durably, relaunch with a rotated leader launch key and
+updated signed documents and peer key sets. Every boot requires valid
+`opkeydata`; omitting it prevents the node from starting. A certificate already
+issued remains usable against its original live cluster until expiry or an
+RBAC change.
 
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,

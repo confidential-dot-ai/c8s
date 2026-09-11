@@ -13,16 +13,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // buildInventoryHosts resolves the sandbox-digests dial bound: the operator's
 // explicit CIDRs when given, else one host route per node derived live from
 // the cluster's node objects.
-func buildInventoryHosts(ctx context.Context, cidrs []string) (workloadclaims.InventoryHosts, error) {
+func buildInventoryHosts(ctx context.Context, cidrs []string, kubeconfig string) (workloadclaims.InventoryHosts, error) {
 	if len(cidrs) > 0 {
 		return workloadclaims.ParseInventoryHosts(cidrs)
 	}
-	return watchNodeInventoryHosts(ctx)
+	return watchNodeInventoryHosts(ctx, kubeconfig)
 }
 
 // nodeCacheSyncTimeout bounds the startup wait for the first node list; a
@@ -44,9 +45,22 @@ var newKubeClientset = func() (kubernetes.Interface, error) {
 // what answers must still pass mutually-attested RA-TLS on a privileged port
 // (docs/ratls.md). Without in-cluster config (local dev) the bound stays
 // empty and every sandbox token is refused, matching the previous posture.
-func watchNodeInventoryHosts(ctx context.Context) (workloadclaims.InventoryHosts, error) {
+func watchNodeInventoryHosts(ctx context.Context, kubeconfig string) (workloadclaims.InventoryHosts, error) {
 	hosts := &workloadclaims.NodeHosts{}
-	clientset, err := newKubeClientset()
+	var clientset kubernetes.Interface
+	var err error
+	if kubeconfig != "" {
+		restCfg, configErr := clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if configErr != nil {
+			return nil, fmt.Errorf("load node inventory kubeconfig: %w", configErr)
+		}
+		clientset, err = kubernetes.NewForConfig(restCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create node inventory client: %w", err)
+		}
+	} else {
+		clientset, err = newKubeClientset()
+	}
 	if err != nil {
 		slog.Warn("--sandbox-inventory-cidr not set and no in-cluster config: CDS will refuse any request carrying a sandbox token", "error", err)
 		return hosts, nil

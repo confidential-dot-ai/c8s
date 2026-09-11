@@ -8,8 +8,12 @@ package measurements
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"sort"
@@ -33,7 +37,7 @@ const (
 	MaxRTMRs = 4
 )
 
-// Entry is one accepted VM image.
+// Entry is one accepted VM image and, optionally, its launch-bound operator.
 type Entry struct {
 	// Name identifies the image in diagnostics and on accept. It carries no
 	// matching semantics.
@@ -45,6 +49,10 @@ type Entry struct {
 	// RTMRs pins TDX runtime measurement registers by index. An absent index
 	// is unchecked; an all-zero value pins the register to zero.
 	RTMRs map[int][]byte
+
+	// OperatorKey pins the exact PEM bytes bound at launch. When absent,
+	// only the image is pinned, preserving non-node policy behavior.
+	OperatorKey []byte
 }
 
 // ReferenceValues is what a verifier compares evidence against: the images an
@@ -60,6 +68,17 @@ type ReferenceValues struct {
 
 // Empty reports whether the set pins nothing, i.e. accepts any attested peer.
 func (s ReferenceValues) Empty() bool { return len(s.Entries) == 0 }
+
+// PinsOperatorKeys reports whether a policy requires launch-bound operator
+// identities. Consumers that can carry only flat pins must refuse these.
+func (s ReferenceValues) PinsOperatorKeys() bool {
+	for _, e := range s.Entries {
+		if len(e.OperatorKey) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // Digests returns every reference launch digest, for gates that match on
 // the digest alone.
@@ -159,6 +178,10 @@ func Format(s ReferenceValues) ([]byte, error) {
 	f := wire{SchemaVersion: SchemaVersion1, TEE: s.TEE}
 	for _, e := range s.Entries {
 		we := wireEntry{Name: e.Name}
+		if len(e.OperatorKey) > 0 {
+			// Marshaling a string cannot fail.
+			we.OperatorKey, _ = json.Marshal(string(e.OperatorKey))
+		}
 		d := hex.EncodeToString(e.Digest)
 		switch s.TEE {
 		case TEESNP:
@@ -193,10 +216,11 @@ type wire struct {
 }
 
 type wireEntry struct {
-	Name        string    `json:"name"`
-	Measurement *string   `json:"measurement,omitempty"`
-	MRTD        *string   `json:"mrtd,omitempty"`
-	RTMR        []*string `json:"rtmr,omitempty"`
+	Name        string          `json:"name"`
+	Measurement *string         `json:"measurement,omitempty"`
+	MRTD        *string         `json:"mrtd,omitempty"`
+	RTMR        []*string       `json:"rtmr,omitempty"`
+	OperatorKey json.RawMessage `json:"operator_key,omitempty"`
 }
 
 // Parse validates a measurements config document. Parsing and linting are the
@@ -259,6 +283,26 @@ func (we wireEntry) validate(tee string, i int) (Entry, error) {
 		return Entry{}, fmt.Errorf("%s: name is required", at)
 	}
 	e := Entry{Name: we.Name}
+	if we.OperatorKey != nil {
+		var text string
+		if err := json.Unmarshal(we.OperatorKey, &text); err != nil {
+			return Entry{}, fmt.Errorf("%s.operator_key: %w", at, err)
+		}
+		key := []byte(text)
+		block, rest := pem.Decode(key)
+		if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 || !bytes.HasPrefix(bytes.TrimSpace(key), []byte("-----BEGIN PUBLIC KEY-----")) {
+			return Entry{}, fmt.Errorf("%s.operator_key: want one PEM PUBLIC KEY", at)
+		}
+		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return Entry{}, fmt.Errorf("%s.operator_key: %w", at, err)
+		}
+		ec, ok := pub.(*ecdsa.PublicKey)
+		if !ok || ec.Curve != elliptic.P256() {
+			return Entry{}, fmt.Errorf("%s.operator_key: want an ECDSA P-256 key", at)
+		}
+		e.OperatorKey = key
+	}
 
 	switch tee {
 	case TEESNP:
@@ -353,6 +397,9 @@ func tupleKey(e Entry) string {
 	sort.Ints(idx)
 	for _, i := range idx {
 		fmt.Fprintf(&b, "|%d=%s", i, hex.EncodeToString(e.RTMRs[i]))
+	}
+	if len(e.OperatorKey) > 0 {
+		fmt.Fprintf(&b, "|operator_key=%x", e.OperatorKey)
 	}
 	return b.String()
 }
@@ -464,7 +511,7 @@ func Serve(s ReferenceValues) ([]byte, error) {
 }
 
 // Diff reports the entries each side pins and the other does not, matched on
-// what decides admission — the digest and its registers. Names are diagnostic
+// what decides admission — the digest, registers, and operator. Names are diagnostic
 // only, so two entries naming one image differently are still the same pin.
 func Diff(want, got ReferenceValues) (missing, extra []Entry) {
 	index := func(s ReferenceValues) map[string]Entry {

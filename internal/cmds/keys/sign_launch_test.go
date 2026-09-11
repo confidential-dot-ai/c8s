@@ -33,44 +33,44 @@ func writeOperatorKey(t *testing.T) (path string, key *ecdsa.PrivateKey) {
 	return path, key
 }
 
-// writeValues writes content to <dir>/values.yaml and returns its path — the
-// fragment every sign-values test signs.
-func writeValues(t *testing.T, dir string, content []byte) string {
+// writeLaunch writes content to <dir>/launch.yaml and returns its path — the
+// document every sign-launch test signs.
+func writeLaunch(t *testing.T, dir string, content []byte) string {
 	t.Helper()
-	path := filepath.Join(dir, "values.yaml")
+	path := filepath.Join(dir, "launch.yaml")
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-// runSign runs `c8s keys sign-values --key <keyPath> <valuesPath>` through
+// runSign runs `c8s keys sign-launch --key <keyPath> <launchPath>` through
 // the real cobra command, the shape every test below exercises.
-func runSign(keyPath, valuesPath string, args ...string) error {
+func runSign(keyPath, launchPath string, args ...string) error {
 	cmd := NewCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	argv := []string{"sign-values"}
+	argv := []string{"sign-launch"}
 	if keyPath != "" {
 		argv = append(argv, "--key", keyPath)
 	}
 	argv = append(argv, args...)
-	argv = append(argv, valuesPath)
+	argv = append(argv, launchPath)
 	cmd.SetArgs(argv)
 	return cmd.Execute()
 }
 
-func TestSignValuesWritesVerifiableSignature(t *testing.T) {
+func TestSignLaunchWritesVerifiableSignature(t *testing.T) {
 	keyPath, key := writeOperatorKey(t)
 	dir := t.TempDir()
-	content := []byte("measurement: deadbeef\nvalues:\n  tlsLb:\n    san: [\"a\"]\n")
-	valuesPath := writeValues(t, dir, content)
+	content := []byte("schemaVersion: c8s-launch/v1\nrole: leader\n")
+	launchPath := writeLaunch(t, dir, content)
 
-	if err := runSign(keyPath, valuesPath); err != nil {
+	if err := runSign(keyPath, launchPath); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	sigPath := valuesPath + ".sig"
+	sigPath := launchPath + ".sig"
 	sigLine, err := os.ReadFile(sigPath)
 	if err != nil {
 		t.Fatalf("read sig: %v", err)
@@ -85,39 +85,39 @@ func TestSignValuesWritesVerifiableSignature(t *testing.T) {
 	}
 	digest := sha256.Sum256(content)
 	if !ecdsa.VerifyASN1(&key.PublicKey, digest[:], der) {
-		t.Fatal("signature does not verify against the signing key over sha256(values.yaml)")
+		t.Fatal("signature does not verify against the signing key over sha256(launch.yaml)")
 	}
 }
 
-func TestSignValuesRefusesToOverwrite(t *testing.T) {
+func TestSignLaunchRefusesToOverwrite(t *testing.T) {
 	keyPath, _ := writeOperatorKey(t)
 	dir := t.TempDir()
-	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
-	if err := os.WriteFile(valuesPath+".sig", []byte("existing"), 0o644); err != nil {
+	launchPath := writeLaunch(t, dir, []byte("schemaVersion: c8s-launch/v1\nrole: follower\n"))
+	if err := os.WriteFile(launchPath+".sig", []byte("existing"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := runSign(keyPath, valuesPath)
-	if err == nil || !strings.Contains(err.Error(), "values.yaml.sig") {
+	err := runSign(keyPath, launchPath)
+	if err == nil || !strings.Contains(err.Error(), "launch.yaml.sig") {
 		t.Fatalf("want refusal naming the existing sig file, got %v", err)
 	}
 }
 
-func TestSignValuesRequiresKey(t *testing.T) {
+func TestSignLaunchRequiresKey(t *testing.T) {
 	dir := t.TempDir()
-	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
-	if err := runSign("", valuesPath); err == nil {
+	launchPath := writeLaunch(t, dir, []byte("schemaVersion: c8s-launch/v1\nrole: follower\n"))
+	if err := runSign("", launchPath); err == nil {
 		t.Fatal("want an error when --key is missing")
 	}
 }
 
-func TestSignValuesDetectsTamperedContent(t *testing.T) {
+func TestSignLaunchDetectsTamperedContent(t *testing.T) {
 	keyPath, key := writeOperatorKey(t)
 	dir := t.TempDir()
-	valuesPath := writeValues(t, dir, []byte("measurement: aa\nvalues: {}\n"))
-	if err := runSign(keyPath, valuesPath); err != nil {
+	launchPath := writeLaunch(t, dir, []byte("schemaVersion: c8s-launch/v1\nrole: follower\n"))
+	if err := runSign(keyPath, launchPath); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	sigLine, err := os.ReadFile(valuesPath + ".sig")
+	sigLine, err := os.ReadFile(launchPath + ".sig")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestSignValuesDetectsTamperedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tamperedDigest := sha256.Sum256([]byte("measurement: aa\nvalues:\n  extra: true\n"))
+	tamperedDigest := sha256.Sum256([]byte("schemaVersion: c8s-launch/v1\nrole: leader\n"))
 	if ecdsa.VerifyASN1(&key.PublicKey, tamperedDigest[:], der) {
 		t.Fatal("signature verified against tampered content")
 	}

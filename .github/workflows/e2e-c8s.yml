@@ -1,89 +1,28 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# CONSUMER: c8s — the flagship payload ("install c8s + prove a cw workload runs")
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# This file owns only WHAT to test (the c8s payload) and WHEN (the trigger).
-# WHERE (boot/attest/teardown a CVM per platform) belongs to the primitive:
-#   .github/workflows/cvm-e2e.yml
-#
-# Adding a platform = adding a matrix row. Adding a DIFFERENT repo's test = a new
-# consumer file with a different payload on the SAME primitive (e.g.
-# attestation-rs: payload = `cargo test --features attest`, flavor: base-cpu).
-#
-# WHY NO OCI PULLS BY <sha> TAG: BOTH c8s publish workflows are PATH-GATED, so
-# a given main commit may have neither artifact under its own sha:
-#  - chart.yml (internal/helmchart/**): a Go-only merge publishes NO chart tag
-#    0.1.0-g<sha> -> helm pull 404s, c8s-system stays empty (failure mode 1).
-#  - docker.yml (source paths): a commit touching neither runs NO Docker at all,
-#    so retag-unchanged never fires and NO :<sha> image tags exist -> pods sit
-#    in ImagePullBackOff (failure mode 2; both observed live on main 70aea72).
-# Resolution, per artifact kind:
-#  - chart: packaged FROM SOURCE at the exact sha (anonymous codeload tarball),
-#    inlined via the HelmChart CR's chartContent.
-#  - images: can't be built from source here — resolve each component to the
-#    NEWEST existing sha tag at-or-before the commit under test (= what that
-#    commit would actually deploy). Under the post-merge trigger this is the
-#    head sha itself, because workflow_run chains off a completed Docker run.
-# No registry credential anywhere in this payload — the whole chain is public.
+# Product checks boot published measured node images on each hardware platform.
+# The image and its complete identity come from the lane's producer refs CM.
+# c8s_ref selects the external CLI/test source; it does not replace baked code.
 name: e2e-c8s
 on:
-  # Reusable: c8s's confidential-e2e.yml wrapper owns triggering (workflow_run
-  # off Docker + dispatch). Vendored from confidential-ci for Phase 0 — a public
-  # repo (c8s) cannot `uses:` a private repo's (confidential-ci) reusable
-  # workflow, so the lane lives here and is called locally (`uses: ./`).
   workflow_call:
     inputs:
       c8s_ref:
-        description: c8s commit to test
+        description: 'Compatible CLI/test source ref; empty uses each image build ref'
         type: string
         required: false
-        default: main
-      aa_ref:
-        description: attestation-api image ref (tag or sha-<short>). Caller pins to a known-good build to avoid floating :main drift; default main keeps prior behaviour.
-        type: string
-        required: false
-        default: main
+        default: ''
 
 concurrency:
   group: e2e-c8s-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # ── ONE JOB PER PLATFORM ─────────────────────────────────────────────────
-  # Vendored from confidential-ci. c8s is PUBLIC and confidential-ci is PRIVATE,
-  # so a public repo cannot `uses:` the private reusable workflows and must keep
-  # local copies. cvm-e2e.yml here is byte-identical to its original; edit
-  # the original, then copy across. tdx-metal-e2e.yml is byte-identical
-  # except for a c8s-local cidata bait/tripwire patch carried until the
-  # source takes the same edit; node-guest-image-lint.yml guards those
-  # markers. snp-metal-e2e.yml is c8s-owned (the c8s payload lives in this
-  # copy); edit it here.
-  #
-  # NOT a `matrix:`. A reusable-workflow `uses:` takes no expressions, so a
-  # matrix would need an if-gated dispatcher, and because every row instantiates
-  # the whole dispatcher that costs rows x jobs entries in the run tree, growing
-  # quadratically. Plain jobs give one real entry each.
-  #
-  # THE AZURE ROWS ARE ABSENT ON PURPOSE, and this is the ONE way this file
-  # differs from its confidential-ci original. Two hard blockers, both outside
-  # CI: (1) the Entra federated credential trusts
-  # `repo:confidential-dot-ai/confidential-ci`, so an OIDC token minted here is
-  # rejected with AADSTS700213; granting c8s its own credential is an access
-  # change, not a code change. (2) azure-tdx-e2e.yml reads
-  # c8s-e2e/azure-tdx-driver.sh, which lives in confidential-ci and does not
-  # exist in this repo. Until both are resolved, azure-snp and azure-tdx run
-  # from confidential-ci on a schedule.
-
   snp-metal:
     permissions:
       contents: read
-      # The CVM reaper asks GitHub whether the owning run finished; without this
-      # it 403s silently and falls back to reaping on age alone.
       actions: read
     uses: ./.github/workflows/snp-metal-e2e.yml
     with:
       c8s_ref: ${{ inputs.c8s_ref }}
-      aa_ref: ${{ inputs.aa_ref }}
 
   tdx-metal:
     permissions:
@@ -91,37 +30,4 @@ jobs:
       actions: read
     uses: ./.github/workflows/tdx-metal-e2e.yml
     with:
-      # DELIBERATELY EMPTY. Empty means "use the ref the node image was built
-      # from", published in the tdx-rke2-image-refs ConfigMap.
-      #
-      # WHY, and the earlier comment here had this WRONG. It claimed the image
-      # bakes a floor "from its build ref, so installing any other ref gets that
-      # ref's own components denied". That is not the mechanism. The measured
-      # always_allow in the node image (confidential-os-builder
-      # mkosi/base/mkosi.profiles/c8s/image-policy.yaml.in) holds exactly TWO
-      # entries, the nri-image-policy image and the cds image. It has never
-      # contained the operator, ratls-mesh, tls-lb, get-cert or attestation-api
-      # at any ref, so "that ref's components" were never in it to be missing.
-      #
-      # THE ACTUAL BINDING IS A BOOTSTRAP ORDERING. CDS serves the allowlist that
-      # admits everything else, so CDS itself has to be admitted first, and the
-      # only thing that can admit it before it is running is that two-entry
-      # measured floor, which pins ONE cds digest: the node image's. Install a
-      # different ref and its cds image is a different digest, so it is denied at
-      # container create in c8s-system, never serves a
-      # seed, and helm --wait expires. Narrow in principle, since retag-unchanged
-      # preserves the digest whenever cds itself is untouched, but measured on
-      # 2026-07-27 it was 0 of the last 3 merge heads.
-      #
-      # Note --resolve-digests does NOT help here: it derives component digests
-      # into the CDS-SERVED seed, which is downstream of the bootstrap. That is
-      # why arbitrary third-party digests (the ARC images) can be seeded at
-      # install and admitted: those pods start after CDS is already serving.
-      #
-      # CONSEQUENCE, UNCHANGED: this lane proves the stack, the host, the image
-      # and the runner, not the code in the merge that triggered it. It is also
-      # the ONLY lane in either repo that runs nri-image-policy in ENFORCE mode
-      # and asserts a real admission denial; the snp-metal lane installs the
-      # merge head but with policy.mode: audit, so it tests newer code with
-      # enforcement off. The two are complementary, not redundant.
-      c8s_ref: ''
+      c8s_ref: ${{ inputs.c8s_ref }}

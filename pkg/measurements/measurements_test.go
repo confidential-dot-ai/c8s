@@ -2,7 +2,13 @@ package measurements
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
 	"strings"
 	"testing"
 )
@@ -43,6 +49,82 @@ func TestParseValidSNP(t *testing.T) {
 	}
 	if set.Empty() {
 		t.Error("Empty() = true for a populated set")
+	}
+}
+
+func operatorPEM(t *testing.T, curve elliptic.Curve) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+}
+
+func TestOperatorIdentityRoundTripAndDuplicateTuples(t *testing.T) {
+	leader := operatorPEM(t, elliptic.P256())
+	follower := operatorPEM(t, elliptic.P256())
+	// Preserve exact PEM whitespace: launch binding hashes the bytes.
+	leader = append(leader, '\n')
+	digest, _ := hex.DecodeString(d1)
+	set := ReferenceValues{TEE: TEESNP, Entries: []Entry{
+		{Name: "leader", Digest: digest, OperatorKey: leader},
+		{Name: "follower", Digest: digest, OperatorKey: follower},
+	}}
+	encoded, err := Format(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(encoded)
+	if err != nil {
+		t.Fatalf("same image, different operators: %v", err)
+	}
+	for i, entry := range got.Entries {
+		if !bytes.Equal(entry.OperatorKey, set.Entries[i].OperatorKey) {
+			t.Fatalf("operator key bytes changed for %s", entry.Name)
+		}
+	}
+	missing, extra := Diff(ReferenceValues{Entries: set.Entries[:1]}, ReferenceValues{Entries: set.Entries[1:]})
+	if len(missing) != 1 || len(extra) != 1 {
+		t.Fatal("policy diff ignored operator identity")
+	}
+	set.Entries[1].OperatorKey = leader
+	encoded, err = Format(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(encoded); err == nil || !strings.Contains(err.Error(), "same tuple") {
+		t.Fatalf("duplicate image/operator tuple: %v", err)
+	}
+}
+
+func TestOperatorIdentityRejectsMalformedKey(t *testing.T) {
+	if _, err := Parse([]byte(snpFile(`{"name":"leader","measurement":"` + d1 + `","operator_key":null}`))); err == nil {
+		t.Fatal("explicit null operator key silently removed its pin")
+	}
+	valid := operatorPEM(t, elliptic.P256())
+	for name, key := range map[string][]byte{
+		"empty":          {},
+		"garbage":        []byte("not a key"),
+		"wrong curve":    operatorPEM(t, elliptic.P384()),
+		"multiple keys":  append(append([]byte{}, valid...), valid...),
+		"prefix garbage": append([]byte("ignored garbage\n"), valid...),
+		"suffix garbage": append(append([]byte{}, valid...), []byte("garbage")...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			encodedKey, err := json.Marshal(string(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := snpFile(`{"name":"leader","measurement":"` + d1 + `","operator_key":` + string(encodedKey) + `}`)
+			if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "operator_key") {
+				t.Fatalf("malformed operator key accepted: %v", err)
+			}
+		})
 	}
 }
 

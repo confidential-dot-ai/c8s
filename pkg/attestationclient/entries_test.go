@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -154,6 +156,64 @@ func TestEnforceEntriesMatchesFlatFlagSemantics(t *testing.T) {
 			entries := EnforceEntries(tc.resp, set.Entries, tdx)
 			if (legacy == nil) != (entries == nil) {
 				t.Errorf("legacy err=%v but entries err=%v", legacy, entries)
+			}
+		})
+	}
+}
+
+// One shared image does not authorize every launch of it to act as CDS.
+func TestEnforceEntriesPinsOperatorWithImage(t *testing.T) {
+	leader := []byte("leader launch key")
+	follower := []byte("follower launch key")
+	for _, platform := range []teetypes.PlatformType{types.PlatformSnp, types.PlatformTdx} {
+		t.Run(string(platform), func(t *testing.T) {
+			bound := func(digest string, key []byte) types.VerifyResponse {
+				r := evidence(t, digest, map[string]string{"rtmr_1": regA1})
+				r.Result.SignatureValid = true
+				r.Result.Platform = platform
+				if platform == types.PlatformTdx {
+					seed := runtimemeasure.Seed(key)
+					r.Result.Claims.PlatformData["rtmr_3"] = hex.EncodeToString(seed[:])
+				} else {
+					hostData := runtimemeasure.HostData(key)
+					r.Result.Claims.InitData = hostData[:]
+				}
+				return r
+			}
+			entry := entryTDX(t, "leader", digestA, regA1, "")
+			entry.OperatorKey = leader
+			policy := []measurements.Entry{entry}
+			if err := EnforceEntries(bound(digestA, leader), policy, string(platform)); err != nil {
+				t.Fatalf("leader refused: %v", err)
+			}
+			if err := EnforceEntries(bound(digestA, follower), policy, string(platform)); !errors.Is(err, ErrOperatorKeyNotAllowed) {
+				t.Fatalf("follower with same image: %v", err)
+			}
+			missing := bound(digestA, leader)
+			missing.Result.Claims.InitData = nil
+			delete(missing.Result.Claims.PlatformData, "rtmr_3")
+			if err := EnforceEntries(missing, policy, string(platform)); !errors.Is(err, ErrOperatorKeyNotAllowed) {
+				t.Fatalf("missing operator binding: %v", err)
+			}
+			unverified := bound(digestA, leader)
+			unverified.Result.SignatureValid = false
+			if err := EnforceEntries(unverified, policy, string(platform)); !errors.Is(err, ErrOperatorKeyNotAllowed) {
+				t.Fatalf("unverified claims accepted: %v", err)
+			}
+			if err := EnforceEntries(bound(digestA, leader), policy, "different-platform"); !errors.Is(err, ErrOperatorKeyNotAllowed) {
+				t.Fatalf("inconsistent verified platform accepted: %v", err)
+			}
+			// Neither key matching a different image nor the shared image
+			// matching a different role may satisfy half of a tuple.
+			other := entry
+			other.Name, other.Digest, other.OperatorKey = "other", mustHex(t, digestB), follower
+			if err := EnforceEntries(bound(digestA, follower), append(policy, other), string(platform)); err == nil {
+				t.Fatal("crossed image/operator tuple accepted")
+			}
+			// Mesh may explicitly allow both roles on the same image.
+			other.Digest = entry.Digest
+			if err := EnforceEntries(bound(digestA, follower), append(policy, other), string(platform)); err != nil {
+				t.Fatalf("authorized follower refused: %v", err)
 			}
 		})
 	}

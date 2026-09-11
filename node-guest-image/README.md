@@ -12,24 +12,13 @@ Layout:
   `confos build --profile-dir` (confos ≥ the release carrying
   confidential-os-builder#81); the dir basename **is** the profile name, so
   it must stay `c8s`.
-- Platform: the profile is platform-neutral; `build` requires
-  `C8S_PLATFORM` (`tdx`|`snp`, no default) and `c8s/mkosi.sync` renders the
-  **entire** tdx/snp divergence — three files — from it: cred-release's
-  `Environment=CRED_PLATFORM` drop-in, the node's self-label
-  (`confidential.ai/tdx` / `confidential.ai/sev-snp`, the k8s vocabulary
-  `c8s install --hardware-platform` selects on), and the NRI floor's
-  `platform:`. The sync refuses to render a missing/invalid value, so the
-  fail-closed gate is at **build** time; `--platform=${CRED_PLATFORM}` in
-  the unit is boot-time defense in depth (cred-release opens no quote
-  device — quotes come from attestation-api over HTTP, the operator-key
-  RTMR read is sysfs). The guest kernel carries both TEEs' symbols via
-  confos `kernel/required.config`, so the images differ only by those
-  three rendered files — which keeps a one-image-serves-both design
-  (boot-time platform probe, confos `--platform both`) evaluable later.
-  NOTE: the operator credential-release flow itself is TDX-only today
-  (RTMR[3] binding; SNP has no runtime-extend equivalent) — an SNP image
-  boots and attests, but operator flows fail closed pending an SNP
-  binding design.
+- Platform: `build` requires `C8S_PLATFORM=tdx|snp`. Both roles share the
+  same image for the selected platform and VM shape. Platform-specific
+  service settings, node labels, measurement policy and image artifacts are
+  generated at build time; TDX and SNP do not share a measurement or image
+  digest. SNP also has one launch digest per supported vCPU count. Both
+  platforms support operator-key-bound launch configuration and credential
+  release: TDX binds the public key in RTMR[3], SNP in HOST_DATA.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
   `c8s-dev.config`), passed via `--kernel-config-fragment` exactly like
   kata-guest-base's `container.config`. confos's `required`/`hardening`
@@ -53,88 +42,125 @@ initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
 `tdx-metal-e2e.yml`); confidential-metal attaches one by default
 (`--datadisk-gi`, 0 opts out).
 
-The initrd encrypts the disk and, via a dm mapping named `scratch`, backs the
-writable state overlays with it; the root itself is the read-only verity
-image. Which directories get an overlay is declared in
-`/usr/lib/confai/state.d/`: confos's base covers `/var`, `/home`, `/root`,
-`/tmp`, and this profile adds `/etc/rancher`, `/etc/cni`, `/opt/cni` and
-`/etc/nri` (`60-c8s.conf` says why each). Without the disk
+The initrd encrypts the disk and, via a dm mapping named `scratch`, places a
+writable overlay above the read-only dm-verity root. The currently pinned
+confos version overlays the whole root; all changes disappear on reboot.
+This profile also declares `/etc/rancher`, `/etc/cni`, `/opt/cni` and
+`/etc/nri` in `/usr/lib/confai/state.d/60-c8s.conf` for confos versions with
+selective writable directories. That declaration is inactive at the current
+pin. Without the disk
 the initrd falls back to a 2G RAM tmpfs: the guest comes up Ready, then
 wedges once RKE2 fills it — a flapping node, not a boot error.
 `scratch-enforce.service` closes that hole by checking for the dm mapping
 and powering the VM off before rke2 starts.
 
-The other disks are optional; each is owned by one unit under
-`c8s/mkosi.extra`, whose header carries the full contract:
+Every boot also requires an ISO labelled `opkeydata` with these three files
+at its root:
 
-- serial `confai-containerd` (or label `containerd`) — recommended:
-  backs containerd's image cache, which otherwise lives in a RAM tmpfs
-  (`containerd-data-disk.service`).
-- serial `confai-models` — a pre-populated, read-only weights disk
-  mounted at `/var/lib/models` so a large cache survives relaunch. It is
-  unencrypted and host-writable: attach it only for public weights whose
-  digests the workload verifies itself (`models-disk.service`).
-- label `joindata` — an ISO that picks server vs agent and joins the
-  cluster; absent means single-node server (`rke2-role.service`).
-- label `opkeydata` — an ISO carrying, at its root:
-  - `pubkey` — the operator public key. Its presence turns on attested
-    credential release (`cred-release.service`, see [operator.md]). The
-    measured initrd is the one reader of the disk for this file: it stages
-    the bytes to `/etc/confai/operator-pubkey` and extends RTMR[3] (TDX) with
-    their digest before `switch_root`, and every later consumer
-    (`cred-release.service`, `c8s-chart-values.service`) reads that staged
-    file rather than mounting the ISO itself. The baked `cred-release-rbac`
-    RKE2 AddOn binds the issued certificate's group to `cluster-admin`
-    through ordinary RBAC; identity, TTL and revocation are documented in
-    [operator.md].
-  - `values.yaml` (optional) — a signed launch-time values fragment (see
-    "Chart install" below): deployment configuration that used to need a
-    `c8s install --values` on a live cluster. Present without a matching
-    `values.yaml.sig` next to it, boot fails closed. Unlike `pubkey`, the
-    initrd does not stage this file yet, so `c8s-chart-values.sh` mounts
-    the ISO itself at boot to read it — an interim step until it is staged
-    next to the pubkey the same way.
-  - `values.yaml.sig` (required with `values.yaml`) — its detached
-    signature: ECDSA (P-256) over SHA-256 of the file's exact bytes, ASN.1
-    DER, base64, one line. Produced with:
-    ```
-    c8s keys sign-values --key operator.key values.yaml
-    ```
+- `pubkey`: the launch public key for this cluster and role. The measured
+  initrd stages the exact PEM bytes to `/etc/confai/operator-pubkey` and binds
+  them into TDX RTMR[3]. An SNP launcher must set HOST_DATA to the SHA-256 of
+  those same bytes.
+- `launch.yaml`: the strict `c8s-launch/v1` document selecting `leader` or
+  `follower`, the image measurements, cluster/node identity, join tokens,
+  trusted role keys and TLS SAN.
+- `launch.yaml.sig`: the detached signature produced by
+  `c8s keys sign-launch --key <role-private-key> launch.yaml`.
 
-## Chart install
+Use distinct leader and follower keys and generate fresh keys for each
+cluster. The private keys stay with the operator. Followers receive only the
+RKE2 agent token; their documents must omit the server token entirely.
+There is no diskless/default-leader boot. Missing or invalid signed input
+fails the role gate before RKE2 or core services can start.
 
-The image installs the c8s chart itself at boot — no `c8s install` step is
-needed (and `c8s install` refuses to run against a cluster that already
-carries the baked release). `c8s/mkosi.sync` fetches `internal/helmchart/c8s`
-from the c8s source tree at `C8S_REF`, packs it into
-`server/static/charts/c8s.tgz`, and renders the platform's
-`c8s/c8s-chart.<platform>.yaml.in` into a `HelmChart c8s` AddOn
-(`server/manifests/c8s-chart.yaml`) that points `spec.chart` at that static
-tarball, with the node-mode component digests resolved at the same `C8S_REF`
-as the rest of the build. `c8s-chart-values.service` runs once at boot, before
-`rke2-server`, and writes the two inputs only a running boot knows into a
-`HelmChartConfig` RKE2 merges into that release:
+See [Authenticated launch configuration](../docs/operator.md#authenticated-launch-configuration)
+for complete leader/follower bundle creation, image-manifest extraction,
+ISO and KubeVirt attachment examples, and the exact schema. A leader may
+omit its address to use `node.ip` or primary-interface IPv4 autodetection;
+a follower must specify the leader's reachable IPv4 address. Switching roles
+requires relaunching with the new role's authorized bundle and launch key.
 
-- `cds.operatorKeys`, from the initrd-staged operator pubkey — present only
-  on an operator boot (see `opkeydata` above); its absence is not an error,
-  it just leaves allowlist writes disabled until a later boot supplies one.
-- `cds.measurements`/`rtmrs` and `ratlsMesh.measurements`/`rtmrs`, this
-  node's own launch measurement, read off a self-attestation the local
-  attestation-api verified (MRTD plus RTMR[1]/[2] on TDX, LAUNCH_DIGEST on
-  SNP) — pinning the mesh to
-  the exact image that is running, the way an operator's `c8s install
-  --measurements` would on a chart-managed cluster.
+Additional optional disks:
 
-When opkeydata carries a `values.yaml` fragment, `c8s-chart-values.sh` mounts
-the disk (the same locked-down way `rke2-role.sh` mounts `joindata`) and
-hands the fragment, its signature, and this boot's own inputs to
-`c8s launch-values render` (`internal/cmds/launchvalues`), which owns
-`spec.valuesContent` from there: it verifies the signature under the
-measured operator key, checks the fragment's `measurement` names this exact
-boot, validates every leaf of its `values` subtree against an explicit
-allowlist, and deep-merges it underneath the boot-derived keys above so a
-fragment can never override them. See docs/operator.md, "Launch-time
-values", for the allowlist and the fragment shape.
+- serial `confai-containerd` (or label `containerd`): backs containerd's
+  image cache (`containerd-data-disk.service`).
+- serial `confai-models`: a pre-populated, read-only weights disk mounted at
+  `/var/lib/models`. It is unencrypted and host-writable; attach public
+  weights whose digests the workload verifies (`models-disk.service`).
+
+## Measured services and Kubernetes integration
+
+One image contains all service binaries and role conditions:
+
+| Service | Leader | Follower |
+|---|---|---|
+| Local attestation API and Unix-socket proxy | Run | Run |
+| NRI image admission | Run under containerd | Run under containerd |
+| RA-TLS mesh and iptables reconciliation | Run | Run |
+| RKE2 | Server | Agent |
+| CDS, certificate renewal, TLS front door and attestation routes | Run | Disabled |
+| Attested operator credential release | Run | Disabled |
+
+`rke2-role.service` verifies and stages the launch configuration once.
+Every dependent service requires that gate. The host attester listens only
+on `127.0.0.1:8400`; workload helpers use its Unix socket in the existing
+admission-inventory directory. CDS listens on the leader's port `30808`;
+RKE2 followers join at `9345`; nginx serves the front door on `443`.
+
+`c8s/mkosi.sync` resolves the shared c8s binary and operator container digest
+from `C8S_REF`, then runs the binary's `c8s node-image render` command in the
+build tools tree with a checksum-pinned Helm binary downloaded from the
+official Helm release. Rendering uses the pinned RKE2 Kubernetes version,
+so chart capabilities match the guest. Helm stays outside the guest image.
+The command
+renders the embedded chart once, preserving
+its Kubernetes operator, CRDs, RBAC, webhook and admission policies while
+extracting nginx configuration and the CDS component seed for the host.
+There is no c8s chart archive, Helm installation job or runtime values merge.
+The image needs a published `C8S_REF` containing the new commands;
+`v0.1.0-rc2` is incompatible and fails the build with an explicit error.
+
+The build stages measured templates at `/usr/lib/c8s/` and Kubernetes
+integration at `server/manifests/c8s-integration.yaml`. At boot, verified
+launch settings produce root-only `/run/confos/launch` files and the public
+`c8s-node-runtime` ConfigMap in `c8s-system`. Its `cds-url` and `cds.json`
+fields contain only the leader endpoint and full software/launch-key policy.
+The operator passes that policy into workload helpers. Host services use the
+same staged policy; peer connections accept authorized roles, while every
+CDS client requires the leader's key. The shared image measurement alone
+does not distinguish the two roles.
+
+`c8s install` refuses this image's cluster: `c8s-system` carries the baked
+ownership label. Workload deployment still uses the Kubernetes API; admission
+protections remain generated from the existing chart. The launch schema has
+no arbitrary Helm values, service arguments or optional component switches.
+It can carry an initial workload allowlist and a DNS SAN, but volume support
+and arbitrary front-door routes are not enabled by launch settings.
+
+CDS keeps its database at `/run/c8s-cds/allowlist.db`; the directory survives
+a service restart, but every VM reboot resets the database and the cluster's
+ephemeral state. The baked component seed and signed initial workload entries
+are reapplied on the next boot. The mesh CA key lives only in CDS process
+memory, so a CDS process restart also requires certificate re-bootstrap.
+Public certificates and discovery files live at `/run/c8s-tls`; launch
+credentials remain in the separate root-only staging directory.
+
+The local unit and rendering checks validate these contracts. They do not
+replace booting the resulting image on the target TEE hardware.
+
+The metal CI lanes require compatible image metadata in their respective
+ConfigMaps; both must set `launchConfigVersion=c8s-launch/v1`:
+
+| ConfigMap | Additional required fields |
+|---|---|
+| `tdx-rke2-image-refs` | `image`, `rootPvc`, `mrtd`, `rtmr1`, `rtmr2`, `c8sRef` |
+| `snp-rke2-image-refs` | `image`, `rootPvc`, `manifestRef`, `igvmFile`, `igvmHookImage`, `smp`, `snpLaunchDigest`, `c8sRef` |
+
+The SNP lane requires digest-pinned OCI references for `image`, `manifestRef`
+and `igvmHookImage`, and a hook that sets HOST_DATA from the launch public key.
+Its `smp` is currently `4`; `snpLaunchDigest` must match that variant in the
+published `manifest.json`. The paired `c8sRef` identifies the image build.
+Changing the attester requires a new measured image.
 
 ## Workload isolation
 
@@ -189,19 +215,16 @@ own kernel fragment makes necessary.
 
 ## Troubleshooting
 
-**`Read-only file system` under `/usr`, `/etc` or `/opt`** — from a unit log
-(`mkdir: cannot create directory '/etc/foo': Read-only file system`), a
-pod stuck in ContainerCreating with a FailedMount event for a hostPath
-there, or a tool you installed on the host by hand. The root is the
-read-only verity image; only `/var`, `/home`, `/root`, `/tmp` and the
-directories listed in `/usr/lib/confai/state.d/*.conf` on the node are
-writable, and nothing installed after boot is covered by the measurement.
-If the writer is part of the image, declare its directory in
-`c8s/mkosi.extra/usr/lib/confai/state.d/60-c8s.conf` (it must be baked; the
-lint checks) or point it at `/var`. If it is something an operator installs
-on the host afterwards, it does not belong on a measured node — run it as a
-pod. `cat /usr/lib/confai/state.d/*.conf` on the node shows the live list;
-a login shell prints it too.
+**`Read-only file system` inside a service** — check that unit's systemd
+sandbox first (`ProtectSystem` and `ReadWritePaths`). The current confos pin
+uses a writable whole-root overlay, while newer confos versions limit writes
+to `/usr/lib/confai/state.d/*.conf` paths. This profile declares its required
+writable directories and the image invariant checks that each exists.
+
+Changes to service binaries or persistent configuration belong in the measured
+image build. Changes made on the running guest are outside the image's
+measurement and disappear on reboot. Deploy workloads through Kubernetes and
+use the signed launch document for the supported per-boot settings.
 
 Migration state (see [#264] for the full plan):
 

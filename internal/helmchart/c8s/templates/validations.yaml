@@ -1,3 +1,6 @@
+{{- if and .Values.node.bakedServices (or (ne .Values.attestationApi.cvmMode "node") .Values.kata.enabled .Values.attestationApi.enabled .Values.nriImagePolicy.enabled .Values.volumed.enabled) -}}
+{{- fail "node.bakedServices requires cvmMode=node and kata, attestationApi, nriImagePolicy and volumed disabled: these services are owned by the measured image" -}}
+{{- end -}}
 {{- $tlsLB := .Values.tlsLb -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (include "c8s.nriCDSURL" .) . -}}

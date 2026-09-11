@@ -1,3 +1,5 @@
+//go:build linux
+
 package ratlsmesh
 
 import (
@@ -153,5 +155,42 @@ func TestCheckTEEMatchesPlatform(t *testing.T) {
 	}
 	if err := checkTEEMatchesPlatform(measurements.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
 		t.Errorf("an unset config reported a mismatch: %v", err)
+	}
+}
+
+func TestSeparateCDSConfigDoesNotWidenLeaderTrustOrNarrowMesh(t *testing.T) {
+	const peersPath = "../../../pkg/measurements/testdata/node-identities.json"
+	peers, err := measurements.Load(peersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := peers
+	leader.Entries = peers.Entries[:1]
+	doc, err := measurements.Format(leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &proxyConfig{measurementsConfig: peersPath, cdsMeasurementsConfig: writeMeshConfig(t, string(doc))}
+	got, err := resolveMeasurementsConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != 2 || len(c.cdsPins.Entries) != 1 || c.cdsPins.Entries[0].Name != "leader" {
+		t.Fatal("CDS and peer policies were conflated")
+	}
+	if len(c.cdsPins.Entries[0].OperatorKey) == 0 || len(got.Entries[1].OperatorKey) == 0 {
+		t.Fatal("role identity dropped")
+	}
+	missing := &proxyConfig{measurementsConfig: peersPath, cdsMeasurementsConfig: "missing-file"}
+	if _, err := resolveMeasurementsConfig(missing); err == nil {
+		t.Fatal("missing leader policy fell back to broad peer policy")
+	}
+	if !missing.cdsPins.Empty() || missing.measurements != "" {
+		t.Fatal("a partial policy was applied after a failed load")
+	}
+	// A dedicated CDS config may also accompany legacy mesh pin flags.
+	flat := &proxyConfig{measurements: "00" + meshDigestA, cdsMeasurementsConfig: peersPath}
+	if _, err := resolveMeasurementsConfig(flat); err != nil || flat.measurements != "00"+meshDigestA {
+		t.Fatalf("separate CDS policy changed legacy mesh pins: %v", err)
 	}
 }

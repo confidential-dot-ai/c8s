@@ -11,8 +11,8 @@ import (
 
 // SignDetached signs sha256(data) with key: ASN.1 DER, base64-encoded, no
 // trailing newline. It is the raw signature line; callers that write it to a
-// file (c8s keys sign-values) append their own newline. Used for launch-time
-// values fragments (internal/cmds/launchvalues) — a smaller, offline-signing
+// file (c8s keys sign-launch) append their own newline. Used for launch-time
+// configuration (internal/cmds/launchconfig) — a smaller, offline-signing
 // counterpart to the JWT-based Authorization scheme this package otherwise
 // implements, over a whole file rather than one request.
 func SignDetached(key *ecdsa.PrivateKey, data []byte) (string, error) {

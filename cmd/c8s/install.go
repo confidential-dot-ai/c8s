@@ -271,48 +271,30 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	return nil
 }
 
-// bakedHelmChartLabel marks the HelmChart the node image's
-// c8s-chart.yaml.in template bakes into server/manifests, so `c8s install`
-// can tell that release apart from any other HelmChart named c8s an operator
-// might have created by hand.
-const bakedHelmChartLabel = "confidential.ai/baked=true"
-
-// preflightNotBakedNode refuses to install onto a cluster whose kube-system
-// already carries the node image's baked HelmChart c8s (see
-// node-guest-image/c8s/c8s-chart.<platform>.yaml.in): on that node the chart
-// installs itself at boot from server/manifests, and
-// c8s-chart-values.service supplies the per-launch inputs (the operator key,
-// this node's own measurement) that this CLI has no way to reach from
-// outside the guest. Running `c8s install` there too would fight the baked
-// release over the same HelmChart object. Read-only and first in RunE
-// (before any other cluster read), so a node operator sees this instead of a
-// confusing helm error deep into the run.
-//
-// Both kubectl reads use --ignore-not-found (empty stdout, exit 0) rather
-// than stderr string matching (a locale- and version-fragile pattern like
-// "NotFound"/"doesn't have a resource type"): a missing CRD or a missing
-// object both come back as an ordinary empty result, and any OTHER kubectl
-// error (RBAC, connectivity, ...) surfaces verbatim rather than being
-// silently treated as "not baked".
+// preflightNotBakedNode refuses a second installation over the image-owned
+// operator and admission resources. A missing namespace is an ordinary empty
+// result; connectivity and authorization failures remain visible.
 func preflightNotBakedNode(ctx context.Context) error {
-	crd, err := exec.CommandContext(ctx, "kubectl", "get", "crd", "helmcharts.helm.cattle.io",
-		"-o", "name", "--ignore-not-found").Output()
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "namespace", "c8s-system",
+		"-o", "json", "--ignore-not-found").Output()
 	if err != nil {
-		return fmt.Errorf("kubectl get crd helmcharts.helm.cattle.io: %w", execErrOutput(err))
-	}
-	if strings.TrimSpace(string(crd)) == "" {
-		return nil // cluster has no HelmChart CRD at all (not RKE2/k3s) — cannot be a baked node
-	}
-
-	out, err := exec.CommandContext(ctx, "kubectl", "get", "helmchart",
-		"-n", "kube-system", "-l", bakedHelmChartLabel, "-o", "name", "--ignore-not-found").Output()
-	if err != nil {
-		return fmt.Errorf("kubectl get helmchart -n kube-system -l %s: %w", bakedHelmChartLabel, execErrOutput(err))
+		return fmt.Errorf("inspect c8s-system namespace: %w", execErrOutput(err))
 	}
 	if strings.TrimSpace(string(out)) == "" {
 		return nil
 	}
-	return fmt.Errorf("this cluster already carries the node image's baked HelmChart c8s in kube-system (label %s): the c8s node image installs the chart itself at boot, and per-launch inputs (the operator key, this node's own measurement) come from opkeydata and the node's own attestation, not from this CLI. `c8s install` would fight the baked release over the same HelmChart object — nothing to do here", bakedHelmChartLabel)
+	var ns struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &ns); err != nil {
+		return fmt.Errorf("decode c8s-system namespace: %w", err)
+	}
+	if ns.Metadata.Labels["confidential.ai/baked"] != "true" {
+		return nil
+	}
+	return fmt.Errorf("c8s-system carries confidential.ai/baked=true: this node image owns the core services, operator and admission policies; configure its signed launch.yaml and workloads instead of running c8s install")
 }
 
 // execErrOutput enriches err with the command's stderr, if it carried one

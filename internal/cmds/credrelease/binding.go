@@ -74,7 +74,7 @@ var (
 
 // waitForAttestationAPI polls GET /health until the local attestation-api
 // answers or attestationReadyTimeout expires. A bounded wait in the binary
-// rather than a unit-level Restart=: c8s-chart-values.service is a oneshot
+// rather than a unit-level Restart=: rke2-role.service is a oneshot
 // rke2-server Requires, and a failed first attempt fails rke2-server's start
 // job for good regardless of how many times systemd restarts the oneshot.
 func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error {
@@ -173,9 +173,8 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 
 // OwnLaunchMeasurement returns this guest's own launch measurement (TDX MRTD
 // or SNP LAUNCH_DIGEST, 48 bytes) and, on TDX, its RTMR[1] and RTMR[2] — the
-// values c8s-chart-values pins cds.measurements/rtmrs and
-// ratlsMesh.measurements/rtmrs to, so the mesh trusts the exact image that
-// is running. rtmrs is nil on SNP, which has no runtime measurement registers.
+// values authenticated launch staging compares against the requested image
+// policy. rtmrs is nil on SNP, which has no runtime measurement registers.
 //
 // platform is the ratls-normalized platform this image was built for ("tdx"
 // or "sev-snp"). The values are read off one verified self-report; platform

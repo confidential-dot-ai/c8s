@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 func TestValidateOperatorPlatform(t *testing.T) {
@@ -28,5 +29,19 @@ func TestValidateOperatorPlatform(t *testing.T) {
 		if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 			t.Errorf("validateOperatorPlatform(%q, %v) = %v, want substring %q", tc.platform, tc.kataEnforce, err, tc.wantErr)
 		}
+	}
+}
+
+func TestKataRefusesOperatorPolicyFlattening(t *testing.T) {
+	pins := measurements.ReferenceValues{Entries: []measurements.Entry{{OperatorKey: []byte("leader")}}}
+	if err := validateOperatorMeasurementsPolicy(pins, true); err == nil || !strings.Contains(err.Error(), "Kata initdata") {
+		t.Fatalf("Kata would discard the operator identity: %v", err)
+	}
+	if err := validateOperatorMeasurementsPolicy(pins, false); err != nil {
+		t.Fatalf("node policy refused: %v", err)
+	}
+	pins.Entries[0].OperatorKey = nil
+	if err := validateOperatorMeasurementsPolicy(pins, true); err != nil {
+		t.Fatalf("legacy Kata policy refused: %v", err)
 	}
 }

@@ -63,9 +63,12 @@ metadata:
     {{- include "tls-lb.labels" . | nindent 4 }}
 data:
   nginx.conf: |
+    {{- if .Values.node.bakedServices }}
+    user www-data;
+    {{- end }}
     worker_processes auto;
     error_log /var/log/nginx/error.log warn;
-    pid /tmp/nginx.pid;
+    pid {{ ternary "/run/nginx.pid" "/tmp/nginx.pid" .Values.node.bakedServices }};
 
     events {
         worker_connections 1024;

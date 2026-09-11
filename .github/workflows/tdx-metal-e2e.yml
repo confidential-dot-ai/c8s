@@ -1,57 +1,11 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
-# ═══════════════════════════════════════════════════════════════════════════
-# SOURCE OF TRUTH:
-#   confidential-dot-ai/confidential-ci  .github/workflows/tdx-metal-e2e.yml
-# VENDORED COPY:
-#   confidential-dot-ai/c8s              .github/workflows/tdx-metal-e2e.yml
-#
-# WHY A COPY EXISTS AT ALL: c8s is PUBLIC and confidential-ci is PRIVATE, and a
-# public repo cannot `uses:` a private repo's reusable workflow. Vendoring is
-# the workaround, the same one cvm-e2e.yml and e2e-c8s.yml already use. It is a
-# stopgap, not a design: see confidential-ci research/ADR-matrix-architecture.
-#
-# THE DRIFT HAZARD IS REAL, NOT THEORETICAL. c8s's vendored cvm-e2e.yml silently
-# fell 121 lines behind its confidential-ci original and lost an entire platform
-# arm. Nothing detected it, because neither copy referenced the other.
-#
-# THE RULE: edit the source of truth, then copy the WHOLE file across unchanged.
-# Both copies carry both triggers (workflow_call and workflow_dispatch) precisely
-# so that no per-repo edit is ever needed and a plain checksum can prove they
-# match. If you find yourself wanting to change only one copy, that is the signal
-# to stop vendoring and solve it properly instead.
-#
-# ═══════════════════════════════════════════════════════════════════════════
-# c8s on TDX BARE METAL: the product lane
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Boots the PUBLISHED, UNMODIFIED c8s node image as an Intel TDX CVM on
-# tdx-gh-runner, waits for the image's own baked c8s chart install, and
-# asserts the product's security guarantee: the baked NRI floor DENIES a
-# non-allowlisted image.
-#
-# Proven by hand on hardware 2026-07-26 before this lane existed: image
-# imported via CDI, CVM booted, operator-key-bound kubeconfig obtained over
-# RA-TLS, `c8s install` deployed cds/operator/ratls-mesh/tls-lb, and busybox
-# was denied with "image not in allowlist".
-#
-# WHY THIS LANE HAS NO SERIAL CONSOLE (and the SNP lane does): the c8s node
-# image is console-dead by design (hardened kernel, no CONFIG_SERIAL_8250, no
-# sshd, root locked). Its supported entrypoint is the network: attestation-api
-# on :8400, kube-apiserver on :6443, cred-release on :8443. That works here
-# only because this host's OUTER cluster was renumbered to 172.20/172.21, so a
-# guest running rke2's default 10.42/10.43 no longer collides with it. The SNP
-# lane cannot do this: its cluster is live on 10.42 and RKE2 CIDRs are fixed at
-# init. Consequence worth keeping: no secret ever transits a loggable channel
-# here, so this lane is free of the console PEM-leak gap the SNP lane carries.
-#
-# DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+# c8s product lane on Intel TDX metal. This c8s-owned integration boots the
+# published measured node image with signed launch configuration. Core services
+# are baked systemd units; Kubernetes receives only pre-rendered integration.
+# confidential-ci's older vendored lane must adopt this launch contract before
+# copying this file back. No runtime chart installation or console transport.
 name: tdx-metal-e2e
 
 on:
-  # workflow_call so the vendored copy can be invoked as a job by c8s's
-  # e2e-c8s.yml. workflow_dispatch so either copy stays runnable by hand.
-  # Both copies carry both, so the two files remain byte-identical.
   workflow_call:
     inputs:
       c8s_ref:
@@ -67,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: 'c8s git ref to build the CLI from + test. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (VERSION PAIRING: the node image bakes an admission floor containing the bootstrap digests from ITS build ref, so a mismatched CLI gets its own components denied).'
+        description: 'Compatible c8s CLI/test ref; empty uses the node image build ref in tdx-rke2-image-refs.'
         required: false
         default: ''
       keep_cvm:
@@ -78,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # One at a time: the lane boots a CVM off a shared RWO rootdisk PVC.
@@ -91,42 +46,42 @@ env:
 
 jobs:
   e2e:
-    # Named to match the SNP primitive's leaf, `cvm (<platform>/<flavor>)`,
-    # so both lanes read the same way in the run tree.
     name: cvm (tdx-metal/rke2-node)
-    # The HOST-side launcher runner on tdx-gh-runner. Its bm-e2e SA is scoped to
-    # confai-images (baremetal/kubevirt-rbac.yaml); kubectl uses the in-cluster
-    # token, so there is no kubeconfig to manage for the OUTER cluster.
+    # Host-side launcher with namespace-scoped KubeVirt permissions; the
+    # outer cluster uses its in-cluster service account credentials.
     runs-on: cvm-launcher-tdx
     # CDI import is pre-staged, so: boot ~1m + guest first boot ~3m + c8s CLI
-    # build ~3m + install/converge ~3m + asserts. Headroom for a cold go cache.
+    # build ~3m + services/convergence ~3m + asserts. Headroom for a cold go cache.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: tools (kubectl, go, crane)
+      - name: tools (kubectl, go, crane, launch generator)
         run: |
           set -euo pipefail
           # Every fetch here crosses the public internet from an ephemeral ARC
           # pod, and one hiccup fails the lane before it reaches a CVM.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends jq openssl python3
           mkdir -p "$PWD/bin"
-          # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
-          # A file, not a function, because each `run:` block is a fresh shell.
-          printf '%s\n' \
-            'retry() {' \
-            '  local i delay=2' \
-            '  for i in 1 2 3 4; do' \
-            '    if eval "$1"; then return 0; fi' \
-            '    [ "$i" -eq 4 ] && break' \
-            '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
-            '    sleep "$delay"' \
-            '    delay=$((delay * 2))' \
-            '  done' \
-            '  echo "::error::gave up after 4 attempts: $1" >&2' \
-            '  return 1' \
-            '}' > bin/retry.sh
+          # A file because each run block starts a fresh shell. Arguments are
+          # executed directly, including refs, without evaluating shell text.
+          cat > bin/retry.sh <<'RETRY'
+          retry() {
+            local attempt delay=2
+            for attempt in 1 2 3 4; do
+              if "$@"; then return 0; fi
+              [ "$attempt" -eq 4 ] && break
+              echo "attempt $attempt failed; retrying in ${delay}s" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            return 1
+          }
+          RETRY
           . bin/retry.sh
-          retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
+          kube_version=$(retry curl -fsSL https://dl.k8s.io/release/stable.txt)
+          retry curl -fsSL "https://dl.k8s.io/release/$kube_version/bin/linux/amd64/kubectl" -o bin/kubectl
           chmod +x bin/kubectl
           echo "$PWD/bin" >> "$GITHUB_PATH"
           if ! command -v go >/dev/null; then
@@ -134,7 +89,8 @@ jobs:
             # pinned fallback on the next line can be reached.
             GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
             [ -n "$GOVER" ] || GOVER=1.26.3
-            retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
+            retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+            sudo tar -C /usr/local -xzf /tmp/go.tar.gz
           fi
           # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
           # inside THIS one. `go install crane` below needs it here and now.
@@ -145,7 +101,7 @@ jobs:
           # fetched through the GitHub releases API, which rate-limits by IP
           # on a shared self-hosted host. The ephemeral ARC pod has no crane,
           # unlike the host, so install rather than assume.
-          command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
+          command -v crane >/dev/null || retry go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
       # Fail SAFE: only reap on a positive "completed", or on age. An unknown
@@ -190,18 +146,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: resolve image refs + the paired c8s ref
+        env:
+          REQUESTED_C8S_REF: ${{ inputs.c8s_ref }}
         run: |
           set -euo pipefail
-          for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef; do
-            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
+          kubectl -n "$NS" get cm "$REFS_CM" -o json > /tmp/tdx-refs.json
+          jq -e '.data.launchConfigVersion == "c8s-launch/v1" and
+            (.data.image | test("^ghcr.io/[a-zA-Z0-9_./:@-]+$")) and
+            (.data.rootPvc | test("^[a-z0-9][a-z0-9.-]*$")) and
+            (.data.mrtd | test("^[0-9a-f]{96}$")) and
+            (.data.rtmr1 | test("^[0-9a-f]{96}$")) and
+            (.data.rtmr2 | test("^[0-9a-f]{96}$")) and
+            (.data.c8sRef | test("^[0-9a-f]{7,40}$"))' /tmp/tdx-refs.json >/dev/null || {
+              echo "::error::$REFS_CM must pin a compatible signed-launch image, full TDX tuple and build ref"; exit 1;
+            }
+          for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef launchConfigVersion; do
+            v=$(jq -r --arg k "$k" '.data[$k]' /tmp/tdx-refs.json)
             [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
             echo "$k=$v" >> "$GITHUB_ENV"
           done
+          [ "$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.launchConfigVersion}')" = c8s-launch/v1 ] || { echo "::error::$REFS_CM must reference a signed-launch node image (launchConfigVersion=c8s-launch/v1); rebuild and publish compatible image metadata"; exit 1; }
           # An explicit input overrides the pin, but say so loudly: the floor is
           # fail-closed, so an unpaired ref is the likeliest cause of a red run.
-          if [ -n '${{ inputs.c8s_ref }}' ]; then
-            echo "::warning title=version pairing::testing c8s_ref='${{ inputs.c8s_ref }}' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': components may be denied by the baked floor"
-            echo "c8sRef=${{ inputs.c8s_ref }}" >> "$GITHUB_ENV"
+          if [ -n "$REQUESTED_C8S_REF" ]; then
+            [[ "$REQUESTED_C8S_REF" =~ ^[a-zA-Z0-9_./-]+$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
+            echo "::warning title=version pairing::testing c8s_ref='$REQUESTED_C8S_REF' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': only the CLI and test source change; node services remain the pinned image"
+            echo "c8sRef=$REQUESTED_C8S_REF" >> "$GITHUB_ENV"
           fi
 
       - name: preflight, the pinned ref still matches the pinned image
@@ -259,19 +229,51 @@ jobs:
             echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
           fi
 
-      - name: per-run operator key + opkeydata secret
-        # The initrd mounts the ISO labelled "opkeydata", SHA-384s the file
-        # named `pubkey`, and extends that into RTMR[3]. cred-release then
-        # refuses to serve if the on-disk key does not match RTMR[3], so the
-        # kubeconfig we fetch is cryptographically bound to THIS keypair.
+      - name: build the c8s CLI at the paired ref
         run: |
           set -euo pipefail
-          umask 077
-          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
-          openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+          # Same exposure as the tools step: this clone and the module fetches
+          # behind `go install` cross the public internet under `set -e`.
+          . "$GITHUB_WORKSPACE/bin/retry.sh"
+          # This clone reproduces fine anonymously from a pod in arc-runners and
+          # from this runner image, so when it fails HERE the cause is something
+          # in the job's own context, and the bare error says nothing useful:
+          #   fatal: could not read Username for 'https://github.com'
+          # Capture the config git actually reads and the exchange it actually
+          # gets, redacting any credential the trace would otherwise print.
+          clone_diag() {
+            echo "::group::c8s clone diagnostics"
+            git config --list --show-origin 2>&1 \
+              | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
+              | sed 's/^/cfg  /' | head -40
+            env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
+              | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
+            GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
+              git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
+              | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
+              | tail -40 | sed 's/^/wire /'
+            echo "::endgroup::"
+          }
+          retry git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src \
+            || { clone_diag; exit 1; }
+          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
+          pushd /tmp/c8s-src >/dev/null
+          retry go install ./cmd/c8s
+          popd >/dev/null
+          c8s --version || true
+
+      - name: sign the leader launch and attach opkeydata
+        # The same exact public PEM is signed into launch.yaml, bound by the
+        # measured initrd into RTMR3, and pinned by the external clients.
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-launch-data.sh /tmp/launch-data tdx "$VM" "$mrtd" "$rtmr1" "$rtmr2"
           kubectl -n "$NS" create secret generic "$VM-opkey" \
-            --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl apply -f -
-          echo "operator key bound (sha384 $(sha384sum < /tmp/op.pub | cut -c1-16)...)"
+            --from-file=pubkey=/tmp/launch-data/pubkey \
+            --from-file=launch.yaml=/tmp/launch-data/launch.yaml \
+            --from-file=launch.yaml.sig=/tmp/launch-data/launch.yaml.sig \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: boot the TDX CVM
         run: |
@@ -334,7 +336,7 @@ jobs:
                         # SHARED qemu lock so concurrent CVMs coexist; a
                         # writable open takes an EXCLUSIVE one and starves every
                         # other guest on the same PVC (cost the SNP lane a day).
-                        # NB: readonly is a field of `disk`, not a sibling of it;
+                        # NB: readonly is a field of disk, not a sibling of it;
                         # KubeVirt's strict decoder rejects the sibling form.
                         disk: {bus: virtio, readonly: true}
                       - name: scratch
@@ -366,7 +368,7 @@ jobs:
                   - name: cloudinit
                     cloudInitNoCloud: {secretRef: {name: $VM-cloudinit}}
           EOF
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             [ "$PHASE" = Running ] && break
             sleep 5
@@ -385,62 +387,25 @@ jobs:
         run: |
           set -euo pipefail
           POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name | head -1)
-          kubectl -n "$NS" exec "$POD" -c compute -- \
-            bash -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline | grep -c "tdx-guest"' | tee /tmp/tdx.cnt
+          kubectl -n "$NS" exec -i "$POD" -c compute -- bash -s <<'CHECK' | tee /tmp/tdx.cnt
+          tr "\0" "\n" < "/proc/$(pgrep -f qemu-system | head -1)/cmdline" | grep -c "tdx-guest"
+          CHECK
           [ "$(cat /tmp/tdx.cnt)" -ge 1 ] || { echo "::error::qemu has no tdx-guest object: not a genuine trust domain"; exit 1; }
           echo "OK: qemu launched with -object tdx-guest"
 
-      - name: wait for guest services (attestation-api, apiserver, cred-release)
+      - name: wait for the credential-release listener
+        # HTTP reachability only; the next step verifies hardware evidence,
+        # the full image tuple and our operator key before accepting credentials.
+        # The raw attestation API is loopback-only in the measured image.
         run: |
           set -euo pipefail
-          for i in $(seq 1 90); do
-            H=$(curl -s --connect-timeout 2 --max-time 4 "http://$GUEST_IP:8400/health" 2>/dev/null || true)
-            [ -n "$H" ] && { echo "attestation-api: $H"; break; }
-            sleep 10
-          done
-          echo "$H" | grep -q '"platform":"tdx"' || { echo "::error::attestation-api did not report platform=tdx"; exit 1; }
-          for i in $(seq 1 60); do
-            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:6443/livez" 2>/dev/null || true)
-            case "$C" in 200|401|403) echo "kube-apiserver: HTTP $C"; break;; esac
+          ready=0
+          for _ in $(seq 1 120); do
+            code=$(curl -sk --connect-timeout 2 --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
+            if [ -n "$code" ] && [ "$code" != 000 ]; then ready=1; break; fi
             sleep 5
           done
-          for i in $(seq 1 60); do
-            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
-            [ -n "$C" ] && [ "$C" != 000 ] && { echo "cred-release: HTTP $C"; break; }
-            sleep 5
-          done
-
-      - name: build the c8s CLI at the paired ref
-        run: |
-          set -euo pipefail
-          # Same exposure as the tools step: this clone and the module fetches
-          # behind `go install` cross the public internet under `set -e`.
-          . "$GITHUB_WORKSPACE/bin/retry.sh"
-          # This clone reproduces fine anonymously from a pod in arc-runners and
-          # from this runner image, so when it fails HERE the cause is something
-          # in the job's own context, and the bare error says nothing useful:
-          #   fatal: could not read Username for 'https://github.com'
-          # Capture the config git actually reads and the exchange it actually
-          # gets, redacting any credential the trace would otherwise print.
-          clone_diag() {
-            echo "::group::c8s clone diagnostics"
-            git config --list --show-origin 2>&1 \
-              | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
-              | sed 's/^/cfg  /' | head -40
-            env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
-              | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
-            GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
-              git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
-              | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
-              | tail -40 | sed 's/^/wire /'
-            echo "::endgroup::"
-          }
-          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
-            || { clone_diag; exit 1; }
-          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
-          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
-          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
-          c8s --version || true
+          [ "$ready" = 1 ] || { echo "::error::credential release did not start; signed launch or measured service startup failed"; exit 1; }
 
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
@@ -499,7 +464,7 @@ jobs:
           # nothing to pin the gate to.
           [ -n "$got_mrtd" ] || { echo "::error::no oras artifact among [$cands] publishes a manifest.json whose mrtd+rtmr1+rtmr2 matches the build this CVM booted. Set 'imageTag' in $REFS_CM to the oras tag published beside the pinned image"; exit 1; }
           echo "manifest from $oras_ref (MRTD $got_mrtd)"
-          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
+          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/operator.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
@@ -509,53 +474,26 @@ jobs:
       - name: assert the host cidata disk is inert
         run: .github/scripts/cidata-tripwire.sh
 
-      # c8s-local patch (see node-guest-image-invariants.sh's tdx-metal-e2e.yml
-      # marker check): the node image now bakes the c8s chart install itself
-      # (HelmChart c8s in kube-system, node-guest-image/c8s/c8s-chart.<platform>.yaml.in) —
-      # `c8s install` refuses to run against a cluster carrying it
-      # (preflightNotBakedNode, cmd/c8s/install.go). RKE2's helm-controller
-      # reconciles that HelmChart into a Job named helm-install-c8s in
-      # kube-system; wait for it instead of running the install ourselves. The
-      # operator key and this node's own measurement (matching $mrtd asserted
-      # above) come from c8s-chart-values.service at boot (opkeydata +
-      # attestation), not from this workflow.
-      - name: wait for the baked chart install (helm-install-c8s)
+      - name: assert measured services and Kubernetes integration converged
+        # components-ready verifies c8s-node-runtime and the full leader policy,
+        # then reaches the baked CDS service over authenticated discovery.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          # `kubectl wait` errors immediately on a Job that does not exist
-          # yet, so wait for helm-controller to create it first.
-          for _ in $(seq 1 60); do
-            kubectl -n kube-system get job/helm-install-c8s >/dev/null 2>&1 && break
-            sleep 5
-          done
-          if ! kubectl -n kube-system wait --for=condition=complete job/helm-install-c8s --timeout=8m; then
-            echo "::error::helm-install-c8s did not complete"
-            echo "--- helmchart c8s status ---"
-            kubectl -n kube-system get helmchart c8s -o yaml || true
-            echo "--- helm-install-c8s job ---"
-            kubectl -n kube-system get job/helm-install-c8s -o yaml || true
-            echo "--- helm-install-c8s pod logs ---"
-            kubectl -n kube-system logs job/helm-install-c8s --all-containers --tail=-1 || true
-            exit 1
-          fi
-          kubectl -n c8s-system get pods -o wide
-
-      - name: assert components converged
-        run: |
-          set -euo pipefail
-          export KUBECONFIG=/tmp/guest.kubeconfig
+          export C8S_NODE_IMAGE=1
+          export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
           bash /tmp/c8s-src/test/e2e/components-ready.sh
 
       - name: assert the image floor denies, then opens to a signed write
-        # tls-lb fronts /allowlist on hostPort 443, and node mode puts CDS in
-        # the node CVM, so the endpoint pins to the node MRTD.
+        # Baked nginx fronts /allowlist on 443; discovery pins the whole
+        # measured image tuple and the leader operator key.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS="$mrtd"
-          export C8S_OPERATOR_KEY=/tmp/op.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
           bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
 
       - name: assert a confidential workload runs with an injected cert
@@ -563,9 +501,15 @@ jobs:
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS="$mrtd"
-          export C8S_OPERATOR_KEY=/tmp/op.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
           bash /tmp/c8s-src/test/e2e/cw-workload.sh
+
+      - name: assert confidential workload label integrity
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          bash /tmp/c8s-src/test/e2e/cw-label-policy.sh
 
       - name: summary
         if: always()

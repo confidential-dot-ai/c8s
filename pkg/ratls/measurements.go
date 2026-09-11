@@ -129,9 +129,8 @@ func ParseRTMRPinsString(raw string) (map[int][]byte, error) {
 
 // FormatRTMRPins is ParseRTMRPins' inverse: it formats rtmrs as
 // "<index>=<hex>" strings in index order — the shape cds.rtmrs/
-// ratlsMesh.rtmrs take in a helm --set fan-out (cmd/c8s/install.go) and in
-// launch-time values (internal/cmds/launchvalues). Empty/nil input returns
-// nil.
+// ratlsMesh.rtmrs take in a helm --set fan-out (cmd/c8s/install.go).
+// Empty/nil input returns nil.
 func FormatRTMRPins(rtmrs map[int][]byte) []string {
 	if len(rtmrs) == 0 {
 		return nil

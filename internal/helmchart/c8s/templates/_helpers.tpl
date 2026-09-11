@@ -306,16 +306,15 @@ and CDS. Three shapes:
   - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
     on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
     INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
-  - otherwise, when attestationApi.enabled=true (the chart DaemonSet shape —
-    the raw-values default, kept by gke/aks installs): the on-node Unix socket
-    its attest-proxy sidecar serves
+  - otherwise, when attestationApi.enabled=true or node.bakedServices=true:
+    the on-node Unix socket served by the chart sidecar or baked attest-proxy
     (c8s.attestationApiSocket). Evidence generation is never published on a
     routable address: the API binds pod loopback, and only on-node callers —
     host processes, and pods the socket directory is mounted into — can
     reach it. Chart components mount the directory at its host path, so this
     URL is verbatim everywhere; the webhook rebases it for injected sidecars,
     which see the directory at workloadclaims.SidecarSocketDir.
-  - otherwise (attestationApi.enabled=false outside kata, i.e. cvmMode=node —
+  - otherwise (legacy node images, attestationApi.enabled=false outside kata —
     require_attestation_api forbids it elsewhere): the node image bakes a HOST
     attestation-api serving :8400 in the host network namespace. Pod-netns
     consumers dial the node's own IP via the $(HOST_IP) downward-API env var
@@ -328,7 +327,7 @@ and CDS. Three shapes:
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if .Values.attestationApi.enabled -}}
+{{- else if or .Values.attestationApi.enabled .Values.node.bakedServices -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
@@ -346,12 +345,11 @@ pod (read-only) and the one the webhook mounts into get-cert sidecars.
 {{- end -}}
 
 {{- /*
-c8s.attestationApiHostSocket — "true" when consumers reach the chart-managed
-attestation-api over the on-node Unix socket, i.e. the DaemonSet renders and
-the in-guest (kata) endpoint does not apply.
+c8s.attestationApiHostSocket — "true" when consumers reach a chart-managed or
+baked attestation proxy over the on-node Unix socket.
 */ -}}
 {{- define "c8s.attestationApiHostSocket" -}}
-{{- if and .Values.attestationApi.enabled (not .Values.kata.enabled) -}}true{{- end -}}
+{{- if and (or .Values.attestationApi.enabled .Values.node.bakedServices) (not .Values.kata.enabled) -}}true{{- end -}}
 {{- end -}}
 
 {{- /*
@@ -386,7 +384,7 @@ pod-netns consumers reach the node-baked host attestation-api via the node's
 own IP. Empty in every other shape.
 */ -}}
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (not .Values.node.bakedServices) (eq .Values.attestationApi.cvmMode "node") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:
@@ -612,6 +610,7 @@ cache_max_entries = 1024
    gate a no-op, deriving even disabled components that carry a digest. */ -}}
 {{- $enabled := true -}}
 {{- if $c.enabledPath -}}{{- $enabled = eq (include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath)) "true" -}}{{- end -}}
+{{- if and $root.Values.node.bakedServices (ne $c.valuePath "image") -}}{{- $enabled = false -}}{{- end -}}
 {{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt) -}}
 {{- end -}}
 {{ $out | toJson }}
@@ -642,7 +641,7 @@ cache_max_entries = 1024
 {{- end -}}
 {{- end -}}
 {{- $cdsImg := .Values.cds.image -}}
-{{- if $cdsImg.digest -}}
+{{- if and $cdsImg.digest (not .Values.node.bakedServices) -}}
 {{- $_ := set $digests $cdsImg.digest (printf "%s@%s" $cdsImg.repository $cdsImg.digest) -}}
 {{- end -}}
 {{- /* tls-lb nginx self-entry: a chart-deployed non-c8s system image. It is
@@ -652,7 +651,7 @@ cache_max_entries = 1024
        enabled — like the CDS self-entry above, independent of deriveComponents
        — so a default install admits the nginx it ships without the operator
        hand-writing an entry for it. */}}
-{{- if .Values.tlsLb.enabled -}}
+{{- if and .Values.tlsLb.enabled (not .Values.node.bakedServices) -}}
 {{- $lbImg := .Values.tlsLb.nginx.image -}}
 {{- if $lbImg.digest -}}
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}

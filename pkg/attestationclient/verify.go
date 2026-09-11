@@ -39,6 +39,10 @@ var (
 	// malformed, or does not match the value the policy pins.
 	ErrRTMRNotAllowed = errors.New("attestationclient: RTMR not allowed")
 
+	// ErrOperatorKeyNotAllowed: verified evidence is not launch-bound to the
+	// operator identity pinned with its image.
+	ErrOperatorKeyNotAllowed = errors.New("attestationclient: operator key not allowed")
+
 	// ErrUnsupportedPlatform: [Client.VerifyEvidence] has no verification
 	// rules for the envelope's platform and fails closed.
 	ErrUnsupportedPlatform = errors.New("attestationclient: unsupported platform for evidence verification")

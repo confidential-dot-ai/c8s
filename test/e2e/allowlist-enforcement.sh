@@ -6,13 +6,19 @@
 # Needs kubectl pointed at a cluster with c8s installed, `c8s` and `crane` on
 # PATH, and:
 #   C8S_ALLOWLIST_URL  RA-TLS tls-lb or direct CDS base URL
-#   C8S_MEASUREMENTS   launch measurement pinning that endpoint
+#   C8S_MEASUREMENTS_CONFIG complete endpoint image/operator policy (preferred)
+#   C8S_MEASUREMENTS   legacy launch-only pin, when no policy file is supplied
 #   C8S_OPERATOR_KEY   path to the operator EC key PEM pinned on CDS
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 : "${C8S_ALLOWLIST_URL:?names the RA-TLS CDS or tls-lb endpoint}"
-: "${C8S_MEASUREMENTS:?pins the launch measurement of that endpoint}"
+if [ -n "${C8S_MEASUREMENTS_CONFIG:-}" ]; then
+  measurement_args=(--measurements-config "$C8S_MEASUREMENTS_CONFIG")
+else
+  : "${C8S_MEASUREMENTS:?pins the launch measurement of that endpoint}"
+  measurement_args=(--measurements "$C8S_MEASUREMENTS")
+fi
 : "${C8S_OPERATOR_KEY:?path to the operator EC key PEM}"
 
 # The node image enforces the restricted PodSecurity standard in `default`,
@@ -22,7 +28,7 @@ ns=default
 pod=allowlist-probe
 image=busybox:1.36
 
-al() { c8s allowlist "$@" --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS"; }
+al() { c8s allowlist "$@" --url "$C8S_ALLOWLIST_URL" "${measurement_args[@]}"; }
 
 probe() {
   kubectl -n "$ns" run "$pod" --image="$image" --restart=Never \

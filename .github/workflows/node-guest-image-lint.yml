@@ -12,6 +12,12 @@ on:
   pull_request:
     paths:
       - "node-guest-image/**"
+      - "internal/cmds/launchconfig/**"
+      - "internal/cmds/nodeservices/**"
+      - "cmd/c8s/node_image*.go"
+      - "cmd/c8s/node_services*.go"
+      - "internal/helmchart/**"
+      - "pkg/measurements/**"
       - ".github/workflows/node-guest-image-lint.yml"
       - ".github/build-pins.json"
       - ".github/scripts/pin-manifest.sh"
@@ -21,6 +27,8 @@ on:
       # The lint guards this vendored file's c8s-local bait/tripwire markers;
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
+      - ".github/workflows/snp-metal-e2e.yml"
+      - ".github/scripts/node-launch-data.sh"
       # The invariants gate body; a script-only change must run the gate.
       - ".github/scripts/node-guest-image-invariants.sh"
   workflow_dispatch:
@@ -58,6 +66,9 @@ jobs:
           EXPECT_IMMUTABLE_ROOT: "0"
           CONFOS_REF: ${{ steps.pins.outputs.confos }}
         run: .github/scripts/node-guest-image-invariants.sh
+
+      - name: Preserve the selected attester configuration with a loopback bind
+        run: ./node-guest-image/tests/attester-finalize-test.sh
 
       - name: Resolve the confos base release
         id: release
@@ -165,27 +176,15 @@ jobs:
       - name: Run the scratch-enforce unit test
         run: make test-node-guest-image-scratch
 
-  chart-values:
-    name: c8s-chart-values.sh logic
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Run the c8s-chart-values unit test
-        run: make test-node-guest-image-chart-values
-
   rke2-role:
     name: rke2-role dispatch (script)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install genisoimage
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends genisoimage
-
       - name: Run the script-level harness
-        # Root: loop mounts + /run/confos writes; the runner VM is disposable.
-        run: sudo make test-node-guest-image-role
+        # The production script runs unchanged in an unprivileged container.
+        run: make test-node-guest-image-role
 
   rke2-role-systemd:
     name: rke2-role dispatch (systemd)

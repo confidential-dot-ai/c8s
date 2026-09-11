@@ -28,6 +28,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
@@ -120,6 +121,8 @@ type proxyConfig struct {
 	measurements              string
 	rtmrs                     string
 	measurementsConfig        string
+	cdsMeasurementsConfig     string
+	cdsPins                   measurements.ReferenceValues
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -166,7 +169,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
-	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image (launch digest plus, on TDX, that image's registers). Every listed image is accepted in both roles: as a mesh peer, and as the CDS this proxy dials — CDS is not scoped to a subset, so any listed image may serve it. Cannot be combined with --measurements, --rtmrs, --cds-measurements or --cds-rtmrs")
+	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to atomic mesh peer image/operator identities; also used for CDS unless --cds-measurements-config is set")
+	fs.StringVar(&c.cdsMeasurementsConfig, "cds-measurements-config", "", "path to the CDS-only image/operator identities; independent of the mesh peer policy")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -280,6 +284,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err := checkTEEMatchesPlatform(pins, teeType); err != nil {
 		return err
 	}
+	if err := checkTEEMatchesPlatform(c.cdsPins, teeType); err != nil {
+		return err
+	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
 	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
@@ -320,7 +327,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
-		CDSEntries:        pins.Entries,
+		CDSEntries:        c.cdsPins.Entries,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)

@@ -11,6 +11,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/controller"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 // validateOperatorPlatform fails at start, not at first injection: an unknown
@@ -32,6 +33,13 @@ func validateOperatorPlatform(platform string, kataEnforce bool) error {
 	return nil
 }
 
+func validateOperatorMeasurementsPolicy(pins measurements.ReferenceValues, kata bool) error {
+	if kata && pins.PinsOperatorKeys() {
+		return fmt.Errorf("--kata-enforce cannot use operator_key policies: Kata initdata cannot carry the complete leader identity; use the baked node launch flow")
+	}
+	return nil
+}
+
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
 	Short: "Run the c8s controller-manager and admission webhook",
@@ -46,40 +54,53 @@ by this command.`,
 		if err := validateOperatorPlatform(operatorHardwarePlatform, kataEnforce); err != nil {
 			return err
 		}
-		// The injected sidecars and the measured initdata document carry a
-		// flat digest list, so a config is flattened into the same fields.
-		if _, err := cmdsutil.LoadMeasurementsConfig(cdsMeasurementsConfig,
+		// Keep the complete policy for sidecars; legacy initdata also needs
+		// the flat fields until the guest policy protocol supports tuples.
+		pins, err := cmdsutil.LoadMeasurementsConfig(cdsMeasurementsConfig,
 			"--measurements-config", "--cds-measurements", "--cds-rtmrs",
-			&cdsMeasurements, &cdsRTMRs); err != nil {
+			&cdsMeasurements, &cdsRTMRs)
+		if err != nil {
 			return err
 		}
+		if err := validateOperatorMeasurementsPolicy(pins, kataEnforce); err != nil {
+			return err
+		}
+		var policyJSON string
+		if !pins.Empty() {
+			encoded, err := measurements.Format(pins)
+			if err != nil {
+				return err
+			}
+			policyJSON = string(encoded)
+		}
 		return controller.Run(cmd.Context(), controller.Options{
-			MetricsAddr:             metricsAddr,
-			HealthAddr:              healthAddr,
-			LeaderElection:          leaderElection,
-			LeaderElectionID:        "c8s-operator.confidential.ai",
-			LeaderElectionNS:        leaderElectionNS,
-			DisableStatusMirror:     !statusMirrorEnabled,
-			GetCertImage:            getCertImage,
-			CDSURL:                  cdsURL,
-			AttestationApiURL:       attestationApiURL,
-			CDSMeasurements:         cdsMeasurements,
-			CDSRTMRs:                cdsRTMRs,
-			ExcludeNamespaces:       excludeNamespaces,
-			WebhookConfigName:       webhookConfigName,
-			WebhookServiceName:      webhookServiceName,
-			WebhookServiceNamespace: webhookServiceNamespace,
-			CertFSGroup:             certFSGroup,
-			CertKeyMode:             certKeyMode,
-			CertRenewInterval:       certRenewInterval,
-			GetCertRunAsUser:        getCertRunAsUser,
-			GetCertRunAsGroup:       getCertRunAsGroup,
-			GetCertRunAsNonRoot:     getCertRunAsNonRoot,
-			KataEnforce:             kataEnforce,
-			KataGuestReadyGate:      kataGuestReadyGate,
-			HardwarePlatform:        operatorHardwarePlatform,
-			WorkloadClaimsHostDir:   workloadClaimsHostDir,
-			WorkloadClaimsGuest:     workloadClaimsGuest,
+			MetricsAddr:               metricsAddr,
+			HealthAddr:                healthAddr,
+			LeaderElection:            leaderElection,
+			LeaderElectionID:          "c8s-operator.confidential.ai",
+			LeaderElectionNS:          leaderElectionNS,
+			DisableStatusMirror:       !statusMirrorEnabled,
+			GetCertImage:              getCertImage,
+			CDSURL:                    cdsURL,
+			AttestationApiURL:         attestationApiURL,
+			CDSMeasurements:           cdsMeasurements,
+			CDSRTMRs:                  cdsRTMRs,
+			CDSMeasurementsConfigJSON: policyJSON,
+			ExcludeNamespaces:         excludeNamespaces,
+			WebhookConfigName:         webhookConfigName,
+			WebhookServiceName:        webhookServiceName,
+			WebhookServiceNamespace:   webhookServiceNamespace,
+			CertFSGroup:               certFSGroup,
+			CertKeyMode:               certKeyMode,
+			CertRenewInterval:         certRenewInterval,
+			GetCertRunAsUser:          getCertRunAsUser,
+			GetCertRunAsGroup:         getCertRunAsGroup,
+			GetCertRunAsNonRoot:       getCertRunAsNonRoot,
+			KataEnforce:               kataEnforce,
+			KataGuestReadyGate:        kataGuestReadyGate,
+			HardwarePlatform:          operatorHardwarePlatform,
+			WorkloadClaimsHostDir:     workloadClaimsHostDir,
+			WorkloadClaimsGuest:       workloadClaimsGuest,
 		})
 	},
 }
@@ -124,7 +145,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
-	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs. Any listed image may serve as CDS; the injected sidecars carry the digests flat. Cannot be combined with --cds-measurements or --cds-rtmrs")
+	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to the CDS identity policy propagated whole to injected sidecars, including image, RTMR and operator key pins. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	operatorCmd.Flags().StringSliceVar(&cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for SNP evidence, empty pins no registers)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")

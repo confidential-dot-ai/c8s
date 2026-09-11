@@ -210,6 +210,9 @@ type Config struct {
 	// registers.
 	CDSRTMRs []string
 
+	// CDSMeasurementsConfigJSON retains the complete identity policy for injected clients.
+	CDSMeasurementsConfigJSON string
+
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
 
@@ -1101,14 +1104,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// get-cert names this one --cds-measurements and takes it comma-joined,
-	// where the secret and volume fetchers take a repeatable --measurements.
-	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
-		args = append(args, "--cds-measurements="+joined)
-	}
-	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
-		args = append(args, "--cds-rtmrs="+joined)
-	}
+	args = append(args, cdsPinArgs(cfg, true)...)
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1531,12 +1527,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Volumes.Specs {
 		args = append(args, "--volume="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1577,12 +1568,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Secrets.Specs {
 		args = append(args, "--secret="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.
 	if cfg.WorkloadClaimsGuest {
@@ -1809,4 +1795,29 @@ func containerMount(c *corev1.Container, name string) *corev1.VolumeMount {
 		}
 	}
 	return nil
+}
+
+// cdsPinArgs propagates the complete CDS identity without weakening operator
+// pins into a digest-only policy. Legacy flag callers keep their old shape.
+func cdsPinArgs(cfg Config, certificate bool) []string {
+	if cfg.CDSMeasurementsConfigJSON != "" {
+		return []string{"--measurements-config-json=" + cfg.CDSMeasurementsConfigJSON}
+	}
+	var args []string
+	if certificate {
+		if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
+			args = append(args, "--cds-measurements="+joined)
+		}
+		if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
+			args = append(args, "--cds-rtmrs="+joined)
+		}
+		return args
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, "--measurements="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, "--rtmrs="+r)
+	}
+	return args
 }

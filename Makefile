@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-chart-values test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -137,8 +137,8 @@ test-integration:
 test-integration-cluster:
 	./test/integration/cluster/run.sh
 
-# The byte-exact rke2-role.sh against real ISO9660 loop devices. Root (loop
-# mounts, writes /run/confos) — sudo on a disposable box.
+# The byte-exact launch script with device and c8s stubs in disposable Linux.
+# Needs Docker; host files are mounted read-only and no privileges are added.
 test-node-guest-image-role:
 	./node-guest-image/tests/rke2-role-test.sh
 
@@ -151,11 +151,6 @@ test-node-guest-image-gpu-cc:
 
 test-node-guest-image-scratch:
 	./node-guest-image/tests/scratch-enforce-test.sh
-
-# c8s-chart-values.sh logic (root-free unit test; a stub c8s records the
-# argv the script hands it, and a fake opkeydata mount carries the fragment).
-test-node-guest-image-chart-values:
-	./node-guest-image/tests/chart-values-test.sh
 
 # Role-gated unit wiring under real systemd in a privileged container.
 # Needs only docker.

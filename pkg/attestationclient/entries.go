@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // EnforceEntries accepts evidence matching one reference image whole: its
-// launch digest AND, on TDX, every register that image pins. A digest from one
-// build with registers from another matches nothing, which is what pinning the
-// two separately could not express.
+// launch digest, every pinned TDX register, and any launch-bound operator key.
+// A digest from one build with registers or an operator from another matches
+// nothing, which independent pin lists could not express.
 //
 // RTMRs are checked only for TDX-shaped evidence, as elsewhere: SNP folds the
 // guest image into its launch digest and reports no registers.
@@ -37,12 +39,21 @@ func EnforceEntries(resp types.VerifyResponse, entries []measurements.Entry, pla
 		if !bytes.Equal(digest, e.Digest) {
 			continue
 		}
-		if !checkRTMRs || len(e.RTMRs) == 0 {
-			return nil
+		if checkRTMRs {
+			if err := enforceRTMRsAgainst(reported, e.RTMRs); err != nil {
+				lastErr = fmt.Errorf("%s: %w", e.Name, err)
+				continue
+			}
 		}
-		if err := enforceRTMRsAgainst(reported, e.RTMRs); err != nil {
-			lastErr = fmt.Errorf("%s: %w", e.Name, err)
-			continue
+		if len(e.OperatorKey) > 0 {
+			if teetypes.NormalizePlatform(platform) != teetypes.NormalizePlatform(string(resp.Result.Platform)) {
+				lastErr = fmt.Errorf("%s: %w: verified platform does not match evidence", e.Name, ErrOperatorKeyNotAllowed)
+				continue
+			}
+			if err := runtimemeasure.VerifyBinding(&resp.Result, e.OperatorKey, nil); err != nil {
+				lastErr = fmt.Errorf("%s: %w: %w", e.Name, ErrOperatorKeyNotAllowed, err)
+				continue
+			}
 		}
 		return nil
 	}
