@@ -421,7 +421,9 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	// and env policy are left unobserved here: this plugin gates images on a
 	// node CVM, where it sees the CRI container rather than a guest's mount
 	// table, and an unobserved field is not a violation
-	// (allowlist.RunningContainer).
+	// (allowlist.RunningContainer). See docs/allowlist-and-capabilities.md,
+	// "Node mode: not enforced", for the resulting gap under
+	// --cvm-mode=node.
 	if !p.policy.alwaysAllows(digest) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and

@@ -216,6 +216,56 @@ than as a violation — so under `--cvm-mode=node`, where that plugin is the onl
 enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
 lint` warns when a document carries one; `--cvm-mode=pod` silences it.
 
+### Node mode: not enforced
+
+Under `--cvm-mode=node`, the `mounts` and `env` policy is not enforced. The
+only enforcer running is the host NRI image-policy plugin, and it does not
+read either field.
+
+`internal/cmds/nri-image-policy/plugin.go` builds the observation the plugin
+checks with only two fields set:
+
+```go
+allowlist.RunningContainer{Digest: digest, Argv: argv}
+```
+
+The comment directly above that line says why:
+
+> Mount and env policy are left unobserved here: this plugin gates images on
+> a node CVM, where it sees the CRI container rather than a guest's mount
+> table, and an unobserved field is not a violation (allowlist.RunningContainer).
+
+`pkg/allowlist/match.go` documents `RunningContainer` the same way: "An
+enforcer that cannot observe a field leaves it nil, which an exact policy
+treats as 'nothing to refuse' rather than as a violation... the host-side NRI
+plugin gates images on a node CVM and fills Digest and Argv only." An
+`exact` `mounts` or `env` policy is therefore vacuously satisfied in node
+mode: every container passes, regardless of what it mounts or what
+environment variables it carries.
+
+**Threat model impact.** An operator credential that can patch a Deployment
+(or anyone who obtains it) can add environment variables (for example
+`LD_PRELOAD` pointing at a mounted library) or bind mounts (ConfigMap,
+Secret, emptyDir, PVC, projected) to an admitted container. The container
+starts. The CDS mesh certificate and the workload receipt derive from digest
+and argv only (`internal/cmds/cds/attest.go`, `matchWorkload`; and
+`pkg/ratls/matchedworkload.go`, the `MatchedWorkload` fields — `Name`,
+`AllowlistVersion`, `AllowlistDigest` — carry no mount or environment data),
+so the change is invisible to a relying party verifying the attestation. The
+allowlist's `env`/`mounts` fields therefore give a relying party no guarantee
+in node mode. `hostPath` remains blocked by the `deny-host-namespaces`
+`ValidatingAdmissionPolicy`.
+
+**What would close it.** The NRI `api.Container` the plugin already receives
+carries `Env` and `Mounts` (`github.com/containerd/nri`, `pkg/api`, fields
+`Args`, `Env`, `Mounts`). Filling `BindMounts` and `EnvNames` on the
+`allowlist.RunningContainer` the plugin builds would let the existing matcher
+(`everyIn` in `pkg/allowlist/match.go`) enforce exact policies in node mode
+the same way the in-guest `policy-monitor` does. An exact list built this way
+must still include the kubelet-added mounts and the Kubernetes-injected env
+names described in the paragraph above. Once the plugin fills those fields,
+`c8s allowlist lint` should stop warning for node mode.
+
 ## Secret grants (`secrets`)
 
 An entry may grant secret-store paths to the workload it names. The subject is
