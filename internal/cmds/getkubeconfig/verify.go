@@ -288,8 +288,10 @@ func (exp measuredPolicy) verificationParams(reportData []byte) localverify.Para
 		measurements = append(measurements, append([]byte(nil), v.Digest[:]...))
 	}
 	return localverify.Params{
-		ExpectedReportData:   reportData,
-		Measurements:         measurements,
-		ExpectedInitDataHash: hostData[:],
+		Measurements: measurements,
+		VerifyParams: teetypes.VerifyParams{
+			ExpectedReportData:   reportData,
+			ExpectedInitDataHash: hostData[:],
+		},
 	}
 }

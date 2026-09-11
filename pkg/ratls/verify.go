@@ -6,7 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -14,46 +13,26 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
+// Pins is the peer-identity pin set an in-cluster RA-TLS verifier enforces:
+// launch-measurement reference values, whole-image pins, and the TDX runtime
+// measurement registers. It is [remote.Policy] under the name the c8s flag
+// plumbing uses; the zero value pins nothing (accept any attested TEE —
+// development only; callers warn).
+type Pins = remote.Policy
+
 // VerifyPolicy defines what attestation claims are acceptable.
 type VerifyPolicy struct {
-	// ImagePins pins whole images — a launch digest together with the registers
-	// measured from the same build. When set it replaces Measurements and
-	// RTMRs, so a digest from one image cannot be paired with another's.
-	ImagePins []remote.ImagePin
-
-	// Measurements is the set of acceptable launch measurements (48 bytes each).
-	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD.
-	Measurements [][]byte
-
-	// RTMRs pins TDX runtime measurement registers by index. MRTD covers TDVF
-	// alone, so on TDX it is these — RTMR[1] for the guest kernel, RTMR[2] for
-	// the command line carrying the dm-verity root hash — that make the guest
-	// image itself attested. Ignored on SNP, where kernel-hashes folds the
-	// command line into the launch digest. Empty pins nothing.
-	//
-	// Leave RTMR[0] unpinned: it carries the TD HOB, so it varies with the
-	// pod's vCPU and memory shape. RTMR[3] is extended by in-guest software and
-	// so cannot speak to guest identity.
-	RTMRs map[int][]byte
-
-	// MinTCBVersion is the minimum acceptable platform TCB version.
-	// This is a packed uint64 where each byte represents a component
-	// (bootloader, TEE, reserved, snp, microcode, etc.) — each component
-	// of the current TCB must be >= the corresponding minimum.
-	// If zero, any TCB version is accepted.
-	// Enforced on the SNP path only; dropped for TDX (see
-	// remote.Policy).
-	MinTCBVersion uint64
-
-	// AllowDebug controls whether debug-mode guests are accepted.
-	// Default: false (reject debug guests).
-	AllowDebug bool
+	// Policy is the evidence policy the attestation-api enforces: image pins,
+	// launch-measurement reference values, TDX runtime registers, the SEV-SNP
+	// TCB floor and the debug rule. Leave ExpectedReportData unset — the
+	// verifying paths derive it from the certificate key and refuse a value
+	// that disagrees.
+	Policy remote.Policy
 
 	// Nonce, when set, is verified against the attestation report's REPORTDATA.
 	// REPORTDATA must equal hash(pubkey || nonce). Use when both sides agree on
@@ -131,29 +110,16 @@ type VerifyResult struct {
 //     REPORTDATA == hash(pub || nonce), proving the key was generated inside
 //     the TEE (and the report is fresh if nonce is set), plus the debug and
 //     minimum-TCB policy.
-//  2. The launch measurement it returns is checked against
-//     policy.Measurements here, and any pinned TDX RTMRs against policy.RTMRs.
+//  2. The launch measurement it returns is checked against policy.Policy here,
+//     by the same enforcement every attestation-go caller gets.
 func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
 	}
-	if policy.AttestationApiURL == "" {
-		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
+	if err := policy.checkEvidenceOnlyPins(); err != nil {
+		return nil, err
 	}
-	if policy.SandboxID != "" {
-		// The ID rides the certificate, which this path never sees.
-		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
-	}
-	if policy.WorkloadName != "" {
-		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
-	}
-
-	expectedReportData, err := ReportDataForKey(pub, nonce)
-	if err != nil {
-		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
-	}
-
-	return verifyReport(att, policy, expectedReportData)
+	return verifyOnline(att, pub, policy, nonce)
 }
 
 // VerifyCert verifies an RA-TLS certificate: it extracts the TEE attestation
@@ -205,22 +171,27 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 		return nil, fmt.Errorf("ratls: extract public key: %w", err)
 	}
 
-	if policy.AttestationApiURL == "" {
-		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
+	if err := policy.checkEvidenceOnlyPins(); err != nil {
+		return nil, err
 	}
-	if policy.SandboxID != "" {
-		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
-	}
-	if policy.WorkloadName != "" {
-		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
-	}
+	return verifyOnline(att, pub, policy, nonce)
+}
 
-	expectedReportData, err := ReportDataForKey(pub, nonce)
-	if err != nil {
-		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
+// checkEvidenceOnlyPins rejects a policy the evidence alone cannot settle: the
+// sandbox ID and the matched workload are CA-vouched stamps, and neither
+// [VerifyAttestation] nor [VerifyCert] verifies a chain. It also requires the
+// attestation-api, since there is no in-process verification path here.
+func (p *VerifyPolicy) checkEvidenceOnlyPins() error {
+	if p.AttestationApiURL == "" {
+		return fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
-
-	return verifyReport(att, policy, expectedReportData)
+	if p.SandboxID != "" {
+		return fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
+	if p.WorkloadName != "" {
+		return fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
+	return nil
 }
 
 // CheckSandboxPin enforces expectedID against a leaf whose CA chain the caller
@@ -247,53 +218,21 @@ func CheckSandboxPin(cert *x509.Certificate, expectedID string) error {
 	return nil
 }
 
-// verifyReport normalizes the attestation into an evidence envelope and hands
-// it to the attestation-api enforced verifier. The extension's TEE type must
-// match the envelope's platform family — fail closed rather than approve one
-// platform's evidence under another's rules.
-//
-// c8s ships no in-process quote parser, so the attestation-api verifies every
-// platform, bare-metal SNP included; [Attestation.Envelope] wraps that raw
-// report in an envelope first. An inline VCEK travels in the envelope, for the
-// attestation-api to use as collateral.
-func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
-	env, err := att.Envelope()
-	if err != nil {
-		return nil, err
-	}
-	family := env.Platform.Family()
-	if family == teetypes.FamilyUnknown {
-		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, env.Platform)
-	}
-	if family != att.Family {
-		return nil, fmt.Errorf("%w: extension declares %s but carries %q evidence", ErrInvalidReport, att.Family, env.Platform)
-	}
-	return verifyEnvelopeOnline(env, policy, expectedReportData)
-}
-
 const defaultAttestationVerifyTimeout = 10 * time.Second
 
-// unpackSNPMinTcb maps a packed AMD SEV-SNP TCB uint64 onto the components
-// the attestation-api understands. Layout matches the SEV-SNP ABI
-// TcbVersion: byte 0 = bootloader, byte 1 = tee, bytes 2-5 reserved,
-// byte 6 = snp, byte 7 = microcode.
-func unpackSNPMinTcb(packed uint64) teetypes.SnpTcb {
-	return teetypes.SnpTcb{
-		Bootloader: byte(packed),
-		Tee:        byte(packed >> 8),
-		Snp:        byte(packed >> 48),
-		Microcode:  byte(packed >> 56),
-	}
-}
-
-// verifyEnvelopeOnline forwards the envelope to the attestation-api enforced
-// verifier ([remote.Client.VerifyEvidence] — verdict gate, measurement
-// reference values) and maps its verdicts onto this package's sentinels.
+// verifyOnline hands the evidence to the attestation-api through
+// [agratls.VerifyWithService], which derives the REPORTDATA anchor from pub
+// and nonce, fails closed on the verdict, and then enforces policy.Policy.
 //
-// Only the 48-byte SHA-384 prefix is sent: that is what the attester was given,
-// and the service zero-extends it into the 64-byte hardware field before
-// comparing.
-func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
+// c8s ships no in-process quote parser, so every platform is verified there,
+// bare-metal SNP included; an inline VCEK travels in the envelope as
+// collateral.
+func verifyOnline(att *Attestation, pub crypto.PublicKey, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
+	expectedReportData, err := ReportDataForKey(pub, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
+	}
+
 	timeout := policy.AttestationVerifyTimeout
 	if timeout <= 0 {
 		timeout = defaultAttestationVerifyTimeout
@@ -301,34 +240,18 @@ func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyP
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var minTcb *teetypes.SnpTcb
-	if policy.MinTCBVersion != 0 {
-		m := unpackSNPMinTcb(policy.MinTCBVersion)
-		minTcb = &m
-	}
-	resp, err := remote.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, evidence, remote.Policy{
-		ExpectedReportData: expectedReportData[:sha512.Size384],
-		AllowDebug:         policy.AllowDebug,
-		MinTcb:             minTcb,
-		Images:             policy.ImagePins,
-		Measurements:       policy.Measurements,
-		RTMRs:              policy.RTMRs,
-	})
+	svc := remote.NewClient(policy.AttestationApiURL)
+	resp, err := agratls.VerifyWithService(ctx, svc, att, pub, nonce, policy.Policy)
 	if err != nil {
-		return nil, mapVerifyError(string(evidence.Platform), err)
+		return nil, mapVerifyError(att.Family, err)
 	}
 
-	teeType := TEETypeSEVSNP
-	if evidence.Platform.IsTDX() {
-		teeType = TEETypeTDX
-	}
-	result := &VerifyResult{TEEType: teeType}
-	if teeType == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 {
+	result := &VerifyResult{TEEType: att.Family, ReportData: expectedReportData}
+	if att.Family == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 {
 		// The claims map came out of json.Unmarshal, so re-marshaling it
 		// cannot fail.
 		result.PlatformInfo, _ = json.Marshal(resp.Result.Claims.PlatformData)
 	}
-	copy(result.ReportData[:], expectedReportData[:])
 	if resp.Result.Claims.LaunchDigest != "" {
 		// Hex validity and length were enforced by VerifyEvidence.
 		measurement, _ := hex.DecodeString(resp.Result.Claims.LaunchDigest)
@@ -337,23 +260,20 @@ func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyP
 	return result, nil
 }
 
-// mapVerifyError translates remote verdict sentinels onto this
-// package's error surface, preserving the pre-consolidation sentinels callers
-// match with errors.Is.
-func mapVerifyError(platform string, err error) error {
+// mapVerifyError translates remote verdict sentinels onto this package's error
+// surface, which callers match with errors.Is.
+func mapVerifyError(family TEEType, err error) error {
 	switch {
 	case errors.Is(err, remote.ErrSignatureInvalid):
 		return ErrSignatureInvalid
 	case errors.Is(err, remote.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, remote.ErrMeasurementNotAllowed):
+	case errors.Is(err, remote.ErrMeasurementNotAllowed), errors.Is(err, remote.ErrRTMRNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, remote.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)
-	case errors.Is(err, remote.ErrUnsupportedPlatform):
-		return fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, platform)
 	default:
-		return fmt.Errorf("ratls: online %s attestation verify: %w", platform, err)
+		return fmt.Errorf("ratls: online %s attestation verify: %w", family, err)
 	}
 }
 

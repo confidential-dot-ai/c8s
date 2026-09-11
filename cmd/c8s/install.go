@@ -1759,7 +1759,11 @@ func validateCvmMode(cvmMode string) error {
 	return nil
 }
 
-var allowedPlatforms = []string{"sev-snp", "tdx"}
+// allowedPlatforms is what --hardware-platform takes: the canonical family
+// names, which is also what the operator and the chart consume. The alias
+// spellings teetypes.ParseFamily accepts are deliberately not taken here —
+// node labelling and runtime-class selection compare this value as written.
+var allowedPlatforms = []string{webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX}
 
 // validateHardwarePlatform enforces that --hardware-platform is set and known,
 // exactly like its sibling --cvm-mode. install checks it first in RunE, before

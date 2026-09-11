@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -46,7 +48,7 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 	if platform != "az-snp" {
 		t.Fatalf("platform = %q, want az-snp", platform)
 	}
-	anchor := Params{ExpectedReportData: []byte("challenge")}
+	anchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("challenge")}}
 
 	res, err := Verify(context.Background(), platform, evidence, anchor)
 	if err != nil {
@@ -69,7 +71,7 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 		t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
 	}
 
-	wrongAnchor := Params{ExpectedReportData: []byte("not-the-nonce")}
+	wrongAnchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("not-the-nonce")}}
 	if _, err := Verify(context.Background(), platform, evidence, wrongAnchor); err == nil {
 		t.Fatal("a wrong binding anchor must fail closed")
 	}

@@ -228,8 +228,10 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 		platform = string(teetypes.PlatformSNP)
 	}
 	if _, err := verify(ctx, platform, d.Attestation.Evidence, localverify.Params{
-		ExpectedReportData: erd[:sha512.Size384],
-		Measurements:       measurements,
+		Measurements: measurements,
+		VerifyParams: teetypes.VerifyParams{
+			ExpectedReportData: erd[:sha512.Size384],
+		},
 	}); err != nil {
 		return nil, err
 	}

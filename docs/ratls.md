@@ -179,7 +179,7 @@ Step by step:
    attestation-api means no connection (fail closed).
 5. **Measurement policy.** The verified launch digest returned by the
    attestation-api is compared against the caller's allowlist
-   (`VerifyPolicy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
+   (`VerifyPolicy.Policy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
    **empty allowlist accepts any genuine TEE** — deliberate bootstrap
    ergonomics, loudly warned, and unsafe in production.
 6. **mTLS.** Servers configured with a `ClientPolicy` require a client
@@ -325,8 +325,8 @@ What it does **not** guarantee:
   Left empty — the default, warned on a TDX install — the in-cluster pins
   confer **no guest-code identity**: any TD booting the pinned firmware is
   accepted. The RTMR pin is one register set for the whole fleet, not a
-  per-image tuple, and `MinTCBVersion` is still dropped on the TDX path
-  (GAP). Operator-side, `c8s verify --image-manifest` pins the full
+  per-image tuple (GAP). A `Policy.MinTcb` floor names SEV-SNP components, so
+  TDX evidence is refused outright rather than verified under no floor. Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
   `--measurements` rather than combining with it — and `--rtmr 3=`
   (or `--operator-pkey`, which derives the same value from the operator public

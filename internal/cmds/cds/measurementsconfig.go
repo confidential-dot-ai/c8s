@@ -8,8 +8,6 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // resolveMeasurementsConfig loads --measurements-config and fills the flat
@@ -29,9 +27,9 @@ func resolveMeasurementsConfig(cfg *config) (refvalues.ReferenceValues, error) {
 	}
 	// Reference values for the other platform would refuse every peer at
 	// runtime. An empty platform is validateConfig's error to report.
-	if platform := ratls.NormalizePlatform(cfg.ratlsPlatform); platform != "" && platform != set.Family.String() {
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil && family != set.Family {
 		return refvalues.ReferenceValues{}, fmt.Errorf(
-			"--measurements-config declares tee %q but --ratls-platform is %q", set.Family, platform)
+			"--measurements-config declares tee %q but --ratls-platform is %q", set.Family, family)
 	}
 
 	hexDigests, common, uniform := set.Flatten()

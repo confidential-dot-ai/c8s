@@ -625,12 +625,12 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
-		policy: &ratls.VerifyPolicy{
-			ImagePins:    refValues.Images,
+		policy: &ratls.VerifyPolicy{Policy: remote.Policy{
+			Images:       refValues.Images,
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
-		},
+		}},
 		pins:         pins,
 		meshCA:       caPool,
 		initDataHash: initDataHash,
@@ -670,7 +670,7 @@ type rtmrPins struct {
 	image runtimemeasure.ImageIdentity
 	rtmr3 []byte
 	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
-	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
+	// other two, rather than left to ratls.VerifyPolicy.Policy.RTMRs: that field is
 	// read only by attestation-go/remote, on the delegated attestation-api
 	// path, and `c8s verify` always verifies in process (verifyInProcess ->
 	// localverify.Verify, whose Params carries no registers). Setting the
@@ -1254,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1319,7 +1319,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 				return oc
 			}
 		}
-		if len(plan.policy.Measurements) > 0 && !remote.MeasurementAllowed(mb, plan.policy.Measurements) {
+		if len(plan.policy.Policy.Measurements) > 0 && !remote.MeasurementAllowed(mb, plan.policy.Policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}

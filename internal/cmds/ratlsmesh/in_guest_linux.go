@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -296,7 +297,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return err
 	}
 	// Normalise c.platform so downstream `ratls.NewServerTLSConfig` /
-	// `NewClientTLSConfig` see a string `ratls.ValidatePlatform` accepts. When
+	// `NewClientTLSConfig` see a string `teetypes.ParseFamily` accepts. When
 	// the operator (or the baked cloudinit.env default) passes
 	// --platform=auto we've now resolved it to a concrete TEE via
 	// /dev/{tdx_guest,sev-guest} probing above; keep the ServerConfig
@@ -421,8 +422,7 @@ func inGuestVerifyPins(c *inGuestConfig, logger *slog.Logger) (*ratls.VerifyPoli
 	}
 
 	meshPolicy := &ratls.VerifyPolicy{
-		Measurements:      meshPolicyMeasurements,
-		RTMRs:             meshRTMRs,
+		Policy:            remote.Policy{Measurements: meshPolicyMeasurements, RTMRs: meshRTMRs},
 		AttestationApiURL: c.attestationServiceURL,
 	}
 	if len(meshPolicyMeasurements) == 0 {

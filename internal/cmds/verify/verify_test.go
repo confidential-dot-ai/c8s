@@ -29,6 +29,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
@@ -996,7 +997,7 @@ func TestRenderOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: m}}
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Policy: remote.Policy{Measurements: m}}}
 	}
 	emptyPlan := func() *verifyPlan { return &verifyPlan{policy: &ratls.VerifyPolicy{}} }
 
@@ -1106,7 +1107,7 @@ func TestRenderOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: other}})
+		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{Policy: remote.Policy{Measurements: other}}})
 		if oc.Verified || !strings.Contains(oc.Error, "not in --measurements allowlist") {
 			t.Errorf("expected allowlist rejection, got %+v", oc)
 		}
@@ -1299,7 +1300,7 @@ func TestNewOutcomePlatform(t *testing.T) {
 // --measurements pin closed: an unparseable digest can never count as allowed.
 func TestNewOutcomeMalformedLaunchDigestFailsPin(t *testing.T) {
 	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
-	plan := &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}}
+	plan := &verifyPlan{policy: &ratls.VerifyPolicy{Policy: remote.Policy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}}}
 	for _, digest := range []string{"", "zz"} {
 		result := &teetypes.VerificationResult{
 			SignatureValid: true,
@@ -1520,8 +1521,8 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(plan.policy.Measurements) != 1 || hex.EncodeToString(plan.policy.Measurements[0]) != measHex {
-			t.Errorf("measurements = %v", plan.policy.Measurements)
+		if len(plan.policy.Policy.Measurements) != 1 || hex.EncodeToString(plan.policy.Policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", plan.policy.Policy.Measurements)
 		}
 	})
 

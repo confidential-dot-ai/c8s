@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
@@ -80,7 +81,7 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 		cert := attestedCertWithWindow(t, now.Add(certutil.LeafValiditySkew-time.Minute), now.Add(2*time.Hour))
-		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: [][]byte{measurement}}, nil); err != nil {
+		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: [][]byte{measurement}}}, nil); err != nil {
 			t.Fatalf("NotBefore within the skew allowance must pass: %v", err)
 		}
 	})

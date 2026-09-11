@@ -171,8 +171,8 @@ func TestMeshVerifyPolicyParsesRTMRPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("meshVerifyPolicy: %v", err)
 	}
-	if len(policy.RTMRs) != 2 {
-		t.Fatalf("policy.RTMRs = %v, want RTMR[1] and RTMR[2]", policy.RTMRs)
+	if len(policy.Policy.RTMRs) != 2 {
+		t.Fatalf("policy.Policy.RTMRs = %v, want RTMR[1] and RTMR[2]", policy.Policy.RTMRs)
 	}
 	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "0="+hex48); err == nil {
 		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -171,9 +173,17 @@ const (
 // choice to the operator so webhook injection and the rendered RuntimeClasses
 // stay in lockstep.
 const (
-	HardwarePlatformSNP = "sev-snp"
-	HardwarePlatformTDX = "tdx"
+	HardwarePlatformSNP = string(teetypes.FamilySNP)
+	HardwarePlatformTDX = string(teetypes.FamilyTDX)
 )
+
+// isTDXPlatform reports whether the configured hardware platform names Intel
+// TDX. It parses rather than compares, so an alias the operator command lets
+// through cannot silently select the SNP runtime classes.
+func isTDXPlatform(platform string) bool {
+	family, err := teetypes.ParseFamily(platform)
+	return err == nil && family == teetypes.FamilyTDX
+}
 
 // nvidiaGpuResourcePrefix is the vendor prefix every NVIDIA GPU extended
 // resource carries. The sandbox-device-plugin advertises per-model names
@@ -907,7 +917,7 @@ func kataRuntimeClassFor(pod *corev1.Pod, cfg Config) string {
 	if kataIncompatible(pod) {
 		return ""
 	}
-	tdx := cfg.HardwarePlatform == HardwarePlatformTDX
+	tdx := isTDXPlatform(cfg.HardwarePlatform)
 	if podRequestsNvidiaGpu(pod) {
 		if tdx {
 			return kataTdxGpuRuntimeClass

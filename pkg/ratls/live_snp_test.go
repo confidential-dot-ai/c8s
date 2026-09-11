@@ -14,7 +14,7 @@ import (
 )
 
 // TestLiveSNPEntryEnforcement drives the delegated verification path
-// VerifyPolicy.ImagePins feeds against real SEV-SNP evidence: a config pinning
+// VerifyPolicy.Policy.Images feeds against real SEV-SNP evidence: a config pinning
 // the booted image is admitted, and one pinning any other image is refused.
 // Set C8S_LIVE_ATTESTATION_URL to the attestation-api of a running CVM,
 // C8S_LIVE_EVIDENCE to its evidence envelope and C8S_LIVE_CONFIG to the

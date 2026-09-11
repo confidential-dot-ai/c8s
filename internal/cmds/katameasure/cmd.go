@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/launchmeasure/snp"
 	"github.com/confidential-dot-ai/attestation-go/launchmeasure/tdx"
 )
@@ -150,12 +151,14 @@ Output is the bare hex digest, one per line, ready for
 // Platforms `measure` can compute a launch measurement for. These match the
 // teetypes.PlatformType spellings the CDS allow-list and RA-TLS policy use.
 const (
-	platformSNP = "snp"
-	platformTDX = "tdx"
+	platformSNP = string(teetypes.PlatformSNP)
+	platformTDX = string(teetypes.PlatformTDX)
 )
 
 func run(cfg config, stdout, stderr io.Writer) error {
 	cfg.platform, cfg.platformFrom = resolvePlatform(cfg)
+	// Exact tags only: cfg.platform is what Result.Platform reports, and the
+	// alias spellings teetypes.ParseFamily takes would land there unnormalized.
 	switch cfg.platform {
 	case platformSNP:
 		return runSNP(cfg, stdout, stderr)

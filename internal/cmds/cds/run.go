@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
@@ -57,7 +58,10 @@ func run(cfg config) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
+	// Empty stays empty: it selects the plain-HTTP path below.
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil {
+		cfg.ratlsPlatform = family.String()
+	}
 
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
@@ -207,7 +211,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, ImagePins: pinned.Images},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Images: pinned.Images},
 			cfg.requestTimeout,
 		)
 		if err != nil {

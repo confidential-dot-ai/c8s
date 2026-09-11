@@ -167,13 +167,6 @@ func TestSentinelErrors(t *testing.T) {
 			t.Errorf("got %v, want errors.Is ErrNoAttestation", err)
 		}
 	})
-
-	t.Run("ErrUnsupportedTEE_parseTEEType", func(t *testing.T) {
-		_, err := parseTEEType("unknown-platform")
-		if !errors.Is(err, ErrUnsupportedTEE) {
-			t.Errorf("got %v, want errors.Is ErrUnsupportedTEE", err)
-		}
-	})
 }
 
 func TestSNPMeasurementSizeConstant(t *testing.T) {
@@ -249,7 +242,9 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{measurement},
+		Policy: remote.Policy{
+			Measurements: [][]byte{measurement},
+		},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
@@ -295,15 +290,19 @@ func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
 	// than verified under no floor.
 	if _, err := VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{mrtd},
-		MinTCBVersion:     1,
+		Policy: remote.Policy{
+			Measurements: [][]byte{mrtd},
+			MinTcb:       &teetypes.SnpTcb{Bootloader: 1},
+		},
 	}, nil); err == nil {
 		t.Fatal("a TCB floor against TDX evidence must be refused")
 	}
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{mrtd},
+		Policy: remote.Policy{
+			Measurements: [][]byte{mrtd},
+		},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
@@ -338,7 +337,9 @@ func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
 	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
 	_, err = VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{wrongMRTD},
+		Policy: remote.Policy{
+			Measurements: [][]byte{wrongMRTD},
+		},
 	}, nil)
 	if !errors.Is(err, ErrPolicyViolation) {
 		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
@@ -358,7 +359,9 @@ func TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi(t *testing.T) {
 
 	if _, err := VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{measurement},
+		Policy: remote.Policy{
+			Measurements: [][]byte{measurement},
+		},
 	}, nil); err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
@@ -384,7 +387,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("422 verification_failed is refused", func(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerifyError(mockapi.VerificationFailed("report signature does not verify"))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		var apiErr *remote.APIError
 		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnprocessableEntity {
 			t.Fatalf("got %v, want a 422 *remote.APIError", err)
@@ -398,7 +401,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		verdict := mockapi.PassingVerdict(hex.EncodeToString(measurement))
 		verdict.SignatureValid = false
 		stub.SetVerdict(verdict)
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrSignatureInvalid) {
 			t.Fatalf("got %v, want ErrSignatureInvalid", err)
 		}
@@ -410,7 +413,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 			SignatureValid: true,
 			Claims:         teetypes.Claims{LaunchDigest: hex.EncodeToString(measurement)},
 		})
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
@@ -424,14 +427,14 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		match := false
 		verdict.ReportDataMatch = &match
 		stub.SetVerdict(verdict)
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
 	})
 
 	t.Run("empty attestation-api URL rejects embedded evidence", func(t *testing.T) {
-		_, err := VerifyCert(cert, &VerifyPolicy{Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -439,7 +442,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 
 	t.Run("launch_digest missing with pinned measurements is rejected", func(t *testing.T) {
 		stub := mockapi.New(t)
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
@@ -448,7 +451,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("launch_digest not in allowed set is rejected", func(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(bytes.Repeat([]byte{0x99}, SNPMeasurementSize))))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
@@ -457,7 +460,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("launch_digest not hex is rejected", func(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict("not-hex"))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -466,7 +469,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("launch_digest wrong length is rejected", func(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(bytes.Repeat([]byte{0x11}, 32))))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -477,7 +480,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 		}))
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if err == nil {
 			t.Fatal("expected error from 500 response")
 		}
@@ -499,8 +502,10 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		start := time.Now()
 		_, err := VerifyCert(cert, &VerifyPolicy{
 			AttestationApiURL:        srv.URL,
-			Measurements:             allowedMeasurements,
 			AttestationVerifyTimeout: 25 * time.Millisecond,
+			Policy: remote.Policy{
+				Measurements: allowedMeasurements,
+			},
 		}, nil)
 		elapsed := time.Since(start)
 		if err == nil {
@@ -511,16 +516,16 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 	})
 
-	t.Run("MinTCBVersion is forwarded as unpacked components", func(t *testing.T) {
+	t.Run("the TCB floor reaches /verify", func(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
-		// Packed layout: bootloader=0x11, tee=0x22, snp=0x33 (byte 6),
-		// microcode=0x44 (byte 7). Reserved bytes stay zero.
-		packed := uint64(0x44_33_00_00_00_00_22_11)
+		floor := teetypes.SnpTcb{Bootloader: 0x11, Tee: 0x22, Snp: 0x33, Microcode: 0x44}
 		_, err := VerifyCert(cert, &VerifyPolicy{
 			AttestationApiURL: stub.URL(),
-			Measurements:      allowedMeasurements,
-			MinTCBVersion:     packed,
+			Policy: remote.Policy{
+				Measurements: allowedMeasurements,
+				MinTcb:       &floor,
+			},
 		}, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -533,9 +538,8 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		if observed.Params == nil || observed.Params.MinTcb == nil {
 			t.Fatal("MinTcb was not forwarded to /verify")
 		}
-		want := teetypes.SnpTcb{Bootloader: 0x11, Tee: 0x22, Snp: 0x33, Microcode: 0x44}
-		if *observed.Params.MinTcb != want {
-			t.Fatalf("MinTcb = %+v, want %+v", *observed.Params.MinTcb, want)
+		if *observed.Params.MinTcb != floor {
+			t.Fatalf("MinTcb = %+v, want %+v", *observed.Params.MinTcb, floor)
 		}
 	})
 
@@ -564,7 +568,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
-		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: allowedMeasurements}, nil)
+		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: allowedMeasurements}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -585,7 +589,9 @@ func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
 		AttestationApiURL: stub.URL(),
-		Measurements:      [][]byte{mrtd},
+		Policy: remote.Policy{
+			Measurements: [][]byte{mrtd},
+		},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
@@ -607,7 +613,7 @@ func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
 	}
 
 	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
-	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: [][]byte{wrongMRTD}}, nil)
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: [][]byte{wrongMRTD}}}, nil)
 	if !errors.Is(err, ErrPolicyViolation) {
 		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
 	}
@@ -631,7 +637,7 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 		stub := mockapi.New(t)
 		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 
-		result, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: [][]byte{measurement}}, nil)
+		result, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Policy: remote.Policy{Measurements: [][]byte{measurement}}}, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
 		}
@@ -668,7 +674,7 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 	})
 
 	t.Run("no attestation-api URL fails closed", func(t *testing.T) {
-		_, err := VerifyCert(cert, &VerifyPolicy{Measurements: [][]byte{measurement}}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{Policy: remote.Policy{Measurements: [][]byte{measurement}}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -726,7 +732,7 @@ func TestVerifyAttestationUnsupportedKey(t *testing.T) {
 func TestVerifyResultPlatformInfo(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 	newPolicy := func(url string) *VerifyPolicy {
-		return &VerifyPolicy{AttestationApiURL: url, Measurements: [][]byte{measurement}}
+		return &VerifyPolicy{AttestationApiURL: url, Policy: remote.Policy{Measurements: [][]byte{measurement}}}
 	}
 	stubWithPlatformData := func(t *testing.T, platformData map[string]any) *mockapi.Stub {
 		t.Helper()

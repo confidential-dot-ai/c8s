@@ -45,7 +45,7 @@ func NewClient(cfg Config, pins ratls.Pins) (*http.Client, crypto.PublicKey, err
 		return nil, nil, fmt.Errorf("parse leaf: %w", err)
 	}
 	tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:       pins.VerifyPolicy(cfg.AttestationApiURL),
+		Policy:       &ratls.VerifyPolicy{Policy: pins, AttestationApiURL: cfg.AttestationApiURL},
 		CertProvider: provider,
 	})
 	if err != nil {

@@ -4,14 +4,16 @@ package cds
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 const (
@@ -158,11 +160,10 @@ type config struct {
 // empty-platform plain-HTTP mode stays reachable only for tests constructing
 // Config directly.
 func validateRATLSPlatformFlag(v string) error {
-	norm := ratls.NormalizePlatform(v)
-	if norm == "" {
+	if strings.TrimSpace(v) == "" {
 		return fmt.Errorf("--ratls-platform must not be empty (RA-TLS is mandatory; tests construct Config directly)")
 	}
-	if err := ratls.ValidatePlatform(norm); err != nil {
+	if _, err := teetypes.ParseFamily(v); err != nil {
 		return fmt.Errorf("--ratls-platform: %w", err)
 	}
 	return nil

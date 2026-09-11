@@ -179,8 +179,8 @@ ones named by TDVF's metadata section table, and only the BFV carries the
 `MR_EXTEND` attribute. The TD HOB — which is where the vCPU count and guest RAM
 size live — is page-added but never content-extended, so its contents never
 reach MRTD. The guest kernel, initrd and command line are measured by TDVF into
-**RTMR[0..2]**, which `pkg/ratls.VerifyPolicy` does not pin (see the comment on
-`Measurements`, and `attestation-go`'s `ExpectedLaunchDigest` → `MrTd` mapping).
+**RTMR[0..2]**, which `pkg/ratls.VerifyPolicy` pins only through `Policy.RTMRs` (see the
+comment on `remote.Policy.Measurements`, and `attestation-go`'s `ExpectedLaunchDigest` → `MrTd` mapping).
 
 Confirmed on live hardware. Two `kata-qemu-tdx` pods on the same node, booting
 the same TDVF, differing only in vCPU shape:

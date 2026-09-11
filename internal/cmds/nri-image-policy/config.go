@@ -14,7 +14,6 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -217,9 +216,14 @@ func foldHexPins(vals []string) []string {
 // literal and validate it directly.
 func (c *config) NormalizedPlatform() string {
 	if strings.TrimSpace(c.Platform) == "" {
-		return ratls.NormalizePlatform(string(teetypes.PlatformSNP))
+		return teetypes.FamilySNP.String()
 	}
-	return ratls.NormalizePlatform(c.Platform)
+	family, err := teetypes.ParseFamily(c.Platform)
+	if err != nil {
+		// Validate reports it; return the input so its message can quote it.
+		return c.Platform
+	}
+	return family.String()
 }
 
 // PullEnabled reports whether the plugin should poll a remote CDS.
@@ -236,7 +240,7 @@ func (c *config) Validate() error {
 	// produces a peer-attestation failure on the CDS side that names the
 	// evidence platform, not this setting, so the cause is several hops from
 	// the symptom.
-	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
+	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
 	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
