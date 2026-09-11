@@ -335,14 +335,6 @@ func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Re
 // Callers proceed without a sandbox ID.
 var ErrSandboxUnsupported = errors.New("workloadclaims: inventory does not serve the sandbox route")
 
-// ErrSandboxNotReady reports that the inventory serves the route but has no
-// signer yet, because the address it commits to needs a pod network that is
-// still being configured. Distinct from ErrSandboxUnsupported because the
-// answer differs: this one is worth waiting for, and issuing without a sandbox
-// ID instead would bind the sandbox in CDS's ledger — first-write-wins — to a
-// leaf that has none.
-var ErrSandboxNotReady = errors.New("workloadclaims: inventory has no sandbox-token signer yet")
-
 // FetchSandboxToken asks the inventory at endpoint for a signed sandbox token
 // bound to requesterPub (the caller's CSR key) and nonce (the CDS challenge for
 // this issuance, which CDS re-checks for freshness). A 404 maps to
@@ -364,9 +356,6 @@ func FetchSandboxToken(ctx context.Context, endpoint string, timeout time.Durati
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrSandboxUnsupported
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, ErrSandboxNotReady
 	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

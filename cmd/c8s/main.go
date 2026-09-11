@@ -18,9 +18,10 @@ var rootCmd = &cobra.Command{
 the per-pod get-cert helpers, and the client-side CLI for installation,
 attestation, and day-2 operations.
 
-Use c8s install to deploy the operator and node services, then apply workloads
-annotated with confidential.ai/cw. CRDs install by default; use
---install-crds=false to omit the advisory status mirror.
+Typical bootstrap flow on a fresh cluster:
+
+    c8s install             # deploy operator + CRDs + component charts
+    kubectl apply -f cwl.yaml
 
 See 'c8s <subcommand> --help' for details.`,
 	Version:       version.Version,

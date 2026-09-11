@@ -63,6 +63,7 @@ func TestValueArgsToTreeBuildsListFromIndexedKeys(t *testing.T) {
 // builder fails loudly rather than writing a bogus key.
 func TestValueArgsToTreeRejectsMalformedIndex(t *testing.T) {
 	for _, kv := range []string{
+		"a.b[0].c=x",  // index mid-path
 		"a.b[=x",      // unterminated
 		"a.b[x]=x",    // non-numeric
 		"a.b[0][1]=x", // nested index
@@ -194,7 +195,7 @@ func setCvmModeForTest(t *testing.T, mode string) {
 
 // buildValueArgs must assume nothing the operator did not pass — like install,
 // an unset --distro (distro == "") emits no distro keys, leaving the chart
-// default to stand; a set --distro plumbs both component distro keys.
+// default to stand; a set --distro configures the NRI installer.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
@@ -326,11 +327,11 @@ func TestWriteComputedValuesProducesReadableFile(t *testing.T) {
 
 // coerceSafeValueArg is the value-arg grammar valueArgsToTree / coerce actually
 // handle: a single `dotted.path=value` token whose path segments are
-// alphanumeric, underscore or hyphen keys, each optionally indexed (`foo[0].bar`).
+// [A-Za-z0-9.], optionally with a single trailing list index (`foo.bar[0]`).
 // Still excluded: escaped dots (`a\.b`), comma-joined multi-values (`a=1,b=2`),
 // nested indices. valueArgsToTree's doc opts out of the rest of helm's --set
 // grammar on the promise that buildValueArgs never emits those shapes.
-var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9_-]+(\[[0-9]+\])?(\.[A-Za-z0-9_-]+(\[[0-9]+\])?)*=[^,]*$`)
+var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+(\[[0-9]+\])?=[^,]*$`)
 
 // TestBuildValueArgsStaysWithinParserGrammar is the lockstep guard between the
 // emitter (buildValueArgs / buildDigestArgs) and the parser (valueArgsToTree /
@@ -506,63 +507,6 @@ func TestCoerceTypedVsString(t *testing.T) {
 	for _, tt := range tests {
 		if got := coerce(tt.raw, tt.typed); got != tt.want {
 			t.Errorf("coerce(%q, typed=%v) = %#v, want %#v", tt.raw, tt.typed, got, tt.want)
-		}
-	}
-}
-
-// Adopted images pass through the same computed-values file used by install.
-// Preserve each container's sibling fields when descending through its index.
-func TestAdoptedImagesRoundTripThroughComputedValues(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("a", 64)
-	args, err := buildWorkloadImageArgs(nil, []string{"ghcr.io/acme/worker@" + digest}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, err := writeComputedValues(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		NRI struct {
-			Bootstrap struct {
-				Workloads map[string]struct {
-					Label      string `yaml:"label"`
-					Containers []struct {
-						Digest  string `yaml:"digest"`
-						Image   string `yaml:"image"`
-						Command struct {
-							Policy string `yaml:"policy"`
-						} `yaml:"command"`
-						Args struct {
-							Policy string `yaml:"policy"`
-						} `yaml:"args"`
-					} `yaml:"containers"`
-				} `yaml:"workloads"`
-			} `yaml:"bootstrapAllowlist"`
-		} `yaml:"nriImagePolicy"`
-	}
-	if err := yaml.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	entry := got.NRI.Bootstrap.Workloads["worker-aaaaaaaaaaaa"]
-	if len(entry.Containers) != 1 {
-		t.Fatalf("missing adopted container: %s", data)
-	}
-	c := entry.Containers[0]
-	if entry.Label != "ghcr.io/acme/worker@"+digest || c.Image != entry.Label || c.Digest != digest || c.Command.Policy != "any" || c.Args.Policy != "any" {
-		t.Fatalf("adopted image fields did not survive computed values: %s", data)
-	}
-}
-
-func TestValueArgsToTreeRejectsIndexedMapConflicts(t *testing.T) {
-	for _, existing := range []string{"a=scalar", "a[0]=scalar"} {
-		if _, err := valueArgsToTree([]string{"--set-string", existing, "--set-string", "a[0].digest=x"}); err == nil {
-			t.Fatalf("accepted indexed map over %s", existing)
 		}
 	}
 }

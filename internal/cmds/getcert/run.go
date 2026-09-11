@@ -187,10 +187,8 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements),
-		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
-		return nil, err
-	}
+	cmdsutil.WarnIfCDSUnpinned(len(measurements),
+		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
 	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
@@ -552,8 +550,8 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) (*x
 		return nil, err
 	}
 
-	// Always embed a nonce-free RA-TLS .1.1 extension so a downstream ratls-mode
-	// verifier (secret-inventory --peer-verify=ratls) can re-verify the leaf —
+	// Always embed a nonce-free RA-TLS .1.1 extension so downstream RA-TLS
+	// verifiers can re-verify the leaf —
 	// the same nonce-free embed the mesh client uses (docs/ratls.md).
 	ext, err := client.AttestationExtension(ctx, cfg.AttestationApiURL, &privateKey.PublicKey)
 	if err != nil {
@@ -606,12 +604,6 @@ func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, no
 	case errors.Is(err, workloadclaims.ErrSandboxUnsupported):
 		slog.Info("inventory does not serve the sandbox route; issuing without a sandbox ID")
 		return nil, nil
-	case errors.Is(err, workloadclaims.ErrSandboxNotReady):
-		// Retryable, not a shape to settle for. CDS binds sandbox to inventory
-		// first-write-wins at issuance, so a leaf taken without a sandbox ID
-		// keeps that binding until it is re-issued — and the injected renewal
-		// is hours away. The caller's initial-retry loop does the waiting.
-		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	case err != nil:
 		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	}

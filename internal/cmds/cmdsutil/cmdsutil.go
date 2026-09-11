@@ -97,10 +97,8 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	srv.Shutdown(shutdownCtx)
 }
 
-func CheckCDSPinned(measurementCount int, warn string) error {
-	if measurementCount > 0 {
-		return nil
+func WarnIfCDSUnpinned(measurementCount int, warn string) {
+	if measurementCount <= 0 {
+		slog.Warn(warn)
 	}
-	slog.Warn(warn)
-	return nil
 }

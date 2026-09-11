@@ -843,3 +843,22 @@ func TestSandboxContainerKeyIsInjective(t *testing.T) {
 		t.Fatal("nil and empty argv must key alike")
 	}
 }
+
+// Temporary HTTP errors must fail issuance, not fall back to an unbound leaf.
+func TestSandboxTokenUnavailableFailsClosed(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "wc.sock")
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	})}
+	t.Cleanup(func() { _ = server.Close() })
+	go func() { _ = server.Serve(listener) }()
+	requester := testRequesterKey(t)
+	_, err = FetchSandboxToken(t.Context(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
+	if err == nil || errors.Is(err, ErrSandboxUnsupported) || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("err = %v, want a temporary HTTP failure without unsupported fallback", err)
+	}
+}

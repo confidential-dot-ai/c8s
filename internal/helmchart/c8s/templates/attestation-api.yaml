@@ -56,6 +56,7 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationApi.port }}
           securityContext:
+            {{- if has .Values.attestationApi.cvmMode (list "node" "gke" "aks") }}
             # All modes need privileged. A hostPath device mount does NOT add a
             # device-cgroup rule, so open(/dev/sev-guest|/dev/tdx-guest|/dev/tpm0)
             # is EPERM from an unprivileged container regardless of SYS_RAWIO
@@ -74,6 +75,9 @@ spec:
             # substantive hardening available until the configfs path lands.
             seccompProfile:
               type: RuntimeDefault
+            {{- else }}
+{{ fail (printf "attestationApi.cvmMode must be one of node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
+            {{- end }}
           # The API's health signal is the attest-proxy's exec probe: the API
           # binds pod loopback, which kubelet cannot dial.
           volumeMounts:
@@ -131,6 +135,9 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
           volumeMounts:
+            - name: config
+              mountPath: /etc/attestation-api
+              readOnly: true
             - name: socket-dir
               mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
           resources:

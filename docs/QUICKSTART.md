@@ -20,36 +20,18 @@ This is the supported install path for the consolidated c8s chart.
 
 ## Install c8s
 
-This installs the operator, RBAC, advisory CRDs, webhook, CDS, mesh, and tls-lb.
-In `node` mode the measured node image already supplies attestation-api and the
-NRI plugin; install configures their integration. GKE and AKS use the
-chart-managed attestation API and NRI installer.
-
-Label the node that will run CDS so the chart's default `role: cds` selector
-matches (override `cds.node.selector` for a different label):
+This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
+webhook, attestation-api, and CDS.
 
 ```sh
-kubectl label node <cds-node> role=cds
+c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+  --operator-keys operator-pub.pem \
+  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
-
-For a one-node cluster, add `--single-node` instead. The adoption example
-assumes `vllm/deployment/serving` already exists.
-
-Generate the operator keypair first:
 
 ```sh
 openssl ecparam -genkey -name prime256v1 -noout -out operator.key
 openssl ec -in operator.key -pubout -out operator-pub.pem
-```
-
-Set `C8S_NODE_MEASUREMENT` to the trusted SNP launch digest from your node
-image manifest. The examples below use SNP; for TDX supply the image
-measurement and RTMR pins as described in [install flows](install-flows.md).
-
-```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
-  --operator-keys operator-pub.pem --measurements "$C8S_NODE_MEASUREMENT" \
-  --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
 tls-lb ships no default upstream: `--upstream` (with the port on its
@@ -70,6 +52,13 @@ its image policy would deny. `crane` must be on PATH. To pin the digests
 yourself instead, pass `--resolve-digests=false` and supply them via
 `-f values.yaml`.
 
+Label the node that will run CDS so the chart's default `role: cds` selector
+matches (override `cds.node.selector` for a different label):
+
+```sh
+kubectl label node <cds-node> role=cds
+```
+
 `c8s install` passes the CLI build version as the chart image tag when it is a
 stable release version (for example `v0.1.0`), for which CI publishes a matching
 image alias. Any other build (a local `git describe` derivative, a commit SHA,
@@ -87,7 +76,7 @@ To install without the advisory CRDs:
 
 ```sh
 c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
-  --operator-keys operator-pub.pem --measurements "$C8S_NODE_MEASUREMENT" --install-crds=false \
+  --operator-keys operator-pub.pem --install-crds=false \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
@@ -110,7 +99,7 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-password="$GITHUB_TOKEN"
 
 c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
-  --operator-keys operator-pub.pem --measurements "$C8S_NODE_MEASUREMENT" \
+  --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
@@ -121,7 +110,7 @@ idempotently (re-run it to rotate the credential in place):
 ```sh
 IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
 c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
-  --operator-keys operator-pub.pem --measurements "$C8S_NODE_MEASUREMENT" \
+  --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
@@ -157,9 +146,9 @@ for the singleton operational guidance. Run this chart inside the intended
 CVM trust boundary; the supported chart path no longer has external CDS
 URL values.
 
-`--measurements` pins both `cds.measurements` and `ratlsMesh.measurements`.
-Without those pins, attestation does not establish that a peer booted the
-expected node image.
+The chart's RA-TLS handshakes accept any TEE-attested peer unless the
+operator pins `cds.measurements` and `ratlsMesh.measurements` to the
+expected launch digests. Leave these empty only on a trusted Pod network.
 
 ## Workload opt-in
 
@@ -171,9 +160,8 @@ metadata:
     confidential.ai/cw: api
 ```
 
-The webhook injects a native `c8s get-cert` sidecar that obtains and renews
-`tls.crt` and `tls.key` in `/etc/c8s/certs`, plus a `c8s-cert-wait` init
-container that gates application startup on the first certificate.
+The webhook injects `c8s get-cert` as an init container and renewal sidecar.
+They write `tls.crt` and `tls.key` into `/etc/c8s/certs`.
 
 See:
 

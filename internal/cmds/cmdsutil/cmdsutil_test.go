@@ -1,8 +1,10 @@
 package cmdsutil
 
 import (
+	"bytes"
 	"context"
 	"flag"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -153,10 +155,17 @@ func TestValidateAttestationAPIURL(t *testing.T) {
 	}
 }
 
-func TestCheckCDSPinned(t *testing.T) {
+func TestWarnIfCDSUnpinned(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	for _, count := range []int{0, 1, 2} {
-		if err := CheckCDSPinned(count, "unpinned development configuration"); err != nil {
-			t.Fatal(err)
+		logs.Reset()
+		WarnIfCDSUnpinned(count, "unpinned development configuration")
+		warned := strings.Contains(logs.String(), "unpinned development configuration")
+		if warned != (count == 0) {
+			t.Errorf("measurement count %d: warning=%t", count, warned)
 		}
 	}
 }

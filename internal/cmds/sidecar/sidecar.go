@@ -96,10 +96,8 @@ func (c *Config) ParsePins() (ratls.Pins, error) {
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements),
-		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
-		return ratls.Pins{}, err
-	}
+	cmdsutil.WarnIfCDSUnpinned(len(measurements),
+		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development.")
 	rtmrs, err := refvalues.ParseRTMRPins(c.RTMRs)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)

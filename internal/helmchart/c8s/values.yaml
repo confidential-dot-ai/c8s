@@ -338,6 +338,14 @@ attestationApi:
     - gcp-snp
     - gcp-tdx
   cvmMode: node
+  ## Unused while all modes render privileged: true (see cvmMode above). Retained
+  ## for the planned least-privilege configfs path.
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+      add: [SYS_RAWIO]
   resources:
     requests:
       cpu: 50m
@@ -524,6 +532,10 @@ ratlsMesh:
   # Priority class for pod scheduling
   priorityClassName: system-node-critical
 
+  networkPolicy:
+    enabled: false
+    monitoringNamespace: monitoring
+
 nriImagePolicy:
   enabled: true
   ## Node-as-CVM (`c8s install --cvm-mode=node`, which sets this): the node image
@@ -535,15 +547,17 @@ nriImagePolicy:
   ## (nri_baked_requires_node).
   baked: false
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
-  ## Selects the containerd config layout it targets. `c8s install` detects the
-  ## distro from kubelet versions; an install with -f values owns it instead.
+  ## Selects the containerd config layout it targets — see the subchart's
+  ## values.yaml. `c8s install` sets this to the distro detected from the
+  ## cluster's kubelet versions (an install with -f values owns it instead).
   distro: k8s
   image:
     repository: ghcr.io/confidential-dot-ai/nri-image-policy
     # -- Image tag. Required: the chart does not pin a default; the consumer
     #    (HelmRelease values or cluster overlay) must set tag or digest. The
-    #    image must contain the host plugin at /usr/local/bin/nri-image-policy.
-    #    The chart embeds the scripts that install it and configure containerd.
+    #    image must contain both the host plugin binary at
+    #    /usr/local/bin/nri-image-policy and the install scripts the
+    #    DaemonSet executes (install-host-plugin.sh, patch-containerd.sh).
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -665,8 +679,8 @@ nriImagePolicy:
   # shape). In production you pin the full set here; deriveComponents below is
   # a demo convenience for the c8s images only.
   bootstrapAllowlist:
-    # deriveComponents is off by default in the chart. `c8s install` enables
-    # it through --resolve-digests (on by default). When true, the c8s
+    # deriveComponents: a demo convenience (off by default, like
+    # `c8s install --resolve-digests`, which turns it on). When true, the c8s
     # component images this chart installs (operator, cds, attestation-api,
     # ratls-mesh, nri-image-policy) are seeded and admitted whenever their
     # image.digest is set, so a digest-pinned install self-allows the c8s
@@ -993,7 +1007,8 @@ tlsLb:
     cdsCertPath: "/.well-known/cds-cert.pem"
     meshCAPath: "/.well-known/mesh-ca.pem"
 
-  # -- Mesh CA bundle exposed for discovery clients from the shared cert volume.
+  # -- Mesh CA bundle exposed for demo preflight clients. Defaults match the
+  # chart-managed c8s CDS ConfigMap name.
   meshCA:
     # -- Serve and advertise the mesh CA PEM at the discovery meshCAPath when
     # discovery is enabled. The bundle is written by the injected get-cert
