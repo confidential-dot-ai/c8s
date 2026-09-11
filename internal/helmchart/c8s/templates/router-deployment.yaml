@@ -94,15 +94,22 @@ spec:
             - --challenge-port={{ include "router.acmeChallengePort" . }}
             - --http-port={{ include "router.acmeHTTPPort" . }}
             - --cert-dir={{ include "router.acmeCertDir" . }}
+            - --ready-port={{ include "router.acmeReadyPort" . }}
           # nginx's config names the acme cert files, so nginx must not start
           # before the bootstrap placeholder exists; regular containers wait
-          # for a native sidecar's startup probe. Probing cert.pem suffices:
-          # the sidecar writes key before cert.
+          # for a native sidecar's startup probe. HTTP, not exec: a locked
+          # node image denies every runc exec, so an exec probe can never pass
+          # there (internal/cmds/c8srunc). /readyz reports exactly what the
+          # probe-file exec reported — both files present and non-empty.
           startupProbe:
-            exec:
-              command: ["/c8s", "probe-file", "{{ include "router.acmeCertDir" . }}/cert.pem"]
+            httpGet:
+              path: /readyz
+              port: acme-ready
             periodSeconds: 1
             failureThreshold: 60
+          ports:
+            - name: acme-ready
+              containerPort: {{ include "router.acmeReadyPort" . | int }}
           volumeMounts:
             - name: acme-tls
               mountPath: {{ include "router.acmeCertDir" . }}
