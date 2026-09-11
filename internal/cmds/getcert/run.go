@@ -56,6 +56,7 @@ type config struct {
 	SAN                    string
 	Verbose                bool
 	RenewInterval          time.Duration
+	RenewJitterPercent     int
 	InitialRetryTimeout    time.Duration
 	InitialRetryInterval   time.Duration
 	ReloadNginx            bool
@@ -87,6 +88,7 @@ var (
 	errInvalidCAWatchInterval                    = errors.New("invalid CA watch interval")
 	errInvalidReloadWatchInterval                = errors.New("invalid reload watch interval")
 	errInvalidUnnamedRenewInterval               = errors.New("invalid unnamed renew interval")
+	errInvalidRenewJitterPercent                 = errors.New("invalid renew jitter percent")
 	errReloadWatchRequiresRenewInterval          = errors.New("reload watch requires renew interval")
 	errContinueOnInitialErrorRequiresRenewalLoop = errors.New("continue on initial error requires renewal loop")
 )
@@ -129,6 +131,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
+	flags.IntVar(&cfg.RenewJitterPercent, "renew-jitter-percent", defaultRenewJitterPercent, "Shorten each renewal delay by a random fraction of itself, up to this percent, so certificates issued together do not refresh in lockstep (0 = no jitter)")
 	flags.DurationVar(&cfg.InitialRetryTimeout, "initial-retry-timeout", 2*time.Minute, "Retry the first certificate request in-process for up to this long before failing, so a transient CDS/mesh outage during a roll does not crash the init container into kubelet backoff (0 = try once)")
 	flags.DurationVar(&cfg.InitialRetryInterval, "initial-retry-interval", 2*time.Second, "Delay between in-process retries of the first certificate request")
 	flags.BoolVar(&cfg.ReloadNginx, "reload-nginx", true, "SIGHUP nginx after certificate renewal or watched file changes")
@@ -415,6 +418,8 @@ const (
 	// up — and must not run a full attestation every --unnamed-renew-interval
 	// for its whole lifetime.
 	unnamedBackoffAfter = 10
+
+	defaultRenewJitterPercent = 20
 )
 
 // renewalRetryBase is the first delay after a failed renewal; consecutive
@@ -446,10 +451,11 @@ func renewalInterval(cfg config, leaf *x509.Certificate, unnamedRuns int) time.D
 			delay = half
 		}
 	}
-	// Renew up to 20% early so certificates issued together do not refresh
-	// in lockstep. Keep the already-jittered unnamed fast poll and delay floor.
-	if fifth := int64(delay) / 5; fifth > 0 {
-		delay -= time.Duration(mrand.Int64N(fifth + 1))
+	// Renew early by up to --renew-jitter-percent so certificates issued
+	// together do not refresh in lockstep. Keep the already-jittered unnamed
+	// fast poll and delay floor.
+	if spread := int64(delay) * int64(cfg.RenewJitterPercent) / 100; spread > 0 {
+		delay -= time.Duration(mrand.Int64N(spread + 1))
 	}
 	if fast := unnamedPollInterval(cfg, leaf, unnamedRuns); fast > 0 && fast < delay {
 		delay = fast
@@ -674,6 +680,9 @@ func validateConfig(cfg config) error {
 	// never what an operator means; 0 is the documented "disabled".
 	if cfg.UnnamedRenewInterval != 0 && cfg.UnnamedRenewInterval < time.Second {
 		return fmt.Errorf("%w: --unnamed-renew-interval must be 0 (disabled) or at least 1s, got %v", errInvalidUnnamedRenewInterval, cfg.UnnamedRenewInterval)
+	}
+	if cfg.RenewJitterPercent < 0 || cfg.RenewJitterPercent >= 100 {
+		return fmt.Errorf("%w: --renew-jitter-percent must be between 0 (disabled) and 99, got %d", errInvalidRenewJitterPercent, cfg.RenewJitterPercent)
 	}
 	if cfg.ContinueOnInitialError && cfg.RenewInterval <= 0 {
 		return fmt.Errorf("%w: --continue-on-initial-error requires --renew-interval", errContinueOnInitialErrorRequiresRenewalLoop)

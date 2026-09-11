@@ -676,8 +676,8 @@ default 30s plus jitter) while the installed leaf is unnamed and settles to
 Poll timing never changes the match decision.
 
 The ordinary renewal delay is the earlier of `--renew-interval` and half the
-installed leaf's remaining lifetime, randomly shortened by 0–20% on each cycle
-to spread refreshes across pods. The default 2h interval becomes 1h36m–2h.
+installed leaf's remaining lifetime, randomly shortened on each cycle by up to
+`--renew-jitter-percent` to spread refreshes across pods.
 Unnamed fast polling retains its existing jitter; the minimum delay still applies.
 Certificate expiry is unchanged. A failed renewal retries on a short backoff
 rather than after a full interval.
