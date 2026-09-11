@@ -455,21 +455,12 @@ func applyChainAnchorPolicy(oc *Outcome, cfg config, ev *evidence) {
 	demoteToPartial(oc, "the mesh chain anchor: the leaf chains to a CA the responder committed into its own attestation transcript — the evidence binds those CA bytes, but the anchor is responder-chosen, so which deployment this endpoint belongs to is not proven (pass --mesh-ca to pin it)")
 }
 
-// applyInitDataNote records what --init-data bound to, on the FINAL verdict:
-// it runs after applyVerdictPolicies (which can fail the verdict past
-// newOutcome) and skips a hard failure (oc.Error set) — the gate renderText
-// also applies. On az-* the pin binds vTPM PCR[8], not result.Claims.InitData
-// (the inner report's HOST_DATA), so a pinned az verdict reports the enforced
-// pin without presenting that field.
+// applyInitDataNote describes the init-data binding only after policy checks pass.
 func applyInitDataNote(oc *Outcome, result *teetypes.VerificationResult, plan *verifyPlan) {
 	if oc.Error != "" {
 		return
 	}
 	switch {
-	case oc.Platform == string(teetypes.PlatformAzSNP) || oc.Platform == string(teetypes.PlatformAzTDX):
-		if plan.initDataHash != nil {
-			oc.InitDataNote = "verified: pinned via vTPM PCR[8] (matches --init-data)"
-		}
 	case len(result.Claims.InitData) > 0:
 		oc.InitData = hex.EncodeToString(result.Claims.InitData)
 		if plan.initDataHash != nil {
@@ -1384,15 +1375,8 @@ func enforceMinTCB(oc *Outcome, cfg config, result *teetypes.VerificationResult)
 	return true
 }
 
-// isTDX reports whether a platform tag names TDX. The tag is chosen by the
-// attester and travels as plain response JSON — it is in no transcript and no
-// report — while attestation-go accepts "tdx", "az-tdx" and "gcp-tdx" and
-// routes all three through one TDX verification path, the variants differing
-// only in that unproven word. Comparing the raw string would let an attester
-// pick "gcp-tdx" to slip past a TDX-only rule, or "tdx" to trip a TDX-only
-// rejection, so every platform decision here normalizes first.
 func isTDX(platform string) bool {
-	return teetypes.NormalizePlatform(platform).IsTDX()
+	return teetypes.NormalizePlatform(platform) == teetypes.PlatformTDX
 }
 
 // applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and the RTMR[3] pin

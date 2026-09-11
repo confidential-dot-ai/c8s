@@ -3,7 +3,6 @@ package attestationclient
 import (
 	"bytes"
 	"context"
-	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -53,6 +52,9 @@ const launchMeasurementSize = 48
 // the verdict fields; doing it here keeps the nil-tolerant fail-open bug out
 // of call sites.
 func (c Client) VerifyEnforced(ctx context.Context, req types.VerifyRequest) (types.VerifyResponse, error) {
+	if req.Platform != "snp" && req.Platform != "tdx" {
+		return types.VerifyResponse{}, fmt.Errorf("%w: %q", ErrUnsupportedPlatform, req.Platform)
+	}
 	resp, err := c.Verify(ctx, req)
 	if err != nil {
 		return types.VerifyResponse{}, err
@@ -86,11 +88,7 @@ func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 
 // EvidencePolicy is the verification policy for [Client.VerifyEvidence].
 type EvidencePolicy struct {
-	// ExpectedReportData is the full 64-byte REPORTDATA the evidence must
-	// bind (SHA-384 in bytes 0-47, zero-padded). The platform-specific wire
-	// form is derived from it: the Azure TPM-nonce platforms (az-snp, az-tdx)
-	// compare the exact 48-byte digest, the native platforms (snp, gcp-snp,
-	// tdx) zero-pad whatever is sent and compare all 64 bytes.
+	// ExpectedReportData is SHA-384 in bytes 0–47, padded to native REPORTDATA.
 	ExpectedReportData [64]byte
 
 	// AllowDebug controls whether debug-mode guests are accepted.
@@ -133,9 +131,9 @@ type EvidencePolicy struct {
 // another platform's rules.
 func (c Client) VerifyEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
 	switch evidence.Platform {
-	case string(types.PlatformSnp), string(types.PlatformAzSnp), string(types.PlatformGcpSnp):
+	case string(types.PlatformSnp):
 		return c.verifySNPEvidence(ctx, evidence, policy)
-	case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
+	case string(types.PlatformTdx):
 		return c.verifyTDXEvidence(ctx, evidence, policy)
 	default:
 		return types.VerifyResponse{}, fmt.Errorf("%w: %q", ErrUnsupportedPlatform, evidence.Platform)
@@ -143,13 +141,7 @@ func (c Client) VerifyEvidence(ctx context.Context, evidence types.AttestationEv
 }
 
 func (c Client) verifySNPEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
-	// az-snp binds the key through a TPM quote whose nonce is the 48-byte
-	// SHA-384 digest — it must receive exactly those 48 bytes. snp and
-	// gcp-snp carry the native 64-byte REPORTDATA field and compare all 64.
 	reportData := policy.ExpectedReportData[:]
-	if evidence.Platform == string(types.PlatformAzSnp) {
-		reportData = policy.ExpectedReportData[:sha512.Size384]
-	}
 
 	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, policy.MinTcb))
 	if err != nil {
@@ -179,14 +171,7 @@ func enforcePins(resp types.VerifyResponse, policy EvidencePolicy, platform stri
 }
 
 func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
-	// az-tdx binds the key through the vTPM quote whose nonce is the 48-byte
-	// SHA-384 digest — it must receive exactly those 48 bytes, like az-snp.
-	// Native tdx carries the 64-byte REPORTDATA field in the TD report and
-	// compares all 64.
 	reportData := policy.ExpectedReportData[:]
-	if evidence.Platform == string(types.PlatformAzTdx) {
-		reportData = policy.ExpectedReportData[:sha512.Size384]
-	}
 
 	// The attestation-api surfaces MRTD as claims.launch_digest, and the raw
 	// RTMRs as hex in claims.platform_data. Both are enforced client-side, so
@@ -202,12 +187,9 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	return resp, nil
 }
 
-// TDXPlatform reports whether platform names TDX-shaped evidence, i.e. carries
-// runtime measurement registers an RTMR pin can be enforced against. The
-// family mapping is teetypes.Family, so a new TDX tag there (gcp-tdx today)
-// gets its RTMRs enforced instead of silently skipping the pin.
+// TDXPlatform reports whether a native TDX evidence tag carries RTMRs.
 func TDXPlatform(platform string) bool {
-	return teetypes.NormalizePlatform(platform).IsTDX()
+	return teetypes.NormalizePlatform(platform) == teetypes.PlatformTDX
 }
 
 // EnforceRTMRs requires each pinned register to byte-equal the value the

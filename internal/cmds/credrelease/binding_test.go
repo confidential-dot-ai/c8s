@@ -61,9 +61,7 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 		binding  []byte
 	}{
 		{teetypes.PlatformTDX, tdxBinding(operatorPub)},
-		{teetypes.PlatformAzTDX, tdxBinding(operatorPub)},
 		{teetypes.PlatformSNP, snpBinding(operatorPub)},
-		{teetypes.PlatformGcpSNP, snpBinding(operatorPub)},
 	} {
 		t.Run(string(tc.platform), func(t *testing.T) {
 			stageOperatorPubkey(t, operatorPub)

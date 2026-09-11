@@ -600,7 +600,7 @@ see Enablement.
 
 ## Corner 8 — exempt namespaces admit on a captured digest, not the name
 
-On the hosted lanes (pod/gke/aks) the provider owns the platform pods in
+On the hosted lanes (pod) the provider owns the platform pods in
 `kube-system` — kube-proxy, CoreDNS, the CNI, CSI drivers — and their images are
 not on the c8s allowlist. Nothing baked into the node measures them either;
 unlike node-CVM, whose image carries the RKE2 system floor, these nodes run the

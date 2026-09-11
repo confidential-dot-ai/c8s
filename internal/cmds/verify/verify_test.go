@@ -870,39 +870,6 @@ func TestParseRealSNPEvidence(t *testing.T) {
 	}
 }
 
-// TestVerifyRealAzSnpEvidence_UnpaddedAnchor drives real az-snp evidence (vTPM
-// quote extraData = ASCII "challenge", VCEK inline; vendored from
-// attestation-go's azsnp testdata) through the --from-file override path. The
-// anchor must reach the verifier unpadded: the Azure vTPM verifiers compare it
-// raw against the quote's extraData, so the historical zero-padding to 64
-// bytes failed every az-snp target with "TPM nonce length mismatch".
-func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
-	fixture, err := os.ReadFile("testdata/azsnp-evidence-v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture", leafTrust{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ev.platform != "az-snp" {
-		t.Fatalf("platform = %q, want az-snp", ev.platform)
-	}
-	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil, nil)
-	if err != nil {
-		t.Fatalf("az-snp evidence with its bound nonce must verify: %v", err)
-	}
-	if res.ReportDataMatch == nil || !*res.ReportDataMatch {
-		t.Fatal("report_data_match must be affirmatively true")
-	}
-
-	// A different anchor fails closed, at the nonce gate specifically.
-	ev.erd = []byte("not-the-nonce")
-	if _, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil, nil); err == nil || !strings.Contains(err.Error(), "nonce") {
-		t.Fatalf("wrong nonce must fail closed at the nonce check, got: %v", err)
-	}
-}
-
 // TestNewOutcomeFromRealGenoaEvidence drives the vendored Genoa fixture
 // through verifyInProcess + newOutcome and asserts the verdict carries the
 // platform's real security state — the platform has SMT on, a value no
@@ -1284,9 +1251,9 @@ func TestDefaultPort(t *testing.T) {
 // The verifier-reported platform wins; the sent platform is only a fallback.
 func TestNewOutcomePlatform(t *testing.T) {
 	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
-	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("az-snp")}
-	if oc := newOutcome(config{}, ev, reported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "az-snp" {
-		t.Errorf("Platform = %q, want the verifier-reported az-snp", oc.Platform)
+	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("snp")}
+	if oc := newOutcome(config{}, ev, reported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "snp" {
+		t.Errorf("Platform = %q, want the verifier-reported snp", oc.Platform)
 	}
 	unreported := &teetypes.VerificationResult{SignatureValid: true}
 	if oc := newOutcome(config{}, ev, unreported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "snp" {

@@ -604,10 +604,6 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 			return "", fmt.Errorf("decode report data hex: %w", err)
 		}
 
-		// Strip SNP REPORTDATA zero-padding before sending to the attestation
-		// service. Bare-metal SNP pads server-side; vTPM passes the data as
-		// the TPM2_Quote nonce (TPM2B_DATA) which has a smaller max size than
-		// 64 bytes, so sending the full padded array causes TPM_RC_SIZE.
 		reportDataBytes = reportDataBytes[:sha512.Size384]
 
 		resp, err := client.GenerateEvidence(attestationApiURL, reportDataBytes)

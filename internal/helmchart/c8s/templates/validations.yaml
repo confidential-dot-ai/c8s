@@ -1,3 +1,17 @@
+{{- if not (has .Values.attestationApi.cvmMode (list "pod" "node")) -}}
+{{- fail (printf "attestationApi.cvmMode must be one of pod, node (got %q)" .Values.attestationApi.cvmMode) -}}
+{{- end -}}
+{{- if hasKey .Values.attestationApi.teeDevices "tpm" -}}
+{{- fail "attestationApi.teeDevices.tpm was removed; use native SNP or TDX devices" -}}
+{{- end -}}
+{{- range .Values.attestationApi.platforms -}}
+{{- if not (has . (list "snp" "tdx")) -}}
+{{- fail (printf "attestationApi.platforms supports only snp and tdx (got %q)" .) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has .Values.tlsLb.attest.platform (list "snp" "tdx")) -}}
+{{- fail "tlsLb.attest.platform must be snp or tdx" -}}
+{{- end -}}
 {{- $tlsLB := .Values.tlsLb -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (include "c8s.nriCDSURL" .) . -}}
@@ -19,8 +33,6 @@
   producing a config that "works on paper" but attests through only one path.
   Install CLI's --hardware-platform flag makes them mutually exclusive by
   construction; this guard catches raw -f overrides that bypass the CLI.
-  aks (tpm) is orthogonal: it's the vTPM path and does not interact with these
-  two flags.
 */ -}}
 {{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
 {{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}

@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,22 +53,6 @@ func fakeSNPReport(reportData [64]byte) []byte {
 	}
 
 	return report
-}
-
-// fakeHCLEnvelope builds the AKS Hyper-V HCL envelope around a raw SNP report:
-// header(32) + report + var_data header(20) + var_data content, with trailing
-// null padding bytes after the content.
-func fakeHCLEnvelope(report []byte, trailing int) []byte {
-	varData := []byte(`{"keys":[]}`)
-	env := make([]byte, 32+len(report)+20+len(varData)+trailing)
-	copy(env[:4], "HCLA")
-	binary.LittleEndian.PutUint32(env[4:8], 1)
-	copy(env[32:], report)
-	hdr := env[32+len(report):]
-	binary.LittleEndian.PutUint32(hdr[8:12], 2) // report_type: SNP
-	binary.LittleEndian.PutUint32(hdr[16:20], uint32(len(varData)+trailing))
-	copy(hdr[20:], varData)
-	return env
 }
 
 // testKeyAndAttestation generates a keypair and matching attestation for tests.
@@ -381,41 +364,6 @@ func marshalASN1(v *attestationASN1) ([]byte, error) {
 	return asn1.Marshal(*v)
 }
 
-func TestNormalizeSEVSNPReportHCLEnvelope(t *testing.T) {
-	reportData := [64]byte{1, 2, 3}
-	report := fakeSNPReport(reportData)
-	envelope := fakeHCLEnvelope(report, 128)
-
-	normalized, err := NormalizeSEVSNPReport(envelope)
-	if err != nil {
-		t.Fatalf("NormalizeSEVSNPReport failed: %v", err)
-	}
-	if !bytes.Equal(normalized, report) {
-		t.Fatal("normalized report mismatch")
-	}
-}
-
-func TestUnmarshalExtensionHCLEnvelope(t *testing.T) {
-	reportData := [64]byte{1, 2, 3}
-	report := fakeSNPReport(reportData)
-	att := &attestationASN1{
-		TEEType: int(TEETypeSEVSNP),
-		Report:  fakeHCLEnvelope(report, 128),
-	}
-	data, err := marshalASN1(att)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := UnmarshalExtension(data)
-	if err != nil {
-		t.Fatalf("UnmarshalExtension failed for HCL envelope: %v", err)
-	}
-	if !bytes.Equal(result.Report, report) {
-		t.Fatal("unmarshaled report mismatch")
-	}
-}
-
 func TestUnmarshalExtensionReportSize(t *testing.T) {
 	t.Run("truncated SNP report", func(t *testing.T) {
 		att := &attestationASN1{
@@ -542,7 +490,7 @@ func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.R
 		t.Fatal(err)
 	}
 	teeType := TEETypeSEVSNP
-	if platform == types.PlatformTdx || platform == types.PlatformAzTdx {
+	if platform == types.PlatformTdx {
 		teeType = TEETypeTDX
 	}
 	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: teeType, Report: embedded}, nil)
@@ -556,77 +504,11 @@ func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.R
 	return cert, expectedReportData
 }
 
-// embeddedAzureCert builds an RA-TLS certificate whose attestation extension
-// carries an az-snp envelope (the post-PR-98 wire shape).
-func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
+// embeddedTDXCert builds an RA-TLS certificate whose attestation extension
+// carries a native TDX envelope.
+func embeddedTDXCert(t *testing.T) (*x509.Certificate, [64]byte) {
 	t.Helper()
-	return embeddedEnvelopeCert(t, types.PlatformAzSnp, json.RawMessage(`{"hcl_report":"fake","tpm_quote":{"message":"fake"}}`))
-}
-
-func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
-	key, expectedReportData, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidenceJSON := json.RawMessage(`{"hcl_report":"fake","tpm_quote":{"message":"fake"}}`)
-	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
-		Evidence: evidenceJSON,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: TEETypeSEVSNP, Report: embedded}, nil)
-	if err != nil {
-		t.Fatalf("CreateAttestedCert: %v", err)
-	}
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		t.Fatalf("ParseCertificate: %v", err)
-	}
-
-	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	stub := testattest.New(t)
-	verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
-	verdict.Claims.PlatformData = map[string]any{"source": "test"}
-	stub.SetVerdict(verdict)
-
-	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: stub.URL,
-		Measurements:      [][]byte{measurement},
-	}, nil)
-	if err != nil {
-		t.Fatalf("VerifyCert: %v", err)
-	}
-	reqs := stub.VerifyRequests()
-	if len(reqs) != 1 {
-		t.Fatal("attestation-api /verify was not called")
-	}
-	req := reqs[0]
-	// attestation-api wants platform at the top level and Evidence as the
-	// platform-specific evidence, not a nested AttestationEvidence envelope.
-	if req.Platform != string(types.PlatformAzSnp) {
-		t.Fatalf("platform = %q, want az-snp", req.Platform)
-	}
-	if string(req.Evidence) != string(evidenceJSON) {
-		t.Fatalf("evidence = %s, want the platform-specific evidence %s (not a nested envelope)", req.Evidence, evidenceJSON)
-	}
-	if req.Params == nil || req.Params.ExpectedReportData == nil {
-		t.Fatal("missing expected report data")
-	}
-	// az-snp binds via a TPM quote whose nonce is the 48-byte SHA-384 digest,
-	// so exactly those 48 bytes must be sent — not the zero-padded 64-byte
-	// form, which fails attestation-api with a nonce-length error.
-	if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
-		t.Fatalf("expected_report_data = %x (%d bytes), want %x (%d bytes)", got, len(got), expectedReportData[:sha512.Size384], sha512.Size384)
-	}
-	if !bytes.Equal(result.ReportData[:], expectedReportData[:]) {
-		t.Fatalf("ReportData = %x, want %x", result.ReportData, expectedReportData)
-	}
-	if !bytes.Equal(result.Measurement[:], measurement) {
-		t.Fatalf("Measurement = %x, want %x", result.Measurement, measurement)
-	}
+	return embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"td_quote":"fake"}`))
 }
 
 func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
@@ -681,39 +563,13 @@ func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
 	}
 }
 
-// TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi mirrors the az-snp
-// online path for GKE SEV-SNP: a gcp-snp evidence envelope passes the platform
-// gate and is forwarded to the attestation-api /verify endpoint, not rejected
-// as an unsupported TEE. (Evidence unwrapping is covered by the az-snp test.)
-func TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi(t *testing.T) {
-	cert, _ := embeddedEnvelopeCert(t, types.PlatformGcpSnp, json.RawMessage(`{"attestation_report":"fake"}`))
-
-	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
-
-	if _, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: stub.URL,
-		Measurements:      [][]byte{measurement},
-	}, nil); err != nil {
-		t.Fatalf("VerifyCert: %v", err)
-	}
-	reqs := stub.VerifyRequests()
-	if len(reqs) != 1 {
-		t.Fatalf("/verify calls = %d, want 1", len(reqs))
-	}
-	if reqs[0].Platform != string(types.PlatformGcpSnp) {
-		t.Fatalf("platform = %q, want gcp-snp", reqs[0].Platform)
-	}
-}
-
-// TestVerifyCertEmbeddedAzureNegativePaths covers the online-verification
+// TestVerifyCertEmbeddedTDXNegativePaths covers the online-verification
 // failure modes. Each case mutates either the policy or the mocked /verify
 // response and asserts that the verifier maps it to the expected sentinel
 // error. A bug that flipped any of these to a "pass" would be silent
 // downgrade of the attestation policy.
-func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
-	cert, _ := embeddedAzureCert(t)
+func TestVerifyCertEmbeddedTDXNegativePaths(t *testing.T) {
+	cert, _ := embeddedTDXCert(t)
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 	allowedMeasurements := [][]byte{measurement}
 
@@ -822,7 +678,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("AttestationVerifyTimeout bounds the call", func(t *testing.T) {
 		match := true
 		slow := types.VerifyResponse{Result: types.VerificationResult{
-			Platform:        types.PlatformAzSnp,
+			Platform:        types.PlatformTdx,
 			SignatureValid:  true,
 			ReportDataMatch: &match,
 			Claims:          types.Claims{LaunchDigest: hex.EncodeToString(measurement)},
@@ -848,6 +704,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	})
 
 	t.Run("MinTCBVersion is forwarded as unpacked components", func(t *testing.T) {
+		cert, _ := embeddedEnvelopeCert(t, types.PlatformSnp, json.RawMessage(`{"attestation_report":"fake"}`))
 		stub := testattest.New(t)
 		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 		// Packed layout: bootloader=0x11, tee=0x22, snp=0x33 (byte 6),
@@ -875,8 +732,8 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 	})
 
-	t.Run("az-tdx evidence with a mismatched SEV-SNP TEE type is rejected", func(t *testing.T) {
-		// az-tdx is a TDX-family platform; carrying it in a cert that declares
+	t.Run("tdx evidence with a mismatched SEV-SNP TEE type is rejected", func(t *testing.T) {
+		// tdx is a TDX-family platform; carrying it in a cert that declares
 		// the SEV-SNP TEE type is a family mismatch and must fail closed rather
 		// than be verified under SNP rules.
 		key, _, err := GenerateKeyPair()
@@ -884,7 +741,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		embedded, err := json.Marshal(types.AttestationEvidence{
-			Platform: string(types.PlatformAzTdx),
+			Platform: string(types.PlatformTdx),
 			Evidence: json.RawMessage(`{"any":"shape"}`),
 		})
 		if err != nil {
@@ -905,48 +762,6 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 			t.Fatalf("got %v, want ErrUnsupportedTEE", err)
 		}
 	})
-}
-
-// TestVerifyCertEmbeddedAzTdxEvidence covers the Azure-vTPM TDX (az-tdx) online
-// path: the vTPM HCL report wraps a TD quote, the mesh peer presents an az-tdx
-// envelope under the TDX TEE type, and the verifier binds the key through the
-// 48-byte vTPM nonce (like az-snp) while enforcing the MRTD as launch digest.
-func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
-	cert, expectedReportData := embeddedEnvelopeCert(t, types.PlatformAzTdx,
-		json.RawMessage(`{"hcl_report":"fake","td_quote":"fake","tpm_quote":{"message":"fake"}}`))
-	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
-
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(mrtd)))
-
-	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: stub.URL,
-		Measurements:      [][]byte{mrtd},
-	}, nil)
-	if err != nil {
-		t.Fatalf("VerifyCert: %v", err)
-	}
-	reqs := stub.VerifyRequests()
-	if len(reqs) != 1 {
-		t.Fatalf("/verify calls = %d, want 1", len(reqs))
-	}
-	observed := reqs[0]
-	// az-tdx binds via the 48-byte vTPM nonce, not the full 64-byte REPORTDATA.
-	if got := observed.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
-		t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte digest %x", got, len(got), expectedReportData[:sha512.Size384])
-	}
-	if result.TEEType != TEETypeTDX {
-		t.Fatalf("TEEType = %v, want TDX", result.TEEType)
-	}
-	if !bytes.Equal(result.Measurement[:], mrtd) {
-		t.Fatalf("Measurement = %x, want MRTD %x", result.Measurement, mrtd)
-	}
-
-	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
-	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{wrongMRTD}}, nil)
-	if !errors.Is(err, ErrPolicyViolation) {
-		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
-	}
 }
 
 // TestVerifyCertBareSNPUsesAttestationApi covers the bare-metal SNP shape:
@@ -1011,42 +826,6 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 	})
 }
 
-func TestNormalizeSEVSNPReportSizeEdges(t *testing.T) {
-	t.Run("header-only HCL input reports HCL truncation", func(t *testing.T) {
-		// Exactly one HCL header, no payload: must be recognized as an HCL
-		// envelope and rejected as truncated, not misreported as a bare report.
-		raw := make([]byte, 32)
-		copy(raw[:4], "HCLA")
-		_, err := NormalizeSEVSNPReport(raw)
-		if err == nil {
-			t.Fatal("expected error for truncated HCL envelope")
-		}
-		if !strings.Contains(err.Error(), "HCL report") {
-			t.Fatalf("error = %v, want HCL truncation error", err)
-		}
-	})
-
-	t.Run("HCL envelope with a TDX report type is rejected", func(t *testing.T) {
-		env := fakeHCLEnvelope(fakeSNPReport([64]byte{1, 2, 3}), 0)
-		binary.LittleEndian.PutUint32(env[32+SNPReportSize+8:], 4) // report_type: TDX
-		_, err := NormalizeSEVSNPReport(env)
-		if err == nil || !strings.Contains(err.Error(), "report type 4") {
-			t.Fatalf("error = %v, want a report-type rejection", err)
-		}
-	})
-
-	t.Run("exact-size HCL envelope is accepted", func(t *testing.T) {
-		report := fakeSNPReport([64]byte{1, 2, 3})
-		normalized, err := NormalizeSEVSNPReport(fakeHCLEnvelope(report, 0))
-		if err != nil {
-			t.Fatalf("NormalizeSEVSNPReport: %v", err)
-		}
-		if !bytes.Equal(normalized, report) {
-			t.Fatal("normalized report mismatch")
-		}
-	})
-}
-
 func TestAttestationReportData(t *testing.T) {
 	rd := [64]byte{0xA1, 0xB2, 0xC3}
 
@@ -1091,7 +870,7 @@ func TestAttestationReportData(t *testing.T) {
 	t.Run("envelope evidence is refused", func(t *testing.T) {
 		data, err := marshalASN1(&attestationASN1{
 			TEEType: int(TEETypeSEVSNP),
-			Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+			Report:  []byte(`{"platform":"tdx","evidence":{"td_quote":"fake"}}`),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1169,7 +948,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 	}
 
 	t.Run("SNP platform data is surfaced", func(t *testing.T) {
-		cert, _ := embeddedAzureCert(t)
+		cert, _ := embeddedEnvelopeCert(t, types.PlatformSnp, json.RawMessage(`{"attestation_report":"fake"}`))
 		srv := stubWithPlatformData(t, map[string]any{"source": "unit"})
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
@@ -1187,7 +966,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 	})
 
 	t.Run("null SNP platform data is dropped", func(t *testing.T) {
-		cert, _ := embeddedAzureCert(t)
+		cert, _ := embeddedEnvelopeCert(t, types.PlatformSnp, json.RawMessage(`{"attestation_report":"fake"}`))
 		srv := stubWithPlatformData(t, nil)
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {

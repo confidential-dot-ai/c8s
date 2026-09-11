@@ -78,7 +78,7 @@ func TestBuildDiscoveryDocumentIncludesCertificateAndEvidence(t *testing.T) {
 	}
 
 	doc, err := buildDiscoveryDocument(config{
-		SAN:                    "confidential-gke.confidential.ai",
+		SAN:                    "confidential-demo.confidential.ai",
 		DiscoveryCDSCertURL:    "/.well-known/cds-cert.pem",
 		DiscoveryMeshCAURL:     "/.well-known/mesh-ca.pem",
 		DiscoveryPublicTLSMode: "webpki",
@@ -90,7 +90,7 @@ func TestBuildDiscoveryDocumentIncludesCertificateAndEvidence(t *testing.T) {
 	if doc.Version != "v1" {
 		t.Fatalf("version = %q, want v1", doc.Version)
 	}
-	if doc.PublicTLS.Hostname != "confidential-gke.confidential.ai" {
+	if doc.PublicTLS.Hostname != "confidential-demo.confidential.ai" {
 		t.Fatalf("hostname = %q", doc.PublicTLS.Hostname)
 	}
 	if doc.PublicTLS.Mode != "webpki" {
@@ -123,7 +123,7 @@ func TestValidateConfigRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 	err := validateConfig(config{
 		CDSURL:                 "http://cds:8443",
 		AttestationApiURL:      "http://attestation-api:8400",
-		SAN:                    "confidential-gke.confidential.ai",
+		SAN:                    "confidential-demo.confidential.ai",
 		DiscoveryOutPath:       "/tmp/discovery.json",
 		DiscoveryPublicTLSMode: "invalid",
 	})
@@ -139,7 +139,7 @@ func TestValidateConfigRejectsInvalidReloadWatchInterval(t *testing.T) {
 	err := validateConfig(config{
 		CDSURL:            "http://cds:8443",
 		AttestationApiURL: "http://attestation-api:8400",
-		SAN:               "confidential-gke.confidential.ai",
+		SAN:               "confidential-demo.confidential.ai",
 		ReloadWatchPaths:  []string{"/public-tls/tls.crt"},
 	})
 	if err == nil {
@@ -154,7 +154,7 @@ func TestValidateConfigRejectsReloadWatchWithoutRenewInterval(t *testing.T) {
 	err := validateConfig(config{
 		CDSURL:              "http://cds:8443",
 		AttestationApiURL:   "http://attestation-api:8400",
-		SAN:                 "confidential-gke.confidential.ai",
+		SAN:                 "confidential-demo.confidential.ai",
 		ReloadWatchPaths:    []string{"/public-tls/tls.crt"},
 		ReloadWatchInterval: time.Minute,
 	})
@@ -170,7 +170,7 @@ func TestValidateConfigRejectsContinueOnInitialErrorWithoutRenewInterval(t *test
 	err := validateConfig(config{
 		CDSURL:                 "http://cds:8443",
 		AttestationApiURL:      "http://attestation-api:8400",
-		SAN:                    "confidential-gke.confidential.ai",
+		SAN:                    "confidential-demo.confidential.ai",
 		ContinueOnInitialError: true,
 	})
 	if err == nil {
@@ -298,7 +298,7 @@ func testCertificatePEM(t *testing.T) string {
 		},
 		NotBefore: time.Now().Add(-time.Minute),
 		NotAfter:  time.Now().Add(time.Hour),
-		DNSNames:  []string{"confidential-gke.confidential.ai"},
+		DNSNames:  []string{"confidential-demo.confidential.ai"},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -359,7 +359,7 @@ func TestValidateConfigAccepts(t *testing.T) {
 			cfg: config{
 				CDSURL:            "http://cds:8443",
 				AttestationApiURL: "http://attestation-api:8400",
-				SAN:               "confidential-gke.confidential.ai",
+				SAN:               "confidential-demo.confidential.ai",
 			},
 		},
 		{
@@ -717,7 +717,7 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 		}
 		sawReportData = append([]byte(nil), req.ReportData.Bytes()...)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"platform":"az-snp","evidence":{"quote":"abc"}}`)
+		_, _ = io.WriteString(w, `{"platform":"tdx","evidence":{"quote":"abc"}}`)
 	}))
 	defer attestationApi.Close()
 
@@ -738,8 +738,8 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal extension: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %v, want SEV-SNP", att.TEEType)
+	if att.TEEType != ratls.TEETypeTDX {
+		t.Fatalf("TEEType = %v, want TDX", att.TEEType)
 	}
 }
 

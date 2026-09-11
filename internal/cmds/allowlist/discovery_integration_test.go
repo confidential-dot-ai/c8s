@@ -59,8 +59,8 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 		},
 		Attestation: types.AttestationDiscovery{
 			Challenge: base64.StdEncoding.EncodeToString(measurementChallenge),
-			Platform:  string(types.PlatformAzSnp),
-			Evidence:  json.RawMessage(`{"hcl_report":"fake"}`),
+			Platform:  string(types.PlatformTdx),
+			Evidence:  json.RawMessage(`{"td_quote":"fake"}`),
 		},
 	})
 	if err != nil {
@@ -164,7 +164,7 @@ func TestListThroughTLSLBFailsClosed(t *testing.T) {
 }
 
 // ratlsCDSServer stands in for a port-forwarded CDS: a TLS server whose
-// serving cert DOES carry the RA-TLS extension (an embedded az-snp envelope),
+// serving cert DOES carry the RA-TLS extension (an embedded tdx envelope),
 // serving the allowlist read handler and no discovery document.
 func ratlsCDSServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -174,8 +174,8 @@ func ratlsCDSServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{
-		TEEType: ratls.TEETypeSEVSNP,
-		Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+		TEEType: ratls.TEETypeTDX,
+		Report:  []byte(`{"platform":"tdx","evidence":{"td_quote":"fake"}}`),
 	}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
@@ -203,8 +203,8 @@ func TestListDirectRATLS(t *testing.T) {
 	var sawVerify bool
 	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		sawVerify = true
-		if platform != string(types.PlatformAzSnp) {
-			t.Fatalf("platform = %q, want az-snp", platform)
+		if platform != string(types.PlatformTdx) {
+			t.Fatalf("platform = %q, want tdx", platform)
 		}
 		if len(p.ExpectedReportData) != sha512.Size384 {
 			t.Fatalf("expected_report_data is %d bytes, want the unpadded %d-byte cert-key anchor", len(p.ExpectedReportData), sha512.Size384)

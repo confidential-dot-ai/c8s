@@ -193,8 +193,7 @@ spec:
               namespace; a direct cross-node pod-IP dial. In all of these the
               workload is protected and the signal identifies the client, so
               start there. One benign cause exists, and only on a dataplane
-              that does not track the reply as ESTABLISHED (Cilium, GKE
-              Dataplane V2) so that replies depend on the exemption at all:
+              that does not track the reply as ESTABLISHED (Cilium) so that replies depend on the exemption at all:
               the exemption admits replies only on the stock ephemeral port
               window, so a cw pod whose net.ipv4.ip_local_port_range was
               moved outside 32768-60999 (pod securityContext.sysctls, or a

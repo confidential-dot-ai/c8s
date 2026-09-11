@@ -82,7 +82,7 @@ func TestValueArgsToTreeCoercesSetTypes(t *testing.T) {
 		"--set", "attestationApi.teeDevices.sevGuest=true",
 		"--set", "attestationApi.teeDevices.tpm=false",
 		"--set", "webhook.getCert.runAsUser=65532",
-		"--set-string", "attestationApi.cvmMode=aks",
+		"--set-string", "attestationApi.cvmMode=pod",
 		"--set-string", "image.tag=main",
 	})
 	if err != nil {
@@ -102,10 +102,10 @@ func TestValueArgsToTreeCoercesSetTypes(t *testing.T) {
 	if got["webhook"].(map[string]any)["getCert"].(map[string]any)["runAsUser"] != int64(65532) {
 		t.Errorf("runAsUser: want int64 65532")
 	}
-	// --set-string keeps "aks"/"main" as strings (cvmMode and tag are never
+	// --set-string keeps "pod"/"main" as strings (cvmMode and tag are never
 	// coerced even though they look plain).
-	if got["attestationApi"].(map[string]any)["cvmMode"] != "aks" {
-		t.Errorf("cvmMode: want string \"aks\"")
+	if got["attestationApi"].(map[string]any)["cvmMode"] != "pod" {
+		t.Errorf("cvmMode: want string \"pod\"")
 	}
 	if got["image"].(map[string]any)["tag"] != "main" {
 		t.Errorf("tag: want string \"main\"")

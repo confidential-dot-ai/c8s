@@ -158,10 +158,7 @@ func containerArgValue(args []string, flag string) (string, bool) {
 }
 
 func TestChartDefaultRendersReplacementStack(t *testing.T) {
-	// gke keeps the host-side attestation-api enabled, reachable only via the
-	// on-node Unix socket (node disables it and points components at the baked
-	// host attestation-api via HOST_IP; that path is covered separately).
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=pod")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -1270,63 +1267,6 @@ func TestChartWebhookExtraExcludedFlowsToWebhookAndSweep(t *testing.T) {
 	}
 }
 
-// TestChartWebhookOptsOutOfAKSAdmissionsEnforcer proves the AKS workaround:
-// with attestationApi.cvmMode=aks (what `c8s install --cvm-mode aks` sets) the
-// pod-injector MutatingWebhookConfiguration carries
-// admissions.enforcer/disabled=true, so AKS's admissionsenforcer controller
-// stops rewriting the webhook namespaceSelector and conflicting with helm
-// re-applies. The default (node) must NOT carry it — the annotation is
-// pure AKS plumbing and shouldn't appear on other platforms. A user-set
-// webhook.annotations value flows through alongside it.
-func TestChartWebhookOptsOutOfAKSAdmissionsEnforcer(t *testing.T) {
-	const annotation = "admissions.enforcer/disabled"
-
-	// Default (node): no AKS opt-out annotation.
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	var def admissionregv1.MutatingWebhookConfiguration
-	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &def) {
-		t.Fatalf("default chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
-	}
-	if _, ok := def.Annotations[annotation]; ok {
-		t.Errorf("default (node) webhook must not carry %s; got %v", annotation, def.Annotations)
-	}
-
-	// aks: opt-out annotation present and "true".
-	out, err = helmTemplate(t, "--set-string", "attestationApi.cvmMode=aks")
-	if err != nil {
-		t.Fatalf("helm template --set attestationApi.cvmMode=aks: %v\n%s", err, out)
-	}
-	var aks admissionregv1.MutatingWebhookConfiguration
-	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &aks) {
-		t.Fatalf("aks chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
-	}
-	if got := aks.Annotations[annotation]; got != "true" {
-		t.Errorf("aks webhook %s = %q, want \"true\"; annotations=%v", annotation, got, aks.Annotations)
-	}
-
-	// A user-supplied annotation coexists with the automatic AKS opt-out.
-	out, err = helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=aks",
-		"--set-string", "webhook.annotations.team=platform",
-	)
-	if err != nil {
-		t.Fatalf("helm template with extra webhook annotation: %v\n%s", err, out)
-	}
-	var both admissionregv1.MutatingWebhookConfiguration
-	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &both) {
-		t.Fatalf("override chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
-	}
-	if got := both.Annotations["team"]; got != "platform" {
-		t.Errorf("user webhook.annotations.team = %q, want \"platform\"; annotations=%v", got, both.Annotations)
-	}
-	if got := both.Annotations[annotation]; got != "true" {
-		t.Errorf("AKS opt-out must still apply alongside user annotations: %s = %q, want \"true\"", annotation, got)
-	}
-}
-
 func TestChartManagedRATLSServiceTargetPortsMatchContainerPorts(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
@@ -1641,15 +1581,9 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
-// On a cluster that is neither kata nor node-baked, host nri-image-policy is the
-// only image-admission enforcement, so disabling it must be rejected — otherwise
-// confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (pod/aks behave the same). kata and cvmMode=node
-// carry their own admission and are exempt (enforce_host_components requires nri
-// off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
 func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
+		"--set-string", "attestationApi.cvmMode=pod",
 		"--set", "nriImagePolicy.enabled=false",
 	)
 	if err == nil {
@@ -1660,11 +1594,6 @@ func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
 	}
 }
 
-// The require_host_image_policy guard exempts cvmMode=node: the node image bakes
-// its own fail-closed nri-image-policy, so nri off there is not an unenforced
-// cluster (unlike gke/aks — TestChartRejectsImagePolicyOffOnNonKata). This is the
-// exact shape `c8s install --cvm-mode=node` produces; the served seed under it is
-// TestChartServesAllowlistSeedInNodeMode.
 func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "attestationApi.cvmMode=node",
@@ -1689,7 +1618,7 @@ func TestChartRejectsPlaintextNRIAllowlist(t *testing.T) {
 // disabling it must fail like disabling the image policy does.
 func TestChartRejectsAttestationApiOffOnNonKata(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
+		"--set-string", "attestationApi.cvmMode=pod",
 		"--set", "attestationApi.enabled=false",
 	)
 	if err == nil {
@@ -1972,26 +1901,16 @@ func TestChartIntValueRejectsNonInteger(t *testing.T) {
 	}
 }
 
-// TestChartAttestationApiPrivileged proves every cvmMode renders privileged:
-// true. A hostPath device mount does not add a device-cgroup rule, so open() on
-// the TEE device (/dev/sev-guest, /dev/tpm0) is EPERM from an unprivileged
-// container regardless of SYS_RAWIO (cgroup v2 eBPF device controller); aks
-// additionally gates the vTPM below the capability layer. TODO: revert to
-// least-privilege once SNP attest goes through the TSM configfs report
-// interface.
 func TestChartAttestationApiPrivileged(t *testing.T) {
 	for _, tc := range []struct {
 		mode string
 		// node is the chart default, so render it via the no-arg path to
 		// also guard that a plain install is privileged.
-		useDefault bool
-		// aks renders the privilege axis only — it must NOT also carry the
-		// least-privilege capabilities map (the modes are either/or, not merged).
+		useDefault     bool
 		noCapabilities bool
 	}{
 		{mode: "node", useDefault: true},
-		{mode: "gke"},
-		{mode: "aks", noCapabilities: true},
+		{mode: "pod", noCapabilities: true},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			var args []string
@@ -2014,17 +1933,14 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 	}
 }
 
-// TestChartAttestationApiInvalidCvmMode proves an unrecognized cvmMode fails
-// the render loudly rather than silently falling through to least-privilege
-// (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	for _, mode := range []string{"bogus", "baremetal"} {
+	for _, mode := range []string{"bogus", "baremetal", "aks", "gke"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
 			if err == nil {
 				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 			}
-			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node (got %q)`, mode))
 		})
 	}
 }
@@ -2129,12 +2045,12 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 }
 
 // TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
-// not leak into the other cvmModes: pod/gke/aks dial the on-node Unix socket
+// not leak into the other cvmModes: pod dial the on-node Unix socket
 // and render no HOST_IP env anywhere. The consumers that must carry both the
 // socket URL and the socket-directory mount are asserted per shape.
 func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
-	for _, mode := range []string{"pod", "gke", "aks"} {
+	for _, mode := range []string{"pod"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
 			if err != nil {
@@ -2189,10 +2105,10 @@ func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 	}
 }
 
-func TestChartRendersManagedClusterKnobs(t *testing.T) {
+func TestChartRendersImagePullSecretsAndAttestationSecurity(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "serviceAccount.imagePullSecrets[0].name=ghcr-secret",
-		"--set", "attestationApi.cvmMode=aks",
+		"--set", "attestationApi.cvmMode=pod",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -2204,10 +2120,9 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 	if !hasPullSecret(sa.ImagePullSecrets, "ghcr-secret") {
 		t.Fatalf("operator ServiceAccount missing chart-wide pull secret ghcr-secret: %v", sa.ImagePullSecrets)
 	}
-	// aks → privileged attestation-api with a read-only root filesystem.
 	sc := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api").SecurityContext
 	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
-		t.Fatalf("attestation-api must be privileged under aks; got %+v", sc)
+		t.Fatalf("attestation-api must be privileged under pod mode; got %+v", sc)
 	}
 	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
 		t.Fatalf("attestation-api must set readOnlyRootFilesystem: true; got %+v", sc)
@@ -2496,7 +2411,7 @@ func TestChartTLSLBPublicTLSModeGuards(t *testing.T) {
 			// The ACME account and serving keys live in pod memory; outside a
 			// TEE the host reads them.
 			name: "acme without a confidential runtime",
-			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=gke"},
+			args: []string{"--set-string", "tlsLb.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=pod"},
 			want: "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (kata.enabled=true or attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held",
 		},
 		{
@@ -4194,7 +4109,7 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	}
 
 	changedOut, err := helmTemplate(t,
-		"--set", "attestationApi.platforms[0]=az-snp",
+		"--set", "attestationApi.platforms[0]=tdx",
 	)
 	if err != nil {
 		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
@@ -5283,10 +5198,7 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 // TestChartCDSWiresInProcessTrustRoot confirms the flag set: the in-memory CA
 // (no Secret/ca-cert flag) and the allowlist DB.
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
-	// gke: host-side attestation-api over the on-node Unix socket. node points
-	// CDS at the baked host attestation-api via HOST_IP (covered separately),
-	// so pin the socket mode here.
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=pod")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -5390,7 +5302,7 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	// helm --set strips backslashes, so use a literal pattern that needs no
 	// escaping to prove plumbing without the assertion fighting --set parsing.
-	const public = "confidential-gke-confidential-dot-ai"
+	const public = "confidential-demo-confidential-dot-ai"
 	out, err := helmTemplate(t, "--set", "cds.dnsSanPatterns[0]="+public)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -8300,5 +8212,19 @@ func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
 	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
 	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
 		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
+	}
+}
+
+func TestChartRejectsRemovedCloudConfiguration(t *testing.T) {
+	for _, value := range []string{"attestationApi.cvmMode=aks", "attestationApi.cvmMode=gke", "attestationApi.teeDevices.tpm=true", "attestationApi.platforms[0]=az-snp", "attestationApi.platforms[0]=gcp-tdx", "tlsLb.attest.platform=az-tdx"} {
+		t.Run(value, func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", "attestationApi.enabled=false", "--set", value)
+			if err == nil {
+				t.Fatalf("removed configuration rendered successfully: %s", out)
+			}
+			if !strings.Contains(out, strings.Split(value, ".")[0]) {
+				t.Fatalf("unexpected failure: %s", out)
+			}
+		})
 	}
 }

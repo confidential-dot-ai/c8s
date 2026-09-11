@@ -38,20 +38,26 @@ func envelopeFixture(t *testing.T, name string) (platform string, evidence json.
 	return env.Platform, env.Evidence
 }
 
-// TestVerifyRealAzSnpEvidence_MeasurementPin drives real az-snp evidence (vTPM
-// quote extraData = ASCII "challenge", VCEK inline, so it verifies fully
-// offline) through the engine and exercises the launch-digest pin — the policy
-// this package enforces on attestation-go's claims.
-func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
-	platform, evidence := envelopeFixture(t, "azsnp-evidence-v1.json")
-	if platform != "az-snp" {
-		t.Fatalf("platform = %q, want az-snp", platform)
+func TestVerifyRealSNPEvidence_MeasurementPin(t *testing.T) {
+	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
+	if platform != "snp" {
+		t.Fatalf("platform = %q, want snp", platform)
 	}
-	anchor := Params{ExpectedReportData: []byte("challenge")}
+	var report struct {
+		AttestationReport string `json:"attestation_report"`
+	}
+	if err := json.Unmarshal(evidence, &report); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(report.AttestationReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := Params{ExpectedReportData: raw[0x50:0x90]}
 
 	res, err := Verify(context.Background(), platform, evidence, anchor)
 	if err != nil {
-		t.Fatalf("az-snp evidence with its bound nonce must verify: %v", err)
+		t.Fatalf("snp evidence with its bound nonce must verify: %v", err)
 	}
 	digest, err := hex.DecodeString(res.Claims.LaunchDigest)
 	if err != nil || len(digest) == 0 {
@@ -110,7 +116,7 @@ func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
 // defense-in-depth must not fire (ReportDataMatch stays nil), so anchor-less
 // verification of otherwise-good evidence succeeds.
 func TestVerify_NoAnchorSkipsBindingCheck(t *testing.T) {
-	platform, evidence := envelopeFixture(t, "azsnp-evidence-v1.json")
+	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
 	res, err := Verify(context.Background(), platform, evidence, Params{})
 	if err != nil {
 		t.Fatalf("anchor-less verification must succeed: %v", err)
@@ -245,4 +251,13 @@ func TestEnvelopeFromAttestation(t *testing.T) {
 			t.Fatal("expected a raw TDX report from a cert to be rejected")
 		}
 	})
+}
+
+// Retired evidence must be rejected before collateral lookup or verification.
+func TestVerifyRejectsCloudPlatforms(t *testing.T) {
+	for _, platform := range []string{"az-snp", "az-tdx", "gcp-snp", "gcp-tdx"} {
+		if _, err := Verify(context.Background(), platform, json.RawMessage(`{}`), Params{}); err == nil {
+			t.Errorf("accepted removed platform %q", platform)
+		}
+	}
 }

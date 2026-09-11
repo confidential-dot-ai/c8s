@@ -413,7 +413,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attestation-rs/target/release/attestation-api
-          key: ${{ runner.os }}-attest-bin-${{ steps.attest-sha.outputs.sha }}-${{ hashFiles('c8s/.github/workflows/c8s-image.yml') }}
+          key: ${{ runner.os }}-attest-bin-${{ steps.attest-sha.outputs.sha }}-${{ hashFiles('c8s/.github/workflows/c8s-image.yml', 'c8s/scripts/build-native-attestation.sh') }}
 
       # attest-gpu: the build runs confos-fetch-attest-gpu, which needs a
       # prebuilt ATTEST_GPU_BIN + LIBNVAT. Vendor libnvat (Apache-2.0, digest-
@@ -451,8 +451,7 @@ jobs:
         working-directory: attestation-rs
         run: |
           if [ "${{ steps.attest-bin.outputs.cache-hit }}" != "true" ]; then
-            cargo build -p attestation-api --release \
-              --features nvidia-gpu-attest --bin attestation-api
+            ../c8s/scripts/build-native-attestation.sh . --features nvidia-gpu-attest
           fi
           # Must actually link libnvat (not a silent fallback).
           ldd target/release/attestation-api | grep -q libnvat

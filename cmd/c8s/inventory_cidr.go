@@ -17,7 +17,7 @@ import (
 // resolveInventoryCIDRs returns the operator's --node-cidr when given.
 // Unset, the answer depends on where the sandbox inventory lives:
 //
-//   - node/gke/aks: a host process, reachable on the node address. The
+//   - node: a host process, reachable on the node address. The
 //     install preflights what CDS will derive at runtime and renders nothing:
 //     CDS bounds the callback from the live node list itself
 //     (docs/operator.md), so there is no install-time snapshot to go stale on

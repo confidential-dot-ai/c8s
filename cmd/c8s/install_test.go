@@ -245,7 +245,7 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 }
 
 func TestAppendKataInstallArgsNonPodModeIsNoOp(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks", ""} {
+	for _, mode := range []string{"node", ""} {
 		got := appendKataInstallArgs([]string{"upgrade"}, mode, false, "")
 		assertArgsEqual(t, got, []string{"upgrade"})
 	}
@@ -373,7 +373,7 @@ func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
 }
 
 func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks"} {
+	for _, mode := range []string{"node"} {
 		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
 		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
 	}
@@ -1108,47 +1108,20 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	installAttestEnabled = true
 	t.Cleanup(func() { installAttestEnabled = prevAttest })
 
-	// Two orthogonal axes:
-	//  --cvm-mode: pod (kata) / node (node-as-CVM) / gke (managed) / aks (vTPM)
-	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
-	// pod+node+gke all take either hardware-platform; aks always emits the vTPM
-	// device and rides the Azure vTPM HCL report for both SNP (az-snp) and TDX
-	// (az-tdx).
-	build := func(mode, platform, sevGuest, tdxGuest, tpm string) []string {
+	build := func(mode, platform, sevGuest, tdxGuest string) []string {
 		out := []string{
 			"upgrade",
 			"--set-string", "attestationApi.cvmMode=" + mode,
 			"--set", "attestationApi.teeDevices.sevGuest=" + sevGuest,
 			"--set", "attestationApi.teeDevices.tdxGuest=" + tdxGuest,
-			"--set", "attestationApi.teeDevices.tpm=" + tpm,
 		}
-		// Any TDX shape — native (/dev/tdx-guest) or Azure vTPM (az-tdx) —
-		// propagates the CPU TEE to the components that name their RA-TLS
-		// platform, or CDS parses the TDX quote as an SNP report.
 		if platform == "tdx" {
 			out = append(out,
 				"--set-string", "cds.ratlsPlatform=tdx",
 				"--set-string", "ratlsMesh.platform=tdx",
 			)
 		}
-		// The attest sidecar's platform names the evidence shape the sidecar
-		// requests from the attestation-api: az-snp/az-tdx under aks (Azure
-		// vTPM HCL report — bare snp/tdx would probe guest devices AKS nodes
-		// do not expose), bare tdx on native TDX. sev-snp outside aks keeps
-		// the chart default (snp). Every override blanks the AMD-only
-		// generation.
-		switch {
-		case mode == "aks" && platform == "tdx":
-			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-tdx",
-				"--set-string", "tlsLb.attest.generation=",
-			)
-		case mode == "aks":
-			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-snp",
-				"--set-string", "tlsLb.attest.generation=",
-			)
-		case platform == "tdx":
+		if platform == "tdx" {
 			out = append(out,
 				"--set-string", "tlsLb.attest.platform=tdx",
 				"--set-string", "tlsLb.attest.generation=",
@@ -1171,15 +1144,10 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		hardwarePlatform string
 		want             []string
 	}{
-		"pod + sev-snp":  {"pod", "sev-snp", build("pod", "sev-snp", "true", "false", "false")},
-		"gke + sev-snp":  {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
-		"node + sev-snp": {"node", "sev-snp", build("node", "sev-snp", "true", "false", "false")},
-		"pod + tdx":      {"pod", "tdx", build("pod", "tdx", "false", "true", "false")},
-		"gke + tdx":      {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
-		"node + tdx":     {"node", "tdx", build("node", "tdx", "false", "true", "false")},
-		"aks + sev-snp":  {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
-		// az-tdx: Azure vTPM (tpm=true, no guest device) + TDX RA-TLS platform.
-		"aks + tdx (az-tdx)": {"aks", "tdx", build("aks", "tdx", "false", "false", "true")},
+		"pod + sev-snp":  {"pod", "sev-snp", build("pod", "sev-snp", "true", "false")},
+		"node + sev-snp": {"node", "sev-snp", build("node", "sev-snp", "true", "false")},
+		"pod + tdx":      {"pod", "tdx", build("pod", "tdx", "false", "true")},
+		"node + tdx":     {"node", "tdx", build("node", "tdx", "false", "true")},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1265,28 +1233,6 @@ func TestAppendCvmModeInstallArgsAcceptsMeasurementsInPodMode(t *testing.T) {
 func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sgx"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted an unknown --hardware-platform, want error")
-	}
-}
-
-func TestAppendCvmModeInstallArgsAcceptsAksWithTdx(t *testing.T) {
-	// aks + tdx is the Azure-vTPM TDX (az-tdx) shape: the node's vTPM HCL report
-	// wraps a TD quote, so it needs the vTPM device (tpm=true, no guest device)
-	// and the TDX RA-TLS platform on CDS/mesh — not a refusal.
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "tdx")
-	if err != nil {
-		t.Fatalf("appendCvmModeInstallArgs(aks, tdx): unexpected error %v", err)
-	}
-	joined := strings.Join(got, " ")
-	for _, want := range []string{
-		"attestationApi.cvmMode=aks",
-		"attestationApi.teeDevices.tpm=true",
-		"attestationApi.teeDevices.tdxGuest=false",
-		"cds.ratlsPlatform=tdx",
-		"ratlsMesh.platform=tdx",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("aks+tdx args missing %q; got %v", want, got)
-		}
 	}
 }
 
@@ -1915,7 +1861,7 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 
 	t.Run("a -f file that sets it wins", func(t *testing.T) {
 		f := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
-		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
+		got, err := appendExemptNamespacesInstallArgs(nil, "pod", []string{f})
 		if err != nil || got != nil {
 			t.Errorf("with an exemptNamespaces -f = (%v, %v), want (nil, nil)", got, err)
 		}
@@ -1923,7 +1869,7 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 
 	t.Run("an unrelated -f file does not suppress the default", func(t *testing.T) {
 		f := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
-		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
+		got, err := appendExemptNamespacesInstallArgs(nil, "pod", []string{f})
 		if err != nil {
 			t.Fatalf("appendExemptNamespacesInstallArgs: %v", err)
 		}
@@ -1931,7 +1877,7 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 	})
 
 	t.Run("an unreadable -f file is an error, not a silent default", func(t *testing.T) {
-		if _, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{"/nonexistent/values.yaml"}); err == nil {
+		if _, err := appendExemptNamespacesInstallArgs(nil, "pod", []string{"/nonexistent/values.yaml"}); err == nil {
 			t.Error("want an error for an unreadable values file")
 		}
 	})
@@ -2102,7 +2048,7 @@ func TestExemptedPlatformImages(t *testing.T) {
 	const (
 		etcd  = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 		proxy = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-		gke   = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		agent = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 		vllm  = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 	)
 	pods := []corev1.Pod{
@@ -2111,7 +2057,7 @@ func TestExemptedPlatformImages(t *testing.T) {
 		// Same DaemonSet on a second node: one line, not two.
 		daemonSetPod("kube-system", "kube-proxy-b", "kube-proxy:v1.31.0", "kube-proxy@"+proxy),
 		// Outside the exempt set: not what this admits.
-		daemonSetPod("gke-system", "gke-agent-a", "gke/agent:v1", "gke/agent@"+gke),
+		daemonSetPod("platform-system", "platform-agent-a", "platform/agent:v1", "platform/agent@"+agent),
 		deploymentPod("tenant", "infer-abc", "example.test/vllm:v1", "example.test/vllm@"+vllm),
 	}
 	got := exemptedPlatformImages(pods, []string{"kube-system"})
@@ -2264,5 +2210,15 @@ func TestTDXRTMRPinWarning(t *testing.T) {
 
 	if _, err := tdxRTMRPinWarning("tdx", nil, []string{filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
 		t.Fatal("an unreadable values file was silently treated as unpinned")
+	}
+}
+
+func TestInstallRejectsRemovedCloudModes(t *testing.T) {
+	for _, mode := range []string{"aks", "gke"} {
+		for _, hardware := range allowedPlatforms {
+			if _, err := appendCvmModeInstallArgs(nil, mode, hardware); err == nil {
+				t.Errorf("accepted removed mode %q on %q", mode, hardware)
+			}
+		}
 	}
 }

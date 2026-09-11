@@ -28,19 +28,18 @@ resources, `internal/helmchart/c8s/templates/`.
 
 `c8s install` runs `helm upgrade --install` against the embedded chart. The
 required `--cvm-mode` flag selects a **mode**, which is a fixed set of `--set`
-choices. `pod` is the kata shape; `node`, `gke`, and `aks` are the
-node-as-CVM shapes ("base" below), differing only in how the node's TEE
-evidence is read (native device, GKE managed CVM, Azure vTPM).
+choices. `pod` is the Kata shape; `node` is the node-as-CVM shape ("base" below).
+Both use native SEV-SNP or Intel TDX evidence.
 
 | Mode | Flag | One-liner |
 |---|---|---|
-| **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. **Single-tenant** — the node is one trust domain. Host-side mesh + attestation + image policy. The dev/baseline shape. |
+| **base** | `--cvm-mode=node` | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. **Single-tenant** — the node is one trust domain. Host-side mesh + attestation + image policy. The dev/baseline shape. |
 | **kata** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
 
 ```mermaid
 flowchart LR
     A["c8s install"] --> B{--cvm-mode}
-    B -->|"node / gke / aks"| BASE["base<br/>host-side everything<br/>no per-pod confidentiality"]
+    B -->|"node"| BASE["base<br/>host-side everything<br/>no per-pod confidentiality"]
     B -->|"--cvm-mode=pod"| KATA["kata (enforcing)<br/>all workloads forced<br/>into kata VMs"]
 ```
 

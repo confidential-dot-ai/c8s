@@ -64,15 +64,6 @@ jobs:
   # the whole dispatcher that costs rows x jobs entries in the run tree, growing
   # quadratically. Plain jobs give one real entry each.
   #
-  # THE AZURE ROWS ARE ABSENT ON PURPOSE, and this is the ONE way this file
-  # differs from its confidential-ci original. Two hard blockers, both outside
-  # CI: (1) the Entra federated credential trusts
-  # `repo:confidential-dot-ai/confidential-ci`, so an OIDC token minted here is
-  # rejected with AADSTS700213; granting c8s its own credential is an access
-  # change, not a code change. (2) azure-tdx-e2e.yml reads
-  # c8s-e2e/azure-tdx-driver.sh, which lives in confidential-ci and does not
-  # exist in this repo. Until both are resolved, azure-snp and azure-tdx run
-  # from confidential-ci on a schedule.
 
   snp-metal:
     permissions:

@@ -116,12 +116,7 @@ hostNamespacePolicy:
 ## annotated with confidential.ai/cw.
 webhook:
   caBundle: ""
-  ## -- Extra annotations for the MutatingWebhookConfiguration. When
-  ## attestationApi.cvmMode=aks (i.e. `c8s install --cvm-mode aks`) the chart
-  ## also adds `admissions.enforcer/disabled: "true"` automatically, so AKS's
-  ## Admissions Enforcer stops rewriting the webhook's namespaceSelector and
-  ## conflicting with `helm upgrade` re-applies. A value set here for the same
-  ## key takes precedence over that automatic default.
+  ## -- Extra annotations for the MutatingWebhookConfiguration.
   annotations: {}
   service:
     port: 443
@@ -343,21 +338,13 @@ attestationApi:
   ## the device node doesn't exist on the host, so disable for nodes that
   ## lack the corresponding hardware.
   ##
-  ## Default is the native /dev/sev-guest ioctl, which covers bare-metal SNP
-  ## and GKE SNP. Azure (AKS) attests through the vTPM at /dev/tpm0 instead, so
-  ## an AKS install flips to tpm (the `c8s install --cvm-mode aks` path sets
-  ## this automatically). tdxGuest is opt-in for TDX hosts via -f.
+  ## Native SNP is the default; tdxGuest enables the TDX device.
   teeDevices:
     sevGuest: true
     tdxGuest: false
-    tpm: false
   platforms:
     - snp
     - tdx
-    - az-snp
-    - az-tdx
-    - gcp-snp
-    - gcp-tdx
   ## CVM platform shape — selects (via the install CLI) the TEE device:
   ##
   ## pod: per-pod confidential VMs via the Kata runtime — every workload pod is
@@ -367,8 +354,6 @@ attestationApi:
   ##   TDX/SNP) are themselves confidential VMs exposing a native TEE device
   ##   (/dev/sev-guest, or /dev/tdx-guest with --hardware-platform tdx); pods run
   ##   as ordinary processes attested via the node's own quote. Cloud-agnostic.
-  ## gke: GKE managed confidential VM — also native /dev/sev-guest.
-  ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0.
   ##
   ## All modes render privileged: true. A hostPath device mount does not add a
   ## device-cgroup rule, so open() on the TEE device is EPERM from an unprivileged
@@ -647,9 +632,7 @@ ratlsMesh:
   imagePullSecrets: []
 
   # -- RA-TLS TEE type embedded in and verified on mesh certs: sev-snp or tdx.
-  #    This is the wire-level platform identifier, not the attestation-api
-  #    detection vocab (az-snp and bare-metal snp both verify as sev-snp here);
-  #    attestation-api still auto-detects how to gather the evidence.
+  #    Native SNP also accepts snp as an alias for sev-snp.
   platform: sev-snp
 
   # Host path for iptables lock (k3s: /run/k3s/agent/xtables.lock)
@@ -672,7 +655,7 @@ ratlsMesh:
   # excluded-namespace dials, cross-node direct-to-pod-IP), which the mesh
   # cannot intercept. passthrough is the reply allowlist: proto:source-port
   # entries RETURNed before the drop for dataplanes whose conntrack does not
-  # mark a reply ESTABLISHED (e.g. GKE Dataplane V2 / Cilium breaks the DNS
+  # mark a reply ESTABLISHED (e.g. Cilium breaks the DNS
   # reply, so without udp/tcp:53 get-cert can never resolve). Entries are
   # bounded to the stock ephemeral destination-port window (32768-60999), and
   # TCP entries additionally to the handshake reply and segments with SYN
@@ -818,9 +801,8 @@ ratlsMesh:
 nriImagePolicy:
   ## Host-side NRI image admission: the installer DaemonSet. Its enabled state is
   ## bound to the cvmMode shape, not free: it MUST be false under kata, where the
-  ## in-guest policy-monitor admits instead (enforce_host_components), and MUST
-  ## be true on gke/aks, where host NRI is the only allowlist gate
-  ## (require_host_image_policy). On cvmMode=node it runs in its baked form
+  ## in-guest policy-monitor admits instead (enforce_host_components).
+  ## On cvmMode=node it runs in its baked form
   ## (below) — the plugin comes from the node image, but only this installer
   ## carries the release's CDS pins to it. `c8s install` sets both from
   ## --cvm-mode. The bootstrapAllowlist below still feeds CDS's served seed
@@ -892,10 +874,10 @@ nriImagePolicy:
     mode: fail-closed  # fail-closed | audit
     enforceExisting: true
     denyMissingAnnotation: true
-    # exemptNamespaces: on the hosted lanes (pod/gke/aks), admit each listed
+    # exemptNamespaces: on the hosted lanes (pod), admit each listed
     # namespace's provider platform pods — which are not on the c8s allowlist —
     # by the image digests captured running in it, frozen at first admission and
-    # scoped to that namespace. `c8s install --cvm-mode=pod|gke|aks` sets
+    # scoped to that namespace. `c8s install --cvm-mode=pod` sets
     # [kube-system] unless a -f file writes this key. Empty (the chart default)
     # keeps digest-only admission; leave it empty on cvmMode=node, whose baked
     # floor already carries the system digests. See
@@ -1434,7 +1416,6 @@ tlsLb:
 
   service:
     # -- Service type. Set to LoadBalancer to expose the listener publicly
-    # (e.g. on AKS/GKE), with annotations below for cloud-LB specifics.
     type: ClusterIP
     port: 443
     # -- externalTrafficPolicy for LoadBalancer/NodePort Services. Empty picks
@@ -1447,10 +1428,7 @@ tlsLb:
     # that whole node, past which any one client's traffic refuses new sessions
     # for every other client behind it.
     externalTrafficPolicy: ""
-    # -- Optional annotations on the Service. Use the provider's LB annotation to
-    # pin a static IP (e.g. networking.gke.io/load-balancer-ip-addresses on GKE,
-    # service.beta.kubernetes.io/azure-pip-name on AKS); the deprecated
-    # spec.loadBalancerIP field is intentionally not exposed.
+    # -- Optional annotations on the Service.
     annotations: {}
 
   # -- Volume mount path for the CDS-issued TLS certificate and key shared

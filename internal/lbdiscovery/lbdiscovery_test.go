@@ -121,7 +121,7 @@ func approvingVerify(measurement []byte) localverify.VerifyFunc {
 func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 	servingCert, leaf := plainServingCert(t)
 	challenge := []byte("issuance-challenge")
-	doc := discoveryDoc(t, leaf, challenge, "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	doc := discoveryDoc(t, leaf, challenge, "cds", string(types.PlatformTdx), `{"td_quote":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
@@ -132,10 +132,10 @@ func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 	var sawVerify bool
 	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		sawVerify = true
-		if platform != string(types.PlatformAzSnp) {
-			t.Fatalf("platform = %q, want az-snp", platform)
+		if platform != string(types.PlatformTdx) {
+			t.Fatalf("platform = %q, want tdx", platform)
 		}
-		// az-snp binds through a TPM quote whose nonce is the unpadded 48-byte
+		// tdx binds through a TPM quote whose nonce is the unpadded 48-byte
 		// digest — the verifier must receive exactly that anchor.
 		if !bytes.Equal(p.ExpectedReportData, erd[:sha512.Size384]) {
 			t.Fatalf("expected_report_data = %x, want %x", p.ExpectedReportData, erd[:sha512.Size384])
@@ -184,7 +184,7 @@ func TestNewVerifiedHTTPClient_NoDiscovery(t *testing.T) {
 // would let the caller fall back and mask an attack.
 func TestNewVerifiedHTTPClient_FailsClosed(t *testing.T) {
 	servingCert, leaf := plainServingCert(t)
-	doc := discoveryDoc(t, leaf, []byte("challenge"), "", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	doc := discoveryDoc(t, leaf, []byte("challenge"), "", string(types.PlatformTdx), `{"td_quote":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
 	errSignature := errors.New("signature verification failed")
@@ -221,7 +221,7 @@ func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 	servingCert, _ := plainServingCert(t)
 	_, otherLeaf := plainServingCert(t)
 	// The doc attests otherLeaf; the server presents servingCert.
-	doc := discoveryDoc(t, otherLeaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	doc := discoveryDoc(t, otherLeaf, []byte("challenge"), "cds", string(types.PlatformTdx), `{"td_quote":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
 	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, approvingVerify(nil))
@@ -256,7 +256,7 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			servingCert, leaf := plainServingCert(t)
-			doc := discoveryDoc(t, leaf, []byte("challenge"), tc.mode, string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+			doc := discoveryDoc(t, leaf, []byte("challenge"), tc.mode, string(types.PlatformTdx), `{"td_quote":"fake"}`)
 			lb := fakeLB(t, servingCert, doc)
 
 			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, approvingVerify(measurement))
@@ -282,7 +282,7 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 // document says nothing about.
 func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 	servingCert, leaf := plainServingCert(t)
-	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformTdx), `{"td_quote":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 
@@ -373,7 +373,7 @@ func TestNewVerifiedHTTPClient_RejectsExpiredServingCert(t *testing.T) {
 	}
 	servingCert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 
-	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformTdx), `{"td_quote":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
 	verifyCalls := 0

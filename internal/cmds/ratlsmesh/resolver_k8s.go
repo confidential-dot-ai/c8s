@@ -305,7 +305,7 @@ func (r *k8sResolver) ValidateOutboundDest(ip string) (bool, string) {
 // host-discovered pod-network CIDRs are available, the IP must fall within one
 // of them and the kernel's best route must use one of that CIDR's interfaces.
 // On CNIs where pods get fabric-routable addresses and no host pod CIDR exists
-// (for example Azure CNI on AKS), ValidateLocalDest falls back to the K8s
+// (for example routed CNIs), ValidateLocalDest falls back to the K8s
 // podMap and only accepts pods whose Pod.Status.HostIP matches this node.
 func (r *k8sResolver) ValidateLocalDest(ip string) bool {
 	if r.isHostAddress(ip) {

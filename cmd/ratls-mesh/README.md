@@ -67,8 +67,7 @@ pod IPs labeled `confidential.ai/cw` and a filter-table chain (`RATLS-MESH-CW`,
 jumped from `FORWARD` position 1) that drops any connection to those IPs, all
 protocols (the mesh carries only TCP, so non-TCP inbound is unmeshed by
 definition). Replies to cw-pod egress pass via a conntrack
-`ESTABLISHED,RELATED` rule. Because some dataplanes (e.g. GKE Dataplane V2 /
-Cilium) do not track a reply as `ESTABLISHED` on `FORWARD`, the guard also
+`ESTABLISHED,RELATED` rule. Because some dataplanes (e.g. Cilium) do not track a reply as `ESTABLISHED` on `FORWARD`, the guard also
 RETURNs replies from a configurable source-port allowlist
 (`--cw-inbound-passthrough`, chart `ratlsMesh.cwInboundEnforcement.passthrough`,
 default `udp:53,tcp:53` so DNS resolves); an empty list is the strict
@@ -101,16 +100,14 @@ non-meshed sources, hostNetwork agents on other nodes. What it does not
 defend: the hypervisor or cloud provider (the CVM boundary's job), host
 root on the node itself (inside the node trust boundary; it delivers via
 `OUTPUT`), kube-proxy IPVS/nftables mode and CNIs whose datapath bypasses
-the host `FORWARD` hook (verified on iptables-mode kube-proxy with Azure
-CNI and kubenet at `bridge-nf-call-iptables=1`; run the e2e check on
+the host `FORWARD` hook (verified on iptables-mode kube-proxy with kubenet at `bridge-nf-call-iptables=1`; run the e2e check on
 anything else), and L7 attacks through the legitimate mesh path.
 
 Inbound delivery is still protected by RA-TLS on the node-to-node leg. The
 only plaintext segment is the final host-to-local-pod dial on the destination
 node. When the host exposes local pod-network CIDRs, `ValidateLocalDest`
 cross-checks the destination Pod IP against those CIDRs and the kernel route.
-On CNIs that do not expose a local pod CIDR on the host, such as AKS with
-Azure CNI, the resolver falls back to the Kubernetes pod cache and only accepts
+On CNIs that do not expose a local pod CIDR on the host, with fabric-routable pod IPs, the resolver falls back to the Kubernetes pod cache and only accepts
 destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 
 ## Common Flags
@@ -255,7 +252,7 @@ are starting points; tune to your scrape interval and pod churn.
 
 | Signal | What it means | Suggested rule |
 |--------|---------------|----------------|
-| `ratls_mesh_resolver_local_cidrs == 0` | `ValidateLocalDest` has no host pod-network CIDRs for the route cross-check, so inbound pod delivery is using Kubernetes `Pod.Status.HostIP` ownership. Expected briefly at startup and expected persistently on CNIs that expose pod IPs without a host-local pod CIDR, such as AKS with Azure CNI. | Warn after 2× `--resync-period` (default 60s) when this is unexpected for the cluster CNI. |
+| `ratls_mesh_resolver_local_cidrs == 0` | `ValidateLocalDest` has no host pod-network CIDRs for the route cross-check, so inbound pod delivery is using Kubernetes `Pod.Status.HostIP` ownership. Expected briefly at startup and expected persistently on CNIs that expose pod IPs without a host-local pod CIDR, with fabric-routable pod IPs. | Warn after 2× `--resync-period` (default 60s) when this is unexpected for the cluster CNI. |
 | `rate(ratls_mesh_iptables_ipset_overflow_total[5m]) > 0` | Pod count exceeded `--ipset-maxelem`; the reconcile rejected the restore and the live ipset is stale. New pod IPs will not be intercepted until the operator bumps `iptablesSync.ipsetMaxElem`. | Page on any non-zero rate for 5+ minutes. |
 | `rate(ratls_mesh_iptables_jump_position_violations_total[5m])` | Watchdog confirmed our PREROUTING/OUTPUT jump was demoted out of position 1 — typically kube-proxy reinserting `KUBE-SERVICES` ahead of us. Occasional events are normal; a steady positive rate indicates a fight with kube-proxy. | Warn when rate > 1/min sustained for 10 min; tune `--watchdog-period` (default 2s) downward if necessary. |
 | `rate(ratls_mesh_iptables_jump_position_check_errors_total[5m])` | `iptables -S` failed during a watchdog tick. Watchdog reinserts defensively, so this is environmental noise, not a kube-proxy race. | Warn at a sustained rate to flag a stuck or busy `xtables.lock`. |

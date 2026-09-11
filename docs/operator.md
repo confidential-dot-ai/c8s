@@ -94,7 +94,7 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   host route per node InternalIP, kept current as nodes are added, replaced,
   or removed — over read-only node access the chart grants its ServiceAccount.
   A host route per node rather than a covering range, because on a CNI that
-  assigns pod IPs from the node subnet (AWS VPC CNI, Azure CNI) any range
+  assigns pod IPs from the node subnet (routed CNIs) any range
   covering the nodes covers the pods too, and the bound would be absent while
   looking configured. `c8s install` preflights the same derivation and fails
   rather than proceeding if it cannot determine them or a node address sits
@@ -926,7 +926,7 @@ uses for a non-release build. The simplest validation disables the image-policy
 component, so only image tags are required (no digests). Disabling it renders
 only because the chart's default `attestationApi.cvmMode=node` bakes its own
 policy plugin and so is exempt from the `require_host_image_policy` guard; other
-modes (gke/aks) must keep nri-image-policy enabled and digest-pinned, as in the
+non-Kata configurations must keep nri-image-policy enabled and digest-pinned, as in the
 full-shape render below.
 
 ```bash

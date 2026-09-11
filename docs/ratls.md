@@ -107,14 +107,9 @@ The `report` field carries one of two shapes, auto-detected on parse
 
 - **Bare-metal SNP**: the raw 1184-byte `ATTESTATION_REPORT`. Kept raw so a
   bare-metal report stays extractable by offline SNP verifiers.
-- **Everything else** (`az-snp`, `gcp-snp`, `tdx`, `az-tdx`): the attestation-api's
-  JSON evidence envelope, forwarded verbatim to `/verify` at handshake time. Both
-  TDX shapes must use the envelope (c8s deliberately ships no in-process quote
-  parser — see `verify.go`): native `tdx` carries a bulky `cc_eventlog` that is
-  stripped before embedding, while Azure-vTPM `az-tdx` (the TD quote wrapped in the
-  HCL report, alongside the vTPM quote) has no eventlog and is embedded as-is.
-  Azure evidence wrapped in a Hyper-V HCL header is normalized back to the raw
-  report where needed (`snp_report.go`).
+- **TDX**: the attestation-api's JSON evidence envelope, forwarded to `/verify`
+  at handshake time. The bulky `cc_eventlog` is stripped before embedding;
+  certificate verification uses the quote in the envelope (`verify.go`).
 
 Certificates live 24h by default and rotate in the background at 50% of TTL.
 While the current certificate is still inside its validity window it keeps
@@ -744,7 +739,7 @@ NODE-AS-CVM — one TEE, one identity, per node
 ║  ratls-mesh DaemonSet ─┼─ shares the NODE's TEE identity              ║
 ║  CDS (one pod)        ─┘                                              ║
 ║  attestation-api DaemonSet ── evidence from the node's TEE device     ║
-║    (/dev/sev-guest, TDX TSM configfs, or vTPM on AKS)                 ║
+║    (/dev/sev-guest or TDX TSM configfs)                              ║
 ╚═══════════════════════════════════════════════════════════════════════╝
    host / hypervisor: untrusted, sees ciphertext
 
@@ -766,13 +761,12 @@ POD-AS-CVM (kata) — one TEE, one identity, per pod
 
 The whole Kubernetes node is one confidential VM; pods are ordinary runc
 containers inside it. (This is the base component layout — `c8s install` with
-`--cvm-mode node|gke|aks` wiring the right TEE device — deployed onto nodes
+`--cvm-mode node` wiring the right TEE device — deployed onto nodes
 that are themselves CVMs. Base on non-CVM nodes has the same layout and no
 confidentiality.)
 
 - **Evidence source:** the per-node attestation-api DaemonSet mounts the host
-  TEE interface (`/dev/sev-guest`; TSM ConfigFS reports on TDX hosts; vTPM on
-  AKS). The API binds pod loopback and its attest-proxy sidecar serves it on a
+  TEE interface (`/dev/sev-guest`; TSM ConfigFS reports on TDX hosts). The API binds pod loopback and its attest-proxy sidecar serves it on a
   node-local Unix socket, so `/attest` is reachable only by on-node callers
   and always produces evidence for the *caller's own node* — nothing
   routable can request evidence, and `/verify` verdicts never cross a node

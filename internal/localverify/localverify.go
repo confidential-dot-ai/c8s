@@ -39,9 +39,7 @@ const (
 
 // Params is the policy a Verify call enforces on the evidence.
 type Params struct {
-	// ExpectedReportData is the binding anchor, unpadded (48-byte SHA-384 for
-	// c8s bindings): hardware verifiers zero-pad it per platform, and the
-	// Azure vTPM verifiers compare it raw — pass it unpadded.
+	// ExpectedReportData is the binding anchor; native verifiers zero-pad it.
 	ExpectedReportData []byte
 	// AllowDebug accepts debug-enabled guests. Default false (reject).
 	AllowDebug bool
@@ -49,10 +47,7 @@ type Params struct {
 	MinTCB *teetypes.SnpTcb
 	// Measurements pins the launch digest (SNP MEASUREMENT / TDX MR_TD).
 	// Empty = no pin; with a pin, a missing launch digest fails closed.
-	Measurements [][]byte
-	// ExpectedInitDataHash, when set, pins the init-data digest: the engine
-	// compares it against SNP HOST_DATA, TDX MRCONFIGID (zero-padded to 48),
-	// or the az vTPM PCR[8] binding, and a mismatch fails verification.
+	Measurements         [][]byte
 	ExpectedInitDataHash []byte
 }
 
@@ -134,6 +129,9 @@ func enforceResult(res *teetypes.VerificationResult, p Params) error {
 // report (Zen4c/Siena-aware) and fetches the VCEK from AMD KDS itself, bounded
 // by ctx.
 func dispatch(ctx context.Context, platform string, evidence json.RawMessage, params teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
+	if err := ratls.ValidatePlatform(platform); err != nil {
+		return nil, err
+	}
 	if mayMissVCEK(platform) {
 		var se snp.SnpEvidence
 		if err := json.Unmarshal(evidence, &se); err != nil {
@@ -167,14 +165,10 @@ func dispatch(ctx context.Context, platform string, evidence json.RawMessage, pa
 	return teeverify.Verify(envelope, params)
 }
 
-// mayMissVCEK reports whether evidence for this platform might lack the VCEK the
-// bare-cert path needs (so we fetch it from AMD KDS). True for bare-metal/GCP
-// SEV-SNP, whose {attestation_report, cert_chain?} object can omit it. az-snp
-// always ships the VCEK inside its HCL-report envelope, and TDX has no VCEK —
-// both verify through the envelope path (teeverify.Verify) directly.
+// mayMissVCEK identifies native SNP evidence needing AMD KDS collateral.
 func mayMissVCEK(platform string) bool {
 	p := teetypes.NormalizePlatform(platform)
-	return p == teetypes.PlatformSNP || p == teetypes.PlatformGcpSNP
+	return p == teetypes.PlatformSNP
 }
 
 // CertEnvelope extracts the RA-TLS attestation from a certificate and returns
@@ -196,12 +190,6 @@ func CertEnvelope(cert *x509.Certificate) (platform string, evidence json.RawMes
 	return platform, evidence, rd[:sha512.Size384], nil
 }
 
-// EnvelopeFromAttestation turns an RA-TLS cert's embedded attestation into the
-// platform + evidence object the verifier expects. An embedded {platform,
-// evidence} envelope (e.g. az-snp) is forwarded verbatim; a raw SEV-SNP report
-// is wrapped as {attestation_report, cert_chain.vcek?}. A raw TDX report has no
-// evidence shape wired here — use the discovery / attestation endpoint, which
-// carries the attester's evidence object directly.
 func EnvelopeFromAttestation(att *ratls.Attestation) (string, json.RawMessage, error) {
 	if env, ok := att.EmbeddedEvidence(); ok {
 		return env.Platform, env.Evidence, nil

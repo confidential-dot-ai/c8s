@@ -141,8 +141,8 @@ func TestResolveMeasurementsConfigAcceptsPlatformAliases(t *testing.T) {
 	tdx := writeConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[{"name":"a","mrtd":"00`+cfgDigestA+`"}]}`)
 
 	for _, tc := range []struct{ platform, path string }{
-		{"snp", snp}, {"az-snp", snp}, {"gcp-snp", snp}, {"sev-snp", snp},
-		{"tdx", tdx}, {"az-tdx", tdx}, {"gcp-tdx", tdx},
+		{"snp", snp}, {"sev-snp", snp},
+		{"tdx", tdx},
 		{"", snp}, // validateConfig reports a missing platform, not this check
 	} {
 		t.Run(tc.platform, func(t *testing.T) {

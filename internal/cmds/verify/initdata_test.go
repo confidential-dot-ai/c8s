@@ -270,12 +270,6 @@ func TestVerifyEvidence_InitDataUnpinnedIsLabelled(t *testing.T) {
 	}
 }
 
-// applyInitDataNote is the single source of truth for the init-data fields: a
-// plan carrying --init-data takes the pinned note, an unpinned plan the
-// unpinned one, and a hard failure (oc.Error set) carries neither — the gate
-// that keeps JSON and text from disagreeing. On az-* the claim is the inner
-// report's HOST_DATA, not the field the pin binds (PCR[8]), so it is not
-// rendered as init-data even when pinned.
 func TestApplyInitDataNote(t *testing.T) {
 	result := &teetypes.VerificationResult{
 		SignatureValid: true,
@@ -301,35 +295,4 @@ func TestApplyInitDataNote(t *testing.T) {
 		t.Errorf("a failed verdict must carry no init-data fields, got %q / %q", failed.InitData, failed.InitDataNote)
 	}
 
-	azResult := &teetypes.VerificationResult{
-		SignatureValid: true,
-		Platform:       teetypes.PlatformAzSNP,
-		Claims:         teetypes.Claims{LaunchDigest: "ab" + strings.Repeat("00", 47), InitData: make([]byte, 32)},
-	}
-	azEv := &evidence{platform: "az-snp", source: "test"}
-	azPinned := finalOutcome(config{}, azEv, azResult, &verifyPlan{policy: &ratls.VerifyPolicy{}, initDataHash: make([]byte, 32)})
-	if azPinned.InitData != "" {
-		t.Errorf("az verdict must not render the inner HOST_DATA as init-data, got %q", azPinned.InitData)
-	}
-	if !strings.Contains(azPinned.InitDataNote, "PCR[8]") {
-		t.Errorf("a pinned az verdict must report the enforced PCR[8] pin, got %q", azPinned.InitDataNote)
-	}
-	var azOut bytes.Buffer
-	renderText(config{}, azPinned, &azOut)
-	if rendered := azOut.String(); !strings.Contains(rendered, "init-data:") || !strings.Contains(rendered, "PCR[8]") ||
-		strings.Contains(rendered, "init-data:    "+strings.Repeat("00", 32)) {
-		t.Errorf("az render must show the PCR[8] pin, never the inner HOST_DATA:\n%s", rendered)
-	}
-
-	// The az note leaks identically on a failed verdict without the gate.
-	azFailed := Outcome{Platform: "az-snp", Error: "a later policy failed"}
-	applyInitDataNote(&azFailed, azResult, &verifyPlan{policy: &ratls.VerifyPolicy{}, initDataHash: make([]byte, 32)})
-	if azFailed.InitDataNote != "" {
-		t.Errorf("a failed az verdict must carry no init-data note, got %q", azFailed.InitDataNote)
-	}
-
-	azUnpinned := finalOutcome(config{}, azEv, azResult, &verifyPlan{policy: &ratls.VerifyPolicy{}})
-	if azUnpinned.InitData != "" || azUnpinned.InitDataNote != "" {
-		t.Errorf("an unpinned az verdict renders no init-data line, got %q / %q", azUnpinned.InitData, azUnpinned.InitDataNote)
-	}
 }

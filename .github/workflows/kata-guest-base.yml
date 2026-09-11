@@ -225,11 +225,11 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: attestation-rs/target/release/attestation-api
-          key: ${{ runner.os }}-attestation-api-${{ steps.pins.outputs.attest }}-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**') }}
+          key: ${{ runner.os }}-attestation-api-${{ steps.pins.outputs.attest }}-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**', 'c8s/scripts/build-native-attestation.sh') }}
 
       # attestation-api links tss-esapi-sys, whose build.rs resolves the TPM2-TSS
       # system library via pkg-config (tss2-sys.pc, shipped by libtss2-dev) for
-      # the TPM/vTPM path. Mirrors attestation-rs's own CI.
+      # the upstream attest dependency, even with only native platforms enabled.
       - name: Install attestation-api build deps (TPM2-TSS)
         if: steps.attestation-api-cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev
@@ -246,7 +246,7 @@ jobs:
         id: build-attestation-api
         if: steps.attestation-api-cache.outputs.cache-hit != 'true'
         working-directory: attestation-rs
-        run: cargo build --release -p attestation-api --bin attestation-api
+        run: ../c8s/scripts/build-native-attestation.sh .
 
       # Save now, before the kata-guest-base step that fails today — see the
       # restore-step note for why the unified cache action wouldn't.

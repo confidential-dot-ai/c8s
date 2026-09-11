@@ -82,8 +82,8 @@ func ratlsServingCert(t *testing.T) tls.Certificate {
 		t.Fatal(err)
 	}
 	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
-		Evidence: json.RawMessage(`{"hcl_report":"fake"}`),
+		Platform: string(types.PlatformTdx),
+		Evidence: json.RawMessage(`{"td_quote":"fake"}`),
 	})
 	if err != nil {
 		t.Fatal(err)

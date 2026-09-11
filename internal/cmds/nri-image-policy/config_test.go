@@ -550,13 +550,6 @@ allowlist:
 		}
 	})
 
-	t.Run("az-tdx normalizes onto tdx, matching CDS", func(t *testing.T) {
-		cfg := writeAndLoad(t, "platform: az-tdx\n"+floor)
-		if got := cfg.NormalizedPlatform(); got != "tdx" {
-			t.Errorf("NormalizedPlatform() = %q, want tdx", got)
-		}
-	})
-
 	t.Run("an unknown platform is refused at load", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "c.yaml")
 		if err := os.WriteFile(path, []byte("platform: nitro\n"+floor), 0o600); err != nil {

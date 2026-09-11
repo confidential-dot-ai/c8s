@@ -22,11 +22,12 @@ func TestTEETypeForPlatform(t *testing.T) {
 		wantErr bool
 	}{
 		"snp":     {ratls.TEETypeSEVSNP, false},
-		"az-snp":  {ratls.TEETypeSEVSNP, false},
-		"gcp-snp": {ratls.TEETypeSEVSNP, false},
 		"tdx":     {ratls.TEETypeTDX, false},
-		"az-tdx":  {ratls.TEETypeTDX, false},
 		"auto":    {0, true},
+		"az-snp":  {0, true},
+		"az-tdx":  {0, true},
+		"gcp-snp": {0, true},
+		"gcp-tdx": {0, true},
 		"":        {0, true},
 	}
 	for platform, tc := range cases {

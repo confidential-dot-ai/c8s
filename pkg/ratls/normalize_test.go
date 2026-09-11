@@ -11,10 +11,7 @@ func TestNormalizePlatform(t *testing.T) {
 		{" ", ""},
 		{"snp", "sev-snp"},
 		{"SEV-SNP", "sev-snp"},
-		{"az-snp", "sev-snp"},
-		{"gcp-snp", "sev-snp"},
 		{"tdx", "tdx"},
-		{"az-tdx", "tdx"},
 		{"unknown", "unknown"},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
@@ -22,5 +19,13 @@ func TestNormalizePlatform(t *testing.T) {
 				t.Fatalf("NormalizePlatform(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRejectCloudPlatformAliases(t *testing.T) {
+	for _, platform := range []string{"az-snp", "az-tdx", "gcp-snp", "gcp-tdx"} {
+		if err := ValidatePlatform(platform); err == nil {
+			t.Errorf("accepted removed platform %q", platform)
+		}
 	}
 }

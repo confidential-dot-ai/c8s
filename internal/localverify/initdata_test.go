@@ -32,10 +32,6 @@ func TestVerify_InitDataPinMatchesEvidence(t *testing.T) {
 	}
 }
 
-// The relying-party refusal the issue asks for: evidence whose init-data
-// digest differs from the pin is rejected by the verifier, not merely
-// reported. This is the engine's refusal — the SNP HOST_DATA and az-snp
-// PCR[8] bindings both fail closed, naming the field.
 func TestVerify_InitDataPinMismatchIsRefused(t *testing.T) {
 	mismatched := bytes.Repeat([]byte{0xab}, 32)
 
@@ -48,16 +44,6 @@ func TestVerify_InitDataPinMismatchIsRefused(t *testing.T) {
 		}
 	})
 
-	// The az-snp fixture's PCR[8] is zero — no init-data was extended into the
-	// vTPM — so any pin refuses at the PCR[8] binding.
-	t.Run("az-snp PCR[8]", func(t *testing.T) {
-		platform, evidence := envelopeFixture(t, "azsnp-evidence-v1.json")
-		if _, err := Verify(context.Background(), platform, evidence, Params{ExpectedInitDataHash: mismatched}); err == nil {
-			t.Fatal("a PCR[8] binding that differs from the pin must be refused")
-		} else if !strings.Contains(err.Error(), "PCR[8]") {
-			t.Fatalf("the refusal must name the failing field, got: %v", err)
-		}
-	})
 }
 
 // enforceResult is the fail-closed backstop: a pin the verdict does not

@@ -77,13 +77,9 @@ func (b *Base64Bytes) UnmarshalJSON(data []byte) error {
 type Platform = teetypes.PlatformType
 
 const (
-	PlatformAuto   Platform = "auto"
-	PlatformSnp             = teetypes.PlatformSNP
-	PlatformTdx             = teetypes.PlatformTDX
-	PlatformAzSnp           = teetypes.PlatformAzSNP
-	PlatformAzTdx           = teetypes.PlatformAzTDX
-	PlatformGcpSnp          = teetypes.PlatformGcpSNP
-	PlatformGcpTdx          = teetypes.PlatformGcpTDX
+	PlatformAuto Platform = "auto"
+	PlatformSnp           = teetypes.PlatformSNP
+	PlatformTdx           = teetypes.PlatformTDX
 )
 
 // AttestRequest is the request body for the attestation-api POST /attest.

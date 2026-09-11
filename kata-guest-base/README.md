@@ -75,8 +75,9 @@ comes up independently.
 sudo apt-get install -y docker.io && sudo systemctl enable --now docker
 
 # Once per c8s/attestation-rs revision: build the in-guest binaries.
+# The attestation wrapper restricts the build checkout's default features to SNP/TDX.
 cd /workspace/c8s            && make build-c8s-node && make build-policy-monitor && make build-rtmr3-measurer && make build-volumed
-cd /workspace/attestation-rs && cargo build --release -p attestation-api --bin attestation-api --target x86_64-unknown-linux-musl
+/workspace/c8s/scripts/build-native-attestation.sh /workspace/attestation-rs --target x86_64-unknown-linux-musl
 
 # Stage the binaries + the bootstrap allowlist into extra/. (The attester
 # unit + config are recipe-owned, already under extra/.) IMAGE_TAG pins

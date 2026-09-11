@@ -264,9 +264,6 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 	evidence := att.embedded
 	switch att.TEEType {
 	case TEETypeSEVSNP:
-		// Envelope platforms (az-snp) embed their evidence in the
-		// extension directly; bare-metal SNP carries the raw report,
-		// which is wrapped in the "snp" evidence envelope here.
 		if evidence == nil {
 			var err error
 			if evidence, err = snpEvidence(att.Report); err != nil {
@@ -274,7 +271,7 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 			}
 		}
 		switch evidence.Platform {
-		case string(types.PlatformSnp), string(types.PlatformAzSnp), string(types.PlatformGcpSnp):
+		case string(types.PlatformSnp):
 		default:
 			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 		}
@@ -287,7 +284,7 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 			return nil, fmt.Errorf("%w: TDX RA-TLS extension missing evidence envelope", ErrInvalidReport)
 		}
 		switch evidence.Platform {
-		case string(types.PlatformTdx), string(types.PlatformAzTdx), string(types.PlatformGcpTdx):
+		case string(types.PlatformTdx):
 		default:
 			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 		}
@@ -342,7 +339,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 	}
 
 	teeType := TEETypeSEVSNP
-	if teetypes.NormalizePlatform(evidence.Platform).IsTDX() {
+	if teetypes.NormalizePlatform(evidence.Platform) == teetypes.PlatformTDX {
 		teeType = TEETypeTDX
 	}
 	result := &VerifyResult{TEEType: teeType}

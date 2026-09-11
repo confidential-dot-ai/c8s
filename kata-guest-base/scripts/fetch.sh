@@ -40,7 +40,7 @@
 # Locally:
 #   cd /workspace/c8s            && make build-c8s-node
 #   cd /workspace/c8s            && make build-policy-monitor
-#   cd /workspace/attestation-rs && cargo build --release -p attestation-api --bin attestation-api
+#   /workspace/c8s/scripts/build-native-attestation.sh /workspace/attestation-rs
 #     (build needs the TPM2-TSS dev headers: apt-get install -y libtss2-dev)
 #   IMAGE_TAG=<c8s-release-tag> /workspace/c8s/kata-guest-base/scripts/fetch.sh
 #
@@ -138,7 +138,7 @@ ATTESTATION_BIN="${ATTESTATION_BIN:-${ATTESTATION_DIR}/target/release/attestatio
 if [[ ! -x "${ATTESTATION_BIN}" ]]; then
     echo "FATAL: ${ATTESTATION_BIN} missing" >&2
     echo "       Build first:" >&2
-    echo "         cd ${ATTESTATION_DIR} && cargo build --release -p attestation-api --bin attestation-api" >&2
+    echo "         ${C8S_DIR}/scripts/build-native-attestation.sh ${ATTESTATION_DIR}" >&2
     exit 1
 fi
 install -m 0755 "${ATTESTATION_BIN}" "${BIN_DIR}/attestation-service"

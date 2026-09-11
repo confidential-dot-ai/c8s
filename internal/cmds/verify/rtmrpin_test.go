@@ -263,12 +263,8 @@ func TestRTMRPinRejectsNonTDXPlatform(t *testing.T) {
 	}
 }
 
-// The TDX platform tag is attester-chosen and covered by no transcript, and
-// attestation-go verifies "tdx", "az-tdx" and "gcp-tdx" through one path. Every
-// TDX policy decision must therefore normalize the tag: a cloud-prefixed
-// variant must neither escape a TDX-only rule nor trip one that does not apply.
 func TestTDXPolicyDecisionsNormalizeThePlatformTag(t *testing.T) {
-	for _, tag := range []string{"tdx", "az-tdx", "gcp-tdx"} {
+	for _, tag := range []string{"tdx"} {
 		t.Run(tag+" cannot escape the MRTD-only rejection", func(t *testing.T) {
 			cfg := config{measurements: []string{testMRTD}}
 			result := tdxResult(testMRTD, matchingRTMRs())

@@ -92,8 +92,6 @@ func TestRenderValuesHostedLaneExemptNamespaces(t *testing.T) {
 		cvmMode string
 		want    any
 	}{
-		{"aks", []any{"kube-system"}},
-		{"gke", []any{"kube-system"}},
 		{"pod", []any{"kube-system"}},
 		// node's baked floor already carries the system digests.
 		{"node", nil},

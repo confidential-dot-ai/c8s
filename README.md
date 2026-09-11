@@ -47,7 +47,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - [confidential.ai](https://confidential.ai), the company behind c8s
 - [Documentation](https://confidential.ai/docs/c8s), the full user-facing docs
 - [Whitepaper](https://confidential.ai/docs/whitepapers/c8s), the c8s architecture paper (also on [arXiv](https://arxiv.org/abs/2604.26974))
-- [Your first confidential cluster](https://confidential.ai/docs/c8s/tutorials/first-confidential-cluster), an end-to-end tutorial from bare cloud account to verified confidential workload
+- [Your first confidential cluster](https://confidential.ai/docs/c8s/tutorials/first-confidential-cluster), an end-to-end tutorial from native TEE hardware to a verified confidential workload
 - [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js), verify a c8s cluster from a browser
 - [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs), the TEE evidence verification service c8s uses
 - [RA-TLS](docs/ratls.md), how attested TLS works in c8s — the handshake step by step, the guarantees, and which certificate is used where
@@ -111,9 +111,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   no special client, via [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js).
 
 - **One-command install.** `c8s install --cvm-mode=<shape>` brings all of this
-  to an existing cluster (vanilla Kubernetes or RKE2, including AKS
-  confidential node pools, where both SEV-SNP and Intel TDX attest through the
-  Azure vTPM).
+  to an existing Kubernetes or RKE2 cluster on native SEV-SNP or Intel TDX hardware.
 
 ## Architecture
 
@@ -127,8 +125,7 @@ containers inside it. A verifier checks the node's launch digest; everything
 on the node is inside that one boundary, including the kubelet. Every pod
 shares that boundary, so **node-as-CVM is single-tenant**: it isolates the
 node from the host, not workloads from each other. This is the simplest and
-densest shape, and the only one available on managed services without nested
-virtualization (for example Azure AKS).
+densest shape.
 
 ```text
                              NODE-AS-CVM
@@ -239,8 +236,8 @@ c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
   --upstream vllm
 ```
 
-`--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
-node-as-CVM shapes, `pod` is pod-as-CVM. `--hardware-platform` is required the
+`--cvm-mode` is required and has no default — `node` is
+node-as-CVM, `pod` is pod-as-CVM. `--hardware-platform` is required the
 same way: `sev-snp` or `tdx`. An unstated shape would silently mismatch the
 cluster it lands on, so the install refuses to guess.
 
@@ -615,8 +612,7 @@ than let you discover them:
 
 - **Pod-as-CVM picks one CPU TEE per install.** Both SEV-SNP and TDX are
   supported, but `--hardware-platform` selects one for the whole cluster;
-  mixed SNP+TDX clusters are not. Pod-as-CVM is also unavailable on Azure,
-  which does not expose nested virtualization.
+  mixed SNP+TDX clusters are not.
 
 - **GPU attestation is not wired end to end.** GPU passthrough into
   confidential pods works, and both the kata GPU guest and the node CVM fail

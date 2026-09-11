@@ -73,7 +73,7 @@ const (
 // the one its endpoint mode selects.
 type AttestationBundle struct {
 	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
-	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
+	Platform   string          `json:"platform"`     // "snp" | "tdx"
 	Generation string          `json:"generation"`   // AMD gen for "snp": milan|genoa|turin; empty otherwise
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
 	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence

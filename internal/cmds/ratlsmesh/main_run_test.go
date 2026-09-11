@@ -229,7 +229,7 @@ func TestNewKubeClientsetConfigOutcomes(t *testing.T) {
 		return &rest.Config{
 			Host:         "https://127.0.0.1:1",
 			ExecProvider: &clientcmdapi.ExecConfig{Command: "true", APIVersion: "client.authentication.k8s.io/v1"},
-			AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "azure"},
+			AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "unsupported"},
 		}, nil
 	}
 	if cs, err := newKubeClientset(""); err == nil || !strings.Contains(err.Error(), "k8s clientset") {

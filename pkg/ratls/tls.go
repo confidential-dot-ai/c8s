@@ -949,21 +949,15 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 	}
 }
 
-// NormalizePlatform maps the platform aliases used across the stack (cloud
-// prefixes like az-/gcp-, and "snp") to the two canonical values the RA-TLS
-// package understands: "sev-snp" and "tdx". The alias table is
-// teetypes.Family; this wrapper additionally accepts the two family names
-// themselves as input, since configs carry them. Unknown values pass through
-// lowercased/trimmed so ValidatePlatform can reject them with a clear error.
-// Call it to canonicalize a value for display or comparison; the package
-// entry points normalize their own input.
+// NormalizePlatform canonicalizes native SNP/TDX names; unknown values remain
+// unchanged except for case and whitespace so validation can reject them.
 func NormalizePlatform(platform string) string {
 	p := teetypes.NormalizePlatform(platform)
 	if string(p) == string(teetypes.FamilySNP) {
 		return string(teetypes.FamilySNP)
 	}
-	if f := p.Family(); f != teetypes.FamilyUnknown {
-		return string(f)
+	if p == teetypes.PlatformSNP {
+		return "sev-snp"
 	}
 	return string(p)
 }

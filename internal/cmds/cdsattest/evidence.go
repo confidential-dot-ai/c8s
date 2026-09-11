@@ -25,12 +25,8 @@ var _ EvidenceProvider = LiveEvidenceProvider{}
 // bound to reportData. This is the production path; it requires a reachable
 // attestation-api and runs inside the LB's CVM.
 type LiveEvidenceProvider struct {
-	Client   attestationclient.Client
-	Platform types.Platform // e.g. types.PlatformSnp
-	// Generation is the AMD processor generation the browser's bare-SNP
-	// verifier needs. It is meaningful only for PlatformSnp; the other
-	// platforms auto-detect (az-snp) or have no generation concept (TDX),
-	// and the bundle field is left empty for them.
+	Client     attestationclient.Client
+	Platform   types.Platform // e.g. types.PlatformSnp
 	Generation string
 }
 

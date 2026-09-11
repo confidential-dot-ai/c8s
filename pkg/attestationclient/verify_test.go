@@ -99,13 +99,7 @@ func TestVerifyEvidenceWireForm(t *testing.T) {
 		platform string
 		wantLen  int
 	}{
-		// The Azure vTPM platforms bind via a TPM nonce of exactly the 48-byte
-		// digest (az-snp wraps an SNP report, az-tdx wraps a TD quote).
-		{string(types.PlatformAzSnp), sha512.Size384},
-		{string(types.PlatformAzTdx), sha512.Size384},
-		// Native platforms carry the full 64-byte REPORTDATA field.
 		{string(types.PlatformSnp), 64},
-		{string(types.PlatformGcpSnp), 64},
 		{string(types.PlatformTdx), 64},
 	}
 	for _, tc := range cases {
@@ -224,21 +218,21 @@ func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("az-tdx enforces MRTD surfaced as launch digest", func(t *testing.T) {
-		srv := verifyServer(t, verifyResult("az-tdx", true, boolPtr(true), measurement), nil)
+	t.Run("tdx enforces MRTD surfaced as launch digest", func(t *testing.T) {
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), measurement), nil)
 		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
-			types.AttestationEvidence{Platform: string(types.PlatformAzTdx), Evidence: json.RawMessage(`{}`)},
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
 			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
 		if err != nil {
 			t.Fatalf("VerifyEvidence: %v", err)
 		}
 	})
 
-	t.Run("az-tdx rejects MRTD outside the pinned set", func(t *testing.T) {
+	t.Run("tdx rejects MRTD outside the pinned set", func(t *testing.T) {
 		other := bytes.Repeat([]byte{0x01}, launchMeasurementSize)
-		srv := verifyServer(t, verifyResult("az-tdx", true, boolPtr(true), other), nil)
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), other), nil)
 		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
-			types.AttestationEvidence{Platform: string(types.PlatformAzTdx), Evidence: json.RawMessage(`{}`)},
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
 			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
 		if !errors.Is(err, ErrMeasurementNotAllowed) {
 			t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
@@ -247,13 +241,22 @@ func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 }
 
 func TestVerifyEvidenceUnsupportedPlatformFailsClosed(t *testing.T) {
-	srv := verifyServer(t, verifyResult("az-tdx", true, boolPtr(true), nil), nil)
+	srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), nil), nil)
 	for _, platform := range []string{"dstack", "sgx", ""} {
 		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
 			types.AttestationEvidence{Platform: platform, Evidence: json.RawMessage(`{}`)},
 			EvidencePolicy{})
 		if !errors.Is(err, ErrUnsupportedPlatform) {
 			t.Fatalf("platform %q: want ErrUnsupportedPlatform, got: %v", platform, err)
+		}
+	}
+}
+
+func TestVerifyEnforcedRejectsCloudPlatforms(t *testing.T) {
+	for _, platform := range []string{"az-snp", "az-tdx", "gcp-snp", "gcp-tdx"} {
+		_, err := NewClient("http://127.0.0.1:1").VerifyEnforced(context.Background(), types.VerifyRequest{Platform: platform})
+		if !errors.Is(err, ErrUnsupportedPlatform) {
+			t.Errorf("platform %q: want rejection before HTTP, got %v", platform, err)
 		}
 	}
 }

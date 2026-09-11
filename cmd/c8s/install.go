@@ -81,15 +81,15 @@ const (
 )
 
 // allowedCvmModes is the --cvm-mode enum. pod is per-pod confidential VMs via
-// the Kata runtime (what --kata used to select before this replaced it); node/gke/aks are host-shaped
-// deployments. There is no default: the shape must be stated explicitly.
-var allowedCvmModes = []string{"pod", "node", "gke", "aks"}
+// the Kata runtime (what --kata used to select before this replaced it); node is a host-shaped
+// deployment. There is no default: the shape must be stated explicitly.
+var allowedCvmModes = []string{"pod", "node"}
 
 // hostedCvmModes are the lanes whose platform pods belong to the cluster
 // provider rather than to c8s, so they are absent from the allowlist the
 // install derives. cvmMode=node is not one: its baked floor already carries the
 // system digests.
-var hostedCvmModes = []string{"pod", "gke", "aks"}
+var hostedCvmModes = []string{"pod"}
 
 // platformExemptNamespace is the namespace those provider pods run in.
 const platformExemptNamespace = "kube-system"
@@ -1056,7 +1056,7 @@ cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
 containerd-prep initContainer that wires up the drop-in import; no node
 preparation is required beyond a running cluster.
 
-On the hosted lanes (--cvm-mode=pod/gke/aks) the provider's kube-system pods are
+On the hosted lanes (--cvm-mode=pod) the provider's kube-system pods are
 not on the c8s allowlist, so the install renders
 nriImagePolicy.policy.exemptNamespaces=[kube-system], admitting them by the
 digests they run at the plugin's first connect. A -f file that sets that key
@@ -1317,19 +1317,12 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// the values, so it runs with -f too — but under --cvm-mode=pod the
 		// block above already checked the effective tdxNodeSelector (which
 		// may be customized or cleared), so skip the fixed-key check there.
-		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !cvmModeIsPod(installCvmMode) {
+		if installHardwarePlatform == "tdx" && !cvmModeIsPod(installCvmMode) {
 			if err := preflightTDXNodes(cmd.Context()); err != nil {
 				return err
 			}
 		}
 
-		// The install always ships pods that exceed the restricted pod-security
-		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
-		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
-		// attestation-api needs SYS_RAWIO (node/gke) or privileged (aks).
-		// --cvm-mode=pod adds kata-deploy on top. No supported shape fits restricted, so
-		// the namespace is always labelled privileged (a CIS-hardened cluster, e.g.
-		// RKE2 with profile: cis, would otherwise reject those pods at admission).
 		if err := applyNamespace(cmd.Context(), installNamespace); err != nil {
 			return err
 		}
@@ -1547,62 +1540,8 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 	)
 }
 
-// appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
-// values. The chart re-validates, so the allowed check is a fast typo guard
-// before shelling to helm.
-//
-// cvm-mode selects which TEE device gets mounted (it does NOT vary the privilege
-// level — all modes render privileged: true, since a hostPath device mount alone
-// does not grant device-cgroup access):
-//
-//	pod, node, gke → native /dev/sev-guest (SEV-SNP) by default, or
-//	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
-//	aks            → vTPM /dev/tpm0
-//
-// pod, node, and gke are distinct deployment targets that happen to share the
-// native-TEE-device wiring (they are NOT aliases):
-//
-//	pod  → per-pod confidential VMs via the Kata runtime: every workload pod is
-//	       a kata CVM. appendKataInstallArgs turns on the kata stack and turns
-//	       off host-side attestation-api/nri/ratls-mesh (served by the in-guest
-//	       counterparts baked into kata-guest-base). The device is still mounted
-//	       for the host-side attestation-api that kata-guest-base derives from.
-//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
-//	       self-managed) are themselves confidential VMs. Pods run as ordinary
-//	       processes attested via the node's own quote. Cloud-agnostic. The node
-//	       image bakes attestation-api and nri-image-policy, so both are disabled
-//	       here (ratlsMesh is not baked, stays on).
-//	gke  → GKE specifically: Google's managed confidential VMs.
-//
-// GKE is the reason a plain managed→vTPM mapping is wrong: GKE confidential VMs
-// are a managed cloud but still expose the native /dev/sev-guest ioctl, not a
-// vTPM. The chart's teeDevices default is the SNP shape; this flips it as
-// needed per (mode, platform). Without it a `--cvm-mode aks` install would
-// mount /dev/sev-guest (absent on AKS), and a bare-metal TDX host would
-// similarly mount the wrong device — the attestation-api pod would fail the
-// hostPath CharDevice check.
-//
-// `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
-// ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
-// (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
-// tdx). aks uses the Azure vTPM path regardless of the CPU TEE: the node's
-// vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
-// on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
-// aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
-// from the vTPM), and the mesh/CDS RA-TLS platform is set to tdx accordingly.
-//
-// Mixed-hardware inside a single cluster (some SNP hosts, some TDX hosts) is
-// out of scope for now — a cluster is one hardware platform. Mixed support
-// would want the attestation-api DaemonSet split per-platform with per-node
-// label selectors, and ratlsmesh's `--platform` similarly per-node.
-// Follow-up work.
-//
-// aks also opts the pod-injector MutatingWebhookConfiguration out of AKS's
-// "admissionsenforcer" controller (annotation admissions.enforcer/disabled),
-// which otherwise rewrites the webhook namespaceSelector and makes every helm
-// re-apply conflict. That is rendered chart-side off attestationApi.cvmMode (so
-// GitOps/HelmRelease installs get it too), not emitted as a --set here; see
-// internal/helmchart/c8s/templates/webhook.yaml.
+// appendCvmModeInstallArgs wires native SNP or TDX devices for pod and node CVMs.
+// Node images bake attestation-api and image policy; pod mode uses the Kata guest.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
@@ -1611,66 +1550,27 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		return nil, err
 	}
 	helmArgs = append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode)
-	// Device wiring:
-	//   aks: vTPM (/dev/tpm0) regardless of --hardware-platform. On Azure the
-	//        node *is* the CVM and attestation rides the vTPM HCL report, which
-	//        wraps either an SNP report (az-snp) or a TD quote (az-tdx). AKS
-	//        exposes no /dev/sev-guest or /dev/tdx_guest to the guest, so the
-	//        vTPM is the only evidence source for both SNP and TDX aks nodes.
-	//   pod/node/gke + --hardware-platform sev-snp: native /dev/sev-guest
-	//   pod/node/gke + --hardware-platform tdx:     native /dev/tdx-guest
-	sevGuest, tdxGuest, tpm := "false", "false", "false"
-	switch {
-	case cvmMode == "aks":
-		tpm = "true"
-	case hardwarePlatform == "tdx":
+	sevGuest, tdxGuest := "false", "false"
+	if hardwarePlatform == "tdx" {
 		tdxGuest = "true"
-	default:
+	} else {
 		sevGuest = "true"
 	}
 	helmArgs = append(helmArgs,
 		"--set", "attestationApi.teeDevices.sevGuest="+sevGuest,
 		"--set", "attestationApi.teeDevices.tdxGuest="+tdxGuest,
-		"--set", "attestationApi.teeDevices.tpm="+tpm,
 	)
-	// Propagate the CPU TEE to every component that names its RA-TLS platform.
-	// These default to SNP in the chart; on a TDX cluster CDS (which self-warms
-	// its serving cert via the attestation-api and is non-privileged, so it
-	// cannot probe /dev/tdx_guest to auto-detect) and the ratls-mesh must be
-	// told `tdx` explicitly, or CDS parses the attestation-api's TDX quote as an
-	// SNP report and crash-loops ("evidence contains neither attestation_report
-	// nor hcl_report"). This holds for the Azure-vTPM TDX shape (aks + tdx,
-	// i.e. az-tdx) too: the vTPM HCL report carries a TD quote, so CDS and the
-	// mesh must expect the TDX family. cds.ratlsPlatform uses `snp`/`tdx`;
-	// ratlsMesh.platform uses `sev-snp`/`tdx` (both normalize az-tdx -> tdx).
+	// Propagate the CPU TEE to CDS and mesh certificate generation.
 	if hardwarePlatform == "tdx" {
 		helmArgs = append(helmArgs,
 			"--set-string", "cds.ratlsPlatform=tdx",
 			"--set-string", "ratlsMesh.platform=tdx",
 		)
 	}
-	// The tls-lb attestation sidecar is on by default (chart default); --attest=false
-	// omits it. When on, it passes this platform straight to the attestation-api
-	// as the evidence request, so the value must name the evidence SHAPE, not just
-	// the silicon: under aks the evidence is the Azure vTPM HCL report (az-snp /
-	// az-tdx), and the bare snp/tdx values would ask for /dev/sev-guest //dev/tdx_guest
-	// evidence that Azure CVM nodes cannot produce — every attest-pq/attest-lb call
-	// then fails 502 attestation_unavailable. generation is AMD-only (Genoa/Milan/…):
-	// az-snp auto-detects it from the report CPUID and TDX has no such concept, so
-	// every override blanks it rather than ship the chart-default codename (genoa)
-	// for hardware it never checked.
+	// Select native evidence for the optional attestation sidecar.
 	switch {
 	case !installAttestEnabled:
 		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")
-	case cvmMode == "aks":
-		attestPlatform := "az-snp"
-		if hardwarePlatform == "tdx" {
-			attestPlatform = "az-tdx"
-		}
-		helmArgs = append(helmArgs,
-			"--set-string", "tlsLb.attest.platform="+attestPlatform,
-			"--set-string", "tlsLb.attest.generation=",
-		)
 	case hardwarePlatform == "tdx":
 		helmArgs = append(helmArgs,
 			"--set-string", "tlsLb.attest.platform=tdx",
@@ -1709,7 +1609,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	}
 	helmArgs = append(helmArgs, pinArgs...)
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
-	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
+	// components that speak to CDS. In node the node IS the CVM, so that
 	// is the node image's M. In pod mode those components are per-pod kata
 	// guests, so the value is instead the kata-guest-base launch digest for the
 	// pod shape CDS runs in — compute it with `c8s kata measure`, not from the
@@ -2494,13 +2394,13 @@ func init() {
 	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory. Under --cvm-mode=pod volumes are served by the in-guest volumed baked into kata-guest-base, so nothing is deployed")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod confidential VMs via the Kata runtime — every workload pod is a kata CVM, host-side attestation-api/nri/ratls-mesh served by the in-guest counterparts), node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant. Only pod isolates workloads from each other")
-	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Under --cvm-mode=aks the CPU TEE rides the Azure vTPM: sev-snp selects az-snp and tdx selects az-tdx (no guest device needed — the report comes from /dev/tpm0)")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED): pod (per-pod confidential VMs via Kata) or node (single-tenant native SNP/TDX CVM nodes with baked attestation-api and image policy)")
+	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED): sev-snp (/dev/sev-guest) or tdx (Intel TDX)")
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network. Under --cvm-mode=pod the inventory runs inside each kata guest on its pod IP, so the default is the cluster's pod range(s) (from spec.podCIDRs; set this explicitly when the CNI runs its own IPAM)")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
 	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")

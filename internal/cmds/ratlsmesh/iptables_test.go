@@ -82,7 +82,7 @@ func TestBuildPodIPSetRulesDualStack(t *testing.T) {
 
 // TestBuildPodIPSetRulesIPv4Only asserts that an IPv4-only node IP installs
 // IPv4 OUTPUT+PREROUTING but skips the IPv6 PREROUTING rule entirely — no
-// REDIRECT fallback, which would silently reintroduce the AKS bug for IPv6.
+// REDIRECT fallback, which would silently reintroduce the redirected-connection bug for IPv6.
 func TestBuildPodIPSetRulesIPv4Only(t *testing.T) {
 	rules := mustBuildPodIPSetRules(t, 15001, 1337, nil, map[iptablesFamily]string{
 		iptablesFamilyIPv4: "10.0.0.1",

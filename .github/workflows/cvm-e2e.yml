@@ -27,7 +27,7 @@ on:
   workflow_call:
     inputs:
       platform:
-        description: 'target cell: snp-metal (the only wired cell). TDX metal is NOT here: it has its own console-free lane, tdx-metal-e2e.yml. gke-snp and gke-tdx are unwired stubs.'
+        description: 'target cell: snp-metal (the only wired cell). TDX metal is NOT here: it has its own console-free lane, tdx-metal-e2e.yml.'
         type: string
         required: true
       runner:
@@ -94,7 +94,7 @@ jobs:
                                  echo "NODE_LABEL=confidential.ai/sev-snp"; echo "GUEST_MARKER=sev-snp-guest" ;;
             snp-metal/base-cpu)  echo "REFS_CM=base-image-refs"; echo "CORES=4"; echo "MEMORY=8Gi";
                                  echo "NODE_LABEL=confidential.ai/sev-snp"; echo "GUEST_MARKER=sev-snp-guest" ;;
-            *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired here (tdx-metal has its own lane: tdx-metal-e2e.yml; gke-* are stubs)" >&2; exit 1 ;;
+            *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired here (tdx-metal has its own lane: tdx-metal-e2e.yml)" >&2; exit 1 ;;
           esac >> "$GITHUB_ENV"
           # RAM override (standing multi-runner CVM). Not in the launch digest,
           # so the golden is unchanged.

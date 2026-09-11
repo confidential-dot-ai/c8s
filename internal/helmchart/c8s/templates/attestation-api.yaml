@@ -56,9 +56,9 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationApi.port }}
           securityContext:
-            {{- if has .Values.attestationApi.cvmMode (list "pod" "node" "gke" "aks") }}
+            {{- if has .Values.attestationApi.cvmMode (list "pod" "node") }}
             # All modes need privileged. A hostPath device mount does NOT add a
-            # device-cgroup rule, so open(/dev/sev-guest|/dev/tdx-guest|/dev/tpm0)
+            # device-cgroup rule, so open(/dev/sev-guest|/dev/tdx-guest)
             # is EPERM from an unprivileged container regardless of SYS_RAWIO
             # (cgroup v2 eBPF device controller; K8s has no securityContext field
             # for a single device rule). TODO: drop privileged by routing SNP/TDX
@@ -76,7 +76,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
             {{- else }}
-{{ fail (printf "attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
+{{ fail (printf "attestationApi.cvmMode must be one of pod, node (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
           # The API's health signal is the attest-proxy's exec probe: the API
           # binds pod loopback, which kubelet cannot dial.
@@ -102,12 +102,6 @@ spec:
             # through its own devfs, no hostPath needed there.
             - name: tdx-tsm-configfs
               mountPath: /sys/kernel/config
-            {{- end }}
-            {{- if .Values.attestationApi.teeDevices.tpm }}
-            - name: tpm
-              mountPath: /dev/tpm0
-            - name: tpmrm
-              mountPath: /dev/tpmrm0
             {{- end }}
           resources:
 {{ toYaml .Values.attestationApi.resources | indent 12 }}
@@ -178,16 +172,6 @@ spec:
           hostPath:
             path: /sys/kernel/config
             type: Directory
-        {{- end }}
-        {{- if .Values.attestationApi.teeDevices.tpm }}
-        - name: tpm
-          hostPath:
-            path: /dev/tpm0
-            type: CharDevice
-        - name: tpmrm
-          hostPath:
-            path: /dev/tpmrm0
-            type: CharDevice
         {{- end }}
         # Shared with the admission inventory — see c8s.attestationApiSocket.
         - name: socket-dir

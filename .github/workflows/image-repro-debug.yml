@@ -97,7 +97,7 @@ jobs:
           NVAT_USE_SYSTEM_LIB: "1"
         working-directory: attestation-rs
         run: |
-          cargo build -p attestation-api --release --features nvidia-gpu-attest --bin attestation-api
+          ../c8s/scripts/build-native-attestation.sh . --features nvidia-gpu-attest
           ldd target/release/attestation-api | grep -q libnvat
 
       - name: Build twice

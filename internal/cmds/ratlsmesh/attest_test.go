@@ -14,10 +14,6 @@ import (
 )
 
 func TestMakeAttestFunc_ReportDataSize(t *testing.T) {
-	// Simulate the data flow: ReportDataForKey returns a 64-byte array
-	// (48-byte SHA-384 hash + 16 zero bytes). makeAttestFunc must send
-	// only the 48-byte hash to the attestation-api, NOT the full
-	// 64-byte padded array. Sending 64 bytes causes TPM_RC_SIZE on vTPMs.
 	stub := testattest.New(t)
 	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
 

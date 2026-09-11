@@ -68,7 +68,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.expectedWorkload, "expected-workload", "", "gate /readyz on the mesh identity leaf carrying a matched-workload stamp with this exact name; empty keeps /readyz unconditionally 200")
 	f.StringVar(&cfg.evidenceFixture, "evidence-fixture", "", "DEV ONLY: serve recorded TEE evidence from this file instead of the attestation-api")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
-	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|az-snp|az-tdx|tdx")
+	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|tdx")
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "established-session idle TTL")
 	f.DurationVar(&cfg.sessionMaxAge, "session-max-age", defaultSessionMaxAge, "absolute session lifetime: a session's keys retire this long after establishment, however busy it is")
@@ -93,8 +93,8 @@ func run(cfg config) error {
 	}
 	// Same rule as front-door-mode: the advertised TEE is a trust statement,
 	// so the deployer must state it.
-	if cfg.platform == "" {
-		return fmt.Errorf("--platform is required: snp, az-snp, az-tdx, or tdx")
+	if cfg.platform != "snp" && cfg.platform != "tdx" {
+		return fmt.Errorf("--platform is required and must be snp or tdx")
 	}
 
 	var provider EvidenceProvider

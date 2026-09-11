@@ -192,11 +192,6 @@ func parseConfig(data []byte) (*config, error) {
 	return cfg, nil
 }
 
-// NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
-// RA-TLS extension records, matching what CDS does with its own
-// --ratls-platform. Defaulting here rather than in loadConfig keeps every
-// construction path on the same value, including callers that build a config
-// literal and validate it directly.
 func (c *config) NormalizedPlatform() string {
 	if strings.TrimSpace(c.Platform) == "" {
 		return ratls.NormalizePlatform(string(types.PlatformSnp))

@@ -80,7 +80,6 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		"sha256:8b5758a10a31a21dd70145bee3ee48f46147fb7fe5d209305461f6aa18bbe6d5": "docker.io/rancher/mirrored-cilium-hubble-ui-backend:v0.13.3",
 		"sha256:867c82633de1f2b48ea6227902861f7119bd41d46362e503068d6cd2525eeb74": "docker.io/rancher/mirrored-cilium-hubble-ui:v0.13.3",
 		"sha256:09af2b5afbccde507fb9e05250b81cacd54ea3bdd71cd08efa453bc775ade0f4": "docker.io/rancher/mirrored-cilium-operator-aws:v1.19.1",
-		"sha256:3a9859ed15a5c601510946c0e4c5806c2344ddcb194a697554de377af6f26134": "docker.io/rancher/mirrored-cilium-operator-azure:v1.19.1",
 		"sha256:c042b8091d611188cbdba24ec1c0b78343745b68df7f5dfc12858e4ecd1000f9": "docker.io/rancher/mirrored-cilium-operator-generic:v1.19.1",
 		"sha256:c28cee6d72f9a1f356367d4b2f77342212da5e807b11ea58844013b63e063e95": "docker.io/rancher/mirrored-ingress-nginx-kube-webhook-certgen:v1.6.7",
 		"sha256:16974531848218d24822bf606be022d030ab8c9b05b2ecf11076c4c1c6885c95": "docker.io/rancher/mirrored-pause:3.6",

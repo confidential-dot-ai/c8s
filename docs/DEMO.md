@@ -18,7 +18,7 @@ tlsLb:
 EOF
 ```
 
-`--cvm-mode` is required (`pod`, `node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`pod` or `node` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to

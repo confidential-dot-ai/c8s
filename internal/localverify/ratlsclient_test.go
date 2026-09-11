@@ -25,7 +25,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// ratlsServingCert mints a self-signed serving cert carrying an az-snp
+// ratlsServingCert mints a self-signed serving cert carrying an TDX
 // evidence envelope in the RA-TLS extension, with the given validity window.
 func ratlsServingCert(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
 	t.Helper()
@@ -34,13 +34,13 @@ func ratlsServingCert(t *testing.T, notBefore, notAfter time.Time) tls.Certifica
 		t.Fatal(err)
 	}
 	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
-		Evidence: json.RawMessage(`{"hcl_report":"fake"}`),
+		Platform: string(types.PlatformTdx),
+		Evidence: json.RawMessage(`{"td_quote":"fake"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: embedded}
+	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: embedded}
 	ext, err := att.MarshalExtension()
 	if err != nil {
 		t.Fatal(err)

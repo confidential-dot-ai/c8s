@@ -42,7 +42,7 @@ mode needs the *set* of per-shape digests, and until now the only way to learn
 one was to boot a pod, let attestation fail, and read the
 `measurement does not match any reference value` warning out of the CDS log. `c8s install
 --cvm-mode=pod --measurements` takes the digests this tool produces
-(`cmd/c8s/install.go`); under `--cvm-mode=node/gke/aks` the same flag takes the
+(`cmd/c8s/install.go`); under `--cvm-mode=node` the same flag takes the
 node image's `manifest.json` value instead.
 
 ## What goes into the digest

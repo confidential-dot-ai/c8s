@@ -26,7 +26,7 @@ func (s cidrSet) contains(host string) bool {
 // NodeHostCIDRs derives the inventory dial bound from node objects: one host
 // route per InternalIP. A host route per node rather than a covering range,
 // deliberately — on a CNI that assigns pod IPs from the node subnet (AWS VPC
-// CNI, Azure CNI) every range covering the nodes covers the pods too, and the
+// CNI, routed CNIs) every range covering the nodes covers the pods too, and the
 // bound would look configured and be absent. A node address inside a pod
 // range is excluded and reported instead: node and pod addresses are not
 // separable there. Where the CNI owns IPAM and leaves podCIDR empty, that

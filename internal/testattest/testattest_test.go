@@ -104,8 +104,8 @@ func TestStubAttestPlatformResolution(t *testing.T) {
 	})
 	t.Run("explicit platform is honored", func(t *testing.T) {
 		stub := testattest.New(t)
-		if got := attest(t, stub, types.PlatformGcpSnp); got != string(types.PlatformGcpSnp) {
-			t.Fatalf("platform = %q, want gcp-snp", got)
+		if got := attest(t, stub, types.PlatformSnp); got != string(types.PlatformSnp) {
+			t.Fatalf("platform = %q, want snp", got)
 		}
 	})
 }
@@ -117,7 +117,7 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 
 	expected := types.NewBase64Bytes([]byte("expected-report-data"))
 	req := types.VerifyReportData(types.AttestationEvidence{
-		Platform: "gcp-snp",
+		Platform: "snp",
 		Evidence: []byte(`{"quote":"x"}`),
 	}, expected)
 	resp, err := client.VerifyEnforced(context.Background(), req)
@@ -139,8 +139,8 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 	if got := reqs[0].Params.ExpectedReportData.Bytes(); string(got) != string(expected.Bytes()) {
 		t.Fatalf("recorded expected_report_data = %x, want %x", got, expected.Bytes())
 	}
-	if reqs[0].Platform != "gcp-snp" {
-		t.Fatalf("recorded platform = %q, want gcp-snp", reqs[0].Platform)
+	if reqs[0].Platform != "snp" {
+		t.Fatalf("recorded platform = %q, want snp", reqs[0].Platform)
 	}
 }
 
