@@ -89,6 +89,14 @@ spec:
               mountPath: /dev/sev-guest
             {{- end }}
             {{- if .Values.attestationApi.teeDevices.tdxGuest }}
+            # Intel TDX quote generation. On a bare-metal TDX host,
+            # /dev/tdx-guest DOES NOT EXIST — that's a guest-side device
+            # only present inside a TDX VM. The host path is the kernel
+            # ConfigFS TSM interface at /sys/kernel/config/tsm/report,
+            # populated by CONFIG_TSM_REPORTS. Mount /sys/kernel/config so
+            # attestation-api (built with `tdx_quote_method = "auto"`, or
+            # explicit "configfs") can read report attributes to request
+            # TDX quotes through QGS.
             - name: tdx-tsm-configfs
               mountPath: /sys/kernel/config
             {{- end }}

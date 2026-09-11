@@ -223,7 +223,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !slices.Contains(args, "nriImagePolicy.distro=rke2") {
-		t.Fatalf("set distro should plumb both component keys, got %v", args)
+		t.Fatalf("set distro should plumb the NRI component key, got %v", args)
 	}
 }
 
@@ -377,6 +377,10 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 		installWorkloadRefs = prev.workloadRefs
 		installMeasurements = prev.measurements
 	}()
+	// Drive every value-producing toggle. --install-crds=false exercises the
+	// non-default CRD path; --resolve-digests=false keeps crane off PATH (the
+	// digest-arg shape is covered separately via buildDigestArgs below).
+	// --measurements exercises the indexed key[i]= form in a second pass below.
 	installCRDs, installSingleNode, installResolveDigests = false, true, false
 	installImagePullSecret, installCvmMode = "regcred", "node"
 	installHardwarePlatform = "sev-snp"

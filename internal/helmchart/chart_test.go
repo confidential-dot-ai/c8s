@@ -197,6 +197,8 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("c8s-cert restartPolicy = %v, want Always", cert.RestartPolicy)
 	}
+	// nginx is gated by the c8s-cert-wait init container, not an exec
+	// startupProbe on the sidecar.
 	if cert.StartupProbe != nil {
 		t.Fatalf("c8s-cert must NOT carry a startupProbe; got %+v", cert.StartupProbe)
 	}
@@ -5025,6 +5027,10 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
+		// nri-image-policy is enabled in this render
+		// (require_host_image_policy); pin its digest + floor so the render is
+		// valid. Output is scoped to the tls-lb templates below, so its
+		// manifests do not appear here.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
@@ -6012,6 +6018,9 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
+		// nri-image-policy is enabled in this render
+		// (require_host_image_policy); pin its digest + floor. The render is
+		// scoped to the tls-lb ConfigMap, so nri manifests do not appear.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest="+baseNRIDigest,
@@ -7281,4 +7290,58 @@ func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
 	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
 		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
 	}
+}
+
+func TestChartRejectsImagePolicyOffOnManagedNodes(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "nriImagePolicy.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with nriImagePolicy disabled on a managed-node cluster, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_host_image_policy" {
+		t.Fatalf("validation error kind = %q, want require_host_image_policy\n%s", kind, out)
+	}
+}
+
+func TestChartRejectsAttestationApiOffOnManagedNodes(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "attestationApi.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with attestationApi disabled on a managed-node cluster, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
+		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
+	}
+}
+
+func TestTLSLBProbesUseHTTPSHealthChecks(t *testing.T) {
+	type namedProbe struct {
+		name  string
+		probe *corev1.Probe
+	}
+
+	base, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, base)
+	}
+	nginx := renderedDeploymentContainer(t, base, "c8s-tls-lb", "nginx")
+	for _, p := range []namedProbe{
+		{"readiness", nginx.ReadinessProbe},
+		{"liveness", nginx.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.HTTPGet == nil {
+			t.Fatalf("base shape: tls-lb %s probe should be httpGet; got %+v", p.name, p.probe)
+		}
+		if got := p.probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+			t.Errorf("base shape: tls-lb %s probe scheme = %q, want HTTPS", p.name, got)
+		}
+		if got := p.probe.HTTPGet.Path; got != "/healthz" {
+			t.Errorf("base shape: tls-lb %s probe path = %q, want /healthz", p.name, got)
+		}
+	}
+
 }

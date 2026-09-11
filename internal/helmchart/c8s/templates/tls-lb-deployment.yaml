@@ -68,7 +68,6 @@ spec:
         {{- end }}
     spec:
 
-      {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
       initContainers:
@@ -95,9 +94,10 @@ spec:
             - --challenge-port={{ include "tls-lb.acmeChallengePort" . }}
             - --http-port={{ include "tls-lb.acmeHTTPPort" . }}
             - --cert-dir={{ include "tls-lb.acmeCertDir" . }}
-          # Nginx names the ACME cert files, so it must wait for the bootstrap
-          # placeholder. Regular containers wait for this native sidecar's
-          # startup probe; cert.pem suffices because the key is written first.
+          # nginx's config names the acme cert files, so nginx must not start
+          # before the bootstrap placeholder exists; regular containers wait
+          # for a native sidecar's startup probe. Probing cert.pem suffices:
+          # the sidecar writes key before cert.
           startupProbe:
             exec:
               command: ["/c8s", "probe-file", "{{ include "tls-lb.acmeCertDir" . }}/cert.pem"]
@@ -251,15 +251,19 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
-          # Workload-verified ingress gate (docs/getcert-workload-binding.md):
-          # ready only while the installed mesh leaf is usable and carries a
-          # matched-workload stamp naming expectedWorkload. Withhold traffic
-          # while the committed identity is unnamed, including after a renewal
-          # loses its match.
-          # Probe through nginx's /readyz because the sidecar is loopback-only.
-          # Nginx does not require a client cert, and kubelet skips certificate
-          # verification for HTTPS probes.
           {{- if .Values.tlsLb.attest.expectedWorkload }}
+          # Workload-verified ingress gate (docs/getcert-workload-binding.md):
+          # ready only while the installed mesh identity leaf is a usable
+          # credential carrying a matched-workload stamp naming
+          # expectedWorkload, so ingress withholds traffic while the committed
+          # identity is unnamed (initial deploy, or after a foreign admission
+          # unnames the next renewal).
+          #
+          # Probed through nginx (location = /readyz), not the sidecar's own
+          # port: the sidecar listens on loopback. Scheme
+          # HTTPS on the nginx port works — nginx sets no
+          # ssl_verify_client and kubelet skips certificate verification on
+          # HTTPS probes.
           readinessProbe:
             httpGet:
               path: /readyz

@@ -1,3 +1,13 @@
+// Package probefile implements the probe-file subcommand: a tiny file-existence
+// helper for distroless containers. gcr.io/distroless/static has no shell or
+// coreutils, so waiting for a file to appear has no `test -s` available.
+//
+// It runs in two shapes:
+//   - one-shot (default): exit 0 if the path exists and is non-empty, for a
+//     kubelet exec probe.
+//   - --wait: block until the path passes (or --timeout elapses), for use as
+//     the entrypoint of a plain init container that gates a workload on the
+//     initial cert. See internal/webhook/pod_mutator.go (certWaitContainer).
 package probefile
 
 import (

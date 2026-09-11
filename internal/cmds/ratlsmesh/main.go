@@ -659,6 +659,11 @@ func effectiveCDSCAURL(certMode, cdsURL string) string {
 func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
 	case "auto":
+		// Probe the guest device tree; attestation-rs's own is_available()
+		// does the same check. Prefer TDX over SNP for the (theoretical)
+		// mixed case — an operator setting --platform=auto wants a working
+		// guest, and choosing arbitrarily is the sanest tiebreaker for a
+		// shape we don't ship today.
 		if _, err := os.Stat("/dev/tdx_guest"); err == nil {
 			return ratls.TEETypeTDX, nil
 		}

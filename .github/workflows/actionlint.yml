@@ -66,5 +66,4 @@ jobs:
             .github/scripts/pin-manifest.sh \
             .github/scripts/repro-gate-changes \
             .github/scripts/tests/test-pin-manifest.sh \
-            .github/scripts/tests/test-repro-gate-changes.sh \
-            cmd/c8s/host-sweep.sh
+            .github/scripts/tests/test-repro-gate-changes.sh

@@ -6,10 +6,9 @@ import (
 	"time"
 
 	"context"
-	"path/filepath"
-
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"path/filepath"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -118,9 +117,8 @@ func TestValidateSocketDirOnlyRequiredOnNodeCVM(t *testing.T) {
 
 }
 
-// The daemon endpoint is compiled in both shapes: the flag picks which, never
-// an address, so a wrong setting fails closed instead of posting the key blob
-// somewhere the control plane chose.
+// The daemon endpoint uses the node socket directory and the unix-transport
+// placeholder, rather than posting the key blob to a network address.
 func TestDaemonClientSelectsCompiledShape(t *testing.T) {
 	_, base := daemonClient(config{SocketDir: "/run/c8s/workload-claims"})
 	if base != "http://volumed" {

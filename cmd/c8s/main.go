@@ -1,3 +1,10 @@
+// Command c8s is the operator-side binary for the confidential Kubernetes
+// stack. Subcommands:
+//
+//   - c8s operator    — controller-manager + admission webhook
+//   - c8s install     — client-side: helm install c8s + CRDs
+//   - c8s uninstall   — client-side: helm uninstall + host sweep
+//   - c8s get-cert    — certificate bootstrap and renewal
 package main
 
 import (

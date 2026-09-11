@@ -76,3 +76,5 @@ kubectl delete namespace demo
 kubectl delete -f samples/confidentialworkload.yaml
 c8s uninstall
 ```
+
+`c8s uninstall` wraps `helm uninstall c8s -n c8s-system`.

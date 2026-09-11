@@ -190,8 +190,9 @@ func TestAppendSingleNodeInstallArgsDisabledIsNoOp(t *testing.T) {
 }
 
 func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
-	// --single-node clears the role=cds selector and its tolerations:
-	// the dedicated-node taint is meaningless without a dedicated node.
+	// --single-node must null both the selector (drops the role=cds pin and
+	// collapses the installer split) and the tolerations (the dedicated-node
+	// taint is meaningless without a dedicated node).
 	got := appendSingleNodeInstallArgs([]string{"upgrade"}, true)
 	assertArgsEqual(t, got, []string{
 		"upgrade",
@@ -926,6 +927,12 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	installAttestEnabled = true
 	t.Cleanup(func() { installAttestEnabled = prevAttest })
 
+	// Two orthogonal axes:
+	//  --cvm-mode: node (node-as-CVM) / gke (managed) / aks (vTPM)
+	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
+	// node+gke all take either hardware-platform; aks always emits the vTPM
+	// device and rides the Azure vTPM HCL report for both SNP (az-snp) and TDX
+	// (az-tdx).
 	build := func(mode, platform, sevGuest, tdxGuest, tpm string) []string {
 		out := []string{
 			"upgrade",
@@ -1311,6 +1318,9 @@ func TestBuildDigestArgsLeavesOtherResolveErrorsUnhinted(t *testing.T) {
 	_, err := buildDigestArgs(nil, "v1", testComponents, resolve, allEnabled)
 	if err == nil {
 		t.Fatal("buildDigestArgs ignored a resolver error, want fail-closed")
+	}
+	if strings.Contains(err.Error(), "lockstep") {
+		t.Errorf("non-not-found error must not carry the tag-coupling hint: %v", err)
 	}
 }
 

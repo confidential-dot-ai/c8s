@@ -222,8 +222,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 		}
 	}
 
-	// Register the workload injector when a certificate image is configured.
-
+	// Admission webhook — injects get-cert containers into annotated pods.
 	if opts.GetCertImage != "" {
 		if err := bootstrapWebhookPKI(ctx, mgr, opts); err != nil {
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
@@ -247,11 +246,14 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			"image", opts.GetCertImage,
 			"cds_url", opts.CDSURL)
 
-		// One-shot startup sweep: delete cw-annotated pods admitted while the
-		// webhook was down and let their owners recreate them through admission.
-		// Leader-only; failurePolicy=Fail makes a recreated pod racing a not-yet-ready
-		// webhook retry. A direct client keeps this single List and targeted Deletes
-		// from pinning a cluster-wide pod informer for the operator's lifetime.
+		// One-shot startup sweep: delete cw-annotated pods that were admitted
+		// while the webhook was down (so never injected) and let their owners
+		// recreate them through admission. Runs whenever the webhook does.
+		// Leader-only runnable. failurePolicy=Fail means a recreated pod that
+		// races a not-yet-ready webhook is retried, not let through. Uses a direct
+		// client, not the manager cache: a single cluster-wide List + targeted
+		// Deletes at startup must not pin a cluster-wide pod informer for the
+		// operator's lifetime.
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 			return runReinjectSweep(ctx, mgr, excluded)
 		})); err != nil {

@@ -176,7 +176,6 @@ update_manifest() {
       echo "no-drift"
       return
     fi
-
   fi
 
   tmp_path=$(mktemp "${manifest}.tmp.XXXXXX")
@@ -192,7 +191,6 @@ update_manifest() {
           mkosi_version: $version
         }
       ' "$manifest" >"$tmp_path"
-
   fi
   validate_manifest "$tmp_path"
   mv -f -- "$tmp_path" "$manifest"

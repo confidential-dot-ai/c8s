@@ -1,5 +1,44 @@
-#!/bin/sh
-# Remove chart-installed NRI and mesh state; preserve baked node components.
+# shellcheck shell=sh
+# c8s host sweep — run by `c8s uninstall` as a privileged init container on
+# every linux node (a short-lived kubectl-applied DaemonSet; see
+# cmd/c8s/uninstall.go).
+#
+# `helm uninstall` already drives the supported cleanup: the chart's
+# pre-delete hooks remove the NRI plugin and volumed mappings, and the mesh's
+# preStop strips its traffic interception. Every one of those is best-effort:
+# hooks need a release healthy enough to run them, a preStop is bounded by
+# the pod's termination grace period (and the runtime restart it triggers can
+# kill the pod mid-cleanup), the mesh preStop deliberately keeps its
+# fail-closed guard, and none of them knows about the c8s-side artifacts
+# (the RKE2 containerd-prep template). This sweep is the
+# idempotent last word and runs on every uninstall, whatever the release's
+# shape: leftovers may come from a previous install of a different shape,
+# which this release's values cannot see.
+#
+# Baked node image exception: on the c8s node image the NRI plugin, its floor
+# config, the containerd drop-in, and the managed RKE2 containerd template
+# are baked into the measured image at the same paths the chart uses. They
+# are node-image state, not release state — deleting them strips the node's
+# fail-closed image admission until reimage — so the NRI and template steps
+# below are skipped when the baked-only nri-node-ip.service unit exists.
+#
+# Fatal vs warn: containerd config removal and the runtime restart
+# fail the sweep (the CLI then keeps the
+# DaemonSet so its logs survive). Per-object netfilter failures warn and
+# continue; a host with no iptables at all fails the sweep at the end, after
+# every other step ran.
+#
+# Env (all required unless noted; set by `c8s uninstall` from the release's
+# computed values):
+#   HOST_CONTAINERD_DIR    — host containerd config directory (nriImagePolicy.distro)
+#   RKE2_PREP              — "true" when the install ran the RKE2 containerd-prep
+#                            initContainer whose template/lock this sweep owns
+#   RESTART_COMMAND        — host runtime restart, run detached via systemd-run
+#   NRI_PLUGIN_DIR         — NRI plugin directory (nriImagePolicy.hostPaths.pluginDir)
+#   NRI_PLUGIN_FILENAME    — plugin filename inside it (nriImagePolicy.pluginFilename)
+#   NRI_CONFIG_DIR         — plugin config dir (nriImagePolicy.hostPaths.configDir)
+#   NRI_RUNTIME_DIR        — plugin runtime dir (nriImagePolicy.hostPaths.runtimeDir)
+#   NRI_CACHE_DIR          — plugin cache dir (nriImagePolicy.hostPaths.cacheDir)
 set -eu
 
 echo "==> c8s host sweep starting"

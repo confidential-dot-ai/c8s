@@ -1,11 +1,14 @@
-// Package workloadclaims implements the admission-inventory API: nri-image-policy
-// is the arbiter of what runs in a pod sandbox and which sandbox a process belongs to.
+// Package workloadclaims implements the admission-inventory API: the component
+// that admitted a pod's containers (nri-image-policy on node-CVM) is the arbiter of both what runs in a pod
+// sandbox and which sandbox a process belongs to.
 //
 // It serves two disjoint surfaces (docs/ratls.md, "Sandbox identity"):
 //
-//   - a node-local Unix socket where get-cert redeems kernel peer credentials
-//     for a signed token naming its own sandbox; nothing the caller sends names the pod;
-//   - a network endpoint over mutually-attested RA-TLS where CDS asks which
+//   - a node-local token route, where get-cert redeems its identity for a
+//     signed sandbox token naming its own sandbox — nothing the caller sends
+//     names the pod. On node-CVM that is a Unix socket, whose kernel peer
+//     credentials bind the caller;
+//   - a network endpoint over mutually-attested RA-TLS, where CDS asks which
 //     image digests a named sandbox is currently running.
 //
 // Keeping them apart bounds each: the socket cannot enumerate other sandboxes,
@@ -46,11 +49,16 @@ type InventoryIdentity struct {
 	PublicKey []byte `json:"public_key"`
 }
 
-// SocketName is the inventory's Unix socket filename; SidecarSocketDir is where
-// NRI presents its directory inside injected sidecars. Both are compiled constants,
-// so the control plane cannot redirect the fetch to a rogue inventory
-// (docs/getcert-workload-binding.md, Corner 5). NRI bind-mounts the directory below
-// the pod spec, so no hostPath volume appears to PodSecurity.
+// SocketName is the fixed filename of the inventory's Unix socket, and
+// SidecarSocketDir is where the socket directory is presented inside the
+// c8s-cert sidecar. Both are compiled constants, not deployment values:
+// get-cert dials InventoryEndpoint (built from them) as a baked path, so the
+// control plane cannot redirect the fetch to a rogue inventory
+// (docs/getcert-workload-binding.md Corner 5). The inventory (nri-image-policy)
+// creates its socket as SocketName
+// under its configured directory, and its NRI plugin bind-mounts that directory
+// at SidecarSocketDir into the SidecarContainers of an injected pod — an OCI
+// mount below the pod spec, so no hostPath volume ever appears to PodSecurity.
 const (
 	SocketName       = "workload-claims.sock"
 	SidecarSocketDir = "/run/c8s/workload-claims"
@@ -176,15 +184,15 @@ type SandboxContainer struct {
 	Argv []string `json:"argv,omitempty"`
 }
 
-// SandboxResolver is the surface the NRI inventory implements using runtime
-// sandbox state from pod events. ServeTokens uses SandboxForPeer;
-// ServeDigests uses DigestsForSandbox. Get-cert treats a missing SandboxPath
+// SandboxResolver is the surface an inventory implements — nri-image-policy on
+// node-CVM (runtime sandbox state from NRI pod events). ServeTokens uses SandboxForPeer;
+// ServeDigests uses DigestsForSandbox. get-cert treats a missing SandboxPath
 // as "no sandbox ID" (ErrSandboxUnsupported).
 //
 // peer carries the kernel-pinned caller identity (SO_PEERCRED PID plus an
-// SO_PEERPIDFD liveness pin) — the caller never names its own pod. The resolver
-// binds peer.PID() to a pod and rechecks peer.IsAlive() after its /proc read
-// to reject PID reuse.
+// SO_PEERPIDFD liveness pin) — the caller never names its own pod. The
+// node-CVM resolver binds peer.PID() to a pod and rechecks peer.IsAlive()
+// after its /proc read to reject PID reuse.
 type SandboxResolver interface {
 	// SandboxForPeer returns the pod sandbox ID of the calling process,
 	// bound by kernel peer credentials exactly like ContainersForPeer.
@@ -219,15 +227,17 @@ func PeerFromConn(c net.Conn) Peer { return peerFrom(c) }
 // PKIX public key.
 const maxSandboxRequestBytes = 64 << 10
 
-// ServeTokens runs the token route on l until ctx is done. It serves POST
-// SandboxPath only, and l must stay node-local: the Unix socket binds the caller
-// by kernel peer credentials. Resolver errors return 500s; get-cert fails closed.
+// ServeTokens runs the token route on l until ctx is done — a unix listener on
+// node-CVM. It serves POST SandboxPath only, and l must stay node-local: on the
+// socket the caller is bound by kernel peer credentials.
+// Errors from the resolver are returned as 500s — get-cert fails closed on them.
 func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signer *SandboxTokenSigner) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
 		if signer == nil {
-			// No CDS can attest the signing key. An unverifiable token is worse
-			// than none; tell the caller to stop asking rather than wait.
+			// No CDS to attest the signing key against, and an unverifiable
+			// token is worse than none. Terminal, so the caller is told to
+			// stop asking rather than to wait.
 			http.Error(w, "inventory serves no sandbox tokens", http.StatusNotFound)
 			return
 		}
@@ -329,9 +339,9 @@ func serveUntil(ctx context.Context, l net.Listener, mux *http.ServeMux) error {
 	return nil
 }
 
-// inventoryDo performs a request against the compiled node-CVM Unix socket,
-// whose peer credentials bind the caller. Any other endpoint is refused, so no
-// control-plane value can redirect the request
+// inventoryDo performs a request against the inventory at endpoint, which must
+// be the node-CVM unix socket (whose peer credentials bind the caller).
+// Anything else is refused, so no control-plane value can redirect the request
 // (docs/getcert-workload-binding.md, Corner 5).
 func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Reader, timeout time.Duration) (*http.Response, error) {
 	base := "http://inventory.invalid"

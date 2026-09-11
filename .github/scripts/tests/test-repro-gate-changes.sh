@@ -34,21 +34,38 @@ set_paths() {
 }
 
 expect_result() {
-  local expected="image=$1" actual
+  local want_image=$1 actual expected
   actual=$(bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths")
-  [[ "$actual" == "$expected" ]] || fail "expected $expected, got $actual"
+  expected=$(printf 'image=%s' "$want_image")
+  [ "$actual" = "$expected" ] || {
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+    fail "classification differs"
+  }
 }
+
 reset_case
-set_paths README.md
+set_paths docs/development.md
 expect_result false
+
 reset_case
-set_paths node-guest-image/kernel/c8s.config
+set_paths node-guest-image/mkosi.conf
 expect_result true
+
 reset_case
-set_paths .github/scripts/pin-manifest.sh
+set_paths .github/actions/setup-mkosi/action.yml
 expect_result true
+
 reset_case
-jq '.builds["node-image"].confos_ref = "2222222222222222222222222222222222222222"' "$current_manifest" >"$current_manifest.next"
-mv "$current_manifest.next" "$current_manifest"
+jq '.builds["node-image"].confos_ref = "1111111111111111111111111111111111111111"' \
+  "$base_manifest" >"$current_manifest"
+set_paths .github/build-pins.json
 expect_result true
-echo "repro-gate-changes tests passed"
+
+reset_case
+printf 'not-json\n' >"$current_manifest"
+if bash "$CLASSIFIER" "$current_manifest" "$base_manifest" "$changed_paths" \
+  >"$test_dir/unexpected.stdout" 2>"$test_dir/unexpected.stderr"; then
+  fail "malformed current manifest unexpectedly passed"
+fi
+
+echo "repro gate change-classification tests passed"

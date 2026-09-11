@@ -80,7 +80,6 @@ bash "$script" update --manifest "$node_fixture" --domain node-image \
   --mkosi-sha "$new_mkosi" --mkosi-ver v28 >/dev/null
 [[ $(jq -r '.builds["node-image"].attestation_rs_ref' "$node_fixture") == \
   "$new_attest" ]] || fail "node attestation pin did not update"
-
 pass
 
 no_drift_fixture=$(new_fixture no-drift)

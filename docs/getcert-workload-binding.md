@@ -12,12 +12,20 @@ rules*.
 
 ## The one-paragraph version
 
-The injected get-cert sidecar asks the node's NRI admission inventory for a
-sandbox token over a Unix socket. Kernel peer credentials identify the caller;
-the inventory resolves its cgroup to a tracked sandbox. CDS verifies the token
-and checks that the admitted container digests satisfy the workload allowlist
-before issuing a certificate bound to that sandbox. The node CVM is the trust
-boundary, including the inventory, kernel, and workloads.
+`get-cert` (the injected `c8s-cert` sidecar) asks a local **inventory** —
+part of the image-admission component itself (`nri-image-policy`), not a
+standalone service — "which pod sandbox am I in?" *without saying who it is*. The inventory learns the caller's identity from
+the **kernel** (unix-socket peer credentials), maps it to a sandbox, and
+returns a **signed token** naming that sandbox, the requester's key, this
+issuance's CDS challenge, and the IP of the node serving its own
+identity+digests endpoint. `get-cert` forwards the token to CDS and says nothing
+about its own images. CDS dials that endpoint on a fixed **privileged** port to
+fetch the key the token is signed under, then asks what the sandbox is running;
+it issues only if every image is allowlisted, and stamps the sandbox ID onto the
+leaf. A relying party can then pin the workload
+(`c8s verify --sandbox-id <id> --mesh-ca ca.pem`) or read a live mesh peer's ID
+off the connection with `ratls.PeerSandboxID` (docs/ratls.md, "Reading a peer's
+sandbox ID").
 
 ---
 
@@ -36,11 +44,26 @@ So the requester's only claim is *which sandbox it is in*; the image set comes
 from the component that admitted those containers, asked directly by CDS.
 (Corner 3, Corner 6.)
 
+**How does the inventory know which pod is calling — is that operator-controlled?**
+No, and that is the crux. get-cert sends no identity at all. When it connects,
+the **kernel** stamps the caller's PID onto the socket (`SO_PEERCRED`); the
+inventory reads that PID and resolves it PID → cgroup (`/proc`) → container → pod
+from its *own* admission record. Every link is kernel/runtime-derived — nothing
+the caller or the control plane supplies is used for identity. The kernel doing
+the stamping is in the TCB (the node is the CVM). (Corner 1.)
+
 **Does get-cert check it's in a TEE first?** No, and it doesn't need to. It
 generates attestation evidence via the local attestation-api, and **CDS**
 verifies that evidence — hardware signature chain plus the pinned launch
 measurement — before issuing anything. Outside a real TEE the evidence does not
 verify, so no certificate is issued. (Step 5; `docs/ratls.md`.)
+
+**How does CDS know to trust get-cert — is it baked into the base image?** For
+the image set it does not have to trust get-cert at all: get-cert is a conduit
+for a token it cannot forge, and CDS asks the inventory itself. get-cert's own
+integrity is still allowlist/measurement-rooted — under node-CVM its image runs
+only because nri-image-policy admitted it — and the inventory socket endpoint
+is compiled in, so the control plane cannot select its address. (Corner 5, Corner 6.)
 
 **What stops a malicious pod claiming some other workload's identity?** It
 cannot mint a token CDS will accept. The token names the sandbox the *kernel*
@@ -55,6 +78,9 @@ all, which yields a leaf with **no** sandbox ID — and that fails any
 `--sandbox-id` pin. What remains is not forgery but trust in the inventory
 itself (Corner 6) and in the mesh CA signature that carries the ID (docs/ratls.md,
 "What vouches for the ID").
+
+**Is the token surface secured so a malicious pod can't hijack it?** It is a
+unix socket, and there are two separate threats:
 
 - *Impersonating another pod over the socket* — closed by `SO_PEERCRED`. The
   socket's mode gates who can *reach* the inventory, but identity comes from the
@@ -76,6 +102,27 @@ itself (Corner 6) and in the mesh CA signature that carries the ID (docs/ratls.m
 
 ## The actors
 
+- **get-cert** — runs in the `c8s-cert` native sidecar the webhook injects
+  into every `confidential.ai/cw` pod. Generates the leaf key, builds the CSR,
+  redeems a sandbox token, drives the CDS attestation flow, writes the cert.
+  (`internal/cmds/getcert`)
+- **The inventory** — fed by the component that makes the admit/deny decision,
+  so it reports what ran on the node whatever that decision was. It serves two
+  disjoint surfaces (`pkg/workloadclaims`): `POST /sandbox` on a **local** endpoint
+  get-cert dials at a compiled unix socket path, and `GET /identity` +
+  `GET /digests/{sandboxID}` on a **network endpoint over mutually-attested
+  RA-TLS**, at the fixed privileged port `workloadclaims.DigestsPort` (1019),
+  that only CDS talks to. The token endpoint cannot enumerate other sandboxes;
+  the network endpoint cannot mint identity.
+  - **node-CVM**: `nri-image-policy` (the host NRI plugin), token route on a
+    node-local unix socket. The node is the confidential VM, so the plugin is
+    in the TCB.
+- **CDS** — verifies the evidence and the sandbox token, calls the inventory
+  back for the sandbox's images, checks each against the allowlist store, signs
+  the leaf with the mesh CA, stamps the sandbox ID.
+- **The verifier** — anyone doing `c8s verify --sandbox-id … --mesh-ca …`, or a
+  mesh peer pinning `VerifyPolicy.SandboxID`.
+
 ---
 
 ## Step by step
@@ -84,6 +131,19 @@ itself (Corner 6) and in the mesh CA signature that carries the ID (docs/ratls.m
    binds both the sandbox token and the evidence REPORTDATA, so the token rides
    the issuance's existing freshness rather than a wall clock of its own
    (`internal/cmds/getcert/run.go`, `obtainCert`).
+
+2. **get-cert asks, anonymously.** `--workload-claims` opens the inventory at a
+   compiled unix socket address and `POST`s `/sandbox`
+   carrying only its CSR public key and that challenge. The request carries
+   **no** PID, pod name, or container ID. (See "Corner 1".)
+
+3. **The inventory binds the caller and signs.** On the unix socket it reads the
+   peer's PID with `getsockopt(SO_PEERCRED)`
+   (`pkg/workloadclaims/peercred_linux.go`), resolves that PID to a container
+   via `/proc/<pid>/cgroup` (`cgroup.go`), and maps container → sandbox from its
+   own admission record (`SandboxForPeer`). It then signs a token over
+   `(version 2, sandboxID, SHA-256(requester pubkey), challenge, inventoryHost)`
+   with an in-process P-256 key. Nothing the caller *sent* is used for identity.
 
 4. **get-cert forwards the token.** The envelope — `token` and `signature`, no
    credential for the key — rides the `/attest` request body as `sandbox_token`,
@@ -170,6 +230,14 @@ choice — is the exploitable one.
 ---
 
 ## Corner 3 — the digests answer is one flat set for the sandbox, not a per-role split
+
+`GET /digests/{sandboxID}` returns the **sorted, deduplicated** image digests of
+every container the inventory currently tracks in that sandbox — user init
+containers included (NRI's `CreateContainer` fires for init and regular
+containers alike), and the c8s-injected `c8s-cert` sidecar included too. The
+pause/sandbox container is not in the answer: it never reaches the plugin's
+`CreateContainer` hook. Unknown sandbox ⇒
+404; a known sandbox with no containers ⇒ `{"digests": []}`.
 
 - **Order-independent.** The same images in a different container order answer
   identically, so a reschedule that reorders containers does not churn the
@@ -294,6 +362,10 @@ wrong sandbox ID.
 
 Two independent properties keep a malicious control plane out of the loop.
 
+**get-cert's inventory target is measured, not injected.** The endpoint is
+compiled: `workloadclaims.InventoryEndpoint` (the node-CVM unix socket path).
+The platform injects the read-only socket *mount*, never the path.
+
 **CDS's callback target is bounded by the operator, and the port is the
 identity.** The token is not self-authenticating: the envelope carries no
 credential for the signing key, so `inventoryHost` is read from the *unverified*
@@ -324,6 +396,14 @@ sandbox ID on the leaf is vouched by the mesh CA signature rather than bound
 into hardware evidence (`docs/ratls.md`, "What vouches for the ID"). Making the
 pod's images part of a hardware measurement, enforced at `/attest`, is the
 stronger close and is unimplemented.
+
+The one surface still on an untrusted path is the **node-CVM** socket mount:
+the inventory socket sits on a host directory its NRI plugin bind-mounts into
+the sidecar, so a malicious *allowlisted* pod able to mount that directory
+read-write could swap the socket file before get-cert connects. That is a PodSecurity /
+filesystem-permission concern (the socket dir must be unwritable by untrusted
+pods), not a redirectable arg — see
+the residual note under "Why a unix socket".
 
 ### Why a unix socket, not an HTTP/DNS endpoint
 
@@ -386,6 +466,37 @@ CDS cannot independently observe a pod's running image digests — no component
 outside the pod can. So how is the answer trustworthy? The chain, weakest link
 named:
 
+- **The evidence proves the requester is a measured TEE**, bound to the CSR key
+  and challenge. That is what gates issuance at all; it says nothing about
+  images.
+- **The sandbox ID comes from the kernel, via a key only a node can serve.**
+  get-cert cannot choose it (Corner 1) and cannot forge the token: CDS accepts
+  only a signature it can verify under a key fetched from a privileged port in
+  a node's own network namespace, at an address in the operator's node CIDRs
+  (Corner 5). It can only decline to present a token, which costs it the sandbox
+  ID entirely.
+- **The ground truth for "what runs" is the inventory** — the admission record —
+  and CDS asks it *directly*, at issuance, over a mutually-attested channel.
+  There is no requester-supplied list to re-derive or cross-check, because the
+  requester supplies none.
+- **CDS's own backstop is the allowlist.** Every digest the inventory reports is
+  re-checked against the allowlist store, so even a compromised inventory cannot
+  smuggle an unallowlisted image past issuance. It *can* report a combination no
+  workload entry authorizes, since CDS no longer matches whole sets (Corner 4).
+- **The remaining assumption is the honest inventory on an honest node.** The
+  key's provenance narrows to a node, not to a process: on node-CVM anything
+  that can bind `:1019` in the node's netns — the inventory, or a privileged
+  node DaemonSet — can sign for any sandbox that node admitted. Those DaemonSets
+  are already root inside the node CVM and can read another pod's memory
+  directly, so they are effectively node TCB; that is an assumption, not
+  something attestation checks. Fleet-wide, a peer node shares the launch
+  measurement, so a hostile node could answer for a node whose traffic it can
+  intercept.
+
+"Did get-cert reach the *real* inventory" is not a control-plane-supplied link:
+the socket endpoint is compiled (Corner 5). What remains is the node-CVM
+socket-file swap — a PodSecurity / filesystem-permission item, not attestation.
+
 ---
 
 ## Corner 7 — who creates the socket, and why a hostile host can't inject one
@@ -393,11 +504,30 @@ named:
 A natural challenge: the socket is a filesystem object on the node — what stops
 a malicious host from planting its own and answering for the inventory?
 
+**First, who actually creates it.** Not the c8s installer. The nri-image-policy
+installer DaemonSet only lays down three things on the node: the plugin
+*binary* (into `/opt/nri/plugins`), a *containerd drop-in* that registers it as
+a pre-installed NRI plugin, and the *runtime directory*
+(`mkdir -p` + `chmod 0711`). The socket itself is created at **runtime by the
+plugin**: containerd launches it as a node process and `workloadclaims.ListenUnix`
+calls `net.Listen("unix", …)` — that syscall materializes the socket. It
+`os.Remove`s the path first, so any pre-existing (stale or planted) socket is
+deleted before it binds its own. So: **the inventory creates the socket, not
+the installer and not the host.**
+
 **The reframe that answers the challenge.** The socket is not a root of trust —
 it is intra-TCB plumbing between two components that are *both already inside*
 the measurement boundary (the inventory and get-cert). Its integrity is *inherited*
 from that boundary, not established by the socket. Which "host" can subvert it
 splits cleanly:
+
+- **The L0 hypervisor — defeated by hardware.** The runtime dir is under `/run`,
+  which is **tmpfs (RAM)**, and under SEV-SNP / TDX the guest's RAM is
+  hardware-encrypted. The L0 host physically cannot read, write, inject, or swap
+  a socket in that memory. The whole node is the CVM and the socket sits in
+  the node's encrypted tmpfs. A guest the
+  host booted with a swapped plugin would not match the launch measurement, so a
+  CDS with `--measurements` set refuses to issue to it.
 
 - **The residual is a co-tenant, not the L0 host** (node-CVM only). The exposure
   is a *malicious allowlisted pod* — inside the node's TCB in the TEE sense, but
@@ -489,13 +619,56 @@ and the baked floor stands alone there.
 
 ## Enablement
 
+Always on: the chart wires the NRI inventory socket and the operator flag,
+and the plugin NRI-mounts the socket directory into the injected sidecars.
+get-cert is fail-closed on an inventory error, so a broken inventory blocks
+workload cert issuance — by design.
+
+**Network reachability.** The identity/digests endpoint is a new *inbound* path:
+CDS must be able to reach the nodes on
+`workloadclaims.DigestsPort` (1019, fixed), and the node bound —
+`cds.sandboxInventoryCIDRs` (`c8s install --node-cidr`), or the live node list
+when unset — must cover those addresses or CDS refuses every request carrying a
+token. The advertised host defaults to the installer DaemonSet's own
+`status.hostIP`, written to a `node-ip` file beside the socket;
+set `nriImagePolicy.sandboxDigests.advertiseHost` or
+`$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` to override. Route inference is the last
+resort and is wrong under the chart's default, where the plugin dials the CDS
+NodePort over loopback.
+
 **A failed digests endpoint is not fatal.** The NRI plugin logs and continues:
 containerd sets `required_plugins`, so a plugin exit takes container creation
 down node-wide, whereas a missing digests endpoint only degrades issuance.
 
-Secret and volume fetchers use the same issuance endpoints. Volume mounts
-also require the node's `volumed` DaemonSet and its Unix socket; see
-[Volumes](volumes.md) for setup and mount ordering.
+**Unpinned measurements do not disable the flow.** With an empty measurement
+allowlist both ends still require a hardware-attested RA-TLS peer but pin no
+measurement — any TEE can answer as the inventory, and any TEE that can reach
+the port can read what a node runs. Both log it as UNSAFE outside development;
+the allowlist gate still runs. A CDS with no `--ratls-platform` has no RA-TLS
+identity to present, makes no callback, and **refuses** any request carrying a
+sandbox token. A `--measurements` entry that is not hex fails CDS startup rather
+than silently unpinning the callback; the same typo fails the plugin's
+config validation at startup.
+
+**Upgrade ordering.** Because get-cert fails closed on an inventory error, roll
+`nri-image-policy` (which creates the socket and serves both surfaces) **before
+or with** the operator/webhook that injects `--workload-claims`. If the
+webhook starts injecting the flag while an old plugin (no inventory socket, no
+NRI-injected socket-directory mount) is still running, every newly admitted
+`cw` pod fails cert issuance until the plugin is current: get-cert exits while
+the socket directory is absent, so the sidecar crashloops and its next
+creation picks up the mount once the node's plugin is. A chart upgrade rolls
+the webhook Deployment and the per-node plugin independently, so expect that
+crashloop window on not-yet-rolled nodes.
+
+Existing Pods that still declare the old claims `hostPath` must be recreated to
+pick up the NRI mount. Pod CREATE/UPDATE and `pods/ephemeralcontainers` updates
+reject that volume even when it is unchanged from a previously admitted Pod.
+Admission does not evict already-running Pods.
+
+The same ordering covers the secret and volume fetchers, which redeem at the
+same endpoint. Volume mounts also require the node's `volumed` DaemonSet and
+its Unix socket; see [Volumes](volumes.md) for setup and mount ordering.
 
 ## Audit pointers
 

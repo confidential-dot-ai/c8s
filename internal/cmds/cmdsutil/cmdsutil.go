@@ -100,6 +100,12 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	srv.Shutdown(shutdownCtx)
 }
 
+// WarnIfCDSUnpinned warns when a sidecar talks to CDS without launch measurements.
+//
+// An empty set accepts any RA-TLS-attested CDS. "No pinning" is a supported
+// development shape (`c8s install --measurements` documents empty as UNSAFE),
+// so it stays a warning. Shared by get-cert, get-secret and get-volume: three
+// copies of this decision would be three chances to drift.
 func WarnIfCDSUnpinned(measurementCount int, warn string) {
 	if measurementCount <= 0 {
 		slog.Warn(warn)

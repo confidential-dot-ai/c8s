@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -628,12 +627,19 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
 			errInvalidInjectionAnnotation, AnnotationWorkload))
 	}
+	// The fetcher redeems a sandbox token from the mounted nri-image-policy
+	// socket. An operator without it has nothing to point the fetcher at, so
+	// injecting would produce a Running pod whose fetcher CrashLoops while the
+	// workload blocks forever on a file that never lands. Refuse at admission.
 	hasWorkloadClaimsEndpoint := m.cfg.WorkloadClaimsHostDir != ""
 	if inj != nil && len(inj.Secrets.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs an admission inventory, which this operator is not configured with (node inventory not configured); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
 	}
+	// Same for volumes: the fetcher hands the key to volumed over the mounted
+	// socket directory. An operator without it has no daemon to hand it to,
+	// so the workload would wait on a mount that can never land (docs/volumes.md).
 	if inj != nil && len(inj.Volumes.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs a volume daemon, which this operator is not configured with (node inventory not configured); see docs/volumes.md",
@@ -645,6 +651,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		inj.SAN = workloadSAN(inj.WorkloadID, req.Namespace)
 	}
 
+	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
+	// every call), so it no longer keys off the confidential.ai/c8s-injected
+	// marker: an author cannot skip injection by pre-setting it.
 	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
 	if inj == nil {
 		return admission.Allowed("no c8s annotation — passthrough")
@@ -837,6 +846,8 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 // cert from CDS on startup and keeps it fresh on a --renew-interval, SIGHUP-ing
 // nginx after each renewal when --reload-nginx is on.
 //
+// Native sidecar (restartPolicy: Always) so it stays resident.
+//
 // --key-out is idempotent (load if a key already exists at the path, else
 // generate-and-write); a fresh key on every restart would invalidate every
 // cert CDS has previously issued for it.
@@ -869,6 +880,8 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
 		args = append(args, "--cds-rtmrs="+joined)
 	}
+	// get-cert redeems a sandbox token from the node's inventory over the
+	// mounted socket.
 	switch {
 	case cfg.WorkloadClaimsHostDir != "":
 		args = append(args, "--workload-claims")
@@ -887,6 +900,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		VolumeMounts:    getCertVolumeMounts(inj, true),
 		SecurityContext: getCertSecurityContext(inj),
+		// The workload is gated on the initial cert by the c8s-cert-wait
+		// init container (certWaitContainer), not a startupProbe here: a
+		// native sidecar is "started" the moment its process launches.
 	}
 }
 

@@ -13,12 +13,29 @@
 {{- fail "VALIDATION_ERROR kind=removed_component: teeProxy.* values are set, but the tee-proxy component was removed; tls-lb dials the workload directly. Migrate teeProxy.hostPort to tlsLb.hostPort and teeProxy.upstream to tlsLb.upstream.address, then drop the teeProxy block." -}}
 {{- end -}}
 
+{{- /*
+  Hardware-TEE mutual exclusion. A single cluster picks one CPU TEE at install
+  time (--hardware-platform sev-snp or tdx). teeDevices.sevGuest and
+  teeDevices.tdxGuest select which /dev/{sev,tdx}-guest node is mounted on the
+  attestation-api DaemonSet.
+  Install CLI's --hardware-platform flag makes them mutually exclusive by
+  construction; this guard catches raw -f overrides that bypass the CLI.
+  aks (tpm) is orthogonal: it's the vTPM path and does not interact with these
+  two flags.
+*/ -}}
 {{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
 {{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}
 {{- end -}}
 
+{{- /*
+  Where the node-baked plugin does not run, host nri-image-policy is the ONLY
+  image-admission enforcement — the attested allowlist gate. Disabling it there
+  runs confidential workloads with no image admission at all, a silent security
+  downgrade. cvmMode=node carries its own fail-closed nri-image-policy, so host
+  nri is mandatory in exactly the remaining shapes.
+*/ -}}
 {{- if and (not .Values.nriImagePolicy.enabled) (ne .Values.attestationApi.cvmMode "node") -}}
-{{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires attestationApi.cvmMode=node. Managed nodes require the host image-policy installer. Use nriImagePolicy.enabled=true with nriImagePolicy.baked=true on the measured node image to deliver CDS pins." -}}
+{{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires attestationApi.cvmMode=node. On a non-node cluster host nri-image-policy is the only image-admission enforcement; disabling it leaves confidential workloads with no attested allowlist gate. Under cvmMode=node the node image bakes the plugin — but leaving the installer off there also leaves the baked plugin without this release's CDS pins, so prefer nriImagePolicy.enabled=true with nriImagePolicy.baked=true (`c8s install --cvm-mode=node` sets both)." -}}
 {{- end -}}
 {{- /*
   nriImagePolicy.baked says the plugin, its containerd registration and its boot
@@ -64,8 +81,14 @@
 {{- end -}}
 {{- end -}}
 
+{{- /*
+  The mirror of require_host_image_policy for evidence: off node mode,
+  the host attestation-api DaemonSet is the only evidence source for
+  get-cert, ratls-mesh, and CDS. Disabling it there renders a cluster whose
+  attestation consumers all point at a socket nothing serves.
+*/ -}}
 {{- if and (not .Values.attestationApi.enabled) (ne .Values.attestationApi.cvmMode "node") -}}
-{{- fail "VALIDATION_ERROR kind=require_attestation_api: attestationApi.enabled=false requires attestationApi.cvmMode=node, where the node image provides the evidence service." -}}
+{{- fail "VALIDATION_ERROR kind=require_attestation_api: attestationApi.enabled=false requires attestationApi.cvmMode=node. On a non-node cluster the host attestation-api DaemonSet is the only evidence source for get-cert/ratls-mesh/CDS (`c8s install --cvm-mode=node` sets attestationApi.enabled=false for you)." -}}
 {{- end -}}
 {{- /*
   Catch-all upstream check. No upstream is a legal state: tls-lb installs and

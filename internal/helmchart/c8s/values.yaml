@@ -144,7 +144,7 @@ webhook:
     ## paces off the installed leaf's own NotAfter, so a mis-set value here
     ## degrades to more frequent renewals rather than an expired certificate.
     renewInterval: 2h
-    ## Security defaults for the distroless nonroot get-cert image.
+    ## Defaults match distroless nonroot.
     runAsUser: 65532
     runAsGroup: 65532
     runAsNonRoot: true
@@ -223,9 +223,11 @@ cds:
   challengeTTL: 60s
   requestTimeout: 5s
   # -- Max HTTP request body CDS accepts on /authenticate and /attest.
-  # Sized for an Intel TDX quote plus full cc_eventlog (~90 KB uncompressed;
-  # the eventlog alone can run 40–85 KB). A 64 KiB limit fits SEV-SNP evidence
-  # (~2 KiB) but rejects these TDX requests with HTTP 422, body too large.
+  # Sized for the largest evidence envelope we serve today: an Intel
+  # TDX quote + full cc_eventlog is ~90 KB uncompressed (the eventlog alone
+  # runs 40-85 KB on real TDX hosts). The stock 64 KiB limit is fine for SEV-SNP
+  # (evidence ~2 KiB) but rejects every TDX request with HTTP 422
+  # `http: request body too large`.
   maxRequestSize: 262144
   # -- Max secret paths one allowlist entry may hold. Must stay below
   # cds.secretsMaxPaths; the chart refuses to render otherwise.
@@ -307,6 +309,7 @@ cds:
 
 ## DaemonSet running the attestation-api image from github.com/confidential-dot-ai/attestation-rs.
 attestationApi:
+  ## Render the host-side attestation-api DaemonSet.
   enabled: true
   image:
     repository: ghcr.io/confidential-dot-ai/attestation-api
@@ -344,15 +347,22 @@ attestationApi:
     - az-tdx
     - gcp-snp
     - gcp-tdx
-  ## CVM platform shape — selects the TEE device via the install CLI:
-  ## node (chart default): self-managed confidential nodes; ordinary pod
-  ##   processes are attested via the node's own quote. Native SNP/TDX device.
-  ## gke: GKE managed confidential nodes, also exposing native TEE devices.
-  ## aks: Azure confidential nodes, attesting via the vTPM at /dev/tpm0.
-  ## All modes render privileged: true: a hostPath device mount alone does
-  ## not grant device-cgroup access, regardless of SYS_RAWIO.
-  ## The install CLI requires --cvm-mode explicitly; this chart default serves
-  ## GitOps/HelmRelease consumers that set values directly.
+  ## CVM platform shape — selects (via the install CLI) the TEE device:
+  ##
+  ## node (default): generalized node-as-CVM — our own nodes (self-managed
+  ##   TDX/SNP) are themselves confidential VMs exposing a native TEE device
+  ##   (/dev/sev-guest, or /dev/tdx-guest with --hardware-platform tdx); pods run
+  ##   as ordinary processes attested via the node's own quote. Cloud-agnostic.
+  ## gke: GKE managed confidential VM — also native /dev/sev-guest.
+  ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0.
+  ##
+  ## All modes render privileged: true. A hostPath device mount does not add a
+  ## device-cgroup rule, so open() on the TEE device is EPERM from an unprivileged
+  ## container regardless of SYS_RAWIO. TODO: drop privileged by routing SNP attest
+  ## through the TSM configfs report interface (/sys/kernel/config/tsm/report).
+  ##
+  ## The install CLI requires --cvm-mode explicitly (no default there); this
+  ## chart default serves GitOps/HelmRelease consumers that set values directly.
   cvmMode: node
   ## Unused while all modes render privileged: true (see cvmMode above). Retained
   ## for the planned least-privilege configfs path.
@@ -370,7 +380,20 @@ attestationApi:
       cpu: 500m
       memory: 256Mi
 
+## RA-TLS service mesh: transparent L4 proxy with hardware-attested mTLS.
+##
+## --- CRITICAL OPERATIONAL REQUIREMENT ---
+## The ratls-mesh DaemonSet hardcodes hostNetwork: true and
+## dnsPolicy: ClusterFirstWithHostNet (see templates/ratls-mesh-daemonset.yaml).
+## Both are non-toggleable: iptables-sync must run in the host network namespace
+## to intercept pre-DNAT pod traffic at the node level, and the paired
+## dnsPolicy keeps in-cluster service DNS working from that netns. Removing
+## either breaks the routing model — there is no values knob because there
+## is no supported configuration without them. Confirm your cluster CNI and
+## any node-level NetworkPolicy/firewall posture is compatible before
+## deploying.
 ratlsMesh:
+  ## Host-side mesh routing.
   enabled: true
 
   image:
@@ -553,6 +576,13 @@ ratlsMesh:
     monitoringNamespace: monitoring
 
 nriImagePolicy:
+  ## Host-side NRI image admission: the installer DaemonSet. Its enabled state is
+  ## bound to the cvmMode shape, not free: it MUST be true on gke/aks, where host NRI is the only allowlist gate
+  ## (require_host_image_policy). On cvmMode=node it runs in its baked form
+  ## (below) — the plugin comes from the node image, but only this installer
+  ## carries the release's CDS pins to it. `c8s install` sets both from
+  ## --cvm-mode. The bootstrapAllowlist below still feeds CDS's served seed
+  ## for host NRI or the node-baked plugin.
   enabled: true
   ## Node-as-CVM (`c8s install --cvm-mode=node`, which sets this): the node image
   ## bakes the plugin binary, its containerd registration and the boot config —
@@ -826,6 +856,22 @@ tlsLb:
   ## empty unless hostPort is off.
   strategy: {}
 
+  # Host-network edge binding. When enabled, nginx's TLS listener is published
+  # on the node's host port so external clients reach the front door directly
+  # on the node IP (kubelet/CNI portmap DNATs the host port to the in-pod
+  # unprivileged listener, so nginx needs no privileged bind). This grabs the
+  # node's 443: on clusters whose ingress already owns it (notably RKE2, which
+  # bundles an ingress on hostPort 80/443 — rke2-ingress-nginx through v1.35,
+  # rke2-traefik from v1.36) the tls-lb pod stays
+  # Pending ("didn't have free ports for the requested pod ports"); set
+  # enabled: false there (reach tls-lb through its Service or your own
+  # ingress) or point https at a free host port. https is the host port to
+  # bind; empty derives 443.
+  #
+  # Availability trade-off: with the port bound the strategy auto-resolves to
+  # Recreate, so every tls-lb roll drops the node-IP front door for the pod
+  # restart window. For gapless rolls set
+  # enabled: false and expose tls-lb through its Service instead.
   hostPort:
     enabled: true
     https: ""
@@ -989,6 +1035,13 @@ tlsLb:
     # -- Seconds browsers may cache the preflight response.
     maxAge: 600
 
+  # -- Public TLS credential presented to internet clients. mode selects it:
+  # cds (default) serves the CDS-issued mesh leaf at tlsMountPath; webpki
+  # serves the operator Secret named by secretName (host-visible key, so the
+  # front door is attest-pq only); acme has the in-pod `c8s acme` sidecar
+  # issue a multi-SAN leaf for the san list (TEE-held key — requires
+  # attestationApi.cvmMode=node).
+  # secretName/certKey/keyKey/mountPath apply to webpki only.
   publicTLS:
     mode: cds
     secretName: ""
@@ -1075,6 +1128,24 @@ tlsLb:
     # -- Attestation-api URL the sidecar binds each session's key exchange
     # against. Empty defaults to this chart's attestation-api.
     attestationApiURL: ""
+    # -- Workload-verified ingress gate: when set to an allowlist entry name,
+    # the sidecar serves /readyz as 200 only while the installed mesh identity
+    # leaf is a usable credential carrying a matched-workload stamp with
+    # exactly this name, and the chart wires a readinessProbe on the cds-attest
+    # container (an HTTPS httpGet through nginx, which proxies /readyz to the
+    # sidecar's loopback port), so ingress withholds traffic while the front
+    # door's committed mesh identity is unnamed. Setting it also switches the
+    # tls-lb get-cert onto the workload-claims flow (inventory socket mount +
+    # supplemental group on node-CVM) — without that
+    # no stamp could ever arrive and the gate would hold the front door at 503
+    # forever. The named entry must match the tls-lb pod's own non-injected
+    # container set (nginx).
+    #
+    # Requires attest.enabled and hostPort.enabled: false — readiness only
+    # withdraws Service endpoints, while a hostPort is published by the CNI
+    # portmap plugin independently of pod readiness, so the gate would withhold
+    # nothing. The chart fails the render on either mistake. Empty keeps
+    # today's always-ready behavior.
     expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.
     resources: {}
@@ -1097,6 +1168,18 @@ tlsLb:
     #    (targetPort references the named `https` port), so public 443 is
     #    unaffected; front it with a LoadBalancer for external ingress.
     httpsPort: 8443
+    # -- DNS server nginx queries to re-resolve a mesh-wrapped catch-all
+    #    upstream at request time (per record TTL). Only the adopted-workload
+    #    headless Service is dialed that way: its pod IPs change on pod churn,
+    #    so a static upstream block would pin the IPs seen at startup and 502
+    #    until the next config reload. Every other upstream address is static
+    #    and this value is unused (no resolver directive is rendered at all).
+    #    The name itself is resolved once at nginx startup through the pod's
+    #    /etc/resolv.conf, and nginx exits (crash-loops) if it does not
+    #    resolve. Empty derives from the distro values
+    #    (nriImagePolicy.distro): rke2 ->
+    #    rke2-coredns-rke2-coredns.kube-system, else kube-dns.kube-system.
+    #    Set explicitly on clusters whose DNS Service is named differently.
     resolver: ""
     # -- UID/GID used by nginx and the get-cert containers so both can access
     #    the in-memory CDS key material on the shared tls-certs volume.

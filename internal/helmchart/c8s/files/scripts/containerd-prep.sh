@@ -1,16 +1,20 @@
-#!/bin/sh
 # containerd-prep — run as a privileged initContainer on RKE2 nodes.
 #
-# The nri-image-policy installer registers its containerd config as a drop-in.
-# Containerd loads it only if the main config imports its directory. This prep
-# adds that import when the RKE2 base template does not already supply it.
-# Drop-in directory and template names follow the config schema version
-# (version >= 3 -> config-v3.toml.*), not the active config's filename.
+# The nri-image-policy installer registers its containerd
+# config as drop-in files. containerd loads a drop-in only if the main config
+# `imports` its directory; RKE2 does not add that import. This prep adds it.
+#
+# It keys the drop-in directory and template names off the containerd config
+# *schema version* (version >= 3 -> config-v3.toml.*) — choosing them from
+# the filename instead is the bug that
+# left the import pointing at the wrong directory.
 #
 # Env:
-#   HOST_CONTAINERD_DIR — host config directory, bind-mounted at /host<dir>
+#   HOST_CONTAINERD_DIR — host containerd config directory, bind-mounted at
+#                         /host<dir>
 #   BASE_DIRECTIVE      — literal RKE2 `{{ template "base" . }}` include,
-#                         used when creating a template from scratch
+#                         used only when the template has to be created from
+#                         scratch
 set -eu
 
 DIR="/host${HOST_CONTAINERD_DIR}"
@@ -75,10 +79,12 @@ remove_managed_tmpl() {
 }
 
 case "$imports_count" in
-  # Add the import to the live config for the installer and to a durable
-  # template so it survives RKE2 regeneration. This base has no imports line,
-  # so prepending one does not collide.
   0)
+    # No imports in the rendered config. Add to the live config (so
+    # nri-image-policy sees it now) and to a durable template
+    # (so it survives RKE2 regenerating config.toml). Since the base does
+    # not emit an `imports` line on this version, our template's prepend
+    # will not collide.
     { printf 'imports = ["%s"]\n\n' "$glob"; cat "$main_config"; } > "${main_config}.c8s-tmp"
     mv -f "${main_config}.c8s-tmp" "$main_config"
     echo "  $(basename "$main_config"): drop-in import added"

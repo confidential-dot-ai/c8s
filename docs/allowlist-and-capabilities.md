@@ -1,5 +1,10 @@
 # Allowlist and capabilities
 
+How c8s decides which container images may run, which commands they may run
+with, and — for future key-management integration — which secret paths they may
+read and write. This document complements [`ratls.md`](ratls.md) (how the allowlist is bound
+into attestation).
+
 > **Trust model.** The host, hypervisor, and Kubernetes control plane are
 > untrusted; the trust boundary is the TEE. The image *reference* a pod presents
 > (`docker.io/vllm/vllm-openai:v0.6.3`) is chosen by the untrusted host and is
@@ -11,7 +16,8 @@
 
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
-policy (`command`, `args`) permitted for those bytes, and the entry as a whole may carry a secret-store grant (`secrets`).
+policy (`command`, `args`) permitted for those bytes, and the entry as a whole
+may carry a secret-store grant (`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -105,6 +111,13 @@ sets: `command` overrides the image `ENTRYPOINT`, `args` overrides `CMD`.
 
 ### What the enforcers see
 
+The host NRI plugin gates container start and observes the container's
+**effective argv**: the OCI
+`process.args`, which is the already-merged result of the image config and any
+pod-spec `command`/`args` override. They do not see the override as an override,
+and they do not fetch the image config. Policy is matched against that effective
+argv:
+
 - **`command`** is matched as an exact **prefix** of the argv (it may be several
   tokens — `/docker-entrypoint.sh nginx`, `/bin/sh -c`, `python3`).
 - **`args`** governs the **remainder** of the argv after the command prefix.
@@ -151,7 +164,6 @@ under any argv, and which that entry needs nothing more running for, is
 match and `lint`, `apply` and `add` refuse it. To tighten a seeded any-argv
 entry, edit it; do not add a narrower entry for the same image beside it.
 
-
 ## Secret grants (`secrets`)
 
 An entry may grant secret-store paths to the workload it names. The subject is
@@ -182,9 +194,14 @@ install still setting the per-container `paths` field needs
 
 ## Where it's enforced
 
-Three independent points enforce, at different strengths:
+Two independent points enforce, at different strengths:
 
-3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
+1. **Host NRI plugin** (`nri-image-policy`), at CreateContainer, per container.
+   Resolves the image digest and checks the effective argv against the allowlist
+   index. Fail-closed before the allowlist first loads; the plugin runs
+   inside the node CVM and is the primary admission gate.
+
+2. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
    allowlisted as some entry's container, checked against one atomic allowlist
@@ -200,6 +217,16 @@ Three independent points enforce, at different strengths:
    `ratls.VerifyPolicy.WorkloadName` enforce against the mesh-CA chain.
 
 ### What each layer can and cannot promise
+
+Per-container digest+argv admission holds at both points. **Combinations**
+("only this image set may run together") are **not enforced anywhere today**.
+NRI sees containers one at a time and cannot detect a
+*missing* container, so they cannot enforce a combination; CDS sees the whole
+reported set but only at issuance, which lands mid-lifecycle when that set is
+still a subset of the declared one, so it checks membership rather than
+composition ([getcert-workload-binding.md](getcert-workload-binding.md),
+Corner 4). The honest guarantee is therefore: **per-container digest + argv
+everywhere; no combination gating.**
 
 Combination gating wants a point where the pod is complete and the decision is
 worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
@@ -258,7 +285,8 @@ tracked follow-on.
 Each enforcer also carries a **local seed** that admits by digest alone ahead of
 the served document and is never touched by a pull: the host NRI plugin's
 `always_allow` (chart-rendered from the chart's own component digests plus every
-`bootstrapAllowlist.workloads` container admitted under any command and args). That lets a node enforce at t=0 offline and bring the platform's own images
+`bootstrapAllowlist.workloads` container admitted under any command and args).
+That is what lets a node enforce at t=0 offline and bring the platform's own images
 up before CDS is reachable.
 
 ## Bootstrap
@@ -279,11 +307,6 @@ apply` survives a restart, while a deleted entry returns on the next CDS start
 for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
-
-In `node` mode, the image contains the NRI plugin's measured boot-time
-`allowlist.always_allow` floor. Install updates its CDS measurement pins while
-preserving that floor. Dynamic workload policies come from CDS; changing the
-image's baked floor requires rebuilding the node image.
 
 ## CLI
 
@@ -336,6 +359,14 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
   write; `--strict` makes warnings block it too.
 
 ### lint
+
+`lint` catches the semantic traps before a write: an entry that admits nothing
+(both lists empty), a `command: deny` container that can never start, a
+shared digest whose union is widened to `any` by some entry — an `any`-policy
+entry for a digest silently makes every narrower entry for it unenforced at the
+per-container gate — and tag-form labels (which can move under the operator).
+`--online` cross-checks digests against the registry with
+`crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an
 **error**, not a warning: release requires exactly one entry to describe a

@@ -221,7 +221,7 @@ func TestNewCmdHasTheDaemonFlags(t *testing.T) {
 	}
 }
 
-// Both target shapes fall back to their compiled default when no root is set,
+// The target falls back to its compiled default when no root is set,
 // which is what the daemon relies on in production.
 func TestTargetRootsDefault(t *testing.T) {
 	if got := (KubeletTargets{}).root(); got != DefaultKubeletRoot {

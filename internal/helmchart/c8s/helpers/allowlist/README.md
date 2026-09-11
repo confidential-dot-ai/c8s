@@ -16,6 +16,13 @@ in [validations.yaml](../../templates/validations.yaml); `c8s install` also read
 it from chart values. CDS is exempt from that guard because its self-entry is
 seeded independently.
 
+`c8s.imageAllowlist` returns a digest-to-image-reference map containing enabled,
+digest-pinned components when `bootstrapAllowlist.deriveComponents` is true,
+plus the CDS self-entry, enabled tls-lb nginx, and applicable RKE2 containerd-prep
+image. Nginx is independently versioned and derives from its own image values.
+Prep entries apply when NRI enforcement is enabled: the NRI prep image requires
+an unbaked RKE2 installer.
+
 `c8s.anyArgvDigests` extracts workload digests whose command and args policies
 are both `any`. `c8s.alwaysAllow` merges these with `c8s.imageAllowlist` for the
 host plugin's local admission list. Workloads that pin argv remain in the served

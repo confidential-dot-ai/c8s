@@ -63,6 +63,34 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   mutual TLS rooted in hardware attestation. Plaintext never crosses the pod
   boundary.
 
+- **Node-as-CVM.** Run the whole node as one confidential VM. Supported modes
+  are `node`, `gke`, and `aks`. See [Architecture](#architecture).
+
+- **Measured boot end to end.** Node images boot via IGVM with dm-verity.
+
+- **Container image and command-line allowlisting.** Every container is
+  enforced against a CDS-served allowlist of named workload entries, each
+  pinning the image digests a workload runs and the command line each may run
+  with. Enforced by an NRI plugin on the node inside the CVM.
+
+- **Attestation-gated secrets.** CDS releases an application secret only once
+  a pod's running containers resolve to a single allowlist entry carrying a
+  grant for that path. An injected sidecar writes the values to a
+  memory-backed volume every container mounts read-only. The sidecar redeems
+  its sandbox token from the node's admission inventory.
+
+- **Encrypted volumes.** Data too large to be a secret — model weights, in
+  practice — encrypted at rest on host-visible storage (dm-crypt) and opened
+  only inside the TEE. Immutable volumes verify every read (erofs, dm-verity);
+  mutable volumes are writable ext4. The key travels as a secret
+  through the release path above, so possession of the volume implies nothing
+  without attestation. On node-as-CVM the `volumed` node agent ships
+  disabled — `c8s install --volumes` deploys it.
+
+- **Fail-closed admission.** A mutating webhook injects certificate sidecars
+  and workload labels; admission policies protect label integrity and deny
+  tenant host-namespace access. The bootstrap ordering fails closed, never open.
+
 - **Confidential GPUs.** NVIDIA GPUs attached to confidential nodes on
   SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
   NVIDIA GPU and NVSwitch evidence; it is not wired into the c8s certificate
@@ -76,26 +104,6 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   to an existing cluster (vanilla Kubernetes or RKE2, including AKS
   confidential node pools, where both SEV-SNP and Intel TDX attest through the
   Azure vTPM).
-
-- **Node-as-CVM.** Each Kubernetes node is a confidential VM and one trust
-  domain. Supported deployment modes are `node`, `gke`, and `aks`.
-
-- **Measured boot.** The measured node image boots via IGVM with dm-verity.
-  Pin its published measurements when installing c8s.
-
-- **Image and command-line allowlisting.** The node's NRI plugin enforces the
-  CDS-served allowlist against containers before they run.
-
-- **Attestation-gated secrets.** A sidecar redeems a sandbox token from the
-  node's admission inventory and obtains secrets from CDS only when the running
-  containers satisfy the grant. Secrets are written to memory-backed volumes.
-
-- **Encrypted volumes.** `c8s install --volumes` deploys the privileged node
-  daemon that opens encrypted devices for entitled pods. Immutable volumes use
-  dm-verity; mutable volumes use ext4. See [volumes](docs/volumes.md).
-
-- **Admission enforcement.** The webhook injects certificate sidecars and
-  workload labels. Admission policies protect injection and label integrity.
 
 ## Architecture
 
@@ -142,8 +150,14 @@ provisioning guides is at
 
 ### Prerequisites
 
-Nodes must run as SEV-SNP or TDX confidential VMs. The node is a single trust
-domain; provision separate nodes for tenants that do not trust each other.
+- A Kubernetes cluster (vanilla or RKE2) with platform-admin permissions.
+- SEV-SNP / TDX confidential VMs as nodes for node-as-CVM
+  (see the [first-cluster tutorial](https://confidential.ai/docs/c8s/tutorials/first-confidential-cluster)).
+  Node kernels must be recent enough for the TEE (AMD SEV-SNP ≥ 6.11, Intel TDX
+  ≥ 6.16), which also satisfies the Linux ≥ 6.5 `SO_PEERPIDFD` the admission
+  inventory relies on — see [docs/QUICKSTART.md](docs/QUICKSTART.md).
+- Helm 3, `kubectl`, and `crane` on PATH.
+- Go 1.26+ to build the CLI.
 
 ### Install
 
@@ -244,6 +258,7 @@ attestation and reports the operator keys it pins.
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
 | [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing the image and argv allowlist on the host; also the node's admission inventory | [allowlist](docs/allowlist-and-capabilities.md) |
+| [`internal/cmds/volumed`](internal/cmds/volumed/) | Encrypted-volume agent — opens volumes into a pod's mount namespace as a node DaemonSet | [volumes](docs/volumes.md) |
 
 ## Libraries
 
@@ -257,10 +272,30 @@ attestation and reports the operator keys it pins.
 | [`pkg/workloadclaims`](pkg/workloadclaims/) | Sandbox-token fetch and the admission-inventory socket contract |
 | [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
 | [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
-| [`pkg/types`](pkg/types/) | Shared request/response types |
+| [`pkg/types`](pkg/types/) | Shared request/response types for the c8s protocols (the attestation-api wire types live in [attestation-go/remote](https://github.com/confidential-dot-ai/attestation-go)) |
+| [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Repository layout
+
+```text
+api/               CRD types
+cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy
+                   (cmd/cds is only
+                   the Dockerfile for the `c8s cds` subcommand,
+                   internal/cmds/cds)
+internal/          Operator, webhook, attestation, mesh CA, secret store,
+                   embedded Helm chart
+pkg/               Public Go libraries (see Libraries above)
+node-guest-image/  The node-image definition for node-as-CVM (new home;
+                   phase 0 — nothing consumes it from here yet)
+docs/              Design and operator docs
+samples/           Example manifests
+scripts/           Dev and CI helpers
+test/              Integration tests: docker-compose get-cert flow
+                   (test/integration) and the kind cluster harness
+                   (test/integration/cluster, see docs/integration-tests.md)
+```
 
 ## Build
 
@@ -287,6 +322,14 @@ make clean
 ```
 
 ## Managing the image allowlist
+
+CDS serves the image-digest allowlist that `nri-image-policy` enforces on
+every node. The `c8s allowlist`
+command reads and mutates it. By default, tls-lb publishes the complete
+`/allowlist` API and verifies CDS's attestation before forwarding requests.
+When tls-lb uses the chart default CDS-issued public certificate
+(`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at
+the same tls-lb URL used for application traffic; no port-forward is required.
 
 ```sh
 TLS_LB=https://<tls-lb-host>
@@ -459,6 +502,14 @@ than let you discover them:
   (`dmsetup ls | grep ^c8s-`). `volumed` does not reconcile existing
   mappings on start, so restarting it does not recover them. See
   [docs/volumes.md](docs/volumes.md).
+
+- **GPU attestation is not wired end to end.** GPU passthrough into
+  confidential nodes works, and the node CVM fails closed on a non-CC GPU.
+  [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
+  verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
+  CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
+  require it at certificate issuance, so no positive GPU attestation reaches
+  the relying party.
 
 - **The browser over-encryption channel does not stream.** Requests and
   responses are buffered per envelope; responses over 32 MiB fail rather than

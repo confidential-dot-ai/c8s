@@ -117,6 +117,22 @@ Rules below apply to both tiers unless marked. Appendix A summarizes what change
 
 The product is trust in artifacts; our own supply chain has to clear the same bar.
 
+- Lockfiles MUST be committed from day one — they're free.
+- Released repos MUST pin container images by digest and GitHub Actions by commit SHA.
+  Incubating SHOULD.
+- Pinning MUST be paired with automated updates (Renovate or Dependabot) — pins
+  without a bump bot are a rot machine. Enable the bot from day one.
+- Secret scanning and push protection MUST be enabled (org-wide). Secrets MUST NOT be
+  committed; a secret that reaches a remote — or an LLM provider (§10) — is burned:
+  rotate it immediately.
+- CI SHOULD authenticate to clouds via OIDC, not long-lived credentials.
+- Release and deploy workflows MUST run with minimal `GITHUB_TOKEN` permissions and
+  SHOULD use protected environments, so a compromised PR can't publish.
+- Commit signing: MUST on every repo (contribution provenance for the CLA).
+- TCB components — anything whose hash lands in an attestation measurement (IGVM,
+  guest kernels, runtime images) — SHOULD build reproducibly from
+  tagged source. For us, binary identity *is* the security claim.
+
 ## 8. Reliability
 
 - Every network call MUST have an explicit timeout — connect and overall deadline. No

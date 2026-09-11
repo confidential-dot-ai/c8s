@@ -40,10 +40,10 @@ The quota bounds one entry, not the store: enough entries one path apiece still
 reach the ceiling. What it buys is that the refusal lands on the entry that
 caused it rather than on the next one to ask.
 
-The two caveats are weaker guarantees, not broken ones, and both are properties
-of the guest rather than of secret release:
-
-A deployment whose threat model cannot accept either should stay on node-CVM.
+The fetcher redeems its sandbox token from the mounted nri-image-policy
+socket. The webhook rejects `confidential.ai/c8s-secrets` when the operator
+has no inventory socket configured, rather than admitting a pod whose fetcher
+would CrashLoop while the workload waits for a file that never lands.
 
 ## Asking for a secret
 
@@ -115,6 +115,11 @@ A request carries:
 | `X-C8s-Challenge` | base64 of the challenge, consumed before anything else happens |
 | `Authorization: SandboxToken <base64>` | the inventory-signed token, in a header so it is bounded and never logged |
 
+The token is obtained from the admission inventory at `POST /sandbox` — the
+node's inventory — bound to the leaf's key and
+that challenge, the same route and the same envelope `get-cert` uses at
+issuance.
+
 **`POST` never carries a value.** CDS generates it, so no caller chooses what
 another caller will later read. On a path that already exists it answers `409`
 with **no body**: returning the value would make a write grant a read grant. A
@@ -161,8 +166,8 @@ serves at `GET /ca` over the attested connection and refuses unless it is one
 you pinned.
 
 `--measurements` alone does not cover this. It proves the peer is an attested
-node image at a pinned launch measurement. Other nodes can boot the same
-image, so the measurement identifies software rather than the CDS instance. The mesh CA key is generated per CDS, so it is what tells your CDS from
+build at a pinned launch measurement — but nodes can boot the same image,
+so that measurement does not identify a particular CDS instance. The mesh CA key is generated per CDS, so it is what tells your CDS from
 another one at the same measurement, and it is the anchor your workloads
 already trust.
 

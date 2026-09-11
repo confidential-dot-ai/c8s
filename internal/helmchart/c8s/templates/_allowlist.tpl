@@ -52,6 +52,11 @@
 {{- end -}}
 {{- end -}}
 
+{{- /* containerd-prep init-container images (rke2-only): the host NRI plugin
+       checks every container node-wide, so its own busybox prep
+       image must be in the floor or a DaemonSet re-roll self-deadlocks on
+       "image not in allowlist: busybox". Only seeded when the plugin enforces,
+       and under .baked the installer runs no prep container. */}}
 {{- if .Values.nriImagePolicy.enabled -}}
 {{- if and (eq .Values.nriImagePolicy.distro "rke2") (not .Values.nriImagePolicy.baked) -}}
 {{- $prep := .Values.nriImagePolicy.containerdPrep.image -}}

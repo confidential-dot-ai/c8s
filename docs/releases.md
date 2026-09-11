@@ -1,5 +1,9 @@
 # Releases
 
+c8s is one versioned release unit. A root `vX.Y.Z` tag versions the CLI,
+component images, measured node image, and Helm chart
+together. Maintainers do not calculate or push release tags manually.
+
 ## Automatic versioning
 
 After every build and retag job in the `Docker` workflow succeeds for a push to
@@ -50,8 +54,8 @@ Release publication stays inside the successful main-push `Docker` run:
    `rke2-{tdx,snp}[-cdi]-vX.Y.Z` only after every matrix leg succeeds. It does
    not publish a bare `vX.Y.Z` because that would not identify a platform and
    format.
-8. Existing stable node aliases are verified by digest and never silently
-   moved by a retry or manual rebuild.
+8. Existing stable node aliases are verified by
+   digest and never silently moved by a retry or manual rebuild.
 
 For the first stable release, the measured node aliases are therefore
 `rke2-tdx-v0.1.0`, `rke2-tdx-cdi-v0.1.0`, `rke2-snp-v0.1.0`, and
@@ -59,6 +63,12 @@ For the first stable release, the measured node aliases are therefore
 `ghcr.io/confidential-dot-ai/node-guest-base`. There is deliberately no moving
 `v0.1` alias for a measured image; operators pin the exact release whose
 measurement they allowlist.
+
+GitHub intentionally does not start new workflows for the tag created with
+`GITHUB_TOKEN`. That is part of this design: component and chart publication is
+explicit in the originating run, while the existing node workflows consume
+that run's successful `workflow_run` completion. No OAuth App, GitHub App,
+personal access token, or long-lived release credential is required.
 
 ## One-time GitHub setup
 

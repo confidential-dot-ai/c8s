@@ -19,6 +19,17 @@ func TestParsePinsWarnsWithoutMeasurements(t *testing.T) {
 	}
 }
 
+func TestParsePinsAcceptsAPinnedCDS(t *testing.T) {
+	cfg := Config{Measurements: []string{measurementHex()}}
+	got, err := cfg.ParsePins()
+	if err != nil {
+		t.Fatalf("ParsePins: %v", err)
+	}
+	if len(got.Measurements) != 1 {
+		t.Fatalf("parsed %d measurements, want 1", len(got.Measurements))
+	}
+}
+
 func TestParsePinsRejectsMalformedHex(t *testing.T) {
 	cfg := Config{Measurements: []string{"zz"}}
 	if _, err := cfg.ParsePins(); err == nil || !strings.Contains(err.Error(), "--measurements") {

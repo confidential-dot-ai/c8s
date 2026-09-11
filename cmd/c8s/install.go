@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -903,12 +904,13 @@ render guards then require those values.
 When the c8s images live in a registry that requires authentication, create a
 kubernetes.io/dockerconfigjson Secret in the release namespace and pass
 --image-pull-secret <name>: the chart wires it into every component's
-imagePullSecrets, so pods authenticate from first start
+imagePullSecrets, so pods authenticate from first start.
 This is the cluster-side (kubelet) credential; digest resolution runs locally
 via crane and uses your local docker login.
 
 --volumes deploys volumed, the node agent that opens a pod's encrypted volumes
 into its mount namespace (docs/volumes.md).
+
 To adopt already-running workloads, pass --workload-ref <id>=<namespace>/<kind>/<name>[:<port>].
 The release namespace is excluded from workload injection, so adopted workloads
 must live in a separate namespace. After the chart is ready, install patches each
@@ -991,9 +993,13 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return fmt.Errorf("read chart components: %w", err)
 		}
 		imageTag := resolveImageTag()
-		// Detect the host containerd layout so the chart's k8s default cannot
-		// silently mis-target RKE2. A -f file owns the layout only when it sets
-		// nriImagePolicy.distro; other supplied values do not suppress detection.
+		// nri-image-policy must bind the host's containerd
+		// layout in every install mode, so the distro is detected from the
+		// cluster's kubelet versions and plumbed; letting the chart default
+		// (k8s) stand would silently mis-target RKE2. Detection is suppressed
+		// only when a -f file actually sets nriImagePolicy.distro
+		// (that file then owns the layout) — not merely because some -f is
+		// present. buildValueArgs skips the distro when it is empty.
 		distro := ""
 		distroInValues, err := valuesFilesSetDistro(installValues)
 		if err != nil {
@@ -1006,9 +1012,12 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
 		}
-		// Preflight that CDS can bound the sandbox-digests callback to node
-		// addresses. Do this before buildValueArgs folds in explicit --node-cidr;
-		// an install must not silently lose sandbox identity.
+		// The sandbox-digests callback dials node addresses and nothing else.
+		// Resolve here, where the cluster is reachable, that CDS can bound
+		// it — a default install must not quietly ship with sandbox identity
+		// disabled. Must run before buildValueArgs, which folds an explicit
+		// --node-cidr into the
+		// computed values.
 		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
 		if err != nil {
 			return err
@@ -1090,16 +1099,22 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
 
-		// Platform services need privileges beyond restricted PodSecurity (root,
-		// host access and NET_ADMIN), so prepare the release namespace before Helm.
+		// The install always ships pods that exceed the restricted pod-security
+		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
+		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
+		// attestation-api needs SYS_RAWIO (node/gke) or privileged (aks).
+		// No supported shape fits restricted, so
+		// the namespace is always labelled privileged (a CIS-hardened cluster, e.g.
+		// RKE2 with profile: cis, would otherwise reject those pods at admission).
 		if err := applyNamespace(cmd.Context(), installNamespace); err != nil {
 			return err
 		}
 
+		fmt.Fprintf(os.Stdout, "+ helm %s\n", strings.Join(helmArgs, " "))
 		hc := exec.CommandContext(cmd.Context(), "helm", helmArgs...)
 		hc.Stdout, hc.Stderr = os.Stdout, os.Stderr
 		if err := hc.Run(); err != nil {
-			return fmt.Errorf("helm upgrade --install failed: %w", err)
+			return fmt.Errorf("helm install failed: %w", err)
 		}
 		for _, adoption := range adoptions {
 			if err := patchAdoptedWorkload(cmd.Context(), adoption.ref, adoption.cwID); err != nil {
@@ -1309,28 +1324,49 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // level — all modes render privileged: true, since a hostPath device mount alone
 // does not grant device-cgroup access):
 //
-//	node, gke → native /dev/sev-guest (SEV-SNP), or /dev/tdx-guest (Intel TDX)
-//	asks       → vTPM /dev/tpm0
+//	node, gke      → native /dev/sev-guest (SEV-SNP) by default, or
+//	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
+//	aks            → vTPM /dev/tpm0
 //
-// node is generalized node-as-CVM: pods run as ordinary processes attested via
-// the node's own quote. The node image bakes attestation-api and nri-image-policy;
-// the NRI installer refreshes baked configuration, and ratlsMesh stays chart-managed.
-// gke targets Google's managed confidential VMs, which still expose native TEE
-// devices. A plain managed→vTPM mapping would mount the wrong device there.
+// node and gke are distinct deployment targets that happen to share the
+// native-TEE-device wiring (they are NOT aliases):
+//
+//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
+//	       self-managed) are themselves confidential VMs. Pods run as ordinary
+//	       processes attested via the node's own quote. Cloud-agnostic. The node
+//	       image bakes attestation-api and nri-image-policy, so both are disabled
+//	       here (ratlsMesh is not baked, stays on).
+//	gke  → GKE specifically: Google's managed confidential VMs.
+//
+// GKE is the reason a plain managed→vTPM mapping is wrong: GKE confidential VMs
+// are a managed cloud but still expose the native /dev/sev-guest ioctl, not a
+// vTPM. The chart's teeDevices default is the SNP shape; this flips it as
+// needed per (mode, platform). Without it a `--cvm-mode aks` install would
+// mount /dev/sev-guest (absent on AKS), and a bare-metal TDX host would
+// similarly mount the wrong device — the attestation-api pod would fail the
+// hostPath CharDevice check.
 //
 // `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
-// orthogonal axes. AKS uses the Azure vTPM path regardless of CPU TEE: its HCL
-// report wraps an SNP report (az-snp) or a TD quote (az-tdx). Intel TDX on AKS
-// needs no /dev/tdx-guest — the TD quote comes from the vTPM — and the mesh/CDS
-// RA-TLS platform is set to tdx accordingly.
+// ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
+// (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
+// tdx). aks uses the Azure vTPM path regardless of the CPU TEE: the node's
+// vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
+// on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
+// aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
+// from the vTPM), and the mesh/CDS RA-TLS platform is set to tdx accordingly.
 //
-// Mixed hardware inside a single cluster is out of scope: support would need
-// per-platform attestation-api DaemonSets and per-node ratlsmesh --platform.
+// Mixed-hardware inside a single cluster (some SNP hosts, some TDX hosts) is
+// out of scope for now — a cluster is one hardware platform. Mixed support
+// would want the attestation-api DaemonSet split per-platform with per-node
+// label selectors, and ratlsmesh's `--platform` similarly per-node.
+// Follow-up work.
 //
-// AKS also opts the pod-injector webhook out of its admissionsenforcer controller,
-// which otherwise rewrites namespaceSelector and makes helm re-apply conflict.
-// The chart renders that annotation from attestationApi.cvmMode so GitOps installs
-// get it too; see internal/helmchart/c8s/templates/webhook.yaml.
+// aks also opts the pod-injector MutatingWebhookConfiguration out of AKS's
+// "admissionsenforcer" controller (annotation admissions.enforcer/disabled),
+// which otherwise rewrites the webhook namespaceSelector and makes every helm
+// re-apply conflict. That is rendered chart-side off attestationApi.cvmMode (so
+// GitOps/HelmRelease installs get it too), not emitted as a --set here; see
+// internal/helmchart/c8s/templates/webhook.yaml.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
 	if !slices.Contains(allowedCvmModes, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedCvmModes, ", "), cvmMode)
@@ -1405,8 +1441,13 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 			"--set-string", "tlsLb.attest.generation=",
 		)
 	}
-	// The node image bakes the API and NRI binary/floor. Keep the NRI installer
-	// to refresh baked configuration (including CDS pins); mesh remains chart-managed.
+	// node: the node image bakes host attestation-api and nri-image-policy;
+	// re-rendering them duplicates the baked pair and the baked fail-closed NRI
+	// floor denies the chart copies' own images. ratlsMesh stays: it is not
+	// baked. The NRI installer does stay on, in its
+	// baked form — the pins below are the one thing an image built before this
+	// release cannot carry, and the installer is the only path that reaches the
+	// baked plugin's config.
 	if cvmMode == "node" {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
@@ -1431,6 +1472,9 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		return nil, err
 	}
 	helmArgs = append(helmArgs, pinArgs...)
+	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
+	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
+	// is the node image's M.
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
@@ -1473,8 +1517,8 @@ func validateCvmMode(cvmMode string) error {
 // allowedPlatforms is what --hardware-platform takes: the canonical family
 // names, which is also what the operator and the chart consume. The alias
 // spellings teetypes.ParseFamily accepts are deliberately not taken here —
-// node labelling and runtime-class selection compare this value as written.
-var allowedPlatforms = []string{webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX}
+// node labelling compares this value as written.
+var allowedPlatforms = []string{string(teetypes.FamilySNP), string(teetypes.FamilyTDX)}
 
 // validateHardwarePlatform enforces that --hardware-platform is set and known,
 // exactly like its sibling --cvm-mode. install checks it first in RunE, before
@@ -1569,7 +1613,8 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 
 // appendSingleNodeInstallArgs collapses the dedicated-CDS-node partition for a
 // single-node / single-CVM cluster: an empty cds.node.selector makes every node
-// CDS-eligible, and the dedicated-node taint toleration is meaningless
+// CDS-eligible (worker/pull installer everywhere, no split; the node pulls from
+// its co-hosted CDS), and the dedicated-node taint toleration is meaningless
 // without it. helm renders =null as an empty value the chart reads as "no
 // partition". --set wins over -f, so the flag is authoritative if both are supplied.
 func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
@@ -1960,7 +2005,7 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 // mismatched component tag is worse than failing: an operator predating the
 // chart's webhook features silently mis-injects.
 func tagCouplingHint(repo string) string {
-	return fmt.Sprintf("the c8s component images publish in lockstep; verify the component tag exists with: crane ls %s", repo)
+	return fmt.Sprintf("the c8s component images publish in lockstep, so each must exist at the install tag; a mismatched older operator would silently lack webhook features the chart expects. If %s is released on its own cadence rather than with c8s, give its c8sComponents entry a pinnedDigest. Verify with: crane ls %s", repo, repo)
 }
 
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
@@ -2158,6 +2203,9 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
+// withStderr appends the stderr an exec failure captured (Cmd.Output records
+// it on ExitError when Cmd.Stderr is unset), so kubectl's own reason reaches
+// the operator instead of a bare "exit status 1".
 func withStderr(err error) error {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {

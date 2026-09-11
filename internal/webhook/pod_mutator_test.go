@@ -71,6 +71,8 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("c8s-cert restartPolicy = %#v, want Always", cert.RestartPolicy)
 	}
+	// The workload is gated by the c8s-cert-wait init container, not an exec
+	// startupProbe on the sidecar. The sidecar must carry no startupProbe.
 	if cert.StartupProbe != nil {
 		t.Fatalf("c8s-cert must NOT carry a startupProbe; got %#v", cert.StartupProbe)
 	}
@@ -1112,6 +1114,7 @@ func TestCertContainerCarriesCDSMeasurements(t *testing.T) {
 		measurements []string
 		want         string
 	}{
+		{"multiple pins", []string{"aa", "bb"}, "--cds-measurements=aa,bb"},
 		{"node shape pins CDS", []string{"aa"}, "--cds-measurements=aa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

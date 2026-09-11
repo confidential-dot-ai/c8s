@@ -25,11 +25,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"log/slog"
 	"net/http"
 	"net/url"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // DigestsPort is the port every inventory serves its digests endpoint on, and

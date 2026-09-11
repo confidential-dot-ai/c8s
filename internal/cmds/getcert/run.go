@@ -550,8 +550,8 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) (*x
 		return nil, err
 	}
 
-	// Always embed a nonce-free RA-TLS .1.1 extension so downstream RA-TLS
-	// verifiers can re-verify the leaf —
+	// Always embed a nonce-free RA-TLS .1.1 extension so a downstream ratls-mode
+	// verifier (secret-inventory --peer-verify=ratls) can re-verify the leaf —
 	// the same nonce-free embed the mesh client uses (docs/ratls.md).
 	ext, err := client.AttestationExtension(ctx, cfg.AttestationApiURL, &privateKey.PublicKey)
 	if err != nil {

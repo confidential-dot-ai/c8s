@@ -66,6 +66,7 @@ func TestSetupManagerStatusMirrorDiscovery(t *testing.T) {
 	}
 }
 
+// The webhook must register whenever get-cert injection is wanted.
 func TestSetupManagerWebhookRegisters(t *testing.T) {
 	mgr := newTestManager(t)
 	opts := Options{

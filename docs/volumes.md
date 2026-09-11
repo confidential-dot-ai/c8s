@@ -308,8 +308,17 @@ one replica, or a `Recreate` strategy — a rolling update of a single-device
 workload briefly runs two pods against it. Immutable volumes share a device
 freely, as they always have.
 
-`volumed` runs as a privileged DaemonSet on each node. The sidecar reaches it
-over a Unix socket in the inventory's socket directory.
+Volumed runs as a privileged DaemonSet on every node. The sidecar reaches it
+via a unix socket in the inventory's socket directory, and it mounts volumes
+into the pod's kubelet directory. The `emptyDir` medium is the default because
+volumed resolves the mount point with `RESOLVE_NO_XDEV`.
+
+The node-CVM DaemonSet is **off by default**: it runs privileged, with `hostPID`
+and a writable bind of the kubelet directory. Turn it on with
+`c8s install --volumes` where volumes are served, or `volumed.enabled=true` for a
+chart consumer. A pod requesting a volume without the node inventory socket
+configured is refused at admission rather than left waiting on a mount that
+can never land.
 
 What decides whether a mount happens, in order:
 
@@ -349,6 +358,17 @@ The daemon does not repeat CDS's release decision. It resolves who is calling
 only to decide where to mount, and checks nothing about what that caller is
 entitled to — any pod that reaches it presenting a well-formed blob has that
 volume opened into its own directory.
+
+What makes that sound is that the daemon's reach is confined to one tenant:
+node-CVM rests on the node being single-tenant. Every pod on it belongs to the
+same tenant, so a blob one of them can obtain is one they are all entitled to.
+
+A node shared between tenants breaks this assumption and needs a daemon-side check
+restored. That needs the caller's *sandbox*, which the node daemon cannot
+resolve for itself — the inventory's socket answers only for the process asking
+it — so the sandbox would have to arrive as an inventory-signed token bound to a
+nonce the daemon issued, because such a token is otherwise transferable between
+pods.
 
 ## Uninstalling, and what is left behind
 

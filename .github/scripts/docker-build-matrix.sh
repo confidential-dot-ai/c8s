@@ -9,11 +9,11 @@
 #
 # The workflow_dispatch fan-out is what makes the manual rebuild work: a
 # dispatch has no before/after diff, so docker.yml skips paths-filter and every
-# per-component flag arrives empty here. Build all of them for a complete manual rebuild.
+# per-component flag arrives empty here. Build all of them.
 #
 # Components NOT included are emitted as a parallel `retag_matrix` so the
 # `retag-unchanged` job in docker.yml can copy each one's current `:main`
-# manifest under `:<short-sha>`.
+# manifest under `:<short-sha>` — even when this run's filter rebuilt only a subset.
 #
 # Inputs (env), each "true"/"false" from the dorny/paths-filter step:
 #   SHARED             shared-core || shared-cmdsutil || shared-root

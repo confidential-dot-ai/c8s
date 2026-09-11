@@ -1,9 +1,8 @@
 package issuer_test
 
 import (
-	"testing"
-
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"testing"
 )
 
 func TestNormalizeMeasurement(t *testing.T) {

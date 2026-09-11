@@ -262,9 +262,11 @@ data:
 
             {{- end }}
             {{- if .Values.tlsLb.attest.enabled }}
-            # Proxy the sidecar's readiness gate for kubelet. The sidecar listens
-            # on loopback because its attestation and tunnel routes must not be
-            # published on the pod IP. Exact-match ahead of any catch-all upstream.
+            # The sidecar's readiness gate, proxied so kubelet can reach it.
+            # cds-attest listens on loopback (its one listener also carries the
+            # attestation and tunnel routes, which must not be
+            # published on the pod IP). So the probe rides the front door:
+            # exact-match, ahead of any catch-all upstream.
             location = /readyz {
                 access_log off;
                 proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};

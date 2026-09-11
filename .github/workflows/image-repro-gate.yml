@@ -1,5 +1,8 @@
-# Build the measured node image twice and compare the resulting measurements.
-# Run on every PR so unrelated changes still resolve the required check.
+# Reproducibility gates for measured images. Node-image changes build the image
+# TWICE and require every measured value to match (c8s#264). This runs on every
+# PR and decides relevance itself — a paths filter would leave the required
+# `compare` check pending on unrelated PRs. Fork PRs are exempt
+# (security-over-coverage); the post-merge builds remain the publication gates.
 name: image repro gate
 on:
   pull_request:
@@ -104,7 +107,7 @@ jobs:
       gate_signing_artifact: module-signing-${{ github.run_id }}
 
   compare:
-    # The required check: green fast when neither domain is relevant (and on
+    # The required check: green fast when the node-image domain is not relevant (and on
     # fork PRs, whose changes job is skipped); otherwise enforce every build
     # and comparison selected by the classifier.
     needs: [changes, build-a, build-b]

@@ -14,11 +14,15 @@ import (
 )
 
 // resolveInventoryCIDRs returns the operator's --node-cidr when given.
-// Otherwise the install preflights what CDS will derive at runtime and renders
-// nothing: CDS bounds the inventory callback from the live node list itself
-// (docs/operator.md), so there is no install-time snapshot to go stale on scale-up.
-// Detection failing is fatal: installing with sandbox identity silently off
-// would leave workload certificates without a sandbox ID or issuance-time image gate.
+// In node/gke/aks the inventory is a host process, reachable on the node address. The
+// install preflights what CDS will derive at runtime and renders nothing:
+// CDS bounds the callback from the live node list itself
+// (docs/operator.md), so there is no install-time snapshot to go stale on
+// scale-up.
+//
+// Detection failing is fatal: the alternative is installing with sandbox
+// identity silently off, which reads as success and leaves workload
+// certificates carrying no sandbox ID and no issuance-time image gate.
 func resolveInventoryCIDRs(ctx context.Context, explicit []string) ([]string, error) {
 	if len(explicit) > 0 {
 		return explicit, nil

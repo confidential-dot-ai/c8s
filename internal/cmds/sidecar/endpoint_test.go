@@ -28,7 +28,7 @@ func TestEndpointSelectsCompiledShape(t *testing.T) {
 	cancel()
 	_, err = workloadclaims.FetchSandboxToken(ctx, workloadclaims.InventoryEndpoint(), timeout, pub, []byte("nonce"))
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("guest endpoint not accepted by the compiled-endpoint check: %v", err)
+		t.Fatalf("node endpoint not accepted by the compiled-endpoint check: %v", err)
 	}
 	_, err = workloadclaims.FetchSandboxToken(ctx, "http://127.0.0.1:9999", timeout, pub, []byte("nonce"))
 	if err == nil || errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "endpoint must be") {

@@ -58,7 +58,7 @@ jobs:
           fi
 
       # Repository-monotonic run IDs serialize release calculation without
-      # dropping a middle merge from the Docker publication chain.
+      # dropping a middle merge from the Docker -> e2e workflow chain.
       - name: Wait for older Docker runs on main
         env:
           GH_TOKEN: ${{ github.token }}
@@ -539,6 +539,8 @@ jobs:
                 new_tags+=(latest)
               fi
             fi
+            # Point this commit tag at the canonical all-components release
+            # rebuild before the parent Docker workflow completes.
             if ! grep -Fxq -- "$short_sha" <<< "$repo_tags" || \
                [ "$(oras resolve "$image:$short_sha")" != "$source_digest" ]; then
               new_tags+=("$short_sha")

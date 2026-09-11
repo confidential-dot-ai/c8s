@@ -3,7 +3,6 @@
        test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-psa-ready test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
 
-
 CONTROLLER_GEN         ?= controller-gen
 CONTROLLER_GEN_VERSION ?= v0.20.1
 
@@ -48,7 +47,6 @@ build-c8s-node:
 		-ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
 		-o $(BUILD_DIR)/c8s-node ./cmd/c8s
 	@echo "Built $(BUILD_DIR)/c8s-node"
-
 
 # --- Get-Cert ---
 
@@ -179,12 +177,12 @@ test-e2e-components-ready:
 test-e2e-cw-workload:
 	./test/e2e/cw-workload.sh
 
+# --- Linting ---
 
 vet:
 	go vet ./...
 
-# --- Linting ---
-# Format-check tracked Go files only, excluding fetched sources and build trees.
+# gofmt over tracked Go files only.
 fmt:
 	@test -z "$$(git ls-files '*.go' | xargs gofmt -l)" || (echo "files need formatting:"; git ls-files '*.go' | xargs gofmt -l; exit 1)
 

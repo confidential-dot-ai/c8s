@@ -6,9 +6,8 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 
-	"strings"
-
 	"github.com/spf13/cobra"
+	"strings"
 )
 
 // TestNewCmdDurationFlagDefaults pins the shipped default for every duration

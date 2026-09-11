@@ -3,6 +3,12 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"reflect"
 	"strings"
 	"testing"
@@ -37,7 +43,7 @@ func TestValidateUninstallFlagsRejectsSweepOnlyWithoutSweep(t *testing.T) {
 }
 
 // The sweep must target exactly the directory the install wrote into — the
-// same mapping as the chart's c8s.hostContainerdConfigDir helper.
+// same mapping as the chart's nri-image-policy.containerdConfigDir helper.
 func TestContainerdConfigDirFor(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -260,5 +266,164 @@ func TestHostSweepScriptMeshNetfilterNames(t *testing.T) {
 	// The -TMP swap variants are destroyed alongside each ipset.
 	if !strings.Contains(hostSweepScript, `"$s-TMP"`) {
 		t.Error("host-sweep.sh does not destroy the -TMP ipset swap variants")
+	}
+}
+
+func TestHostConfigFromEmbeddedChartValues(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not on PATH")
+	}
+	dir, err := extractChart()
+	if err != nil {
+		t.Fatalf("extractChart: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	out, err := exec.CommandContext(context.Background(), "helm", "show", "values",
+		filepath.Join(dir, helmchart.ChartRoot)).Output()
+	if err != nil {
+		t.Fatalf("helm show values: %v", err)
+	}
+	cfg, err := hostConfigFromValues(chartValuesTree(t, string(out)))
+	if err != nil {
+		t.Fatalf("hostConfigFromValues on embedded chart defaults: %v", err)
+	}
+	if cfg.ContainerdConfigDir != "/etc/containerd" {
+		t.Errorf("ContainerdConfigDir = %q, want /etc/containerd (chart default distro k8s)", cfg.ContainerdConfigDir)
+	}
+	// The chart digest-pins the containerd-prep image; the sweep must inherit
+	// the pin, never a floating tag.
+	if !strings.Contains(cfg.SweepImage, "@sha256:") {
+		t.Errorf("SweepImage = %q, want a digest-pinned reference", cfg.SweepImage)
+	}
+}
+
+func TestHostSweepDaemonSetShape(t *testing.T) {
+	cfg := hostUninstallConfig{
+		Distro:              "rke2",
+		ContainerdConfigDir: "/var/lib/rancher/rke2/agent/etc/containerd",
+		SweepImage:          "busybox@sha256:abc",
+		NriPluginDir:        "/opt/nri/plugins",
+		NriPluginFilename:   "10-nri-image-policy",
+		NriConfigDir:        "/etc/nri/conf.d",
+		NriRuntimeDir:       "/var/run/nri-image-policy",
+		NriCacheDir:         "/var/lib/nri-image-policy",
+		ImagePullSecretRef:  []string{"regcred"},
+	}
+	ds := hostSweepDaemonSet("c8s", "c8s-system", cfg)
+
+	if ds.Name != "c8s-host-sweep" || ds.Namespace != "c8s-system" {
+		t.Errorf("metadata = %s/%s, want c8s-system/c8s-host-sweep", ds.Namespace, ds.Name)
+	}
+
+	pod := ds.Spec.Template.Spec
+	// The sweep must reach every linux node: the NRI installer and the mesh
+	// DaemonSets are deployed on all nodes, and a node can
+	// carry a previous shape's leftovers. All taints tolerated; hostPID for
+	// the nsenter-driven host work.
+	wantSelector := map[string]string{
+		"kubernetes.io/os": "linux",
+	}
+	if !reflect.DeepEqual(pod.NodeSelector, wantSelector) {
+		t.Errorf("nodeSelector = %v, want %v", pod.NodeSelector, wantSelector)
+	}
+	if len(pod.ImagePullSecrets) != 1 || pod.ImagePullSecrets[0].Name != "regcred" {
+		t.Errorf("imagePullSecrets = %v, want [regcred]", pod.ImagePullSecrets)
+	}
+	if len(pod.Tolerations) != 1 || pod.Tolerations[0].Operator != "Exists" {
+		t.Errorf("tolerations = %v, want a single operator:Exists", pod.Tolerations)
+	}
+	if !pod.HostPID {
+		t.Error("hostPID = false, want true")
+	}
+
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want 1", len(pod.InitContainers))
+	}
+	sweep := pod.InitContainers[0]
+	if sweep.SecurityContext == nil || sweep.SecurityContext.Privileged == nil || !*sweep.SecurityContext.Privileged {
+		t.Error("sweep container is not privileged; it cannot touch the host paths")
+	}
+	if sweep.Image != cfg.SweepImage {
+		t.Errorf("sweep image = %q, want %q", sweep.Image, cfg.SweepImage)
+	}
+	if len(sweep.Args) != 1 || sweep.Args[0] != hostSweepScript {
+		t.Error("sweep container args do not carry the embedded host-sweep.sh")
+	}
+	// The script's env contract (see host-sweep.sh header) — every value the
+	// release config carries must be plumbed.
+	wantEnv := map[string]string{
+		"HOST_CONTAINERD_DIR": "/var/lib/rancher/rke2/agent/etc/containerd",
+		"RKE2_PREP":           "true",
+		"RESTART_COMMAND":     hostRestartCommand("rke2"),
+		"NRI_PLUGIN_DIR":      "/opt/nri/plugins",
+		"NRI_PLUGIN_FILENAME": "10-nri-image-policy",
+		"NRI_CONFIG_DIR":      "/etc/nri/conf.d",
+		"NRI_RUNTIME_DIR":     "/var/run/nri-image-policy",
+		"NRI_CACHE_DIR":       "/var/lib/nri-image-policy",
+	}
+	gotEnv := map[string]string{}
+	for _, e := range sweep.Env {
+		gotEnv[e.Name] = e.Value
+	}
+	if !reflect.DeepEqual(gotEnv, wantEnv) {
+		t.Errorf("sweep env = %v, want %v", gotEnv, wantEnv)
+	}
+
+	// The host root must be mounted where the script expects it.
+	if len(pod.Volumes) != 1 || pod.Volumes[0].HostPath == nil || pod.Volumes[0].HostPath.Path != "/" {
+		t.Errorf("volumes = %v, want a single hostPath /", pod.Volumes)
+	}
+	if len(sweep.VolumeMounts) != 1 || sweep.VolumeMounts[0].MountPath != "/host" {
+		t.Errorf("sweep volume mounts = %v, want /host", sweep.VolumeMounts)
+	}
+
+	// Selector must match the template labels or the DaemonSet is rejected.
+	if !reflect.DeepEqual(ds.Spec.Selector.MatchLabels, ds.Spec.Template.Labels) {
+		t.Errorf("selector %v does not match template labels %v", ds.Spec.Selector.MatchLabels, ds.Spec.Template.Labels)
+	}
+}
+
+func TestHostSweepDaemonSetK8sDisablesRKE2Prep(t *testing.T) {
+	ds := hostSweepDaemonSet("c8s", "c8s-system", hostUninstallConfig{
+		Distro:              "k8s",
+		ContainerdConfigDir: "/etc/containerd",
+		SweepImage:          "busybox@sha256:abc",
+	})
+	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
+		if e.Name == "RKE2_PREP" && e.Value != "false" {
+			t.Errorf("RKE2_PREP = %q on k8s, want false", e.Value)
+		}
+	}
+}
+
+func TestHostConfigFromValues(t *testing.T) {
+	tree := chartValuesTree(t, `
+nriImagePolicy:
+  distro: rke2
+  containerdConfigDir: ""
+  containerdPrep:
+    image:
+      repository: busybox
+      tag: ""
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+`)
+	cfg, err := hostConfigFromValues(tree)
+	if err != nil {
+		t.Fatalf("hostConfigFromValues: %v", err)
+	}
+	want := hostUninstallConfig{
+		Distro:              "rke2",
+		ContainerdConfigDir: "/var/lib/rancher/rke2/agent/etc/containerd",
+		SweepImage:          "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
+		// The host paths fall back to the chart defaults when absent.
+		NriPluginDir:      "/opt/nri/plugins",
+		NriPluginFilename: "10-nri-image-policy",
+		NriConfigDir:      "/etc/nri/conf.d",
+		NriRuntimeDir:     "/var/run/nri-image-policy",
+		NriCacheDir:       "/var/lib/nri-image-policy",
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
 }

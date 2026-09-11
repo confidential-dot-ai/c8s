@@ -110,7 +110,6 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
       securityContext:
 
 {{ toYaml .Values.podSecurityContext | indent 8 }}

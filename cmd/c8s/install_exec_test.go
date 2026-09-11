@@ -922,7 +922,7 @@ func TestInstallHelmUpgradeFailureSurfaces(t *testing.T) {
 	s := newInstallStubs(t, "", true)
 	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
 	err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--force", "--resolve-digests=false")
-	if err == nil || !strings.Contains(err.Error(), "helm upgrade --install failed") {
+	if err == nil || !strings.Contains(err.Error(), "helm install failed") {
 		t.Fatalf("want the helm failure surfaced, got %v", err)
 	}
 }

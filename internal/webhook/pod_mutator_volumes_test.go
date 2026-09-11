@@ -302,9 +302,8 @@ func TestHandleRejectsVolumesWithoutAnyDaemon(t *testing.T) {
 	}
 }
 
-// The placeholder's medium is load-bearing and differs by shape: a default
-// emptyDir becomes a disk.img block device under shared_fs="none", and a
-// memory-backed one is unreachable to volumed's RESOLVE_NO_XDEV on node-CVM.
+// The placeholder's medium is load-bearing: a memory-backed emptyDir is
+// unreachable to volumed's RESOLVE_NO_XDEV on node-CVM.
 func TestOpenedVolumeMediumFollowsTheShape(t *testing.T) {
 	if got := openedVolume("weights").EmptyDir.Medium; got != corev1.StorageMediumDefault {
 		t.Errorf("node-CVM medium = %q, want default", got)

@@ -445,6 +445,12 @@ app.kubernetes.io/name: {{ include "tls-lb.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{/*
+The validated public front-door mode: cds | webpki | acme. Fails the render on
+a mode/values mismatch: webpki needs the Secret and is the only mode that may
+carry one; acme needs a TEE-held key (node-CVM), a reachable :80
+challenge, and HTTP-01-issuable sanList entries.
+*/}}
 {{- define "tls-lb.publicTLSMode" -}}
 {{- $mode := printf "%v" .Values.tlsLb.publicTLS.mode -}}
 {{- if not (has $mode (list "cds" "webpki" "acme")) -}}
@@ -534,12 +540,28 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 {{- end }}
 {{- end }}
 
+{{/*
+"true" when the tls-lb pod must mount the node inventory's socket directory:
+the readiness gate is on and this is the node-CVM shape.
+
+The condition mirrors the operator's own inventory condition
+(operator.yaml): the directory exists only where an installer put it, and a
+`type: Directory` hostPath naming a path nothing created wedges the pod in
+ContainerCreating. validations.yaml (kind=require_host_image_policy) makes that
+condition true in every renderable shape today; the condition is spelled out
+anyway so the two consumers of the socket stay on one rule.
+*/}}
 {{- define "tls-lb.mountInventorySocket" -}}
 {{- if and .Values.tlsLb.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
 true
 {{- end -}}
 {{- end -}}
 
+{{/*
+c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
+and renews it on a ticker, SIGHUP-ing nginx after each renewal. Caller nindents into the Pod spec's initContainers
+list.
+*/}}
 {{- define "tls-lb.getCertContainers" -}}
 {{- $mounts := list -}}
 {{- if .Values.tlsLb.discovery.enabled -}}
@@ -551,6 +573,15 @@ true
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
 {{- if .Values.tlsLb.attest.expectedWorkload -}}
 
+{{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
+       stamp on the mesh leaf, which only exists when get-cert redeems a
+       sandbox token from the inventory — so wire the claims flow whenever
+       the gate is enabled (the deployment fails the render if the gate is
+       set without the sidecar it gates). Node-CVM mounts the inventory
+       socket directory at get-cert's compiled path
+       (workloadclaims.SidecarSocketDir). The deployment adds the hostPath
+       volume and the socket's supplemental group
+       (workloadclaims.InventorySocketGID) on the same condition. */ -}}
 {{- $extraArgs = append $extraArgs "--workload-claims" -}}
 {{- if eq (include "tls-lb.mountInventorySocket" .) "true" -}}
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}

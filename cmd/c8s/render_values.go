@@ -38,19 +38,23 @@ var renderValuesDistro string
 
 // renderValuesCmd emits the resolved Helm values an install would apply, as a
 // values.yaml, without touching a cluster. It runs the same value computation
-// as `c8s install`: resolve component image tags to registry digests (via crane),
-// map --cvm-mode to TEE devices, clear the CDS node selector for --single-node,
-// and enable NRI allowlist derivation. It writes stdout instead of running helm.
+// as `c8s install` — resolve each component image tag to its registry digest
+// (via crane), map --cvm-mode to the TEE devices, --single-node to the cleared
+// CDS node selector, and enable the NRI
+// allowlist derivation — but writes the values to stdout instead of running
+// helm upgrade --install.
 //
 // This is the GitOps seam: a Flux HelmRelease (or any chart consumer) can
 // valuesFrom a bundle produced here instead of recomputing digests and device
-// mappings itself. There is no node-distro autodetection (pass --distro),
-// CDS-node / pull-secret preflight, or namespace apply.
+// mappings itself. The cluster-only steps of install are dropped: there is no
+// node-distro autodetection (pass --distro), no CDS-node / pull-secret
+// preflight, and no namespace apply.
 //
-// The output is the install-computed base, not a full per-cluster values file.
-// Consumers layer cluster overrides (dnsSanPatterns, tls-lb SAN/LB IP/CORS,
-// nodeSelectors) on top; the chart still derives internal settings such as the
-// AKS webhook annotation from attestationApi.cvmMode.
+// What it does NOT emit: the per-cluster overrides a consumer layers on top
+// (dnsSanPatterns, tls-lb SAN/LB IP/CORS, nodeSelectors) and anything the chart
+// renders off these values internally (e.g. the AKS webhook annotation off
+// attestationApi.cvmMode). The output is the install-computed base, not a full
+// per-cluster values file.
 var renderValuesCmd = &cobra.Command{
 	Use:   "render-values",
 	Short: "Print the resolved Helm values an install would apply (no cluster needed)",
@@ -165,6 +169,9 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 		}
 	}
 	setArgs = appendInstallCRDArgs(setArgs, installCRDs)
+	// Empty distro means "don't plumb it" — both commands leave the chart
+	// default to stand: install when -f is given, render-values when --distro
+	// is unset (the values-file / chart owns nriImagePolicy.distro).
 	if distro != "" {
 		setArgs = appendDistroInstallArgs(setArgs, distro)
 	}

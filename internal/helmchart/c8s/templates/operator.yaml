@@ -80,7 +80,13 @@ spec:
             - --get-cert-run-as-group={{ include "c8s.int" .Values.webhook.getCert.runAsGroup }}
             - --get-cert-run-as-non-root={{ .Values.webhook.getCert.runAsNonRoot }}
 
-            # The node inventory is available whether baked in or chart-installed.
+            {{- /* Workload-digest claims (docs/ratls.md): get-cert
+                   redeems a sandbox token from the node's inventory over a
+                   compiled endpoint: the nri-image-policy socket that plugin
+                   NRI-mounts into c8s-cert on node-CVM. */}}
+            {{- /* cvmMode=node bakes the plugin into the node image instead of
+                   installing it from the chart, so the socket exists even when
+                   nriImagePolicy.enabled is false. */}}
             - --workload-claims-host-dir={{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
             {{- range .Values.operator.extraArgs }}
             - {{ . | quote }}
