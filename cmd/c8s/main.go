@@ -5,6 +5,9 @@
 //   - c8s install     — client-side: helm install c8s + CRDs
 //   - c8s uninstall   — client-side: helm uninstall + host sweep
 //   - c8s get-cert    — certificate bootstrap and renewal
+//
+// Installed as c8s-runc it is instead the measured OCI runtime wrapper
+// (internal/cmds/c8srunc), dispatched by basename before any flag parsing.
 package main
 
 import (
@@ -15,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/c8srunc"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 )
 
@@ -37,11 +41,26 @@ See 'c8s <subcommand> --help' for details.`,
 }
 
 func main() {
+	// The runtime wrapper takes runc's argv, which cobra must never parse: an
+	// unrecognised runc flag would become a usage error instead of a runtime
+	// call. It is dispatched by basename alone, ahead of everything else.
+	if isRuncAlias(os.Args[0]) {
+		os.Exit(c8srunc.Main(os.Args))
+	}
 	normalizeArgvAlias()
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runcAlias is the name the node image installs the wrapper under; see
+// internal/cmds/c8srunc.
+const runcAlias = "c8s-runc"
+
+func isRuncAlias(argv0 string) bool {
+	base := filepath.Base(argv0)
+	return base == runcAlias || strings.HasSuffix(base, "-"+runcAlias)
 }
 
 func normalizeArgvAlias() {
