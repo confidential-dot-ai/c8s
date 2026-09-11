@@ -3,16 +3,55 @@ package allowlist
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // RunningContainer holds the launch characteristics observed by an enforcer.
 // Missing Env is unavailable evidence and fails exact/deny policies.
+//
+// Mounts and BindMounts are the same bind-mount observation at two resolutions:
+// BindMounts is destinations alone, Mounts also says who staged each source. An
+// enforcer fills whichever it can produce, and Mounts wins when both are set.
+// The NRI plugin recognises the node's own staging paths, so it fills Mounts.
 type RunningContainer struct {
 	Digest     string
 	Argv       []string
 	BindMounts []string
+	Mounts     []ObservedMount
 	Env        *EnvObservation
 }
+
+// ObservedMount is one bind mount an enforcer can attribute: where it lands and
+// who staged the bytes behind it. Source is diagnostic — it is what the
+// enforcer classified, and what a deny log has to name for a reviewer to act on
+// it — never a value policy matches against.
+type ObservedMount struct {
+	Destination string
+	Source      string
+	Class       MountClass
+}
+
+// MountClass says who chose the bytes behind a bind mount, which is what
+// decides whether it can carry code into a container the allowlist admitted.
+type MountClass string
+
+const (
+	// MountPlatform is a mount the node makes for every pod whatever its spec
+	// says: /etc/hosts, /etc/hostname, /etc/resolv.conf, /dev/termination-log,
+	// /dev/shm and the serviceaccount projection. No entry lists it.
+	MountPlatform MountClass = "platform"
+	// MountEmptyDir is an emptyDir of either medium. The operator picks the
+	// destination but never the bytes, so a listed destination is the whole
+	// check.
+	MountEmptyDir MountClass = "emptyDir"
+	// MountData is operator-supplied content: configMap, secret, projected, PVC,
+	// CSI, local volume, or a subPath of one.
+	MountData MountClass = "data"
+	// MountHost is the node's own filesystem reaching into the container — a
+	// hostPath volume, or any source the enforcer could not attribute. Nothing
+	// but a node-TCB floor rule admits one.
+	MountHost MountClass = "host"
+)
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
 // more than one does. Both are refusals, but they say different things to an
@@ -140,7 +179,7 @@ func (c Container) admits(r RunningContainer) bool {
 	if !c.admitsProcess(r) {
 		return false
 	}
-	return c.Mounts.admits(r.BindMounts) && c.Env.matches(r)
+	return c.Mounts.admits(r) && c.Env.matches(r)
 }
 
 func (c Container) admitsProcess(r RunningContainer) bool {
@@ -151,12 +190,56 @@ func (c Container) admitsProcess(r RunningContainer) bool {
 	return ok && c.Args.matchArgs(rest)
 }
 
-// admits reports whether every bind destination is one this policy names.
-func (p MountPolicy) admits(destinations []string) bool {
+// admits reports whether the container's bind mounts satisfy this policy.
+//
+// A sandboxed policy meets a classified observation with the node-as-CVM rule
+// (admitsMount). Everything else — a non-sandboxed exact policy, or an enforcer
+// that reports destinations without saying who staged them — is plain
+// containment, which is what the field meant before Sandboxed existed.
+func (p MountPolicy) admits(r RunningContainer) bool {
 	if p.Policy != PolicyExact {
 		return true
 	}
-	return everyIn(destinations, p.Destinations)
+	if !p.Sandboxed || r.Mounts == nil {
+		return everyIn(observedDestinations(r), p.Destinations)
+	}
+	for _, m := range r.Mounts {
+		if !p.admitsMount(m) {
+			return false
+		}
+	}
+	return true
+}
+
+// admitsMount applies the sandboxed-workload rule to one classified mount.
+// Unknown classes fall to the default and are refused: an enforcer that grew a
+// class this policy has never heard of is reporting something nothing reviewed.
+func (p MountPolicy) admitsMount(m ObservedMount) bool {
+	switch m.Class {
+	case MountPlatform:
+		return true
+	case MountEmptyDir:
+		return slices.Contains(p.Destinations, m.Destination)
+	case MountData:
+		return slices.Contains(p.Destinations, m.Destination) &&
+			strings.HasPrefix(m.Destination, DataMountPrefix) &&
+			p.Reviews[m.Destination] != ""
+	default:
+		return false
+	}
+}
+
+// observedDestinations is the destination list the containment check reads,
+// from whichever resolution the enforcer filled.
+func observedDestinations(r RunningContainer) []string {
+	if r.Mounts == nil {
+		return r.BindMounts
+	}
+	out := make([]string, 0, len(r.Mounts))
+	for _, m := range r.Mounts {
+		out = append(out, m.Destination)
+	}
+	return out
 }
 
 func (p EnvPolicy) matches(r RunningContainer) bool {
