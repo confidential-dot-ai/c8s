@@ -417,11 +417,12 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	}
 
 	// always_allow digests admit regardless of argv; served digests require
-	// the effective argv to satisfy some entry's entrypoint/cmd policy. Mount
-	// and env policy are left unobserved here: this plugin gates images on a
-	// node CVM, where it sees the CRI container rather than a guest's mount
-	// table, and an unobserved field is not a violation
-	// (allowlist.RunningContainer).
+	// the effective argv to satisfy some entry's entrypoint/cmd policy. This
+	// call leaves mount and env unobserved even though NRI's Container carries
+	// the original CRI values. An exact policy treats a nil observation as
+	// nothing to refuse (allowlist.RunningContainer). Checking those original
+	// values alone would not cover later NRI adjustments. See
+	// docs/allowlist-and-capabilities.md, "Node mode: not enforced".
 	if !p.policy.alwaysAllows(digest) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
