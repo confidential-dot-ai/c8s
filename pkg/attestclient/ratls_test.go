@@ -122,8 +122,8 @@ func TestAttestationExtension_BindsKeyAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extension does not parse as an attestation: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %d, want SEV-SNP", att.TEEType)
+	if att.Family != ratls.TEETypeSEVSNP {
+		t.Fatalf("Family = %q, want %q", att.Family, ratls.TEETypeSEVSNP)
 	}
 }
 

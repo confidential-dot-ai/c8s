@@ -185,12 +185,28 @@ func parseConfig(data []byte) (*config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	// The pin parsers take one spelling of a digest, and this file is
+	// hand-editable: fold the case an operator typed rather than refusing a
+	// config the node has been booting with.
+	cfg.Allowlist.Pull.CDSMeasurements = foldHexPins(cfg.Allowlist.Pull.CDSMeasurements)
+	cfg.Allowlist.Pull.CDSRTMRs = foldHexPins(cfg.Allowlist.Pull.CDSRTMRs)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// foldHexPins lowercases each pin, leaving blanks and the "<index>=" prefix of
+// an RTMR pin untouched: both halves are hex or digits, which fold to
+// themselves.
+func foldHexPins(vals []string) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = strings.ToLower(v)
+	}
+	return out
 }
 
 // NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the

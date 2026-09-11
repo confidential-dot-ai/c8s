@@ -5,6 +5,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
@@ -17,14 +18,15 @@ import (
 // Attestation is the TEE evidence an RA-TLS certificate extension carries.
 type Attestation = agratls.Attestation
 
-// TEEType is the hardware family recorded in the extension.
-type TEEType = agratls.TEEType
+// TEEType is the hardware TEE family an extension records. The extension
+// carries the family, so this is teetypes.Family under the c8s name.
+type TEEType = teetypes.Family
 
 const (
 	// TEETypeSEVSNP is AMD SEV-SNP: snp, az-snp, gcp-snp.
-	TEETypeSEVSNP = agratls.TEETypeSEVSNP
+	TEETypeSEVSNP = teetypes.FamilySNP
 	// TEETypeTDX is Intel TDX: tdx, az-tdx, gcp-tdx.
-	TEETypeTDX = agratls.TEETypeTDX
+	TEETypeTDX = teetypes.FamilyTDX
 
 	// SNPReportSize is the exact size of an AMD SEV-SNP attestation report
 	// (ATTESTATION_REPORT, AMD SEV-SNP ABI Specification).

@@ -266,8 +266,8 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 	if family == teetypes.FamilyUnknown {
 		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, env.Platform)
 	}
-	if family != att.TEEType.Family() {
-		return nil, fmt.Errorf("%w: extension declares %s but carries %q evidence", ErrInvalidReport, att.TEEType, env.Platform)
+	if family != att.Family {
+		return nil, fmt.Errorf("%w: extension declares %s but carries %q evidence", ErrInvalidReport, att.Family, env.Platform)
 	}
 	return verifyEnvelopeOnline(env, policy, expectedReportData)
 }

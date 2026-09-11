@@ -174,8 +174,8 @@ func ratlsCDSServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{
-		TEEType: ratls.TEETypeSEVSNP,
-		Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+		Family: ratls.TEETypeSEVSNP,
+		Report: []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
 	}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {

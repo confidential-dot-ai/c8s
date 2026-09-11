@@ -985,6 +985,6 @@ func parseTEEType(platform string) (TEEType, error) {
 	case string(teetypes.FamilyTDX):
 		return TEETypeTDX, nil
 	default:
-		return 0, fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)
+		return "", fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)
 	}
 }

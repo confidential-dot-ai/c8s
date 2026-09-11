@@ -293,15 +293,15 @@ func (c *Client) attestationExtension(ctx context.Context, key *ecdsa.PrivateKey
 		return pkix.Extension{}, err
 	}
 	att := &ratls.Attestation{
-		TEEType: teeType,
-		Report:  []byte(report),
+		Family: teeType,
+		Report: []byte(report),
 	}
 	return ratls.MarshalExtension(att)
 }
 
 func (cfg *Config) teeType() (ratls.TEEType, error) {
-	if cfg == nil || cfg.TEEType == 0 {
-		return 0, fmt.Errorf("cdsclient: TEEType is required")
+	if cfg == nil || cfg.TEEType == "" {
+		return "", fmt.Errorf("cdsclient: TEEType is required")
 	}
 	// Both SEV-SNP and TDX are supported. attestclient.RATLSEvidence
 	// dispatches per-TEE (SNP → raw report bytes; TDX → envelope minus
@@ -311,7 +311,7 @@ func (cfg *Config) teeType() (ratls.TEEType, error) {
 	case ratls.TEETypeSEVSNP, ratls.TEETypeTDX:
 		return cfg.TEEType, nil
 	default:
-		return 0, fmt.Errorf("cdsclient: TEEType %s is not supported", cfg.TEEType)
+		return "", fmt.Errorf("cdsclient: TEEType %s is not supported", cfg.TEEType)
 	}
 }
 

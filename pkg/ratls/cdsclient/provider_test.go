@@ -1032,8 +1032,8 @@ func TestNewProviderValidation(t *testing.T) {
 		{"missing CDSCAURL", func(c *Config) { c.CDSCAURL = "" }},
 		{"missing NodeIP", func(c *Config) { c.NodeIP = "" }},
 		{"invalid NodeIP", func(c *Config) { c.NodeIP = "not-an-ip" }},
-		{"missing TEEType", func(c *Config) { c.TEEType = 0 }},
-		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEEType(99) }},
+		{"missing TEEType", func(c *Config) { c.TEEType = "" }},
+		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEEType("nitro") }},
 	}
 
 	for _, tt := range tests {

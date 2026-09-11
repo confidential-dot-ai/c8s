@@ -440,8 +440,8 @@ func TestParseTEEType(t *testing.T) {
 		{"az-tdx", TEETypeTDX, false},
 		{"gcp-tdx", TEETypeTDX, false},
 		{"SEV-SNP", TEETypeSEVSNP, false},
-		{"", 0, true},
-		{"unknown", 0, true},
+		{"", "", true},
+		{"unknown", "", true},
 	}
 	for _, tt := range tests {
 		got, err := parseTEEType(tt.input)

@@ -62,8 +62,8 @@ func testKeyAndAttestation(t *testing.T) (*ecdsa.PrivateKey, *Attestation) {
 		t.Fatal(err)
 	}
 	att := &Attestation{
-		TEEType: TEETypeSEVSNP,
-		Report:  fakeSNPReport(reportData),
+		Family: TEETypeSEVSNP,
+		Report: fakeSNPReport(reportData),
 	}
 	return key, att
 }
@@ -200,7 +200,7 @@ func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.R
 	if platform == types.PlatformTdx || platform == types.PlatformAzTdx {
 		teeType = TEETypeTDX
 	}
-	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: teeType, Report: embedded}, nil)
+	certDER, err := CreateAttestedCert(key, &Attestation{Family: teeType, Report: embedded}, nil)
 	if err != nil {
 		t.Fatalf("CreateAttestedCert: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: TEETypeSEVSNP, Report: embedded}, nil)
+	certDER, err := CreateAttestedCert(key, &Attestation{Family: TEETypeSEVSNP, Report: embedded}, nil)
 	if err != nil {
 		t.Fatalf("CreateAttestedCert: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		certDER, err := CreateAttestedCert(key, &Attestation{TEEType: TEETypeSEVSNP, Report: embedded}, nil)
+		certDER, err := CreateAttestedCert(key, &Attestation{Family: TEETypeSEVSNP, Report: embedded}, nil)
 		if err != nil {
 			t.Fatalf("CreateAttestedCert: %v", err)
 		}

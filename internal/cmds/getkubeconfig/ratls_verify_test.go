@@ -110,7 +110,7 @@ func attestedCert(t *testing.T, envelope types.AttestationEvidence) *x509.Certif
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: report}
+	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: report}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -248,10 +248,10 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 		}, "MRTD mismatch"},
 		{"wrong rtmr1", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_1"] = strings.Repeat("00", 48)
-		}, "RTMR[1] mismatch"},
+		}, "RTMR[1] does not match"},
 		{"wrong rtmr2", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_2"] = strings.Repeat("00", 48)
-		}, "RTMR[2] mismatch"},
+		}, "RTMR[2] does not match"},
 		{"wrong rtmr3", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
 		}, "not bound to the expected anchor"},
@@ -309,7 +309,7 @@ func mintServingCert(t *testing.T, holder *ecdsa.PublicKey, signer *ecdsa.Privat
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: report}
+	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: report}
 	ext, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
@@ -509,7 +509,7 @@ func snpAttestedCert(t *testing.T) *x509.Certificate {
 	// reads; the rest stays zero (the stubbed verifier supplies the verdict).
 	report := make([]byte, 1184)
 	copy(report[0x50:], rd[:])
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: report}
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: report}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)

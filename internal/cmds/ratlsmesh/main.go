@@ -677,10 +677,10 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 		if _, err := os.Stat("/dev/sev-guest"); err == nil {
 			return ratls.TEETypeSEVSNP, nil
 		}
-		return 0, fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
+		return "", fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
 	case "":
-		return 0, fmt.Errorf("--platform is required")
+		return "", fmt.Errorf("--platform is required")
 	default:
-		return 0, fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
+		return "", fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
 	}
 }

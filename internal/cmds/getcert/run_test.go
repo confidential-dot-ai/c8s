@@ -739,8 +739,8 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal extension: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %v, want SEV-SNP", att.TEEType)
+	if att.Family != ratls.TEETypeSEVSNP {
+		t.Fatalf("TEEType = %v, want SEV-SNP", att.Family)
 	}
 }
 

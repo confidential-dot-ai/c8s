@@ -147,7 +147,7 @@ func TestCertEnvelope(t *testing.T) {
 	}
 
 	t.Run("attested cert yields envelope and key-bound anchor", func(t *testing.T) {
-		att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+		att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
 		der, err := ratls.CreateAttestedCert(key, att, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestCertEnvelope(t *testing.T) {
 	})
 
 	t.Run("raw TDX cert is rejected", func(t *testing.T) {
-		att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte{1}}
+		att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte{1}}
 		der, err := ratls.CreateAttestedCert(key, att, nil)
 		if err != nil {
 			t.Fatal(err)

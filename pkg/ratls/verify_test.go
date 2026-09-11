@@ -13,7 +13,7 @@ import (
 func TestSandboxPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
 	policy := &VerifyPolicy{AttestationApiURL: "http://127.0.0.1:1", SandboxID: "abc123"}
 
-	if _, err := VerifyAttestation(nil, &Attestation{TEEType: TEETypeSEVSNP}, policy, nil); err == nil {
+	if _, err := VerifyAttestation(nil, &Attestation{Family: TEETypeSEVSNP}, policy, nil); err == nil {
 		t.Fatal("VerifyAttestation accepted a sandbox-ID pin it cannot authenticate")
 	} else if !errors.Is(err, ErrPolicyViolation) {
 		t.Fatalf("err = %v, want ErrPolicyViolation", err)
@@ -30,7 +30,7 @@ func TestSandboxPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
 func TestWorkloadPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
 	policy := &VerifyPolicy{AttestationApiURL: "http://127.0.0.1:1", WorkloadName: "api"}
 
-	if _, err := VerifyAttestation(nil, &Attestation{TEEType: TEETypeSEVSNP}, policy, nil); err == nil {
+	if _, err := VerifyAttestation(nil, &Attestation{Family: TEETypeSEVSNP}, policy, nil); err == nil {
 		t.Fatal("VerifyAttestation accepted a workload pin it cannot authenticate")
 	} else if !errors.Is(err, ErrPolicyViolation) {
 		t.Fatalf("err = %v, want ErrPolicyViolation", err)
@@ -44,7 +44,7 @@ func TestWorkloadPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
 // Both paths also require an attestation-api: there is no in-process verifier,
 // so without one they must fail rather than accept unverified evidence.
 func TestVerifyRequiresAttestationApi(t *testing.T) {
-	if _, err := VerifyAttestation(nil, &Attestation{TEEType: TEETypeSEVSNP}, &VerifyPolicy{}, nil); err == nil {
+	if _, err := VerifyAttestation(nil, &Attestation{Family: TEETypeSEVSNP}, &VerifyPolicy{}, nil); err == nil {
 		t.Fatal("VerifyAttestation ran with no attestation-api URL")
 	} else if !errors.Is(err, ErrInvalidReport) {
 		t.Fatalf("err = %v, want ErrInvalidReport", err)

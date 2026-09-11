@@ -59,7 +59,7 @@ func (p *SelfSignedProvider) Provision(ctx context.Context) (*tls.Certificate, t
 		return nil, 0, fmt.Errorf("ratls: get attestation: %w", err)
 	}
 
-	att := &Attestation{TEEType: teeType, Report: []byte(evidence)}
+	att := &Attestation{Family: teeType, Report: []byte(evidence)}
 	certDER, err := CreateAttestedCert(key, att, p.Opts)
 	if err != nil {
 		return nil, 0, err
