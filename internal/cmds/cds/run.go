@@ -120,6 +120,13 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
+	nodeInitData, err := ratls.ParseHexInitDataList(cfg.nodeInitData)
+	if err != nil {
+		return fmt.Errorf("--node-init-data: %w", err)
+	}
+	if len(nodeInitData) > 0 {
+		slog.Info("init-data pinning enabled for /attest", "count", len(nodeInitData))
+	}
 	if len(rtmrPins) > 0 {
 		slog.Info("TDX RTMR pinning enabled for /attest", "count", len(rtmrPins))
 	} else if len(measurements) > 0 {
@@ -207,7 +214,7 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Entries},
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Entries, InitData: nodeInitData},
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -273,6 +280,7 @@ func run(cfg config) error {
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
 			Entries:           pinned.Entries,
+			InitData:          nodeInitData,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

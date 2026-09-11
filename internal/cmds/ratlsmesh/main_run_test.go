@@ -186,6 +186,22 @@ func TestRunProxyConfigErrors(t *testing.T) {
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = valid48 + ",zz"
 		}, "invalid measurement hex"},
+		{"invalid peer init-data", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.initData = "zz"
+		}, "--init-data"},
+		{"init-data of the wrong width", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.initData = strings.Repeat("aa", 31)
+		}, "--init-data"},
+		{"invalid cds init-data", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.platform = "sev-snp"
+			c.cdsInitData = strings.Repeat("aa", 64)
+		}, "--cds-init-data"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

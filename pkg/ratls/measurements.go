@@ -25,6 +25,10 @@ type Pins struct {
 	// Measurements and RTMRs, so a digest from one image cannot be paired
 	// with another's registers.
 	Entries []measurements.Entry
+
+	// InitData pins the launch-time init-data field (VerifyPolicy.InitData):
+	// SNP HOST_DATA or TDX MRCONFIGID, any listed value passes.
+	InitData [][]byte
 }
 
 // VerifyPolicy converts the pins into the policy the verifying paths read.
@@ -35,8 +39,47 @@ func (p Pins) VerifyPolicy(attestationApiURL string) *VerifyPolicy {
 		Entries:           p.Entries,
 		Measurements:      p.Measurements,
 		RTMRs:             p.RTMRs,
+		InitData:          p.InitData,
 		AttestationApiURL: attestationApiURL,
 	}
+}
+
+// Init-data widths: SNP HOST_DATA is 32 bytes, TDX MRCONFIGID 48.
+const (
+	SNPHostDataSize   = 32
+	TDXMRConfigIDSize = 48
+)
+
+// ParseHexInitData parses a comma-separated list of hex-encoded init-data
+// values (SNP HOST_DATA or TDX MRCONFIGID) into the byte form
+// VerifyPolicy.InitData expects. Empty input returns nil.
+func ParseHexInitData(raw string) ([][]byte, error) {
+	return ParseHexInitDataList(strings.Split(raw, ","))
+}
+
+// ParseHexInitDataList parses hex-encoded init-data values, each 32 bytes (SNP
+// HOST_DATA) or 48 bytes (TDX MRCONFIGID). Blank entries are skipped; an
+// all-blank or empty slice returns nil (no pin).
+func ParseHexInitDataList(raw []string) ([][]byte, error) {
+	out := make([][]byte, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		decoded, err := hex.DecodeString(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex init-data %q: %w", p, err)
+		}
+		if len(decoded) != SNPHostDataSize && len(decoded) != TDXMRConfigIDSize {
+			return nil, fmt.Errorf("init-data %q is %d bytes, want %d (SNP HOST_DATA) or %d (TDX MRCONFIGID)", p, len(decoded), SNPHostDataSize, TDXMRConfigIDSize)
+		}
+		out = append(out, decoded)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 // ParseHexMeasurements parses a comma-separated list of hex-encoded SEV-SNP

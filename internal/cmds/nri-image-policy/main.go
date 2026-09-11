@@ -254,7 +254,11 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	initData, err := ratls.ParseHexInitDataList(cfg.CDSInitData)
+	if err != nil {
+		return nil, fmt.Errorf("parse CDS init-data pins: %w", err)
+	}
+	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, InitData: initData}, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
@@ -498,13 +502,17 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	if err != nil {
 		return fmt.Errorf("parse CDS RTMR pins: %w", err)
 	}
+	initData, err := ratls.ParseHexInitDataList(cfg.Allowlist.Pull.CDSInitData)
+	if err != nil {
+		return fmt.Errorf("parse CDS init-data pins: %w", err)
+	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
 	// The attest func is platform-agnostic despite its name (see its doc
 	// comment); the platform string is the only thing that follows the hardware.
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs})
+		attestationApiURL, ratls.Pins{Measurements: measurements, RTMRs: rtmrs, InitData: initData})
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).

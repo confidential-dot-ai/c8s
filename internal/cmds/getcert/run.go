@@ -47,6 +47,7 @@ import (
 type config struct {
 	CDSURL                 string
 	CDSMeasurements        string
+	CDSInitData            string
 	CDSRTMRs               string
 	AttestationApiURL      string
 	OutPath                string
@@ -120,6 +121,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags := cmd.Flags()
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
+	flags.StringVar(&cfg.CDSInitData, "cds-init-data", "", "comma-separated hex launch-time init-data values (SNP HOST_DATA / TDX MRCONFIGID) CDS's RA-TLS cert must carry — the launchdata commitment of the CDS node's ISO (empty = no init-data pinning)")
 	flags.StringVar(&cfg.CDSRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> CDS's RA-TLS cert must additionally satisfy; ignored when CDS presents SNP evidence (empty = launch-digest pinning only)")
 	flags.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "URL of the node-local attestation-api (http://localhost:8400, or unix:// plus the on-node socket path the chart wires)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
@@ -196,8 +198,12 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
+	initData, err := ratls.ParseHexInitData(cfg.CDSInitData)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-init-data: %w", err)
+	}
 
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, InitData: initData}, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}

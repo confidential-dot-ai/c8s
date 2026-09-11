@@ -63,6 +63,13 @@ type AttestHandler struct {
 	// so a digest from one image cannot be paired with another's registers.
 	Entries []measurements.Entry
 
+	// InitData pins the launch-time init-data (SNP HOST_DATA / TDX
+	// MRCONFIGID) a caller's evidence must carry, on top of the image pins:
+	// the launchdata commitments of the node ISOs, so a launch of a listed
+	// image with a different deployment config is not issued a leaf. Empty =
+	// no init-data pinning.
+	InitData [][]byte
+
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
 	// subject — see THREAT MODEL on issuer.CA.SignCSR.
@@ -226,6 +233,11 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if err := attestationclient.EnforceInitData(verifyResp, h.InitData); err != nil {
+		slog.Warn("init-data pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
+		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch-time init-data not allowed")
+		return
 	}
 
 	policy := h.Policy

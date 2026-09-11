@@ -41,6 +41,14 @@ type VerifyPolicy struct {
 	// so cannot speak to guest identity.
 	RTMRs map[int][]byte
 
+	// InitData pins the launch-time init-data field (SNP HOST_DATA / TDX
+	// MRCONFIGID) to one of the listed raw values. Where the launch digest
+	// names the image, this names the launch: a node image fed by a
+	// launchdata ISO commits the ISO's digest here, so peers that share an
+	// image but not a role or a deployment config are told apart. Empty pins
+	// nothing.
+	InitData [][]byte
+
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component
 	// (bootloader, TEE, reserved, snp, microcode, etc.) — each component
@@ -336,6 +344,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		Entries:            policy.Entries,
 		Measurements:       policy.Measurements,
 		RTMRs:              policy.RTMRs,
+		InitData:           policy.InitData,
 	})
 	if err != nil {
 		return nil, mapVerifyError(evidence.Platform, err)
@@ -370,6 +379,8 @@ func mapVerifyError(platform string, err error) error {
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
 	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed):
+		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
+	case errors.Is(err, attestationclient.ErrInitDataNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, attestationclient.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

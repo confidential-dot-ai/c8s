@@ -710,6 +710,23 @@ func TestRenewLoopRenewsWhenCDSMeshCAChanges(t *testing.T) {
 	}
 }
 
+// A malformed --cds-init-data is refused rather than silently unpinning the
+// CDS launch; a valid pin builds the client.
+func TestCDSHTTPClientParsesInitDataPins(t *testing.T) {
+	base := config{CDSURL: "https://cds:8443", AttestationApiURL: "http://attestation-api:8400"}
+
+	cfg := base
+	cfg.CDSInitData = strings.Repeat("aa", 31)
+	if _, err := cdsHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "--cds-init-data") {
+		t.Fatalf("err = %v, want an init-data parse failure naming the flag", err)
+	}
+
+	cfg.CDSInitData = strings.Repeat("aa", 32) + "," + strings.Repeat("bb", 48)
+	if _, err := cdsHTTPClient(cfg); err != nil {
+		t.Fatalf("valid init-data pins rejected: %v", err)
+	}
+}
+
 // A malformed --cds-rtmrs is refused rather than silently unpinning the
 // registers; a valid pin builds the client.
 func TestCDSHTTPClientParsesRTMRPins(t *testing.T) {

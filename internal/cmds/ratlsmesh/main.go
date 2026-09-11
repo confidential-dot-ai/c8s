@@ -129,6 +129,8 @@ type proxyConfig struct {
 	caPollInterval            time.Duration
 	cdsMeasurements           string
 	cdsRTMRs                  string
+	initData                  string
+	cdsInitData               string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
@@ -177,6 +179,8 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.StringVar(&c.cdsRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents SNP evidence. Empty = launch-digest pinning only")
+	fs.StringVar(&c.initData, "init-data", "", "comma-separated hex launch-time init-data values (SNP HOST_DATA, 64 hex; TDX MRCONFIGID, 96 hex) mesh peers must carry — the launchdata commitments of the node ISOs. Empty = no init-data pinning")
+	fs.StringVar(&c.cdsInitData, "cds-init-data", "", "comma-separated hex launch-time init-data values that CDS's RA-TLS peer cert must carry — the launchdata commitment of the CDS node's ISO. Empty = no init-data pinning")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
@@ -244,6 +248,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return err
 	}
 	meshPolicy.Entries = peerPins.Entries
+	if meshPolicy.InitData, err = ratls.ParseHexInitData(c.initData); err != nil {
+		return fmt.Errorf("--init-data: %w", err)
+	}
 	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
@@ -302,6 +309,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
+	cdsInitData, err := ratls.ParseHexInitData(c.cdsInitData)
+	if err != nil {
+		return fmt.Errorf("--cds-init-data: %w", err)
+	}
 	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
 	}
@@ -334,6 +345,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
 		CDSEntries:        cdsPins.Entries,
+		CDSInitData:       cdsInitData,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)
