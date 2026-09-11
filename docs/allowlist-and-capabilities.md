@@ -16,8 +16,9 @@ into attestation).
 
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
-policy (`command`, `args`) permitted for those bytes, and the entry as a whole
-may carry a secret-store grant (`secrets`).
+policy (`command`, `args`) permitted for those bytes, optionally to the
+environment values it may launch with (`env`), and the entry as a whole may
+carry a secret-store grant (`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -164,6 +165,23 @@ under any argv, and which that entry needs nothing more running for, is
 match and `lint`, `apply` and `add` refuse it. To tighten a seeded any-argv
 entry, edit it; do not add a narrower entry for the same image beside it.
 
+## Environment policy (`env`)
+
+`env` constrains the complete OCI launch environment: `exact` requires
+equality, so all names and values must match, including image defaults and
+runtime additions. `deny` requires an observed empty environment; `any` permits
+any environment. Missing env evidence fails `exact` and `deny`. An empty
+`exact.values` normalizes to `deny`, and an absent policy defaults to `any`.
+
+```json
+"env": { "policy": "exact", "values": {"PATH": "/usr/bin:/bin", "MODEL_DIR": "/models"} }
+```
+
+The NRI plugin enforces env after cumulative NRI adjustments, and the admission
+inventory carries an environment fingerprint for CDS workload matching and
+secret release.
+
+
 ## Secret grants (`secrets`)
 
 An entry may grant secret-store paths to the workload it names. The subject is
@@ -196,10 +214,11 @@ install still setting the per-container `paths` field needs
 
 Two independent points enforce, at different strengths:
 
-1. **Host NRI plugin** (`nri-image-policy`), at CreateContainer, per container.
-   Resolves the image digest and checks the effective argv against the allowlist
-   index. Fail-closed before the allowlist first loads; the plugin runs
-   inside the node CVM and is the primary admission gate.
+1. **Host NRI plugin** (`nri-image-policy`), per container. Resolves the image
+   digest and checks the effective argv at creation, validates env after
+   cumulative NRI adjustments, and rechecks the final OCI spec before start.
+   Fail-closed before the allowlist first loads; the plugin runs inside the
+   node CVM and is the primary admission gate.
 
 2. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is

@@ -246,6 +246,13 @@ func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, 
 func seedWorkloadsTx(tx *sql.Tx, workloads map[string]pkgallowlist.Workload) (int, error) {
 	var added int
 	for name, w := range workloads {
+		var exists int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM workload_entry WHERE name=?", name).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if exists != 0 {
+			continue
+		}
 		entryJSON, err := json.Marshal(w)
 		if err != nil {
 			return 0, err
@@ -277,13 +284,12 @@ func seedWorkloadsTx(tx *sql.Tx, workloads map[string]pkgallowlist.Workload) (in
 // validated against the frozen allowlist rules; a rejection wraps
 // ErrInvalidWorkload.
 func (s *Store) PutWorkload(name string, w pkgallowlist.Workload) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	norm, err := normalizeEntry(name, w)
 	if err != nil {
 		return err
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -418,7 +424,7 @@ func indexWorkloadTx(tx *sql.Tx, name string, w pkgallowlist.Workload) error {
 	return nil
 }
 
-// normalizeEntry validates name and w through the frozen allowlist validator and
+// normalizeEntry validates name and w through the allowlist validator and
 // returns the canonical entry to store. A rejection wraps ErrInvalidWorkload.
 func normalizeEntry(name string, w pkgallowlist.Workload) (pkgallowlist.Workload, error) {
 	probe := &pkgallowlist.Allowlist{

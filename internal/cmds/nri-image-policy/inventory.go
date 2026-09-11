@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/internal/admissionhistory"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -46,7 +47,7 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 // an inventory of what was admitted in the sandbox, and the injected images are
 // admitted under any argv, so CDS drops them from workload matching itself.
 // argv is the effective OCI process.args the container runs.
-func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string) {
+func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string, env *allowlist.EnvObservation) {
 	if containerID == "" || sandboxID == "" {
 		return
 	}
@@ -55,7 +56,7 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	b.containers[containerID] = ctrRec{sandboxID: sandboxID, name: name, digest: digest, argv: argv}
 
 	rec := b.admitted[sandboxID]
-	rec.Record(containerID, digest, argv)
+	rec.Record(containerID, digest, argv, env)
 	b.admitted[sandboxID] = rec
 
 	// A container implies its sandbox, so a record arriving before (or without)

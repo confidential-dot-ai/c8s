@@ -149,3 +149,23 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// AdmitsProcess is the preliminary NRI create-time check. It deliberately checks
+// only digest/argv; a successful result MUST be followed by AdmitsContainer on
+// the finalized OCI spec before start, and must never authorize secret release.
+func (i *Index) AdmitsProcess(r RunningContainer) bool {
+	if i == nil {
+		return false
+	}
+	d, err := types.ParseDigest(r.Digest)
+	if err != nil {
+		return false
+	}
+	r.Digest = d.String()
+	for _, c := range i.byDigest[r.Digest] {
+		if c.admitsProcess(r) {
+			return true
+		}
+	}
+	return false
+}

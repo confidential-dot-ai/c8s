@@ -63,8 +63,6 @@ replaced whole — this never field-merges into a live entry.`,
 				return fmt.Errorf("no workload entries in %q", args[0])
 			}
 
-			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
-
 			c, err := o.client(ctx(cmd))
 			if err != nil {
 				return err
@@ -74,6 +72,7 @@ replaced whole — this never field-merges into a live entry.`,
 				return err
 			}
 
+			findings := lintOffline(&pkgallowlist.Allowlist{Schema: live.Schema, Workloads: entries})
 			// The ambiguity check is the one finding that cannot be made from
 			// the file alone: the entry it collides with is usually one already
 			// served. Only pairs that span both are added here, since a

@@ -35,8 +35,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
 CLUSTER="${C8S_IT_CLUSTER:-c8s-it}"
-# kind v0.30.0's default node image, pinned by digest.
-NODE_IMAGE="${C8S_IT_NODE_IMAGE:-kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a}"
+# kind v0.33.0's Kubernetes 1.34 image, pinned by digest. Its containerd
+# includes NRI adjustment validation, required for env enforcement.
+NODE_IMAGE="${C8S_IT_NODE_IMAGE:-kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d}"
 IMAGE_TAG=it
 NS=c8s-system
 CDS_LOCAL_PORT=18443
@@ -67,6 +68,10 @@ diagnostics() {
     kubectl get pods -A -o wide 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-cds --tail=40 2>&1 || true
     kubectl -n "$NS" logs deploy/c8s-operator --tail=40 2>&1 || true
+    kubectl -n "$NS" logs ds/c8s-nri-image-policy-worker -c install --tail=80 2>&1 || true
+    if [ -n "$NODE" ]; then
+        node_exec journalctl -u containerd --no-pager -n 100 2>&1 || true
+    fi
     mesh_diagnostics
 }
 

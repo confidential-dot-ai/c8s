@@ -970,3 +970,31 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretReleaseEnforcesEnvEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		unknown bool
+		want    int
+	}{
+		{"matches", []string{"MODE=production"}, false, http.StatusCreated},
+		{"wrong", []string{"MODE=unsafe"}, false, http.StatusForbidden},
+		{"old inventory", nil, true, http.StatusForbidden},
+		{"empty", nil, false, http.StatusForbidden},
+		{"duplicate", []string{"MODE=unsafe", "MODE=production"}, false, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			al := hn.h.Policy.(fakePolicy).al
+			al.Workloads["api"].Containers[0].Env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyExact, Values: map[string]string{"MODE": "production"}}
+			if !tc.unknown {
+				hn.inv.containers[0].Env, _ = pkgallowlist.ObserveEnv(tc.env)
+			}
+			w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body)
+			}
+		})
+	}
+}

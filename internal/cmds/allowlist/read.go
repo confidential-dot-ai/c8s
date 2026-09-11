@@ -148,12 +148,12 @@ func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload)
 	names := slices.Sorted(maps.Keys(workloads))
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tLABEL\tINIT\tCTRS\tCOMMAND/ARGS\tSECRETS")
+	fmt.Fprintln(tw, "NAME\tLABEL\tINIT\tCTRS\tCOMMAND/ARGS\tENV\tSECRETS")
 	for _, name := range names {
 		wl := workloads[name]
 		command, args, secrets := summarizeWorkload(wl)
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\n", name, wl.Label, len(wl.InitContainers), len(wl.Containers),
-			"command="+command+" args="+args, secrets)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\t%s\n", name, wl.Label, len(wl.InitContainers), len(wl.Containers),
+			"command="+command+" args="+args, "env="+summarizeEnv(wl), secrets)
 	}
 	tw.Flush()
 }
@@ -210,7 +210,9 @@ func secretsSummary(p *pkgallowlist.SecretsPolicy) string {
 // containerSummary renders one container's argv policy pair, e.g.
 // "command=exact[/bin/sh -c] args=any".
 func containerSummary(c pkgallowlist.Container) string {
-	return fmt.Sprintf("command=%s args=%s", argvSummary(c.Command), argvSummary(c.Args))
+	env, _ := json.Marshal(c.Env)
+	mounts, _ := json.Marshal(c.Mounts)
+	return fmt.Sprintf("command=%s args=%s env=%s mounts=%s", argvSummary(c.Command), argvSummary(c.Args), env, mounts)
 }
 
 func shellJoin(argv []string) string {
@@ -222,4 +224,16 @@ func shellJoin(argv []string) string {
 		out += a
 	}
 	return out
+}
+
+func summarizeEnv(w pkgallowlist.Workload) string {
+	modes := map[string]bool{}
+	for _, c := range allContainers(w) {
+		mode := c.Env.Policy
+		if mode == "" {
+			mode = pkgallowlist.PolicyAny
+		}
+		modes[mode] = true
+	}
+	return joinSet(modes)
 }

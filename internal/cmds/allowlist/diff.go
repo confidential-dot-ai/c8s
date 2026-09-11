@@ -91,8 +91,8 @@ func diffEntry(live, desired pkgallowlist.Workload) entryDiff {
 // exactly one dropped and one introduced policy it is reported as a change;
 // otherwise the policies are reported as separate additions/removals.
 func diffContainers(kind string, live, desired []pkgallowlist.Container) (added, removed, changed []containerDiff) {
-	liveByDigest := groupSummaries(live)
-	desiredByDigest := groupSummaries(desired)
+	liveByDigest := groupPolicies(live)
+	desiredByDigest := groupPolicies(desired)
 
 	digests := map[string]bool{}
 	for d := range liveByDigest {
@@ -107,26 +107,39 @@ func diffContainers(kind string, live, desired []pkgallowlist.Container) (added,
 		onlyDesired := multisetSub(desiredByDigest[digest], liveByDigest[digest])
 		onlyLive := multisetSub(liveByDigest[digest], desiredByDigest[digest])
 		if len(onlyDesired) == 1 && len(onlyLive) == 1 {
-			changed = append(changed, containerDiff{Kind: kind, Digest: digest, From: onlyLive[0], To: onlyDesired[0]})
+			changed = append(changed, containerDiff{Kind: kind, Digest: digest, From: policySummary(onlyLive[0]), To: policySummary(onlyDesired[0])})
 			continue
 		}
 		for _, s := range onlyDesired {
-			added = append(added, containerDiff{Kind: kind, Digest: digest, To: s})
+			added = append(added, containerDiff{Kind: kind, Digest: digest, To: policySummary(s)})
 		}
 		for _, s := range onlyLive {
-			removed = append(removed, containerDiff{Kind: kind, Digest: digest, From: s})
+			removed = append(removed, containerDiff{Kind: kind, Digest: digest, From: policySummary(s)})
 		}
 	}
 	return added, removed, changed
 }
 
-func groupSummaries(cs []pkgallowlist.Container) map[string][]string {
+func groupPolicies(cs []pkgallowlist.Container) map[string][]string {
 	out := map[string][]string{}
 	for _, c := range cs {
 		d := c.Digest.String()
-		out[d] = append(out[d], containerSummary(c))
+		// Comparison uses framed JSON, not an ambiguous human argv rendering.
+		b, _ := json.Marshal(struct {
+			Command pkgallowlist.ArgvPolicy  `json:"command"`
+			Args    pkgallowlist.ArgvPolicy  `json:"args"`
+			Mounts  pkgallowlist.MountPolicy `json:"mounts"`
+			Env     pkgallowlist.EnvPolicy   `json:"env"`
+		}{c.Command, c.Args, c.Mounts, c.Env})
+		out[d] = append(out[d], string(b))
 	}
 	return out
+}
+
+func policySummary(key string) string {
+	var c pkgallowlist.Container
+	_ = json.Unmarshal([]byte(key), &c)
+	return containerSummary(c)
 }
 
 // multisetSub returns the elements of a not covered by an equal element of b,
