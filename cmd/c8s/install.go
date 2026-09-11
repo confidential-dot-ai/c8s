@@ -32,6 +32,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -43,7 +44,6 @@ var (
 	installCRDs      bool
 
 	installCertFSGroup          int64
-	installCertKeyMode          string
 	installGetCertRenewInterval time.Duration
 	installGetCertRunAsUser     int64
 	installGetCertRunAsGroup    int64
@@ -571,7 +571,7 @@ func preflightImagePolicy(ctx context.Context, w io.Writer, values map[string]an
 	if force {
 		return "installing a fail-closed image policy that denies " + deniedSummary(denied) + "; those containers will not come back after the containerd restart", nil
 	}
-	return "", fmt.Errorf("fail-closed image admission would deny %s the cluster runs, and registering the plugin restarts containerd — the denied containers would not come back:\n  %s\nAdmit their namespaces with -f setting nriImagePolicy.policy.exemptNamespaces, pin their digests in nriImagePolicy.bootstrapAllowlist.digests, or re-run with --force to install anyway",
+	return "", fmt.Errorf("fail-closed image admission would deny %s the cluster runs, and registering the plugin restarts containerd — the denied containers would not come back:\n  %s\nAdmit their namespaces with -f setting nriImagePolicy.policy.exemptNamespaces, admit their digests with nriImagePolicy.bootstrapAllowlist.workloads entries under any command and args, or re-run with --force to install anyway",
 		deniedSummary(denied), strings.Join(denied, "\n  "))
 }
 
@@ -592,7 +592,7 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	seen := map[string]bool{}
 	var lines []string
 	for _, p := range pods {
-		if !platformPod(p) || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		if !platformPod(p) || isTerminalPod(p) {
 			continue
 		}
 		for _, st := range podContainerStatuses(p) {
@@ -608,6 +608,10 @@ func platformImageLines(pods []corev1.Pod, accept func(namespace, digest string)
 	}
 	slices.Sort(lines)
 	return lines
+}
+
+func isTerminalPod(p corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
 
 // deniedPlatformImages lists the platform-pod images the policy would deny.
@@ -632,9 +636,9 @@ func exemptedPlatformImages(pods []corev1.Pod, exempt []string) []string {
 
 // reportExemptedImages prints what the exemption will admit. The plugin freezes
 // the digest set per node under its own cache dir, so an install is the one
-// place an operator can review it — and the one place where pinning the same
-// digests in the floor instead is still a choice. Uncapped: a truncated audit
-// list is not one.
+// place an operator can review it — and the one place where admitting the same
+// digests by entry instead is still a choice. Uncapped: a truncated audit list
+// is not one.
 func reportExemptedImages(w io.Writer, exempt, images []string) {
 	if len(images) == 0 {
 		return
@@ -644,8 +648,9 @@ func reportExemptedImages(w io.Writer, exempt, images []string) {
 	for _, image := range images {
 		fmt.Fprintf(w, "    %s\n", image)
 	}
-	fmt.Fprintf(w, "  To pin them explicitly instead, put these digests in\n"+
-		"  nriImagePolicy.bootstrapAllowlist.digests and set %s: [] via -f.\n", exemptNamespacesPath)
+	fmt.Fprintf(w, "  To pin them explicitly instead, admit these digests with\n"+
+		"  nriImagePolicy.bootstrapAllowlist.workloads entries under any command and args\n"+
+		"  (c8s allowlist add writes the same shape) and set %s: [] via -f.\n", exemptNamespacesPath)
 }
 
 // platformPod reports whether a pod belongs to the cluster's own platform
@@ -696,8 +701,7 @@ func imageDigest(refs ...string) string {
 
 // imageRepository normalizes the first parseable reference to the bare
 // repository the digest is reported against — the same form
-// workloadImageAllowlistEntry writes into the floor, so a reported line pastes
-// straight into it.
+// workloadImageAllowlistEntry writes as an entry's image label.
 func imageRepository(refs ...string) string {
 	for _, ref := range refs {
 		named, err := reference.ParseDockerRef(strings.TrimPrefix(ref, "docker-pullable://"))
@@ -709,25 +713,18 @@ func imageRepository(refs ...string) string {
 	return ""
 }
 
-// admissibleDigests collects the image digests the rendered floor admits: the
-// operator-supplied bootstrapAllowlist (digests, and the per-container digests
-// of its workloads) plus every pinned component image the floor derives from.
-// The component digests are taken whether or not derivation is on and whether
-// or not the component renders — a digest here that the chart would not
-// actually emit can only mean one fewer image reported, and no c8s component
-// image runs in a platform pod.
+// admissibleDigests collects the image digests the rendered allowlist admits:
+// the per-container digests of the operator-supplied bootstrapAllowlist
+// workloads plus every pinned component image the chart derives from. The
+// component digests are taken whether or not derivation is on and whether or
+// not the component renders — a digest here that the chart would not actually
+// emit can only mean one fewer image reported, and no c8s component image runs
+// in a platform pod.
 func admissibleDigests(values map[string]any, components []c8sComponent) map[string]bool {
 	admitted := map[string]bool{}
 	for _, c := range components {
 		if digest, err := stringAtPath(values, c.valuePrefix+".digest"); err == nil && digest != "" {
 			admitted[digest] = true
-		}
-	}
-	if floor, ok := valueAtPath(values, "nriImagePolicy.bootstrapAllowlist.digests"); ok {
-		if m, ok := floor.(map[string]any); ok {
-			for digest := range m {
-				admitted[digest] = true
-			}
 		}
 	}
 	if workloads, ok := nestedMap(values, "nriImagePolicy", "bootstrapAllowlist", "workloads"); ok {
@@ -1038,7 +1035,7 @@ var installCmd = &cobra.Command{
   - the ConfidentialWorkload CRD
   - the mutating admission webhook configuration
   - the attestation-api DaemonSet (per-node /attest + /verify)
-  - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
+  - the CDS trust root (attestation, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, and tls-lb components
 
 Under --cvm-mode=pod the install is ENFORCING: every workload pod runs as a kata VM
@@ -1097,9 +1094,10 @@ through the c8s webhook and the operator provisions the c8s-<id> headless Servic
 To front one of them behind tls-lb, give that ref a :<port> and pass --upstream <id>;
 tls-lb routes its catch-all to that adopted workload's headless Service
 (c8s-<id>.<ns>.svc.cluster.local:<port>). With --resolve-digests, install also
-resolves adopted workload images into nriImagePolicy.bootstrapAllowlist.digests
-so image admission (the host NRI plugin, or the in-guest policy-monitor under
---cvm-mode=pod) allows those rollouts.
+resolves adopted workload images into nriImagePolicy.bootstrapAllowlist.workloads
+entries admitting them under any command and args, so image admission (the host
+NRI plugin, or the in-guest policy-monitor under --cvm-mode=pod) allows those
+rollouts.
 
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 --resolve-digests=false.`,
@@ -2248,47 +2246,60 @@ func appendResolvedWorkloadImageArgs(ctx context.Context, helmArgs []string, ima
 	})
 }
 
+// buildWorkloadImageArgs renders one any-argv bootstrapAllowlist.workloads
+// entry per adopted image digest, named and shaped as `c8s allowlist add` and
+// the chart's own component entries are (pkgallowlist.DigestEntry).
 func buildWorkloadImageArgs(helmArgs []string, images []string, resolve func(ref string) (string, error)) ([]string, error) {
 	entries := map[string]string{}
+	digests := map[string]types.Digest{}
 	for _, image := range images {
 		digest, ref, err := workloadImageAllowlistEntry(image, resolve)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := entries[digest]; !ok {
-			entries[digest] = ref
+		if _, ok := entries[digest.String()]; !ok {
+			entries[digest.String()] = ref
+			digests[digest.String()] = digest
 		}
 	}
-	digests := make([]string, 0, len(entries))
+	keys := make([]string, 0, len(entries))
 	for digest := range entries {
-		digests = append(digests, digest)
+		keys = append(keys, digest)
 	}
-	sort.Strings(digests)
-	for _, digest := range digests {
-		helmArgs = append(helmArgs, "--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+digest+"="+entries[digest])
+	sort.Strings(keys)
+	for _, key := range keys {
+		ref := entries[key]
+		prefix := "nriImagePolicy.bootstrapAllowlist.workloads." + pkgallowlist.DigestEntryName(digests[key], ref) + "."
+		helmArgs = append(helmArgs,
+			"--set-string", prefix+"label="+ref,
+			"--set-string", prefix+"containers[0].digest="+key,
+			"--set-string", prefix+"containers[0].image="+ref,
+			"--set-string", prefix+"containers[0].command.policy=any",
+			"--set-string", prefix+"containers[0].args.policy=any",
+		)
 	}
 	return helmArgs, nil
 }
 
-func workloadImageAllowlistEntry(image string, resolve func(ref string) (string, error)) (digest, ref string, err error) {
+func workloadImageAllowlistEntry(image string, resolve func(ref string) (string, error)) (digest types.Digest, ref string, err error) {
 	named, err := reference.ParseDockerRef(image)
 	if err != nil {
-		return "", "", fmt.Errorf("parse adopted workload image %q: %w", image, err)
+		return types.Digest{}, "", fmt.Errorf("parse adopted workload image %q: %w", image, err)
 	}
 	repo := reference.TrimNamed(named).String()
 	raw := ""
 	if digested, ok := named.(reference.Digested); ok {
 		raw = digested.Digest().String()
 	} else if raw, err = resolve(named.String()); err != nil {
-		return "", "", err
+		return types.Digest{}, "", err
 	}
 	// ParseDigest enforces sha256:<64 hex> (NRI allowlist keys must be sha256)
 	// and lowercases the hex so the emitted key matches containerd's lookup form.
 	parsed, err := types.ParseDigest(raw)
 	if err != nil {
-		return "", "", fmt.Errorf("adopted workload image %q digest %q is not sha256; NRI allowlist entries must be sha256: %w", image, raw, err)
+		return types.Digest{}, "", fmt.Errorf("adopted workload image %q digest %q is not sha256; NRI allowlist entries must be sha256: %w", image, raw, err)
 	}
-	return parsed.String(), repo + "@" + parsed.String(), nil
+	return parsed, repo + "@" + parsed.String(), nil
 }
 
 // tagCouplingHint explains a missing component image in terms of the c8s
@@ -2475,7 +2486,6 @@ func init() {
 	installCmd.Flags().BoolVar(&installWait, "wait", true, "wait for the release to become ready (helm --wait)")
 	installCmd.Flags().BoolVar(&installCRDs, "install-crds", true, "install chart CRDs (false passes helm --skip-crds)")
 	installCmd.Flags().Int64Var(&installCertFSGroup, "webhook-cert-fs-group", 65532, "fsGroup for injected certificate volume")
-	installCmd.Flags().StringVar(&installCertKeyMode, "webhook-cert-key-mode", "0640", "octal mode for injected tls.key")
 	installCmd.Flags().DurationVar(&installGetCertRenewInterval, "webhook-get-cert-renew-interval", 6*time.Hour, "renewal interval for injected workload certificates")
 	installCmd.Flags().Int64Var(&installGetCertRunAsUser, "webhook-get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")

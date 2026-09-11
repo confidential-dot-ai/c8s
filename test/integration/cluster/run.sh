@@ -182,13 +182,28 @@ store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -Fq "docker.io/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
 python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
-import sys, yaml
+import re, sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
     digest, ref = line.rstrip("\n").split("\t")
     floor.setdefault(digest, ref)
 # Kept out of the floor on purpose: the admission test's unseen digest.
 floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
+
+def entry_name(digest, ref):
+    # Mirrors pkg/allowlist DigestEntryName.
+    base = ref.split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0][:50]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", base):
+        base = "image"
+    return base + "-" + digest[len("sha256:"):][:12]
+
+workloads = {
+    entry_name(d, r): {
+        "label": r,
+        "containers": [{"digest": d, "image": r, "command": {"policy": "any"}, "args": {"policy": "any"}}],
+    }
+    for d, r in floor.items()
+}
 with open(sys.argv[2], "w") as f:
     yaml.safe_dump({
         "nriImagePolicy": {
@@ -196,10 +211,10 @@ with open(sys.argv[2], "w") as f:
             # installer stays off: its baked form would find no config to
             # patch. The full installer is applied out-of-band below.
             "enabled": False,
-            "bootstrapAllowlist": {"digests": floor},
+            "bootstrapAllowlist": {"workloads": workloads},
         },
     }, f)
-print(f"floor: {len(floor)} digests")
+print(f"floor: {len(workloads)} any-argv entries")
 PYEOF
 
 # Digest-alias the loaded c8s images: the NRI installer renders its pod image
@@ -239,6 +254,13 @@ cds_pf_start() {
 }
 
 # cds_write <method> <path> <body-file> -> http code; signed with the operator key.
+# any_workload <digest> <image>: print a workload entry that admits the digest
+# under any command line, the body of PUT /allowlist/workloads/<name>.
+any_workload() {
+    printf '{"label":"%s","initContainers":[],"containers":[{"digest":"%s","image":"%s","command":{"policy":"any"},"args":{"policy":"any"}}]}' \
+        "$2" "$1" "$2"
+}
+
 cds_write() {
     local method="$1" path="$2" bodyfile="$3" token
     cds_pf_start
@@ -309,28 +331,28 @@ pass "CRD, mutating webhook, and both ValidatingAdmissionPolicies installed"
 log "Allowlist API"
 # Unsigned and wrongly-signed writes are refused; a write signed by the
 # pinned operator key lands, is served, and deletes cleanly. Exercised on a
-# throwaway digest so no assertion can pass on the seeded floor.
+# throwaway digest so no assertion can pass on the seeded entries.
 cds_pf_start
 THROWAWAY_DIGEST="sha256:$(printf 'ab%.0s' {1..32})"
-printf '{"digest":"%s","image":"example.com/harness/throwaway:1"}' "$THROWAWAY_DIGEST" > "$WORKDIR/add.json"
-code="$(curl -sSk -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-    --data-binary @"$WORKDIR/add.json" "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist/digests" || true)"
+any_workload "$THROWAWAY_DIGEST" "example.com/harness/throwaway:1" > "$WORKDIR/add.json"
+code="$(curl -sSk -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/json' \
+    --data-binary @"$WORKDIR/add.json" "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist/workloads/throwaway" || true)"
 [ "$code" = "401" ] || fail "unsigned allowlist write: want HTTP 401, got $code"
 pass "unsigned allowlist write rejected (401)"
 
 openssl ecparam -genkey -name prime256v1 -noout -out "$WORKDIR/rogue.key" 2>/dev/null
-rogue_token="$("$WORKDIR/optoken" "$WORKDIR/rogue.key" POST /allowlist/digests "$WORKDIR/add.json")"
-code="$(curl -sSk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: $rogue_token" -H 'Content-Type: application/json' \
-    --data-binary @"$WORKDIR/add.json" "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist/digests" || true)"
+rogue_token="$("$WORKDIR/optoken" "$WORKDIR/rogue.key" PUT /allowlist/workloads/throwaway "$WORKDIR/add.json")"
+code="$(curl -sSk -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: $rogue_token" -H 'Content-Type: application/json' \
+    --data-binary @"$WORKDIR/add.json" "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist/workloads/throwaway" || true)"
 [ "$code" = "401" ] || fail "wrong-key allowlist write: want HTTP 401, got $code"
 pass "allowlist write signed by an unpinned key rejected (401)"
 
-code="$(cds_write POST /allowlist/digests "$WORKDIR/add.json")"
+code="$(cds_write PUT /allowlist/workloads/throwaway "$WORKDIR/add.json")"
 [ "$code" = "204" ] || fail "signed allowlist write: want HTTP 204, got $code"
 curl -sSk "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist" | grep -q "$THROWAWAY_DIGEST" \
     || fail "added digest not served from /allowlist"
-printf '{"digests":["%s"]}' "$THROWAWAY_DIGEST" > "$WORKDIR/del.json"
-code="$(cds_write DELETE /allowlist/digests "$WORKDIR/del.json")"
+: > "$WORKDIR/del.json"
+code="$(cds_write DELETE /allowlist/workloads/throwaway "$WORKDIR/del.json")"
 [ "$code" = "204" ] || fail "signed allowlist delete: want HTTP 204, got $code"
 if curl -sSk "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist" | grep -q "$THROWAWAY_DIGEST"; then
     fail "deleted digest still served from /allowlist"
@@ -419,8 +441,8 @@ done
 pass "non-allowlisted image denied at container creation (fail-closed)"
 
 # Allow, and the same pod proceeds.
-printf '{"digest":"%s","image":"docker.io/%s"}' "$CURL_DIGEST" "$CURL_IMAGE" > "$WORKDIR/add-curl.json"
-code="$(cds_write POST /allowlist/digests "$WORKDIR/add-curl.json")"
+any_workload "$CURL_DIGEST" "docker.io/$CURL_IMAGE" > "$WORKDIR/add-curl.json"
+code="$(cds_write PUT /allowlist/workloads/curl "$WORKDIR/add-curl.json")"
 [ "$code" = "204" ] || fail "signed allowlist re-add: want HTTP 204, got $code"
 # kubelet's CreateContainerError backoff stretches into the minutes, so this
 # wait must comfortably outlive it.

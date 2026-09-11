@@ -53,6 +53,9 @@ jobs:
 
       - name: node-guest-image invariants
         env:
+          # Flip to "1" in the PR that bumps CONFOS_REF past confos#120
+          # (immutable root); until then the state.d declaration is inert.
+          EXPECT_IMMUTABLE_ROOT: "0"
           CONFOS_REF: ${{ steps.pins.outputs.confos }}
         run: .github/scripts/node-guest-image-invariants.sh
 

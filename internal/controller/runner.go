@@ -71,7 +71,6 @@ type Options struct {
 	WebhookServiceNamespace string
 
 	CertFSGroup         int64
-	CertKeyMode         string
 	CertRenewInterval   time.Duration
 	GetCertRunAsUser    int64
 	GetCertRunAsGroup   int64
@@ -101,8 +100,8 @@ type Options struct {
 	KataGuestReadyGate bool
 
 	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy inventory
-	// socket directory: the webhook mounts it into c8s-cert and injects the
-	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
+	// socket directory: that plugin NRI-mounts it into c8s-cert and the webhook
+	// injects the get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
 	WorkloadClaimsHostDir string
 
 	// WorkloadClaimsGuest selects the kata shape: the inventory is reached on
@@ -270,7 +269,6 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			CDSMeasurements:       opts.CDSMeasurements,
 			CDSRTMRs:              opts.CDSRTMRs,
 			CertFSGroup:           ptr.To(opts.CertFSGroup),
-			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,
 			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
 			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),

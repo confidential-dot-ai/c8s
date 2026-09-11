@@ -93,19 +93,22 @@ IMAGE_TAG=<c8s-release-tag> ./scripts/fetch.sh
 #                   kernel_verity_params, rootfs_type}
 ```
 
-The kernel is built from confos's required + hardening baseline plus this
-image's `kernel/container.config` fragment, passed as `confos kernel
---kernel-config-fragment`. confos resolves the merged `.config` and writes
-it to a snapshot in its own tree (there is no `--kernel-snapshot` /
-`--update-snapshot` flag). `scripts/build.sh` then copies that snapshot to
-`kernel/config-x86_64.snapshot` in **this** repo: the committed, reviewable
-record of the resolved guest-kernel config (confos's baseline + this
-fragment, merged). It is a lockfile, not a build input — editing the
-fragment or re-pinning confos (the `kata-guest` entry in
-`.github/build-pins.json`) moves it, so commit the snapshot alongside that
-change and review its diff. It is the
-only place a change in confos's kernel base that affects our guest kernel
-shows up. For kernel version bumps see
+The kernel is built from confos's required, hardening, and confidential
+baselines plus this image's `kernel/container.config` fragment, passed as
+`confos kernel --kernel-config-fragment`. confos writes the resolved config
+to `kernel/config-x86_64-container.snapshot` beside the fragment and includes
+its digest in the kernel cache fingerprint.
+
+`scripts/build-kernel.sh` compares that generated file with the committed
+`kernel/config-x86_64.snapshot`, then captures the result there for review.
+With `CHECK_SNAPSHOT=1`, drift fails the build while leaving the resolved
+snapshot available to inspect. CI caches the generated file with the kernel
+and manifest; it never restores over the committed comparison baseline.
+The image's `scripts/build.sh` uses the same helper for local builds.
+
+Editing the fragment or re-pinning confos (the `kata-guest` entry in
+`.github/build-pins.json`) can change the resolved config. Commit the captured
+snapshot alongside that change and review its diff. For kernel version bumps see
 [base-images/rke2/README.md](https://github.com/confidential-dot-ai/base-images/blob/master/rke2/README.md)
 "Bumping versions".
 

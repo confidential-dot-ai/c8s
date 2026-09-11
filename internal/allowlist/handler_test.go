@@ -1,6 +1,7 @@
 package allowlist_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -90,8 +91,6 @@ func allowlistTestRouter(wh allowlist.Handler, ready attestation.ReadinessFunc) 
 	r.Get("/readyz", attestation.HandleReadyz(ready))
 	r.Get("/allowlist", wh.HandleList)
 	r.Put("/allowlist", wh.HandleReplaceAll)
-	r.Post("/allowlist/digests", wh.HandleAddDigest)
-	r.Delete("/allowlist/digests", wh.HandleDeleteDigests)
 	r.Put("/allowlist/workloads/{name}", wh.HandlePutWorkload)
 	r.Delete("/allowlist/workloads/{name}", wh.HandleDeleteWorkload)
 	return r
@@ -144,9 +143,6 @@ func TestAllowlistListEmpty(t *testing.T) {
 	if al.Schema != pkgallowlist.Schema {
 		t.Fatalf("schema = %q, want %q", al.Schema, pkgallowlist.Schema)
 	}
-	if len(al.Digests) != 0 {
-		t.Fatalf("expected empty floor, got %d entries", len(al.Digests))
-	}
 	if len(al.Workloads) != 0 {
 		t.Fatalf("expected empty workloads, got %d entries", len(al.Workloads))
 	}
@@ -157,7 +153,7 @@ func TestAllowlistReplaceRequiresAuth(t *testing.T) {
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	body := fmt.Sprintf(`{"schema":%q,"digests":{"%s":"test-image"}}`, pkgallowlist.Schema, digestA)
+	body := fmt.Sprintf(`{"schema":%q,"workloads":{"web":{"containers":[{"digest":"%s"}]}}}`, pkgallowlist.Schema, digestA)
 	req, err := http.NewRequest(http.MethodPut, srv.URL+"/allowlist", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create request: %v", err)
@@ -182,9 +178,9 @@ func TestAllowlistReplaceSwapsSet(t *testing.T) {
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	addDigest(t, srv.URL, signer, digestA, "old-image")
+	putWorkload(t, srv.URL, signer, "old", digestA)
 
-	putBody := fmt.Sprintf(`{"schema":%q,"digests":{"%s":"new-image"}}`, pkgallowlist.Schema, digestMissing)
+	putBody := fmt.Sprintf(`{"schema":%q,"workloads":{"new":{"containers":[{"digest":"%s"}]}}}`, pkgallowlist.Schema, digestMissing)
 	putReq, _ := http.NewRequest(http.MethodPut, srv.URL+"/allowlist", strings.NewReader(putBody))
 	putReq.Header.Set("Content-Type", "application/json")
 	putReq.Header.Set("Authorization", authHeader(t, signer, http.MethodPut, "/allowlist", []byte(putBody)))
@@ -198,13 +194,13 @@ func TestAllowlistReplaceSwapsSet(t *testing.T) {
 	}
 
 	al := getAllowlist(t, srv.URL)
-	if len(al.Digests) != 1 {
-		t.Fatalf("expected exactly 1 floor digest after replace, got %d", len(al.Digests))
+	if len(al.Workloads) != 1 {
+		t.Fatalf("expected exactly 1 entry after replace, got %d", len(al.Workloads))
 	}
-	if al.Digests[digestMissing] != "new-image" {
-		t.Fatalf("replaced set missing new entry: %#v", al.Digests)
+	if w, ok := al.Workloads["new"]; !ok || w.Containers[0].Digest.String() != digestMissing {
+		t.Fatalf("replaced set missing new entry: %#v", al.Workloads)
 	}
-	if _, ok := al.Digests[digestA]; ok {
+	if _, ok := al.Workloads["old"]; ok {
 		t.Fatal("old entry survived a full replace")
 	}
 }
@@ -226,13 +222,15 @@ func guardTestHandler(t *testing.T) (allowlist.Handler, *allowlist.Store) {
 // touch the store.
 func TestAllowlistReplaceRejectsInvalidDoc(t *testing.T) {
 	h, store := guardTestHandler(t)
-	d, _ := types.ParseDigest(digestA)
-	if err := store.Add(d, "img"); err != nil {
+	if err := store.PutWorkload("web", entryFor(t, digestA)); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	versionBefore, _, _ := store.ListAll()
+	_, versionBefore, _ := store.LoadAll()
 
-	for _, body := range []string{`{}`, `{"digests":{}}`, `{"schema":"other","digests":{}}`} {
+	// The last body is the pre-unification shape: a top-level digests map is
+	// an unknown field now and must be refused rather than silently dropped.
+	for _, body := range []string{`{}`, `{"workloads":{}}`, `{"schema":"other","workloads":{}}`,
+		`{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"img"}}`} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/allowlist", strings.NewReader(body))
 		h.HandleReplaceAll(rec, req)
@@ -241,13 +239,13 @@ func TestAllowlistReplaceRejectsInvalidDoc(t *testing.T) {
 		}
 	}
 
-	version, digests, err := store.ListAll()
+	doc, version, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(digests) != 1 || version != versionBefore {
+	if len(doc.Workloads) != 1 || version != versionBefore {
 		t.Fatalf("invalid PUT must not change the allowlist: %d entries, version %s -> %s",
-			len(digests), versionBefore, version)
+			len(doc.Workloads), versionBefore, version)
 	}
 }
 
@@ -255,85 +253,85 @@ func TestAllowlistReplaceRejectsInvalidDoc(t *testing.T) {
 // the allowlist.
 func TestAllowlistReplaceExplicitEmptyClears(t *testing.T) {
 	h, store := guardTestHandler(t)
-	d, _ := types.ParseDigest(digestA)
-	if err := store.Add(d, "img"); err != nil {
+	if err := store.PutWorkload("web", entryFor(t, digestA)); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
-	body := fmt.Sprintf(`{"schema":%q,"digests":{}}`, pkgallowlist.Schema)
+	body := fmt.Sprintf(`{"schema":%q,"workloads":{}}`, pkgallowlist.Schema)
 	req := httptest.NewRequest(http.MethodPut, "/allowlist", strings.NewReader(body))
 	h.HandleReplaceAll(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("got status %d, want 204", rec.Code)
 	}
 
-	_, digests, err := store.ListAll()
+	doc, _, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(digests) != 0 {
-		t.Fatalf("explicit empty replace left %d entries", len(digests))
+	if len(doc.Workloads) != 0 {
+		t.Fatalf("explicit empty replace left %d entries", len(doc.Workloads))
 	}
 }
 
-// TestAllowlistAddRejectsMissingDigest pins the zero-digest guard: an absent
-// digest field skips Digest's validating UnmarshalJSON, and the row it would
-// insert is invisible to LoadAll and unaddressable by Delete.
-func TestAllowlistAddRejectsMissingDigest(t *testing.T) {
-	h, store := guardTestHandler(t)
-	versionBefore, _, _ := store.ListAll()
-
-	for _, body := range []string{`{}`, `{"image":"ghost"}`} {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(body))
-		h.HandleAddDigest(rec, req)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("POST %s: got status %d, want 422", body, rec.Code)
-		}
-	}
-
-	version, _, err := store.ListAll()
+// entryFor is a minimally-specified one-container entry at digest.
+func entryFor(t *testing.T, digest string) pkgallowlist.Workload {
+	t.Helper()
+	d, err := types.ParseDigest(digest)
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatal(err)
 	}
-	if version != versionBefore {
-		t.Fatalf("zero-digest POST bumped version %s -> %s (ghost row inserted)", versionBefore, version)
-	}
+	return pkgallowlist.Workload{Containers: []pkgallowlist.Container{{Digest: d}}}
 }
 
-func TestAllowlistAddRequiresAuth(t *testing.T) {
-	app, _, _ := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
+// workloadRequest builds a request for the per-entry handlers with the chi
+// {name} parameter resolved, as the cds router would.
+func workloadRequest(method, name, body string) *http.Request {
+	req := httptest.NewRequest(method, "/allowlist/workloads/"+name, strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", name)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
 
-	body := fmt.Sprintf(`{"digest":"%s","image":"test-image"}`, digestA)
-	resp, err := http.Post(srv.URL+"/allowlist/digests", "application/json", strings.NewReader(body))
+// putWorkload writes a one-container entry through the signed PUT path.
+func putWorkload(t *testing.T, srvURL string, signer *operatorauth.Signer, name, digest string) {
+	t.Helper()
+	path := "/allowlist/workloads/" + name
+	body := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digest)
+	req, err := http.NewRequest(http.MethodPut, srvURL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPut, path, []byte(body)))
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("got status %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("put workload got status %d, want 204", resp.StatusCode)
 	}
 }
 
-// TestAllowlistAddRejectsUnpinnedOperatorKey proves a well-formed token signed
+// TestWorkloadPutRejectsUnpinnedOperatorKey proves a well-formed token signed
 // by a key CDS does not pin is rejected at the handler level.
-func TestAllowlistAddRejectsUnpinnedOperatorKey(t *testing.T) {
+func TestWorkloadPutRejectsUnpinnedOperatorKey(t *testing.T) {
 	app, _, _ := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
 	otherSigner, _ := testOperatorCredential(t) // not the pinned key
-	body := fmt.Sprintf(`{"digest":"%s","image":"test-image"}`, digestA)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist/digests", strings.NewReader(body))
+	path := "/allowlist/workloads/web"
+	body := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestA)
+	req, err := http.NewRequest(http.MethodPut, srv.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, otherSigner, http.MethodPost, "/allowlist/digests", []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, otherSigner, http.MethodPut, path, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -346,154 +344,19 @@ func TestAllowlistAddRejectsUnpinnedOperatorKey(t *testing.T) {
 	}
 }
 
-func addDigest(t *testing.T, srvURL string, signer *operatorauth.Signer, digest, image string) {
-	t.Helper()
-	body := fmt.Sprintf(`{"digest":"%s","image":"%s"}`, digest, image)
-	req, err := http.NewRequest(http.MethodPost, srvURL+"/allowlist/digests", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, "/allowlist/digests", []byte(body)))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("add digest got status %d, want 204", resp.StatusCode)
-	}
-}
-
-func TestAllowlistAddAndListRoundtrip(t *testing.T) {
-	app, _, signer := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	addDigest(t, srv.URL, signer, digestA, "test-image")
-
-	al := getAllowlist(t, srv.URL)
-	if al.Digests[digestA] != "test-image" {
-		t.Fatalf("floor digest = %q, want test-image", al.Digests[digestA])
-	}
-}
-
-func TestAllowlistDeleteExistingReturnsNoContent(t *testing.T) {
-	app, _, signer := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	addDigest(t, srv.URL, signer, digestA, "test-image")
-
-	body := fmt.Sprintf(`{"digests":["%s"]}`, digestA)
-	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/allowlist/digests", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, signer, http.MethodDelete, "/allowlist/digests", []byte(body)))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("got status %d, want 204", resp.StatusCode)
-	}
-
-	al := getAllowlist(t, srv.URL)
-	if len(al.Digests) != 0 {
-		t.Fatalf("expected empty floor, got %d", len(al.Digests))
-	}
-}
-
-func TestAllowlistDeleteNonexistentReturnsNotFound(t *testing.T) {
-	app, _, signer := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	body := fmt.Sprintf(`{"digests":["%s"]}`, digestMissing)
-	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/allowlist/digests", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, signer, http.MethodDelete, "/allowlist/digests", []byte(body)))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("got status %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestAllowlistDeleteRequiresAuth(t *testing.T) {
-	app, _, _ := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	body := fmt.Sprintf(`{"digests":["%s"]}`, digestA)
-	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/allowlist/digests", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("got status %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestAllowlistAddRejectsInvalidDigest(t *testing.T) {
-	app, _, signer := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	body := `{"digest":"sha256:abc","image":"test-image"}`
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist/digests", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, "/allowlist/digests", []byte(body)))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("got status %d, want 422", resp.StatusCode)
-	}
-}
-
-// TestAllowlistAddRejectsReplayWithDifferentBody: a captured operator token for
+// TestWorkloadPutRejectsReplayWithDifferentBody: a captured operator token for
 // one body MUST NOT authorize a different body within the token's TTL.
-func TestAllowlistAddRejectsReplayWithDifferentBody(t *testing.T) {
+func TestWorkloadPutRejectsReplayWithDifferentBody(t *testing.T) {
 	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	originalBody := fmt.Sprintf(`{"digest":"%s","image":"trusted-image"}`, digestA)
-	header := authHeader(t, signer, http.MethodPost, "/allowlist/digests", []byte(originalBody))
+	path := "/allowlist/workloads/web"
+	originalBody := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestA)
+	header := authHeader(t, signer, http.MethodPut, path, []byte(originalBody))
 
-	attackerBody := fmt.Sprintf(`{"digest":"%s","image":"attacker-image"}`, digestMissing)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist/digests", strings.NewReader(attackerBody))
+	attackerBody := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestMissing)
+	req, err := http.NewRequest(http.MethodPut, srv.URL+path, strings.NewReader(attackerBody))
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
@@ -511,9 +374,9 @@ func TestAllowlistAddRejectsReplayWithDifferentBody(t *testing.T) {
 	}
 }
 
-// TestAllowlistAddRejectsBodyOverConfiguredCap confirms the per-Handler cap is
+// TestWorkloadPutRejectsBodyOverConfiguredCap confirms the per-Handler cap is
 // honoured: an over-cap body returns 413 before the auth check runs.
-func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
+func TestWorkloadPutRejectsBodyOverConfiguredCap(t *testing.T) {
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
 		t.Fatalf("open in-memory store: %v", err)
@@ -529,13 +392,14 @@ func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
 	srv := httptest.NewServer(allowlistTestRouter(wh, checker.Ready))
 	defer srv.Close()
 
+	path := "/allowlist/workloads/web"
 	body := strings.Repeat("x", 1024)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist/digests", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPut, srv.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, "/allowlist/digests", []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPut, path, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -553,18 +417,16 @@ func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
 func TestAllowlistDefaultWriteBodyCap(t *testing.T) {
 	h, _ := guardTestHandler(t)
 
-	small := fmt.Sprintf(`{"digest":%q,"image":"img"}`, digestA)
+	small := fmt.Sprintf(`{"containers":[{"digest":%q}]}`, digestA)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(small))
-	h.HandleAddDigest(rec, req)
+	h.HandlePutWorkload(rec, workloadRequest(http.MethodPut, "web", small))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("small body got status %d, want 204 (body %q)", rec.Code, rec.Body.String())
 	}
 
 	big := strings.Repeat("x", 64*1024+1)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(big))
-	h.HandleAddDigest(rec, req)
+	h.HandlePutWorkload(rec, workloadRequest(http.MethodPut, "web", big))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over-cap body got status %d, want 413", rec.Code)
 	}
@@ -705,7 +567,7 @@ func TestAllowlistListStaleIfNoneMatchReturns200WithNewETag(t *testing.T) {
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	addDigest(t, srv.URL, signer, digestA, "test-image")
+	putWorkload(t, srv.URL, signer, "web", digestA)
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL+"/allowlist", nil)
 	if err != nil {
@@ -735,11 +597,11 @@ func TestAllowlistWritesRejectedWithoutAuthorizer(t *testing.T) {
 	}
 	h := allowlist.Handler{Store: &store}
 
-	body := fmt.Sprintf(`{"digest":"%s","image":"img"}`, digestA)
+	body := fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestA)
 	rec := httptest.NewRecorder()
-	h.HandleAddDigest(rec, httptest.NewRequest(http.MethodPost, "/allowlist", strings.NewReader(body)))
+	h.HandlePutWorkload(rec, workloadRequest(http.MethodPut, "web", body))
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("POST without authorizer: got status %d, want 401", rec.Code)
+		t.Fatalf("PUT without authorizer: got status %d, want 401", rec.Code)
 	}
 }
 
@@ -751,20 +613,17 @@ func TestAllowlistMutationsRejectMalformedBody(t *testing.T) {
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
-		method  string
 		body    string
 	}{
-		{"add invalid json", h.HandleAddDigest, http.MethodPost, `{`},
-		{"add unknown field", h.HandleAddDigest, http.MethodPost, `{"digest":"` + digestA + `","bogus":1}`},
-		{"delete invalid json", h.HandleDeleteDigests, http.MethodDelete, `{`},
-		{"delete unknown field", h.HandleDeleteDigests, http.MethodDelete, `{"digests":["` + digestA + `"],"bogus":1}`},
-		{"replace invalid json", h.HandleReplaceAll, http.MethodPut, `{`},
-		{"replace unknown field", h.HandleReplaceAll, http.MethodPut, `{"digests":{},"bogus":1}`},
+		{"put invalid json", h.HandlePutWorkload, `{`},
+		{"put unknown field", h.HandlePutWorkload, `{"containers":[{"digest":"` + digestA + `"}],"bogus":1}`},
+		{"replace invalid json", h.HandleReplaceAll, `{`},
+		{"replace unknown field", h.HandleReplaceAll, `{"workloads":{},"bogus":1}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			tc.handler(rec, httptest.NewRequest(tc.method, "/allowlist", strings.NewReader(tc.body)))
+			tc.handler(rec, workloadRequest(http.MethodPut, "web", tc.body))
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("got status %d, want 422", rec.Code)
 			}
@@ -791,14 +650,14 @@ func TestAllowlistHandlersReturn500OnStoreFailure(t *testing.T) {
 		body    string
 	}{
 		{"list", h.HandleList, http.MethodGet, ""},
-		{"add", h.HandleAddDigest, http.MethodPost, fmt.Sprintf(`{"digest":"%s","image":"img"}`, digestA)},
-		{"delete", h.HandleDeleteDigests, http.MethodDelete, fmt.Sprintf(`{"digests":["%s"]}`, digestA)},
-		{"replace", h.HandleReplaceAll, http.MethodPut, fmt.Sprintf(`{"schema":"c8s.allowlist/v1","digests":{"%s":"img"}}`, digestA)},
+		{"put", h.HandlePutWorkload, http.MethodPut, fmt.Sprintf(`{"containers":[{"digest":"%s"}]}`, digestA)},
+		{"delete", h.HandleDeleteWorkload, http.MethodDelete, ""},
+		{"replace", h.HandleReplaceAll, http.MethodPut, fmt.Sprintf(`{"schema":"c8s.allowlist/v1","workloads":{"web":{"containers":[{"digest":"%s"}]}}}`, digestA)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			tc.handler(rec, httptest.NewRequest(tc.method, "/allowlist", strings.NewReader(tc.body)))
+			tc.handler(rec, workloadRequest(tc.method, "web", tc.body))
 			if rec.Code != http.StatusInternalServerError {
 				t.Fatalf("got status %d, want 500", rec.Code)
 			}

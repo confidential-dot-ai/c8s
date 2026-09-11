@@ -200,6 +200,12 @@ jobs:
             [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
             echo "$k=$v" >> "$GITHUB_ENV"
           done
+          # Optional: the oras tag of the manifest artifact, for when the
+          # digest-to-tag walk below cannot derive it. Two error messages in the
+          # get-kubeconfig step tell the operator to set this key, but nothing
+          # read it, so the documented remedy could not work.
+          v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.imageTag}' 2>/dev/null)
+          [ -z "$v" ] || echo "imageTag=$v" >> "$GITHUB_ENV"
           # An explicit input overrides the pin, but say so loudly: the floor is
           # fail-closed, so an unpaired ref is the likeliest cause of a red run.
           if [ -n '${{ inputs.c8s_ref }}' ]; then

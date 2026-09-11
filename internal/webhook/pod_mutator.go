@@ -45,8 +45,9 @@ const (
 	AnnotationWorkload = "confidential.ai/cw"
 
 	// AnnotationInjected is stamped on pods after a successful mutation
-	// so re-invocations of the webhook are no-ops.
-	AnnotationInjected = "confidential.ai/c8s-injected"
+	// so re-invocations of the webhook are no-ops. Shared with the node's
+	// admission inventory, which keys its socket mount on it.
+	AnnotationInjected = workloadclaims.AnnotationInjected
 
 	// LabelWorkload mirrors AnnotationWorkload as a pod label so the
 	// operator-managed headless Service (one per annotated workload) can
@@ -99,9 +100,8 @@ var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation
 
 // defaultCertFSGroup is the shared group used for the injected EmptyDir
 // when the pod does not already specify an fsGroup. The c8s image runs as
-// the distroless nonroot UID/GID 65532, and get-cert writes tls.key 0640.
+// the distroless nonroot UID/GID 65532, and get-cert creates tls.key 0640 in the setgid certificate volume.
 const defaultCertFSGroup int64 = 65532
-const defaultCertKeyMode = "0640"
 
 // defaultCertRenewInterval must stay strictly below issuer.MaxNamedLeafTTL, the
 // shortest TTL CDS issues: a leaf carrying a matched-workload stamp is capped
@@ -117,7 +117,7 @@ const discoveryPublicTLSModeWebPKI = "webpki"
 // reservedSecretContainerName is the injected secret fetcher. Reserved like
 // the cert containers: a pod that declared the name itself would have the
 // webhook's container silently replace or collide with it.
-const reservedSecretContainerName = "c8s-secret"
+const reservedSecretContainerName = workloadclaims.SecretContainerName
 
 // defaultCertVolumeName is the injected cert volume when a pod does not name
 // its own with AnnotationCertVolume.
@@ -132,7 +132,7 @@ const defaultSecretDir = "/run/c8s/secrets"
 
 // reservedVolumeContainerName is the injected volume fetcher. Reserved like the
 // cert containers.
-const reservedVolumeContainerName = "c8s-volume"
+const reservedVolumeContainerName = workloadclaims.VolumeContainerName
 
 // defaultVolumeDir is where opened volumes are mounted, one directory each.
 const defaultVolumeDir = "/run/c8s/volumes"
@@ -142,7 +142,7 @@ const defaultVolumeDir = "/run/c8s/volumes"
 // webhook rebuilds the sidecar every call (injectInitContainers) and rejects
 // the name in the regular/ephemeral lists (rejectReservedCertContainer); the
 // cw-label-integrity VAP enforces its presence in the API server.
-const reservedCertContainerName = "c8s-cert"
+const reservedCertContainerName = workloadclaims.CertContainerName
 
 // reservedCertWaitContainerName is the injected gate init container that blocks
 // the workload until c8s-cert has written the initial cert (see
@@ -217,9 +217,6 @@ type Config struct {
 	// fsGroup. A negative value disables fsGroup mutation.
 	CertFSGroup *int64
 
-	// CertKeyMode is passed to get-cert for the generated tls.key.
-	CertKeyMode string
-
 	// CertRenewInterval is passed to the renewal sidecar. Non-positive
 	// values use the default interval.
 	CertRenewInterval time.Duration
@@ -246,10 +243,11 @@ type Config struct {
 	HardwarePlatform string
 
 	// WorkloadClaimsHostDir, when set (node-CVM), is the host directory holding
-	// the nri-image-policy inventory socket. The webhook mounts it read-only at
-	// workloadclaims.SidecarSocketDir in the c8s-cert sidecar and injects
-	// --workload-claims so get-cert redeems a sandbox token over that socket
-	// (docs/ratls.md).
+	// the nri-image-policy inventory socket. That plugin bind-mounts the
+	// directory at workloadclaims.SidecarSocketDir into the injected sidecars
+	// (an NRI mount, never a pod-spec hostPath — PodSecurity baseline and
+	// restricted forbid hostPath); the webhook injects --workload-claims so
+	// get-cert redeems a sandbox token over that socket (docs/ratls.md).
 	WorkloadClaimsHostDir string
 
 	// KataGuestReadyGate makes kata runtimeClass injection also require
@@ -698,7 +696,8 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// under kata. An operator with neither has nothing to point it at, so
 	// injecting would produce a Running pod whose fetcher CrashLoops while the
 	// workload blocks forever on a file that never lands. Refuse at admission.
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	hasWorkloadClaimsEndpoint := m.cfg.WorkloadClaimsHostDir != "" || m.cfg.WorkloadClaimsGuest
+	if inj != nil && len(inj.Secrets.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
@@ -707,7 +706,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// socket directory on node-CVM or on guest loopback under kata. An operator
 	// with neither shape has no daemon to hand it to, so the workload would wait
 	// on a mount that can never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	if inj != nil && len(inj.Volumes.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
 			errInvalidInjectionAnnotation, AnnotationVolumes))
@@ -1001,8 +1000,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		ensureFSGroup(pod, *cfg.CertFSGroup)
 	}
 	ensureVolume(pod, certsVolume(effective.Cert.Volume))
-	if vol, ok := workloadClaimsVolume(cfg); ok {
-		ensureVolume(pod, vol)
+	if cfg.WorkloadClaimsHostDir != "" {
 		// The inventory socket is group-owned by InventorySocketGID and the non-root
 		// get-cert sidecar connects to it; without this supplemental group the
 		// connect fails closed and the pod hangs on its initial cert.
@@ -1092,7 +1090,6 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		// doing VERIFY_CA against the mesh) reads it directly instead of
 		// splitting the bundle in an entrypoint.
 		"--ca-out=" + certPath(inj.Cert.Dir, inj.Cert.CAFile),
-		"--key-mode=" + cfg.CertKeyMode,
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
@@ -1130,7 +1127,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		RestartPolicy:   &always,
 		Args:            args,
 		Env:             getCertEnv(inj),
-		VolumeMounts:    append(getCertVolumeMounts(inj, true), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    getCertVolumeMounts(inj, true),
 		SecurityContext: getCertSecurityContext(inj),
 		// The workload is gated on the initial cert by the c8s-cert-wait
 		// init container (certWaitContainer), not a startupProbe here: a
@@ -1285,9 +1282,6 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.CertFSGroup == nil {
 		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
-	}
-	if cfg.CertKeyMode == "" {
-		cfg.CertKeyMode = defaultCertKeyMode
 	}
 	if cfg.CertRenewInterval <= 0 {
 		cfg.CertRenewInterval = defaultCertRenewInterval
@@ -1553,7 +1547,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		// It reads the leaf and talks to the node agent's socket; the volumes
 		// themselves are mounted into the workload, not into this.
-		VolumeMounts:    append(getCertVolumeMounts(inj, false), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    getCertVolumeMounts(inj, false),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1600,12 +1594,10 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 		// The only container with write access: the shared directory is
 		// readable pod-wide by design, but a workload able to write it could
 		// replace a value another container has yet to read.
-		VolumeMounts: append(
-			append(getCertVolumeMounts(inj, false), corev1.VolumeMount{
-				Name:      secretsVolumeName,
-				MountPath: inj.Secrets.Dir,
-			}),
-			workloadClaimsMounts(cfg)...),
+		VolumeMounts: append(getCertVolumeMounts(inj, false), corev1.VolumeMount{
+			Name:      secretsVolumeName,
+			MountPath: inj.Secrets.Dir,
+		}),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1619,49 +1611,16 @@ func certsVolume(name string) corev1.Volume {
 	}
 }
 
-// workloadClaimsVolumeName is the injected volume that mounts the node-CVM
-// inventory socket directory into the c8s-cert sidecar.
-const workloadClaimsVolumeName = "c8s-workload-claims"
-
-// workloadClaimsVolume returns a read-only hostPath volume over the inventory
-// socket's host directory, for node-CVM only (WorkloadClaimsHostDir set). Under
-// kata the guest bind-mounts the inventory socket itself, so the webhook injects
-// no volume.
-func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
-	if cfg.WorkloadClaimsHostDir == "" {
-		return corev1.Volume{}, false
-	}
-	hpType := corev1.HostPathDirectory
-	return corev1.Volume{
-		Name: workloadClaimsVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{Path: cfg.WorkloadClaimsHostDir, Type: &hpType},
-		},
-	}, true
-}
-
 // sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
-// the inventory's host directory onto the sidecar's mount of that directory
-// (workloadClaimsMounts); every other shape passes through verbatim.
+// the inventory's host directory onto the sidecar's NRI-injected mount of that
+// directory (workloadclaims.SidecarSocketDir); every other shape passes
+// through verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL
 	}
 	return "unix://" + workloadclaims.SidecarSocketDir + "/" + strings.TrimPrefix(cfg.AttestationApiURL, hostPrefix)
-}
-
-// workloadClaimsMounts returns the sidecar mount for the inventory socket
-// directory (node-CVM only), read-only.
-func workloadClaimsMounts(cfg Config) []corev1.VolumeMount {
-	if cfg.WorkloadClaimsHostDir == "" {
-		return nil
-	}
-	return []corev1.VolumeMount{{
-		Name:      workloadClaimsVolumeName,
-		MountPath: workloadclaims.SidecarSocketDir,
-		ReadOnly:  true,
-	}}
 }
 
 func ensureVolume(pod *corev1.Pod, v corev1.Volume) {

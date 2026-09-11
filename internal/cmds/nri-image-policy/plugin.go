@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -36,8 +38,8 @@ const (
 )
 
 // policySnapshot is an immutable admission view: an Index built from the
-// always_allow floor unioned with the last-applied CDS pull, tagged with that
-// pull's version (the ETag counter). Swapped as a unit.
+// last-applied CDS pull, tagged with that pull's version (the ETag counter).
+// Swapped as a unit; policyStore checks always_allow ahead of it.
 type policySnapshot struct {
 	index   *allowlist.Index
 	version uint64
@@ -45,18 +47,21 @@ type policySnapshot struct {
 
 // policyStore holds the current admission snapshot. A single writer (the pull
 // loop) swaps it via apply; CreateContainer reads it concurrently via current.
-// The always_allow floor is unioned into every snapshot, so a failed or
-// withheld pull never drops it.
+// The always_allow digests are checked ahead of every snapshot, so a failed or
+// withheld pull never drops them.
 type policyStore struct {
-	bootstrap *allowlist.Allowlist // static floor, unioned into every snapshot
-	snap      atomic.Pointer[policySnapshot]
+	alwaysAllow *allowlist.Index // digests admitted by digest alone
+	snap        atomic.Pointer[policySnapshot]
 }
 
-// newPolicyStore seeds the store with the floor alone (version 0) so admission
-// enforces the floor before the first pull lands and after any pull failure.
-func newPolicyStore(bootstrap *allowlist.Allowlist) *policyStore {
-	s := &policyStore{bootstrap: bootstrap}
-	s.snap.Store(&policySnapshot{index: mergeAllowlists(bootstrap, nil).BuildIndex()})
+// newPolicyStore seeds the store with an empty snapshot (version 0) so admission
+// enforces always_allow alone before the first pull lands and after any pull
+// failure. Config validation has already rejected a malformed digest, so
+// DigestIndex's warnings cannot fire here.
+func newPolicyStore(alwaysAllow map[string]string) *policyStore {
+	idx, _ := allowlist.DigestIndex(slices.Collect(maps.Keys(alwaysAllow)))
+	s := &policyStore{alwaysAllow: idx}
+	s.snap.Store(&policySnapshot{index: (&allowlist.Allowlist{}).BuildIndex()})
 	return s
 }
 
@@ -67,10 +72,19 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
-// apply installs floor ∪ pulled at version, unless version is below the applied
-// one — an epoch rollback a withheld/rolled-back CDS must not use to loosen a
-// tightened policy. Reports whether it applied. Single-writer: only the pull
-// loop calls it, so the read-compare-store needs no lock against other writers.
+// alwaysAllows reports whether the digest is admitted by digest alone.
+func (s *policyStore) alwaysAllows(digest string) bool {
+	if s == nil {
+		return false
+	}
+	return s.alwaysAllow.AdmitsDigest(digest)
+}
+
+// apply installs the pulled document at version, unless version is below the
+// applied one — an epoch rollback a withheld/rolled-back CDS must not use to
+// loosen a tightened policy. Reports whether it applied. Single-writer: only the
+// pull loop calls it, so the read-compare-store needs no lock against other
+// writers.
 //
 // The applied version is process-local (newPolicyStore starts at 0), so
 // rollback is only rejected within a process lifetime: after a restart the first
@@ -82,10 +96,7 @@ func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 	if cur := s.snap.Load(); cur != nil && version < cur.version {
 		return false
 	}
-	s.snap.Store(&policySnapshot{
-		index:   mergeAllowlists(s.bootstrap, pulled).BuildIndex(),
-		version: version,
-	})
+	s.snap.Store(&policySnapshot{index: pulled.BuildIndex(), version: version})
 	return true
 }
 
@@ -334,9 +345,9 @@ func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName stri
 }
 
 // checkImage validates a container's image against the allowlist. argv is the
-// container's effective OCI process.args (NRI api.Container.Args): floor digests
-// are admitted regardless of it, workload digests only when it satisfies an
-// entry's entrypoint/cmd policy. Returns the verdict and an error string.
+// container's effective OCI process.args (NRI api.Container.Args): always_allow
+// digests are admitted regardless of it, served digests only when it satisfies
+// an entry's entrypoint/cmd policy. Returns the verdict and an error string.
 func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
@@ -405,12 +416,13 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		return verdictDeny, fmt.Sprintf("no allowlist available for %s", imageRef)
 	}
 
-	// Floor digests admit regardless of argv; workload digests require the
-	// effective argv to satisfy some entry's entrypoint/cmd policy. Mount and env
-	// policy are left unobserved here: this plugin gates images on a node CVM,
-	// where it sees the CRI container rather than a guest's mount table, and an
-	// unobserved field is not a violation (allowlist.RunningContainer).
-	if !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	// always_allow digests admit regardless of argv; served digests require
+	// the effective argv to satisfy some entry's entrypoint/cmd policy. Mount
+	// and env policy are left unobserved here: this plugin gates images on a
+	// node CVM, where it sees the CRI container rather than a guest's mount
+	// table, and an unobserved field is not a violation
+	// (allowlist.RunningContainer).
+	if !p.policy.alwaysAllows(digest) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.
@@ -692,8 +704,8 @@ func (p *plugin) RunDeferredCheck(ctx context.Context) {
 
 // admitWhileInitializing decides a container seen after NRI registration but
 // before the first allowlist fetch: audit mode passes, everything else takes
-// the ordinary check. The store is seeded with the always_allow floor at
-// startup, so bootstrap images are admitted and nothing else is.
+// the ordinary check. always_allow admits ahead of the empty startup snapshot,
+// so bootstrap images are admitted and nothing else is.
 func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) error {
 	log := p.logger.With(
 		"namespace", pod.GetNamespace(),
@@ -724,7 +736,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			return nil, nil, err
 		}
 		p.recordUncheckedForInventory(ctr, imageRef)
-		return nil, nil, nil
+		return p.socketDirAdjustment(pod, ctr), nil, nil
 	}
 
 	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
@@ -733,7 +745,36 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	p.recordForInventory(ctx, ctr, imageRef)
-	return nil, nil, nil
+	return p.socketDirAdjustment(pod, ctr), nil, nil
+}
+
+// socketDirAdjustment bind-mounts the inventory's socket directory, read-only,
+// at workloadclaims.SidecarSocketDir into the webhook-injected sidecars of an
+// injected pod — the OCI-level replacement for a pod-spec hostPath volume,
+// which PodSecurity baseline and restricted would reject. nil for every other
+// container, and whenever the inventory is disabled.
+//
+// The annotation+name gate scopes the mount; it is NOT a security boundary.
+// Both are tenant-forgeable, so every socket in the directory must stay safe
+// against any on-node caller (peer-credential binding, RO mount).
+func (p *plugin) socketDirAdjustment(pod *api.PodSandbox, ctr *api.Container) *api.ContainerAdjustment {
+	if p.inventory == nil {
+		return nil
+	}
+	if pod.GetAnnotations()[workloadclaims.AnnotationInjected] != "true" {
+		return nil
+	}
+	if !workloadclaims.IsSidecarContainer(ctr.GetName()) {
+		return nil
+	}
+	adjust := &api.ContainerAdjustment{}
+	adjust.AddMount(&api.Mount{
+		Destination: workloadclaims.SidecarSocketDir,
+		Type:        "bind",
+		Source:      p.cfg.WorkloadClaims.SocketDir,
+		Options:     []string{"rbind", "ro", "rprivate", "nosuid", "nodev", "noexec"},
+	})
+	return adjust
 }
 
 // extractDigest returns the canonical "sha256:<64hex>" digest from an image

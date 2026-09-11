@@ -128,8 +128,8 @@ var testNonce = []byte("c8s-test-challenge-nonce")
 
 // TestSandboxTokenRoute: POST /sandbox binds the kernel-reported caller to a
 // signed token carrying the resolver's sandbox ID, the inventory address, the
-// requester-key digest, the request nonce, and the inventory's EAR — verifiable
-// against the signer's key and that nonce.
+// requester-key digest, and the request nonce — verifiable against the
+// inventory signing key and that nonce.
 func TestSandboxTokenRoute(t *testing.T) {
 	resolver := &fakeResolver{sandboxID: "sandbox-1"}
 	signer := testSigner(t)
@@ -504,7 +504,7 @@ func TestValidateInventoryHost(t *testing.T) {
 	}
 }
 
-// A sandbox token is mintable by anything holding an /attest-key EAR, so the
+// A sandbox token is mintable by anything holding an attested RA-TLS key, so the
 // address it carries is attacker-chosen. These are the request-forgery targets
 // that must never be dialable: the cloud metadata service, CDS's own loopback,
 // and names that let DNS pick the destination after the check.

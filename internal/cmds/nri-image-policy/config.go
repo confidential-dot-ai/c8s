@@ -43,9 +43,11 @@ type pluginConfig struct {
 // (docs/ratls.md).
 type workloadClaimsConfig struct {
 	// SocketDir is the host directory the inventory creates its socket in (as the
-	// compiled workloadclaims.SocketName); the webhook mounts it into c8s-cert
+	// compiled workloadclaims.SocketName); the plugin NRI-mounts it into c8s-cert
 	// sidecars so get-cert can fetch its pod's digests. The filename is fixed
 	// so get-cert can bake the dial path — see workloadclaims.InventoryEndpoint.
+	// The attestation-api and volumed sockets live in the same directory, so
+	// sidecar reachability of all three rides this setting.
 	SocketDir string `yaml:"socket_dir"`
 	// ProcRoot is the /proc mount used to resolve a caller PID to its
 	// container cgroup. Defaults to "/proc".

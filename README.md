@@ -74,11 +74,10 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   entire in-guest security stack.
 
 - **Container image and command-line allowlisting.** Every container is
-  enforced against a CDS-served allowlist with two layers: a floor of image
-  digests admitted by digest alone, and named workload entries that
-  additionally pin the command line each image may run with — and, in the
-  guest, the bind-mount destinations and environment variable names.
-  Enforced by an
+  enforced against a CDS-served allowlist of named workload entries, each
+  pinning the image digests a workload runs and the command line each may run
+  with — and, in the guest, the bind-mount destinations and environment
+  variable names. Enforced by an
   NRI plugin on the host under node-as-CVM, and by an in-guest
   `policy-monitor` under pod-as-CVM, where the host cannot tamper with it.
 
@@ -334,7 +333,7 @@ attestation and reports the operator keys it pins.
 
 | Component | Description | Docs |
 |---|---|---|
-| [`cmd/cds`](cmd/cds/) | Certificate Distribution Service - verifies TEE attestation evidence, issues EAR tokens, signs workload CSRs with an in-process mesh CA, and serves the allowlist and secret-release APIs | [operator docs](docs/operator.md) |
+| [`cmd/cds`](cmd/cds/) | Certificate Distribution Service - verifies TEE attestation evidence, signs workload CSRs with an in-process mesh CA, and serves the allowlist and secret-release APIs | [operator docs](docs/operator.md) |
 | [`cmd/c8s`](cmd/c8s/) | Operator and install CLI for CRDs, status mirroring, webhook injection, and the embedded Helm chart | [operator docs](docs/operator.md) |
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
@@ -356,9 +355,6 @@ attestation and reports the operator keys it pins.
 | [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
 | [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
 | [`pkg/types`](pkg/types/) | Shared request/response types |
-| [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
-| [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
-| [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
 | [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
@@ -427,7 +423,8 @@ c8s allowlist export --url "$TLS_LB" \
 c8s allowlist diff allowlist.json --url "$TLS_LB" \
   --measurements <tls-lb-launch-digest>
 
-# Writes are signed with the operator key
+# Writes are signed with the operator key. 'add' admits an image under any
+# command line; 'apply' or 'derive' pins one or grants secrets.
 c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
   --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
   --operator-key operator.key

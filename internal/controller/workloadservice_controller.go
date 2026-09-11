@@ -223,12 +223,8 @@ func servicePorts(template *corev1.PodTemplateSpec) []corev1.ServicePort {
 					continue
 				}
 				seen[key] = struct{}{}
-				name := fmt.Sprintf("port-%d", cp.ContainerPort)
-				if protocol != corev1.ProtocolTCP {
-					name = fmt.Sprintf("port-%d-%s", cp.ContainerPort, strings.ToLower(string(protocol)))
-				}
 				out = append(out, corev1.ServicePort{
-					Name:     name,
+					Name:     servicePortName(cp.ContainerPort, protocol),
 					Port:     cp.ContainerPort,
 					Protocol: protocol,
 				})
@@ -236,6 +232,13 @@ func servicePorts(template *corev1.PodTemplateSpec) []corev1.ServicePort {
 		}
 	}
 	return out
+}
+
+func servicePortName(port int32, protocol corev1.Protocol) string {
+	if protocol != corev1.ProtocolTCP {
+		return fmt.Sprintf("port-%d-%s", port, strings.ToLower(string(protocol)))
+	}
+	return fmt.Sprintf("port-%d", port)
 }
 
 func (r *WorkloadServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {

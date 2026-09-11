@@ -70,6 +70,21 @@ func setPins(t *testing.T, path string, extra ...string) string {
 	return strings.TrimSpace(out.String())
 }
 
+func TestSetCDSPinsPreservesFileMode(t *testing.T) {
+	path := writeConfig(t, bakedConfig)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setPins(t, path, "--cds-measurements", pinA)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o, want 600", got)
+	}
+}
+
 // The pins land and the baked floor — which the chart cannot re-render, because
 // only the image build resolves the RKE2 system digests — survives untouched.
 func TestSetCDSPinsKeepsTheBakedFloor(t *testing.T) {

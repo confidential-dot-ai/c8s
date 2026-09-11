@@ -209,13 +209,12 @@ Requires a guest kernel exposing the TDX RTMR-extend sysfs
 (`/sys/devices/virtual/misc/tdx_guest/measurements/`, mainline ≥ 6.16).
 
 **Convention.** Pinned by
-[`pkg/runtimemeasure`](../pkg/runtimemeasure/runtimemeasure.go), the
-single source of truth for both sides:
+[`attestation-go/runtimemeasure`](https://github.com/confidential-dot-ai/attestation-go/tree/main/runtimemeasure),
+the single source of truth for both sides:
 `event = SHA384("sha256:"+hex)`, `RTMR3' = SHA384(RTMR3 ‖ event)`,
 folded from the boot value (all zeros — or from the operator-key seed
-`ForOperatorKey` on nodes launched with one). Golden vectors in
-`pkg/runtimemeasure/runtimemeasure_test.go` freeze it; every verifier
-MUST build on `pkg/runtimemeasure`, never re-derive the convention
+`Seed` on nodes launched with one). Golden vectors in that package freeze
+it; every verifier MUST build on it, never re-derive the convention
 (`c8s get-kubeconfig` and `c8s verify --operator-pkey` already do;
 `c8s verify --rtmr 3=` takes the folded value directly). Note that
 `c8s verify --operator-pkey` pins the *bare* seed only — no per-workload

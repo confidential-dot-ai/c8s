@@ -85,10 +85,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
-- CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one
-  process; EAR validation and signing share that process, so there is no
-  internal Service hop or JWKS fetch between them.
-- allowlist admin is EAR-authorized through CDS; the chart does not render a
+- CDS verifies evidence and signs workload CSRs in one process.
+- allowlist admin uses operator-signed JWTs through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
 - Sandbox identity needs the node addresses CDS may dial for a pod's admission
@@ -162,9 +160,9 @@ webhook, and the workload-service reconciler creates the `c8s-<id>` headless
 Services. `--upstream vllm-router` points tls-lb at
 `c8s-vllm-router.vllm.svc.cluster.local:8000` (its `<cw-id>` must be one of the
 adopted refs, carrying a `:<port>`). With `--resolve-digests=true`, install resolves adopted workload
-images into `nriImagePolicy.bootstrapAllowlist.digests` so image admission (the
-host NRI plugin, or the in-guest policy-monitor under `--cvm-mode=pod`) allows those
-rollouts.
+images into `nriImagePolicy.bootstrapAllowlist.workloads` entries admitting them
+under any command and args, so image admission (the host NRI plugin, or the
+in-guest policy-monitor under `--cvm-mode=pod`) allows those rollouts.
 
 `c8s install --install-crds=false` passes Helm's `--skip-crds`; CRDs are
 advisory and not required for pod injection. That path also disables the
@@ -253,12 +251,15 @@ whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
 that token (see the README, "Managing the image allowlist"). Without
 `cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
 
-CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
-those flows comes from EAR validation, measurement allowlists, and CA
-continuity checks rather than WebPKI on the Service hop.
+Operator clients construct signed requests through `operatorauth.NewRequest`,
+which binds the token to the actual HTTP method, parsed URL path (including
+any base URL prefix), and an owned copy of the body.
 
-CDS verifies EAR JWTs against its own in-process signer; there is no JWKS
-fetch to a separate component. The chart does not render a CA private key into
+CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
+those flows comes from authenticated certificate issuance and CA continuity
+checks.
+
+The chart does not render a CA private key into
 a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
 public-bundle PVC.
@@ -324,15 +325,20 @@ With CDS a singleton:
 
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator adds with `c8s allowlist add`. With
+whatever an operator writes with `c8s allowlist add` or `apply`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
+restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
 the install seed — workloads pulling those images are denied roughly one worker
 poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
-Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
-entries, are also enforced from the baked floor.
+(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
+chart-seeded component entries are unaffected — they are re-seeded and, unlike
+dynamic entries, are also admitted from the plugin's `always_allow` and the
+guest's baked seed. The restart also resets the allowlist version counter, and
+every enforcer ignores a served version at or below the one it last applied
+(`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
+or guest that had applied version N stays on that policy until the restarted
+CDS counts past N again, or the plugin or guest itself restarts.
 
 ## Attestation-api
 
@@ -426,7 +432,7 @@ images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
 rootfs pins with it.
 
 `--rtmr 3=<sha384-hex>` can additionally pin the runtime register — the ordered
-operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
+operator-key/workload extend chain ([`runtimemeasure`](https://github.com/confidential-dot-ai/attestation-go/tree/main/runtimemeasure)) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
 anything and reproduce that chain. (`--expected-rtmr3` is the former spelling of
@@ -508,7 +514,7 @@ and again on the RA-TLS credential-release connection:
   build-artifact manifest carrying all three fields under its `tdx` object. A
   generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
-  (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
+  (`runtimemeasure.Seed` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are
   rejected). With no `--workload-image` the register must equal the bare seed;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
@@ -616,7 +622,6 @@ get-cert \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
   --ca-out=/etc/c8s/certs/ca.crt \
-  --key-mode=<webhook.certVolume.keyMode> \
   --renew-interval=<webhook.getCert.renewInterval> \
   --reload-nginx=<from annotation> \
   --continue-on-initial-error
@@ -817,9 +822,10 @@ guard, not this render guard.
 
 ## Certificate file permissions
 
-`get-cert` writes the private key with the mode passed by `--key-mode`. The
-webhook default is `0640`, and it sets `fsGroup: 65532` on injected pods that
-do not already define an `fsGroup`. This lets application containers running
+`get-cert` writes private keys with mode `0640` (owner read/write, group read)
+in setgid directories and `0600` (owner read/write) elsewhere, on every write.
+The webhook sets `fsGroup: 65532` on injected pods that do not already
+define an `fsGroup`. This lets application containers running
 as a different non-root UID read `tls.key` through the shared group.
 
 Relevant values:
@@ -828,7 +834,6 @@ Relevant values:
 webhook:
   certVolume:
     fsGroup: 65532
-    keyMode: "0640"
   getCert:
     renewInterval: 2h
     runAsUser: 65532

@@ -211,7 +211,7 @@ func openOne(ctx context.Context, cfg config, daemon *http.Client, daemonBase, n
 }
 
 // daemonClient reaches volumed and returns the base URL to post to: the socket
-// the webhook mounts into this sidecar on node-CVM, or the guest's compiled
+// directory NRI-mounted into this sidecar on node-CVM, or the guest's compiled
 // loopback address under kata, where volumed is in this VM and there is no
 // shared filesystem. Both are compiled; the flag selects a shape, not an
 // address.

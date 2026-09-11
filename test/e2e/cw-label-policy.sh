@@ -15,8 +15,8 @@ pod=probe
 pause_image=registry.k8s.io/pause:3.9
 
 # kubectl run's generated pod is otherwise root/default-seccomp, which the
-# deny-host-namespaces policy correctly rejects in the privileged-labelled CW
-# namespace. Keep every probe compliant so only the intended guard decides it.
+# Restricted policy correctly rejects. Keep every probe compliant so only the
+# intended guard decides it.
 restricted_overrides() {
   local name=$1 image=$2
   printf '{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"%s","image":"%s","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' "$name" "$image"
@@ -44,13 +44,7 @@ expect_deny() {
   echo "ok: $what denied"
 }
 
-kubectl create namespace "$ns" >/dev/null
-# The probes are bare pods, so a cluster enforcing the restricted PSA standard
-# denies them before the policy under test is ever consulted.
-kubectl label namespace "$ns" \
-  pod-security.kubernetes.io/enforce=privileged \
-  pod-security.kubernetes.io/warn=restricted \
-  pod-security.kubernetes.io/audit=restricted >/dev/null
+cw_namespace "$ns"
 
 # Ordinary pod admission must be unaffected. This is also the canary for a
 # broken CEL expression: failurePolicy=Fail turns one into a deny-all.

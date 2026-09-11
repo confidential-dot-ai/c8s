@@ -1,31 +1,14 @@
 {{- if .Values.hostNamespacePolicy.enabled }}
 {{- /*
-Tenant namespaces cannot rely on Pod Security Admission's stock Restricted
-profile because the webhook-injected credential sidecars need one hostPath:
-the node-local workload-claims socket directory. Keep the complete Restricted
-contract here and carve out only that exact, read-only sidecar mount.
+Enforce Restricted Pod Security controls in workload namespaces, including a
+blanket hostPath denial. The inventory socket directory reaches credential
+sidecars through NRI below the Pod spec, so no volume or image exception is
+needed here.
 
 The release namespace, kube-system, local-path-storage, and configured
 exemptions host trusted platform components that legitimately need privileges
 which tenant workloads must never receive.
 */}}
-{{- /* Share the prior-admission guard between both sidecar image gates. */}}
-{{- $priorClaimsIdentity := printf `request.operation == 'UPDATE' &&
-oldObject != null &&
-has(oldObject.metadata.annotations) &&
-'confidential.ai/c8s-injected' in oldObject.metadata.annotations &&
-oldObject.metadata.annotations['confidential.ai/c8s-injected'] == 'true' &&
-'confidential.ai/cw' in oldObject.metadata.annotations &&
-oldObject.metadata.annotations['confidential.ai/cw'] == object.metadata.annotations['confidential.ai/cw'] &&
-has(oldObject.metadata.labels) &&
-'confidential.ai/cw' in oldObject.metadata.labels &&
-oldObject.metadata.labels['confidential.ai/cw'] == object.metadata.annotations['confidential.ai/cw'] &&
-has(oldObject.spec.volumes) &&
-oldObject.spec.volumes.filter(v, has(v.hostPath)).size() == 1 &&
-oldObject.spec.volumes.exists(v,
-  v.name == 'c8s-workload-claims' && has(v.hostPath) &&
-  v.hostPath.path == %s &&
-  has(v.hostPath.type) && v.hostPath.type == 'Directory')` (.Values.nriImagePolicy.hostPaths.runtimeDir | quote) }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -129,88 +112,15 @@ spec:
                c.lifecycle.preStop.tcpSocket.host == '')))))))
       message: "Probe and lifecycle HTTP/TCP handlers must not set an explicit host."
     - expression: >-
-        (!has(object.spec.volumes) || object.spec.volumes.all(v,
-          (!has(v.hostPath) &&
-           (has(v.configMap) || has(v.csi) || has(v.downwardAPI) ||
-            has(v.emptyDir) || has(v.ephemeral) ||
-            has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))) ||
-          (has(v.hostPath) &&
-           v.name == 'c8s-workload-claims' &&
-           v.hostPath.path == {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }} &&
-           has(v.hostPath.type) && v.hostPath.type == 'Directory'))) &&
-        (!has(object.spec.volumes) ||
-         object.spec.volumes.filter(v, has(v.hostPath)).size() <= 1)
-      message: "Volumes must use a Restricted-safe source, except for the single webhook-owned c8s-workload-claims Directory hostPath at the configured inventory runtime directory."
-    - expression: >-
         !has(object.spec.volumes) ||
-        !object.spec.volumes.exists(v, has(v.hostPath)) ||
-        ((has(object.metadata.annotations) &&
-          'confidential.ai/cw' in object.metadata.annotations &&
-          object.metadata.annotations['confidential.ai/cw'] != '' &&
-          'confidential.ai/c8s-injected' in object.metadata.annotations &&
-          object.metadata.annotations['confidential.ai/c8s-injected'] == 'true' &&
-          has(object.metadata.labels) &&
-          'confidential.ai/cw' in object.metadata.labels &&
-          object.metadata.labels['confidential.ai/cw'] ==
-            object.metadata.annotations['confidential.ai/cw'] &&
-          has(object.spec.initContainers) &&
-          object.spec.initContainers.exists(c,
-            (c.image == {{ include "c8s.image" . | quote }} ||
-             (({{ $priorClaimsIdentity | nindent 15 }}) &&
-              has(oldObject.spec.initContainers) &&
-              oldObject.spec.initContainers.exists(prior, prior == c))) &&
-            has(c.restartPolicy) && c.restartPolicy == 'Always' &&
-            (!has(c.command) || c.command.size() == 0) &&
-            !has(c.lifecycle) && !has(c.livenessProbe) &&
-            !has(c.readinessProbe) && !has(c.startupProbe) &&
-            has(c.args) && c.args.size() > 0 &&
-            ((c.name == 'c8s-cert' && c.args[0] == 'get-cert' &&
-              c.args.exists(a, a == '--workload-claims')) ||
-             (c.name == 'c8s-secret' && c.args[0] == 'get-secret' &&
-              'confidential.ai/c8s-secrets' in object.metadata.annotations &&
-              object.metadata.annotations['confidential.ai/c8s-secrets'] != '') ||
-             (c.name == 'c8s-volume' && c.args[0] == 'get-volume' &&
-              'confidential.ai/c8s-volumes' in object.metadata.annotations &&
-              object.metadata.annotations['confidential.ai/c8s-volumes'] != '')) &&
-            has(c.volumeMounts) && c.volumeMounts.exists(m,
-              m.name == 'c8s-workload-claims' &&
-              m.mountPath == '/run/c8s/workload-claims' &&
-              has(m.readOnly) && m.readOnly == true &&
-              (!has(m.subPath) || m.subPath == '') &&
-              (!has(m.subPathExpr) || m.subPathExpr == '') &&
-              (!has(m.mountPropagation) || m.mountPropagation == 'None'))) &&
-          object.spec.initContainers.all(c,
-            !has(c.volumeMounts) || c.volumeMounts.all(m,
-              m.name != 'c8s-workload-claims' ||
-              ((c.image == {{ include "c8s.image" . | quote }} ||
-                (({{ $priorClaimsIdentity | nindent 18 }}) &&
-                 has(oldObject.spec.initContainers) &&
-                 oldObject.spec.initContainers.exists(prior, prior == c))) &&
-               has(c.restartPolicy) && c.restartPolicy == 'Always' &&
-               (!has(c.command) || c.command.size() == 0) &&
-               !has(c.lifecycle) && !has(c.livenessProbe) &&
-               !has(c.readinessProbe) && !has(c.startupProbe) &&
-               has(c.args) && c.args.size() > 0 &&
-               ((c.name == 'c8s-cert' && c.args[0] == 'get-cert' &&
-                 c.args.exists(a, a == '--workload-claims')) ||
-                (c.name == 'c8s-secret' && c.args[0] == 'get-secret' &&
-                 'confidential.ai/c8s-secrets' in object.metadata.annotations &&
-                 object.metadata.annotations['confidential.ai/c8s-secrets'] != '') ||
-                (c.name == 'c8s-volume' && c.args[0] == 'get-volume' &&
-                 'confidential.ai/c8s-volumes' in object.metadata.annotations &&
-                 object.metadata.annotations['confidential.ai/c8s-volumes'] != '')) &&
-               m.mountPath == '/run/c8s/workload-claims' &&
-               has(m.readOnly) && m.readOnly == true &&
-               (!has(m.subPath) || m.subPath == '') &&
-               (!has(m.subPathExpr) || m.subPathExpr == '') &&
-               (!has(m.mountPropagation) || m.mountPropagation == 'None'))))) &&
-         (!has(object.spec.containers) || object.spec.containers.all(c,
-           !has(c.volumeMounts) ||
-           c.volumeMounts.all(m, m.name != 'c8s-workload-claims'))) &&
-         (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
-           !has(c.volumeMounts) ||
-           c.volumeMounts.all(m, m.name != 'c8s-workload-claims'))))
-      message: "The c8s-workload-claims hostPath is allowed only on an injected confidential workload, mounted read-only at /run/c8s/workload-claims without subPath or propagation, by the chart's c8s image or an unchanged previously injected sidecar on UPDATE, in the matching credential-sidecar mode."
+        object.spec.volumes.all(v, !has(v.hostPath))
+      message: "hostPath volumes are denied for tenant pods: a mount of the node filesystem could swap the sockets c8s components dial (docs/getcert-workload-binding.md, Corner 7)."
+    - expression: >-
+        !has(object.spec.volumes) || object.spec.volumes.all(v,
+          has(v.configMap) || has(v.csi) || has(v.downwardAPI) ||
+          has(v.emptyDir) || has(v.ephemeral) ||
+          has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))
+      message: "Volumes must use a Restricted-safe source."
     - expression: >-
         (!has(object.spec.securityContext) ||
          !has(object.spec.securityContext.windowsOptions) ||
@@ -255,7 +165,10 @@ spec:
           c.securityContext.allowPrivilegeEscalation == false))
       message: "Every container must set allowPrivilegeEscalation: false."
     - expression: >-
-        (!has(object.spec.containers) || object.spec.containers.all(c,
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.runAsNonRoot) ||
+         object.spec.securityContext.runAsNonRoot == true) &&
+        ((!has(object.spec.containers) || object.spec.containers.all(c,
           (has(c.securityContext) && has(c.securityContext.runAsNonRoot)) ?
             c.securityContext.runAsNonRoot == true :
             (has(object.spec.securityContext) &&
@@ -272,8 +185,8 @@ spec:
             c.securityContext.runAsNonRoot == true :
             (has(object.spec.securityContext) &&
              has(object.spec.securityContext.runAsNonRoot) &&
-             object.spec.securityContext.runAsNonRoot == true)))
-      message: "Every container must run as non-root, either explicitly or by inheriting pod-level runAsNonRoot: true."
+             object.spec.securityContext.runAsNonRoot == true))))
+      message: "Pod runAsNonRoot must not be false; every container must run as non-root explicitly or by inheritance."
     - expression: >-
         (!has(object.spec.securityContext) ||
          !has(object.spec.securityContext.runAsUser) ||
@@ -309,7 +222,10 @@ spec:
            c.securityContext.capabilities.add.all(cap, cap == 'NET_BIND_SERVICE'))))
       message: "Every container must drop ALL capabilities and may add back only NET_BIND_SERVICE."
     - expression: >-
-        (!has(object.spec.containers) || object.spec.containers.all(c,
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.seccompProfile) ||
+         object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost']) &&
+        ((!has(object.spec.containers) || object.spec.containers.all(c,
           (has(c.securityContext) && has(c.securityContext.seccompProfile)) ?
             c.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'] :
             (has(object.spec.securityContext) &&
@@ -326,8 +242,8 @@ spec:
             c.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'] :
             (has(object.spec.securityContext) &&
              has(object.spec.securityContext.seccompProfile) &&
-             object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'])))
-      message: "Every container must use RuntimeDefault or Localhost seccomp, either explicitly or by inheritance from the pod."
+             object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost']))))
+      message: "Pod and container seccomp profiles must be RuntimeDefault or Localhost; every container must set or inherit one."
     - expression: >-
         (!has(object.spec.securityContext) ||
          !has(object.spec.securityContext.appArmorProfile) ||
@@ -341,7 +257,7 @@ spec:
         (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
           !has(c.securityContext) || !has(c.securityContext.appArmorProfile) ||
           c.securityContext.appArmorProfile.type != 'Unconfined')) &&
-        (!has(object.metadata.annotations) ||
+        (!has(object.metadata) || !has(object.metadata.annotations) ||
          object.metadata.annotations.all(k,
            !k.startsWith('container.apparmor.security.beta.kubernetes.io/') ||
            object.metadata.annotations[k] != 'unconfined'))
@@ -457,16 +373,28 @@ spec:
             {{- end }}
   validations:
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
-        object.spec.ephemeralContainers.all(c,
-          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))
-      message: "Ephemeral containers must not publish a hostPort."
+        !has(object.spec.hostNetwork) || object.spec.hostNetwork == false
+      message: "hostNetwork is reserved for c8s node components: a pod sharing the node network namespace could bind the privileged port CDS uses to identify the admission inventory, and impersonate it."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
-        object.spec.ephemeralContainers.all(c,
-          !has(c.volumeMounts) ||
-          c.volumeMounts.all(m, m.name != 'c8s-workload-claims'))
-      message: "Ephemeral containers must never mount the c8s-workload-claims hostPath."
+        !has(object.spec.hostPID) || object.spec.hostPID == false
+      message: "hostPID is denied: sharing the node PID namespace defeats the kernel peer-credential binding the admission inventory uses to identify its caller."
+    - expression: >-
+        !has(object.spec.hostIPC) || object.spec.hostIPC == false
+      message: "hostIPC is denied for tenant pods."
+    - expression: >-
+        (!has(object.spec.containers) || object.spec.containers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c,
+          !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      message: "hostPort is reserved for c8s node components: workloadclaims.DigestsPort (1019) is the admission inventory's identity, and a hostPort publishes a pod on the node's address without hostNetwork — so a tenant pod could answer as the inventory and have CDS resolve its signing key."
+    # Keep the blanket denial for full-Pod ephemeral updates too, including
+    # Pods admitted before this policy that still contain a hostPath.
+    - expression: >-
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(v, !has(v.hostPath))
+      message: "hostPath volumes are denied for tenant pods: a mount of the node filesystem could swap the sockets c8s components dial (docs/getcert-workload-binding.md, Corner 7)."
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
@@ -488,20 +416,26 @@ spec:
           c.securityContext.allowPrivilegeEscalation == false)
       message: "Every ephemeral container must set allowPrivilegeEscalation: false."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.runAsNonRoot) ||
+         object.spec.securityContext.runAsNonRoot == true) &&
+        (!has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           (has(c.securityContext) && has(c.securityContext.runAsNonRoot)) ?
             c.securityContext.runAsNonRoot == true :
             (has(object.spec.securityContext) &&
              has(object.spec.securityContext.runAsNonRoot) &&
-             object.spec.securityContext.runAsNonRoot == true))
-      message: "Every ephemeral container must run as non-root, either explicitly or by inheriting pod-level runAsNonRoot: true."
+             object.spec.securityContext.runAsNonRoot == true)))
+      message: "Pod runAsNonRoot must not be false; every ephemeral container must run as non-root explicitly or by inheritance."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.runAsUser) ||
+         object.spec.securityContext.runAsUser != 0) &&
+        (!has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           !has(c.securityContext) || !has(c.securityContext.runAsUser) ||
-          c.securityContext.runAsUser != 0)
-      message: "Ephemeral containers must not set runAsUser to UID 0."
+          c.securityContext.runAsUser != 0))
+      message: "runAsUser must not be UID 0 at pod or ephemeral-container scope."
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
@@ -512,22 +446,41 @@ spec:
            c.securityContext.capabilities.add.all(cap, cap == 'NET_BIND_SERVICE')))
       message: "Every ephemeral container must drop ALL capabilities and may add back only NET_BIND_SERVICE."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.seccompProfile) ||
+         object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost']) &&
+        (!has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           (has(c.securityContext) && has(c.securityContext.seccompProfile)) ?
             c.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'] :
             (has(object.spec.securityContext) &&
              has(object.spec.securityContext.seccompProfile) &&
-             object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost']))
-      message: "Every ephemeral container must use RuntimeDefault or Localhost seccomp, either explicitly or by inheriting the pod-level profile."
+             object.spec.securityContext.seccompProfile.type in ['RuntimeDefault', 'Localhost'])))
+      message: "Pod and ephemeral-container seccomp profiles must be RuntimeDefault or Localhost; every ephemeral container must set or inherit one."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.appArmorProfile) ||
+         object.spec.securityContext.appArmorProfile.type != 'Unconfined') &&
+        (!has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           !has(c.securityContext) || !has(c.securityContext.appArmorProfile) ||
-          c.securityContext.appArmorProfile.type != 'Unconfined')
-      message: "Ephemeral containers must not set AppArmor to Unconfined."
+          c.securityContext.appArmorProfile.type != 'Unconfined')) &&
+        (!has(object.metadata) || !has(object.metadata.annotations) ||
+         object.metadata.annotations.all(k,
+           !k.startsWith('container.apparmor.security.beta.kubernetes.io/') ||
+           object.metadata.annotations[k] != 'unconfined'))
+      message: "AppArmor must not be Unconfined at pod or ephemeral-container scope."
     - expression: >-
-        !has(object.spec.ephemeralContainers) ||
+        (!has(object.spec.securityContext) ||
+         !has(object.spec.securityContext.seLinuxOptions) ||
+         ((!has(object.spec.securityContext.seLinuxOptions.user) ||
+           object.spec.securityContext.seLinuxOptions.user == '') &&
+          (!has(object.spec.securityContext.seLinuxOptions.role) ||
+           object.spec.securityContext.seLinuxOptions.role == '') &&
+          (!has(object.spec.securityContext.seLinuxOptions.type) ||
+           object.spec.securityContext.seLinuxOptions.type in
+             ['', 'container_t', 'container_init_t', 'container_kvm_t', 'container_engine_t']))) &&
+        (!has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           !has(c.securityContext) || !has(c.securityContext.seLinuxOptions) ||
           ((!has(c.securityContext.seLinuxOptions.user) ||
@@ -536,14 +489,32 @@ spec:
             c.securityContext.seLinuxOptions.role == '') &&
            (!has(c.securityContext.seLinuxOptions.type) ||
             c.securityContext.seLinuxOptions.type in
-              ['', 'container_t', 'container_init_t', 'container_kvm_t', 'container_engine_t'])))
-      message: "Ephemeral-container SELinux user and role must be unset, and type must be a container-safe type."
+              ['', 'container_t', 'container_init_t', 'container_kvm_t', 'container_engine_t']))))
+      message: "Pod and ephemeral-container SELinux user and role must be unset, and type must be a container-safe type."
     - expression: >-
         !has(object.spec.ephemeralContainers) ||
         object.spec.ephemeralContainers.all(c,
           !has(c.securityContext) || !has(c.securityContext.procMount) ||
           c.securityContext.procMount == 'Default')
       message: "Ephemeral-container procMount must be Default."
+    - expression: >-
+        !has(object.spec.securityContext) ||
+        !has(object.spec.securityContext.sysctls) ||
+        object.spec.securityContext.sysctls.all(s, s.name in [
+          'kernel.shm_rmid_forced',
+          'net.ipv4.ip_local_port_range',
+          'net.ipv4.ip_unprivileged_port_start',
+          'net.ipv4.tcp_syncookies',
+          'net.ipv4.ping_group_range',
+          'net.ipv4.ip_local_reserved_ports',
+          'net.ipv4.tcp_keepalive_time',
+          'net.ipv4.tcp_fin_timeout',
+          'net.ipv4.tcp_keepalive_intvl',
+          'net.ipv4.tcp_keepalive_probes',
+          'net.ipv4.tcp_rmem',
+          'net.ipv4.tcp_wmem'
+        ])
+      message: "Only sysctls allowed by the Kubernetes Restricted profile may be set."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

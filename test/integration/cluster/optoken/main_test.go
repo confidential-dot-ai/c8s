@@ -39,7 +39,7 @@ func TestRunProducesAuthorizingHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	header, err := run([]string{"optoken", keyPath, "POST", "/allowlist/digests", bodyPath})
+	header, err := run([]string{"optoken", keyPath, "PUT", "/allowlist/workloads/x", bodyPath})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestRunProducesAuthorizingHeader(t *testing.T) {
 		t.Fatalf("header = %q, want a Bearer token", header)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, "https://cds/allowlist/digests", nil)
+	req, err := http.NewRequest(http.MethodPut, "https://cds/allowlist/workloads/x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

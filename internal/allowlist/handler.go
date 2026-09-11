@@ -1,8 +1,6 @@
 package allowlist
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,12 +9,11 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/httputil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // DefaultMaxWriteBodyBytes caps a mutation body when Handler.MaxWriteBodyBytes
-// is zero. A digest line is tiny; the deployed handler raises this so a full
-// workload document fits (see the cds router's allowlist write cap).
+// is zero. One entry fits; the deployed handler raises this so a full document
+// fits (see the cds router's allowlist write cap).
 const DefaultMaxWriteBodyBytes int64 = 64 * 1024
 
 // Handler holds the dependencies for allowlist HTTP handlers.
@@ -60,7 +57,7 @@ func (h Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleReplaceAll handles PUT /allowlist: validate the full document and swap
-// floor and workloads atomically. CDS assigns the new version.
+// it in atomically. CDS assigns the new version.
 func (h Handler) HandleReplaceAll(w http.ResponseWriter, r *http.Request) {
 	body, ok := h.authorize(w, r)
 	if !ok {
@@ -78,67 +75,7 @@ func (h Handler) HandleReplaceAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("allowlist replaced", "floor", len(al.Digests), "workloads", len(al.Workloads))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// HandleAddDigest handles POST /allowlist/digests: add one floor digest.
-func (h Handler) HandleAddDigest(w http.ResponseWriter, r *http.Request) {
-	body, ok := h.authorize(w, r)
-	if !ok {
-		return
-	}
-
-	var req types.DigestAddRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	// An absent digest field skips Digest's validating UnmarshalJSON, and a zero
-	// digest would insert a row LoadAll skips and Delete cannot name.
-	if req.Digest.String() == "" {
-		http.Error(w, "digest is required", http.StatusUnprocessableEntity)
-		return
-	}
-
-	if err := h.Store.Add(req.Digest, req.Image); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	slog.Info("allowlist floor digest added", "digest", req.Digest.String(), "image", req.Image)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// HandleDeleteDigests handles DELETE /allowlist/digests: remove floor digests
-// atomically, 404 if any is absent.
-func (h Handler) HandleDeleteDigests(w http.ResponseWriter, r *http.Request) {
-	body, ok := h.authorize(w, r)
-	if !ok {
-		return
-	}
-
-	var req types.DigestDeleteRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	allFound, err := h.Store.Delete(req.Digests)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	if !allFound {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	slog.Info("allowlist floor digests deleted", "count", len(req.Digests))
+	slog.Info("allowlist replaced", "workloads", len(al.Workloads))
 	w.WriteHeader(http.StatusNoContent)
 }
 

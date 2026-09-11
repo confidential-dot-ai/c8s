@@ -48,7 +48,8 @@ const (
 // from workload matching — see WorkloadContainers.
 //
 // An entrypoint added here widens the assumption in docs/secrets.md that no
-// floor image other than c8s's carries an executable at one of these names.
+// image admitted with an unconstrained argv other than c8s's carries an
+// executable at one of these names.
 var InjectedEntrypoints = []string{"get-cert", "get-secret", "get-volume", "/c8s"}
 
 // RateKey charges a request to the sandbox its client certificate names, so a
@@ -344,6 +345,11 @@ func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (
 	if workload.Secrets == nil {
 		return grant{}, deny("workload %q holds no secret grant", name)
 	}
+	// The write path refuses this shape; the store may still hold one written
+	// before it did.
+	if !workload.ArgvPinned() {
+		return grant{}, deny("workload %q holds a secret grant but leaves a container's argv unconstrained", name)
+	}
 	return grant{workload: name, secrets: workload.Secrets}, nil
 }
 
@@ -457,25 +463,16 @@ func WorkloadContainers(al *pkgallowlist.Allowlist, reported []workloadclaims.Sa
 	return out
 }
 
-// isInjected reports whether a reported container is one c8s injected.
-//
-// The image must be an allowlist floor entry AND its entrypoint one c8s
-// injects. Floor membership alone is not enough — floor images are admitted
-// regardless of argv by design, so busybox running a shell is a floor entry
-// too, and dropping on that alone would let a pod add one and have it ignored.
-//
-// The floor is additive, so it holds the previous digest alongside the new one
-// for as long as pods are still running it, and the drop set tracks an image
-// bump on its own.
-//
-// What this rests on: no floor image other than c8s's has an executable at one
-// of InjectedEntrypoints. Floor contents are operator-controlled and auditable,
-// but that is a property of the deployment rather than something enforced here.
+// isInjected reports whether a reported container is one c8s injected: its
+// image is admitted under an unconstrained argv AND its entrypoint is one c8s
+// injects. Both halves are required — an unconstrained image running a shell is
+// not injected. Rests on no unconstrained image other than c8s's carrying an
+// executable at one of InjectedEntrypoints (docs/secrets.md).
 func isInjected(al *pkgallowlist.Allowlist, c workloadclaims.SandboxContainer) bool {
 	if len(c.Argv) == 0 {
 		return false
 	}
-	if _, floor := al.Digests[c.Digest]; !floor {
+	if !al.AdmitsAnyArgv(c.Digest) {
 		return false
 	}
 	return slices.Contains(InjectedEntrypoints, c.Argv[0])

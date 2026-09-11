@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 // Malformed and duplicate log lines are tolerated: skipped/deduped, never
@@ -217,34 +217,61 @@ func TestUnrecordLastRewriteFailureIsLoggedNotFatal(t *testing.T) {
 	}
 }
 
-// The real sysfs helpers, pointed at a temp file standing in for the TSM node.
-func TestSysfsExtendAndReadRegister(t *testing.T) {
-	orig := rtmr3Sysfs
-	t.Cleanup(func() { rtmr3Sysfs = orig })
+func TestUnrecordLastRenameFailureCleansUpTemp(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "measured")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(state, "keep")
+	if err := os.WriteFile(marker, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m := newMeasurer(slog.New(slog.NewTextHandler(&logs, nil)))
+	m.statePath = state
+	m.measuredOrder = []string{"sha256:" + hexA}
+	m.unrecordLast("sha256:" + hexA)
+	if len(m.measuredOrder) != 0 {
+		t.Fatalf("measuredOrder = %v, want empty", m.measuredOrder)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("rewrite measured-digest log failed")) {
+		t.Fatalf("rewrite failure was not logged: %s", logs.String())
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "original" {
+		t.Fatalf("failed rewrite changed destination: %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "measured" {
+		t.Fatalf("failed rewrite left temporary files: %v", entries)
+	}
+}
+
+// The adapters, pointed at a temp file standing in for the TSM node. Register
+// semantics (widths, a missing node) are covered in attestation-go; this checks
+// only that the measurer is wired to the register it thinks it is.
+func TestExtendAndReadRegister(t *testing.T) {
+	orig := register
+	t.Cleanup(func() { register = orig })
 
 	node := filepath.Join(t.TempDir(), "rtmr3:sha384")
 	if err := os.WriteFile(node, make([]byte, runtimemeasure.Size), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rtmr3Sysfs = node
+	register = runtimemeasure.TDXRegister(node)
 
 	event := runtimemeasure.Event("sha256:" + hexA)
-	if err := extendSysfs(event); err != nil {
-		t.Fatalf("extendSysfs: %v", err)
+	if err := extendRegister(event); err != nil {
+		t.Fatalf("extendRegister: %v", err)
 	}
-	got, err := readRegisterSysfs()
+	got, err := readRegister()
 	if err != nil {
-		t.Fatalf("readRegisterSysfs: %v", err)
+		t.Fatalf("readRegister: %v", err)
 	}
 	if !bytes.Equal(got[:], event[:]) {
-		t.Fatal("readRegisterSysfs did not return the written event bytes")
-	}
-
-	// Wrong-size node contents are rejected, not silently truncated.
-	if err := os.WriteFile(node, []byte("short"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readRegisterSysfs(); err == nil {
-		t.Fatal("readRegisterSysfs = nil error, want size mismatch error")
+		t.Fatal("readRegister did not return the written event bytes")
 	}
 }

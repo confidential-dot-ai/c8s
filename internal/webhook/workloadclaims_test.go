@@ -25,10 +25,11 @@ func findVolume(pod *corev1.Pod, name string) *corev1.Volume {
 	return nil
 }
 
-// node-CVM (inventory + host dir): the webhook injects --workload-claims
-// plus a read-only hostPath mount of the socket directory into the c8s-cert
-// sidecar, so get-cert dials the mounted socket over its compiled path.
-func TestWorkloadClaims_NodeCVMMountsInventorySocket(t *testing.T) {
+// node-CVM (inventory + host dir): the webhook injects --workload-claims so
+// get-cert dials its compiled socket path; the socket directory itself arrives
+// as an NRI mount from the inventory plugin, so the pod spec must carry no
+// volume or mount for it (a hostPath would fail PodSecurity restricted).
+func TestWorkloadClaims_NodeCVMLeavesMountToNRI(t *testing.T) {
 	pod := newInjectablePod()
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "img",
@@ -42,18 +43,15 @@ func TestWorkloadClaims_NodeCVMMountsInventorySocket(t *testing.T) {
 	if !hasArg(cert.Args, "--workload-claims") {
 		t.Fatalf("c8s-cert missing workload-claims flag: %v", cert.Args)
 	}
-	vol := findVolume(pod, workloadClaimsVolumeName)
-	if vol == nil || vol.HostPath == nil || vol.HostPath.Path != "/var/run/nri-image-policy" {
-		t.Fatalf("inventory hostPath volume missing or wrong: %#v", vol)
-	}
-	var mount *corev1.VolumeMount
-	for i := range cert.VolumeMounts {
-		if cert.VolumeMounts[i].Name == workloadClaimsVolumeName {
-			mount = &cert.VolumeMounts[i]
+	for _, v := range pod.Spec.Volumes {
+		if v.HostPath != nil {
+			t.Fatalf("mutated pod declares hostPath volume %q", v.Name)
 		}
 	}
-	if mount == nil || !mount.ReadOnly || mount.MountPath != workloadclaims.SidecarSocketDir {
-		t.Fatalf("inventory socket mount missing/writable/wrong path: %#v", mount)
+	for _, m := range cert.VolumeMounts {
+		if m.MountPath == workloadclaims.SidecarSocketDir {
+			t.Fatalf("c8s-cert declares a pod-spec mount at %s; it arrives by NRI mount only", workloadclaims.SidecarSocketDir)
+		}
 	}
 }
 
@@ -96,7 +94,7 @@ func TestWorkloadClaims_NoHostDirNoInventory(t *testing.T) {
 	if hasArg(cert.Args, "--workload-claims") {
 		t.Fatalf("unexpected workload-claims flag: %v", cert.Args)
 	}
-	if findVolume(pod, workloadClaimsVolumeName) != nil {
+	if findVolume(pod, "c8s-workload-claims") != nil {
 		t.Fatal("no inventory volume expected when disabled")
 	}
 	if pod.Spec.SecurityContext != nil {
@@ -153,7 +151,7 @@ func TestWorkloadClaims_KataUsesGuestLoopback(t *testing.T) {
 			t.Fatalf("c8s-cert missing %s: %v", want, cert.Args)
 		}
 	}
-	if findVolume(pod, workloadClaimsVolumeName) != nil {
+	if findVolume(pod, "c8s-workload-claims") != nil {
 		t.Fatal("kata pod got an inventory socket volume; the guest serves it on loopback")
 	}
 }

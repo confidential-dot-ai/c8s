@@ -29,7 +29,8 @@ func renderedHostSecurityPolicies(t *testing.T) map[string][]admissionregv1.Vali
 		if err := sigsyaml.Unmarshal(doc, &policy); err != nil {
 			return false
 		}
-		if policy.Kind == "ValidatingAdmissionPolicy" {
+		if policy.Kind == "ValidatingAdmissionPolicy" &&
+			(policy.Name == "c8s-deny-host-namespaces" || policy.Name == "c8s-deny-host-namespaces-ephemeral") {
 			policies[policy.Name] = policy.Spec.Validations
 		}
 		return false
@@ -81,11 +82,7 @@ func validClaimsSidecar(name, mode string) map[string]any {
 	if mode == "get-cert" {
 		sidecar["args"] = append(sidecar["args"].([]any), "--workload-claims")
 	}
-	sidecar["volumeMounts"] = []any{map[string]any{
-		"name":      "c8s-workload-claims",
-		"mountPath": testClaimsMountPath,
-		"readOnly":  true,
-	}}
+	// The node plugin supplies the claims mount through NRI, below the Pod spec.
 	return sidecar
 }
 
@@ -118,13 +115,6 @@ func validRestrictedTestPod() map[string]any {
 			},
 			"volumes": []any{
 				map[string]any{"name": "settings", "configMap": map[string]any{}},
-				map[string]any{
-					"name": "c8s-workload-claims",
-					"hostPath": map[string]any{
-						"path": testClaimsHostDir,
-						"type": "Directory",
-					},
-				},
 			},
 			"containers":          []any{app},
 			"initContainers":      []any{cert},
@@ -151,10 +141,6 @@ func hostSecurityContainerSC(object map[string]any, field string) map[string]any
 	return hostSecurityContainer(object, field)["securityContext"].(map[string]any)
 }
 
-func hostSecurityClaimsMount(object map[string]any) map[string]any {
-	return hostSecurityContainer(object, "initContainers")["volumeMounts"].([]any)[0].(map[string]any)
-}
-
 func TestHostSecurityPodPolicyAllowsRestrictedPod(t *testing.T) {
 	validations := renderedHostSecurityPolicies(t)["c8s-deny-host-namespaces"]
 	allTrue(t, validations, validRestrictedTestPod())
@@ -178,18 +164,18 @@ func TestHostSecurityPodPolicyAllowsRestrictedPod(t *testing.T) {
 	)
 	allTrue(t, validations, withFetchers)
 
-	withoutCarveOut := validRestrictedTestPod()
-	spec := hostSecuritySpec(withoutCarveOut)
+	withoutSidecars := validRestrictedTestPod()
+	spec := hostSecuritySpec(withoutSidecars)
 	delete(spec, "initContainers")
 	spec["volumes"] = []any{map[string]any{
 		"name":     "scratch",
 		"emptyDir": map[string]any{},
 	}}
-	allTrue(t, validations, withoutCarveOut)
+	allTrue(t, validations, withoutSidecars)
 
 	explicitContainerDefaults := validRestrictedTestPod()
 	podSC := hostSecuritySpec(explicitContainerDefaults)["securityContext"].(map[string]any)
-	podSC["runAsNonRoot"] = false
+	delete(podSC, "runAsNonRoot")
 	delete(podSC, "seccompProfile")
 	for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
 		sc := hostSecurityContainerSC(explicitContainerDefaults, field)
@@ -199,151 +185,111 @@ func TestHostSecurityPodPolicyAllowsRestrictedPod(t *testing.T) {
 	allTrue(t, validations, explicitContainerDefaults)
 }
 
-func previousClaimsPod() map[string]any {
-	object := validRestrictedTestPod()
-	hostSecurityContainer(object, "initContainers")["image"] = "ghcr.io/confidential-dot-ai/c8s-operator:previous"
-	return object
+func TestHostSecurityPoliciesAllowNRIClaimsSidecars(t *testing.T) {
+	policies := renderedHostSecurityPolicies(t)
+	for _, image := range []string{testC8sImage, "ghcr.io/confidential-dot-ai/c8s-operator:previous"} {
+		for _, sidecar := range []struct{ name, mode, annotation string }{
+			{"c8s-cert", "get-cert", "confidential.ai/cw"},
+			{"c8s-secret", "get-secret", "confidential.ai/c8s-secrets"},
+			{"c8s-volume", "get-volume", "confidential.ai/c8s-volumes"},
+		} {
+			t.Run(image+"/"+sidecar.mode, func(t *testing.T) {
+				makePod := func() map[string]any {
+					object := validRestrictedTestPod()
+					annotations := object["metadata"].(map[string]any)["annotations"].(map[string]any)
+					if sidecar.annotation != "confidential.ai/cw" {
+						annotations[sidecar.annotation] = "data=/prod/data"
+					}
+					container := validClaimsSidecar(sidecar.name, sidecar.mode)
+					container["image"] = image
+					hostSecuritySpec(object)["initContainers"] = []any{container}
+					return object
+				}
+				old, object := makePod(), makePod()
+				old["metadata"].(map[string]any)["finalizers"] = []any{"batch.kubernetes.io/job-tracking"}
+				object["metadata"].(map[string]any)["labels"].(map[string]any)["example.com/observed"] = "true"
+				for _, validations := range policies {
+					// There is no chart-image exception to maintain after an upgrade:
+					// both Pod shapes are Restricted and declare no hostPath.
+					allTrueAdmission(t, validations, object, nil, "CREATE")
+					allTrueAdmission(t, validations, object, old, "UPDATE")
+				}
+			})
+		}
+	}
 }
 
-func TestHostSecurityPodPolicyPreservesPreviousSidecarsOnUpdate(t *testing.T) {
-	validations := renderedHostSecurityPolicies(t)["c8s-deny-host-namespaces"]
-	for _, mode := range []string{"get-cert", "get-secret", "get-volume", "all"} {
-		t.Run(mode, func(t *testing.T) {
+func TestHostSecurityPoliciesDenyEveryHostPath(t *testing.T) {
+	policies := renderedHostSecurityPolicies(t)
+	for _, tc := range []struct {
+		name, volume, path, hostType, field, mode string
+	}{
+		{"node root", "node-root", "/", "Directory", "containers", "get-cert"},
+		{"legacy cert claims", "c8s-workload-claims", testClaimsHostDir, "Directory", "initContainers", "get-cert"},
+		{"legacy secret claims", "c8s-workload-claims", testClaimsHostDir, "Directory", "initContainers", "get-secret"},
+		{"legacy volume claims", "c8s-workload-claims", testClaimsHostDir, "Directory", "initContainers", "get-volume"},
+		{"aliased claims", "claims-alias", testClaimsHostDir, "Directory", "ephemeralContainers", "get-cert"},
+		{"claims DirectoryOrCreate", "c8s-workload-claims", testClaimsHostDir, "DirectoryOrCreate", "initContainers", "get-cert"},
+		{"claims without mount", "c8s-workload-claims", testClaimsHostDir, "", "", "get-cert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			makePod := func() map[string]any {
-				object := previousClaimsPod()
+				object := validRestrictedTestPod()
 				annotations := object["metadata"].(map[string]any)["annotations"].(map[string]any)
-				annotations["confidential.ai/c8s-secrets"] = "api-key=/prod/api-key"
+				annotations["confidential.ai/c8s-secrets"] = "data=/prod/data"
 				annotations["confidential.ai/c8s-volumes"] = "data=/prod/data"
-				var sidecars []any
-				for _, sidecarMode := range []struct{ name, mode string }{
-					{"c8s-cert", "get-cert"},
-					{"c8s-secret", "get-secret"},
-					{"c8s-volume", "get-volume"},
-				} {
-					if mode != "all" && mode != sidecarMode.mode {
-						continue
-					}
-					sidecar := validClaimsSidecar(sidecarMode.name, sidecarMode.mode)
-					sidecar["image"] = "ghcr.io/confidential-dot-ai/c8s-operator:previous"
-					sidecars = append(sidecars, sidecar)
+				name := map[string]string{"get-cert": "c8s-cert", "get-secret": "c8s-secret", "get-volume": "c8s-volume"}[tc.mode]
+				container := validClaimsSidecar(name, tc.mode)
+				spec := hostSecuritySpec(object)
+				spec["initContainers"] = []any{container}
+				hostPath := map[string]any{"path": tc.path}
+				if tc.hostType != "" {
+					hostPath["type"] = tc.hostType
 				}
-				hostSecuritySpec(object)["initContainers"] = sidecars
+				spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
+					"name": tc.volume, "hostPath": hostPath,
+				})
+				if tc.field != "" {
+					hostSecurityContainer(object, tc.field)["volumeMounts"] = []any{map[string]any{
+						"name": tc.volume, "mountPath": testClaimsMountPath, "readOnly": true,
+					}}
+				}
 				return object
 			}
 			old, object := makePod(), makePod()
-			old["metadata"].(map[string]any)["finalizers"] = []any{"batch.kubernetes.io/job-tracking"}
+			for _, validations := range policies {
+				anyFalseAdmission(t, validations, object, nil, "CREATE")
+			}
+			// Even an unchanged, previously admitted claims sidecar and volume
+			// cannot authorize a hostPath after the chart image changes.
+			for _, pod := range []map[string]any{old, object} {
+				hostSecurityContainer(pod, "initContainers")["image"] = "ghcr.io/confidential-dot-ai/c8s-operator:previous"
+			}
+			delete(hostSecuritySpec(old), "ephemeralContainers")
 			object["metadata"].(map[string]any)["labels"].(map[string]any)["example.com/observed"] = "true"
-			allTrueAdmission(t, validations, object, old, "UPDATE")
-			anyFalseAdmission(t, validations, object, nil, "CREATE")
-			// Even a synthetic CREATE with an old object cannot use the exception.
-			anyFalseAdmission(t, validations, object, old, "CREATE")
+			for _, validations := range policies {
+				// Includes pods/ephemeralcontainers, whose full Pod admission
+				// object must preserve main's blanket hostPath denial.
+				anyFalseAdmission(t, validations, object, old, "UPDATE")
+			}
 		})
 	}
-
-	// Changing to the current chart image uses the normal image gate.
-	allTrueAdmission(t, validations, validRestrictedTestPod(), previousClaimsPod(), "UPDATE")
 }
 
-func TestHostSecurityPodPolicyRejectsPreviousSidecarBypasses(t *testing.T) {
-	validations := renderedHostSecurityPolicies(t)["c8s-deny-host-namespaces"]
-	anyFalseAdmission(t, validations, previousClaimsPod(), nil, "UPDATE")
-	tests := []struct {
-		name   string
-		mutate func(object, old map[string]any)
-	}{
-		{"missing prior annotations", func(_, old map[string]any) {
-			delete(old["metadata"].(map[string]any), "annotations")
-		}},
-		{"missing prior injected marker", func(_, old map[string]any) {
-			delete(old["metadata"].(map[string]any)["annotations"].(map[string]any), "confidential.ai/c8s-injected")
-		}},
-		{"false prior injected marker", func(_, old map[string]any) {
-			old["metadata"].(map[string]any)["annotations"].(map[string]any)["confidential.ai/c8s-injected"] = "false"
-		}},
-		{"missing prior workload identity", func(_, old map[string]any) {
-			delete(old["metadata"].(map[string]any)["annotations"].(map[string]any), "confidential.ai/cw")
-		}},
-		{"changed workload identity", func(object, _ map[string]any) {
-			metadata := object["metadata"].(map[string]any)
-			metadata["annotations"].(map[string]any)["confidential.ai/cw"] = "other"
-			metadata["labels"].(map[string]any)["confidential.ai/cw"] = "other"
-		}},
-		{"missing prior labels", func(_, old map[string]any) {
-			delete(old["metadata"].(map[string]any), "labels")
-		}},
-		{"mismatched prior label", func(_, old map[string]any) {
-			old["metadata"].(map[string]any)["labels"].(map[string]any)["confidential.ai/cw"] = "other"
-		}},
-		{"missing prior volumes", func(_, old map[string]any) {
-			delete(hostSecuritySpec(old), "volumes")
-		}},
-		{"missing prior hostPath", func(_, old map[string]any) {
-			delete(hostSecuritySpec(old)["volumes"].([]any)[1].(map[string]any), "hostPath")
-		}},
-		{"wrong prior volume name", func(_, old map[string]any) {
-			hostSecuritySpec(old)["volumes"].([]any)[1].(map[string]any)["name"] = "other"
-		}},
-		{"wrong prior hostPath", func(_, old map[string]any) {
-			hostSecuritySpec(old)["volumes"].([]any)[1].(map[string]any)["hostPath"].(map[string]any)["path"] = "/"
-		}},
-		{"wrong prior hostPath type", func(_, old map[string]any) {
-			hostSecuritySpec(old)["volumes"].([]any)[1].(map[string]any)["hostPath"].(map[string]any)["type"] = "DirectoryOrCreate"
-		}},
-		{"missing prior hostPath type", func(_, old map[string]any) {
-			delete(hostSecuritySpec(old)["volumes"].([]any)[1].(map[string]any)["hostPath"].(map[string]any), "type")
-		}},
-		{"multiple prior hostPaths", func(_, old map[string]any) {
-			spec := hostSecuritySpec(old)
-			spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
-				"name": "other", "hostPath": map[string]any{"path": "/", "type": "Directory"},
-			})
-		}},
-		{"missing prior sidecars", func(_, old map[string]any) {
-			delete(hostSecuritySpec(old), "initContainers")
-		}},
-		{"different prior image", func(_, old map[string]any) {
-			hostSecurityContainer(old, "initContainers")["image"] = testC8sImage
-		}},
-		{"changed args", func(object, _ map[string]any) {
-			c := hostSecurityContainer(object, "initContainers")
-			c["args"] = append(c["args"].([]any), "--other-argument")
-		}},
-		{"changed environment", func(object, _ map[string]any) {
-			hostSecurityContainer(object, "initContainers")["env"] = []any{map[string]any{"name": "MODE", "value": "changed"}}
-		}},
-		{"changed resources", func(object, _ map[string]any) {
-			hostSecurityContainer(object, "initContainers")["resources"] = map[string]any{"requests": map[string]any{"cpu": "50m"}}
-		}},
-		{"new old-image sidecar", func(object, _ map[string]any) {
-			object["metadata"].(map[string]any)["annotations"].(map[string]any)["confidential.ai/c8s-secrets"] = "api-key=/prod/api-key"
-			sidecar := validClaimsSidecar("c8s-secret", "get-secret")
-			sidecar["image"] = "ghcr.io/confidential-dot-ai/c8s-operator:previous"
-			spec := hostSecuritySpec(object)
-			spec["initContainers"] = append(spec["initContainers"].([]any), sidecar)
-		}},
-		{"unchanged unsafe sidecar", func(object, old map[string]any) {
-			for _, pod := range []map[string]any{object, old} {
-				hostSecurityContainerSC(pod, "initContainers")["privileged"] = true
-			}
-		}},
-		{"unchanged writable claims mount", func(object, old map[string]any) {
-			for _, pod := range []map[string]any{object, old} {
-				hostSecurityClaimsMount(pod)["readOnly"] = false
-			}
-		}},
-		{"unsafe app update", func(object, _ map[string]any) {
-			hostSecurityContainerSC(object, "containers")["allowPrivilegeEscalation"] = true
-		}},
-		{"unsafe host namespace update", func(object, _ map[string]any) {
-			hostSecuritySpec(object)["hostNetwork"] = true
-		}},
+func TestHostSecurityPoliciesAllowRestrictedClaimsVolumeName(t *testing.T) {
+	object := validRestrictedTestPod()
+	spec := hostSecuritySpec(object)
+	spec["volumes"] = append(spec["volumes"].([]any), map[string]any{
+		"name": "c8s-workload-claims", "emptyDir": map[string]any{},
+	})
+	for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		hostSecurityContainer(object, field)["volumeMounts"] = []any{map[string]any{
+			"name": "c8s-workload-claims", "mountPath": "/scratch", "readOnly": true,
+		}}
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			object, old := previousClaimsPod(), previousClaimsPod()
-			tc.mutate(object, old)
-			anyFalseAdmission(t, validations, object, old, "UPDATE")
-		})
+	for _, validations := range renderedHostSecurityPolicies(t) {
+		// A Restricted-safe volume's name grants no access to the node.
+		allTrueAdmission(t, validations, object, validRestrictedTestPod(), "UPDATE")
 	}
 }
 
@@ -408,96 +354,6 @@ func TestHostSecurityPodPolicyRejectsNamespaceAndVolumeBypasses(t *testing.T) {
 				"name": "network-share",
 				"nfs":  map[string]any{"server": "127.0.0.1", "path": "/"},
 			}
-		}},
-		{"claims volume wrong name", func(o map[string]any) {
-			hostSecuritySpec(o)["volumes"].([]any)[1].(map[string]any)["name"] = "claims-alias"
-		}},
-		{"claims volume wrong host path", func(o map[string]any) {
-			hostSecuritySpec(o)["volumes"].([]any)[1].(map[string]any)["hostPath"].(map[string]any)["path"] = "/"
-		}},
-		{"claims volume wrong host path type", func(o map[string]any) {
-			hostSecuritySpec(o)["volumes"].([]any)[1].(map[string]any)["hostPath"].(map[string]any)["type"] = "DirectoryOrCreate"
-		}},
-		{"two claims host paths", func(o map[string]any) {
-			volumes := hostSecuritySpec(o)["volumes"].([]any)
-			hostSecuritySpec(o)["volumes"] = append(volumes, map[string]any{
-				"name": "c8s-workload-claims",
-				"hostPath": map[string]any{
-					"path": testClaimsHostDir,
-					"type": "Directory",
-				},
-			})
-		}},
-		{"claims volume not mounted", func(o map[string]any) {
-			delete(hostSecurityContainer(o, "initContainers"), "volumeMounts")
-		}},
-		{"claims mount writable", func(o map[string]any) {
-			hostSecurityClaimsMount(o)["readOnly"] = false
-		}},
-		{"claims mount wrong path", func(o map[string]any) {
-			hostSecurityClaimsMount(o)["mountPath"] = "/tmp/claims"
-		}},
-		{"claims mount subPath", func(o map[string]any) {
-			hostSecurityClaimsMount(o)["subPath"] = "inventory.sock"
-		}},
-		{"claims mount subPathExpr", func(o map[string]any) {
-			hostSecurityClaimsMount(o)["subPathExpr"] = "$(POD_NAME)"
-		}},
-		{"claims mount propagation", func(o map[string]any) {
-			hostSecurityClaimsMount(o)["mountPropagation"] = "HostToContainer"
-		}},
-		{"claims mount run-once init", func(o map[string]any) {
-			delete(hostSecurityContainer(o, "initContainers"), "restartPolicy")
-		}},
-		{"claims mount attacker init", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["name"] = "attacker"
-		}},
-		{"claims mount missing injected marker", func(o map[string]any) {
-			delete(o["metadata"].(map[string]any)["annotations"].(map[string]any), "confidential.ai/c8s-injected")
-		}},
-		{"claims mount missing workload identity", func(o map[string]any) {
-			delete(o["metadata"].(map[string]any)["annotations"].(map[string]any), "confidential.ai/cw")
-		}},
-		{"claims mount mismatched workload label", func(o map[string]any) {
-			o["metadata"].(map[string]any)["labels"].(map[string]any)["confidential.ai/cw"] = "other"
-		}},
-		{"claims mount wrong sidecar image", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["image"] = "attacker.example/claims-client:latest"
-		}},
-		{"claims mount wrong sidecar mode", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["args"] = []any{"operator"}
-		}},
-		{"claims mount overridden entrypoint", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["command"] = []any{"/c8s", "operator"}
-		}},
-		{"claims mount lifecycle execution", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["lifecycle"] = map[string]any{
-				"postStart": map[string]any{"exec": map[string]any{"command": []any{"/c8s", "operator"}}},
-			}
-		}},
-		{"claims mount probe execution", func(o map[string]any) {
-			hostSecurityContainer(o, "initContainers")["livenessProbe"] = map[string]any{
-				"exec": map[string]any{"command": []any{"/c8s", "operator"}},
-			}
-		}},
-		{"claims mount secret mode without request", func(o map[string]any) {
-			container := hostSecurityContainer(o, "initContainers")
-			container["name"] = "c8s-secret"
-			container["args"] = []any{"get-secret"}
-		}},
-		{"claims mount regular container", func(o map[string]any) {
-			hostSecurityContainer(o, "containers")["volumeMounts"] = []any{map[string]any{
-				"name":      "c8s-workload-claims",
-				"mountPath": testClaimsMountPath,
-				"readOnly":  true,
-			}}
-		}},
-		{"claims mount ephemeral container", func(o map[string]any) {
-			hostSecurityContainer(o, "ephemeralContainers")["volumeMounts"] = []any{map[string]any{
-				"name":      "c8s-workload-claims",
-				"mountPath": testClaimsMountPath,
-				"readOnly":  true,
-			}}
 		}},
 	}
 	for _, tc := range tests {
@@ -633,6 +489,130 @@ func TestHostSecurityPodPolicyRejectsPodSecurityBypasses(t *testing.T) {
 	}
 }
 
+func TestHostSecurityPoliciesPreserveRestrictedPodDefaults(t *testing.T) {
+	policies := renderedHostSecurityPolicies(t)
+	tests := []struct {
+		name    string
+		mutate  func(map[string]any)
+		allowed bool
+	}{
+		{"absent pod defaults", func(o map[string]any) {
+			delete(hostSecuritySpec(o), "securityContext")
+		}, true},
+		{"absent metadata", func(o map[string]any) {
+			delete(o, "metadata")
+		}, true},
+		{"safe legacy apparmor", func(o map[string]any) {
+			o["metadata"].(map[string]any)["annotations"] = map[string]any{
+				"container.apparmor.security.beta.kubernetes.io/debugger": "runtime/default",
+			}
+		}, true},
+		{"pod runAsNonRoot false", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["runAsNonRoot"] = false
+		}, false},
+		{"pod root uid", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["runAsUser"] = int64(0)
+		}, false},
+		{"pod unconfined seccomp", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["seccompProfile"] = map[string]any{"type": "Unconfined"}
+		}, false},
+		{"pod unconfined apparmor", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["appArmorProfile"] = map[string]any{"type": "Unconfined"}
+		}, false},
+		{"pod unsafe selinux type", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["seLinuxOptions"] = map[string]any{"type": "spc_t"}
+		}, false},
+		{"pod custom selinux user", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["seLinuxOptions"] = map[string]any{"type": "container_t", "user": "system_u"}
+		}, false},
+		{"pod custom selinux role", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["seLinuxOptions"] = map[string]any{"type": "container_t", "role": "system_r"}
+		}, false},
+		{"pod unsafe sysctl", func(o map[string]any) {
+			hostSecuritySpec(o)["securityContext"].(map[string]any)["sysctls"] = []any{map[string]any{
+				"name": "kernel.core_pattern", "value": "|/bin/sh",
+			}}
+		}, false},
+		{"unconfined legacy apparmor", func(o map[string]any) {
+			o["metadata"].(map[string]any)["annotations"] = map[string]any{
+				"container.apparmor.security.beta.kubernetes.io/debugger": "unconfined",
+			}
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			object, old := validRestrictedEphemeralUpdate(), validRestrictedTestPod()
+			for _, pod := range []map[string]any{object, old} {
+				for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
+					hostSecurityContainer(pod, field)["securityContext"] = restrictedTestSecurityContext(true)
+				}
+				tc.mutate(pod)
+			}
+			delete(hostSecuritySpec(old), "ephemeralContainers")
+			for name, validations := range policies {
+				t.Run(name, func(t *testing.T) {
+					// Restricted rejects explicit unsafe Pod settings even when
+					// every container declares safe overrides of those defaults.
+					if tc.allowed {
+						allTrueAdmission(t, validations, object, old, "UPDATE")
+					} else {
+						anyFalseAdmission(t, validations, object, old, "UPDATE")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestHostSecurityEphemeralPolicyPreservesHostIsolation(t *testing.T) {
+	validations := renderedHostSecurityPolicies(t)["c8s-deny-host-namespaces-ephemeral"]
+	tests := []struct {
+		name    string
+		mutate  func(map[string]any)
+		allowed bool
+	}{
+		{"absent optional host settings", func(map[string]any) {}, true},
+		{"explicit safe host settings", func(o map[string]any) {
+			for _, field := range []string{"hostNetwork", "hostPID", "hostIPC"} {
+				hostSecuritySpec(o)[field] = false
+			}
+			for _, field := range []string{"containers", "initContainers"} {
+				hostSecurityContainer(o, field)["ports"] = []any{map[string]any{
+					"containerPort": int64(8080), "hostPort": int64(0),
+				}}
+			}
+		}, true},
+		{"existing host network", func(o map[string]any) { hostSecuritySpec(o)["hostNetwork"] = true }, false},
+		{"existing host pid", func(o map[string]any) { hostSecuritySpec(o)["hostPID"] = true }, false},
+		{"existing host ipc", func(o map[string]any) { hostSecuritySpec(o)["hostIPC"] = true }, false},
+		{"existing application host port", func(o map[string]any) {
+			hostSecurityContainer(o, "containers")["ports"] = []any{map[string]any{
+				"containerPort": int64(1019), "hostPort": int64(1019),
+			}}
+		}, false},
+		{"existing init host port", func(o map[string]any) {
+			hostSecurityContainer(o, "initContainers")["ports"] = []any{map[string]any{
+				"containerPort": int64(1019), "hostPort": int64(1019),
+			}}
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			object, old := validRestrictedEphemeralUpdate(), validRestrictedTestPod()
+			// These fields are unchanged by the subresource update. Main's
+			// full-Pod host-isolation checks still apply to the new debugger.
+			tc.mutate(object)
+			tc.mutate(old)
+			delete(hostSecuritySpec(old), "ephemeralContainers")
+			if tc.allowed {
+				allTrueAdmission(t, validations, object, old, "UPDATE")
+			} else {
+				anyFalseAdmission(t, validations, object, old, "UPDATE")
+			}
+		})
+	}
+}
+
 func TestHostSecurityEphemeralPolicyBehaviors(t *testing.T) {
 	validations := renderedHostSecurityPolicies(t)["c8s-deny-host-namespaces-ephemeral"]
 	allTrue(t, validations, map[string]any{"spec": map[string]any{}})
@@ -646,13 +626,6 @@ func TestHostSecurityEphemeralPolicyBehaviors(t *testing.T) {
 			c["ports"] = []any{map[string]any{
 				"containerPort": int64(1019),
 				"hostPort":      int64(1019),
-			}}
-		}},
-		{"claims mount", func(c, _ map[string]any) {
-			c["volumeMounts"] = []any{map[string]any{
-				"name":      "c8s-workload-claims",
-				"mountPath": testClaimsMountPath,
-				"readOnly":  true,
 			}}
 		}},
 		{"host process", func(_, sc map[string]any) {
@@ -720,12 +693,12 @@ func TestHostSecurityEphemeralPolicyInheritance(t *testing.T) {
 			delete(hostSecuritySpec(o), "securityContext")
 			hostSecurityContainer(o, "ephemeralContainers")["securityContext"] = restrictedTestSecurityContext(true)
 		}, true},
-		{"explicit values override unsafe pod defaults", func(o map[string]any) {
+		{"explicit values cannot bypass unsafe pod defaults", func(o map[string]any) {
 			sc := hostSecuritySpec(o)["securityContext"].(map[string]any)
 			sc["runAsNonRoot"] = false
 			sc["seccompProfile"] = map[string]any{"type": "Unconfined"}
 			hostSecurityContainer(o, "ephemeralContainers")["securityContext"] = restrictedTestSecurityContext(true)
-		}, true},
+		}, false},
 		{"missing pod context", func(o map[string]any) {
 			delete(hostSecuritySpec(o), "securityContext")
 		}, false},

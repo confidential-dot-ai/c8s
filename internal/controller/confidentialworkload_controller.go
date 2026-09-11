@@ -73,17 +73,7 @@ func (r *ConfidentialWorkloadReconciler) Reconcile(ctx context.Context, req ctrl
 
 	matchID := r.resolveWorkloadCWID(ctx, &cw)
 
-	summary := v1alpha2.AttestationSummary{}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if pod.Annotations[webhook.AnnotationWorkload] != matchID {
-			continue
-		}
-		summary.Total++
-		if isPodReady(pod) {
-			summary.Attested++
-		}
-	}
+	summary := summarizeWorkloadAttestation(pods.Items, matchID)
 	cw.Status.AttestationSummary = &summary
 	cw.Status.ObservedGeneration = cw.Generation
 
@@ -116,6 +106,21 @@ func (r *ConfidentialWorkloadReconciler) Reconcile(ctx context.Context, req ctrl
 
 	l.V(1).Info("status mirrored", "total", summary.Total, "attested", summary.Attested)
 	return ctrl.Result{RequeueAfter: statusMirrorRequeue}, nil
+}
+
+func summarizeWorkloadAttestation(pods []corev1.Pod, matchID string) v1alpha2.AttestationSummary {
+	summary := v1alpha2.AttestationSummary{}
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Annotations[webhook.AnnotationWorkload] != matchID {
+			continue
+		}
+		summary.Total++
+		if isPodReady(pod) {
+			summary.Attested++
+		}
+	}
+	return summary
 }
 
 // isPodReady is the heuristic for "this pod has attested": the kubelet has

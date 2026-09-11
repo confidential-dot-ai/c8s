@@ -34,19 +34,18 @@ kubectl apply -f samples/confidentialworkload.yaml
 
 ## 3. Deploy an annotated workload
 
-The node image enforces the restricted PodSecurity standard in every tenant
-namespace. In node mode the injected sidecar mounts the node's inventory
-socket as a hostPath, which restricted forbids, so a namespace that hosts
-confidential workloads is opened by the operator. Only a credential allowed
-to grant PodSecurity exemptions can set this label; tenants cannot. The chart
-still enforces Restricted-equivalent pod security there and permits only the
-webhook's exact read-only socket mount on its own sidecars. `warn` and `audit`
-stay Restricted so the expected exception and any drift remain observable.
+The node image enforces the Restricted PodSecurity standard in every tenant
+namespace, including namespaces hosting confidential workloads. In node mode,
+`nri-image-policy` mounts the inventory socket directory read-only into credential
+sidecars through NRI, below the Pod spec. The chart also enforces Restricted
+controls and denies every tenant `hostPath` volume. Keep enforcement, warning,
+and audit at Restricted:
 
 ```sh
 kubectl create namespace demo
 kubectl label namespace demo \
-  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
   pod-security.kubernetes.io/warn=restricted \
   pod-security.kubernetes.io/audit=restricted
 kubectl -n demo apply -f samples/nginx-confidential-pod.yaml

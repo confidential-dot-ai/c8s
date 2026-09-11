@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 )
 
 const (

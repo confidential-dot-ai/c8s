@@ -90,7 +90,7 @@ func fakeLB(t *testing.T, servingCert tls.Certificate, doc []byte) *httptest.Ser
 			w.Write(doc)
 		case "/allowlist":
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"version":"1","digests":{}}`))
+			w.Write([]byte(`{"schema":"c8s.allowlist/v1","workloads":{}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -160,7 +160,7 @@ func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"version"`)) {
+		if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"workloads"`)) {
 			t.Fatalf("GET /allowlist #%d = %d %s", i+1, resp.StatusCode, body)
 		}
 	}

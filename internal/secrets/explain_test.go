@@ -127,9 +127,9 @@ func TestExplainNamesTheForeignContainer(t *testing.T) {
 	}
 }
 
-// A floor image running a shell is not an injected container, so it must land
+// An any-argv image running a shell is not an injected container, so it must land
 // in candidates rather than being silently dropped.
-func TestExplainDoesNotDropAFloorImageRunningAShell(t *testing.T) {
+func TestExplainDoesNotDropAnAnyArgvImageRunningAShell(t *testing.T) {
 	eh := newExplainHarness(t)
 	eh.inv.containers = append(eh.inv.containers,
 		workloadclaims.SandboxContainer{Digest: testInjected, Argv: []string{"sh", "-c", "cat /run/c8s/secrets/DB"}})
@@ -137,11 +137,30 @@ func TestExplainDoesNotDropAFloorImageRunningAShell(t *testing.T) {
 	_, resp := eh.serve(testSandbox)
 	for _, c := range resp.Reported {
 		if c.Digest == testInjected && len(c.Argv) > 0 && c.Argv[0] == "sh" && c.Injected {
-			t.Fatal("a floor image running a shell was dropped as injected")
+			t.Fatal("an any-argv image running a shell was dropped as injected")
 		}
 	}
 	if resp.Match != "" {
 		t.Fatalf("it must break the match, got %q", resp.Match)
+	}
+}
+
+// A matching entry whose grant is refused for an unconstrained argv names that
+// as the refusal, with no grant in the answer.
+func TestExplainNamesUnpinnedGrant(t *testing.T) {
+	eh := newExplainHarness(t)
+	al, _ := eh.h.Policy.Allowlist()
+	api := al.Workloads["api"]
+	api.Containers[0].Args = pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}
+	al.Workloads["api"] = api
+	eh.h.Policy = fakePolicy{al: al}
+
+	_, resp := eh.serve(testSandbox)
+	if resp.Match != "api" {
+		t.Fatalf("match = %q, want api", resp.Match)
+	}
+	if resp.Grant != nil || !strings.Contains(resp.Refusal, "unconstrained") {
+		t.Fatalf("refusal = %q, grant = %v; want the unpinned argv named and no grant", resp.Refusal, resp.Grant)
 	}
 }
 

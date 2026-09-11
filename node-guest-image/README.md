@@ -53,11 +53,16 @@ initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
 `tdx-metal-e2e.yml`); confidential-metal attaches one by default
 (`--datadisk-gi`, 0 opts out).
 
-The initrd encrypts the disk and mounts it as the rootfs upper, via a dm
-mapping named `scratch`. Without the disk it falls back to a 2G RAM tmpfs:
-the guest comes up Ready, then wedges once RKE2 fills it — a flapping
-node, not a boot error. `scratch-enforce.service` closes that hole by
-checking for the dm mapping and powering the VM off before rke2 starts.
+The initrd encrypts the disk and, via a dm mapping named `scratch`, backs the
+writable state overlays with it; the root itself is the read-only verity
+image. Which directories get an overlay is declared in
+`/usr/lib/confai/state.d/`: confos's base covers `/var`, `/home`, `/root`,
+`/tmp`, and this profile adds `/etc/rancher`, `/etc/cni`, `/opt/cni` and
+`/etc/nri` (`60-c8s.conf` says why each). Without the disk
+the initrd falls back to a 2G RAM tmpfs: the guest comes up Ready, then
+wedges once RKE2 fills it — a flapping node, not a boot error.
+`scratch-enforce.service` closes that hole by checking for the dm mapping
+and powering the VM off before rke2 starts.
 
 The other disks are optional; each is owned by one unit under
 `c8s/mkosi.extra`, whose header carries the full contract:
@@ -89,9 +94,9 @@ Tenant pods run on the node's own kernel under runc, so what a pod may ask
 for is what stands between it and the measured host. The image enforces the
 restricted PodSecurity standard by default
 (`etc/rancher/rke2/psa-config.yaml`): no privileged pods, no host
-namespaces, no root user, no added capabilities, no unconfined seccomp or
-AppArmor. Only `kube-system` and `local-path-storage` are exempt; `default`
-is not.
+namespaces, no root user, dropped ALL capabilities (only `NET_BIND_SERVICE`
+may be added back), and no unconfined seccomp or AppArmor. Only `kube-system`
+and `local-path-storage` are exempt; `default` is not.
 
 A namespace label can normally lower that level. The baked
 `psa-level-policy.yaml` AddOn denies an `enforce` label other than
@@ -111,24 +116,63 @@ that a restricted namespace is admitted and a privileged one is denied by
 `confos-psa-level`. No externally released operator credential can enter the
 first-boot reconciliation window.
 
-The floor covers namespaces without confidential workloads. In node mode
-the webhook mounts the node's inventory socket into every
-`confidential.ai/cw` pod as a read-only hostPath, which restricted (and
-baseline) forbids, so a namespace hosting confidential workloads is opened
-by the operator with the privileged label, as `c8s install` does for its
-release namespace. This does not grant workloads privileged semantics: the
-chart's fail-closed `deny-host-namespaces` policies reproduce the Restricted controls and
-carve out only the exact inventory directory, read-only and mounted only into
-the webhook-owned c8s sidecars. Application and ephemeral containers cannot
-mount it. Restricted warning and audit labels remain enabled, so the expected
-hostPath exception and any drift stay visible.
+The floor also covers namespaces hosting confidential workloads. In node mode,
+`nri-image-policy` mounts the inventory socket directory read-only into credential
+sidecars through NRI, below the Pod spec. Tenant namespaces keep Restricted
+enforcement, warning, and audit. `c8s install` labels its release namespace
+privileged for trusted platform components, including node DaemonSets.
 
-After chart image upgrades, unchanged existing sidecars remain eligible for
-the mount exception on Pod UPDATE only when the prior Pod already had the exact
-configured claims volume and matching injected/CW identity. All other controls
-still apply. Ephemeral containers may inherit pod-level `runAsNonRoot` and
-seccomp settings when their own settings are absent; explicit unsafe overrides
-are denied.
+The chart's fail-closed `deny-host-namespaces` policies enforce Restricted
+controls and deny every tenant `hostPath` volume on Pod CREATE/UPDATE and
+`pods/ephemeralcontainers` updates. Existing Pods that still declare the old
+claims hostPath must be recreated to pick up NRI wiring; an unchanged prior
+sidecar or chart image never exempts the volume. Admission does not evict
+already-running Pods. The ephemeral policy also preserves the host-namespace
+and host-port checks over the full Pod.
+
+Ephemeral containers may inherit safe pod-level `runAsNonRoot` and seccomp
+settings when their own settings are absent. Explicit unsafe Pod settings,
+including root UID, Unconfined seccomp or AppArmor, disallowed SELinux settings,
+and unsafe sysctls, are rejected even when the debugger specifies safe
+container settings. Explicit `runAsNonRoot: false` and legacy Unconfined
+AppArmor annotations are rejected too. The same Pod-level guards apply to
+ordinary Pod admission.
+
+## Module loading
+
+`kernel/c8s.config` sets `CONFIG_MODULES=y`, which the confos base kernel
+compiles out. It is on for exactly two out-of-tree modules, `nvidia.ko` and
+`nvidia-uvm.ko` (see [MODULE-SIGNING.md](MODULE-SIGNING.md)); every symbol
+kubelet, containerd and Cilium need is `=y`, so nothing modprobes at runtime.
+
+Because the key exists on this kernel, the runtime lock has to be set here:
+confos's `99-kspp-hardening.conf` omits `kernel.modules_disabled` on the
+grounds that the base kernel has no such key. `c8s-modules-latch.service`
+sets it to 1 once boot-time loading is done, ordered after the gpu profile's
+`nvidia-modules-latch.service` and before the rke2 pair, which it is
+`RequiredBy`. The latch is one-way for the rest of the boot.
+
+The gpu profile ships a latch of its own, so on the canonical GPU build both
+run and the second rewrites a 1. This one also covers the GPU-less
+composition (`attest` + `c8s`, no `gpu`), where that unit is absent. The same
+split applies to `99-c8s-bpf.conf`: the c8s profile owns the runtime locks its
+own kernel fragment makes necessary.
+
+## Troubleshooting
+
+**`Read-only file system` under `/usr`, `/etc` or `/opt`** — from a unit log
+(`mkdir: cannot create directory '/etc/foo': Read-only file system`), a
+pod stuck in ContainerCreating with a FailedMount event for a hostPath
+there, or a tool you installed on the host by hand. The root is the
+read-only verity image; only `/var`, `/home`, `/root`, `/tmp` and the
+directories listed in `/usr/lib/confai/state.d/*.conf` on the node are
+writable, and nothing installed after boot is covered by the measurement.
+If the writer is part of the image, declare its directory in
+`c8s/mkosi.extra/usr/lib/confai/state.d/60-c8s.conf` (it must be baked; the
+lint checks) or point it at `/var`. If it is something an operator installs
+on the host afterwards, it does not belong on a measured node — run it as a
+pod. `cat /usr/lib/confai/state.d/*.conf` on the node shows the live list;
+a login shell prints it too.
 
 Migration state (see [#264] for the full plan):
 

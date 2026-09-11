@@ -23,10 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -113,7 +114,7 @@ type testEnv struct {
 	attestURL    string
 	releaseURL   string
 	outPath      string
-	exp          measuredPolicy
+	exp          tdxMeasuredPolicy
 }
 
 func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody string) testEnv {
@@ -133,10 +134,11 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 		t.Fatal(err)
 	}
 	manifestPath := writeTestManifest(t, tdxManifest())
-	exp, err := policyFor(manifestPath, pub, nil)
+	policy, err := policyFor(manifestPath, pub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	exp := requireTDXPolicy(t, policy)
 	stubVerify(t, verifiedResultFor(exp), nil)
 
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
@@ -391,7 +393,7 @@ func TestCheckMeasuredIdentityNoRTMR3Claim(t *testing.T) {
 	exp := testPolicy(t, operatorPub(t))
 	res := verifiedResultFor(exp)
 	res.Claims.PlatformData["rtmr_3"] = ""
-	err := checkMeasuredIdentity(res, exp)
+	err := exp.checkIdentity(res)
 	if err == nil || !strings.Contains(err.Error(), "no rtmr_3") {
 		t.Fatalf("want no-rtmr_3 error, got %v", err)
 	}
@@ -410,7 +412,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bare.rtmr3 != runtimemeasure.ForOperatorKey(pub) {
+	if requireTDXPolicy(t, bare).rtmr3 != runtimemeasure.Seed(pub) {
 		t.Error("with no workload images the expected register must equal the bare operator-key seed")
 	}
 
@@ -418,9 +420,9 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub),
+	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub),
 		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
-	if chained.rtmr3 != want {
+	if requireTDXPolicy(t, chained).rtmr3 != want {
 		t.Error("workload images must chain onto the operator-key seed via the shared convention")
 	}
 
@@ -428,7 +430,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reversed.rtmr3 == chained.rtmr3 {
+	if requireTDXPolicy(t, reversed).rtmr3 == requireTDXPolicy(t, chained).rtmr3 {
 		t.Error("extend order must change the expected register — the chain is ordered")
 	}
 
@@ -469,7 +471,7 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig}) {
+	if requireTDXPolicy(t, single).rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub), []string{dig}) {
 		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
 	}
 }

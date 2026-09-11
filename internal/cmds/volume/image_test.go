@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,52 +149,6 @@ func TestBuildPassesNoSuperblockAndExplicitGeometry(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("veritysetup argv missing %q: %s", want, joined)
 		}
-	}
-}
-
-// The plaintext image is what the whole design protects; it must not survive
-// the build, including when the caller supplied the work directory.
-func TestBuildRemovesPlaintextIntermediates(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	if err := os.MkdirAll(src, 0o755); err != nil {
-		t.Fatalf("mkdir src: %v", err)
-	}
-	work := filepath.Join(dir, "work")
-	f := newFake()
-
-	if _, err := Build(t.Context(), BuildConfig{
-		Source: src, Out: filepath.Join(dir, "vol.img"), Key: testKey(), WorkDir: work, Run: f.run,
-	}); err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	entries, err := os.ReadDir(work)
-	if err != nil {
-		t.Fatalf("read work dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("work dir still holds %d file(s); the plaintext image survived the build", len(entries))
-	}
-}
-
-func TestBuildRemovesIntermediatesOnFailure(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	if err := os.MkdirAll(src, 0o755); err != nil {
-		t.Fatalf("mkdir src: %v", err)
-	}
-	work := filepath.Join(dir, "work")
-	f := newFake()
-	f.failOn = "veritysetup"
-
-	if _, err := Build(t.Context(), BuildConfig{
-		Source: src, Out: filepath.Join(dir, "vol.img"), Key: testKey(), WorkDir: work, Run: f.run,
-	}); err == nil {
-		t.Fatal("build succeeded despite veritysetup failing")
-	}
-	entries, _ := os.ReadDir(work)
-	if len(entries) != 0 {
-		t.Fatalf("failed build left %d file(s) behind", len(entries))
 	}
 }
 
@@ -459,27 +414,6 @@ func TestBuildMutableRejectsBadInvocations(t *testing.T) {
 	}
 }
 
-// The plaintext image is what the whole design protects, on this path too:
-// it must not survive the build, including when the caller supplied the work
-// directory.
-func TestBuildMutableRemovesPlaintextIntermediates(t *testing.T) {
-	dir := t.TempDir()
-	work := filepath.Join(dir, "work")
-	f := newFake()
-	if _, err := BuildMutable(t.Context(), MutableBuildConfig{
-		Out: filepath.Join(dir, "vol.img"), Key: testKey(), Size: 20 << 20, WorkDir: work, Run: f.run,
-	}); err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	entries, err := os.ReadDir(work)
-	if err != nil {
-		t.Fatalf("read work dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("work dir still holds %d file(s); the plaintext image survived the build", len(entries))
-	}
-}
-
 func TestBuildMutableRefusesToOverwriteExistingImage(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "vol.img")
@@ -515,5 +449,65 @@ func TestInferInodes(t *testing.T) {
 	// A tree of small files outnumbers it.
 	if got := inferInodes(1<<30, 100000); got != 200000 {
 		t.Errorf("inferInodes(1GiB, 100000) = %d, want 200000", got)
+	}
+}
+
+func TestBuildCleansPlaintextAndPreservesWorkDir(t *testing.T) {
+	for _, mutable := range []bool{false, true} {
+		for _, outcome := range []string{"success", "format failure", "missing image", "unaligned image"} {
+			t.Run(fmt.Sprintf("mutable=%t/%s", mutable, outcome), func(t *testing.T) {
+				work := t.TempDir()
+				marker := filepath.Join(work, "unrelated")
+				if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				tools := newFake()
+				failed := errors.New("formatter failed after writing plaintext")
+				run := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					out, err := tools.run(ctx, name, args...)
+					if err != nil || name == "mkfs.erofs" {
+						return out, err
+					}
+					lastImage := args[len(args)-1]
+					if name == "veritysetup" {
+						lastImage = args[2]
+					}
+					switch outcome {
+					case "format failure":
+						return nil, failed
+					case "missing image":
+						return out, os.Remove(lastImage)
+					case "unaligned image":
+						return out, os.Truncate(lastImage, 1)
+					}
+					return out, nil
+				}
+				out := filepath.Join(t.TempDir(), "vol.img")
+				var err error
+				if mutable {
+					_, err = BuildMutable(t.Context(), MutableBuildConfig{
+						Out: out, Key: testKey(), Size: minMutableBytes, WorkDir: work, Run: run,
+					})
+				} else {
+					_, err = Build(t.Context(), BuildConfig{
+						Source: t.TempDir(), Out: out, Key: testKey(), WorkDir: work, Run: run,
+					})
+				}
+				if (err != nil) != (outcome != "success") {
+					t.Fatalf("build error = %v", err)
+				}
+				if outcome == "format failure" && !errors.Is(err, failed) {
+					t.Fatalf("lost formatter error: %v", err)
+				}
+				entries, err := os.ReadDir(work)
+				if err != nil || len(entries) != 1 || entries[0].Name() != "unrelated" {
+					t.Fatalf("workdir after build = %v, error = %v", entries, err)
+				}
+				data, err := os.ReadFile(marker)
+				if err != nil || string(data) != "keep" {
+					t.Fatalf("unrelated file = %q, error = %v", data, err)
+				}
+			})
+		}
 	}
 }

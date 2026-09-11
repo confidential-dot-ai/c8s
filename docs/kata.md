@@ -251,9 +251,10 @@ listener. The trade-off is that 8443 is unmeshed inbound in every guest.
 A Kata pod is a VM and cannot join the host's network, PID, or IPC namespace.
 A pod that sets `hostNetwork`, `hostPID`, or `hostIPC` is therefore skipped by
 the Kata-specific webhook and runtime-class policy. The chart's separate,
-default-on `deny-host-namespaces` policy rejects that pod in tenant namespaces, even
-when the namespace carries the PSA `privileged` label needed for the injected
-inventory socket. Only trusted platform namespaces (or explicit
+default-on `deny-host-namespaces` policy rejects that pod in tenant namespaces.
+Workload namespaces can retain PSA Restricted: node-CVM claims sockets arrive
+through NRI, and Kata credential sidecars use the guest's loopback endpoint.
+Only trusted platform namespaces (or explicit
 `hostNamespacePolicy.exemptNamespaces`) may run the pod as an ordinary
 container. Disabling that policy without an equivalent control reopens the
 host-namespace escape from Kata.
@@ -566,10 +567,10 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
 - **Tenant host-namespace escape is denied by default.** The Kata webhook and
   runtime-class policy must skip `hostNetwork`/`hostPID`/`hostIPC` because a VM
   cannot share those namespaces. The separate `hostNamespacePolicy` VAP closes
-  that gap and enforces Restricted-equivalent security in every non-exempt
-  namespace, including a confidential-workload namespace labelled PSA
-  `privileged` for the inventory socket. Its only volume exception is the exact
-  read-only socket mount on webhook-owned c8s sidecars. If you disable it, first
+  that gap and enforces Restricted controls in every non-exempt namespace,
+  including confidential-workload namespaces, with all `hostPath` volumes
+  denied. The same host-namespace, host-port, and hostPath checks apply when
+  adding an ephemeral container to an existing Pod. If you disable it, first
   install an equivalent admission control; otherwise a namespace user can opt
   out of Kata or run a privileged root container. Admission is prospective: an
   upgrade does not evict already-running violating pods, so audit and replace
