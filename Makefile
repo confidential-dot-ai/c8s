@@ -176,6 +176,12 @@ test-node-guest-image-role-systemd:
 test-node-guest-image-cloud-init:
 	./node-guest-image/tests/cloud-init-disabled.sh
 
+# Needs root on disposable Linux and a ./confos checkout (or CONFOS_DIR).
+# Executes the pinned initrd with real overlays; stops before systemd/TEE boot.
+.PHONY: test-node-guest-image-immutable-root
+test-node-guest-image-immutable-root:
+	bash node-guest-image/tests/immutable-root-test.sh
+
 # Advisory mutation testing of code changed vs BASE (default origin/main).
 mutation-check:
 	./scripts/mutation-check.sh run "$${BASE:-origin/main}"

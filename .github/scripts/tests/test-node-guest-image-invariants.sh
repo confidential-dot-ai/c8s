@@ -9,7 +9,10 @@ confos_dir=$(cd "$repo_dir/confos" && pwd -P)
 fixture_dir=$(mktemp -d)
 trap 'rm -rf -- "$fixture_dir"' EXIT
 cp -a "$repo_dir/node-guest-image" "$repo_dir/.github" "$fixture_dir/"
-ln -s "$confos_dir" "$fixture_dir/confos"
+mkdir -p "$fixture_dir/confos/mkosi/initrd/mkosi.extra"
+ln -s "$confos_dir/kernel" "$fixture_dir/confos/kernel"
+fixture_init="$fixture_dir/confos/mkosi/initrd/mkosi.extra/init"
+cp "$confos_dir/mkosi/initrd/mkosi.extra/init" "$fixture_init"
 probe="$fixture_dir/node-guest-image/c8s/mkosi.extra/usr/local/bin/invariant-write-test.sh"
 tests=0
 
@@ -17,7 +20,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 run_gate() {
   (
     cd "$fixture_dir"
-    bash .github/scripts/node-guest-image-invariants.sh
+    env "$@" bash .github/scripts/node-guest-image-invariants.sh
   ) >"$fixture_dir/output" 2>&1
 }
 accepts() {
@@ -57,4 +60,30 @@ rejects "copy with descriptor duplication" \
   'cp /tmp/source /usr/bin/c8s-invariant-probe 2>&1'
 rejects "mkdir with descriptor duplication" \
   'mkdir /usr/bin/c8s-invariant-probe 2>&1'
+
+printf '%s\n' '# no additional runtime writes' >"$probe"
+# Remove the support marker only from our copied init. Other confos inputs
+# remain read-only references to the pinned checkout.
+sed 's|/usr/lib/confai/state\.d|/usr/lib/confai/missing-state.d|g' \
+  "$confos_dir/mkosi/initrd/mkosi.extra/init" >"$fixture_init"
+for expectation in unset 1; do
+  if [ "$expectation" = unset ]; then
+    gate_env=(-u EXPECT_IMMUTABLE_ROOT)
+  else
+    gate_env=(EXPECT_IMMUTABLE_ROOT=1)
+  fi
+  if run_gate "${gate_env[@]}"; then
+    fail "missing immutable-root support was accepted with EXPECT_IMMUTABLE_ROOT=$expectation"
+  fi
+  grep -Fq 'has no state.d in its initrd' "$fixture_dir/output" || {
+    cat "$fixture_dir/output"
+    fail "missing immutable-root support failed for an unrelated reason"
+  }
+  tests=$((tests + 1))
+done
+if ! run_gate EXPECT_IMMUTABLE_ROOT=0; then
+  cat "$fixture_dir/output"
+  fail "explicit legacy compatibility override was rejected"
+fi
+tests=$((tests + 1))
 echo "$tests node-image invariant assertions passed"

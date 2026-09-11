@@ -46,6 +46,13 @@ Layout:
 
 ## Launch requirements
 
+The `node-image` domain in [`.github/build-pins.json`](../.github/build-pins.json)
+pins confos `7b1f5168`, activating the immutable root merged in
+[confidential-os-builder#120](https://github.com/confidential-dot-ai/confidential-os-builder/pull/120).
+The independent `kata-guest` and `kernel-snapshot` pins stay unchanged. The
+node-image invariant gate requires immutable-root support by default and CI
+sets `EXPECT_IMMUTABLE_ROOT=1` explicitly.
+
 Every node VM needs a write-storage disk with virtio-blk serial
 `confai-scratch`, at least 64G. The serial is what matters: the confos
 initrd scans `/dev/vd{b,c,d}` for it and ignores labels. In KubeVirt that's
@@ -81,6 +88,32 @@ The other disks are optional; each is owned by one unit under
   see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
   issued certificate's group to `cluster-admin` through ordinary RBAC;
   identity, TTL and revocation are documented in [operator.md].
+
+## Immutable root checks
+
+From the repository root on a disposable Linux system, check out the
+`node-image` confos pin at `./confos`, then run as root. Set `CONFOS_DIR` to
+use another checkout:
+
+```sh
+sudo make test-node-guest-image-immutable-root
+sudo make test-node-guest-image-immutable-root CONFOS_DIR=/path/to/confidential-os-builder
+```
+
+The Bash test requires GNU coreutils/findutils, grep, cmp, and util-linux
+with mount namespace and overlay support. It stages the actual base, GPU,
+attestation and c8s profile extra trees, then executes the pinned base
+finalizer and initrd unchanged in a private mount namespace and chroot.
+Real overlays must permit c8s state writes and atomic NRI floor replacement
+while `/usr`, `/opt/nri` and undeclared `/etc` paths stay read-only and the
+lower image stays unchanged.
+A missing declared directory must stop boot before `switch_root`. Sync-created
+CNI/NRI directories are fixture inputs; the invariant gate separately checks
+that `mkosi.sync` creates them. Each case unmounts its fixture before cleanup.
+
+This checks initrd handoff with tmpfs state backing. Hardware discovery and
+`switch_root` are shims: it does not boot a full CVM, start systemd or validate
+encrypted scratch storage. Those require validation on the built node image.
 
 ## Workload isolation
 
@@ -233,6 +266,35 @@ For manual image builds, dispatch `c8s-image-manual.yml` (Actions name:
 `gate` inputs. It builds through the same reusable builder but cannot call
 exact acceptance or promote stable aliases. `tdx-metal-e2e.yml` remains
 manually dispatchable for staged-stack regression and `keep_cvm` debugging.
+
+## Refreshing measurements
+
+A builder-pin change requires rebuilding both platforms and deriving fresh
+measurement configurations from their `manifest.json` files. Given built or
+downloaded image directories, use the existing CLI:
+
+```sh
+c8s measurements derive --tee tdx --out measurements-tdx.json output/rke2-tdx
+c8s measurements derive --tee sev-snp --out measurements-snp.json output/rke2-snp
+```
+
+The input can also be a manifest path. Keep one configuration per platform:
+TDX includes MRTD and RTMR[1]/RTMR[2]; SNP includes each measured vCPU variant.
+
+The PR reproducibility gate builds both platforms twice with a shared
+ephemeral module-signing key and the published component ref pinned by
+`c8s/mkosi.sync`. Its manifests and derived configurations are candidate
+evidence for that build. They are not production reference values: automatic
+publication uses the production signing key and components paired with its
+source commit. Derive production references from those newly published
+measured images, retaining their manifest and immutable artifact identity.
+Do not substitute gate measurements into an existing cluster's trusted
+reference configuration.
+
+Exact-image TDX hardware acceptance runs only after automatic publication,
+using that publication's source SHA, digests and manifest as described above.
+A successful PR comparison does not prove the new image boots on hardware;
+manual and PR gate builds cannot invoke the exact-image acceptance path.
 
 ## Module loading
 

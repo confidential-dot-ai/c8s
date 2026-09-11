@@ -4,8 +4,8 @@
 #
 # Inputs (env):
 #   CONFOS_REF   pinned confos ref the workflow resolved; names the pass line.
-#   EXPECT_IMMUTABLE_ROOT  1 once CONFOS_REF carries confos's immutable root
-#                (state.d in its initrd); makes its absence an error.
+#   EXPECT_IMMUTABLE_ROOT  defaults to 1; requires state.d in confos's initrd.
+#                Set to 0 only when inspecting a legacy confos checkout.
 
 set -euo pipefail
 
@@ -202,10 +202,8 @@ for w in $writes; do
 done
 
 # confos side. The parser this lint mirrors is pinned like the dm name
-# above. Until CONFOS_REF carries the immutable root the declaration is
-# inert (warning only); the bump PR sets EXPECT_IMMUTABLE_ROOT=1 in
-# node-guest-image-lint.yml so a later confos drop of state.d fails here
-# instead of reading as "older confos".
+# above. Missing immutable-root support fails by default, including local
+# runs; the explicit compatibility override only supports legacy inspection.
 init=confos/mkosi/initrd/mkosi.extra/init
 if grep -qF '/usr/lib/confai/state.d' "$init"; then
   for pin in '[ -d "/sysroot/$dir" ]' 'while read -r dir || [ -n "$dir" ]'; do
@@ -214,11 +212,11 @@ if grep -qF '/usr/lib/confai/state.d' "$init"; then
       exit 1
     fi
   done
-elif [ "${EXPECT_IMMUTABLE_ROOT:-0}" = 1 ]; then
+elif [ "${EXPECT_IMMUTABLE_ROOT:-1}" = 1 ]; then
   echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
   exit 1
 else
-  echo "::warning::confos at CONFOS_REF $CONFOS_REF predates the immutable root (no state.d in its initrd): the state.d declaration is inert until the ref is bumped — then set EXPECT_IMMUTABLE_ROOT=1 in node-guest-image-lint.yml"
+  echo "::warning::EXPECT_IMMUTABLE_ROOT=$EXPECT_IMMUTABLE_ROOT permits confos at CONFOS_REF $CONFOS_REF without state.d in its initrd; the profile's state.d declaration is inert"
 fi
 
 # The scratch floor is prose in the README and a sector count in the gate;
