@@ -25,10 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -40,10 +41,10 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-func newStubAttestationApi(t *testing.T, launchDigest string) *testattest.Stub {
+func newStubAttestationApi(t *testing.T, launchDigest string) *mockapi.Stub {
 	t.Helper()
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(launchDigest))
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(launchDigest))
 	return stub
 }
 
@@ -75,7 +76,7 @@ func newTestAttestHandler(t *testing.T, stubURL string, allowedMeasurements map[
 	store := attestation.NewChallengeStore(30 * time.Second)
 	return AttestHandler{
 		Challenges:        &store,
-		AttestationClient: attestationclient.NewClient(stubURL),
+		AttestationClient: remote.NewClient(stubURL),
 		CA:                ca,
 		CAChainPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		CertTTL:           time.Hour,
@@ -93,7 +94,7 @@ func postAttest(t *testing.T, h AttestHandler, challenge, csrPEM string) *httpte
 	t.Helper()
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"test":true}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"test":true}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -119,7 +120,7 @@ func leafFromAttestResponse(t *testing.T, w *httptest.ResponseRecorder) *x509.Ce
 
 func TestAttest_InProcessSignAndReturnsChain(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -152,7 +153,7 @@ func TestAttest_InProcessSignAndReturnsChain(t *testing.T) {
 
 func TestAttest_ClampsCertTTLBeforeSigning(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	base := newTestAttestHandler(t, stub.URL, nil)
+	base := newTestAttestHandler(t, stub.URL(), nil)
 	for _, tc := range []struct {
 		name       string
 		configured time.Duration
@@ -184,7 +185,7 @@ func TestAttest_ClampsCertTTLBeforeSigning(t *testing.T) {
 
 func TestAttest_LaunchDigestAllowlistAllowed(t *testing.T) {
 	stub := newStubAttestationApi(t, "approved-digest")
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{"approved-digest": true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{"approved-digest": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -196,7 +197,7 @@ func TestAttest_LaunchDigestAllowlistAllowed(t *testing.T) {
 
 func TestAttest_LaunchDigestAllowlistCaseInsensitive(t *testing.T) {
 	stub := newStubAttestationApi(t, "DEADBEEF")
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{"deadbeef": true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{"deadbeef": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -208,7 +209,7 @@ func TestAttest_LaunchDigestAllowlistCaseInsensitive(t *testing.T) {
 
 func TestAttest_LaunchDigestAllowlistDenied(t *testing.T) {
 	stub := newStubAttestationApi(t, "unknown-digest")
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{"approved-digest": true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{"approved-digest": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -224,16 +225,16 @@ func TestAttest_LaunchDigestAllowlistDenied(t *testing.T) {
 func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 	h := newTestAttestHandler(t, "http://attestation.test", nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	h.AttestationClient = attestationclient.NewClientWithHTTP("http://attestation.test", &http.Client{
+	h.AttestationClient = remote.NewClientWithHTTP("http://attestation.test", &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			cancel()
 			match := true
-			resp := types.VerifyResponse{
-				Result: types.VerificationResult{
+			resp := remote.VerifyResponse{
+				Result: teetypes.VerificationResult{
 					Platform:        "snp",
 					SignatureValid:  true,
 					ReportDataMatch: &match,
-					Claims:          types.Claims{LaunchDigest: "deadbeef"},
+					Claims:          teetypes.Claims{LaunchDigest: "deadbeef"},
 				},
 			}
 			var body bytes.Buffer
@@ -252,7 +253,7 @@ func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 	csrPEM, _ := generateCSR(t)
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"test":true}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"test":true}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -272,7 +273,7 @@ func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 
 func TestAttest_ConsumedChallengeRejectsReplay(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -289,7 +290,7 @@ func TestAttest_ConsumedChallengeRejectsReplay(t *testing.T) {
 // anything weaker signs a leaf for whoever holds any verifiable TEE report.
 func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, csrKey := generateCSR(t)
 
@@ -302,7 +303,7 @@ func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("/verify called %d times, want 1", len(reqs))
 	}
-	if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
+	if reqs[0].Params == nil || len(reqs[0].Params.ExpectedReportData) == 0 {
 		t.Fatal("/verify carried no expected_report_data")
 	}
 	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
@@ -313,7 +314,7 @@ func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReportDataForKey: %v", err)
 	}
-	if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
+	if got := reqs[0].Params.ExpectedReportData; !bytes.Equal(got, want[:sha512.Size384]) {
 		t.Fatalf("expected_report_data = %x (%d bytes), want SHA-384(key||challenge) %x",
 			got, len(got), want[:sha512.Size384])
 	}
@@ -328,15 +329,15 @@ func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 
 // A verifier reporting that the evidence binds different report data must
 // deny issuance: the report attests some other key or challenge. Defensive:
-// non-production shape (testattest.Verdict) — production refuses a mismatch
+// non-production shape (mockapi.Verdict) — production refuses a mismatch
 // with a 422; the 401 pins CDS's own fail-closed gate.
 func TestAttest_ReportDataMismatchReturns401(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	verdict := testattest.PassingVerdict("deadbeef")
+	verdict := mockapi.PassingVerdict("deadbeef")
 	match := false
 	verdict.ReportDataMatch = &match
 	stub.SetVerdict(verdict)
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -351,7 +352,7 @@ func TestAttest_ReportDataMismatchReturns401(t *testing.T) {
 
 func TestAttest_BadCSRRejected(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 
 	w := postAttest(t, h, challenge, "not a pem")
@@ -362,7 +363,7 @@ func TestAttest_BadCSRRejected(t *testing.T) {
 
 func TestAttest_RejectsCSRWithUnconfiguredDNSSAN(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, []string{"foo.mesh.svc"}, nil)
 
@@ -377,7 +378,7 @@ func TestAttest_RejectsCSRWithUnconfiguredDNSSAN(t *testing.T) {
 
 func TestAttest_AcceptsCSRWithAllowedDNSSAN(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	h.Policy.DNSSANPatterns = []*regexp.Regexp{regexp.MustCompile(`^[a-z]+\.mesh\.svc$`)}
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, []string{"foo.mesh.svc"}, nil)
@@ -390,7 +391,7 @@ func TestAttest_AcceptsCSRWithAllowedDNSSAN(t *testing.T) {
 
 func TestAttest_RejectsCSRWithBadCN(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	h.Policy.AllowedCNPattern = regexp.MustCompile(`^ratls-mesh-[0-9.]+$`)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "evil"}, nil, nil)
@@ -403,7 +404,7 @@ func TestAttest_RejectsCSRWithBadCN(t *testing.T) {
 
 func TestAttest_RejectsCSRWithMismatchedSourceIP(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	h.SANValidation = true
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, nil, []net.IP{net.ParseIP("10.0.0.99")})
@@ -412,7 +413,7 @@ func TestAttest_RejectsCSRWithMismatchedSourceIP(t *testing.T) {
 	// 10.0.0.99 IP SAN should not match.
 	body, _ := json.Marshal(types.AttestRequestBody{
 		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
 		CSR:       csrPEM,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader(body))
@@ -426,7 +427,7 @@ func TestAttest_RejectsCSRWithMismatchedSourceIP(t *testing.T) {
 
 func TestAttest_RejectsCSRWithIPSANWhenSANValidationDisabled(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	// SANValidation defaults to false, leaving Policy.SourceIP empty.
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, nil, []net.IP{net.ParseIP("10.0.0.99")})
@@ -532,28 +533,28 @@ func TestClassifyVerifyError(t *testing.T) {
 	}{
 		{
 			name:       "signature invalid",
-			err:        wrapped(attestationclient.ErrSignatureInvalid),
+			err:        wrapped(remote.ErrSignatureInvalid),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    "attestation signature invalid",
 		},
 		{
 			name:       "report data mismatch",
-			err:        wrapped(attestationclient.ErrReportDataMismatch),
+			err:        wrapped(remote.ErrReportDataMismatch),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    "challenge mismatch in attestation evidence",
 		},
 		{
 			name:       "api 400 is client fault",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusBadRequest}),
+			err:        wrapped(&remote.APIError{Status: http.StatusBadRequest}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgEvidenceRejected,
 		},
 		{
 			name:       "api 403 is client fault",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusForbidden}),
+			err:        wrapped(&remote.APIError{Status: http.StatusForbidden}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgEvidenceRejected,
@@ -562,63 +563,63 @@ func TestClassifyVerifyError(t *testing.T) {
 			// Deliberately bare: the sentinel arms above are wrapped, so this
 			// is the one row that would still pass a plain type assertion.
 			name:       "api 400 unwrapped is client fault",
-			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
+			err:        &remote.APIError{Status: http.StatusBadRequest},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgEvidenceRejected,
 		},
 		{
 			name:       "api 500 is upstream outage",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusInternalServerError}),
+			err:        wrapped(&remote.APIError{Status: http.StatusInternalServerError}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 408 is retryable unavailability",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusRequestTimeout}),
+			err:        wrapped(&remote.APIError{Status: http.StatusRequestTimeout}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 429 is retryable unavailability",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusTooManyRequests}),
+			err:        wrapped(&remote.APIError{Status: http.StatusTooManyRequests}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 399 is not a refusal",
-			err:        wrapped(&attestationclient.APIError{Status: 399}),
+			err:        wrapped(&remote.APIError{Status: 399}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 302 is not a refusal",
-			err:        wrapped(&attestationclient.APIError{Status: http.StatusFound}),
+			err:        wrapped(&remote.APIError{Status: http.StatusFound}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 400 is a request rejection",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusBadRequest, Text: "Failed to parse the request body as JSON"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusBadRequest, Text: "Failed to parse the request body as JSON"}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgRequestRejected,
 		},
 		{
 			name:       "non-json 415 is a request rejection",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusUnsupportedMediaType, Text: "Expected request with `Content-Type: application/json`"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusUnsupportedMediaType, Text: "Expected request with `Content-Type: application/json`"}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgRequestRejected,
 		},
 		{
 			name:       "non-json 422 is a request rejection",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Failed to deserialize the JSON body into the target type"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Failed to deserialize the JSON body into the target type"}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 			wantMsg:    msgRequestRejected,
@@ -626,7 +627,7 @@ func TestClassifyVerifyError(t *testing.T) {
 		{
 			// A body cut mid-response names nothing, so it is not a rejection.
 			name:       "non-json 400 with no body is an outage",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusBadRequest}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusBadRequest}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
@@ -634,63 +635,63 @@ func TestClassifyVerifyError(t *testing.T) {
 		{
 			// The api has no 403; an on-path proxy does.
 			name:       "non-json 403 is an outage",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusForbidden, Text: "<html>403 Forbidden</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusForbidden, Text: "<html>403 Forbidden</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 404 is an outage",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusNotFound, Text: "<html>404 Not Found</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusNotFound, Text: "<html>404 Not Found</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 413 is an outage",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusRequestEntityTooLarge, Text: "<html>413 Request Entity Too Large</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusRequestEntityTooLarge, Text: "<html>413 Request Entity Too Large</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 500 is upstream outage",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusInternalServerError, Text: "<html>500 Internal Server Error</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusInternalServerError, Text: "<html>500 Internal Server Error</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 408 is retryable unavailability",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusRequestTimeout, Text: "<html>408 Request Timeout</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusRequestTimeout, Text: "<html>408 Request Timeout</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 429 is retryable unavailability",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusTooManyRequests, Text: "<html>429 Too Many Requests</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusTooManyRequests, Text: "<html>429 Too Many Requests</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 399 is not a rejection",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: 399, Text: "unknown"}),
+			err:        wrapped(&remote.UnexpectedError{Status: 399, Text: "unknown"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "non-json 302 is not a rejection",
-			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusFound, Text: "<html>302 Found</html>"}),
+			err:        wrapped(&remote.UnexpectedError{Status: http.StatusFound, Text: "<html>302 Found</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "transport failure is unreachable",
-			err:        wrapped(&attestationclient.RequestError{Err: errors.New("dial tcp: connection refused")}),
+			err:        wrapped(&remote.RequestError{Err: errors.New("dial tcp: connection refused")}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 			wantMsg:    anyUnreachableMsg,
@@ -754,7 +755,7 @@ func TestStatusPredicates(t *testing.T) {
 func TestClassifyVerifyErrorDoesNotEchoUpstreamBody(t *testing.T) {
 	const leak = "s3cret-internal-hostname.cluster.local"
 	_, _, msg := classifyVerifyError(fmt.Errorf("verify enforced: %w",
-		&attestationclient.UnexpectedError{Status: http.StatusBadRequest, Text: leak}))
+		&remote.UnexpectedError{Status: http.StatusBadRequest, Text: leak}))
 	if strings.Contains(msg, leak) {
 		t.Fatalf("message echoes upstream body: %q", msg)
 	}
@@ -803,7 +804,7 @@ func TestAttestHandler_caChainPEM(t *testing.T) {
 
 func TestAttest_RejectsUnknownJSONFields(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader([]byte(`{"unknown":true}`)))
 	w := httptest.NewRecorder()
@@ -815,12 +816,12 @@ func TestAttest_RejectsUnknownJSONFields(t *testing.T) {
 
 func TestAttest_RejectsMalformedChallengeEncoding(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	csrPEM, _ := generateCSR(t)
 
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: "!!!not-base64!!!",
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -836,13 +837,13 @@ func TestAttest_RejectsMalformedChallengeEncoding(t *testing.T) {
 
 func TestAttest_RejectsValidBase64UnknownChallenge(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	csrPEM, _ := generateCSR(t)
 
 	// Valid base64 but never issued, so Consume returns false.
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: "AAAAAAAAAAAAAAAAAAAAAA==",
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -859,7 +860,7 @@ func TestAttest_RejectsValidBase64UnknownChallenge(t *testing.T) {
 // A CSR whose public key is not ECDSA must be rejected before verification.
 func TestAttest_RejectsNonECDSACSR(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -884,7 +885,7 @@ func TestAttest_RejectsNonECDSACSR(t *testing.T) {
 // Also exercises the RequestTimeout>0 wrapping.
 func TestAttest_SignFailureReturns500(t *testing.T) {
 	stub := newStubAttestationApi(t, "x")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	h.CA = &issuer.CA{} // no cert/key loaded: SignCSR fails
 	h.RequestTimeout = time.Second
 	challenge := issueChallenge(t, h)
@@ -905,7 +906,7 @@ func TestAttest_SignFailureReturns500(t *testing.T) {
 // workloads afterwards. The serial has to match the leaf actually returned.
 func TestAttest_IssuanceIsRecorded(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h := newTestAttestHandler(t, stub.URL, nil)
+	h := newTestAttestHandler(t, stub.URL(), nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 
@@ -945,7 +946,7 @@ func TestAttest_IssuanceIsRecorded(t *testing.T) {
 // of probes against CDS cannot be tied to the leaf that eventually succeeded.
 func TestAttest_MeasurementDenialRecordsPeer(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{"cafe": true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{"cafe": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
 

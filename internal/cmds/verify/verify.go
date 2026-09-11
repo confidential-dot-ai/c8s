@@ -26,8 +26,8 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -671,7 +671,7 @@ type rtmrPins struct {
 	rtmr3 []byte
 	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
 	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
-	// read only by pkg/attestationclient, on the delegated attestation-api
+	// read only by attestation-go/remote, on the delegated attestation-api
 	// path, and `c8s verify` always verifies in process (verifyInProcess ->
 	// localverify.Verify, whose Params carries no registers). Setting the
 	// policy field alone made the flag a silent no-op.
@@ -1319,7 +1319,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 				return oc
 			}
 		}
-		if len(plan.policy.Measurements) > 0 && !attestationclient.MeasurementAllowed(mb, plan.policy.Measurements) {
+		if len(plan.policy.Measurements) > 0 && !remote.MeasurementAllowed(mb, plan.policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}

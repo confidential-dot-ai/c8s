@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -52,9 +52,9 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 	now := time.Now()
 
 	t.Run("expired rejected before the evidence round-trip", func(t *testing.T) {
-		stub := testattest.New(t)
+		stub := mockapi.New(t)
 		cert := attestedCertWithWindow(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL()}, nil)
 		if !errors.Is(err, ErrCertValidity) {
 			t.Fatalf("err = %v, want errors.Is ErrCertValidity", err)
 		}
@@ -64,9 +64,9 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 	})
 
 	t.Run("not yet valid beyond skew rejected", func(t *testing.T) {
-		stub := testattest.New(t)
+		stub := mockapi.New(t)
 		cert := attestedCertWithWindow(t, now.Add(certutil.LeafValiditySkew+time.Minute), now.Add(2*time.Hour))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL()}, nil)
 		if !errors.Is(err, ErrCertValidity) {
 			t.Fatalf("err = %v, want errors.Is ErrCertValidity", err)
 		}
@@ -77,10 +77,10 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 
 	t.Run("NotBefore within skew accepted", func(t *testing.T) {
 		measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-		stub := testattest.New(t)
-		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+		stub := mockapi.New(t)
+		stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 		cert := attestedCertWithWindow(t, now.Add(certutil.LeafValiditySkew-time.Minute), now.Add(2*time.Hour))
-		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}}, nil); err != nil {
+		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL(), Measurements: [][]byte{measurement}}, nil); err != nil {
 			t.Fatalf("NotBefore within the skew allowance must pass: %v", err)
 		}
 	})
@@ -91,12 +91,12 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 // evidence has, so an expired peer must be refused — and cheaply, before any
 // attestation-api round-trip.
 func TestDualVerifyPeerCallbackRejectsExpiredSelfSigned(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	cert := attestedCertWithWindow(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
 	_, caCert := generateCACert(t)
 
 	verify := dualVerifyPeerCallback(
-		&VerifyPolicy{AttestationApiURL: stub.URL},
+		&VerifyPolicy{AttestationApiURL: stub.URL()},
 		newSharedCACerts([]*x509.Certificate{caCert}),
 	)
 	err := verify([][]byte{cert.Raw}, nil)
@@ -286,7 +286,7 @@ func TestDualVerifyPeerCallbackSharesTheSkewWindow(t *testing.T) {
 // rewritable under a genuine attestation. That check belongs here, not only
 // in the callers that happen to run certutil.AuthenticateLeafBody themselves.
 func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	now := time.Now()
 
 	// Same attested key, body signed by a different key: a self-issued leaf
@@ -316,7 +316,7 @@ func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL()}, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not verify with its own key") {
 		t.Fatalf("err = %v, want the self-signature rejection", err)
 	}

@@ -8,9 +8,8 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 var operatorPub = []byte("operator public key bytes")
@@ -37,16 +36,16 @@ func stageOperatorPubkey(t *testing.T, pub []byte) {
 // varying only the platform and the claim.
 func attester(t *testing.T, platform teetypes.PlatformType, binding []byte) string {
 	t.Helper()
-	stub := testattest.New(t)
-	stub.SetPlatform(types.Platform(platform))
-	v := testattest.PassingVerdict("")
+	stub := mockapi.New(t)
+	stub.SetPlatform(teetypes.PlatformType(platform))
+	v := mockapi.PassingVerdict("")
 	if platform.IsTDX() {
 		v.Claims.PlatformData = map[string]any{"rtmr_3": hex.EncodeToString(binding)}
 	} else {
 		v.Claims.InitData = binding
 	}
 	stub.SetVerdict(v)
-	return stub.URL
+	return stub.URL()
 }
 
 func tdxBinding(pub []byte) []byte { v := runtimemeasure.Seed(pub); return v[:] }
@@ -136,13 +135,13 @@ func TestLoadMeasuredOperatorKeyRefusesUnknownPlatform(t *testing.T) {
 // fresh nonce, and a stub reporting success without one would pass a replay.
 func TestSelfReportBindsAFreshNonce(t *testing.T) {
 	stageOperatorPubkey(t, operatorPub)
-	stub := testattest.New(t)
-	stub.SetPlatform(types.Platform(teetypes.PlatformSNP))
-	v := testattest.PassingVerdict("")
+	stub := mockapi.New(t)
+	stub.SetPlatform(teetypes.PlatformType(teetypes.PlatformSNP))
+	v := mockapi.PassingVerdict("")
 	v.Claims.InitData = snpBinding(operatorPub)
 	stub.SetVerdict(v)
 
-	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL); err != nil {
+	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL()); err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
 	reqs := stub.VerifyRequests()
@@ -150,11 +149,11 @@ func TestSelfReportBindsAFreshNonce(t *testing.T) {
 		t.Fatalf("verify requests = %d, want 1", len(reqs))
 	}
 	sent := reqs[0].Params.ExpectedReportData
-	if sent == nil || len(sent.Bytes()) == 0 {
+	if len(sent) == 0 {
 		t.Fatal("no expected report data sent; a self-report with no nonce is replayable")
 	}
 	var zero [64]byte
-	if string(sent.Bytes()) == string(zero[:len(sent.Bytes())]) {
+	if string(sent) == string(zero[:len(sent)]) {
 		t.Fatal("expected report data is all zero, so it is not a fresh nonce")
 	}
 }

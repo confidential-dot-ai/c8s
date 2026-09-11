@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -712,11 +713,11 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Errorf("attestation-api path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode attest request: %v", err)
 		}
-		sawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		sawReportData = append([]byte(nil), req.ReportData...)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"platform":"az-snp","evidence":{"quote":"abc"}}`)
 	}))

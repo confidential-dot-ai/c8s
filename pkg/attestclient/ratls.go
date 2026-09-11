@@ -10,9 +10,8 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // MakeSNPRATLSAttestFunc returns an RA-TLS AttestFunc (matching
@@ -68,7 +67,7 @@ func (c Client) AttestationExtension(ctx context.Context, attestationApiURL stri
 // extension: the raw report for native SEV-SNP (snp, gcp-snp), the evidence
 // envelope for everything else. See attestation-go/ratls.EvidenceForExtension
 // for why the two shapes exist and what native TDX loses on the way in.
-func RATLSEvidence(resp types.AttestResponse) (string, error) {
+func RATLSEvidence(resp remote.AttestResponse) (string, error) {
 	evidence, err := agratls.EvidenceForExtension(evidenceEnvelope(resp))
 	if err != nil {
 		return "", err
@@ -79,7 +78,7 @@ func RATLSEvidence(resp types.AttestResponse) (string, error) {
 // evidenceEnvelope re-tags an /attest response as the library's evidence
 // envelope. The two carry the same JSON; only the platform tag's Go type
 // differs.
-func evidenceEnvelope(resp types.AttestResponse) teetypes.AttestationEvidence {
+func evidenceEnvelope(resp remote.AttestResponse) teetypes.AttestationEvidence {
 	return teetypes.AttestationEvidence{
 		Platform: teetypes.NormalizePlatform(string(resp.Platform)),
 		Evidence: resp.Evidence,

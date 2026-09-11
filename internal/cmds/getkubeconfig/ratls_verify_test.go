@@ -25,7 +25,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // The fixed guest-image tuple the test manifests pin.
@@ -100,7 +99,7 @@ func mustKeyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
 
 // attestedCert builds a genuine RA-TLS TDX cert carrying the given evidence
 // envelope, bound to the cert's own key (as the real serving path does).
-func attestedCert(t *testing.T, envelope types.AttestationEvidence) *x509.Certificate {
+func attestedCert(t *testing.T, envelope teetypes.AttestationEvidence) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -226,7 +225,7 @@ func TestVerifyServerCertRejectsBadReportData(t *testing.T) {
 	res := verifiedResultFor(exp)
 	res.ReportDataMatch = teetypes.Ptr(false)
 	stubVerify(t, res, nil)
-	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 	err := verifyServerCert(cert, exp)
 	if err == nil || !strings.Contains(err.Error(), "report_data") {
@@ -267,7 +266,7 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 			res := verifiedResultFor(exp)
 			tc.wreck(res)
 			stubVerify(t, res, nil)
-			cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+			cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 			err := verifyServerCert(cert, exp)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -281,7 +280,7 @@ func TestVerifyServerCertAccepts(t *testing.T) {
 	// Genuine quote, bound to the cert key, full measured identity: accept.
 	exp := testPolicy(t, operatorPub(t))
 	rec := stubVerify(t, verifiedResultFor(exp), nil)
-	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 	if err := verifyServerCert(cert, exp); err != nil {
 		t.Fatalf("want accept, got %v", err)
@@ -305,7 +304,7 @@ func TestVerifyServerCertAccepts(t *testing.T) {
 // validity, embedded key from holder, and signature from signer.
 func mintServingCert(t *testing.T, holder *ecdsa.PublicKey, signer *ecdsa.PrivateKey, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
-	report, err := json.Marshal(types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	report, err := json.Marshal(teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

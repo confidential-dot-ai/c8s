@@ -6,20 +6,20 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // Checker periodically polls the attestation-api and exposes a readiness flag.
 type Checker struct {
 	ready atomic.Bool
 
-	attestationClient attestationclient.Client
+	attestationClient remote.Client
 	interval          time.Duration
 }
 
 // NewChecker creates a new readiness checker.
 func NewChecker(
-	attestationClient attestationclient.Client,
+	attestationClient remote.Client,
 	interval time.Duration,
 ) Checker {
 	return Checker{

@@ -148,7 +148,7 @@ Output is the bare hex digest, one per line, ready for
 }
 
 // Platforms `measure` can compute a launch measurement for. These match the
-// pkg/types.Platform spellings the CDS allow-list and RA-TLS policy use.
+// teetypes.PlatformType spellings the CDS allow-list and RA-TLS policy use.
 const (
 	platformSNP = "snp"
 	platformTDX = "tdx"

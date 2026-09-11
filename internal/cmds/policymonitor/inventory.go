@@ -328,5 +328,5 @@ func detectGuestPlatform(ctx context.Context, attestationServiceURL string) (str
 	if resp.Platform == "" {
 		return "", fmt.Errorf("attestation-api reported no platform")
 	}
-	return resp.Platform, nil
+	return string(resp.Platform), nil
 }

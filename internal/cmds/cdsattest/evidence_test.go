@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 func writeTempFile(t *testing.T, name, content string) string {
@@ -75,7 +75,7 @@ func TestLoadFixtureEvidenceDefaultsPlatform(t *testing.T) {
 }
 
 func TestLiveEvidenceProvider(t *testing.T) {
-	var gotReq types.AttestRequest
+	var gotReq remote.AttestRequest
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/attest" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -83,7 +83,7 @@ func TestLiveEvidenceProvider(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
 			t.Error(err)
 		}
-		json.NewEncoder(w).Encode(types.AttestResponse{
+		json.NewEncoder(w).Encode(remote.AttestResponse{
 			Platform: "snp",
 			Evidence: json.RawMessage(`{"attestation_report":"AAAA"}`),
 		})
@@ -91,8 +91,8 @@ func TestLiveEvidenceProvider(t *testing.T) {
 	defer api.Close()
 
 	p := LiveEvidenceProvider{
-		Client:     attestationclient.NewClient(api.URL),
-		Platform:   types.PlatformSnp,
+		Client:     remote.NewClient(api.URL),
+		Platform:   teetypes.PlatformSNP,
 		Generation: "genoa",
 	}
 	ev, platform, generation, err := p.Evidence(context.Background(), []byte("report-data"))
@@ -102,25 +102,25 @@ func TestLiveEvidenceProvider(t *testing.T) {
 	if string(ev) != `{"attestation_report":"AAAA"}` || platform != "snp" || generation != "genoa" {
 		t.Fatalf("Evidence() = %q, %q, %q", ev, platform, generation)
 	}
-	if string(gotReq.ReportData.Bytes()) != "report-data" {
-		t.Fatalf("report_data not forwarded: %q", gotReq.ReportData.Bytes())
+	if string(gotReq.ReportData) != "report-data" {
+		t.Fatalf("report_data not forwarded: %q", gotReq.ReportData)
 	}
 }
 
 func TestLiveEvidenceProviderPlatformFallback(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// No platform in the response: the provider must fall back to its own.
-		json.NewEncoder(w).Encode(types.AttestResponse{Evidence: json.RawMessage(`{}`)})
+		json.NewEncoder(w).Encode(remote.AttestResponse{Evidence: json.RawMessage(`{}`)})
 	}))
 	defer api.Close()
 
-	p := LiveEvidenceProvider{Client: attestationclient.NewClient(api.URL), Platform: types.PlatformSnp, Generation: "genoa"}
+	p := LiveEvidenceProvider{Client: remote.NewClient(api.URL), Platform: teetypes.PlatformSNP, Generation: "genoa"}
 	_, platform, _, err := p.Evidence(context.Background(), []byte("rd"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if platform != string(types.PlatformSnp) {
-		t.Fatalf("platform = %q, want fallback %q", platform, types.PlatformSnp)
+	if platform != string(teetypes.PlatformSNP) {
+		t.Fatalf("platform = %q, want fallback %q", platform, teetypes.PlatformSNP)
 	}
 }
 
@@ -130,7 +130,7 @@ func TestLiveEvidenceProviderError(t *testing.T) {
 	}))
 	defer api.Close()
 
-	p := LiveEvidenceProvider{Client: attestationclient.NewClient(api.URL), Platform: types.PlatformSnp}
+	p := LiveEvidenceProvider{Client: remote.NewClient(api.URL), Platform: teetypes.PlatformSNP}
 	_, _, _, err := p.Evidence(context.Background(), []byte("rd"))
 	if err == nil || !strings.Contains(err.Error(), "attestation-api") {
 		t.Fatalf("expected attestation-api error, got %v", err)

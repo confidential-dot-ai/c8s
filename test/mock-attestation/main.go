@@ -1,5 +1,5 @@
 // mock-attestation is a fake attestation-api for integration testing: the
-// networked counterpart of internal/testattest. /attest answers synthetic
+// networked counterpart of internal/mockapi. /attest answers synthetic
 // SEV-SNP reports binding the requested REPORTDATA; /verify checks that
 // binding and refuses mismatches with the real api's 422 verification_failed
 // shape. Speaks the production wire types (pkg/types). No real TEE — use
@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -50,31 +52,31 @@ func main() {
 }
 
 func handleAttest(w http.ResponseWriter, r *http.Request) {
-	var req types.AttestRequest
+	var req remote.AttestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
 
 	platform := req.Platform
-	if platform == "" || platform == types.PlatformAuto {
-		platform = types.PlatformSnp
+	if platform == "" || platform == remote.PlatformAuto {
+		platform = teetypes.PlatformSNP
 	}
 	slog.Info("mock attest called", "platform", platform)
 
 	report := make([]byte, snpReportSize)
 	report[0] = 0x02    // report version 2
 	report[0x0A] = 0x03 // SMT-allowed policy
-	copy(report[reportDataOffset:reportDataOffset+reportDataSize], req.ReportData.Bytes())
+	copy(report[reportDataOffset:reportDataOffset+reportDataSize], req.ReportData)
 
 	evidence, _ := json.Marshal(map[string]string{
 		"attestation_report": base64.StdEncoding.EncodeToString(report),
 	})
-	writeJSON(w, types.AttestResponse{Platform: string(platform), Evidence: evidence})
+	writeJSON(w, remote.AttestResponse{Platform: platform, Evidence: evidence})
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request) {
-	var req types.VerifyRequest
+	var req remote.VerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDecodeError(w, err)
 		return
@@ -91,9 +93,9 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	// params.expected_report_data. No expectation is the api's no-check shape
 	// (report_data_match: null).
 	var match *bool
-	if req.Params != nil && req.Params.ExpectedReportData != nil {
+	if req.Params != nil && len(req.Params.ExpectedReportData) > 0 {
 		expected := make([]byte, reportDataSize)
-		copy(expected, req.Params.ExpectedReportData.Bytes())
+		copy(expected, req.Params.ExpectedReportData)
 		m := string(report[reportDataOffset:reportDataOffset+reportDataSize]) == string(expected)
 		if !m {
 			writeError(w, http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "REPORTDATA does not match expected value")
@@ -102,12 +104,12 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		match = &m
 	}
 
-	writeJSON(w, types.VerifyResponse{
-		Result: types.VerificationResult{
-			Platform:        types.Platform(req.Platform),
+	writeJSON(w, remote.VerifyResponse{
+		Result: teetypes.VerificationResult{
+			Platform:        req.Platform,
 			SignatureValid:  true,
 			ReportDataMatch: match,
-			Claims: types.Claims{
+			Claims: teetypes.Claims{
 				LaunchDigest: hex.EncodeToString(report[measurementOffset : measurementOffset+measurementSize]),
 			},
 		},
@@ -134,8 +136,8 @@ func extractSNPReport(evidence json.RawMessage) ([]byte, error) {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	platform := string(types.PlatformSnp)
-	writeJSON(w, types.HealthResponse{Status: "ok", Platform: &platform})
+	platform := teetypes.PlatformSNP
+	writeJSON(w, remote.HealthResponse{Status: "ok", Platform: &platform})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -146,7 +148,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: code, Message: message})
+	_ = json.NewEncoder(w).Encode(remote.ErrorResponse{Error: code, Message: message})
 }
 
 // writeDecodeError mirrors the attestation-api's axum Json rejection: 400 for a

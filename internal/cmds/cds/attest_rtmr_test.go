@@ -9,7 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -21,9 +22,9 @@ const (
 
 // tdxVerdict is a passing verdict whose claims carry the TDX register set the
 // attestation-api reports in platform_data.
-func tdxVerdict(t *testing.T, mrtd, rtmr1, rtmr2 string) testattest.Verdict {
+func tdxVerdict(t *testing.T, mrtd, rtmr1, rtmr2 string) mockapi.Verdict {
 	t.Helper()
-	v := testattest.PassingVerdict(mrtd)
+	v := mockapi.PassingVerdict(mrtd)
 	v.Claims.PlatformData = map[string]any{
 		"rtmr_0": strings.Repeat("00", 48),
 		"rtmr_1": rtmr1,
@@ -37,7 +38,7 @@ func postAttestTDX(t *testing.T, h AttestHandler, challenge, csrPEM string) *htt
 	t.Helper()
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{"quote":"abc"}`)},
+		Evidence:  teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{"quote":"abc"}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -70,10 +71,10 @@ func mustDecode(t *testing.T, hexVal string) []byte {
 // The TDX lane's positive case: MRTD allowlisted and both pinned registers
 // matching the report.
 func TestAttestTDXWithMatchingRTMRsIssues(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	stub.SetVerdict(tdxVerdict(t, testMRTD, testRTMR1, testRTMR2))
 
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{testMRTD: true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{testMRTD: true})
 	h.RTMRs = map[int][]byte{1: mustDecode(t, testRTMR1), 2: mustDecode(t, testRTMR2)}
 
 	csrPEM, _ := generateCSR(t)
@@ -87,10 +88,10 @@ func TestAttestTDXWithMatchingRTMRsIssues(t *testing.T) {
 // guest kernel (RTMR[1] differs). Must be refused, not issued.
 func TestAttestTDXMatchingMRTDButWrongRTMRIsRefused(t *testing.T) {
 	otherKernel := strings.Repeat("ab", 48)
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	stub.SetVerdict(tdxVerdict(t, testMRTD, otherKernel, testRTMR2))
 
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{testMRTD: true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{testMRTD: true})
 	h.RTMRs = rtmrPin(t, 1, testRTMR1)
 
 	csrPEM, _ := generateCSR(t)
@@ -110,10 +111,10 @@ func TestAttestTDXMatchingMRTDButWrongRTMRIsRefused(t *testing.T) {
 // A pinned register the verdict does not report is a refusal, not a pass — a
 // verifier that stopped reporting registers must not silently unpin them.
 func TestAttestTDXPinnedRTMRNotReportedIsRefused(t *testing.T) {
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(testMRTD)) // no platform_data at all
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(testMRTD)) // no platform_data at all
 
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{testMRTD: true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{testMRTD: true})
 	h.RTMRs = rtmrPin(t, 1, testRTMR1)
 
 	csrPEM, _ := generateCSR(t)
@@ -129,7 +130,7 @@ func TestAttestTDXPinnedRTMRNotReportedIsRefused(t *testing.T) {
 func TestAttestSNPUnaffectedByRTMRPins(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 
-	h := newTestAttestHandler(t, stub.URL, map[string]bool{"deadbeef": true})
+	h := newTestAttestHandler(t, stub.URL(), map[string]bool{"deadbeef": true})
 	h.RTMRs = rtmrPin(t, 1, testRTMR1)
 
 	csrPEM, _ := generateCSR(t)

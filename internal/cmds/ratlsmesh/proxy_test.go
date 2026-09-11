@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -63,16 +63,16 @@ func (r *fixedRemoteResolver) ValidateOutboundDest(string) (bool, string) { retu
 func (r *fixedRemoteResolver) ValidateLocalDest(string) bool              { return true }
 
 // testTLSConfigs creates mutually-attested server+client TLS configs: both
-// sides mint RA-TLS certs from testattest evidence and verify the peer
+// sides mint RA-TLS certs from mockapi evidence and verify the peer
 // through the production VerifyPeerCertificate. These tests exercise L4 proxy
 // plumbing, not attestation policy, so the policy pins no measurements;
 // pinning is covered by the mesh handshake tests.
 func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
 	t.Helper()
 
-	stub := testattest.New(t)
-	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
-	policy := &ratls.VerifyPolicy{AttestationApiURL: stub.URL}
+	stub := mockapi.New(t)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL())
+	policy := &ratls.VerifyPolicy{AttestationApiURL: stub.URL()}
 
 	serverCfg, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:     "sev-snp",

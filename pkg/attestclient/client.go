@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -50,7 +51,7 @@ type Client struct {
 type CertificateResult struct {
 	Certificate string
 	Challenge   string
-	Platform    string
+	Platform    teetypes.PlatformType
 	Evidence    json.RawMessage
 }
 
@@ -74,17 +75,17 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 // for the given report data. This is the same attestation-api call used
 // internally by ObtainCertificate, exposed for callers that need evidence
 // without the full CDS challenge-attest-certify flow.
-func (c Client) GenerateEvidence(attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
+func (c Client) GenerateEvidence(attestationApiURL string, reportData []byte) (remote.AttestResponse, error) {
 	return c.GenerateEvidenceContext(context.Background(), attestationApiURL, reportData)
 }
 
 // GenerateEvidenceContext is GenerateEvidence with caller-controlled
 // cancellation.
-func (c Client) GenerateEvidenceContext(ctx context.Context, attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
-	asClient := attestationclient.NewClientWithHTTP(attestationApiURL, c.httpClient)
-	return asClient.Attest(contextOrBackground(ctx), types.AttestRequest{
-		ReportData: types.NewBase64Bytes(reportData),
-		Platform:   types.PlatformAuto,
+func (c Client) GenerateEvidenceContext(ctx context.Context, attestationApiURL string, reportData []byte) (remote.AttestResponse, error) {
+	asClient := remote.NewClientWithHTTP(attestationApiURL, c.httpClient)
+	return asClient.Attest(contextOrBackground(ctx), remote.AttestRequest{
+		ReportData: reportData,
+		Platform:   remote.PlatformAuto,
 	})
 }
 
@@ -166,11 +167,8 @@ func (c Client) ObtainCertificateWithSandboxContext(ctx context.Context, attesta
 	// /attest; CDS's /attest expects it wrapped in an AttestationEvidence
 	// envelope keyed by Platform.
 	attestReq := attestRequest{
-		Challenge: challenge,
-		Evidence: attestEvidence{
-			Platform: asResp.Platform,
-			Evidence: asResp.Evidence,
-		},
+		Challenge:    challenge,
+		Evidence:     asResp.Envelope(),
 		CSR:          csrPEM,
 		SandboxToken: sandboxToken,
 	}
@@ -207,15 +205,10 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge    string          `json:"challenge"`
-	Evidence     attestEvidence  `json:"evidence"`
-	CSR          string          `json:"csr"`
-	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
-}
-
-type attestEvidence struct {
-	Platform string          `json:"platform"`
-	Evidence json.RawMessage `json:"evidence"`
+	Challenge    string                       `json:"challenge"`
+	Evidence     teetypes.AttestationEvidence `json:"evidence"`
+	CSR          string                       `json:"csr"`
+	SandboxToken json.RawMessage              `json:"sandbox_token,omitempty"`
 }
 
 // Attest submits attestation evidence and receives a signed certificate chain

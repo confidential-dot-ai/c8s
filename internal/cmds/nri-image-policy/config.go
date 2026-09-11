@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -216,7 +217,7 @@ func foldHexPins(vals []string) []string {
 // literal and validate it directly.
 func (c *config) NormalizedPlatform() string {
 	if strings.TrimSpace(c.Platform) == "" {
-		return ratls.NormalizePlatform(string(types.PlatformSnp))
+		return ratls.NormalizePlatform(string(teetypes.PlatformSNP))
 	}
 	return ratls.NormalizePlatform(c.Platform)
 }

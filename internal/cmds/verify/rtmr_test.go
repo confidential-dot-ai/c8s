@@ -25,7 +25,7 @@ func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
 // A --rtmr pin must be enforced against the verified claims, not merely
 // carried on the policy. It was carried and never read: `c8s verify` verifies
 // in process, and localverify.Params has no register field, so the only reader
-// of VerifyPolicy.RTMRs (pkg/attestationclient) sits on a path this command
+// of VerifyPolicy.RTMRs (attestation-go/remote) sits on a path this command
 // never takes. The flag parsed, validated, and did nothing.
 func TestRTMRFlagIsEnforcedNotJustCarried(t *testing.T) {
 	plan, err := buildPolicy(config{rtmrs: []string{"1=" + testRTMR1, "2=" + testRTMR2}})

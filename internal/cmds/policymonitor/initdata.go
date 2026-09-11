@@ -13,10 +13,9 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Distinct from a document that fails verification: this is an older control
@@ -235,8 +234,8 @@ func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 		return nil, fmt.Errorf("%w: attest self: %w", errAttestUnavailable, err)
 	}
 	// Measurements stay unpinned.
-	verified, err := attestationclient.NewClient(cfg.AttestationServiceURL).VerifyEvidence(ctx,
-		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+	verified, err := remote.NewClient(cfg.AttestationServiceURL).VerifyEvidence(ctx,
+		resp.Envelope(), remote.Policy{ExpectedReportData: reportData[:sha512.Size384]})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", classifyVerifyError(err), err)
 	}
@@ -254,21 +253,24 @@ func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 // so the status arm is the one a conforming verifier takes.
 func classifyVerifyError(err error) error {
 	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid),
-		errors.Is(err, attestationclient.ErrReportDataMismatch),
-		errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
-		errors.Is(err, attestationclient.ErrInvalidLaunchDigest),
-		errors.Is(err, attestationclient.ErrRTMRNotAllowed),
-		errors.Is(err, attestationclient.ErrUnsupportedPlatform):
+	case errors.Is(err, remote.ErrSignatureInvalid),
+		errors.Is(err, remote.ErrReportDataMismatch),
+		errors.Is(err, remote.ErrInitDataMismatch),
+		errors.Is(err, remote.ErrMeasurementNotAllowed),
+		errors.Is(err, remote.ErrInvalidLaunchDigest),
+		errors.Is(err, remote.ErrRTMRNotAllowed),
+		errors.Is(err, remote.ErrPCRNotAllowed),
+		errors.Is(err, remote.ErrMinTcbNotAllowed),
+		errors.Is(err, remote.ErrUnsupportedPlatform):
 		return errAttestVerdict
 	}
-	var apiErr *attestationclient.APIError
+	var apiErr *remote.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return errAttestVerdict
 	}
 	// A refusal whose body is not the api's JSON error shape arrives as
 	// UnexpectedError, carrying the same status.
-	var unexpected *attestationclient.UnexpectedError
+	var unexpected *remote.UnexpectedError
 	if errors.As(err, &unexpected) && refusesEvidence(unexpected.Status) {
 		return errAttestVerdict
 	}

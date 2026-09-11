@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -15,9 +16,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/remote"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // VerifyPolicy defines what attestation claims are acceptable.
@@ -49,7 +48,7 @@ type VerifyPolicy struct {
 	// of the current TCB must be >= the corresponding minimum.
 	// If zero, any TCB version is accepted.
 	// Enforced on the SNP path only; dropped for TDX (see
-	// attestationclient.EvidencePolicy).
+	// remote.Policy).
 	MinTCBVersion uint64
 
 	// AllowDebug controls whether debug-mode guests are accepted.
@@ -278,8 +277,8 @@ const defaultAttestationVerifyTimeout = 10 * time.Second
 // the attestation-api understands. Layout matches the SEV-SNP ABI
 // TcbVersion: byte 0 = bootloader, byte 1 = tee, bytes 2-5 reserved,
 // byte 6 = snp, byte 7 = microcode.
-func unpackSNPMinTcb(packed uint64) types.MinTcb {
-	return types.MinTcb{
+func unpackSNPMinTcb(packed uint64) teetypes.SnpTcb {
+	return teetypes.SnpTcb{
 		Bootloader: byte(packed),
 		Tee:        byte(packed >> 8),
 		Snp:        byte(packed >> 48),
@@ -288,9 +287,12 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 }
 
 // verifyEnvelopeOnline forwards the envelope to the attestation-api enforced
-// verifier ([attestationclient.Client.VerifyEvidence] — verdict gate,
-// platform-specific REPORTDATA wire form, measurement reference values) and maps its
-// verdicts onto this package's sentinels.
+// verifier ([remote.Client.VerifyEvidence] — verdict gate, measurement
+// reference values) and maps its verdicts onto this package's sentinels.
+//
+// Only the 48-byte SHA-384 prefix is sent: that is what the attester was given,
+// and the service zero-extends it into the 64-byte hardware field before
+// comparing.
 func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
 	timeout := policy.AttestationVerifyTimeout
 	if timeout <= 0 {
@@ -299,19 +301,16 @@ func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyP
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var minTcb *types.MinTcb
+	var minTcb *teetypes.SnpTcb
 	if policy.MinTCBVersion != 0 {
 		m := unpackSNPMinTcb(policy.MinTCBVersion)
 		minTcb = &m
 	}
-	resp, err := attestationclient.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, types.AttestationEvidence{
-		Platform: string(evidence.Platform),
-		Evidence: evidence.Evidence,
-	}, attestationclient.EvidencePolicy{
-		ExpectedReportData: expectedReportData,
+	resp, err := remote.NewClient(policy.AttestationApiURL).VerifyEvidence(ctx, evidence, remote.Policy{
+		ExpectedReportData: expectedReportData[:sha512.Size384],
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
-		ImagePins:          policy.ImagePins,
+		Images:             policy.ImagePins,
 		Measurements:       policy.Measurements,
 		RTMRs:              policy.RTMRs,
 	})
@@ -338,20 +337,20 @@ func verifyEnvelopeOnline(evidence teetypes.AttestationEvidence, policy *VerifyP
 	return result, nil
 }
 
-// mapVerifyError translates attestationclient verdict sentinels onto this
+// mapVerifyError translates remote verdict sentinels onto this
 // package's error surface, preserving the pre-consolidation sentinels callers
 // match with errors.Is.
 func mapVerifyError(platform string, err error) error {
 	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+	case errors.Is(err, remote.ErrSignatureInvalid):
 		return ErrSignatureInvalid
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+	case errors.Is(err, remote.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed):
+	case errors.Is(err, remote.ErrMeasurementNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
-	case errors.Is(err, attestationclient.ErrInvalidLaunchDigest):
+	case errors.Is(err, remote.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)
-	case errors.Is(err, attestationclient.ErrUnsupportedPlatform):
+	case errors.Is(err, remote.ErrUnsupportedPlatform):
 		return fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, platform)
 	default:
 		return fmt.Errorf("ratls: online %s attestation verify: %w", platform, err)

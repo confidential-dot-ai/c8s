@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -224,7 +225,7 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	// a genuinely unknown platform fails closed in the verifier.
 	platform := d.Attestation.Platform
 	if platform == "" {
-		platform = string(types.PlatformSnp)
+		platform = string(teetypes.PlatformSNP)
 	}
 	if _, err := verify(ctx, platform, d.Attestation.Evidence, localverify.Params{
 		ExpectedReportData: erd[:sha512.Size384],

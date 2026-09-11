@@ -24,7 +24,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // testMeasurement is a syntactically valid SHA-384 launch measurement. Its
@@ -81,8 +80,8 @@ func ratlsServingCert(t *testing.T) tls.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
+	embedded, err := json.Marshal(teetypes.AttestationEvidence{
+		Platform: teetypes.PlatformAzSNP,
 		Evidence: json.RawMessage(`{"hcl_report":"fake"}`),
 	})
 	if err != nil {

@@ -31,3 +31,10 @@ const (
 	// ErrorCodeSecretStoreFull: the store is at --secrets-max-paths.
 	ErrorCodeSecretStoreFull = "secret_store_full"
 )
+
+// ErrorResponse is the body a c8s service returns with a non-2xx status: one
+// of the codes above plus a human-readable message.
+type ErrorResponse struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}

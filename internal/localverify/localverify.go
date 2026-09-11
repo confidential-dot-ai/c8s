@@ -24,7 +24,7 @@ import (
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // KDS getter bounds: the retry backoff is capped so several attempts fit inside
@@ -129,7 +129,7 @@ func enforceResult(res *teetypes.VerificationResult, p Params) error {
 		if err != nil || len(mb) == 0 {
 			return fmt.Errorf("cannot enforce the measurement pin: launch digest missing or malformed (%q)", res.Claims.LaunchDigest)
 		}
-		if !attestationclient.MeasurementAllowed(mb, p.Measurements) {
+		if !remote.MeasurementAllowed(mb, p.Measurements) {
 			return fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
 		}
 	}

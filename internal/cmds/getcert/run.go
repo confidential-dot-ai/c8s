@@ -989,7 +989,7 @@ func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (
 		},
 		Attestation: types.AttestationDiscovery{
 			Challenge: result.Challenge,
-			Platform:  result.Platform,
+			Platform:  string(result.Platform),
 			Evidence:  result.Evidence,
 		},
 	}, nil

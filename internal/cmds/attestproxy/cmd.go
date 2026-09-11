@@ -6,7 +6,7 @@
 // an off-node host — can reach /attest. Reachability is not authorization:
 // the socket must stay safe against any on-node caller. Socket ownership and
 // mode gate reachability; callers additionally re-check them on every dial
-// (pkg/attestationclient).
+// (attestation-go/remote).
 package attestproxy
 
 import (
@@ -25,8 +25,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -84,7 +84,7 @@ func newHealthcheckCmd() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
 			defer cancel()
-			if _, err := attestationclient.NewClient("unix://" + socket).Health(ctx); err != nil {
+			if _, err := remote.NewClient("unix://" + socket).Health(ctx); err != nil {
 				return fmt.Errorf("healthcheck over %s: %w", socket, err)
 			}
 			return nil

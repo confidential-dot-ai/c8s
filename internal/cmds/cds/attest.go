@@ -23,7 +23,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -38,7 +37,7 @@ import (
 // they choose. Empty Measurements skips this check (UNSAFE outside dev).
 type AttestHandler struct {
 	Challenges        *attestation.ChallengeStore
-	AttestationClient attestationclient.Client
+	AttestationClient remote.Client
 	CA                *issuer.CA
 	CAChainPEM        []byte
 	CertTTL           time.Duration
@@ -191,8 +190,9 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	verifyReq := remote.NewVerifyRequest(req.Evidence, &remote.VerifyParams{
+		ExpectedReportData: expectedReportData[:sha512.Size384],
+	}, false)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
@@ -206,7 +206,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
 	if len(h.ImagePins) > 0 {
-		if err := attestationclient.EnforceImagePins(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
+		if err := remote.EnforceImages(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
 			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
@@ -219,8 +219,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if attestationclient.TDXPlatform(req.Evidence.Platform) {
-			if err := attestationclient.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
+		if req.Evidence.Platform.HasRegisters() {
+			if err := remote.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
 				slog.Warn("RTMR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
 				attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "TDX runtime measurement registers not allowed")
 				return
@@ -582,19 +582,19 @@ func (h AttestHandler) caChainPEM() []byte {
 // conditions, not evidence rejections, so they classify as unreachable too.
 func classifyVerifyError(err error) (int, string, string) {
 	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+	case errors.Is(err, remote.ErrSignatureInvalid):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+	case errors.Is(err, remote.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
 	}
-	var apiErr *attestationclient.APIError
+	var apiErr *remote.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
 	}
 	// The api answers its own refusals in the JSON envelope, so a non-JSON body
 	// names the request rather than the evidence, and only where there is a
 	// body to have named it.
-	var unexpected *attestationclient.UnexpectedError
+	var unexpected *remote.UnexpectedError
 	if errors.As(err, &unexpected) && rejectsRequest(unexpected.Status) && unexpected.Text != "" {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation-api rejected the request"
 	}

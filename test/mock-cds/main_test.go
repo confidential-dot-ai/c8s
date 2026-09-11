@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -25,85 +25,85 @@ func TestClassifyVerifyError(t *testing.T) {
 	}{
 		{
 			name:       "signature invalid",
-			err:        fmt.Errorf("wrap: %w", attestationclient.ErrSignatureInvalid),
+			err:        fmt.Errorf("wrap: %w", remote.ErrSignatureInvalid),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "report data mismatch",
-			err:        fmt.Errorf("wrap: %w", attestationclient.ErrReportDataMismatch),
+			err:        fmt.Errorf("wrap: %w", remote.ErrReportDataMismatch),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "api 400 is client fault",
-			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
+			err:        &remote.APIError{Status: http.StatusBadRequest},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "api 403 is client fault",
-			err:        &attestationclient.APIError{Status: http.StatusForbidden},
+			err:        &remote.APIError{Status: http.StatusForbidden},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "api 422 is a mismatch or garbage refusal",
-			err:        &attestationclient.APIError{Status: http.StatusUnprocessableEntity},
+			err:        &remote.APIError{Status: http.StatusUnprocessableEntity},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "api 500 is upstream outage",
-			err:        &attestationclient.APIError{Status: http.StatusInternalServerError},
+			err:        &remote.APIError{Status: http.StatusInternalServerError},
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "api 408 is retryable unavailability",
-			err:        &attestationclient.APIError{Status: http.StatusRequestTimeout},
+			err:        &remote.APIError{Status: http.StatusRequestTimeout},
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "api 429 is retryable unavailability",
-			err:        &attestationclient.APIError{Status: http.StatusTooManyRequests},
+			err:        &remote.APIError{Status: http.StatusTooManyRequests},
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "non-json 400 is a request rejection",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.UnexpectedError{Status: http.StatusBadRequest, Text: "Failed to parse the request body as JSON"}),
+			err:        fmt.Errorf("wrap: %w", &remote.UnexpectedError{Status: http.StatusBadRequest, Text: "Failed to parse the request body as JSON"}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "non-json 415 is a request rejection",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.UnexpectedError{Status: http.StatusUnsupportedMediaType, Text: "Expected request with `Content-Type: application/json`"}),
+			err:        fmt.Errorf("wrap: %w", &remote.UnexpectedError{Status: http.StatusUnsupportedMediaType, Text: "Expected request with `Content-Type: application/json`"}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
 			name:       "non-json 400 with no body is an outage",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.UnexpectedError{Status: http.StatusBadRequest}),
+			err:        fmt.Errorf("wrap: %w", &remote.UnexpectedError{Status: http.StatusBadRequest}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "non-json 403 is an outage",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.UnexpectedError{Status: http.StatusForbidden, Text: "<html>403 Forbidden</html>"}),
+			err:        fmt.Errorf("wrap: %w", &remote.UnexpectedError{Status: http.StatusForbidden, Text: "<html>403 Forbidden</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "non-json 500 is upstream outage",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.UnexpectedError{Status: http.StatusInternalServerError, Text: "<html>500 Internal Server Error</html>"}),
+			err:        fmt.Errorf("wrap: %w", &remote.UnexpectedError{Status: http.StatusInternalServerError, Text: "<html>500 Internal Server Error</html>"}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "transport failure is unreachable",
-			err:        fmt.Errorf("wrap: %w", &attestationclient.RequestError{Err: errors.New("dial tcp: connection refused")}),
+			err:        fmt.Errorf("wrap: %w", &remote.RequestError{Err: errors.New("dial tcp: connection refused")}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},

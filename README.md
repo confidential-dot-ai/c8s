@@ -348,13 +348,12 @@ attestation and reports the operator keys it pins.
 | [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) — see [docs/ratls.md](docs/ratls.md) |
 | [`pkg/ratls/cdsclient`](pkg/ratls/cdsclient/) | CDS attestation client for certificate provisioning |
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the CDS attestation flow |
-| [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation-api |
 | [`pkg/allowlistclient`](pkg/allowlistclient/) | CRUD client for the CDS allowlist API |
 | [`pkg/allowlist`](pkg/allowlist/) | Allowlist types, argv policy, and secret grants |
 | [`pkg/workloadclaims`](pkg/workloadclaims/) | Sandbox-token fetch and the admission-inventory socket contract |
 | [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
 | [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
-| [`pkg/types`](pkg/types/) | Shared request/response types |
+| [`pkg/types`](pkg/types/) | Shared request/response types for the c8s protocols (the attestation-api wire types live in [attestation-go/remote](https://github.com/confidential-dot-ai/attestation-go)) |
 | [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 

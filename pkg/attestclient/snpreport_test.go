@@ -10,10 +10,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // hclEnvelope builds an AKS HCL envelope wrapping the given hardware report:
@@ -44,17 +44,17 @@ func TestRATLSEvidence_VTPMPreservesEnvelope(t *testing.T) {
 	}
 	evidenceJSON, _ := json.Marshal(evidence)
 
-	resp := types.AttestResponse{Platform: string(types.PlatformAzSnp), Evidence: evidenceJSON}
+	resp := remote.AttestResponse{Platform: teetypes.PlatformAzSNP, Evidence: evidenceJSON}
 	payload, err := attestclient.RATLSEvidence(resp)
 	if err != nil {
 		t.Fatalf("RATLSEvidence failed: %v", err)
 	}
 
-	var embedded types.AttestationEvidence
+	var embedded teetypes.AttestationEvidence
 	if err := json.Unmarshal([]byte(payload), &embedded); err != nil {
 		t.Fatalf("embedded evidence is not JSON: %v", err)
 	}
-	if embedded.Platform != string(types.PlatformAzSnp) {
+	if embedded.Platform != teetypes.PlatformAzSNP {
 		t.Fatalf("embedded platform = %q, want az-snp", embedded.Platform)
 	}
 	if !bytes.Equal(embedded.Evidence, evidenceJSON) {
