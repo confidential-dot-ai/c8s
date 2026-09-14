@@ -8,7 +8,7 @@ Source: [templates/_services.tpl](../../templates/_services.tpl).
 | Values | Endpoint |
 | --- | --- |
 | `attestationApi.enabled=true` or `node.bakedServices=true` | Node-local `unix://<runtimeDir>/attestation-api.sock` |
-| `attestationApi.enabled=false` and `node.bakedServices=false` (legacy node mode only) | Node-baked service, `http://$(HOST_IP):<port>` |
+| `attestationApi.enabled=false` and `node.bakedServices=false` (legacy bare-metal mode only) | Node-baked service, `http://$(HOST_IP):<port>` |
 
 The chart-managed attestation API binds pod loopback. Its attest-proxy exposes
 the node-local socket in `nriImagePolicy.hostPaths.runtimeDir`.
@@ -18,7 +18,7 @@ helpers expose the directory to chart components at its host path with a read-on
 get-cert sidecars, and nri-image-policy NRI-mounts the directory read-only into
 those sidecars.
 
-In legacy node CVM mode with both the chart API and baked services disabled, `c8s.attestationApiHostIPEnv`
+In legacy bare-metal CVM mode with both the chart API and baked services disabled, `c8s.attestationApiHostIPEnv`
 renders the downward-API `HOST_IP` variable. Kubelet expands the placeholder
 against each consumer's node. The operator forwards the URL to tenant sidecars
 with the placeholder intact, so its own container must leave `HOST_IP` unset.

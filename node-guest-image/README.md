@@ -235,7 +235,7 @@ that a restricted namespace is admitted and a privileged one is denied by
 `confos-psa-level`. No externally released operator credential can enter the
 first-boot reconciliation window.
 
-The floor also covers namespaces hosting confidential workloads. In node mode,
+The floor also covers namespaces hosting confidential workloads. In bare-metal mode,
 `nri-image-policy` mounts the inventory socket directory read-only into credential
 sidecars through NRI, below the Pod spec. Tenant namespaces keep Restricted
 enforcement, warning, and audit. `c8s install` labels its release namespace

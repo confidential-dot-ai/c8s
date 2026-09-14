@@ -105,7 +105,7 @@ func renderNodeImage(ctx context.Context, cfg nodeImageRenderConfig) error {
 		defer os.RemoveAll(tmp)
 		chartDir = filepath.Join(tmp, helmchart.ChartRoot)
 	}
-	args, err := appendCvmModeInstallArgs(nil, "node", cfg.platform)
+	args, err := appendCvmModeInstallArgs(nil, "bare-metal", cfg.platform)
 	if err != nil {
 		return err
 	}

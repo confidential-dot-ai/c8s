@@ -16,13 +16,13 @@ resources, `internal/helmchart/c8s/templates/`.
 ## Deployment modes
 
 `c8s install` runs `helm upgrade --install` against the embedded chart. The
-required `--cvm-mode` selects `node`, `gke`, or `aks`. All run normal Kubernetes
+required `--cvm-mode` selects `bare-metal`, `gke`, or `aks`. All run normal Kubernetes
 pods on confidential nodes. The node is a single trust domain; use separate
 nodes for tenants that do not trust each other.
 
 | Mode | Deployment | Evidence |
 |---|---|---|
-| `node` | c8s measured node image; baked attestation API and NRI plugin | Native SNP/TDX |
+| `bare-metal` | c8s measured node image; baked attestation API and NRI plugin | Native SNP/TDX |
 | `gke` | GKE confidential nodes; chart-managed security services | Native TEE device |
 | `aks` | AKS confidential nodes; chart-managed security services | Azure vTPM |
 
@@ -58,9 +58,9 @@ Because it lives in the chart, this runs for both `c8s install` and GitOps
 | c8s operator (webhook + controllers) | Ordinary pod; release namespace is webhook-exempt |
 | MWC `pod-injector` | Cluster resource, tracked by the release |
 | CDS (verify + mesh CA + leaf signing) | Ordinary pod inside the node CVM |
-| attestation API | Baked service in `node` mode; chart DaemonSet in `gke`/`aks` |
+| attestation API | Baked service in `bare-metal` mode; chart DaemonSet in `gke`/`aks` |
 | ratls-mesh | Node DaemonSet |
-| nri-image-policy | Node process launched by containerd; baked binary in `node` mode |
+| nri-image-policy | Node process launched by containerd; baked binary in `bare-metal` mode |
 | get-cert injection (`confidential.ai/cw` pods) | Webhook at admission time |
 | router | Ordinary pod inside the node CVM |
 
@@ -231,7 +231,7 @@ already deleted. See [`operator.md`](operator.md#uninstall).
 # workload's mesh-wrapped headless Service (see operator.md, "router upstream").
 
 # Base — normal cluster, host-side components, no per-pod confidentiality.
-c8s install --cvm-mode=node --hardware-platform=sev-snp --operator-keys operator-pub.pem \
+c8s install --cvm-mode=bare-metal --hardware-platform=sev-snp --operator-keys operator-pub.pem \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 
 # Uninstall: helm uninstall + sweep chart-installed host artifacts.

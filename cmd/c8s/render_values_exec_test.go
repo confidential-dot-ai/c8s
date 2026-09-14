@@ -16,7 +16,7 @@ func TestRenderValuesEmitsComputedBundle(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = runC8s(t, "render-values", "--cvm-mode=node", "--resolve-digests=false", "--distro", "rke2")
+		err = runC8s(t, "render-values", "--cvm-mode=bare-metal", "--resolve-digests=false", "--distro", "rke2")
 	})
 	if err != nil {
 		t.Fatalf("render-values: %v", err)
@@ -29,8 +29,8 @@ func TestRenderValuesEmitsComputedBundle(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(out), &tree); err != nil {
 		t.Fatalf("output is not a values.yaml: %v\n%s", err, out)
 	}
-	if got := treeAt(t, tree, "attestationApi", "cvmMode"); got != "node" {
-		t.Errorf("attestationApi.cvmMode = %#v, want node", got)
+	if got := treeAt(t, tree, "attestationApi", "cvmMode"); got != "bare-metal" {
+		t.Errorf("attestationApi.cvmMode = %#v, want bare-metal", got)
 	}
 	if got := treeAt(t, tree, "attestationApi", "teeDevices", "sevGuest"); got != true {
 		t.Errorf("teeDevices.sevGuest = %#v, want true", got)
@@ -66,7 +66,7 @@ func TestRenderValuesRequiresCvmMode(t *testing.T) {
 
 func TestRenderValuesRequiresHelm(t *testing.T) {
 	newFakeBin(t)
-	err := runC8s(t, "render-values", "--cvm-mode=node", "--resolve-digests=false")
+	err := runC8s(t, "render-values", "--cvm-mode=bare-metal", "--resolve-digests=false")
 	if err == nil || !strings.Contains(err.Error(), "helm CLI not found") {
 		t.Fatalf("want a helm-not-found error, got %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRenderValuesHostedLaneExemptNamespaces(t *testing.T) {
 		{"aks", []any{"kube-system"}},
 		{"gke", []any{"kube-system"}},
 		// node's baked floor already carries the system digests.
-		{"node", nil},
+		{"bare-metal", nil},
 	} {
 		t.Run(tc.cvmMode, func(t *testing.T) {
 			f := newFakeBin(t)

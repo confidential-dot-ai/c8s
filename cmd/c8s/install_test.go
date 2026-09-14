@@ -928,7 +928,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	t.Cleanup(func() { installAttestEnabled = prevAttest })
 
 	// Two orthogonal axes:
-	//  --cvm-mode: node (node-as-CVM) / gke (managed) / aks (vTPM)
+	//  --cvm-mode: bare-metal (node-as-CVM) / gke (managed) / aks (vTPM)
 	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
 	// node+gke all take either hardware-platform; aks always emits the vTPM
 	// device and rides the Azure vTPM HCL report for both SNP (az-snp) and TDX
@@ -977,7 +977,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		// attestation-api copy is skipped and the NRI installer switches to its
 		// baked form — the only path that reaches the baked plugin's CDS pins.
 		// ratlsMesh is not baked, stays on.
-		if mode == "node" {
+		if mode == "bare-metal" {
 			out = append(out,
 				"--set", "attestationApi.enabled=false",
 				"--set", "nriImagePolicy.baked=true",
@@ -990,11 +990,11 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		hardwarePlatform string
 		want             []string
 	}{
-		"gke + sev-snp":  {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
-		"node + sev-snp": {"node", "sev-snp", build("node", "sev-snp", "true", "false", "false")},
-		"gke + tdx":      {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
-		"node + tdx":     {"node", "tdx", build("node", "tdx", "false", "true", "false")},
-		"aks + sev-snp":  {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
+		"gke + sev-snp":        {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
+		"bare-metal + sev-snp": {"bare-metal", "sev-snp", build("bare-metal", "sev-snp", "true", "false", "false")},
+		"gke + tdx":            {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
+		"bare-metal + tdx":     {"bare-metal", "tdx", build("bare-metal", "tdx", "false", "true", "false")},
+		"aks + sev-snp":        {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
 		// az-tdx: Azure vTPM (tpm=true, no guest device) + TDX RA-TLS platform.
 		"aks + tdx (az-tdx)": {"aks", "tdx", build("aks", "tdx", "false", "false", "true")},
 	}
@@ -1010,7 +1010,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
 		t.Fatalf("empty --hardware-platform: err = %v, want required error", err)
 	}
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure", "sev-snp"); err == nil {
@@ -1028,7 +1028,7 @@ func TestAppendCvmModeInstallArgsMeasurements(t *testing.T) {
 	m0, m1 := strings.Repeat("aa", 48), strings.Repeat("bb", 48)
 	installMeasurements = []string{m0, "", m1} // blank middle entry
 
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1052,13 +1052,13 @@ func TestAppendCvmModeInstallArgsRejectsBadMeasurement(t *testing.T) {
 	prev := installMeasurements
 	defer func() { installMeasurements = prev }()
 	installMeasurements = []string{"not-hex"}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted a malformed measurement, want error")
 	}
 }
 
 func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sgx"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "sgx"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted an unknown --hardware-platform, want error")
 	}
 }
@@ -1163,7 +1163,7 @@ func TestBuildDigestArgsResolvesEachComponentOnce(t *testing.T) {
 
 // A component whose enabledPath resolves to false never renders, so its tag
 // must not be resolved (that image may be unpublished at the install tag — e.g.
-// attestationApi under --cvm-mode=node) and it must contribute no --set args.
+// attestationApi under --cvm-mode=bare-metal) and it must contribute no --set args.
 // Enabled components still resolve and pin.
 func TestBuildDigestArgsSkipsDisabledComponent(t *testing.T) {
 	resolved := map[string]bool{}
@@ -1644,9 +1644,9 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 
 	// node bakes the system digests into its own floor, so the chart's empty
 	// default stands.
-	got, err := appendExemptNamespacesInstallArgs(nil, "node", nil)
+	got, err := appendExemptNamespacesInstallArgs(nil, "bare-metal", nil)
 	if err != nil || got != nil {
-		t.Errorf("--cvm-mode=node = (%v, %v), want (nil, nil)", got, err)
+		t.Errorf("--cvm-mode=bare-metal = (%v, %v), want (nil, nil)", got, err)
 	}
 
 	t.Run("a -f file that sets it wins", func(t *testing.T) {
@@ -1901,7 +1901,7 @@ func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
 	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
 	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
 
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1915,7 +1915,7 @@ func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
 	}
 
 	installRTMRs = []string{"0=" + r1}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx"); err == nil {
 		t.Fatal("RTMR[0] pin accepted; only RTMR[1] and RTMR[2] are supported")
 	}
 }

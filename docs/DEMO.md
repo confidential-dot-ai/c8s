@@ -11,14 +11,14 @@ it installs with router disabled. To also expose a workload through router, give
 it an upstream instead (see [router upstream](operator.md#router-upstream)).
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem -f - <<'EOF'
 router:
   enabled: false
 EOF
 ```
 
-`--cvm-mode` is required (`node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`bare-metal`, `gke`, or `aks` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to
@@ -35,7 +35,7 @@ kubectl apply -f samples/confidentialworkload.yaml
 ## 3. Deploy an annotated workload
 
 The node image enforces the Restricted PodSecurity standard in every tenant
-namespace, including namespaces hosting confidential workloads. In node mode,
+namespace, including namespaces hosting confidential workloads. In bare-metal mode,
 `nri-image-policy` mounts the inventory socket directory read-only into credential
 sidecars through NRI, below the Pod spec. The chart also enforces Restricted
 controls and denies every tenant `hostPath` volume. Keep enforcement, warning,

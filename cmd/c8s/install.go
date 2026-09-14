@@ -78,13 +78,13 @@ const (
 	flagUpstream         = "upstream"
 )
 
-// allowedCvmModes is the --cvm-mode enum: node/gke/aks are node-as-CVM
+// allowedCvmModes is the --cvm-mode enum: bare-metal/gke/aks are node-as-CVM
 // deployments. There is no default: the shape must be stated explicitly.
-var allowedCvmModes = []string{"node", "gke", "aks"}
+var allowedCvmModes = []string{"bare-metal", "gke", "aks"}
 
 // hostedCvmModes are the lanes whose platform pods belong to the cluster
 // provider rather than to c8s, so they are absent from the allowlist the
-// install derives. cvmMode=node is not one: its baked floor already carries the
+// install derives. cvmMode=bare-metal is not one: its baked floor already carries the
 // system digests.
 var hostedCvmModes = []string{"gke", "aks"}
 
@@ -1367,10 +1367,10 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 //	                 /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
 //	aks            → vTPM /dev/tpm0
 //
-// node and gke are distinct deployment targets that happen to share the
+// bare-metal and gke are distinct deployment targets that happen to share the
 // native-TEE-device wiring (they are NOT aliases):
 //
-//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
+//	bare-metal → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
 //	       self-managed) are themselves confidential VMs. Pods run as ordinary
 //	       processes attested via the node's own quote. Cloud-agnostic. The node
 //	       image bakes attestation-api and nri-image-policy, so both are disabled
@@ -1487,7 +1487,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// baked form — the pins below are the one thing an image built before this
 	// release cannot carry, and the installer is the only path that reaches the
 	// baked plugin's config.
-	if cvmMode == "node" {
+	if cvmMode == "bare-metal" {
 		helmArgs = append(helmArgs,
 			"--set", "attestationApi.enabled=false",
 			"--set", "nriImagePolicy.baked=true",
@@ -1512,7 +1512,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	}
 	helmArgs = append(helmArgs, pinArgs...)
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
-	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
+	// components that speak to CDS. In bare-metal/gke/aks the node IS the CVM, so that
 	// is the node image's M.
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
@@ -2165,7 +2165,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 	for _, c := range components {
 		// Skip components the effective config disables: they never render, so
 		// resolving their tag is pointless and aborts a valid install if that
-		// baked-only image (e.g. attestationApi under --cvm-mode=node) is
+		// baked-only image (e.g. attestationApi under --cvm-mode=bare-metal) is
 		// unpublished at the install tag.
 		if c.enabledPath != "" {
 			on, err := enabled(c.enabledPath)
@@ -2217,12 +2217,12 @@ func init() {
 	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the router upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload router routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https router.upstream, router renders no catch-all route until one is attached")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): bare-metal (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). bare-metal/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant")
 	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Under --cvm-mode=aks the CPU TEE rides the Azure vTPM: sev-snp selects az-snp and tdx selects az-tdx (no guest device needed — the report comes from /dev/tpm0)")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the router attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=bare-metal/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=bare-metal/gke/aks this is the node image's manifest.json value")
 	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")
 	installCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Pins cds.rtmrs + ratlsMesh.rtmrs: RTMR[1] is the guest kernel, RTMR[2] the command line carrying the dm-verity root hash — without them the measurement pin covers TDVF firmware only. Read the values off a boot you trust; ignored for SNP evidence")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")

@@ -84,7 +84,7 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-`c8s install` (including `--cvm-mode=node`) is for chart-managed clusters.
+`c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
 The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
 RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
 CRDs, webhook and admission policies are rendered from this same chart at
@@ -1047,7 +1047,7 @@ The chart ships no default image tag, so a bare `helm template` must set one.
 `c8s install` injects this for you; `main` here is the same fallback tag it
 uses for a non-release build. The simplest validation disables the image-policy
 component, so only image tags are required (no digests). Disabling it renders
-only because the chart's default `attestationApi.cvmMode=node` bakes its own
+only because the chart's default `attestationApi.cvmMode=bare-metal` bakes its own
 policy plugin and so is exempt from the `require_host_image_policy` guard; other
 modes (gke/aks) must keep nri-image-policy enabled and digest-pinned, as in the
 full-shape render below.

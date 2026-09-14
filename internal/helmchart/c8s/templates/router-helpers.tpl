@@ -463,8 +463,8 @@ challenge, and HTTP-01-issuable sanList entries.
 {{- fail (printf "router.publicTLS.secretName is set but router.publicTLS.mode is %q; set mode=webpki to serve the Secret, or clear secretName" $mode) -}}
 {{- end -}}
 {{- if eq $mode "acme" -}}
-{{- if not (eq .Values.attestationApi.cvmMode "node") -}}
-{{- fail "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
+{{- if not (eq .Values.attestationApi.cvmMode "bare-metal") -}}
+{{- fail "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=bare-metal) so the ACME account and serving keys are TEE-held" -}}
 {{- end -}}
 
 {{- range $s := (include "router.sanList" . | fromJsonArray) -}}
@@ -552,7 +552,7 @@ condition true in every renderable shape today; the condition is spelled out
 anyway so the two consumers of the socket stay on one rule.
 */}}
 {{- define "router.mountInventorySocket" -}}
-{{- if and .Values.router.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+{{- if and .Values.router.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "bare-metal")) -}}
 true
 {{- end -}}
 {{- end -}}

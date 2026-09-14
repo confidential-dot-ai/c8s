@@ -13,7 +13,7 @@
 # The TEE is replaced at exactly one point: evidence generation. A
 # mock-attestation deployment (test/mock-attestation) serves synthetic SNP
 # reports — launch digest all-zero — on the node IP :8400, the address
-# cvmMode=node consumers dial for the node-baked api. Every stack component
+# cvmMode=bare-metal consumers dial for the node-baked api. Every stack component
 # that delegates verification to the attestation-api (get-cert, CDS, the
 # mesh, the NRI plugin) works unchanged. In-process hardware verification
 # (`c8s verify`, the `c8s allowlist` CLI) cannot pass synthetic evidence, so
@@ -239,7 +239,7 @@ openssl ecparam -genkey -name prime256v1 -noout -out "$WORKDIR/operator.key" 2>/
 openssl ec -in "$WORKDIR/operator.key" -pubout -out "$WORKDIR/operator-pub.pem" 2>/dev/null
 
 log "c8s install"
-./build/c8s install --namespace "$NS" --cvm-mode=node --hardware-platform=sev-snp \
+./build/c8s install --namespace "$NS" --cvm-mode=bare-metal --hardware-platform=sev-snp \
     --single-node --resolve-digests=false --image-tag="$IMAGE_TAG" \
     --operator-keys "$WORKDIR/operator-pub.pem" \
     --measurements "$MOCK_MEASUREMENT" \
@@ -280,7 +280,7 @@ cds_write() {
 # --- NRI image-policy plugin ---
 
 log "Installing the NRI image-policy plugin"
-# Under --cvm-mode=node the chart renders the installer only in its baked
+# Under --cvm-mode=bare-metal the chart renders the installer only in its baked
 # pins-patching form, and the install above leaves even that off (values.yaml):
 # the kind node bakes no plugin for it to pin. The harness renders the full
 # installer from the chart source and applies it out-of-band — same installer,
@@ -295,7 +295,7 @@ KUBE_VERSION="$(kubectl version -o json \
 helm template c8s internal/helmchart/c8s -n "$NS" \
     --kube-version "$KUBE_VERSION" \
     --set-string image.tag="$IMAGE_TAG" \
-    --set-string attestationApi.cvmMode=node \
+    --set-string attestationApi.cvmMode=bare-metal \
     --set attestationApi.enabled=false \
     --set nriImagePolicy.enabled=true \
     --set-string nriImagePolicy.image.tag="$IMAGE_TAG" \
@@ -649,7 +649,7 @@ log "Workload adoption"
 kubectl apply -f test/integration/cluster/manifests/adopt-me.yaml
 kubectl -n adopted wait --for=condition=Available deploy/web --timeout=120s \
     || fail "adoption fixture never became Available"
-./build/c8s install --namespace "$NS" --cvm-mode=node --hardware-platform=sev-snp \
+./build/c8s install --namespace "$NS" --cvm-mode=bare-metal --hardware-platform=sev-snp \
     --single-node --resolve-digests=false --image-tag="$IMAGE_TAG" \
     --operator-keys "$WORKDIR/operator-pub.pem" \
     --measurements "$MOCK_MEASUREMENT" \

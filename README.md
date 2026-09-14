@@ -64,7 +64,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   boundary.
 
 - **Node-as-CVM.** Run the whole node as one confidential VM. Supported modes
-  are `node`, `gke`, and `aks`. See [Architecture](#architecture).
+  are `bare-metal`, `gke`, and `aks`. See [Architecture](#architecture).
 
 - **Measured boot end to end.** Node images boot via IGVM with dm-verity.
 
@@ -177,13 +177,13 @@ openssl ec -in operator.key -pubout -out operator.pub
 
 # Install the platform (node-as-CVM) and point the bundled router
 # at your workload
-c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
+c8s install --cvm-mode=bare-metal --hardware-platform=sev-snp --namespace c8s-system \
   --operator-keys operator.pub \
   --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```
 
-`--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
+`--cvm-mode` is required and has no default — `bare-metal`, `gke`, and `aks` are the
 node-as-CVM shapes. `--hardware-platform` is required the
 same way: `sev-snp` or `tdx`. An unstated shape would silently mismatch the
 cluster it lands on, so the install refuses to guess.

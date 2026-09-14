@@ -7,16 +7,16 @@ covers and why the kind harness is shaped the way it is.
 | Harness | Entrypoint | CI job | Subject |
 | --- | --- | --- | --- |
 | docker-compose | `make test-integration` | Integration | get-cert's RA-TLS flow against mock CDS + mock attestation-api, nginx serving the issued leaf |
-| kind cluster | `make test-integration-cluster` | Integration (cluster) | the full node-mode control plane and workload path (below) |
+| kind cluster | `make test-integration-cluster` | Integration (cluster) | the full bare-metal-mode control plane and workload path (below) |
 | live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, allowlist enforcement, control-plane convergence on real TEEs |
 
 ## The kind harness
 
 `test/integration/cluster/run.sh` boots a single-node kind cluster, builds the
 component images from the checkout, and runs the real `c8s install
---cvm-mode=node`. The TEE is substituted at exactly one point: **evidence
+--cvm-mode=bare-metal`. The TEE is substituted at exactly one point: **evidence
 generation**. `test/mock-attestation` serves synthetic SNP reports (launch
-digest all-zero) on the node IP :8400 — the address node-mode consumers dial
+digest all-zero) on the node IP :8400 — the address bare-metal-mode consumers dial
 for the node-baked api — and an `attest-proxy` sidecar publishes it on the
 hostPath unix socket the host plugin uses. Every component that delegates
 verification to the attestation-api (get-cert, CDS, ratls-mesh, the NRI
@@ -24,7 +24,7 @@ plugin) works unchanged against it. The all-zero digest is pinned via
 `--measurements`, so every RA-TLS hop is verified exactly as in production.
 
 The NRI image-policy plugin runs for real: the harness renders the chart's
-full installer DaemonSet and applies it out-of-band (node mode renders only
+full installer DaemonSet and applies it out-of-band (bare-metal mode renders only
 the baked pins patcher, and the kind node bakes no plugin for it to pin). The
 installer patches the node's containerd config and restarts it, which kind
 survives. The install-time bootstrap entries are generated from the node

@@ -355,7 +355,7 @@ attestationApi:
     - gcp-tdx
   ## CVM platform shape — selects (via the install CLI) the TEE device:
   ##
-  ## node (default): generalized node-as-CVM — our own nodes (self-managed
+  ## bare-metal (default): generalized node-as-CVM — our own nodes (self-managed
   ##   TDX/SNP) are themselves confidential VMs exposing a native TEE device
   ##   (/dev/sev-guest, or /dev/tdx-guest with --hardware-platform tdx); pods run
   ##   as ordinary processes attested via the node's own quote. Cloud-agnostic.
@@ -369,7 +369,7 @@ attestationApi:
   ##
   ## The install CLI requires --cvm-mode explicitly (no default there); this
   ## chart default serves GitOps/HelmRelease consumers that set values directly.
-  cvmMode: node
+  cvmMode: bare-metal
   ## Unused while all modes render privileged: true (see cvmMode above). Retained
   ## for the planned least-privilege configfs path.
   securityContext:
@@ -584,18 +584,18 @@ ratlsMesh:
 nriImagePolicy:
   ## Host-side NRI image admission: the installer DaemonSet. Its enabled state is
   ## bound to the cvmMode shape, not free: it MUST be true on gke/aks, where host NRI is the only allowlist gate
-  ## (require_host_image_policy). On cvmMode=node it runs in its baked form
+  ## (require_host_image_policy). On cvmMode=bare-metal it runs in its baked form
   ## (below) — the plugin comes from the node image, but only this installer
   ## carries the release's CDS pins to it. `c8s install` sets both from
   ## --cvm-mode. The bootstrapAllowlist below still feeds CDS's served seed
   ## for host NRI or the node-baked plugin.
   enabled: true
-  ## Node-as-CVM (`c8s install --cvm-mode=node`, which sets this): the node image
+  ## Node-as-CVM (`c8s install --cvm-mode=bare-metal`, which sets this): the node image
   ## bakes the plugin binary, its containerd registration and the boot config —
   ## floor included, whose RKE2 system-image digests only the image build
   ## resolves. The installer then writes this release's cds.measurements /
   ## cds.rtmrs into that config and restarts containerd when they change,
-  ## touching nothing else. Requires attestationApi.cvmMode=node
+  ## touching nothing else. Requires attestationApi.cvmMode=bare-metal
   ## (nri_baked_requires_node).
   baked: false
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
@@ -660,7 +660,7 @@ nriImagePolicy:
     # by the image digests captured running in it, frozen at first admission and
     # scoped to that namespace. `c8s install --cvm-mode=gke|aks` sets
     # [kube-system] unless a -f file writes this key. Empty (the chart default)
-    # keeps digest-only admission; leave it empty on cvmMode=node, whose baked
+    # keeps digest-only admission; leave it empty on cvmMode=bare-metal, whose baked
     # floor already carries the system digests. See
     # docs/getcert-workload-binding.md, Corner 8.
     exemptNamespaces: []
@@ -1046,7 +1046,7 @@ router:
   # serves the operator Secret named by secretName (host-visible key, so the
   # front door is attest-pq only); acme has the in-pod `c8s acme` sidecar
   # issue a multi-SAN leaf for the san list (TEE-held key — requires
-  # attestationApi.cvmMode=node).
+  # attestationApi.cvmMode=bare-metal).
   # secretName/certKey/keyKey/mountPath apply to webpki only.
   publicTLS:
     mode: cds
