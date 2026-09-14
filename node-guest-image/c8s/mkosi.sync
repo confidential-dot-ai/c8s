@@ -113,7 +113,22 @@ C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.
 # docker.yml publishes images under v* tags, so the tag itself is the ref.
 C8S_REF="${C8S_REF:-v0.1.0-rc2}"
-echo "c8s sync: resolving c8s binary + operator at c8s ref ${C8S_REF}"
+# c8s-binary=1: the build script pre-staged the multi-command binary at
+# usr/local/bin/c8s in mkosi.local (built from a source checkout). The image
+# repro gate uses this so a PR that changes the baked binary or its commands
+# is gated on its own code; the operator/get-cert pod image and the NRI floor
+# still resolve from C8S_REF. Published builds never set it.
+C8S_PRESTAGED=$(cat "$SYNC_INPUTS/c8s-binary" 2>/dev/null || true)
+C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
+if [ "$C8S_PRESTAGED" = 1 ] && [ ! -f "$C8S_TARGET" ]; then
+    echo "c8s sync: FATAL c8s-binary=1 but no binary was pre-staged at ${C8S_TARGET#"$SRCDIR"/}" >&2
+    exit 1
+fi
+if [ "$C8S_PRESTAGED" = 1 ]; then
+    echo "c8s sync: using the pre-staged c8s binary; resolving operator at c8s ref ${C8S_REF}"
+else
+    echo "c8s sync: resolving c8s binary + operator at c8s ref ${C8S_REF}"
+fi
 # Resolve the independent OCI digests together. CDS, mesh and NRI all use
 # the same extracted c8s binary; only the operator still runs in a pod.
 DIGEST_TMPDIR=$(mktemp -d)
@@ -126,8 +141,13 @@ resolve_digest_bg() {  # <repo> <ref> <out-file> -> writes sha256:... or FATALs
         *) echo "c8s sync: FATAL cannot resolve $1:$2 (is the image published? run c8s docker.yml for the branch)" >&2; exit 1 ;;
     esac
 }
-resolve_digest_bg "$NRI_REPO" "$C8S_REF" "$DIGEST_TMPDIR/nri" &
-nri_pid=$!
+nri_pid=""
+if [ "$C8S_PRESTAGED" = 1 ]; then
+    printf 'sha256:prestaged' > "$DIGEST_TMPDIR/nri"
+else
+    resolve_digest_bg "$NRI_REPO" "$C8S_REF" "$DIGEST_TMPDIR/nri" &
+    nri_pid=$!
+fi
 resolve_digest_bg "$OPERATOR_REPO" "$C8S_REF" "$DIGEST_TMPDIR/operator" &
 operator_pid=$!
 # Wait on every job regardless of individual exit status (a bare `wait $pid`
@@ -135,7 +155,7 @@ operator_pid=$!
 # running as orphans) — resolve_digest_bg already printed a FATAL for
 # whichever repo failed; read_digest below re-checks each result file's
 # shape and is what actually fails the build closed.
-wait "$nri_pid" || true
+[ -z "$nri_pid" ] || wait "$nri_pid" || true
 wait "$operator_pid" || true
 
 read_digest() {  # <name> <out-file> -> prints sha256:... or FATALs on a bad/missing result
@@ -275,11 +295,10 @@ stage "$CACHE_DIR/rke2-images-cilium-${CACHE_VER}.tar.zst" \
 # --- 3. nri-image-policy plugin binary ------------------------------------
 
 PLUGIN_TARGET="$STAGE_DIR/opt/nri/plugins/10-nri-image-policy"
-# The same multi-command binary, also staged under its own name so the
-# cred-release systemd unit can invoke `c8s cred-release` (argv[0]="c8s"
-# falls through to normal cobra dispatch — only get-cert/nri-image-policy/
-# ratls-mesh are argv-aliased).
-C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
+# The same multi-command binary, also staged under its own name (C8S_TARGET,
+# set above) so the cred-release systemd unit can invoke `c8s cred-release`
+# (argv[0]="c8s" falls through to normal cobra dispatch — only
+# get-cert/nri-image-policy/ratls-mesh are argv-aliased).
 # Content-addressed by the image digest: a cached copy skips the GHCR pull
 # entirely (oras digest-verifies the blobs on the pull that populates it).
 PLUGIN_CACHE="$CACHE_DIR/nri-image-policy-${NRI_IMAGE##*@sha256:}"
@@ -348,13 +367,18 @@ extract_plugin_binary() {
     install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
 }
 
-if [ -f "$PLUGIN_CACHE" ]; then
-    echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
+if [ "$C8S_PRESTAGED" = 1 ]; then
+    chmod 0755 "$C8S_TARGET"
+    install -D -m 0755 "$C8S_TARGET" "$PLUGIN_TARGET"
 else
-    extract_plugin_binary
+    if [ -f "$PLUGIN_CACHE" ]; then
+        echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
+    else
+        extract_plugin_binary
+    fi
+    install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
+    install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
 fi
-install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
-install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
 
 render_nri_floor
 render_node_integration

@@ -122,10 +122,13 @@ The command renders the embedded chart once, preserving its Kubernetes
 operator, CRDs, RBAC, webhook and admission policies while extracting nginx
 configuration and the CDS component seed for the host.
 There is no c8s chart archive, Helm installation job or runtime values merge.
-The image needs a published `C8S_REF` containing the new commands;
+Published images need a `C8S_REF` containing the new commands;
 `v0.1.0-rc2` is incompatible and fails the build with an explicit error.
 
 The build stages measured templates at `/usr/lib/c8s/` and Kubernetes
+The image repro gate instead builds the binary from the gated checkout and
+pre-stages it (`C8S_BINARY`), so a PR is gated on its own code; only the
+operator image and NRI floor still resolve from `C8S_REF` there.
 integration at `server/manifests/c8s-integration.yaml`. At boot, verified
 launch settings produce root-only `/run/confos/launch` files and the public
 `c8s-node-runtime` ConfigMap in `c8s-system`. Its `cds-url` and `cds.json`
