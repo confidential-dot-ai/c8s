@@ -138,8 +138,8 @@ func hostPortPod(ns, name, node string, port int32) corev1.Pod {
 	}
 }
 
-func TestPreflightTLSLBHostPortExec(t *testing.T) {
-	values := "tlsLb:\n  enabled: true\n  hostPort:\n    enabled: true\n    https: \"\"\n"
+func TestPreflightRouterHostPortExec(t *testing.T) {
+	values := "router:\n  enabled: true\n  hostPort:\n    enabled: true\n    https: \"\"\n"
 	kubectlBody := func(nodes, podsFile string) string {
 		return `case "$*" in
 "get pods --all-namespaces -o json") /bin/cat '` + podsFile + `' ;;
@@ -152,11 +152,11 @@ esac`
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", kubectlBody(`node-a\n`, pods))
-		err := preflightTLSLBHostPort(context.Background(), writeChart(t, values), "c8s-system")
+		err := preflightRouterHostPort(context.Background(), writeChart(t, values), "c8s-system")
 		if err == nil {
 			t.Fatal("want error when the host port is bound on every node")
 		}
-		for _, want := range []string{"443", "kube-system/ingress-a", "tlsLb.hostPort.enabled=false"} {
+		for _, want := range []string{"443", "kube-system/ingress-a", "router.hostPort.enabled=false"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q missing %q", err, want)
 			}
@@ -168,18 +168,18 @@ esac`
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", kubectlBody(`node-a\nnode-b\n`, pods))
-		if err := preflightTLSLBHostPort(context.Background(), writeChart(t, values), "c8s-system"); err != nil {
+		if err := preflightRouterHostPort(context.Background(), writeChart(t, values), "c8s-system"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("own namespace holder is ignored", func(t *testing.T) {
-		pods := podListFile(t, hostPortPod("c8s-system", "c8s-tls-lb", "node-a", 443))
+		pods := podListFile(t, hostPortPod("c8s-system", "c8s-router", "node-a", 443))
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", kubectlBody(`node-a\n`, pods))
-		if err := preflightTLSLBHostPort(context.Background(), writeChart(t, values), "c8s-system"); err != nil {
-			t.Fatalf("re-install must not flag its own tls-lb: %v", err)
+		if err := preflightRouterHostPort(context.Background(), writeChart(t, values), "c8s-system"); err != nil {
+			t.Fatalf("re-install must not flag its own router: %v", err)
 		}
 	})
 
@@ -187,8 +187,8 @@ esac`
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", "")
-		chart := writeChart(t, "tlsLb:\n  enabled: true\n  hostPort:\n    enabled: false\n")
-		if err := preflightTLSLBHostPort(context.Background(), chart, "c8s-system"); err != nil {
+		chart := writeChart(t, "router:\n  enabled: true\n  hostPort:\n    enabled: false\n")
+		if err := preflightRouterHostPort(context.Background(), chart, "c8s-system"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		mustNotContainPrefix(t, f.calls(t), "kubectl")
@@ -198,7 +198,7 @@ esac`
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", "exit 1")
-		if err := preflightTLSLBHostPort(context.Background(), writeChart(t, values), "c8s-system"); err == nil {
+		if err := preflightRouterHostPort(context.Background(), writeChart(t, values), "c8s-system"); err == nil {
 			t.Fatal("want error when kubectl fails")
 		}
 	})
@@ -211,7 +211,7 @@ esac`
 		f := newFakeBin(t)
 		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", kubectlBody(`node-a\n`, bad))
-		if err := preflightTLSLBHostPort(context.Background(), writeChart(t, values), "c8s-system"); err == nil {
+		if err := preflightRouterHostPort(context.Background(), writeChart(t, values), "c8s-system"); err == nil {
 			t.Fatal("want error for unparseable pod list")
 		}
 	})
@@ -869,7 +869,7 @@ func TestInstallSingleNodeSkipsCDSNodePreflight(t *testing.T) {
 	}
 }
 
-func TestInstallAbortsOnTLSLBHostPortConflict(t *testing.T) {
+func TestInstallAbortsOnRouterHostPortConflict(t *testing.T) {
 	pods := podListFile(t, hostPortPod("kube-system", "ingress-a", "node-a", 443))
 	s := newInstallStubs(t, "", false)
 	// kubeletVersion first: the distro query also mentions .metadata.name.
@@ -879,7 +879,7 @@ func TestInstallAbortsOnTLSLBHostPortConflict(t *testing.T) {
 `))
 	err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--force", "--resolve-digests=false")
 	if err == nil || !strings.Contains(err.Error(), "443") || !strings.Contains(err.Error(), "kube-system/ingress-a") {
-		t.Fatalf("want the tls-lb host-port conflict, got %v", err)
+		t.Fatalf("want the router host-port conflict, got %v", err)
 	}
 	mustNotContainPrefix(t, s.f.calls(t), "helm upgrade")
 }
@@ -913,8 +913,8 @@ func TestInstallAdoptsWorkloadAfterHelm(t *testing.T) {
 	}
 
 	tree := readYAMLTree(t, s.computed)
-	if got := treeAt(t, tree, "tlsLb", "upstream", "address"); got != "c8s-infer.ws.svc.cluster.local:8000" {
-		t.Errorf("tlsLb.upstream.address = %#v, want the adopted headless-Service address", got)
+	if got := treeAt(t, tree, "router", "upstream", "address"); got != "c8s-infer.ws.svc.cluster.local:8000" {
+		t.Errorf("router.upstream.address = %#v, want the adopted headless-Service address", got)
 	}
 }
 
@@ -1040,7 +1040,7 @@ func TestInstallStdinValuesMaterializeFailure(t *testing.T) {
 	f := newFakeBin(t)
 	resetCLIState(t)
 	t.Cleanup(func() { rootCmd.SetIn(nil) })
-	rootCmd.SetIn(strings.NewReader("tlsLb:\n  enabled: false\n"))
+	rootCmd.SetIn(strings.NewReader("router:\n  enabled: false\n"))
 	rootCmd.SetArgs([]string{"install", "--cvm-mode=node", "-f", "-"})
 	err := rootCmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "create stdin values file") {

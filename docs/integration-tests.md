@@ -53,7 +53,7 @@ a port-forward).
 - `c8s install` end-to-end: preflights, helm install, CRDs, RBAC,
   MutatingWebhookConfiguration, ValidatingAdmissionPolicies.
 - Control-plane readiness: operator, CDS (RA-TLS serving cert via the mock
-  api), tls-lb (mesh cert from CDS), ratls-mesh DaemonSet.
+  api), router (mesh cert from CDS), ratls-mesh DaemonSet.
 - NRI plugin: installer writes the binary + config, patches containerd,
   restarts it, registers, serves the admission inventory socket.
 - Allowlist authorization: unsigned writes and wrong-key writes are 401; a
@@ -75,10 +75,10 @@ a port-forward).
   plaintext — proven by the drop/wrap counters (rule ordering between
   kube-proxy and the mesh is not stable). Mirrors
   `test/e2e/mesh-cw-enforcement.sh`.
-- tls-lb front door: HTTPS verified against the CDS mesh CA.
+- router front door: HTTPS verified against the CDS mesh CA.
 - Workload adoption: `c8s install --workload-ref` patches a running
   deployment, its rollout goes through injection, the status mirror reports
-  `kubectl get cwl`, and tls-lb routes the front door to it over the mesh.
+  `kubectl get cwl`, and router routes the front door to it over the mesh.
 - `c8s uninstall`: release, webhook, and admission policies are removed.
 
 ## Deliberately out of scope

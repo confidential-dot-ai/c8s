@@ -114,7 +114,7 @@ jobs:
             [ -n "$d" ] || { echo "::error::no digest for ${comp}:${tag}"; exit 1; }
             echo "$d"
           }
-          OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
+          OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + router init
           CDSTAG=$(resolve_tag cds)
           NRITAG=$(resolve_tag nri-image-policy)
           CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
@@ -211,7 +211,7 @@ jobs:
               # THE FIX. deriveComponents is off by default and `c8s install
               # --resolve-digests` is what normally turns it on; this lane writes raw
               # values into a HelmChart CR, so it never did. Without it only cds and
-              # tls-lb nginx get self-entries, so the OPERATOR image is absent from
+              # router nginx get self-entries, so the OPERATOR image is absent from
               # always_allow and from the CDS seed. That image is also the injected
               # c8s-cert sidecar, so under policy.mode=audit it is denied-but-admitted,
               # and the workload-claims broker records only on the ALLOW path. The
@@ -222,7 +222,7 @@ jobs:
             policy:
               mode: audit          # bring-up: log would-be denials, admit all (chart-blessed).
                                    # enforce needs an operator-keyed allowlist first — roadmap.
-          tlsLb:
+          router:
             hostPort:
               enabled: false
           EOF

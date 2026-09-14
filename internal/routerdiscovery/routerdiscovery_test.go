@@ -1,4 +1,4 @@
-package lbdiscovery
+package routerdiscovery
 
 import (
 	"bytes"
@@ -30,7 +30,7 @@ import (
 )
 
 // plainServingCert generates a self-signed ECDSA serving cert with NO RA-TLS
-// extension — the shape a tls-lb front door presents.
+// extension — the shape a router front door presents.
 func plainServingCert(t *testing.T) (tls.Certificate, *x509.Certificate) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -39,7 +39,7 @@ func plainServingCert(t *testing.T) (tls.Certificate, *x509.Certificate) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "tls-lb"},
+		Subject:      pkix.Name{CommonName: "router"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		DNSNames:     []string{"127.0.0.1", "localhost"},
@@ -55,7 +55,7 @@ func plainServingCert(t *testing.T) (tls.Certificate, *x509.Certificate) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, leaf
 }
 
-// discoveryDoc builds a tls-lb discovery document embedding cert + challenge.
+// discoveryDoc builds a router discovery document embedding cert + challenge.
 // mode is the public_tls.mode field; "" mimics a pre-mode-field document.
 func discoveryDoc(t *testing.T, cert *x509.Certificate, challenge []byte, mode, platform string, evidence string) []byte {
 	t.Helper()
@@ -80,7 +80,7 @@ func discoveryDoc(t *testing.T, cert *x509.Certificate, challenge []byte, mode, 
 }
 
 // fakeLB serves the discovery document plus a proxied /allowlist body over TLS
-// with servingCert (no RA-TLS extension), like a tls-lb front door.
+// with servingCert (no RA-TLS extension), like a router front door.
 func fakeLB(t *testing.T, servingCert tls.Certificate, doc []byte) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +113,7 @@ func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	}
 }
 
-// TestNewVerifiedHTTPClient_EndToEnd is the regression test for the tls-lb
+// TestNewVerifiedHTTPClient_EndToEnd is the regression test for the router
 // allowlist bug: a front door whose serving cert has no RA-TLS extension must
 // be verified via its discovery document (evidence bound to
 // SHA-384(cert pubkey ‖ challenge)) and subsequent requests must succeed
@@ -215,7 +215,7 @@ func TestNewVerifiedHTTPClient_FailsClosed(t *testing.T) {
 
 // TestNewVerifiedHTTPClient_BindsDocCertToConnection proves the bootstrap
 // fails when the document attests a cert other than the leaf the connection's
-// handshake presented — a MITM, or a different tls-lb replica answering
+// handshake presented — a MITM, or a different router replica answering
 // discovery than the one that terminated TLS.
 func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 	servingCert, _ := plainServingCert(t)
@@ -225,7 +225,7 @@ func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 	lb := fakeLB(t, servingCert, doc)
 
 	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, approvingVerify(nil))
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("different tls-lb replica")) {
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("different router replica")) {
 		t.Fatalf("want a doc-cert/connection-leaf binding failure, got: %v", err)
 	}
 	if errors.Is(err, ErrNoDiscovery) {
@@ -278,7 +278,7 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 
 // TestNewVerifiedHTTPClient_FailsClosedOnReconnect proves the client never
 // redials once the attested connection is gone: a new handshake could land on
-// a different tls-lb replica (per-pod serving certs) that the verified
+// a different router replica (per-pod serving certs) that the verified
 // document says nothing about.
 func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 	servingCert, leaf := plainServingCert(t)
@@ -358,7 +358,7 @@ func TestNewVerifiedHTTPClient_RejectsExpiredServingCert(t *testing.T) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "tls-lb"},
+		Subject:      pkix.Name{CommonName: "router"},
 		NotBefore:    time.Now().Add(-2 * time.Hour),
 		NotAfter:     time.Now().Add(-time.Hour),
 		DNSNames:     []string{"127.0.0.1", "localhost"},

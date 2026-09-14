@@ -83,7 +83,7 @@ var uninstallCmd = &cobra.Command{
 NRI and mesh artifacts off every node.
 
 'helm uninstall' already unwinds most of the install: the release resources
-(operator, CDS, attestation-api, ratls-mesh, tls-lb, webhook
+(operator, CDS, attestation-api, ratls-mesh, router, webhook
 configuration), the NRI image-policy host plugin (pre-delete hook), and
 the mesh traffic interception (preStop hook).
 

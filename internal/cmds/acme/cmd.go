@@ -1,4 +1,4 @@
-// Package acme implements the tls-lb ACME sidecar (`c8s acme`): the in-guest
+// Package acme implements the router ACME sidecar (`c8s acme`): the in-guest
 // public-TLS issuer for the acme front-door mode. It obtains one multi-SAN
 // WebPKI certificate for --domains via ACME HTTP-01 (nginx's :80 server
 // proxies /.well-known/acme-challenge/ to the loopback challenge listener),
@@ -47,8 +47,8 @@ func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:   "acme",
-		Short: "Run the tls-lb in-guest ACME sidecar (acme front-door mode)",
-		Long: `acme runs beside nginx in the tls-lb pod and keeps one multi-SAN WebPKI
+		Short: "Run the router in-guest ACME sidecar (acme front-door mode)",
+		Long: `acme runs beside nginx in the router pod and keeps one multi-SAN WebPKI
 certificate for --domains under --cert-dir: cert.pem (full chain) and key.pem.
 Issuance uses ACME HTTP-01; nginx's :80 server proxies
 /.well-known/acme-challenge/ to the loopback challenge listener. The

@@ -38,15 +38,15 @@
 {{- if $cdsImg.digest -}}
 {{- $_ := set $digests $cdsImg.digest (printf "%s@%s" $cdsImg.repository $cdsImg.digest) -}}
 {{- end -}}
-{{- /* tls-lb nginx self-entry: a chart-deployed non-c8s system image. It is
+{{- /* router nginx self-entry: a chart-deployed non-c8s system image. It is
        independently versioned and digest-pinned, so it is not in the
        tag-locked c8sComponents derive set (the resolver would `crane digest
-       nginx:<c8s-tag>`). Seed it from its pinned digest whenever tls-lb is
+       nginx:<c8s-tag>`). Seed it from its pinned digest whenever router is
        enabled — like the CDS self-entry above, independent of deriveComponents
        — so a default install admits the nginx it ships without the operator
        hand-writing an entry for it. */}}
-{{- if .Values.tlsLb.enabled -}}
-{{- $lbImg := .Values.tlsLb.nginx.image -}}
+{{- if .Values.router.enabled -}}
+{{- $lbImg := .Values.router.nginx.image -}}
 {{- if $lbImg.digest -}}
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}
 {{- end -}}

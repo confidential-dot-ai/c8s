@@ -204,7 +204,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 	excluded := excludedNamespaceSet(opts.LeaderElectionNS, opts.ExcludeNamespaces)
 
 	// Headless-Service provisioning: one Service per annotated workload so
-	// in-cluster clients (tls-lb) can dial pod IPs by DNS and get the
+	// in-cluster clients (router) can dial pod IPs by DNS and get the
 	// node mesh's attested mTLS — the mesh cannot intercept Service VIPs.
 	// Gated on get-cert injection: without it no pod carries the cw label
 	// the Service selects on.

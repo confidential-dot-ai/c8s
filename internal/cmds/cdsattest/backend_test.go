@@ -31,7 +31,7 @@ func writeClientKeyPair(t *testing.T) (certPath, keyPath string) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "c8s-tls-lb-client"},
+		Subject:      pkix.Name{CommonName: "c8s-router-client"},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

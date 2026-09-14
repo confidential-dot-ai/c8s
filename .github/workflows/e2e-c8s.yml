@@ -104,7 +104,7 @@ jobs:
       # always_allow in the node image (confidential-os-builder
       # mkosi/base/mkosi.profiles/c8s/image-policy.yaml.in) holds exactly TWO
       # entries, the nri-image-policy image and the cds image. It has never
-      # contained the operator, ratls-mesh, tls-lb, get-cert or attestation-api
+      # contained the operator, ratls-mesh, router, get-cert or attestation-api
       # at any ref, so "that ref's components" were never in it to be missing.
       #
       # THE ACTUAL BINDING IS A BOOTSTRAP ORDERING. CDS serves the allowlist that

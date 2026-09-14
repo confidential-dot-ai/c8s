@@ -241,13 +241,13 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	return nil
 }
 
-// preflightTLSLBHostPort fails fast when tls-lb's host port is already bound on
-// every node, so the tls-lb pod would sit Pending and `--wait` would time out
+// preflightRouterHostPort fails fast when router's host port is already bound on
+// every node, so the router pod would sit Pending and `--wait` would time out
 // with an opaque scheduler error. The classic collision is a bundled ingress
 // controller (rke2 <= v1.35 ships rke2-ingress-nginx, v1.36+ rke2-traefik,
 // both on host 80/443). Reads chart
 // defaults, so the caller gates it to the default (no -f) path where they apply.
-func preflightTLSLBHostPort(ctx context.Context, chartPath, namespace string) error {
+func preflightRouterHostPort(ctx context.Context, chartPath, namespace string) error {
 	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
 	if err != nil {
 		return fmt.Errorf("helm show values %q: %w", chartPath, err)
@@ -256,10 +256,10 @@ func preflightTLSLBHostPort(ctx context.Context, chartPath, namespace string) er
 	if err := yaml.Unmarshal(out, &tree); err != nil {
 		return fmt.Errorf("parse chart values: %w", err)
 	}
-	if !boolAtPath(tree, "tlsLb.enabled") || !boolAtPath(tree, "tlsLb.hostPort.enabled") {
+	if !boolAtPath(tree, "router.enabled") || !boolAtPath(tree, "router.hostPort.enabled") {
 		return nil
 	}
-	port, err := tlsLBHostPort(tree)
+	port, err := routerHostPort(tree)
 	if err != nil {
 		return err
 	}
@@ -286,12 +286,12 @@ func preflightTLSLBHostPort(ctx context.Context, chartPath, namespace string) er
 		return fmt.Errorf("parse pod list: %w", err)
 	}
 
-	// Ignore the install namespace: c8s's own tls-lb pod lives there, so a
+	// Ignore the install namespace: c8s's own router pod lives there, so a
 	// re-install (Recreate) does not flag itself.
 	if blocked, holders := hostPortConflict(list.Items, nodes, port, namespace); blocked {
-		return fmt.Errorf("tls-lb wants host port %d but it is already bound on every node by: %s. "+
-			"tls-lb would stay Pending and --wait would time out. Reach tls-lb via its Service, or install with "+
-			"-f setting tlsLb.hostPort.enabled=false (or tlsLb.hostPort.https to a free port, or tlsLb.enabled=false)",
+		return fmt.Errorf("router wants host port %d but it is already bound on every node by: %s. "+
+			"router would stay Pending and --wait would time out. Reach router via its Service, or install with "+
+			"-f setting router.hostPort.enabled=false (or router.hostPort.https to a free port, or router.enabled=false)",
 			port, strings.Join(holders, ", "))
 	}
 	return nil
@@ -312,10 +312,10 @@ func boolAtPath(tree map[string]any, path string) bool {
 	return b
 }
 
-// tlsLBHostPort resolves tlsLb.hostPort.https, defaulting to 443 (the chart's
+// routerHostPort resolves router.hostPort.https, defaulting to 443 (the chart's
 // empty-string default derives 443).
-func tlsLBHostPort(tree map[string]any) (int32, error) {
-	m, ok := nestedMap(tree, "tlsLb", "hostPort")
+func routerHostPort(tree map[string]any) (int32, error) {
+	m, ok := nestedMap(tree, "router", "hostPort")
 	if !ok {
 		return 443, nil
 	}
@@ -330,7 +330,7 @@ func tlsLBHostPort(tree map[string]any) (int32, error) {
 		// ParseInt with bitSize 32 rejects values that would overflow int32.
 		n, err := strconv.ParseInt(v, 10, 32)
 		if err != nil {
-			return 0, fmt.Errorf("tlsLb.hostPort.https %q is not a valid port number: %w", v, err)
+			return 0, fmt.Errorf("router.hostPort.https %q is not a valid port number: %w", v, err)
 		}
 		port = n
 	case int:
@@ -338,17 +338,17 @@ func tlsLBHostPort(tree map[string]any) (int32, error) {
 	case float64:
 		port = int64(v)
 	default:
-		return 0, fmt.Errorf("tlsLb.hostPort.https has unexpected type %T", v)
+		return 0, fmt.Errorf("router.hostPort.https has unexpected type %T", v)
 	}
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("tlsLb.hostPort.https %d is out of range (1-65535)", port)
+		return 0, fmt.Errorf("router.hostPort.https %d is out of range (1-65535)", port)
 	}
 	return int32(port), nil
 }
 
 // hostPortConflict reports whether port is already bound on every node (so a new
 // host-port pod cannot schedule anywhere), along with the pods that hold it.
-// Pods in ignoreNamespace are skipped so c8s's own tls-lb does not self-flag.
+// Pods in ignoreNamespace are skipped so c8s's own router does not self-flag.
 func hostPortConflict(pods []corev1.Pod, nodes []string, port int32, ignoreNamespace string) (bool, []string) {
 	taken := map[string]bool{}
 	holderSet := map[string]bool{}
@@ -372,7 +372,7 @@ func hostPortConflict(pods []corev1.Pod, nodes []string, port int32, ignoreNames
 	}
 	for _, n := range nodes {
 		if !taken[n] {
-			return false, holders // a free node exists; tls-lb can bind there
+			return false, holders // a free node exists; router can bind there
 		}
 	}
 	return true, holders
@@ -876,7 +876,7 @@ var installCmd = &cobra.Command{
   - the mutating admission webhook configuration
   - the attestation-api DaemonSet (per-node /attest + /verify)
   - the CDS trust root (attestation, mesh CA, leaf signing)
-  - the ratls-mesh, nri-image-policy, and tls-lb components
+  - the ratls-mesh, nri-image-policy, and router components
 
 The host distro (k8s vs rke2) is detected from the cluster's kubelet versions;
 override nriImagePolicy.distro via -f for a layout detection
@@ -916,8 +916,8 @@ The release namespace is excluded from workload injection, so adopted workloads
 must live in a separate namespace. After the chart is ready, install patches each
 workload's pod template with confidential.ai/cw=<id>; the rollout then goes
 through the c8s webhook and the operator provisions the c8s-<id> headless Service.
-To front one of them behind tls-lb, give that ref a :<port> and pass --upstream <id>;
-tls-lb routes its catch-all to that adopted workload's headless Service
+To front one of them behind router, give that ref a :<port> and pass --upstream <id>;
+router routes its catch-all to that adopted workload's headless Service
 (c8s-<id>.<ns>.svc.cluster.local:<port>). With --resolve-digests, install also
 resolves adopted workload images into nriImagePolicy.bootstrapAllowlist.workloads
 entries admitting them under any command and args, so image admission (the host
@@ -1058,11 +1058,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 		}
 
-		// Fail fast when tls-lb's host port is already taken cluster-wide (e.g.
+		// Fail fast when router's host port is already taken cluster-wide (e.g.
 		// an existing ingress owns 443), which would otherwise wedge `--wait`.
-		// Default path only: a -f owner controls tlsLb.* and node placement.
+		// Default path only: a -f owner controls router.* and node placement.
 		if len(installValues) == 0 {
-			if err := preflightTLSLBHostPort(cmd.Context(), chartPath, installNamespace); err != nil {
+			if err := preflightRouterHostPort(cmd.Context(), chartPath, installNamespace); err != nil {
 				return err
 			}
 		}
@@ -1128,7 +1128,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 }
 
 // printAttestVerifyHint surfaces measurement pinning after an install with the
-// tls-lb attestation sidecar (on by default).
+// router attestation sidecar (on by default).
 //
 // The cluster's launch measurement M is a property of the deployed node image
 // (its manifest.json), known before the cluster runs. --measurements <M> pins it
@@ -1141,14 +1141,14 @@ func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 		return
 	}
 	if len(installMeasurements) > 0 {
-		fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled; mesh pinned to --measurements.")
-		fmt.Fprintln(w, "  Clients verify with the same M: c8s verify https://<tls-lb> --measurements <M>")
+		fmt.Fprintln(w, "+ router attestation sidecar enabled; mesh pinned to --measurements.")
+		fmt.Fprintln(w, "  Clients verify with the same M: c8s verify https://<router> --measurements <M>")
 		return
 	}
-	fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled, but the mesh is UNPINNED (accepts any")
+	fmt.Fprintln(w, "+ router attestation sidecar enabled, but the mesh is UNPINNED (accepts any")
 	fmt.Fprintln(w, "  attested TEE). Pin it with the node image's launch measurement M (its")
 	fmt.Fprintln(w, "  manifest.json): reinstall with --measurements <M>. Clients verify with the")
-	fmt.Fprintln(w, "  same M: c8s verify https://<tls-lb> --measurements <M>.")
+	fmt.Fprintln(w, "  same M: c8s verify https://<router> --measurements <M>.")
 }
 
 // extractChart writes the embedded chart tree to a fresh tmpdir and returns
@@ -1413,7 +1413,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 			"--set-string", "ratlsMesh.platform=tdx",
 		)
 	}
-	// The tls-lb attestation sidecar is on by default (chart default); --attest=false
+	// The router attestation sidecar is on by default (chart default); --attest=false
 	// omits it. When on, it passes this platform straight to the attestation-api
 	// as the evidence request, so the value must name the evidence SHAPE, not just
 	// the silicon: under aks the evidence is the Azure vTPM HCL report (az-snp /
@@ -1425,20 +1425,20 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// for hardware it never checked.
 	switch {
 	case !installAttestEnabled:
-		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")
+		helmArgs = append(helmArgs, "--set", "router.attest.enabled=false")
 	case cvmMode == "aks":
 		attestPlatform := "az-snp"
 		if hardwarePlatform == "tdx" {
 			attestPlatform = "az-tdx"
 		}
 		helmArgs = append(helmArgs,
-			"--set-string", "tlsLb.attest.platform="+attestPlatform,
-			"--set-string", "tlsLb.attest.generation=",
+			"--set-string", "router.attest.platform="+attestPlatform,
+			"--set-string", "router.attest.generation=",
 		)
 	case hardwarePlatform == "tdx":
 		helmArgs = append(helmArgs,
-			"--set-string", "tlsLb.attest.platform=tdx",
-			"--set-string", "tlsLb.attest.generation=",
+			"--set-string", "router.attest.platform=tdx",
+			"--set-string", "router.attest.generation=",
 		)
 	}
 	// node: the node image bakes host attestation-api and nri-image-policy;
@@ -1663,7 +1663,7 @@ type workloadRef struct {
 	kind      string
 	name      string
 	namespace string
-	// port is the tls-lb upstream port from the ref's optional :<port> suffix,
+	// port is the router upstream port from the ref's optional :<port> suffix,
 	// or 0 when absent. Only consumed for the ref --upstream selects.
 	port int
 }
@@ -1688,10 +1688,10 @@ func validateWorkloadAdoptionFlags(releaseNamespace string, adoptions []workload
 	return nil
 }
 
-// upstreamAddress derives tls-lb's upstream from --upstream (a cw id that must
+// upstreamAddress derives router's upstream from --upstream (a cw id that must
 // name an adopted workload): the selected workload's headless-Service FQDN with
-// the port from that ref's :<port> suffix appended, so tls-lb dials the Service
-// the operator provisions. Empty --upstream yields "" (tlsLb.upstream.address is
+// the port from that ref's :<port> suffix appended, so router dials the Service
+// the operator provisions. Empty --upstream yields "" (router.upstream.address is
 // used as-is).
 func upstreamAddress(upstream string, adoptions []workloadAdoption) (string, error) {
 	if upstream == "" {
@@ -1705,7 +1705,7 @@ func upstreamAddress(upstream string, adoptions []workloadAdoption) (string, err
 			return fmt.Sprintf("%s:%d", webhook.WorkloadServiceFQDN(upstream, a.ref.namespace), a.ref.port), nil
 		}
 	}
-	return "", fmt.Errorf("--%s %q must name a --%s confidential.ai/cw id so tls-lb routes to an adopted workload", flagUpstream, upstream, flagWorkloadRef)
+	return "", fmt.Errorf("--%s %q must name a --%s confidential.ai/cw id so router routes to an adopted workload", flagUpstream, upstream, flagWorkloadRef)
 }
 
 func collectWorkloadAdoptions(rawRefs []string) ([]workloadAdoption, error) {
@@ -1807,7 +1807,7 @@ func parseWorkloadRef(ref, flagName string) (workloadRef, error) {
 }
 
 func errWorkloadRefFormat(flagName string) error {
-	return fmt.Errorf("--%s must be <cw-id>=<namespace>/<kind>/<name>[:<port>] (kind is any resource exposing a pod template at spec.template, e.g. deployment, statefulset, daemonset, or an operator CRD; :<port> is the tls-lb upstream port, required on the --upstream ref)", flagName)
+	return fmt.Errorf("--%s must be <cw-id>=<namespace>/<kind>/<name>[:<port>] (kind is any resource exposing a pod template at spec.template, e.g. deployment, statefulset, daemonset, or an operator CRD; :<port> is the router upstream port, required on the --upstream ref)", flagName)
 }
 
 // normalizeWorkloadKind canonicalizes the built-in aliases and passes any other
@@ -2186,12 +2186,12 @@ func init() {
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
 	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory")
-	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
-	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
+	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the router upstream port, needed on the ref --upstream selects")
+	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload router routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https router.upstream, router renders no catch-all route until one is attached")
 	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). node/gke/aks are node-as-CVM shapes: the node is one trust domain, so they are single-tenant")
 	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "", "CPU-level TEE hardware (REQUIRED; orthogonal to --cvm-mode): sev-snp (/dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Under --cvm-mode=aks the CPU TEE rides the Azure vTPM: sev-snp selects az-snp and tdx selects az-tdx (no guest device needed — the report comes from /dev/tpm0)")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
-	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
+	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the router attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
 	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's sandbox inventories (repeatable/comma-separated): CDS dials an inventory inside them and nowhere else. Under --cvm-mode=node/gke/aks these are node addresses, which is what stops a workload pointing the sandbox-digests callback at its own pod IP; the default is CDS deriving one host route per node from the live node list, so set a range only when the node network is separate from the pod network")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value")
 	installCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Templated down to cds + ratlsMesh, and also fanned out flat so every component keeps pinning. Cannot be combined with --measurements or --rtmrs")

@@ -17,7 +17,7 @@ type CSRPolicy struct {
 	// not a conjunction. The chart always supplies the in-cluster Service DNS
 	// pattern (<name>.<namespace>.svc) so the mesh's own CSRs validate, and an
 	// operator fronting a routed domain appends the public hostname for the
-	// tls-lb leaf. Empty (nil/zero-length) rejects any CSR carrying DNS SANs.
+	// router leaf. Empty (nil/zero-length) rejects any CSR carrying DNS SANs.
 	DNSSANPatterns []*regexp.Regexp
 
 	// AllowedCNPattern restricts the CSR's Subject CN to a full regex match.

@@ -325,34 +325,34 @@ make clean
 
 CDS serves the image-digest allowlist that `nri-image-policy` enforces on
 every node. The `c8s allowlist`
-command reads and mutates it. By default, tls-lb publishes the complete
+command reads and mutates it. By default, router publishes the complete
 `/allowlist` API and verifies CDS's attestation before forwarding requests.
-When tls-lb uses the chart default CDS-issued public certificate
-(`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at
-the same tls-lb URL used for application traffic; no port-forward is required.
+When router uses the chart default CDS-issued public certificate
+(`router.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at
+the same router URL used for application traffic; no port-forward is required.
 
 ```sh
-TLS_LB=https://<tls-lb-host>
+ROUTER=https://<router-host>
 
 # Reads are unauthenticated
-c8s allowlist export --url "$TLS_LB" \
-  --measurements <tls-lb-launch-digest> > allowlist.json
-c8s allowlist diff allowlist.json --url "$TLS_LB" \
-  --measurements <tls-lb-launch-digest>
+c8s allowlist export --url "$ROUTER" \
+  --measurements <router-launch-digest> > allowlist.json
+c8s allowlist diff allowlist.json --url "$ROUTER" \
+  --measurements <router-launch-digest>
 
 # Writes are signed with the operator key. 'add' admits an image under any
 # command line; 'apply' or 'derive' pins one or grants secrets.
 c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
-  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+  --url "$ROUTER" --measurements <router-launch-digest> \
   --operator-key operator.key
 c8s allowlist upload allowlist.json \
-  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+  --url "$ROUTER" --measurements <router-launch-digest> \
   --operator-key operator.key
 ```
 
 `--measurements` identifies the trusted build of the endpoint you connected
-to. For the default public route, use the tls-lb launch digest; the CLI reads
-tls-lb's discovery document and verifies its attestation automatically.
+to. For the default public route, use the router launch digest; the CLI reads
+router's discovery document and verifies its attestation automatically.
 Direct CDS URLs remain supported, in which case pin the CDS launch digest.
 
 An empty set accepts any attested endpoint. Reads run with a warning; anything
@@ -361,7 +361,7 @@ that signs with the operator key — every `c8s allowlist` write and
 payload would go to whatever answered. A plaintext `--insecure` dev endpoint is
 exempt: it already declares that nothing about it is attested.
 
-Do not point this CLI at tls-lb when `tlsLb.publicTLS.secretName` is set. That
+Do not point this CLI at router when `router.publicTLS.secretName` is set. That
 front door uses WebPKI (`public_tls.mode=webpki`), and its public certificate is
 not cryptographically bound to the discovery attestation, so the CLI
 deliberately refuses it. Use a direct CDS RA-TLS URL and the CDS launch digest;
@@ -388,10 +388,10 @@ Installing without `--operator-keys` leaves allowlist writes disabled, and
 acknowledge. Supply the private key to the CLI by flag (`--operator-key`) or
 environment (`C8S_OPERATOR_KEY`). Write tokens are short-lived and bound to
 the request body, so a captured token cannot be replayed against a different
-payload. The private key remains on the operator machine: tls-lb forwards only
+payload. The private key remains on the operator machine: router forwards only
 the signed request and CDS verifies it against the pinned public key.
 
-Set `tlsLb.allowlist.enabled=false` to remove the built-in public route. A
+Set `router.allowlist.enabled=false` to remove the built-in public route. A
 direct CDS connection, including a local port-forward for debugging, can
 still be passed explicitly with `--url`.
 

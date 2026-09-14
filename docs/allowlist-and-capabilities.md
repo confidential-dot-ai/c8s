@@ -23,7 +23,7 @@ are informational. Policy is always resolved by container digest.
 
 An image that may run **however it is invoked** — the standalone and injected
 c8s components (cds, get-cert, the operator, ratls-mesh, nri-image-policy, the
-tls-lb, the containerd-prep helper), whose argv is per-pod — is an entry whose
+router, the containerd-prep helper), whose argv is per-pod — is an entry whose
 container `command` and `args` are both `any`. Nothing distinguishes such an
 entry from any other: it is matched, stamped and diffed like the rest, and the
 same digest may also appear elsewhere under a narrower policy — see [union

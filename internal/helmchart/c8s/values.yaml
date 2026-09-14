@@ -243,12 +243,12 @@ cds:
   ## always-present in-cluster Service DNS pattern (c8s.cdsDnsSanPattern:
   ## <name>.<namespace>.svc). A SAN passes if it matches any allowed pattern.
   ##
-  ## The mesh's own CSRs (tls-lb.<ns>.svc, ratls-mesh.<ns>.svc)
+  ## The mesh's own CSRs (router.<ns>.svc, ratls-mesh.<ns>.svc)
   ## always validate against the built-in Service pattern, so leave this empty
-  ## for purely in-cluster deployments. When tls-lb fronts a routed domain, make
-  ## that hostname the first tlsLb.san entry and add it here so CDS signs it onto
-  ## the tls-lb leaf — appending here never shadows the in-cluster pattern. Only
-  ## the first tlsLb.san is the mesh-cert identity; extra entries widen nginx
+  ## for purely in-cluster deployments. When router fronts a routed domain, make
+  ## that hostname the first router.san entry and add it here so CDS signs it onto
+  ## the router leaf — appending here never shadows the in-cluster pattern. Only
+  ## the first router.san is the mesh-cert identity; extra entries widen nginx
   ## server_name only and need no pattern here.
   dnsSanPatterns: []
   cnPattern: ""
@@ -503,7 +503,7 @@ ratlsMesh:
   # Iptables sync sidecar resources
   iptablesSync:
     # Local source namespaces excluded from transparent mesh interception.
-    # The release namespace is intentionally NOT excluded: tls-lb's egress
+    # The release namespace is intentionally NOT excluded: router's egress
     # to workload pod IPs must be intercepted to get attested mTLS, and
     # control-plane traffic dials Service VIPs the mesh never intercepts.
     # With cwInboundEnforcement, excluded sources are blocked from reaching
@@ -841,7 +841,7 @@ volumed:
       cpu: 200m
       memory: 128Mi
 
-tlsLb:
+router:
   enabled: true
 
   ## Rollout strategy. Empty resolves by hostPort.enabled: Recreate when the
@@ -862,23 +862,23 @@ tlsLb:
   # unprivileged listener, so nginx needs no privileged bind). This grabs the
   # node's 443: on clusters whose ingress already owns it (notably RKE2, which
   # bundles an ingress on hostPort 80/443 — rke2-ingress-nginx through v1.35,
-  # rke2-traefik from v1.36) the tls-lb pod stays
+  # rke2-traefik from v1.36) the router pod stays
   # Pending ("didn't have free ports for the requested pod ports"); set
-  # enabled: false there (reach tls-lb through its Service or your own
+  # enabled: false there (reach router through its Service or your own
   # ingress) or point https at a free host port. https is the host port to
   # bind; empty derives 443.
   #
   # Availability trade-off: with the port bound the strategy auto-resolves to
-  # Recreate, so every tls-lb roll drops the node-IP front door for the pod
+  # Recreate, so every router roll drops the node-IP front door for the pod
   # restart window. For gapless rolls set
-  # enabled: false and expose tls-lb through its Service instead.
+  # enabled: false and expose router through its Service instead.
   hostPort:
     enabled: true
     https: ""
 
   # -- Public hostnames for the front door, as a list. Empty defaults to the
-  # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc. Every entry
-  # becomes an nginx server_name, so one tls-lb can answer on several hostnames
+  # chart-managed Service DNS name: <release>-router.<namespace>.svc. Every entry
+  # becomes an nginx server_name, so one router can answer on several hostnames
   # the serving cert (publicTLS) covers. The FIRST entry is the single identity
   # on the CDS-issued mesh cert — pin it in cds.dnsSanPatterns; the rest widen
   # only server_name and need no dnsSanPatterns entry.
@@ -892,7 +892,7 @@ tlsLb:
   # reached, over plaintext http the mesh secures); otherwise a manual address
   # must be https with tls.verify=true, an upstream that terminates and
   # authenticates TLS itself (app-TLS). A plaintext http or unverified-https
-  # manual address fails the render (kind=tlslb_unsecured_upstream): the chart
+  # manual address fails the render (kind=router_unsecured_upstream): the chart
   # cannot confirm it resolves to pod IPs the mesh intercepts and there is no
   # acknowledgment to override that.
   upstream:
@@ -922,7 +922,7 @@ tlsLb:
       # path for a different upstream.
       trustedCAPath: /tls/cert.pem
 
-  # -- Publish CDS's complete /allowlist API through the tls-lb front door.
+  # -- Publish CDS's complete /allowlist API through the router front door.
   # The built-in route uses an in-pod loopback proxy that verifies the
   # chart-managed CDS Service's RA-TLS evidence; nginx forwards the original
   # method, URI, body, and Authorization header unchanged. Reads remain
@@ -930,13 +930,13 @@ tlsLb:
   # Writes still require the short-lived, body-bound operator token minted by
   # `c8s allowlist --operator-key`; the private key never enters the cluster.
   #
-  # An explicit tlsLb.routes entry at /allowlist or /allowlist/ takes precedence
+  # An explicit router.routes entry at /allowlist or /allowlist/ takes precedence
   # for backwards compatibility. Set enabled: false to remove the built-in
   # public route entirely.
   allowlist:
     enabled: true
     # -- Loopback port for the RA-TLS-verifying allowlist proxy. This is not a
-    # pod or Service port and is reachable only inside the tls-lb pod.
+    # pod or Service port and is reachable only inside the router pod.
     proxyPort: 8801
     # -- nginx write limiting, per public client and in aggregate across all
     # clients. The aggregate bound protects the single per-source-IP CDS
@@ -967,8 +967,8 @@ tlsLb:
     #     # A route backend must be https with tls.verify: true (app-TLS): the
     #     # chart cannot confirm a plaintext http or unverified-https address
     #     # resolves to pod IPs the node mesh wraps, so it fails the render
-    #     # (kind=tlslb_unsecured_route). A confidential workload is reached via
-    #     # tlsLb.upstream (the --upstream flow), not a route.
+    #     # (kind=router_unsecured_route). A confidential workload is reached via
+    #     # router.upstream (the --upstream flow), not a route.
     #     address: cds.default.svc.cluster.local:8443
     #     protocol: https
     #     tls:
@@ -985,11 +985,11 @@ tlsLb:
   # `discovery.cdsCertPath`, `discovery.meshCAPath`) so browser clients can
   # bootstrap the attested TLS handshake. The internal /healthz endpoint is
   # never affected. Upstream pass-through: if the upstream emits
-  # Access-Control-Allow-Origin on a non-preflight response, tls-lb forwards
+  # Access-Control-Allow-Origin on a non-preflight response, router forwards
   # the upstream's CORS header set verbatim and suppresses its own — browsers
   # never see duplicate headers. If the upstream emits no CORS headers,
-  # tls-lb injects the configured ones below. Preflight `OPTIONS` requests
-  # are short-circuited at nginx with a 204 response using tls-lb's policy
+  # router injects the configured ones below. Preflight `OPTIONS` requests
+  # are short-circuited at nginx with a 204 response using router's policy
   # (they never reach the upstream). Per-route opt-out: set
   # `routes[i].cors.enabled: false` to disable CORS on that route while
   # leaving the global block enabled. Only the `enabled` key is honored on a
@@ -1026,7 +1026,7 @@ tlsLb:
     # the over-encrypted channel to work cross-origin.
     allowHeaders: ["Authorization", "Content-Type", "X-C8s-Session"]
     # -- Headers advertised in Access-Control-Expose-Headers. Always emitted
-    # by tls-lb (and merged in front of the upstream's value in pass-through
+    # by router (and merged in front of the upstream's value in pass-through
     # mode) so browsers can read these headers from JS regardless of what
     # the upstream advertises.
     exposeHeaders: []
@@ -1135,10 +1135,10 @@ tlsLb:
     # container (an HTTPS httpGet through nginx, which proxies /readyz to the
     # sidecar's loopback port), so ingress withholds traffic while the front
     # door's committed mesh identity is unnamed. Setting it also switches the
-    # tls-lb get-cert onto the workload-claims flow (inventory socket mount +
+    # router get-cert onto the workload-claims flow (inventory socket mount +
     # supplemental group on node-CVM) — without that
     # no stamp could ever arrive and the gate would hold the front door at 503
-    # forever. The named entry must match the tls-lb pod's own non-injected
+    # forever. The named entry must match the router pod's own non-injected
     # container set (nginx).
     #
     # Requires attest.enabled and hostPort.enabled: false — readiness only
@@ -1154,7 +1154,7 @@ tlsLb:
     image:
       repository: nginxinc/nginx-unprivileged
       # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
-      # core modules tls-lb uses; the full/perl variants ship image-filter,
+      # core modules router uses; the full/perl variants ship image-filter,
       # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
       # Accepted CVEs against this pin live in .grype.yaml.
       digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
@@ -1197,7 +1197,7 @@ tlsLb:
     # Local while the built-in /allowlist route or the attestation sidecar
     # renders (their limiters key on nginx's public peer address, which Cluster
     # would SNAT away) and Cluster otherwise. Local delivers traffic only
-    # through nodes running the tls-lb pod; set Cluster explicitly if your LB
+    # through nodes running the router pod; set Cluster explicitly if your LB
     # cannot health-check nodes, and every client behind a node then shares one
     # budget and one per-client bound: 512 concurrent attestation sessions for
     # that whole node, past which any one client's traffic refuses new sessions

@@ -119,8 +119,8 @@ application workloads until those workloads opt in with
 `confidential.ai/cw`.
 
 Install with the CLI. Adopt a running workload as a CW and front it behind
-tls-lb with `--upstream` (see [Existing workload adoption](#existing-workload-adoption)
-and [tls-lb upstream](#tls-lb-upstream)):
+router with `--upstream` (see [Existing workload adoption](#existing-workload-adoption)
+and [router upstream](#router-upstream)):
 
 ```bash
 c8s install \
@@ -144,11 +144,11 @@ c8s install \
 The ref syntax is `<cw-id>=<namespace>/<kind>/<name>[:<port>]`, where kind is any
 resource exposing a pod template at `spec.template` (`deployment`,
 `statefulset`, `daemonset`, or an operator CRD such as `<kind>.<group>`); the
-optional `:<port>` is the tls-lb upstream port, needed on the ref `--upstream`
+optional `:<port>` is the router upstream port, needed on the ref `--upstream`
 selects. After Helm reports the c8s release ready, the CLI patches each workload
 pod template with `confidential.ai/cw: <id>`. Those rollouts go through the
 webhook, and the workload-service reconciler creates the `c8s-<id>` headless
-Services. `--upstream vllm-router` points tls-lb at
+Services. `--upstream vllm-router` points router at
 `c8s-vllm-router.vllm.svc.cluster.local:8000` (its `<cw-id>` must be one of the
 adopted refs, carrying a `:<port>`). With `--resolve-digests=true`, install resolves adopted workload
 images into `nriImagePolicy.bootstrapAllowlist.workloads` entries admitting them
@@ -166,7 +166,7 @@ trusted platform namespaces.
 ## Uninstall
 
 `c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
-release (operator, CDS, attestation-api, ratls-mesh, tls-lb, the
+release (operator, CDS, attestation-api, ratls-mesh, router, the
 webhook configuration and admission policies). The
 `MutatingWebhookConfiguration` is release-tracked, so it is deleted with the
 release — a `failurePolicy: Fail` webhook cannot outlive the operator Service
@@ -266,10 +266,10 @@ trusts them, and the mesh degrades as old leaves expire. Recovery is to
 restart every workload so its get-cert init container re-runs the CDS
 provisioning flow.
 
-The tls-lb discovery endpoints (`/.well-known/mesh-ca.pem`,
+The router discovery endpoints (`/.well-known/mesh-ca.pem`,
 `/.well-known/cds-cert.pem`, `/v1/discovery`) track the new CA without a
-tls-lb restart: the c8s-cert sidecar polls CDS's `/ca` every
-`tlsLb.certProvisioning.caWatchInterval` (default 1m) over the same
+router restart: the c8s-cert sidecar polls CDS's `/ca` every
+`router.certProvisioning.caWatchInterval` (default 1m) over the same
 RA-TLS-verified channel it obtains certificates on, and re-issues its leaf —
 rewriting the served CA bundle and discovery document — as soon as CDS holds
 a CA the served bundle is missing. External clients that pinned the old CA
@@ -438,7 +438,7 @@ front door's live TLS handshake presenting a serving certificate the discovery
 evidence does not attest (a WebPKI front door, whatever the document's
 `public_tls.mode` declares — the verdict keys on the handshake observed on the
 verifier's own connection at verify time, not the host-served declaration;
-what is proven is the tls-lb pod's TEE residency and measurement, not the TLS
+what is proven is the router pod's TEE residency and measurement, not the TLS
 endpoint clients reach), a discovery target fetched over a non-TLS connection
 (no live handshake observed — the declared `public_tls.mode` is then the only
 mode signal, a host-served claim nothing authenticates), and attest-pq or
@@ -531,7 +531,7 @@ workload set to it.
 The webhook only reads pod metadata. A `ConfidentialWorkload` CR is not
 required for injection. The single webhook entry (`pods.c8s.confidential.ai`)
 excludes the release namespace via its namespaceSelector, so the chart's own
-pods never hit the webhook during bootstrap; tls-lb's get-cert containers are
+pods never hit the webhook during bootstrap; router's get-cert containers are
 rendered directly into its pod template by the chart instead of injected.
 
 Opt a pod template in with:
@@ -603,15 +603,15 @@ pod opts into one of the c8s reload annotations.
 Platform-owned workloads can specialize the same webhook behavior with typed
 c8s annotations for the cert volume, cert/key filenames, renewal interval,
 nginx reload, Secret watch paths, discovery output, and get-cert UID/GID.
-(tls-lb, living in the webhook-excluded release namespace, renders equivalent
+(router, living in the webhook-excluded release namespace, renders equivalent
 get-cert containers directly from the chart's templates instead.) The
 webhook rejects incomplete reload-watch or discovery annotation sets during pod
 admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.
 
-## tls-lb public TLS modes
+## router public TLS modes
 
-`tlsLb.publicTLS.mode` selects which credential terminates public TLS at the
+`router.publicTLS.mode` selects which credential terminates public TLS at the
 front door:
 
 - `cds` (default) — get-cert provisions a mesh-CA-issued serving leaf into a
@@ -619,7 +619,7 @@ front door:
 - `webpki` — nginx serves an operator-supplied `publicTLS` Secret; the key is
   host-visible.
 - `acme` — the `c8s acme` sidecar keeps one multi-SAN WebPKI certificate for
-  the validated tls-lb SAN list via ACME HTTP-01: nginx's :80 server proxies
+  the validated router SAN list via ACME HTTP-01: nginx's :80 server proxies
   `/.well-known/acme-challenge/` to the sidecar's loopback challenge listener
   and 301s everything else to https. The CA's validation fetch arrives on that
   port, so the mode needs :80 reachable from the internet, not just from the
@@ -638,39 +638,39 @@ it into the attest-pq and attest-lb report_data transcripts and echoes it as
 leaf — is served only for the TEE-held-key modes, `cds` and `acme`; `webpki`
 is attest-pq-only.
 
-## tls-lb upstream
+## router upstream
 
 ### Built-in allowlist route
 
-The chart publishes CDS's complete `/allowlist` API through tls-lb by default.
+The chart publishes CDS's complete `/allowlist` API through router by default.
 It renders exact `/allowlist` and `/allowlist/` prefix locations backed by the
 release's chart-managed CDS Service, so lookalike paths such as `/allowlisted`
-are not exposed. The tls-lb-to-CDS hop verifies CDS's RA-TLS attestation using
+are not exposed. The router-to-CDS hop verifies CDS's RA-TLS attestation using
 `cds.measurements`; `c8s install --measurements` populates that pin in node-CVM
 mode. An empty pin still verifies that the peer is a TEE but accepts any launch
 measurement, which is unsafe outside development.
 
 Before nginx collapses requests onto the loopback proxy connection, it
 rate-limits the route while it still has the public client address. Mutation
-methods are limited per client (`tlsLb.allowlist.rateLimit.requestsPerSecond`/
+methods are limited per client (`router.allowlist.rateLimit.requestsPerSecond`/
 `burst`, default 1 r/s, burst 5) and in aggregate across all clients
 (`totalRequestsPerSecond`/`totalBurst`, default 8 r/s, burst 15). The
 aggregate bound matters because CDS rate-limits per source IP and sees every
-front-door request as the one tls-lb pod IP: without it, many distinct public
+front-door request as the one router pod IP: without it, many distinct public
 clients each inside their per-client budget could drain the single CDS bucket
 that signed operator writes share. The chart requires the per-client values
 not to exceed the totals and the totals to stay below `cds.rateLimit`/
 `rateBurst`. Reads (GET/HEAD) are limited per client under
-`tlsLb.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
+`router.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
 read pressure on CDS — which also serves attestation issuance and node
 allowlist fetches — stays bounded; CORS preflights are exempt. If a flood
 saturates the front-door buckets, signed writes still work over a direct CDS
 URL or port-forward, which CDS accounts under the caller's own source IP.
 LoadBalancer and NodePort Services default to `externalTrafficPolicy: Local`
-while this route or the attestation sidecar (`tlsLb.attest.enabled`) renders,
+while this route or the attestation sidecar (`router.attest.enabled`) renders,
 so nginx receives the public source address their per-client keys need;
-`tlsLb.service.externalTrafficPolicy` overrides (Local delivers traffic only
-through nodes that run the tls-lb pod).
+`router.service.externalTrafficPolicy` overrides (Local delivers traffic only
+through nodes that run the router pod).
 
 The attestation sidecar bounds what one client may hold as well as how fast it
 may ask: 512 concurrent sessions per client address (an IPv6 client is one
@@ -685,18 +685,18 @@ The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still
 require the short-lived, body-bound operator token generated by
 `c8s allowlist --operator-key`; the operator private key is never mounted in
-tls-lb or CDS.
-Use the tls-lb URL with `c8s allowlist --url` and pin tls-lb's launch digest
-with `--measurements` only when `tlsLb.publicTLS.mode` is `cds`. In the other
+router or CDS.
+Use the router URL with `c8s allowlist --url` and pin router's launch digest
+with `--measurements` only when `router.publicTLS.mode` is `cds`. In the other
 modes the public certificate is not yet bound to the discovery attestation and
 the CLI refuses that front door. Use a direct CDS RA-TLS URL (or a CDS
 port-forward) and pin the CDS launch digest instead.
 
-Set `tlsLb.allowlist.enabled=false` to remove this route. For compatibility,
-an explicit `tlsLb.routes` entry whose path is `/allowlist` or `/allowlist/`
+Set `router.allowlist.enabled=false` to remove this route. For compatibility,
+an explicit `router.routes` entry whose path is `/allowlist` or `/allowlist/`
 takes precedence and suppresses the built-in route.
 
-tls-lb proxies its catch-all route to one upstream, `tlsLb.upstream.address`,
+router proxies its catch-all route to one upstream, `router.upstream.address`,
 an opaque `host:port` the chart never interprets. For a workload run as the
 operator-managed headless Service (annotated `confidential.ai/cw`, see
 [Injection contract](#injection-contract)), that upstream must be the headless
@@ -709,7 +709,7 @@ is why the explicit container port is required.
 
 `c8s install --upstream <cw-id>` builds that string for you from an adopted
 workload: `<cw-id>` must be one of your `--workload-ref` ids and that ref must
-carry a `:<port>`, and install sets `tlsLb.upstream.address` to
+carry a `:<port>`, and install sets `router.upstream.address` to
 `c8s-<id>.<ns>.svc.cluster.local:<port>` (the ref's namespace and port). The
 chart recognizes that headless-Service address shape as mesh-wrapped and admits
 the plaintext http hop; any other address must be app-TLS (see below):
@@ -718,27 +718,27 @@ the plaintext http hop; any other address must be app-TLS (see below):
 c8s install --namespace c8s-system \
   --workload-ref infer=vllm/deployment/serving:8000 --wait \
   --upstream infer
-# tlsLb.upstream.address = c8s-infer.vllm.svc.cluster.local:8000
+# router.upstream.address = c8s-infer.vllm.svc.cluster.local:8000
 ```
 
-Without `--upstream`, `tlsLb.upstream.address` is used as-is: an upstream that
+Without `--upstream`, `router.upstream.address` is used as-is: an upstream that
 is not a c8s-managed workload (an existing Service, an external address). The
 chart cannot verify a manual address resolves to pod IPs the mesh intercepts,
 so it must be `protocol: https` with `tls.verify: true`: an upstream that
 terminates and authenticates TLS itself (app-TLS). There is no
 plaintext-to-unattested escape hatch and no default upstream.
 
-Leaving the upstream unset is legal: tls-lb installs and serves its cert,
+Leaving the upstream unset is legal: router installs and serves its cert,
 discovery, and any explicit routes with **no catch-all** `location /` until one
 is wired. This is the install-then-attach flow: `c8s install` stands up the
 front door, and the operator attaches the workload later (`--upstream`, or a
-verified-https `tlsLb.upstream.address` via `-f`). An unmatched request gets
+verified-https `router.upstream.address` via `-f`). An unmatched request gets
 nginx's default 404 until then.
 
 The chart rejects, at render time, with stable `kind=` markers (the same the
 chart tests assert on):
 
-- `tlslb_unsecured_upstream`: a `tlsLb.upstream.address` that is not a
+- `router_unsecured_upstream`: a `router.upstream.address` that is not a
   `c8s-<id>.<ns>.svc.cluster.local` headless-Service address is a plaintext http
   backend, or https without `tls.verify=true`. Only a verified-https (app-TLS)
   manual address is admitted; there is no acknowledgment to override this. To
@@ -747,21 +747,21 @@ chart tests assert on):
   unmeshed, and the always-on cw guard drops it, so the hop fails closed rather
   than running plaintext.
 - `workload_https_upstream`: the address is a `c8s-<id>` headless Service (a
-  mesh-wrapped upstream) with `tlsLb.upstream.protocol=https`. That hop is
+  mesh-wrapped upstream) with `router.upstream.protocol=https`. That hop is
   plaintext at the app layer (the mesh wraps it in attested mTLS), so an https
   protocol could only fail at runtime; use http for a mesh-wrapped upstream.
 
-The same secured-backend rule applies to every `tlsLb.routes[].backend`: it
+The same secured-backend rule applies to every `router.routes[].backend`: it
 must use `protocol: https` with `tls.verify: true` (app-TLS). A plaintext http
-or unverified-https route backend fails the render (`tlslb_unsecured_route`);
+or unverified-https route backend fails the render (`router_unsecured_route`);
 there is no acknowledgment to override it. Routes have no default backend, so
 this only affects routes you configure. A confidential workload is reached via
-`tlsLb.upstream` (the `--upstream` flow), not a route.
+`router.upstream` (the `--upstream` flow), not a route.
 
 The mesh guarantee holds only when `--upstream` names a real cw workload: the
 CLI checks the id is one of the adopted refs, but cannot confirm `c8s-<id>`
 fronts attested cw pods. A wrong id derives a headless Service that resolves to
-nothing (tls-lb has no backend) rather than a plaintext leak; the runtime
+nothing (router has no backend) rather than a plaintext leak; the runtime
 boundary that a peer is a genuine cw pod is the mesh's always-on cw inbound
 guard, not this render guard.
 
@@ -816,14 +816,14 @@ it:
 | `c8s-cds-ingress` | cds | `cds.port` (RA-TLS; also the NodePort route) |
 | `c8s-operator-ingress` | operator | 9443 webhook, 8081 probes, 8080 metrics |
 | `c8s-volumed-ingress` | volumed | nothing (it serves a node-local Unix socket) |
-| `c8s-tls-lb-ingress` | tls-lb | `tlsLb.nginx.httpsPort`, plus the :80 HTTP-01/redirect server in `publicTLS.mode=acme` |
+| `c8s-router-ingress` | router | `router.nginx.httpsPort`, plus the :80 HTTP-01/redirect server in `publicTLS.mode=acme` |
 
 They are ingress-only. `ratls-mesh-tcp-only-egress` already selects every pod in
 the namespace and allows all TCP, and NetworkPolicies union, so an egress rule
 on one component would be allowed by that policy regardless.
 
 **None of them restricts the source of a connection** — no rule carries a
-`from`, so each one narrows which port answers, not who may connect. tls-lb is
+`from`, so each one narrows which port answers, not who may connect. router is
 the public front door and stays reachable from off-cluster; the API server that
 dials the admission webhook has no address a selector could name; get-cert runs
 beside every adopted workload in every namespace; and the CDS NodePort route

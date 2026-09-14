@@ -1,6 +1,6 @@
-// Package cdsattest implements the tls-lb attestation + over-encryption sidecar:
+// Package cdsattest implements the router attestation + over-encryption sidecar:
 // the *dynamic* client-facing endpoints of the c8s-verify protocol. The
-// tls-lb nginx front-end terminates public TLS, serves the static CDS/mesh-CA
+// router nginx front-end terminates public TLS, serves the static CDS/mesh-CA
 // certs, and reverse-proxies the two explicit attestation endpoints
 // (attest-pq, attest-lb) and the over-encrypted application paths to this
 // sidecar on loopback. attest-pq lets an out-of-cluster JavaScript client
