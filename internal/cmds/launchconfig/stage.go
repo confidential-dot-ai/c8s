@@ -194,10 +194,13 @@ func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
 	return out, nil
 }
 
+// chooseHostInterface is a package var so tests can fake the host's routes.
+var chooseHostInterface = utilnet.ChooseHostInterface
+
 // primaryIPv4 uses Kubernetes' route-aware host-address selection, so the
 // address published to followers matches the node's own RKE2 registration.
 func primaryIPv4() (string, error) {
-	ip, err := utilnet.ChooseHostInterface()
+	ip, err := chooseHostInterface()
 	if err != nil {
 		return "", err
 	}

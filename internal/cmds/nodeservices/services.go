@@ -92,9 +92,16 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 	}
 }
 
+// chooseHostInterface is a package var so tests can fake the host's routes.
+var chooseHostInterface = utilnet.ChooseHostInterface
+
 // NodeIP reads the address selected before containerd starts its NRI plugin.
-func NodeIP() (string, error) {
-	data, err := os.ReadFile(nodeIPPath)
+func NodeIP() (string, error) { return readNodeIP("") }
+
+// readNodeIP reads PublishNodeIP's output. rootDir only rebases the fixed
+// path for tests.
+func readNodeIP(rootDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(rootDir, nodeIPPath))
 	if err != nil {
 		return "", err
 	}
@@ -106,7 +113,7 @@ func NodeIP() (string, error) {
 func PublishNodeIP(rootDir string, d *launchconfig.Document) error {
 	address := d.Node.IP
 	if address == "" {
-		ip, err := utilnet.ChooseHostInterface()
+		ip, err := chooseHostInterface()
 		if err != nil {
 			return fmt.Errorf("resolve node address: %w", err)
 		}
