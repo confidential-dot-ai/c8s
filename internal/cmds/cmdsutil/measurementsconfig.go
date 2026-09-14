@@ -2,9 +2,10 @@ package cmdsutil
 
 import (
 	"fmt"
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"log/slog"
 	"sort"
+
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 // LoadMeasurementsConfig loads a measurements config and fills the flat flag
