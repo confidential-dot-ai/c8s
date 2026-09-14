@@ -612,7 +612,7 @@ in a listed namespace before the plugin first connected is captured along with
 the genuine platform set. That is strictly narrower than the removed
 namespace-name exemption — bounded to one capture window per node and to
 concrete digests rather than "any image, forever" — but it is weaker than the
-node-CVM floor, which is why `exempt_namespaces` is left empty on `cvmMode=node`
+node-CVM floor, which is why `exempt_namespaces` is left empty on `cvmMode=bare-metal`
 and the baked floor stands alone there.
 
 ---

@@ -212,7 +212,7 @@ echo "==> nri-image-policy installer finished; plugin healthy: $health"
 {{- end }}
 
 {{/*
-Pins script for a node-as-CVM (--cvm-mode=node), where the node image bakes the
+Pins script for a node-as-CVM (--cvm-mode=bare-metal), where the node image bakes the
 plugin binary, its containerd registration and the boot config — floor included,
 whose RKE2 system digests only the image build resolves. This release's CDS pins
 are the one thing that config cannot carry, so the installer patches those two

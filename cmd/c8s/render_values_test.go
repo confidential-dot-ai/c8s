@@ -198,8 +198,8 @@ func setCvmModeForTest(t *testing.T, mode string) {
 // default to stand; a set --distro configures the NRI installer.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
+	cmd.Flags().String(flagCvmMode, "bare-metal", "")
+	setCvmModeForTest(t, "bare-metal")
 
 	// Isolate the distro logic from the crane digest path (which needs the
 	// binary on PATH); this test is about what the builder assumes, not digests.
@@ -232,8 +232,8 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 // coerce never int-coerces it (0640 -> 640 would pin the wrong image).
 func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
+	cmd.Flags().String(flagCvmMode, "bare-metal", "")
+	setCvmModeForTest(t, "bare-metal")
 	prev := installResolveDigests
 	installResolveDigests = false // tag is the sole image ref only when digests are off
 	defer func() { installResolveDigests = prev }()
@@ -259,8 +259,8 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 // derivation survives to the tree and keeps crane off PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
+	cmd.Flags().String(flagCvmMode, "bare-metal", "")
+	setCvmModeForTest(t, "bare-metal")
 
 	prevFlag := installResolveDigests
 	defer func() { installResolveDigests = prevFlag }()
@@ -347,7 +347,7 @@ var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+(\[[0-9]+\])?=[^,]*$`
 // shared path hides the divergence) with every existing test still green.
 func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
+	cmd.Flags().String(flagCvmMode, "bare-metal", "")
 	cmd.Flags().Int64("webhook-cert-fs-group", 0, "")
 	cmd.Flags().Duration("webhook-get-cert-renew-interval", 0, "")
 	cmd.Flags().Int64("webhook-get-cert-run-as-user", 0, "")
@@ -382,7 +382,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	// digest-arg shape is covered separately via buildDigestArgs below).
 	// --measurements exercises the indexed key[i]= form in a second pass below.
 	installCRDs, installSingleNode, installResolveDigests = false, true, false
-	installImagePullSecret, installCvmMode = "regcred", "node"
+	installImagePullSecret, installCvmMode = "regcred", "bare-metal"
 	installHardwarePlatform = "sev-snp"
 	installWorkloadRefs = []string{"infer=workloads/deployment/vllm:8000"}
 	installUpstream = "infer"
@@ -428,14 +428,14 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 		t.Fatalf("cds.operatorKeys = %q, want the PEM content of %s", keys, installOperatorKeys)
 	}
 
-	// Second pass: node mode with --measurements exercises the indexed key[i]=
+	// Second pass: bare-metal mode with --measurements exercises the indexed key[i]=
 	// form. Its args must also stay within the
 	// grammar and round-trip to a list.
-	installCvmMode = "node"
+	installCvmMode = "bare-metal"
 	installMeasurements = []string{strings.Repeat("ab", 48)}
 	mArgs, err := appendCvmModeInstallArgs(nil, installCvmMode, installHardwarePlatform)
 	if err != nil {
-		t.Fatalf("appendCvmModeInstallArgs (node + measurements): %v", err)
+		t.Fatalf("appendCvmModeInstallArgs (bare-metal + measurements): %v", err)
 	}
 	for i := 0; i < len(mArgs); i += 2 {
 		if kv := mArgs[i+1]; !coerceSafeValueArg.MatchString(kv) {
@@ -452,8 +452,8 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 // duplicate ref dedups to one adoption, so --upstream still resolves it.
 func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "node", "")
-	setCvmModeForTest(t, "node")
+	cmd.Flags().String(flagCvmMode, "bare-metal", "")
+	setCvmModeForTest(t, "bare-metal")
 
 	prev := struct {
 		resolveDigests bool

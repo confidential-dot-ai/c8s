@@ -246,7 +246,7 @@ spec:
             {{- end }}
             {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
+          # cvmMode=bare-metal: expands $(HOST_IP) in --attestation-api-url to the node
           # IP so this pod-netns pod reaches the node-baked host attestation-api.
           env:
             {{- . | nindent 12 }}
@@ -325,7 +325,7 @@ spec:
             {{- end }}
             {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
-          # cvmMode=node: the proxy verifies CDS through the node-baked
+          # cvmMode=bare-metal: the proxy verifies CDS through the node-baked
           # attestation-api, reached from this pod via its node IP.
           env:
             {{- . | nindent 12 }}

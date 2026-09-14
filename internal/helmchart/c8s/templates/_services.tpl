@@ -30,7 +30,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+{{- if and (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "bare-metal") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:

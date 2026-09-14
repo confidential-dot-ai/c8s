@@ -877,7 +877,7 @@ The chart ships no default image tag, so a bare `helm template` must set one.
 `c8s install` injects this for you; `main` here is the same fallback tag it
 uses for a non-release build. The simplest validation disables the image-policy
 component, so only image tags are required (no digests). Disabling it renders
-only because the chart's default `attestationApi.cvmMode=node` bakes its own
+only because the chart's default `attestationApi.cvmMode=bare-metal` bakes its own
 policy plugin and so is exempt from the `require_host_image_policy` guard; other
 modes (gke/aks) must keep nri-image-policy enabled and digest-pinned, as in the
 full-shape render below.

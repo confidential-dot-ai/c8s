@@ -986,7 +986,7 @@ func getCertEnv(inj *injection) []corev1.EnvVar {
 		{Name: "C8S_POD_UID", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 		}},
-		// cvmMode=node: the chart passes the operator a verbatim
+		// cvmMode=bare-metal: the chart passes the operator a verbatim
 		// --attestation-api-url=http://$(HOST_IP):8400, which reaches this arg
 		// (certContainer) through sidecarAttestationApiURL — its pass-through of
 		// non-unix URLs is what keeps $(HOST_IP) unexpanded. The kubelet expands
