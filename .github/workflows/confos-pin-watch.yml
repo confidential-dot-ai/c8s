@@ -6,8 +6,8 @@
 # by construction. The canonical data lives in .github/build-pins.json;
 # .github/scripts/pin-manifest.sh validates the full schema before updating it.
 #
-# One matrix leg per measurement domain, so each roll is its own PR:
-#   node-image: node rootfs / RTMR + SNP digests
+# The one measurement domain today is node-image (node rootfs / RTMR + SNP
+# digests); each roll is its own PR.
 #
 # Authentication prefers a short-lived, repository-scoped GitHub App token.
 # Checkout, push, and gh use one credential; an unconfigured App falls back to
@@ -30,11 +30,6 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - domain: node-image
     steps:
       - name: Create pin-watch GitHub App token
         id: pin-watch-app-token
@@ -53,7 +48,7 @@ jobs:
       - name: Bump stale pins and open the PR
         env:
           GH_TOKEN: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
-          DOMAIN: ${{ matrix.domain }}
+          DOMAIN: node-image
         run: |
           set -euo pipefail
           confos=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main --jq .sha)

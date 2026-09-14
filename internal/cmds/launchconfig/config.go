@@ -8,12 +8,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha512"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/netip"
@@ -22,9 +19,11 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -33,10 +32,12 @@ import (
 const (
 	SchemaVersion            = "c8s-launch/v1"
 	DefaultAttestationAPIURL = "http://127.0.0.1:8400"
-	DefaultStagedPath        = "/run/confos/launch/config.json"
-	MaxDocumentSize          = 1024 * 1024
-	maxSignatureSize         = 4096
-	maxFollowerKeys          = 128
+	// Dir holds the root-only artifacts Stage writes for the node services.
+	Dir               = "/run/confos/launch"
+	DefaultStagedPath = Dir + "/config.json"
+	MaxDocumentSize   = 1024 * 1024
+	maxSignatureSize  = 4096
+	maxFollowerKeys   = 128
 )
 
 // Role selects the services started for this boot, without changing its image.
@@ -100,9 +101,6 @@ type Config struct {
 	DocumentPath      string
 	SignaturePath     string
 	RootDir           string
-	// ResolveNodeIP defaults to the same primary-interface selection RKE2
-	// uses. It is consulted only when a leader omits both addresses.
-	ResolveNodeIP func() (string, error)
 }
 
 var loadMeasuredOperatorKeyAndOwnMeasurement = credrelease.LoadMeasuredOperatorKeyAndOwnMeasurement
@@ -139,7 +137,9 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	if api == "" {
 		api = DefaultAttestationAPIURL
 	}
-	pub, pubErr, digest, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, string(platform), api)
+	// credrelease compares against the verified report's family ("sev-snp",
+	// "tdx"), not the launch tag ("snp", "tdx").
+	pub, pubErr, digest, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, string(platform.Family()), api)
 	if err != nil {
 		return nil, fmt.Errorf("verify this boot's identity: %w", err)
 	}
@@ -270,17 +270,16 @@ func checkYAML(n *yaml.Node, depth int) error {
 	return nil
 }
 
-var labelRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 var tokenRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (d *Document) validate() error {
 	if d.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schemaVersion must be %s", SchemaVersion)
 	}
-	if !labelRE.MatchString(d.ClusterID) {
+	if !dnsLabel(d.ClusterID) {
 		return fmt.Errorf("clusterID must be an RFC1123 label")
 	}
-	if !labelRE.MatchString(d.Node.Name) {
+	if !dnsLabel(d.Node.Name) {
 		return fmt.Errorf("node.name must be an RFC1123 label")
 	}
 	if d.Role != Leader && d.Role != Follower {
@@ -300,12 +299,12 @@ func (d *Document) validate() error {
 		return fmt.Errorf("SNP image cannot carry RTMR pins")
 	}
 	if d.Leader.Address != "" || d.Role == Follower {
-		if err := ipv4(d.Leader.Address, true); err != nil {
+		if err := ValidateIPv4(d.Leader.Address, true); err != nil {
 			return fmt.Errorf("leader.address: %w", err)
 		}
 	}
 	if d.Node.IP != "" {
-		if err := ipv4(d.Node.IP, false); err != nil {
+		if err := ValidateIPv4(d.Node.IP, false); err != nil {
 			return fmt.Errorf("node.ip: %w", err)
 		}
 		if d.Node.IP == "0.0.0.0" {
@@ -313,7 +312,7 @@ func (d *Document) validate() error {
 		}
 	}
 	if d.Node.ExternalIP != "" {
-		if err := ipv4(d.Node.ExternalIP, true); err != nil {
+		if err := ValidateIPv4(d.Node.ExternalIP, true); err != nil {
 			return fmt.Errorf("node.externalIP: %w", err)
 		}
 	}
@@ -360,7 +359,7 @@ func (d *Document) validate() error {
 		return fmt.Errorf("tlsSAN exceeds DNS name length")
 	}
 	for _, label := range strings.Split(d.TLSSAN, ".") {
-		if !labelRE.MatchString(label) {
+		if !dnsLabel(label) {
 			return fmt.Errorf("tlsSAN must be a lowercase DNS hostname")
 		}
 	}
@@ -398,20 +397,10 @@ func parseLaunchKey(raw string) (*ecdsa.PublicKey, error) {
 	if len(raw) > 8192 {
 		return nil, fmt.Errorf("launch public key is too large")
 	}
-	block, rest := pem.Decode([]byte(raw))
-	if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
-		return nil, fmt.Errorf("expected exactly one PEM PUBLIC KEY without headers")
-	}
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse public key: %w", err)
-	}
-	key, ok := pub.(*ecdsa.PublicKey)
-	if !ok || key.Curve != elliptic.P256() {
-		return nil, fmt.Errorf("launch key must be ECDSA P-256")
-	}
-	return key, nil
+	return measurements.ParsePublicKeyPEM([]byte(raw))
 }
+
+func dnsLabel(s string) bool { return len(validation.IsDNS1123Label(s)) == 0 }
 
 func registerHex(s string) bool {
 	if len(s) != sha512.Size384*2 || s != strings.ToLower(s) {
@@ -423,7 +412,9 @@ func registerHex(s string) bool {
 
 func mustDecodeHex(s string) []byte { b, _ := hex.DecodeString(s); return b }
 
-func ipv4(raw string, routable bool) error {
+// ValidateIPv4 accepts an IPv4 address; routable additionally requires
+// global unicast, so loopback and unspecified addresses cannot be published.
+func ValidateIPv4(raw string, routable bool) error {
 	addr, err := netip.ParseAddr(raw)
 	if err != nil || !addr.Is4() {
 		return fmt.Errorf("must be an IPv4 address")
@@ -447,11 +438,11 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
 		return nil, fmt.Errorf("%s must be a regular file containing 1..%d bytes", path, limit)
 	}
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	data, err := readutil.ReadAll(f, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if len(data) == 0 || int64(len(data)) > limit {
+	if len(data) == 0 {
 		return nil, fmt.Errorf("%s exceeded the bounded read", path)
 	}
 	return data, nil

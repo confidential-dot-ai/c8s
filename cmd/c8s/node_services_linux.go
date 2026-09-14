@@ -10,28 +10,31 @@ import (
 )
 
 func init() {
+	staged := func() (*launchconfig.Document, error) {
+		return launchconfig.LoadStaged(launchconfig.DefaultStagedPath)
+	}
 	cmd := &cobra.Command{Use: "node-services", Short: "Run the image's authenticated host services"}
 	cmd.AddCommand(&cobra.Command{Use: "prepare", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-		doc, err := launchconfig.LoadStaged(launchconfig.DefaultStagedPath)
+		doc, err := staged()
 		if err != nil {
 			return err
 		}
 		return nodeservices.Prepare("", doc)
 	}})
 	cmd.AddCommand(&cobra.Command{Use: "node-ip", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-		doc, err := launchconfig.LoadStaged(launchconfig.DefaultStagedPath)
+		doc, err := staged()
 		if err != nil {
 			return err
 		}
 		return nodeservices.PublishNodeIP("", doc)
 	}})
 	cmd.AddCommand(&cobra.Command{Use: "run SERVICE", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		doc, err := launchconfig.LoadStaged(launchconfig.DefaultStagedPath)
+		doc, err := staged()
 		if err != nil {
 			return err
 		}
 		var ip string
-		if args[0] == "mesh" || args[0] == "mesh-sync" {
+		if nodeservices.NeedsNodeIP(args[0]) {
 			ip, err = nodeservices.NodeIP()
 			if err != nil {
 				return err

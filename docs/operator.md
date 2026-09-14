@@ -218,8 +218,8 @@ public-key hash as HOST_DATA; attaching the disk alone is insufficient.
 
 `c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
 and writes an ASN.1 DER signature encoded as one base64 line to
-`<file>.sig`. It does not overwrite an existing signature. Any later edit
-requires a new signature. At boot, `rke2-role.service` calls
+`<file>.sig`. It does not overwrite an existing signature unless `--force`
+is passed. Any later edit requires a new signature. At boot, `rke2-role.service` calls
 `c8s launch-config stage`, which authenticates those bytes before parsing,
 checks the complete software measurement and role-key relationship against
 verified self-attestation, then publishes the role marker last. Missing,

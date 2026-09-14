@@ -42,23 +42,12 @@ func resolveMeasurementsConfig(cfg *config) (measurements.ReferenceValues, error
 		slog.Warn("measurements config pins different registers per image: /attest matches whole images, but legacy flat diagnostics are digest-only",
 			"images", len(set.Entries))
 	}
-	for _, idx := range sortedIndices(common) {
-		cfg.rtmrs = append(cfg.rtmrs, fmt.Sprintf("%d=%x", idx, common[idx]))
-	}
+	cfg.rtmrs = measurements.FormatRTMRPins(common)
 	if _, err := refvalues.ParseRTMRPins(cfg.rtmrs); err != nil {
 		return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config: %w", err)
 	}
 	slog.Info("measurements config loaded", "tee", set.TEE, "images", len(set.Entries))
 	return set, nil
-}
-
-func sortedIndices(m map[int][]byte) []int {
-	out := make([]int, 0, len(m))
-	for i := range m {
-		out = append(out, i)
-	}
-	sort.Ints(out)
-	return out
 }
 
 // servedFamily names the platform the served document declares. The flat flags

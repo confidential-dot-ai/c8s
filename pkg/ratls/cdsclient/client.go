@@ -82,11 +82,6 @@ type Config struct {
 	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
 	CDSRTMRs map[int][]byte
 
-	// CDSImagePins pins CDS as a whole image — a launch digest together with
-	// the registers measured from the same build. When set it replaces
-	// CDSMeasurements and CDSRTMRs.
-	CDSImagePins []remote.ImagePin
-
 	// CDSEntries additionally binds the CDS image to its authorized leader key.
 	CDSEntries []measurements.Entry
 
@@ -115,7 +110,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Entries: cfg.CDSEntries, Policy: remote.Policy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Images: cfg.CDSImagePins}, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Entries: cfg.CDSEntries, Policy: remote.Policy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

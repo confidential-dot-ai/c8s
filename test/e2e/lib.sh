@@ -25,3 +25,15 @@ cw_namespace() {
 
 # cw_namespace_owned lets cleanup check ownership without adopting old state.
 cw_namespace_owned() { [ "${CW_NAMESPACE_CREATED:-}" = "$1" ]; }
+
+# cds_measurement_args fills the measurement_args array with the CDS endpoint
+# pin: a complete policy file (C8S_MEASUREMENTS_CONFIG) when supplied, else the
+# legacy launch-only digest (C8S_MEASUREMENTS), which is then required.
+cds_measurement_args() {
+  if [ -n "${C8S_MEASUREMENTS_CONFIG:-}" ]; then
+    measurement_args=(--measurements-config "$C8S_MEASUREMENTS_CONFIG")
+  else
+    : "${C8S_MEASUREMENTS:?pins the launch measurement of the CDS endpoint}"
+    measurement_args=(--measurements "$C8S_MEASUREMENTS")
+  fi
+}

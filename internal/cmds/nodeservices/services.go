@@ -4,7 +4,6 @@ package nodeservices
 
 import (
 	"fmt"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,12 +11,11 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
-	utilnet "k8s.io/apimachinery/pkg/util/net"
 )
 
 const (
-	launchDir     = "/run/confos/launch/"
-	apiURL        = "http://127.0.0.1:8400"
+	launchDir     = launchconfig.Dir + "/"
+	apiURL        = launchconfig.DefaultAttestationAPIURL
 	kubeletConfig = "/var/lib/rancher/rke2/agent/kubelet.kubeconfig"
 	nodeIPPath    = "/var/run/nri-image-policy/node-ip"
 )
@@ -31,17 +29,14 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 	if d.Role != launchconfig.Leader && d.Role != launchconfig.Follower {
 		return nil, fmt.Errorf("invalid staged role")
 	}
-	switch service {
-	case "mesh", "mesh-sync":
-		ip, err := netip.ParseAddr(nodeIP)
-		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() {
+	switch {
+	case NeedsNodeIP(service):
+		if err := launchconfig.ValidateIPv4(nodeIP, true); err != nil {
 			return nil, fmt.Errorf("mesh requires the routable node IPv4 address")
 		}
-	case "attest-proxy":
-	default:
-		if d.Role != launchconfig.Leader {
-			return nil, fmt.Errorf("%s is a leader-only service", service)
-		}
+	case service == "attest-proxy":
+	case d.Role != launchconfig.Leader:
+		return nil, fmt.Errorf("%s is a leader-only service", service)
 	}
 	cds := "--cds-url=" + d.CDSURL()
 	api := "--attestation-api-url=" + apiURL
@@ -92,8 +87,11 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 	}
 }
 
-// chooseHostInterface is a package var so tests can fake the host's routes.
-var chooseHostInterface = utilnet.ChooseHostInterface
+// NeedsNodeIP reports the services that bind the node's own routable address.
+func NeedsNodeIP(service string) bool { return service == "mesh" || service == "mesh-sync" }
+
+// primaryIPv4 is a package var so tests can fake the host's routes.
+var primaryIPv4 = launchconfig.PrimaryIPv4
 
 // NodeIP reads the address selected before containerd starts its NRI plugin.
 func NodeIP() (string, error) { return readNodeIP("") }
@@ -113,14 +111,12 @@ func readNodeIP(rootDir string) (string, error) {
 func PublishNodeIP(rootDir string, d *launchconfig.Document) error {
 	address := d.Node.IP
 	if address == "" {
-		ip, err := chooseHostInterface()
-		if err != nil {
+		var err error
+		if address, err = primaryIPv4(); err != nil {
 			return fmt.Errorf("resolve node address: %w", err)
 		}
-		address = ip.String()
 	}
-	ip, err := netip.ParseAddr(address)
-	if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() {
+	if err := launchconfig.ValidateIPv4(address, true); err != nil {
 		return fmt.Errorf("node inventory requires a routable IPv4 address")
 	}
 	dst := filepath.Join(rootDir, nodeIPPath)

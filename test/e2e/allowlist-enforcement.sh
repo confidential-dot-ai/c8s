@@ -13,12 +13,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 : "${C8S_ALLOWLIST_URL:?names the RA-TLS CDS or router endpoint}"
-if [ -n "${C8S_MEASUREMENTS_CONFIG:-}" ]; then
-  measurement_args=(--measurements-config "$C8S_MEASUREMENTS_CONFIG")
-else
-  : "${C8S_MEASUREMENTS:?pins the launch measurement of that endpoint}"
-  measurement_args=(--measurements "$C8S_MEASUREMENTS")
-fi
+cds_measurement_args
 : "${C8S_OPERATOR_KEY:?path to the operator EC key PEM}"
 
 # The node image enforces the restricted PodSecurity standard in `default`,

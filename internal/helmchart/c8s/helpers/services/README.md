@@ -3,6 +3,10 @@
 Source: [templates/_services.tpl](../../templates/_services.tpl).
 [All helpers](../README.md).
 
+`c8s.attestationApiSocketPresent` is the one predicate for "a node-local
+attestation socket exists": non-empty when `attestationApi.enabled` or
+`node.bakedServices` is set. The helpers below branch on it.
+
 `c8s.attestationApiURL` selects the endpoint available to its consumer:
 
 | Values | Endpoint |

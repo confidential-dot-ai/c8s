@@ -2,7 +2,6 @@ package nodeservices
 
 import (
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,19 +39,19 @@ func TestNodeIPRoundTrip(t *testing.T) {
 }
 
 func TestPublishNodeIPResolvesTheHostRoute(t *testing.T) {
-	old := chooseHostInterface
-	t.Cleanup(func() { chooseHostInterface = old })
+	old := primaryIPv4
+	t.Cleanup(func() { primaryIPv4 = old })
 	doc := document(launchconfig.Follower)
 
-	chooseHostInterface = func() (net.IP, error) { return nil, errors.New("no default route") }
+	primaryIPv4 = func() (string, error) { return "", errors.New("no default route") }
 	if err := PublishNodeIP(t.TempDir(), doc); err == nil || !strings.Contains(err.Error(), "no default route") {
 		t.Fatalf("route failure: %v", err)
 	}
-	chooseHostInterface = func() (net.IP, error) { return net.ParseIP("2001:db8::1"), nil }
+	primaryIPv4 = func() (string, error) { return "2001:db8::1", nil }
 	if err := PublishNodeIP(t.TempDir(), doc); err == nil || !strings.Contains(err.Error(), "IPv4") {
 		t.Fatalf("IPv6 route: %v", err)
 	}
-	chooseHostInterface = func() (net.IP, error) { return net.ParseIP("192.0.2.30"), nil }
+	primaryIPv4 = func() (string, error) { return "192.0.2.30", nil }
 	root := t.TempDir()
 	if err := PublishNodeIP(root, doc); err != nil {
 		t.Fatal(err)

@@ -32,12 +32,7 @@ image=$(grep -oE '[[:graph:]]+@sha256:[0-9a-f]{64}' "$manifest" | head -1)
 
 if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
   : "${C8S_ALLOWLIST_URL:?needed alongside C8S_OPERATOR_KEY}"
-  if [ -n "${C8S_MEASUREMENTS_CONFIG:-}" ]; then
-    measurement_args=(--measurements-config "$C8S_MEASUREMENTS_CONFIG")
-  else
-    : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
-    measurement_args=(--measurements "$C8S_MEASUREMENTS")
-  fi
+  cds_measurement_args
   c8s allowlist add "${image#*@}" "$image" \
     --url "$C8S_ALLOWLIST_URL" "${measurement_args[@]}" >/dev/null \
     || fail "signed allowlist write rejected for the workload digest"

@@ -59,10 +59,6 @@ type AttestHandler struct {
 	// its launch digest). Empty = no RTMR pinning.
 	RTMRs map[int][]byte
 
-	// ImagePins pins whole images. When set it replaces Measurements and RTMRs,
-	// so a digest from one image cannot be paired with another's registers.
-	ImagePins []remote.ImagePin
-
 	// NodeEntries binds each node image to an authorized launch key.
 	NodeEntries []nodepolicy.Entry
 
@@ -213,12 +209,6 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		if err := nodepolicy.EnforceEntries(verifyResp, h.NodeEntries, string(req.Evidence.Platform)); err != nil {
 			slog.Warn("node identity does not match policy", "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "node identity not allowed")
-			return
-		}
-	} else if len(h.ImagePins) > 0 {
-		if err := remote.EnforceImages(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
-			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
-			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
 		}
 	} else {

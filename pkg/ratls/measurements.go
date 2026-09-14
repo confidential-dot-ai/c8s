@@ -10,14 +10,13 @@ import (
 type Pins struct {
 	Measurements [][]byte
 	RTMRs        map[int][]byte
-	Images       []remote.ImagePin
 	Entries      []measurements.Entry
 }
 
 // VerifyPolicy is the single conversion used by c8s peer verifiers.
 func (p Pins) VerifyPolicy(url string) *VerifyPolicy {
 	return &VerifyPolicy{
-		Policy:            remote.Policy{Measurements: p.Measurements, RTMRs: p.RTMRs, Images: p.Images},
+		Policy:            remote.Policy{Measurements: p.Measurements, RTMRs: p.RTMRs},
 		Entries:           p.Entries,
 		AttestationApiURL: url,
 	}

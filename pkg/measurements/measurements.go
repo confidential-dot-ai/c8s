@@ -26,7 +26,6 @@ const (
 	TEESNP         = string(teetypes.FamilySNP)
 	TEETDX         = string(teetypes.FamilyTDX)
 	DigestSize     = refvalues.DigestSize
-	MaxRTMRs       = 4
 )
 
 // Entry pins an image and, optionally, its exact launch-bound operator PEM.
@@ -160,29 +159,53 @@ func Parse(data []byte) (ReferenceValues, error) {
 }
 
 func parseOperatorKey(raw json.RawMessage, i int) ([]byte, error) {
-	at := fmt.Sprintf("measurements[%d]", i)
-	if raw != nil {
-		var text string
-		if err := json.Unmarshal(raw, &text); err != nil {
-			return nil, fmt.Errorf("%s.operator_key: %w", at, err)
-		}
-		key := []byte(text)
-		block, rest := pem.Decode(key)
-		if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 || !bytes.HasPrefix(bytes.TrimSpace(key), []byte("-----BEGIN PUBLIC KEY-----")) {
-			return nil, fmt.Errorf("%s.operator_key: want one PEM PUBLIC KEY", at)
-		}
-		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("%s.operator_key: %w", at, err)
-		}
-		ec, ok := pub.(*ecdsa.PublicKey)
-		if !ok || ec.Curve != elliptic.P256() {
-			return nil, fmt.Errorf("%s.operator_key: want an ECDSA P-256 key", at)
-		}
-		return key, nil
+	if raw == nil {
+		return nil, nil
 	}
+	at := fmt.Sprintf("measurements[%d].operator_key", i)
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, fmt.Errorf("%s: %w", at, err)
+	}
+	key := []byte(text)
+	if _, err := ParsePublicKeyPEM(key); err != nil {
+		return nil, fmt.Errorf("%s: %w", at, err)
+	}
+	return key, nil
+}
 
-	return nil, nil
+// ParsePublicKeyPEM accepts exactly one headerless PEM PUBLIC KEY block, with
+// nothing before or after it, holding an ECDSA P-256 key. It is the one strict
+// parser for operator and launch keys, which are pinned byte-for-byte.
+func ParsePublicKeyPEM(key []byte) (*ecdsa.PublicKey, error) {
+	block, rest := pem.Decode(key)
+	if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 || !bytes.HasPrefix(bytes.TrimSpace(key), []byte("-----BEGIN PUBLIC KEY-----")) {
+		return nil, fmt.Errorf("want one PEM PUBLIC KEY")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	ec, ok := pub.(*ecdsa.PublicKey)
+	if !ok || ec.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("want an ECDSA P-256 key")
+	}
+	return ec, nil
+}
+
+// FormatRTMRPins renders register pins as the "<index>=<hex>" flag form, in
+// index order so the output is stable for the flat flags and helm values.
+func FormatRTMRPins(rtmrs map[int][]byte) []string {
+	indices := make([]int, 0, len(rtmrs))
+	for idx := range rtmrs {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	pins := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		pins = append(pins, fmt.Sprintf("%d=%x", idx, rtmrs[idx]))
+	}
+	return pins
 }
 
 // Format uses the shared image formatter before adding exact operator PEM bytes.
@@ -349,6 +372,3 @@ func ParseServed(data []byte) (ReferenceValues, error) {
 	}
 	return ReferenceValues{TEE: string(rv.Family)}, nil
 }
-
-// Serve renders the exact enforced node policy, including an empty set.
-func Serve(s ReferenceValues) ([]byte, error) { return Format(s) }

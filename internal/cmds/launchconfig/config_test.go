@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,11 +122,11 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				if staged.Role != role || staged.TLSSAN != "c8s.local" || staged.Node.IP != "" {
 					t.Fatalf("incorrect staged role/default/address")
 				}
-				peers, err := measurements.Load(cfg.path(launchDir + "/peers.json"))
+				peers, err := measurements.Load(cfg.path(Dir + "/peers.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				cds, err := measurements.Load(cfg.path(launchDir + "/cds.json"))
+				cds, err := measurements.Load(cfg.path(Dir + "/cds.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -170,7 +171,7 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 						t.Fatal("follower does not join signed leader")
 					}
 				}
-				for _, path := range []string{DefaultStagedPath, agentTokenPath, launchDir + "/workloads.json", rke2FragmentPath} {
+				for _, path := range []string{DefaultStagedPath, agentTokenPath, Dir + "/workloads.json", rke2FragmentPath} {
 					info, err := os.Stat(cfg.path(path))
 					if err != nil {
 						t.Fatal(err)
@@ -178,13 +179,6 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					if info.Mode().Perm() != 0o600 {
 						t.Fatalf("%s mode = %v", path, info.Mode())
 					}
-				}
-				env, err := os.ReadFile(cfg.path(launchDir + "/env"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if bytes.Contains(env, []byte(doc.RKE2.AgentToken)) {
-					t.Fatal("environment leaked agent token")
 				}
 			})
 		}
@@ -385,11 +379,16 @@ func TestLeaderAddressResolution(t *testing.T) {
 			doc.Node.IP = tc.nodeIP
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
-			cfg.ResolveNodeIP = func() (string, error) {
+			old := chooseHostInterface
+			t.Cleanup(func() { chooseHostInterface = old })
+			chooseHostInterface = func() (net.IP, error) {
 				if tc.nodeIP != "" {
 					t.Fatal("resolver should not replace signed node IP")
 				}
-				return tc.resolved, tc.resolveErr
+				if tc.resolveErr != nil {
+					return nil, tc.resolveErr
+				}
+				return net.ParseIP(tc.resolved), nil
 			}
 			err := Stage(context.Background(), cfg)
 			if tc.want == "" {

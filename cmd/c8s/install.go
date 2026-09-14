@@ -33,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -247,7 +248,7 @@ func preflightNotBakedNode(ctx context.Context) error {
 	out, err := exec.CommandContext(ctx, "kubectl", "get", "namespace", "c8s-system",
 		"-o", "json", "--ignore-not-found").Output()
 	if err != nil {
-		return fmt.Errorf("inspect c8s-system namespace: %w", execErrOutput(err))
+		return fmt.Errorf("inspect c8s-system namespace: %w", withStderr(err))
 	}
 	if strings.TrimSpace(string(out)) == "" {
 		return nil
@@ -264,17 +265,6 @@ func preflightNotBakedNode(ctx context.Context) error {
 		return nil
 	}
 	return fmt.Errorf("c8s-system carries confidential.ai/baked=true: this node image owns the core services, operator and admission policies; configure its signed launch.yaml and workloads instead of running c8s install")
-}
-
-// execErrOutput enriches err with the command's stderr, if it carried one
-// (an *exec.ExitError does; other exec errors, e.g. "executable not found",
-// do not), so a kubectl failure surfaces the server's own reason.
-func execErrOutput(err error) error {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
-	}
-	return err
 }
 
 // preflightRouterHostPort fails fast when router's host port is already bound on
@@ -1506,7 +1496,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// list matches exactly what was validated (a blank/whitespace entry, e.g.
 	// from a trailing comma, is dropped by the parser, not silently emitted as
 	// an empty pin that would disable pinning at that index).
-	measurements, rtmrs, pinArgs, err := installPins()
+	digests, rtmrs, pinArgs, err := installPins()
 	if err != nil {
 		return nil, err
 	}
@@ -1514,7 +1504,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In bare-metal/gke/aks the node IS the CVM, so that
 	// is the node image's M.
-	for i, m := range measurements {
+	for i, m := range digests {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
@@ -1525,13 +1515,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	indices := make([]int, 0, len(rtmrs))
-	for idx := range rtmrs {
-		indices = append(indices, idx)
-	}
-	sort.Ints(indices)
-	for i, idx := range indices {
-		pin := fmt.Sprintf("%d=%x", idx, rtmrs[idx])
+	for i, pin := range measurements.FormatRTMRPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),

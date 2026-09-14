@@ -5,7 +5,6 @@ package ratlsmesh
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
@@ -55,16 +54,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, er
 // flatPins fills legacy diagnostics; verification always keeps the entries.
 func flatPins(set measurements.ReferenceValues) (string, string) {
 	common, _ := set.CommonRTMRs()
-	indices := make([]int, 0, len(common))
-	for idx := range common {
-		indices = append(indices, idx)
-	}
-	sort.Ints(indices)
-	pins := make([]string, 0, len(indices))
-	for _, idx := range indices {
-		pins = append(pins, fmt.Sprintf("%d=%x", idx, common[idx]))
-	}
-	return strings.Join(set.HexDigests(), ","), strings.Join(pins, ",")
+	return strings.Join(set.HexDigests(), ","), strings.Join(measurements.FormatRTMRPins(common), ",")
 }
 
 // checkTEEMatchesPlatform reports a config written for the other platform. It

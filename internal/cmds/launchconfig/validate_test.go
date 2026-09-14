@@ -251,11 +251,11 @@ func TestPrimaryIPv4FollowsTheHostRoute(t *testing.T) {
 	old := chooseHostInterface
 	t.Cleanup(func() { chooseHostInterface = old })
 	chooseHostInterface = func() (net.IP, error) { return nil, errors.New("no default route") }
-	if _, err := primaryIPv4(); err == nil {
+	if _, err := PrimaryIPv4(); err == nil {
 		t.Fatal("route failure ignored")
 	}
 	chooseHostInterface = func() (net.IP, error) { return net.ParseIP("192.0.2.9"), nil }
-	if ip, err := primaryIPv4(); err != nil || ip != "192.0.2.9" {
+	if ip, err := PrimaryIPv4(); err != nil || ip != "192.0.2.9" {
 		t.Fatalf("got %q, %v", ip, err)
 	}
 
@@ -303,5 +303,28 @@ func TestStageCommandFailsClosed(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "platform") {
 		t.Fatalf("unsupported platform: %v", err)
+	}
+}
+
+// The self-report loader compares against the verified family name, which for
+// SNP ("sev-snp") differs from the launch platform tag ("snp").
+func TestVerifyPassesTheFamilyNameToTheSelfReport(t *testing.T) {
+	for platform, family := range map[string]string{"snp": "sev-snp", "tdx": "tdx"} {
+		t.Run(platform, func(t *testing.T) {
+			doc, key, pub := testDocument(t, platform, Leader)
+			testLoader(t, doc, pub)
+			inner := loadMeasuredOperatorKeyAndOwnMeasurement
+			var got string
+			loadMeasuredOperatorKeyAndOwnMeasurement = func(ctx context.Context, platform, api string) ([]byte, error, []byte, map[int][]byte, error) {
+				got = platform
+				return inner(ctx, platform, api)
+			}
+			if _, err := Verify(context.Background(), testConfig(t, doc, key)); err != nil {
+				t.Fatal(err)
+			}
+			if got != family {
+				t.Fatalf("self-report asked for platform %q, want family %q", got, family)
+			}
+		})
 	}
 }

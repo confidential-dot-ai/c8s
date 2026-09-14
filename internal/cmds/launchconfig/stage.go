@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	launchDir           = "/run/confos/launch"
 	serverMarker        = "/run/confos/role-server"
 	agentMarker         = "/run/confos/role-agent"
 	serverTokenPath     = "/run/confos/rke2-server-token"
@@ -55,8 +54,8 @@ func clearOutputs(cfg Config) error {
 	// attempting to remove the other.
 	var errs []error
 	paths := []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, rke2FragmentPath, runtimeManifestPath}
-	for _, name := range []string{"peers.json", "cds.json", "operator-pubkey", "config.json", "env", "workloads.json"} {
-		paths = append(paths, launchDir+"/"+name)
+	for _, name := range []string{"peers.json", "cds.json", "operator-pubkey", "config.json", "workloads.json"} {
+		paths = append(paths, Dir+"/"+name)
 	}
 	for _, path := range paths {
 		if err := os.Remove(cfg.path(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -76,17 +75,13 @@ func stageVerified(cfg Config, v *Verified) error {
 	if doc.Role == Leader && doc.Leader.Address == "" {
 		address := doc.Node.IP
 		if address == "" {
-			resolve := cfg.ResolveNodeIP
-			if resolve == nil {
-				resolve = primaryIPv4
-			}
 			var err error
-			address, err = resolve()
+			address, err = PrimaryIPv4()
 			if err != nil {
 				return fmt.Errorf("resolve leader address: %w", err)
 			}
 		}
-		if err := ipv4(address, true); err != nil {
+		if err := ValidateIPv4(address, true); err != nil {
 			return fmt.Errorf("resolved leader address: %w", err)
 		}
 		doc.Leader.Address = address
@@ -109,16 +104,15 @@ func stageVerified(cfg Config, v *Verified) error {
 		return fmt.Errorf("encode RKE2 role fragment: %w", err)
 	}
 	outputs := []outputFile{
-		{launchDir + "/peers.json", peers},
-		{launchDir + "/cds.json", cds},
-		{launchDir + "/operator-pubkey", v.operatorPub},
-		{launchDir + "/config.json", append(encoded, '\n')},
-		{launchDir + "/env", environment(doc)},
+		{Dir + "/peers.json", peers},
+		{Dir + "/cds.json", cds},
+		{Dir + "/operator-pubkey", v.operatorPub},
+		{Dir + "/config.json", append(encoded, '\n')},
 		{agentTokenPath, []byte(doc.RKE2.AgentToken)},
 		{rke2FragmentPath, fragment},
 	}
 	if doc.Workloads != "" {
-		outputs = append(outputs, outputFile{launchDir + "/workloads.json", []byte(doc.Workloads)})
+		outputs = append(outputs, outputFile{Dir + "/workloads.json", []byte(doc.Workloads)})
 	}
 	marker := agentMarker
 	if doc.Role == Leader {
@@ -167,14 +161,6 @@ func rke2Fragment(doc *Document) roleFragment {
 	return out
 }
 
-func environment(doc *Document) []byte {
-	// Every value is either fixed or constrained by validation to a single
-	// hostname/address/label. Tokens and arbitrary workload JSON never enter
-	// an environment file or command line.
-	return []byte(fmt.Sprintf("ROLE=%s\nCLUSTER_ID=%s\nNODE_NAME=%s\nNODE_IP=%s\nLEADER_ADDRESS=%s\nCDS_URL=%s\nTLS_SAN=%s\n",
-		doc.Role, doc.ClusterID, doc.Node.Name, doc.Node.IP, doc.Leader.Address, doc.CDSURL(), doc.TLSSAN))
-}
-
 func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
 	manifest := struct {
 		APIVersion string `yaml:"apiVersion"`
@@ -197,9 +183,9 @@ func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
 // chooseHostInterface is a package var so tests can fake the host's routes.
 var chooseHostInterface = utilnet.ChooseHostInterface
 
-// primaryIPv4 uses Kubernetes' route-aware host-address selection, so the
+// PrimaryIPv4 uses Kubernetes' route-aware host-address selection, so the
 // address published to followers matches the node's own RKE2 registration.
-func primaryIPv4() (string, error) {
+func PrimaryIPv4() (string, error) {
 	ip, err := chooseHostInterface()
 	if err != nil {
 		return "", err

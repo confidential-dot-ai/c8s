@@ -97,8 +97,15 @@ func TestSignLaunchRefusesToOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := runSign(keyPath, launchPath)
-	if err == nil || !strings.Contains(err.Error(), "launch.yaml.sig") {
-		t.Fatalf("want refusal naming the existing sig file, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "launch.yaml.sig") || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("want refusal naming the existing sig file and --force, got %v", err)
+	}
+	if err := runSign(keyPath, launchPath, "--force"); err != nil {
+		t.Fatalf("--force: %v", err)
+	}
+	sig, err := os.ReadFile(launchPath + ".sig")
+	if err != nil || string(sig) == "existing" {
+		t.Fatalf("--force did not replace the signature: %q, %v", sig, err)
 	}
 }
 

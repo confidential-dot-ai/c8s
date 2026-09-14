@@ -10,7 +10,7 @@ import (
 // A verifier must be able to read the policy a component reports as enforced,
 // including the empty set an unpinned component publishes.
 func TestServeAndParseServedRoundTrip(t *testing.T) {
-	empty, err := Serve(ReferenceValues{TEE: TEESNP})
+	empty, err := Format(ReferenceValues{TEE: TEESNP})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestServeAndParseServedRoundTrip(t *testing.T) {
 	}
 
 	key := operatorPEM(t, elliptic.P256())
-	pinned, err := Serve(ReferenceValues{TEE: TEETDX, Entries: []Entry{{
+	pinned, err := Format(ReferenceValues{TEE: TEETDX, Entries: []Entry{{
 		Name: "leader", Digest: mustHex(t, d1), RTMRs: map[int][]byte{1: mustHex(t, r1)}, OperatorKey: key,
 	}}})
 	if err != nil {
