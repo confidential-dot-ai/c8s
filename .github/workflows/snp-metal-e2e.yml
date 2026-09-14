@@ -305,7 +305,16 @@ jobs:
               [ "\$HC" = "200" ] && { NRIOK=1; say NRI_PLUGIN_READY; break; }
               sleep 5
             done
-            [ "\$NRIOK" = "1" ] || say WARN_NRI_NOT_READY
+            if [ "\$NRIOK" != "1" ]; then
+              say WARN_NRI_NOT_READY
+              # The installer is the plugin's only way onto the node. When it
+              # crashloops, the reason is in its container log and in the
+              # containerd journal; neither reaches this log otherwise.
+              \$K -n c8s-system get pods -l app.kubernetes.io/component=nri-installer-worker -o wide --no-headers 2>&1 | sed 's/^/@@NRIPOD /;s/\$/@@/'
+              \$K -n c8s-system logs ds/c8s-nri-image-policy-worker -c install --tail=20 2>&1 | sed 's/^/@@NRIINST /;s/\$/@@/'
+              \$K -n c8s-system logs ds/c8s-nri-image-policy-worker -c install --previous --tail=20 2>&1 | sed 's/^/@@NRIPREV /;s/\$/@@/'
+              journalctl -u rke2-server --no-pager -n 500 2>/dev/null | grep -i 'nri' | tail -12 | sed 's/^/@@NRIJRNL /;s/\$/@@/'
+            fi
             # Live-cluster e2e suites from the merge-under-test's own source.
             # A suite failure fails the lane (FAIL_ marker -> no PAYLOAD_OK).
             # Only markers reach the run log, so a suite's own stdout lands in
