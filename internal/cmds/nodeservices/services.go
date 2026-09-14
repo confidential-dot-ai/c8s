@@ -59,6 +59,7 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 			"--measurements-config=" + launchDir + "peers.json",
 			"--cds-measurements-config=" + launchDir + "cds.json", cds,
 			"--cert-mode=cds", "--cert-dns-san=ratls-mesh.c8s.svc",
+			"--max-conns=10000",
 			"--iptables-metrics-file=/run/ratls-mesh/iptables-metrics.json"}, nil
 	case "mesh-sync":
 		return []string{"ratls-mesh", "iptables-sync", "--kubeconfig=" + kubeletConfig,

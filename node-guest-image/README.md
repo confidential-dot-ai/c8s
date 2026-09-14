@@ -115,6 +115,10 @@ on `127.0.0.1:8400`; workload helpers use its Unix socket in the existing
 admission-inventory directory. CDS listens on the leader's port `30808`;
 RKE2 followers join at `9345`; nginx serves the front door on `443`.
 
+The mesh preserves the chart defaults of 10,000 concurrent connections and
+a 128 MiB memory limit. These are fixed in the measured service arguments
+and systemd unit for both roles.
+
 `c8s/mkosi.sync` resolves the shared c8s binary and operator container digest
 from `C8S_REF`, then runs the binary's `c8s node-image render` command in the
 build tools tree with a checksum-pinned Helm binary downloaded from the
