@@ -189,12 +189,12 @@ jobs:
             image:
               tag: "$AATAG"
               digest: "$AADIG"
-            # cvmMode=node (what we ship on metal), but this node image
+            # cvmMode=bare-metal (what we ship on metal), but this node image
             # predates the baked host attestation-api — so the chart's own
             # DaemonSet + attest-proxy sidecar supplies the node-local
             # endpoint on its Unix socket, and no $(HOST_IP)/NodePort
             # alignment is needed.
-            cvmMode: node
+            cvmMode: bare-metal
             teeDevices:
               sevGuest: true
               tdxGuest: false

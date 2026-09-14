@@ -1682,17 +1682,17 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
-// The require_host_image_policy guard exempts cvmMode=node: the node image bakes
+// The require_host_image_policy guard exempts cvmMode=bare-metal: the node image bakes
 // its own fail-closed nri-image-policy, so nri off there is not an unenforced
 // cluster. The served seed under this shape is covered by
-// TestChartServesAllowlistSeedInNodeMode.
-func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
+// TestChartServesAllowlistSeedInBareMetalMode.
+func TestChartAllowsImagePolicyOffInBareMetalMode(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "nriImagePolicy.enabled=false",
 	)
 	if err != nil {
-		t.Fatalf("helm template rejected cvmMode=node with nri off, want success (the node image bakes the plugin)\n%s", out)
+		t.Fatalf("helm template rejected cvmMode=bare-metal with nri off, want success (the node image bakes the plugin)\n%s", out)
 	}
 }
 
@@ -1979,7 +1979,7 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 		// least-privilege capabilities map (the modes are either/or, not merged).
 		noCapabilities bool
 	}{
-		{mode: "node", useDefault: true},
+		{mode: "bare-metal", useDefault: true},
 		{mode: "gke"},
 		{mode: "aks", noCapabilities: true},
 	} {
@@ -2014,14 +2014,14 @@ func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 			}
-			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of node, gke, aks (got %q)`, mode))
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of bare-metal, gke, aks (got %q)`, mode))
 		})
 	}
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
 // from the status.hostIP downward-API field — the substitution source for the
-// $(HOST_IP) placeholder in the node-mode attestation-api URL.
+// $(HOST_IP) placeholder in the bare-metal-mode attestation-api URL.
 func hasHostIPEnv(c corev1.Container) bool {
 	for _, e := range c.Env {
 		if e.Name == "HOST_IP" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
@@ -2032,7 +2032,7 @@ func hasHostIPEnv(c corev1.Container) bool {
 	return false
 }
 
-// TestChartNodeModeAttestationApiURLUsesHostIP proves cvmMode=node points the
+// TestChartBareMetalModeAttestationApiURLUsesHostIP proves cvmMode=bare-metal points the
 // pod-netns components (cds, router's cert sidecar, ratls-mesh) at the
 // node-baked host attestation-api via the $(HOST_IP) downward-API env var, since
 // there is no in-cluster Service and pods cannot reach host loopback. The
@@ -2040,33 +2040,33 @@ func hasHostIPEnv(c corev1.Container) bool {
 // the tenant get-cert sidecars it injects, so the placeholder must stay
 // UNEXPANDED there — the operator container deliberately omits HOST_IP so each
 // tenant pod expands it against its own node.
-// KNOWN-GAP (ATTEST-ORACLE, node mode): the http://$(HOST_IP):8400 wiring
+// KNOWN-GAP (ATTEST-ORACLE, bare-metal mode): the http://$(HOST_IP):8400 wiring
 // this test pins reaches the node image's baked attestation-api, which still
 // binds 0.0.0.0:8400 with no auth — the oracle shape this branch removes
-// everywhere the chart controls. Closing node mode needs the
+// everywhere the chart controls. Closing bare-metal mode needs the
 // confidential-os-builder companion (loopback bind + baked attest-proxy
 // systemd unit + image-policy socket URL), tracked cross-repo; when it
-// lands, the chart's node-mode branch and this test flip to the socket shape
+// lands, the chart's bare-metal-mode branch and this test flip to the socket shape
 // together.
-func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
+func TestChartBareMetalModeAttestationApiURLUsesHostIP(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
-	// The exact shape `c8s install --cvm-mode=node` produces: the node image
+	// The exact shape `c8s install --cvm-mode=bare-metal` produces: the node image
 	// bakes attestation-api and nri-image-policy, so both chart components
 	// are off and consumers dial the baked host service via $(HOST_IP).
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "router.attest.enabled=true",
 	)
 	if err != nil {
-		t.Fatalf("helm template (cvmMode=node): %v\n%s", err, out)
+		t.Fatalf("helm template (cvmMode=bare-metal): %v\n%s", err, out)
 	}
 
 	// No chart-managed evidence source renders in this shape at all.
 	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") ||
 		renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
-		t.Fatalf("cvmMode=node install shape renders no attestation-api Service or DaemonSet\n%s", out)
+		t.Fatalf("cvmMode=bare-metal install shape renders no attestation-api Service or DaemonSet\n%s", out)
 	}
 
 	// cds: pod-netns, dials the host attestation-api via $(HOST_IP).
@@ -2118,11 +2118,11 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	}
 }
 
-// TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
+// TestChartNonBareMetalModeUsesAttestationSocket proves the bare-metal-mode wiring does
 // not leak into the other cvmModes: gke/aks dial the on-node Unix socket
 // and render no HOST_IP env anywhere. The consumers that must carry both the
 // socket URL and the socket-directory mount are asserted per shape.
-func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
+func TestChartNonBareMetalModeUsesAttestationSocket(t *testing.T) {
 	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
 	for _, mode := range []string{"gke", "aks"} {
 		t.Run(mode, func(t *testing.T) {
@@ -2487,7 +2487,7 @@ func TestChartRouterPublicTLSModeGuards(t *testing.T) {
 			// TEE the host reads them.
 			name: "acme without a confidential runtime",
 			args: []string{"--set-string", "router.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=gke"},
-			want: "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held",
+			want: "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=bare-metal) so the ACME account and serving keys are TEE-held",
 		},
 		{
 			name: "acme with a wildcard san",
@@ -5585,21 +5585,21 @@ func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
 	}
 }
 
-// TestChartPinsCDSInNodeMode guards the node-as-CVM pin path. The node image
+// TestChartPinsCDSInBareMetalMode guards the node-as-CVM pin path. The node image
 // bakes the plugin with empty cds_measurements, and the chart is the only thing
 // that knows this release's pins — so an install that does not carry them into
 // the baked config leaves the component deciding which images may run on the
 // node willing to take its allowlist from ANY RA-TLS-attested CDS, and its
 // sandbox-digests endpoint willing to answer any of them. Regression for a
 // bare-metal run that found exactly that (2026-08-26).
-func TestChartPinsCDSInNodeMode(t *testing.T) {
+func TestChartPinsCDSInBareMetalMode(t *testing.T) {
 	const (
 		pinM = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 		pinR = "1=bbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"
 	)
 	const pinsImageDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.baked=true",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
@@ -5619,7 +5619,7 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 		"--cds-rtmrs \"" + pinR + "\"",
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("node-mode installer script missing %q\n%s", want, script)
+			t.Errorf("bare-metal-mode installer script missing %q\n%s", want, script)
 		}
 	}
 
@@ -5628,12 +5628,12 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	// it — and must leave the binary and the containerd registration alone.
 	for _, forbidden := range []string{"IMAGE_POLICY_EOF", "install_file", "render_nri_toml"} {
 		if strings.Contains(script, forbidden) {
-			t.Errorf("node-mode installer script must not run %q — it would replace what the node image measured\n%s", forbidden, script)
+			t.Errorf("bare-metal-mode installer script must not run %q — it would replace what the node image measured\n%s", forbidden, script)
 		}
 	}
 	for _, c := range ds.Spec.Template.Spec.InitContainers {
 		if c.Name == "containerd-prep" {
-			t.Errorf("node-mode installer renders containerd-prep; the node image owns the containerd NRI registration")
+			t.Errorf("bare-metal-mode installer renders containerd-prep; the node image owns the containerd NRI registration")
 		}
 	}
 
@@ -5642,26 +5642,26 @@ func TestChartPinsCDSInNodeMode(t *testing.T) {
 	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
 	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
 	if err != nil {
-		t.Fatalf("node-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+		t.Fatalf("bare-metal-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
 	if got := seedLabel(seed, pinsImageDigest); got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
 		t.Errorf("seed[%s] = %q, want the pins installer image; the baked plugin would deny it", pinsImageDigest, got)
 	}
 }
 
-// TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: even
+// TestChartServesAllowlistSeedInBareMetalMode guards the node-as-CVM seed path: even
 // with chart nriImagePolicy disabled, the baked plugin pulls the live allowlist
 // from CDS. If the seed is not served, CDS starts empty and every un-baked
 // component (operator, ratls-mesh, router's nginx) is denied until an operator
 // hand-runs `c8s allowlist add`. The seed ConfigMap must render, be mounted,
 // and carry the deployed digests.
-func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
+func TestChartServesAllowlistSeedInBareMetalMode(t *testing.T) {
 	const (
 		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
 		rmD = "sha256:00000000000000000000000000000000000000000000000000000000000000c2"
 	)
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
@@ -5675,24 +5675,24 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
 	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
 	if err != nil {
-		t.Fatalf("node-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
+		t.Fatalf("bare-metal-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
 	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
 	// and router's nginx (default digest from values.yaml).
 	if got := seedLabel(seed, opD); got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
-		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Workloads)
+		t.Errorf("bare-metal-mode seed missing operator entry; got %q\nseed: %v", got, seed.Workloads)
 	}
 	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
-		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
+		t.Errorf("bare-metal-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
 	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
 	if _, ok := seedEntry(seed, nginxD); !ok {
-		t.Errorf("node-mode seed missing router nginx self-entry\nseed: %v", seed.Workloads)
+		t.Errorf("bare-metal-mode seed missing router nginx self-entry\nseed: %v", seed.Workloads)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
-		t.Errorf("node-mode CDS missing --allowlist-seed flag; seed rendered but not loaded\nargs: %v", cds.Args)
+		t.Errorf("bare-metal-mode CDS missing --allowlist-seed flag; seed rendered but not loaded\nargs: %v", cds.Args)
 	}
 }
 
@@ -7041,7 +7041,7 @@ func TestChartNRICDSURLRefusesAnUnderivableService(t *testing.T) {
 // The node image bakes its own copy of the pull URL into the NRI floor, and the
 // chart cannot reach it. Keeping the two literals equal in-tree is the half
 // that is enforceable here; a per-install -f override still cannot follow (the
-// node-mode baked-config problem).
+// bare-metal-mode baked-config problem).
 func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
 	baked, err := os.ReadFile(bakedPath)

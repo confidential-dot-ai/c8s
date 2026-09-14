@@ -742,7 +742,7 @@ NODE-AS-CVM — one TEE, one identity, per node
 
 The whole Kubernetes node is one confidential VM; pods are ordinary runc
 containers inside it. (This is the base component layout — `c8s install` with
-`--cvm-mode node|gke|aks` wiring the right TEE device — deployed onto nodes
+`--cvm-mode bare-metal|gke|aks` wiring the right TEE device — deployed onto nodes
 that are themselves CVMs. Base on non-CVM nodes has the same layout and no
 confidentiality.)
 

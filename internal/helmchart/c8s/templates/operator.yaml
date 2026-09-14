@@ -84,7 +84,7 @@ spec:
                    redeems a sandbox token from the node's inventory over a
                    compiled endpoint: the nri-image-policy socket that plugin
                    NRI-mounts into c8s-cert on node-CVM. */}}
-            {{- /* cvmMode=node bakes the plugin into the node image instead of
+            {{- /* cvmMode=bare-metal bakes the plugin into the node image instead of
                    installing it from the chart, so the socket exists even when
                    nriImagePolicy.enabled is false. */}}
             - --workload-claims-host-dir={{ .Values.nriImagePolicy.hostPaths.runtimeDir }}

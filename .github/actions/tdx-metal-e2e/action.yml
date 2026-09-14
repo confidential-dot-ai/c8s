@@ -529,7 +529,7 @@ runs:
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
-      c8s install --cvm-mode node --single-node --hardware-platform tdx \
+      c8s install --cvm-mode bare-metal --single-node --hardware-platform tdx \
         --image-tag "$c8sRef" \
         --operator-keys /tmp/op.pub \
         --measurements "$mrtd" \
@@ -544,7 +544,7 @@ runs:
       bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
 
   - name: assert the image floor denies, then opens to a signed write
-    # router fronts /allowlist on hostPort 443, and node mode puts CDS in
+    # router fronts /allowlist on hostPort 443, and bare-metal mode puts CDS in
     # the node CVM, so the endpoint pins to the node MRTD.
     shell: bash
     run: |
