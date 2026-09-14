@@ -13,6 +13,7 @@ ExecStart=/usr/local/bin/c8s node-services run mesh
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=630
+MemoryMax=128M
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
