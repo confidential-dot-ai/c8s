@@ -294,7 +294,7 @@
         }
       }
     },
-    "tlsLb": {
+    "router": {
       "type": [
         "object",
         "null"

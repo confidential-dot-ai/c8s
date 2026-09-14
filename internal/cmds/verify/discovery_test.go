@@ -401,7 +401,7 @@ func verdictShape(oc Outcome) string {
 
 // The document and the observed handshake leaf must ride ONE connection:
 // serving certs are per replica, so a second dial can reach a different
-// replica — or, for an adversarial host, a proxied attested tls-lb pod — and
+// replica — or, for an adversarial host, a proxied attested router pod — and
 // make a WebPKI door look attested. The server below is that host: the door
 // clients reach (first connection) serves a WebPKI stand-in, every later
 // connection gets the attested cert. The observation must be the dialed

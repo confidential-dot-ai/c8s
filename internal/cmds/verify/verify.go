@@ -406,7 +406,7 @@ func demoteToPartial(oc *Outcome, notProven string) {
 const frontDoorAttestedNote = "; the live handshake presented the attested serving certificate"
 
 // frontDoorScopeWarning bounds an attested front door to the observation made.
-const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single tls-lb replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/lbdiscovery)"
+const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single router replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/routerdiscovery)"
 
 // applyFrontDoorPolicy settles what the verdict may claim about the front
 // door's serving key, keying on the live handshake the discovery gather
@@ -430,9 +430,9 @@ func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
 			oc.Error += "; " + digests + " — the TLS endpoint clients reach is not attestation-bound"
 			return
 		}
-		demoteToPartial(oc, digests+" — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
+		demoteToPartial(oc, digests+" — the router pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
 	case frontDoorUnobserved:
-		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
+		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the router pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 	}
 }
 

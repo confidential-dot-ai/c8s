@@ -2,14 +2,14 @@
 # Each entry names one CVE and the packages it applies to; remove an entry as
 # soon as a fixed package is published upstream.
 ignore:
-  # OpenSSL 3.5.7-r0 in the tls-lb nginx image. All of these are fixed in
+  # OpenSSL 3.5.7-r0 in the router nginx image. All of these are fixed in
   # Alpine's openssl 3.5.8-r0; nginxinc rebuilds nginx-unprivileged roughly
   # monthly and its newest build predates that package, so drop this whole
   # block at the first rebuild that carries 3.5.8-r0.
   #
   # Each one lives in QUIC, DTLS, CMS, CMP or RFC7250 raw-public-key code.
-  # tls-lb's server block declares a single listener, `listen <httpsPort> ssl`
-  # (templates/tls-lb-configmap.yaml), so nginx binds TCP only: it never opens
+  # router's server block declares a single listener, `listen <httpsPort> ssl`
+  # (templates/router-configmap.yaml), so nginx binds TCP only: it never opens
   # a QUIC connection, speaks DTLS, parses a CMS or CMP message, or negotiates
   # a certificate type other than X.509.
   #

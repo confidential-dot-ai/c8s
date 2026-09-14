@@ -116,13 +116,13 @@ func renderNodeImage(ctx context.Context, cfg nodeImageRenderConfig) error {
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
 		"--set", "volumed.enabled=false",
-		"--set", "tlsLb.attest.enabled=true",
-		"--set", "tlsLb.nginx.httpsPort=443",
+		"--set", "router.attest.enabled=true",
+		"--set", "router.nginx.httpsPort=443",
 		"--set-string", "image.repository="+cfg.imageRepository,
 		"--set-string", "image.digest="+cfg.imageDigest,
-		"--set-string", "tlsLb.san[0]=c8s-node.invalid",
-		"--set-string", "tlsLb.tlsMountPath=/run/c8s-tls",
-		"--set-string", "tlsLb.discovery.mountPath=/run/c8s-tls",
+		"--set-string", "router.san[0]=c8s-node.invalid",
+		"--set-string", "router.tlsMountPath=/run/c8s-tls",
+		"--set-string", "router.discovery.mountPath=/run/c8s-tls",
 	)
 	args = append([]string{"template", "c8s", chartDir, "--namespace", nodeImageNamespace, "--kube-version", cfg.kubeVersion, "--include-crds"}, args...)
 	helm := exec.CommandContext(ctx, "helm", args...)
@@ -199,7 +199,7 @@ func splitNodeImageArtifacts(rendered []byte) (integration, nginx, seed []byte, 
 				return nil, nil, nil, fmt.Errorf("decode chart ConfigMap: %w", err)
 			}
 			switch cm.Name {
-			case "c8s-tls-lb-nginx":
+			case "c8s-router-nginx":
 				if nginx != nil {
 					return nil, nil, nil, fmt.Errorf("duplicate nginx ConfigMap")
 				}

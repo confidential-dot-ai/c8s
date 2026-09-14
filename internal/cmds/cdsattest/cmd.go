@@ -45,8 +45,8 @@ type config struct {
 }
 
 // NewCmd returns the `cds-attest` subcommand: a sidecar that runs inside the
-// tls-lb pod and serves the *dynamic* client-facing attestation +
-// over-encryption endpoints (the c8s-verify protocol). The tls-lb nginx
+// router pod and serves the *dynamic* client-facing attestation +
+// over-encryption endpoints (the c8s-verify protocol). The router nginx
 // front-end terminates public TLS, serves the static CDS/mesh-CA certs, and
 // reverse-proxies /.well-known/c8s/attest-pq, /attest-lb, and the
 // over-encrypted application paths to this sidecar on loopback.
@@ -54,7 +54,7 @@ func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:   "cds-attest",
-		Short: "Run the tls-lb attestation + over-encryption sidecar (attest-pq / attest-lb)",
+		Short: "Run the router attestation + over-encryption sidecar (attest-pq / attest-lb)",
 		RunE:  func(_ *cobra.Command, _ []string) error { return run(cfg) },
 	}
 	f := cmd.Flags()

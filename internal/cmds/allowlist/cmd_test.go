@@ -182,7 +182,7 @@ func TestMissingComponents(t *testing.T) {
 
 // TestMissingComponentsMatchesRealChartImages pins the defaultRequiredComponents
 // substring needles against the actual chart image repositories, so a rename
-// (notably the tls-lb "nginxinc/nginx-unprivileged" image, which only matches
+// (notably the router "nginxinc/nginx-unprivileged" image, which only matches
 // the "nginx" needle as a substring) can't silently defeat the upload guard.
 func TestMissingComponentsMatchesRealChartImages(t *testing.T) {
 	chartImages := map[string]string{
@@ -196,7 +196,7 @@ func TestMissingComponentsMatchesRealChartImages(t *testing.T) {
 		t.Fatalf("real chart images should satisfy every required component, missing: %v", got)
 	}
 
-	// Sanity: dropping the tls-lb image reports exactly "nginx" — proving that
+	// Sanity: dropping the router image reports exactly "nginx" — proving that
 	// entry is really carried by nginxinc/nginx-unprivileged and nothing else.
 	delete(chartImages, "e")
 	got := missingComponents(chartImages, defaultRequiredComponents)
@@ -449,7 +449,7 @@ func TestNewCmdWiring(t *testing.T) {
 	_ = fmt.Sprint(cmd.Use)
 }
 
-func TestHelpDistinguishesCDSIssuedAndWebPKITLSLB(t *testing.T) {
+func TestHelpDistinguishesCDSIssuedAndWebPKIRouter(t *testing.T) {
 	cmd := NewCmd()
 	wantLong := `Read and mutate the image allowlist that CDS serves and nri-image-policy
 enforces on every node: named workload entries, each pinning an init/main
@@ -465,9 +465,9 @@ short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
-The default chart publishes /allowlist through tls-lb. Point --url at that
+The default chart publishes /allowlist through router. Point --url at that
 front door only when it uses CDS-issued public TLS (discovery reports
-public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
+public_tls.mode=cds), and use the router launch digest with --measurements. A
 WebPKI front door cannot yet bind its public certificate to the attestation
 evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
 example through a port-forward) and pin the CDS launch digest. To generate an
@@ -478,8 +478,8 @@ allowlist").`
 	}
 
 	wantFlags := map[string]string{
-		"url":          "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound",
-		"measurements": "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)",
+		"url":          "CDS-issued-TLS router or direct CDS base URL (required); WebPKI router URLs are not attestation-bound",
+		"measurements": "trusted endpoint build ID(s) (repeatable/comma-separated); use the router value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)",
 	}
 	for name, want := range wantFlags {
 		flag := cmd.PersistentFlags().Lookup(name)

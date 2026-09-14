@@ -1,14 +1,14 @@
-{{- if .Values.tlsLb.enabled }}
-{{- $sans := include "tls-lb.sanList" . | fromJsonArray -}}
-{{- range $s := $sans -}}{{- include "tls-lb.validateSan" $s -}}{{- end -}}
+{{- if .Values.router.enabled }}
+{{- $sans := include "router.sanList" . | fromJsonArray -}}
+{{- range $s := $sans -}}{{- include "router.validateSan" $s -}}{{- end -}}
 {{- $serverNames := join " " $sans -}}
-{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
-{{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
-{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
-{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
-{{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
-{{- $upstreamMeshWrapped := eq (include "tls-lb.meshWrappedUpstream" $upstreamAddress) "true" -}}
-{{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
+{{- $publicTLSMode := include "router.publicTLSMode" . -}}
+{{- include "router.validateProtocol" (required "protocol must be http or https" .Values.router.upstream.protocol) -}}
+{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.router.tlsMountPath -}}
+{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.router.upstream.tls.trustedCAPath -}}
+{{- $upstreamAddress := .Values.router.upstream.address | trim -}}
+{{- $upstreamMeshWrapped := eq (include "router.meshWrappedUpstream" $upstreamAddress) "true" -}}
+{{- $renderAllowlistRoute := eq (include "router.renderAllowlistRoute" .) "true" -}}
 {{- $allowlistProxyPort := 0 -}}
 {{- $allowlistWriteRate := 0 -}}
 {{- $allowlistWriteBurst := 0 -}}
@@ -17,27 +17,27 @@
 {{- $allowlistReadRate := 0 -}}
 {{- $allowlistReadBurst := 0 -}}
 {{- if $renderAllowlistRoute -}}
-{{- $allowlistProxyPort = include "c8s.int" .Values.tlsLb.allowlist.proxyPort | int -}}
+{{- $allowlistProxyPort = include "c8s.int" .Values.router.allowlist.proxyPort | int -}}
 {{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
-{{- fail (printf "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
+{{- fail (printf "router.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
 {{- end -}}
-{{- if and .Values.tlsLb.attest.enabled (eq $allowlistProxyPort (int .Values.tlsLb.attest.port)) -}}
-{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: %d" $allowlistProxyPort) -}}
+{{- if and .Values.router.attest.enabled (eq $allowlistProxyPort (int .Values.router.attest.port)) -}}
+{{- fail (printf "router.allowlist.proxyPort must differ from router.attest.port, got: %d" $allowlistProxyPort) -}}
 {{- end -}}
-{{- if eq $allowlistProxyPort (int .Values.tlsLb.nginx.httpsPort) -}}
-{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
+{{- if eq $allowlistProxyPort (int .Values.router.nginx.httpsPort) -}}
+{{- fail (printf "router.allowlist.proxyPort must differ from router.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
 {{- end -}}
-{{- $allowlistWriteRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
-{{- $allowlistWriteBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
-{{- $allowlistWriteTotalRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
-{{- $allowlistWriteTotalBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
-{{- $allowlistReadRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.requestsPerSecond "label" "tlsLb.allowlist.readRateLimit.requestsPerSecond")) -}}
-{{- $allowlistReadBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.burst "label" "tlsLb.allowlist.readRateLimit.burst")) -}}
+{{- $allowlistWriteRate = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.rateLimit.requestsPerSecond "label" "router.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $allowlistWriteBurst = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.rateLimit.burst "label" "router.allowlist.rateLimit.burst")) -}}
+{{- $allowlistWriteTotalRate = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.rateLimit.totalRequestsPerSecond "label" "router.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $allowlistWriteTotalBurst = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.rateLimit.totalBurst "label" "router.allowlist.rateLimit.totalBurst")) -}}
+{{- $allowlistReadRate = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.readRateLimit.requestsPerSecond "label" "router.allowlist.readRateLimit.requestsPerSecond")) -}}
+{{- $allowlistReadBurst = int (include "c8s.positiveInt" (dict "value" .Values.router.allowlist.readRateLimit.burst "label" "router.allowlist.readRateLimit.burst")) -}}
 {{- /* Cross-value budget invariants (per-client <= total < cds bucket) live
-   in validations.yaml, kind=tlslb_allowlist_rate_budget. */ -}}
+   in validations.yaml, kind=router_allowlist_rate_budget. */ -}}
 {{- end -}}
 {{- /*
-  No upstream is a legal state: tls-lb serves its cert and explicit routes with
+  No upstream is a legal state: router serves its cert and explicit routes with
   no catch-all until one is wired (an install-then-attach-inference flow). The
   address-format check, the secured-backend guard (validations.yaml), and the
   location / block all render only when an upstream is set.
@@ -45,22 +45,22 @@
 {{- $upstreamServerName := "" -}}
 {{- if $upstreamAddress -}}
 {{- if not (regexMatch `^[^[:space:]{};/#]+$` $upstreamAddress) -}}
-{{- fail (printf "tlsLb.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $upstreamAddress) -}}
+{{- fail (printf "router.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $upstreamAddress) -}}
 {{- end -}}
-{{- $upstreamServerName = default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
-{{- include "tls-lb.validateProxyTLS" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "tlsLb.upstream") -}}
+{{- $upstreamServerName = default (include "router.serverNameFromAddress" $upstreamAddress) .Values.router.upstream.tls.serverName -}}
+{{- include "router.validateProxyTLS" (dict "protocol" .Values.router.upstream.protocol "tls" .Values.router.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "router.upstream") -}}
 {{- end -}}
-{{- include "tls-lb.validateCORS" .Values.tlsLb.cors -}}
-{{- range $i, $route := .Values.tlsLb.routes -}}
-{{- include "tls-lb.validateRouteCORS" (dict "cors" $route.cors "label" (printf "tlsLb.routes[%d]" $i)) -}}
+{{- include "router.validateCORS" .Values.router.cors -}}
+{{- range $i, $route := .Values.router.routes -}}
+{{- include "router.validateRouteCORS" (dict "cors" $route.cors "label" (printf "router.routes[%d]" $i)) -}}
 {{- end }}
 
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "tls-lb.fullname" . }}-nginx
+  name: {{ include "router.fullname" . }}-nginx
   labels:
-    {{- include "tls-lb.labels" . | nindent 4 }}
+    {{- include "router.labels" . | nindent 4 }}
 data:
   nginx.conf: |
     {{- if .Values.node.bakedServices }}
@@ -85,8 +85,8 @@ data:
 
         sendfile on;
         keepalive_timeout 65;
-{{- if default false .Values.tlsLb.cors.enabled }}
-        {{- include "tls-lb.corsMap" . | nindent 8 }}
+{{- if default false .Values.router.cors.enabled }}
+        {{- include "router.corsMap" . | nindent 8 }}
 {{- end }}
 {{- if $renderAllowlistRoute }}
 
@@ -125,17 +125,17 @@ data:
         # mesh binds the pod IP it is handed, not the name -- so an adversary
         # who can forge cluster DNS retargets this hop. Every other upstream
         # gets a static block below and no resolver is rendered at all.
-        resolver {{ include "c8s.tlsLb.resolver" . }};
+        resolver {{ include "c8s.router.resolver" . }};
         {{- end }}
 
-        {{- range $i, $route := .Values.tlsLb.routes }}
+        {{- range $i, $route := .Values.router.routes }}
         {{- if hasKey $route "upstream" }}
-        {{- fail (printf "tlsLb.routes[%d].upstream is not supported; set backend.address and backend.protocol instead" $i) }}
+        {{- fail (printf "router.routes[%d].upstream is not supported; set backend.address and backend.protocol instead" $i) }}
         {{- end }}
-        {{- $backend := required (printf "tlsLb.routes[%d].backend is required" $i) $route.backend }}
-        {{- $backendAddress := required (printf "tlsLb.routes[%d].backend.address is required" $i) $backend.address }}
+        {{- $backend := required (printf "router.routes[%d].backend is required" $i) $route.backend }}
+        {{- $backendAddress := required (printf "router.routes[%d].backend.address is required" $i) $backend.address }}
         {{- if not (regexMatch `^[^[:space:]{};/#]+$` $backendAddress) }}
-        {{- fail (printf "tlsLb.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
+        {{- fail (printf "router.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
         {{- end }}
         upstream route_{{ $i }} {
             server {{ $backendAddress }};
@@ -149,11 +149,11 @@ data:
         {{- end }}
 
         server {
-            listen {{ .Values.tlsLb.nginx.httpsPort }} ssl;
+            listen {{ .Values.router.nginx.httpsPort }} ssl;
             server_name {{ $serverNames }};
 
-            ssl_certificate     {{ include "tls-lb.publicCertPath" . }};
-            ssl_certificate_key {{ include "tls-lb.publicKeyPath" . }};
+            ssl_certificate     {{ include "router.publicCertPath" . }};
+            ssl_certificate_key {{ include "router.publicKeyPath" . }};
 
             ssl_protocols TLSv1.2 TLSv1.3;
             ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
@@ -169,38 +169,38 @@ data:
             # Built-in control-plane route. The exact + slash-prefix pair
             # exposes only /allowlist and its API subtree, not lookalike paths.
             {{- $allowlistLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
-            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
-            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
+            {{- include "router.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
+            {{- include "router.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
 
             {{- end }}
-            {{- range $i, $route := .Values.tlsLb.routes }}
-            {{- $path := required (printf "tlsLb.routes[%d].path is required" $i) $route.path }}
+            {{- range $i, $route := .Values.router.routes }}
+            {{- $path := required (printf "router.routes[%d].path is required" $i) $route.path }}
             {{- $match := default "prefix" $route.match }}
             {{- if not (or (eq $match "exact") (eq $match "prefix")) }}
-            {{- fail (printf "tlsLb.routes[%d].match must be 'exact' or 'prefix', got: %s" $i $match) }}
+            {{- fail (printf "router.routes[%d].match must be 'exact' or 'prefix', got: %s" $i $match) }}
             {{- end }}
             {{- if not (regexMatch `^/[A-Za-z0-9._~!$&()*+,=:@%/-]*$` $path) }}
-            {{- fail (printf "tlsLb.routes[%d].path must start with '/' and contain only URI path characters safe for nginx locations, got: %s" $i $path) }}
+            {{- fail (printf "router.routes[%d].path must start with '/' and contain only URI path characters safe for nginx locations, got: %s" $i $path) }}
             {{- end }}
-            {{- $backend := required (printf "tlsLb.routes[%d].backend is required" $i) $route.backend }}
-            {{- $backendAddress := required (printf "tlsLb.routes[%d].backend.address is required" $i) $backend.address }}
+            {{- $backend := required (printf "router.routes[%d].backend is required" $i) $route.backend }}
+            {{- $backendAddress := required (printf "router.routes[%d].backend.address is required" $i) $backend.address }}
             {{- $backendProtocol := default "http" $backend.protocol }}
             {{- if not (or (eq $backendProtocol "http") (eq $backendProtocol "https")) }}
-            {{- fail (printf "tlsLb.routes[%d].backend.protocol must be 'http' or 'https', got: %s" $i $backendProtocol) }}
+            {{- fail (printf "router.routes[%d].backend.protocol must be 'http' or 'https', got: %s" $i $backendProtocol) }}
             {{- end }}
             {{- if not (regexMatch `^[^[:space:]{};/#]+$` $backendAddress) }}
-            {{- fail (printf "tlsLb.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
+            {{- fail (printf "router.routes[%d].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $i $backendAddress) }}
             {{- end }}
             {{- $backendTLS := default dict $backend.tls }}
             {{- $backendTrustedCAPath := default $defaultMeshCAPath $backendTLS.trustedCAPath }}
-            {{- $backendServerName := default (include "tls-lb.serverNameFromAddress" $backendAddress) $backendTLS.serverName }}
-            {{- include "tls-lb.validateProxyTLS" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "label" (printf "tlsLb.routes[%d].backend" $i)) }}
+            {{- $backendServerName := default (include "router.serverNameFromAddress" $backendAddress) $backendTLS.serverName }}
+            {{- include "router.validateProxyTLS" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "label" (printf "router.routes[%d].backend" $i)) }}
             {{- if and (ne $backendProtocol "https") (or (default false $backendTLS.verify) (default false $backendTLS.useCDSClientCert)) }}
-            {{- fail (printf "tlsLb.routes[%d].backend.tls.verify and useCDSClientCert require backend.protocol: https" $i) }}
+            {{- fail (printf "router.routes[%d].backend.tls.verify and useCDSClientCert require backend.protocol: https" $i) }}
             {{- end }}
-            {{- include "tls-lb.requireSecuredBackend" (dict "protocol" $backendProtocol "tls" $backendTLS "address" $backendAddress "label" (printf "tlsLb.routes[%d].backend" $i) "kind" "tlslb_unsecured_route" "suggest" "") }}
+            {{- include "router.requireSecuredBackend" (dict "protocol" $backendProtocol "tls" $backendTLS "address" $backendAddress "label" (printf "router.routes[%d].backend" $i) "kind" "router_unsecured_route" "suggest" "") }}
             {{- /* Route inherits the global CORS block; route.cors.enabled (if set) toggles it on/off for this route only. */}}
-            {{- $routeCors := deepCopy $.Values.tlsLb.cors }}
+            {{- $routeCors := deepCopy $.Values.router.cors }}
             {{- if and (hasKey $route "cors") (hasKey (default dict $route.cors) "enabled") }}
             {{- $_ := set $routeCors "enabled" $route.cors.enabled }}
             {{- end }}
@@ -211,10 +211,10 @@ data:
             location {{ $path }} {
             {{- end }}
                 {{- if default false $routeCors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" $routeCors | nindent 16 }}
+                {{- include "router.corsLocationDirectives" $routeCors | nindent 16 }}
                 {{- end }}
                 {{- if eq $backendProtocol "https" }}
-                {{- include "tls-lb.proxySSLDirectives" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "tlsMountPath" $.Values.tlsLb.tlsMountPath) | nindent 16 }}
+                {{- include "router.proxySSLDirectives" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "tlsMountPath" $.Values.router.tlsMountPath) | nindent 16 }}
                 {{- end }}
                 proxy_pass {{ $backendProtocol }}://route_{{ $i }};
                 proxy_set_header Host $host;
@@ -224,37 +224,37 @@ data:
             }
 
             {{- end }}
-            {{- if .Values.tlsLb.discovery.enabled }}
-            location = {{ .Values.tlsLb.discovery.path }} {
-                {{- if default false .Values.tlsLb.cors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
-                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
-                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
+            {{- if .Values.router.discovery.enabled }}
+            location = {{ .Values.router.discovery.path }} {
+                {{- if default false .Values.router.cors.enabled }}
+                {{- include "router.corsLocationDirectives" .Values.router.cors | nindent 16 }}
+                {{- else if eq (include "router.protocolCorsEnabled" .) "true" }}
+                {{- include "router.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/json;
                 add_header Cache-Control "no-store" always;
-                alias {{ include "tls-lb.discoveryFilePath" . }};
+                alias {{ include "router.discoveryFilePath" . }};
             }
 
-            location = {{ .Values.tlsLb.discovery.cdsCertPath }} {
-                {{- if default false .Values.tlsLb.cors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
-                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
-                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
+            location = {{ .Values.router.discovery.cdsCertPath }} {
+                {{- if default false .Values.router.cors.enabled }}
+                {{- include "router.corsLocationDirectives" .Values.router.cors | nindent 16 }}
+                {{- else if eq (include "router.protocolCorsEnabled" .) "true" }}
+                {{- include "router.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
                 add_header Cache-Control "no-store" always;
-                alias {{ .Values.tlsLb.tlsMountPath }}/cert.pem;
+                alias {{ .Values.router.tlsMountPath }}/cert.pem;
             }
 
-            {{- if .Values.tlsLb.meshCA.expose }}
-            location = {{ .Values.tlsLb.discovery.meshCAPath }} {
-                {{- if default false .Values.tlsLb.cors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
-                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
-                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
+            {{- if .Values.router.meshCA.expose }}
+            location = {{ .Values.router.discovery.meshCAPath }} {
+                {{- if default false .Values.router.cors.enabled }}
+                {{- include "router.corsLocationDirectives" .Values.router.cors | nindent 16 }}
+                {{- else if eq (include "router.protocolCorsEnabled" .) "true" }}
+                {{- include "router.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
@@ -264,7 +264,7 @@ data:
             {{- end }}
 
             {{- end }}
-            {{- if .Values.tlsLb.attest.enabled }}
+            {{- if .Values.router.attest.enabled }}
             # The sidecar's readiness gate, proxied so kubelet can reach it.
             # cds-attest listens on loopback (its one listener also carries the
             # attestation and tunnel routes, which must not be
@@ -272,7 +272,7 @@ data:
             # exact-match, ahead of any catch-all upstream.
             location = /readyz {
                 access_log off;
-                proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
+                proxy_pass http://127.0.0.1:{{ .Values.router.attest.port }};
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -289,12 +289,12 @@ data:
             # downgrade) instead of nginx 404ing them.
             # X-Real-IP is the address the sidecar meters each client by.
             location /.well-known/c8s/ {
-                {{- if default false .Values.tlsLb.cors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
-                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
-                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
+                {{- if default false .Values.router.cors.enabled }}
+                {{- include "router.corsLocationDirectives" .Values.router.cors | nindent 16 }}
+                {{- else if eq (include "router.protocolCorsEnabled" .) "true" }}
+                {{- include "router.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
-                proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
+                proxy_pass http://127.0.0.1:{{ .Values.router.attest.port }};
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -304,17 +304,17 @@ data:
             {{- end }}
             {{- if $upstreamAddress }}
             location / {
-                {{- if default false .Values.tlsLb.cors.enabled }}
-                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- if default false .Values.router.cors.enabled }}
+                {{- include "router.corsLocationDirectives" .Values.router.cors | nindent 16 }}
                 {{- end }}
-                {{- if eq .Values.tlsLb.upstream.protocol "https" }}
-                {{- include "tls-lb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
+                {{- if eq .Values.router.upstream.protocol "https" }}
+                {{- include "router.proxySSLDirectives" (dict "protocol" .Values.router.upstream.protocol "tls" .Values.router.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.router.tlsMountPath) | nindent 16 }}
                 {{- end }}
                 {{- if $upstreamMeshWrapped }}
                 set $backend_addr {{ $upstreamAddress }};
-                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://$backend_addr;
+                proxy_pass {{ .Values.router.upstream.protocol }}://$backend_addr;
                 {{- else }}
-                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://catch_all;
+                proxy_pass {{ .Values.router.upstream.protocol }}://catch_all;
                 {{- end }}
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
@@ -356,12 +356,12 @@ data:
         # Public :80 (hostPort/Service -> acmeHTTPPort): HTTP-01 challenges
         # reach the acme sidecar on loopback; everything else upgrades.
         server {
-            listen {{ include "tls-lb.acmeHTTPPort" . }};
+            listen {{ include "router.acmeHTTPPort" . }};
             server_name {{ $serverNames }};
 
             location /.well-known/acme-challenge/ {
                 access_log off;
-                proxy_pass http://127.0.0.1:{{ include "tls-lb.acmeChallengePort" . }};
+                proxy_pass http://127.0.0.1:{{ include "router.acmeChallengePort" . }};
                 proxy_set_header Host $host;
             }
 

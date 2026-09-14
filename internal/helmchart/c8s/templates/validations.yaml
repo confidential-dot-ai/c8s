@@ -4,7 +4,7 @@
 {{- if not (has .Values.attestationApi.cvmMode (list "node" "gke" "aks")) -}}
 {{- fail (printf "attestationApi.cvmMode must be one of node, gke, aks (got %q)" .Values.attestationApi.cvmMode) -}}
 {{- end -}}
-{{- $tlsLB := .Values.tlsLb -}}
+{{- $router := .Values.router -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (include "c8s.nriCDSURL" .) . -}}
 {{- /*
@@ -13,7 +13,7 @@
   settings (hostPort opt-out, upstream) without a trace. Fail loud instead.
 */ -}}
 {{- if hasKey .Values "teeProxy" -}}
-{{- fail "VALIDATION_ERROR kind=removed_component: teeProxy.* values are set, but the tee-proxy component was removed; tls-lb dials the workload directly. Migrate teeProxy.hostPort to tlsLb.hostPort and teeProxy.upstream to tlsLb.upstream.address, then drop the teeProxy block." -}}
+{{- fail "VALIDATION_ERROR kind=removed_component: teeProxy.* values are set, but the tee-proxy component was removed; router dials the workload directly. Migrate teeProxy.hostPort to router.hostPort and teeProxy.upstream to router.upstream.address, then drop the teeProxy block." -}}
 {{- end -}}
 
 {{- /*
@@ -94,7 +94,7 @@
 {{- fail "VALIDATION_ERROR kind=require_attestation_api: attestationApi.enabled=false requires attestationApi.cvmMode=node. On a non-node cluster the host attestation-api DaemonSet is the only evidence source for get-cert/ratls-mesh/CDS (`c8s install --cvm-mode=node` sets attestationApi.enabled=false for you)." -}}
 {{- end -}}
 {{- /*
-  Catch-all upstream check. No upstream is a legal state: tls-lb installs and
+  Catch-all upstream check. No upstream is a legal state: router installs and
   serves with no catch-all until a backend is wired (install-then-attach). When
   an upstream IS set, it must be either:
    - an operator-managed headless Service (c8s-<id>.<ns>.svc.cluster.local:<port>,
@@ -109,39 +109,39 @@
      be https with tls.verify=true. A silently plaintext manual address would
      leave the hop unprotected. There is no plaintext-to-unattested escape hatch.
 */ -}}
-{{- if and $tlsLB.enabled $tlsLB.upstream.address -}}
-{{- if eq (include "tls-lb.meshWrappedUpstream" $tlsLB.upstream.address) "true" -}}
-{{- if eq $tlsLB.upstream.protocol "https" -}}
-{{- fail "VALIDATION_ERROR kind=workload_https_upstream: a c8s-<id> headless-Service upstream is plaintext http at the app layer (the mesh wraps the hop in attested mTLS), but tlsLb.upstream.protocol=https; use protocol http for a mesh-wrapped upstream" -}}
+{{- if and $router.enabled $router.upstream.address -}}
+{{- if eq (include "router.meshWrappedUpstream" $router.upstream.address) "true" -}}
+{{- if eq $router.upstream.protocol "https" -}}
+{{- fail "VALIDATION_ERROR kind=workload_https_upstream: a c8s-<id> headless-Service upstream is plaintext http at the app layer (the mesh wraps the hop in attested mTLS), but router.upstream.protocol=https; use protocol http for a mesh-wrapped upstream" -}}
 {{- end -}}
 {{- else -}}
-{{- include "tls-lb.requireSecuredBackend" (dict "protocol" $tlsLB.upstream.protocol "tls" $tlsLB.upstream.tls "address" $tlsLB.upstream.address "label" "tlsLb.upstream" "kind" "tlslb_unsecured_upstream" "suggest" "To reach a confidential workload adopt it with --workload-ref <id>=<ns>/<kind>/<name>:<port> and pass --upstream <id> (the mesh wraps that plaintext hop in attested mTLS); ") -}}
+{{- include "router.requireSecuredBackend" (dict "protocol" $router.upstream.protocol "tls" $router.upstream.tls "address" $router.upstream.address "label" "router.upstream" "kind" "router_unsecured_upstream" "suggest" "To reach a confidential workload adopt it with --workload-ref <id>=<ns>/<kind>/<name>:<port> and pass --upstream <id> (the mesh wraps that plaintext hop in attested mTLS); ") -}}
 {{- end -}}
 {{- end -}}
 {{- /*
   Rate budget for the built-in /allowlist route. CDS rate-limits per source
-  IP and sees every front-door request as the one tls-lb pod IP, so the nginx
+  IP and sees every front-door request as the one router pod IP, so the nginx
   aggregate write bound must undercut the CDS bucket signed operator writes
   share, and each per-client bound must fit inside the aggregate. Positivity
-  parsing lives with the zone rendering in tls-lb-configmap.yaml (same
+  parsing lives with the zone rendering in router-configmap.yaml (same
   c8s.positiveInt, so either template failing first reports the same message).
 */ -}}
-{{- if and $tlsLB.enabled (eq (include "tls-lb.renderAllowlistRoute" .) "true") -}}
-{{- $writeRate := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
-{{- $writeBurst := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
-{{- $writeTotalRate := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
-{{- $writeTotalBurst := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
+{{- if and $router.enabled (eq (include "router.renderAllowlistRoute" .) "true") -}}
+{{- $writeRate := int (include "c8s.positiveInt" (dict "value" $router.allowlist.rateLimit.requestsPerSecond "label" "router.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $writeBurst := int (include "c8s.positiveInt" (dict "value" $router.allowlist.rateLimit.burst "label" "router.allowlist.rateLimit.burst")) -}}
+{{- $writeTotalRate := int (include "c8s.positiveInt" (dict "value" $router.allowlist.rateLimit.totalRequestsPerSecond "label" "router.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $writeTotalBurst := int (include "c8s.positiveInt" (dict "value" $router.allowlist.rateLimit.totalBurst "label" "router.allowlist.rateLimit.totalBurst")) -}}
 {{- if gt $writeRate $writeTotalRate -}}
-{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (%d), got: %d" $writeTotalRate $writeRate) -}}
+{{- fail (printf "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (%d), got: %d" $writeTotalRate $writeRate) -}}
 {{- end -}}
 {{- if gt $writeBurst $writeTotalBurst -}}
-{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (%d), got: %d" $writeTotalBurst $writeBurst) -}}
+{{- fail (printf "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (%d), got: %d" $writeTotalBurst $writeBurst) -}}
 {{- end -}}
 {{- if ge (float64 $writeTotalRate) (float64 .Values.cds.rateLimit) -}}
-{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $writeTotalRate) -}}
+{{- fail (printf "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $writeTotalRate) -}}
 {{- end -}}
 {{- if ge $writeTotalBurst (int .Values.cds.rateBurst) -}}
-{{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $writeTotalBurst) -}}
+{{- fail (printf "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $writeTotalBurst) -}}
 {{- end -}}
 {{- end -}}
 {{- /*

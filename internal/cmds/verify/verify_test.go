@@ -1167,7 +1167,7 @@ func TestRunDiscoveryVerify_EndToEnd(t *testing.T) {
 	challenge := []byte("issuance-challenge")
 	doc := discoveryDocWith(t, certPEM, challenge, `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`)
 
-	// The "tls-lb": serves the discovery doc unauthenticated at /v1/discovery.
+	// The "router": serves the discovery doc unauthenticated at /v1/discovery.
 	lb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != defaultDiscoveryPath {
 			http.Error(w, "not found", http.StatusNotFound)

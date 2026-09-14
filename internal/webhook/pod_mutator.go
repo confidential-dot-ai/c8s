@@ -733,7 +733,7 @@ func workloadServiceDNS(cwID, namespace string) string {
 
 // WorkloadServiceFQDN is the managed headless Service's fully-qualified DNS name,
 // c8s-<id>.<namespace>.svc.cluster.local, or "" when the id cannot name a
-// Service. It is the name tls-lb dials for an adopted workload upstream.
+// Service. It is the name router dials for an adopted workload upstream.
 func WorkloadServiceFQDN(cwID, namespace string) string {
 	dns := workloadServiceDNS(cwID, namespace)
 	if dns == "" {

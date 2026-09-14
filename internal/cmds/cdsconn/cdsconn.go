@@ -4,7 +4,7 @@
 //
 // It is shared by `c8s allowlist` and `c8s secrets`, which authorize against the
 // same pinned operator keys and reach CDS the same way. The attestation
-// decisions — that plaintext http needs --insecure, that a tls-lb front door is
+// decisions — that plaintext http needs --insecure, that a router front door is
 // trusted through its discovery document, that a direct URL is verified by
 // RA-TLS — belong in one place, since each is a way to talk to an unattested
 // endpoint by mistake.
@@ -26,8 +26,8 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/remote"
-	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
@@ -54,8 +54,8 @@ type Options struct {
 // BindFlags registers the connection and credential flags on a command's
 // persistent flag set, so every operator CLI spells them the same way.
 func BindFlags(pf *pflag.FlagSet, o *Options) {
-	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound")
-	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
+	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS router or direct CDS base URL (required); WebPKI router URLs are not attestation-bound")
+	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the router value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
 	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
 	pf.StringVar(&o.MeasurementsConfig, "measurements-config", "", "complete endpoint image, RTMR and launch-bound operator policy; excludes --measurements and --measurements-file")
 	pf.DurationVar(&o.Timeout, "timeout", 15*time.Second, "per-request timeout")
@@ -110,7 +110,7 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 	}
 }
 
-// httpsClient builds the attestation-verifying client. A tls-lb front door
+// httpsClient builds the attestation-verifying client. A router front door
 // serves a CDS-issued cert with no RA-TLS extension; its trust path is the
 // discovery document, so probe for that first and fall back to direct RA-TLS
 // serving-cert verification (a port-forwarded CDS) when the target serves none
@@ -120,12 +120,12 @@ func (o *Options) httpsClient(ctx context.Context, pins measurements.ReferenceVa
 	probeCtx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
 	verify := o.pinnedVerifier(pins)
-	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, pins.Digests(), verify)
+	hc, err := routerdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, pins.Digests(), verify)
 	switch {
 	case err == nil:
-		fmt.Fprintln(os.Stderr, "note: target is a tls-lb front door; verified its discovery attestation and bound this session to the attested connection")
+		fmt.Fprintln(os.Stderr, "note: target is a router front door; verified its discovery attestation and bound this session to the attested connection")
 		return hc, nil
-	case errors.Is(err, lbdiscovery.ErrNoDiscovery):
+	case errors.Is(err, routerdiscovery.ErrNoDiscovery):
 		return localverify.NewRATLSHTTPClient(pins.Digests(), verify, o.Timeout), nil
 	default:
 		return nil, err
@@ -224,7 +224,7 @@ func (o *Options) requirePinnedEndpoint() error {
 		return err
 	}
 	if pins.Empty() {
-		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the tls-lb value for a CDS-issued public TLS front door, the CDS value for a direct URL")
+		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
 	}
 	return nil
 }

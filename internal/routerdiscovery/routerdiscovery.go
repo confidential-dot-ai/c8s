@@ -1,11 +1,11 @@
-// Package lbdiscovery consumes the tls-lb front-door discovery contract
+// Package routerdiscovery consumes the router front-door discovery contract
 // (types.DiscoveryDocument, served at /v1/discovery, written by get-cert).
 // The front door's serving cert carries no RA-TLS extension; its trust path is
 // the discovery document instead: attestation evidence captured at issuance,
 // with REPORTDATA binding the serving-cert key + issuance challenge
 // (ratls.ReportDataForKey).
 //
-// Serving certs are per replica (each tls-lb pod provisions its own leaf into
+// Serving certs are per replica (each router pod provisions its own leaf into
 // a pod-local emptyDir), so evidence fetched on one connection says nothing
 // about the leaf a *different* connection would be served — a scaled-out or
 // rolling Service can answer alternating handshakes with alternating certs.
@@ -17,7 +17,7 @@
 // is the eventual replacement for this single-connection model.
 //
 // Evidence verification runs in-process (internal/localverify).
-package lbdiscovery
+package routerdiscovery
 
 import (
 	"bytes"
@@ -44,7 +44,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// DefaultPath is the path the tls-lb serves its discovery document on.
+// DefaultPath is the path the router serves its discovery document on.
 const DefaultPath = "/v1/discovery"
 
 // maxDocumentBytes caps the discovery document read.
@@ -55,9 +55,9 @@ const maxDocumentBytes = 1 << 20
 // back to direct RA-TLS serving-cert verification
 // (localverify.NewRATLSHTTPClient). A document that is present but malformed
 // or failing verification is NOT this error — those fail closed.
-var ErrNoDiscovery = errors.New("lbdiscovery: target serves no discovery document")
+var ErrNoDiscovery = errors.New("routerdiscovery: target serves no discovery document")
 
-// NewVerifiedHTTPClient returns an http.Client for a tls-lb front door: it
+// NewVerifiedHTTPClient returns an http.Client for a router front door: it
 // dials base once, fetches the discovery document over that connection,
 // verifies the embedded attestation evidence (launch measurement checked
 // against measurements — empty accepts any, UNSAFE), and requires the
@@ -76,14 +76,14 @@ var ErrNoDiscovery = errors.New("lbdiscovery: target serves no discovery documen
 // not proven — the same trade-off as `c8s verify` discovery mode.
 func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]byte, verify localverify.VerifyFunc) (*http.Client, error) {
 	if verify == nil {
-		return nil, fmt.Errorf("lbdiscovery: evidence verifier is required")
+		return nil, fmt.Errorf("routerdiscovery: evidence verifier is required")
 	}
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("parse url %q: %w", base, err)
 	}
 	if u.Scheme != "https" {
-		return nil, fmt.Errorf("lbdiscovery: URL scheme must be https, got %q", u.Scheme)
+		return nil, fmt.Errorf("routerdiscovery: URL scheme must be https, got %q", u.Scheme)
 	}
 
 	conn, err := dialFrontDoor(ctx, u.Host)
@@ -104,7 +104,7 @@ func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]by
 	}
 	cert, err := verifyDocument(ctx, data, verify, measurements)
 	if err != nil {
-		return nil, fmt.Errorf("lbdiscovery: discovery document verification failed: %w", err)
+		return nil, fmt.Errorf("routerdiscovery: discovery document verification failed: %w", err)
 	}
 
 	// The evidence binds cert's key; require cert to be the leaf THIS
@@ -112,12 +112,12 @@ func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]by
 	// are talking to (a different replica may have answered the handshake).
 	peers := conn.ConnectionState().PeerCertificates
 	if len(peers) == 0 {
-		return nil, fmt.Errorf("lbdiscovery: connection presented no peer certificate")
+		return nil, fmt.Errorf("routerdiscovery: connection presented no peer certificate")
 	}
 	if !bytes.Equal(peers[0].Raw, cert.Raw) {
 		docSum := sha256.Sum256(cert.Raw)
 		connSum := sha256.Sum256(peers[0].Raw)
-		return nil, fmt.Errorf("lbdiscovery: discovery document attests serving cert sha256 %s but the connection presented %s — a different tls-lb replica may have answered; re-run the command",
+		return nil, fmt.Errorf("routerdiscovery: discovery document attests serving cert sha256 %s but the connection presented %s — a different router replica may have answered; re-run the command",
 			hex.EncodeToString(docSum[:]), hex.EncodeToString(connSum[:]))
 	}
 
@@ -206,7 +206,7 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	// honestly-stale document is refused without costing a verification.
 	//
 	// The classification is deliberately not asserted here, and the window is
-	// ADVISORY on this path: cds_tls.certificate_pem is the tls-lb's
+	// ADVISORY on this path: cds_tls.certificate_pem is the router's
 	// CDS-issued leaf, so RawIssuer != RawSubject and the result is
 	// BodyCAVouched — nothing checked that issuer's signature. This package
 	// cannot fix that: it is bootstrapping trust, the only CA it could reach
@@ -241,7 +241,7 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 // newSingleConnClient returns an http.Client whose transport hands out exactly
 // conn (MaxConnsPerHost=1 serializes requests over it) and never dials again:
 // the attestation verified one handshake, and a new handshake could reach a
-// different tls-lb replica whose leaf that evidence does not cover. A lost
+// different router replica whose leaf that evidence does not cover. A lost
 // connection — server keepalive close, idle eviction, cert rotation — fails
 // closed with a re-run hint. Timeout knobs mirror ratls.NewVerifyingHTTPClient.
 // dialFrontDoor + this guard are a sibling of the verify CLI's dialFrontDoor +
@@ -253,7 +253,7 @@ func newSingleConnClient(conn *tls.Conn) *http.Client {
 		Transport: &http.Transport{
 			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
 				if used.Swap(true) {
-					return nil, errors.New("lbdiscovery: the attested connection was lost and redialing could reach a different tls-lb replica; re-run the command to attest a fresh connection")
+					return nil, errors.New("routerdiscovery: the attested connection was lost and redialing could reach a different router replica; re-run the command to attest a fresh connection")
 				}
 				return conn, nil
 			},
