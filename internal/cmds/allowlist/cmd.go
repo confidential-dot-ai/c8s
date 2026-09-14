@@ -32,7 +32,7 @@ import (
 // references in the uploaded allowlist (see missingComponents). They are chosen
 // to match the chart image repositories: "cds", "ratls-mesh",
 // "nri-image-policy", and "attestation-api" are the component repo basenames,
-// and "nginx" deliberately stays loose because the tls-lb image is the
+// and "nginx" deliberately stays loose because the router image is the
 // third-party "nginxinc/nginx-unprivileged" — a tighter needle would miss it.
 // TestMissingComponentsMatchesRealChartImages pins these against the real repos.
 var defaultRequiredComponents = []string{
@@ -75,9 +75,9 @@ short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
-The default chart publishes /allowlist through tls-lb. Point --url at that
+The default chart publishes /allowlist through router. Point --url at that
 front door only when it uses CDS-issued public TLS (discovery reports
-public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
+public_tls.mode=cds), and use the router launch digest with --measurements. A
 WebPKI front door cannot yet bind its public certificate to the attestation
 evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
 example through a port-forward) and pin the CDS launch digest. To generate an

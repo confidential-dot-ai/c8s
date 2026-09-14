@@ -18,7 +18,7 @@ seeded independently.
 
 `c8s.imageAllowlist` returns a digest-to-image-reference map containing enabled,
 digest-pinned components when `bootstrapAllowlist.deriveComponents` is true,
-plus the CDS self-entry, enabled tls-lb nginx, and applicable RKE2 containerd-prep
+plus the CDS self-entry, enabled router nginx, and applicable RKE2 containerd-prep
 image. Nginx is independently versioned and derives from its own image values.
 Prep entries apply when NRI enforcement is enabled: the NRI prep image requires
 an unbaked RKE2 installer.

@@ -3,7 +3,7 @@ package types
 import "encoding/json"
 
 // Browser-facing attestation + over-encryption wire types for the c8s-verify
-// protocol served by the Load Balancer. These mirror c8s-verify-js/PROTOCOL.md
+// protocol served by the router. These mirror c8s-verify-js/PROTOCOL.md
 // and are consumed by the JavaScript client (c8s-verify-js) and any other
 // out-of-cluster verifier. All key-exchange byte fields are base64url
 // (unpadded); the evidence sub-fields follow the platform's attestation-rs

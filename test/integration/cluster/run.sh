@@ -164,19 +164,19 @@ node_exec ctr -n k8s.io images pull "docker.io/$CURL_IMAGE" >/dev/null \
     || fail "could not pull $CURL_IMAGE into the node (registry rate limit?)"
 node_exec ctr -n k8s.io images pull "docker.io/$WORKLOAD_IMAGE" >/dev/null \
     || fail "could not pull $WORKLOAD_IMAGE into the node (registry rate limit?)"
-# tls-lb's nginx is pulled at install time — after the floor scan — so its
+# router's nginx is pulled at install time — after the floor scan — so its
 # chart-pinned digest is pulled by reference and seeded up front; otherwise
 # the plugin's enforce-existing check kills the front door's own container.
-TLSLB_NGINX_REF="$(helm show values internal/helmchart/c8s | python3 -c '
+ROUTER_NGINX_REF="$(helm show values internal/helmchart/c8s | python3 -c '
 import sys, yaml
-img = yaml.safe_load(sys.stdin)["tlsLb"]["nginx"]["image"]
+img = yaml.safe_load(sys.stdin)["router"]["nginx"]["image"]
 repo = img["repository"]
 # Bare docker-hub names (nginxinc/foo) need the registry made explicit for ctr.
 if "/" not in repo or ("." not in repo.split("/")[0] and ":" not in repo.split("/")[0] and repo.split("/")[0] != "localhost"):
     repo = "docker.io/" + repo
 print(repo + "@" + img["digest"])')"
-node_exec ctr -n k8s.io images pull "$TLSLB_NGINX_REF" >/dev/null \
-    || fail "could not pull $TLSLB_NGINX_REF into the node"
+node_exec ctr -n k8s.io images pull "$ROUTER_NGINX_REF" >/dev/null \
+    || fail "could not pull $ROUTER_NGINX_REF into the node"
 
 log "Writing the allowlist floor"
 # Every image in the node's store (kind system images, the loaded c8s images,
@@ -302,7 +302,7 @@ helm template c8s internal/helmchart/c8s -n "$NS" \
     --set-string nriImagePolicy.image.digest="$NRI_STORE_DIGEST" \
     --set-string cds.image.digest="$CDS_STORE_DIGEST" \
     --set-string "cds.measurements[0]=$MOCK_MEASUREMENT" \
-    --set tlsLb.enabled=false \
+    --set router.enabled=false \
     --set volumed.enabled=false \
     --set ratlsMesh.enabled=false \
     -f "$WORKDIR/values.yaml" \
@@ -320,12 +320,12 @@ pass "NRI plugin registered with containerd and serves the admission inventory"
 # --- Tests ---
 
 log "Control plane"
-for deploy in c8s-operator c8s-cds c8s-tls-lb; do
+for deploy in c8s-operator c8s-cds c8s-router; do
     kubectl -n "$NS" wait --for=condition=Available "deploy/$deploy" --timeout=180s \
         || fail "$deploy not Available"
 done
 kubectl -n "$NS" rollout status ds/c8s-ratls-mesh --timeout=240s || fail "ratls-mesh not ready"
-pass "operator, CDS, tls-lb and ratls-mesh all Ready after c8s install"
+pass "operator, CDS, router and ratls-mesh all Ready after c8s install"
 
 kubectl get crd confidentialworkloads.confidential.ai >/dev/null || fail "ConfidentialWorkload CRD missing"
 kubectl get mutatingwebhookconfiguration c8s-pod-injector >/dev/null || fail "pod-injector webhook config missing"
@@ -633,17 +633,17 @@ case "$rc" in
         ;;
 esac
 
-log "tls-lb front door"
-kubectl -n "$NS" exec deploy/c8s-tls-lb -c nginx -- cat /tls/ca.pem > "$WORKDIR/mesh-ca.pem" \
-    || fail "could not read the mesh CA from tls-lb"
+log "router front door"
+kubectl -n "$NS" exec deploy/c8s-router -c nginx -- cat /tls/ca.pem > "$WORKDIR/mesh-ca.pem" \
+    || fail "could not read the mesh CA from router"
 kubectl create configmap it-mesh-ca --from-file=ca.pem="$WORKDIR/mesh-ca.pem"
 pod_fixture front-door it-curl-lb default curl -sS --cacert /ca/ca.pem \
-    "https://c8s-tls-lb.$NS.svc/healthz" > "$WORKDIR/curl-lb.yaml"
+    "https://c8s-router.$NS.svc/healthz" > "$WORKDIR/curl-lb.yaml"
 kubectl apply -f "$WORKDIR/curl-lb.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/it-curl-lb --timeout=120s \
     || fail "front-door healthz request failed"
 [ "$(kubectl logs it-curl-lb)" = "ok" ] || fail "front-door /healthz did not return ok"
-pass "tls-lb front door serves HTTPS verified against the CDS mesh CA"
+pass "router front door serves HTTPS verified against the CDS mesh CA"
 
 log "Workload adoption"
 kubectl apply -f test/integration/cluster/manifests/adopt-me.yaml
@@ -683,10 +683,10 @@ done
 [ "$SUMMARY" = "1/1" ] || fail "status mirror never reported the adopted workload (got: $SUMMARY)"
 pass "status mirror reports the adopted workload (attestationSummary 1/1)"
 
-# tls-lb now routes its catch-all to the adopted workload over the mesh.
+# router now routes its catch-all to the adopted workload over the mesh.
 kubectl delete pod it-curl-lb 2>/dev/null || true
 pod_fixture front-door it-curl-lb default curl -sS --cacert /ca/ca.pem \
-    "https://c8s-tls-lb.$NS.svc/" > "$WORKDIR/curl-lb.yaml"
+    "https://c8s-router.$NS.svc/" > "$WORKDIR/curl-lb.yaml"
 kubectl apply -f "$WORKDIR/curl-lb.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/it-curl-lb --timeout=120s \
     || fail "front-door request to the adopted workload failed"
@@ -698,7 +698,7 @@ case "$BODY" in
     *"Welcome to nginx"*) ;;
     *) fail "front door did not proxy the adopted workload: $BODY" ;;
 esac
-pass "tls-lb routes the front door to the adopted workload over the mesh"
+pass "router routes the front door to the adopted workload over the mesh"
 
 log "Uninstall"
 ./build/c8s uninstall --namespace "$NS" || fail "c8s uninstall failed"

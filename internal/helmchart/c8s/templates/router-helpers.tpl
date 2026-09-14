@@ -1,50 +1,50 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "tls-lb.name" -}}
-{{- default "tls-lb" .Values.tlsLb.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- define "router.name" -}}
+{{- default "router" .Values.router.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "tls-lb.fullname" -}}
-{{- printf "%s-tls-lb" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- define "router.fullname" -}}
+{{- printf "%s-router" .Release.Name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-The tlsLb.san list, defaulted. Empty -> the chart-managed Service DNS name
-(<release>-tls-lb.<namespace>.svc) as a single entry. The first entry is the
-CDS mesh-cert identity (see tls-lb.san); the whole list is joined into nginx
-server_name by tls-lb-configmap.yaml. Fails if san is set but not a list.
+The router.san list, defaulted. Empty -> the chart-managed Service DNS name
+(<release>-router.<namespace>.svc) as a single entry. The first entry is the
+CDS mesh-cert identity (see router.san); the whole list is joined into nginx
+server_name by router-configmap.yaml. Fails if san is set but not a list.
 */}}
-{{- define "tls-lb.sanList" -}}
-{{- $san := .Values.tlsLb.san -}}
+{{- define "router.sanList" -}}
+{{- $san := .Values.router.san -}}
 {{- if not (kindIs "slice" $san) -}}
-{{- fail (printf "tlsLb.san must be a list of hostnames, got %s: %v" (kindOf $san) $san) -}}
+{{- fail (printf "router.san must be a list of hostnames, got %s: %v" (kindOf $san) $san) -}}
 {{- end -}}
 {{- if $san -}}
 {{- toJson $san -}}
 {{- else -}}
-{{- toJson (list (printf "%s.%s.svc" (include "tls-lb.fullname" .) .Release.Namespace)) -}}
+{{- toJson (list (printf "%s.%s.svc" (include "router.fullname" .) .Release.Namespace)) -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 The single identity baked into the CDS-issued mesh cert (get-cert) and validated
-by cds.dnsSanPatterns: the first entry of tls-lb.sanList. Extra san entries
+by cds.dnsSanPatterns: the first entry of router.sanList. Extra san entries
 widen only nginx server_name, not the mesh cert.
 */}}
-{{- define "tls-lb.san" -}}
-{{- first (include "tls-lb.sanList" . | fromJsonArray) -}}
+{{- define "router.san" -}}
+{{- first (include "router.sanList" . | fromJsonArray) -}}
 {{- end -}}
 
 {{/*
 Common labels.
 */}}
-{{- define "tls-lb.labels" -}}
-helm.sh/chart: tls-lb-0.5.0
-{{ include "tls-lb.selectorLabels" . }}
+{{- define "router.labels" -}}
+helm.sh/chart: router-0.5.0
+{{ include "router.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
@@ -52,7 +52,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 Validate that san contains only safe characters for use in nginx config.
 Allows DNS hostnames and wildcards (e.g. *.example.com).
 */}}
-{{- define "tls-lb.validateSan" -}}
+{{- define "router.validateSan" -}}
 {{- if regexMatch `[^a-zA-Z0-9.*-]` . -}}
 {{- fail (printf "san contains invalid characters: %s - only alphanumeric, dots, hyphens, and wildcards are allowed" .) -}}
 {{- end -}}
@@ -61,7 +61,7 @@ Allows DNS hostnames and wildcards (e.g. *.example.com).
 {{/*
 Validate that the protocol used for an upstream is only http or https
 */}}
-{{- define "tls-lb.validateProtocol" -}}
+{{- define "router.validateProtocol" -}}
 {{- if not (or (eq . "http") (eq . "https")) -}}
 {{- fail (printf "upstream.protocol must be 'http' or 'https', got: %s" .) -}}
 {{- end -}}
@@ -70,7 +70,7 @@ Validate that the protocol used for an upstream is only http or https
 {{/*
 Derive an SNI/verification name from a host:port upstream address.
 */}}
-{{- define "tls-lb.serverNameFromAddress" -}}
+{{- define "router.serverNameFromAddress" -}}
 {{- $serverName := regexReplaceAll `^\[([^\]]+)\](?::[0-9]+)?$` . "${1}" -}}
 {{- regexReplaceAll `^([^:]+)(?::[0-9]+)?$` $serverName "${1}" -}}
 {{- end -}}
@@ -81,7 +81,7 @@ route backend). Fails the render on values that would be silently ignored or
 break out of the generated nginx directives. Args: protocol, tls (dict),
 serverName, trustedCAPath, label.
 */}}
-{{- define "tls-lb.validateProxyTLS" -}}
+{{- define "router.validateProxyTLS" -}}
 {{- $tls := default dict .tls -}}
 {{- range $k := list "verify" "useCDSClientCert" -}}
 {{- if and (hasKey $tls $k) (not (kindIs "bool" (index $tls $k))) -}}
@@ -106,7 +106,7 @@ serverName, trustedCAPath, label.
 {{- end -}}
 
 {{/*
-tls-lb.requireSecuredBackend fails the render on a proxied backend hop that is
+router.requireSecuredBackend fails the render on a proxied backend hop that is
 not authenticated: plaintext http, or https without tls.verify. A confidential
 platform has exactly two safe paths to a backend and this helper admits only
 them: an adopted workload (a mesh-wrapped headless Service, validated separately),
@@ -116,7 +116,7 @@ every route backend so the invariant lives in one place.
 Args: protocol, tls (dict), address, label, kind, suggest (leading hint prose,
 may be "").
 */}}
-{{- define "tls-lb.requireSecuredBackend" -}}
+{{- define "router.requireSecuredBackend" -}}
 {{- $tls := default dict .tls -}}
 {{- $secured := and (eq .protocol "https") (default false $tls.verify) -}}
 {{- if not $secured -}}
@@ -127,7 +127,7 @@ may be "").
 {{/*
 Render nginx proxy TLS directives for an HTTPS backend.
 */}}
-{{- define "tls-lb.proxySSLDirectives" -}}
+{{- define "router.proxySSLDirectives" -}}
 {{- if eq .protocol "https" -}}
 {{- $tls := default dict .tls -}}
 {{- if (default false $tls.useCDSClientCert) }}
@@ -154,20 +154,20 @@ real bool set to true and no legacy typed route owns /allowlist. The nginx
 locations, the loopback proxy sidecar, and the Service traffic policy must all
 flip on this one predicate.
 */}}
-{{- define "tls-lb.renderAllowlistRoute" -}}
-{{- if not (kindIs "bool" .Values.tlsLb.allowlist.enabled) -}}
-{{- fail (printf "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.allowlist.enabled) -}}
+{{- define "router.renderAllowlistRoute" -}}
+{{- if not (kindIs "bool" .Values.router.allowlist.enabled) -}}
+{{- fail (printf "router.allowlist.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.router.allowlist.enabled) -}}
 {{- end -}}
-{{- and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") -}}
+{{- and .Values.router.allowlist.enabled (ne (include "router.hasExplicitAllowlistRoute" .) "true") -}}
 {{- end -}}
 
 {{/*
 Return true when a legacy typed route owns /allowlist. Such a route suppresses
 both the built-in nginx locations and their loopback proxy sidecar.
 */}}
-{{- define "tls-lb.hasExplicitAllowlistRoute" -}}
+{{- define "router.hasExplicitAllowlistRoute" -}}
 {{- $found := false -}}
-{{- range $route := .Values.tlsLb.routes -}}
+{{- range $route := .Values.router.routes -}}
 {{- $path := toString (default "" $route.path) -}}
 {{- if or (eq $path "/allowlist") (eq $path "/allowlist/") -}}
 {{- $found = true -}}
@@ -189,13 +189,13 @@ the attestation extension itself, so it must never dial CDS directly here.
 Args: root, exact (bool), path, proxyPort, writeBurst, writeTotalBurst,
 readBurst — the numeric args arrive pre-validated by the configmap prologue.
 */}}
-{{- define "tls-lb.allowlistLocation" -}}
+{{- define "router.allowlistLocation" -}}
 {{- $root := .root -}}
 location{{ if .exact }} ={{ end }} {{ .path }} {
-    {{- if default false $root.Values.tlsLb.cors.enabled }}
-    {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
-    {{- else if eq (include "tls-lb.protocolCorsEnabled" $root) "true" }}
-    {{- include "tls-lb.protocolCorsLocationDirectives" $root | nindent 4 }}
+    {{- if default false $root.Values.router.cors.enabled }}
+    {{- include "router.corsLocationDirectives" $root.Values.router.cors | nindent 4 }}
+    {{- else if eq (include "router.protocolCorsEnabled" $root) "true" }}
+    {{- include "router.protocolCorsLocationDirectives" $root | nindent 4 }}
     {{- end }}
     # These run before nginx collapses callers onto the loopback proxy source.
     # Each zone's map key is empty for the methods it does not cover, so
@@ -216,41 +216,41 @@ location{{ if .exact }} ={{ end }} {{ .path }} {
 {{/*
 Validate the global CORS configuration. Skips when disabled.
 */}}
-{{- define "tls-lb.validateCORS" -}}
+{{- define "router.validateCORS" -}}
 {{- $cors := default dict . -}}
 {{- if hasKey $cors "enabled" -}}
 {{- if not (kindIs "bool" $cors.enabled) -}}
-{{- fail (printf "tlsLb.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $cors.enabled) -}}
+{{- fail (printf "router.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $cors.enabled) -}}
 {{- end -}}
 {{- end -}}
 {{- if hasKey $cors "protocolEndpoints" -}}
 {{- if not (kindIs "bool" $cors.protocolEndpoints) -}}
-{{- fail (printf "tlsLb.cors.protocolEndpoints must be a boolean; do not set it via --set-string, got: %v" $cors.protocolEndpoints) -}}
+{{- fail (printf "router.cors.protocolEndpoints must be a boolean; do not set it via --set-string, got: %v" $cors.protocolEndpoints) -}}
 {{- end -}}
 {{- end -}}
 {{- if default false $cors.enabled -}}
 {{- $origins := default (list) $cors.allowOrigins -}}
 {{- if not $origins -}}
-{{- fail "tlsLb.cors.enabled=true requires tlsLb.cors.allowOrigins to be non-empty" -}}
+{{- fail "router.cors.enabled=true requires router.cors.allowOrigins to be non-empty" -}}
 {{- end -}}
 {{- range $o := $origins -}}
 {{- if not (or (eq $o "*") (regexMatch `^https?://[A-Za-z0-9.-]+(?::[0-9]+)?$` $o)) -}}
-{{- fail (printf "tlsLb.cors.allowOrigins entry %q must be \"*\" or a scheme://host[:port] URL" $o) -}}
+{{- fail (printf "router.cors.allowOrigins entry %q must be \"*\" or a scheme://host[:port] URL" $o) -}}
 {{- end -}}
 {{- end -}}
 {{- if and (default false $cors.allowCredentials) (has "*" $origins) -}}
-{{- fail "tlsLb.cors.allowCredentials=true is incompatible with allowOrigins containing \"*\" (browsers reject this combination)" -}}
+{{- fail "router.cors.allowCredentials=true is incompatible with allowOrigins containing \"*\" (browsers reject this combination)" -}}
 {{- end -}}
 {{- range $field := list "allowMethods" "allowHeaders" "exposeHeaders" -}}
 {{- range $v := default (list) (index $cors $field) -}}
 {{- if regexMatch `[\r\n";{}\\]` $v -}}
-{{- fail (printf "tlsLb.cors.%s entry %q must not contain CR, LF, quotes, semicolons, braces, or backslashes" $field $v) -}}
+{{- fail (printf "router.cors.%s entry %q must not contain CR, LF, quotes, semicolons, braces, or backslashes" $field $v) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if hasKey $cors "maxAge" -}}
 {{- if not (regexMatch `^[0-9]+$` (printf "%v" $cors.maxAge)) -}}
-{{- fail (printf "tlsLb.cors.maxAge must be a non-negative integer, got: %v" $cors.maxAge) -}}
+{{- fail (printf "router.cors.maxAge must be a non-negative integer, got: %v" $cors.maxAge) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -258,14 +258,14 @@ Validate the global CORS configuration. Skips when disabled.
 
 {{/*
 Validate a per-route CORS override. Only the `enabled` field is honored;
-shared knobs live on tlsLb.cors. Args: dict { "cors": route.cors, "label": ... }.
+shared knobs live on router.cors. Args: dict { "cors": route.cors, "label": ... }.
 */}}
-{{- define "tls-lb.validateRouteCORS" -}}
+{{- define "router.validateRouteCORS" -}}
 {{- if .cors -}}
 {{- $cors := .cors -}}
 {{- range $k, $_ := $cors -}}
 {{- if ne $k "enabled" -}}
-{{- fail (printf "%s.cors only supports the `enabled` field; remove %q (configure shared CORS knobs under tlsLb.cors)" $.label $k) -}}
+{{- fail (printf "%s.cors only supports the `enabled` field; remove %q (configure shared CORS knobs under router.cors)" $.label $k) -}}
 {{- end -}}
 {{- end -}}
 {{- if hasKey $cors "enabled" -}}
@@ -278,12 +278,12 @@ shared knobs live on tlsLb.cors. Args: dict { "cors": route.cors, "label": ... }
 
 {{/*
 Render the http-level CORS maps. `$cors_origin` echoes a matching request
-Origin from tlsLb.cors.allowOrigins. The remaining maps implement
+Origin from router.cors.allowOrigins. The remaining maps implement
 upstream-pass-through: when the upstream emits Access-Control-Allow-Origin
 we adopt its full CORS header set verbatim (so browsers never see duplicate
-headers); otherwise we fall back to tls-lb's configured values.
+headers); otherwise we fall back to router's configured values.
 
-Access-Control-Expose-Headers is the one exception: tls-lb's configured
+Access-Control-Expose-Headers is the one exception: router's configured
 exposeHeaders are ALWAYS advertised (and merged in front of upstream's
 value when in pass-through mode), so browsers can read custom response
 headers the upstream does not know to advertise.
@@ -291,8 +291,8 @@ headers the upstream does not know to advertise.
 Emitted only when CORS is enabled. Caller nindents into the nginx `http {}`
 context.
 */}}
-{{- define "tls-lb.corsMap" -}}
-{{- $cors := default dict .Values.tlsLb.cors -}}
+{{- define "router.corsMap" -}}
+{{- $cors := default dict .Values.router.cors -}}
 {{- if default false $cors.enabled -}}
 {{- $origins := default (list) $cors.allowOrigins -}}
 {{- $methods := join ", " (default (list "GET" "POST" "OPTIONS") $cors.allowMethods) -}}
@@ -357,13 +357,13 @@ map $cors_passthrough $cors_out_expose {
 {{/*
 Render per-location CORS directives. Non-preflight responses go through
 $cors_out_* — either the upstream's CORS headers (passed through unchanged)
-or tls-lb's configured ones, never both. proxy_hide_header drops the
+or router's configured ones, never both. proxy_hide_header drops the
 upstream copies so the maps' re-emitted version is the only one on the
-wire. Preflight OPTIONS short-circuits at nginx with tls-lb's configured
+wire. Preflight OPTIONS short-circuits at nginx with router's configured
 policy. Caller passes the effective CORS dict and guarantees CORS is
 enabled. Caller nindents into a `location {}` block.
 */}}
-{{- define "tls-lb.corsLocationDirectives" -}}
+{{- define "router.corsLocationDirectives" -}}
 {{- $cors := default dict . -}}
 {{- $methods := join ", " (default (list "GET" "POST" "OPTIONS") $cors.allowMethods) -}}
 {{- $headers := join ", " (default (list "Authorization" "Content-Type" "X-C8s-Session") $cors.allowHeaders) -}}
@@ -393,13 +393,13 @@ add_header Access-Control-Expose-Headers    $cors_out_expose always;
 
 {{/*
 Whether the c8s protocol-owned locations get the built-in wide-open CORS
-block: tlsLb.cors.protocolEndpoints (default true), unless the operator's
+block: router.cors.protocolEndpoints (default true), unless the operator's
 global CORS block is enabled — an explicit policy already covers every
 location, so the built-in one steps aside. hasKey instead of `default`
 because sprig's default treats an explicit false as unset.
 */}}
-{{- define "tls-lb.protocolCorsEnabled" -}}
-{{- $cors := default dict .Values.tlsLb.cors -}}
+{{- define "router.protocolCorsEnabled" -}}
+{{- $cors := default dict .Values.router.cors -}}
 {{- $pe := true -}}
 {{- if hasKey $cors "protocolEndpoints" -}}{{- $pe = $cors.protocolEndpoints -}}{{- end -}}
 {{- and $pe (not (default false $cors.enabled)) -}}
@@ -416,11 +416,11 @@ browser credentials (allowlist mutations are operator-signed over method,
 path, and body). An origin allowlist here cannot protect anything and only
 breaks third-party verifiers, so the policy is a constant: any origin, no
 credentials. Self-contained on purpose — no http-level maps and no
-upstream pass-through; these endpoints are c8s-owned end to end, so tls-lb
+upstream pass-through; these endpoints are c8s-owned end to end, so router
 states their CORS policy itself. Caller nindents into a `location {}`
 block.
 */}}
-{{- define "tls-lb.protocolCorsLocationDirectives" -}}
+{{- define "router.protocolCorsLocationDirectives" -}}
 proxy_hide_header Access-Control-Allow-Origin;
 proxy_hide_header Access-Control-Allow-Methods;
 proxy_hide_header Access-Control-Allow-Headers;
@@ -440,8 +440,8 @@ add_header Access-Control-Allow-Origin "*" always;
 {{/*
 Selector labels.
 */}}
-{{- define "tls-lb.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "tls-lb.name" . }}
+{{- define "router.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "router.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
@@ -451,29 +451,29 @@ a mode/values mismatch: webpki needs the Secret and is the only mode that may
 carry one; acme needs a TEE-held key (node-CVM), a reachable :80
 challenge, and HTTP-01-issuable sanList entries.
 */}}
-{{- define "tls-lb.publicTLSMode" -}}
-{{- $mode := printf "%v" .Values.tlsLb.publicTLS.mode -}}
+{{- define "router.publicTLSMode" -}}
+{{- $mode := printf "%v" .Values.router.publicTLS.mode -}}
 {{- if not (has $mode (list "cds" "webpki" "acme")) -}}
-{{- fail (printf "tlsLb.publicTLS.mode must be cds, webpki, or acme, got: %s" $mode) -}}
+{{- fail (printf "router.publicTLS.mode must be cds, webpki, or acme, got: %s" $mode) -}}
 {{- end -}}
-{{- if and (eq $mode "webpki") (not .Values.tlsLb.publicTLS.secretName) -}}
-{{- fail "tlsLb.publicTLS.mode=webpki requires tlsLb.publicTLS.secretName" -}}
+{{- if and (eq $mode "webpki") (not .Values.router.publicTLS.secretName) -}}
+{{- fail "router.publicTLS.mode=webpki requires router.publicTLS.secretName" -}}
 {{- end -}}
-{{- if and (ne $mode "webpki") .Values.tlsLb.publicTLS.secretName -}}
-{{- fail (printf "tlsLb.publicTLS.secretName is set but tlsLb.publicTLS.mode is %q; set mode=webpki to serve the Secret, or clear secretName" $mode) -}}
+{{- if and (ne $mode "webpki") .Values.router.publicTLS.secretName -}}
+{{- fail (printf "router.publicTLS.secretName is set but router.publicTLS.mode is %q; set mode=webpki to serve the Secret, or clear secretName" $mode) -}}
 {{- end -}}
 {{- if eq $mode "acme" -}}
 {{- if not (eq .Values.attestationApi.cvmMode "node") -}}
-{{- fail "VALIDATION_ERROR kind=tlslb_acme_runtime: tlsLb.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
+{{- fail "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=node) so the ACME account and serving keys are TEE-held" -}}
 {{- end -}}
 
-{{- range $s := (include "tls-lb.sanList" . | fromJsonArray) -}}
+{{- range $s := (include "router.sanList" . | fromJsonArray) -}}
 {{- if contains "*" $s -}}
-{{- fail (printf "tlsLb.publicTLS.mode=acme cannot issue for wildcard san %q: HTTP-01 forbids wildcards" $s) -}}
+{{- fail (printf "router.publicTLS.mode=acme cannot issue for wildcard san %q: HTTP-01 forbids wildcards" $s) -}}
 {{- end -}}
 {{- end -}}
-{{- if and (not .Values.tlsLb.hostPort.enabled) (eq .Values.tlsLb.service.type "ClusterIP") -}}
-{{- fail "VALIDATION_ERROR kind=tlslb_acme_front_door: tlsLb.publicTLS.mode=acme needs an internet-reachable front door for the HTTP-01 challenge: set tlsLb.service.type=LoadBalancer (any LB implementation: cloud controller, MetalLB, kube-vip, ...) or tlsLb.hostPort.enabled=true" -}}
+{{- if and (not .Values.router.hostPort.enabled) (eq .Values.router.service.type "ClusterIP") -}}
+{{- fail "VALIDATION_ERROR kind=router_acme_front_door: router.publicTLS.mode=acme needs an internet-reachable front door for the HTTP-01 challenge: set router.service.type=LoadBalancer (any LB implementation: cloud controller, MetalLB, kube-vip, ...) or router.hostPort.enabled=true" -}}
 {{- end -}}
 {{- end -}}
 {{- $mode -}}
@@ -483,65 +483,65 @@ challenge, and HTTP-01-issuable sanList entries.
 ACME constants shared by the acme sidecar args, the deployment mounts, the
 nginx :80 server, and the cert-path helpers below.
 */}}
-{{- define "tls-lb.acmeCertDir" -}}/etc/c8s-acme-tls{{- end -}}
-{{- define "tls-lb.acmeChallengePort" -}}8402{{- end -}}
-{{- define "tls-lb.acmeHTTPPort" -}}8080{{- end -}}
+{{- define "router.acmeCertDir" -}}/etc/c8s-acme-tls{{- end -}}
+{{- define "router.acmeChallengePort" -}}8402{{- end -}}
+{{- define "router.acmeHTTPPort" -}}8080{{- end -}}
 
 {{/*
 Path to the public-TLS certificate nginx serves: the publicTLS Secret
 (webpki), the sidecar-issued ACME leaf (acme), or the CDS-issued cert under
 tlsMountPath (cds).
 */}}
-{{- define "tls-lb.publicCertPath" -}}
-{{- $mode := include "tls-lb.publicTLSMode" . -}}
+{{- define "router.publicCertPath" -}}
+{{- $mode := include "router.publicTLSMode" . -}}
 {{- if eq $mode "webpki" -}}
-{{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.certKey -}}
+{{- printf "%s/%s" .Values.router.publicTLS.mountPath .Values.router.publicTLS.certKey -}}
 {{- else if eq $mode "acme" -}}
-{{- printf "%s/cert.pem" (include "tls-lb.acmeCertDir" .) -}}
+{{- printf "%s/cert.pem" (include "router.acmeCertDir" .) -}}
 {{- else -}}
-{{- printf "%s/cert.pem" .Values.tlsLb.tlsMountPath -}}
+{{- printf "%s/cert.pem" .Values.router.tlsMountPath -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "tls-lb.publicKeyPath" -}}
-{{- $mode := include "tls-lb.publicTLSMode" . -}}
+{{- define "router.publicKeyPath" -}}
+{{- $mode := include "router.publicTLSMode" . -}}
 {{- if eq $mode "webpki" -}}
-{{- printf "%s/%s" .Values.tlsLb.publicTLS.mountPath .Values.tlsLb.publicTLS.keyKey -}}
+{{- printf "%s/%s" .Values.router.publicTLS.mountPath .Values.router.publicTLS.keyKey -}}
 {{- else if eq $mode "acme" -}}
-{{- printf "%s/key.pem" (include "tls-lb.acmeCertDir" .) -}}
+{{- printf "%s/key.pem" (include "router.acmeCertDir" .) -}}
 {{- else -}}
-{{- printf "%s/key.pem" .Values.tlsLb.tlsMountPath -}}
+{{- printf "%s/key.pem" .Values.router.tlsMountPath -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "tls-lb.discoveryFilePath" -}}
-{{- printf "%s/%s" .Values.tlsLb.discovery.mountPath .Values.tlsLb.discovery.fileName -}}
+{{- define "router.discoveryFilePath" -}}
+{{- printf "%s/%s" .Values.router.discovery.mountPath .Values.router.discovery.fileName -}}
 {{- end -}}
 
 {{/*
-tls-lb's discovery + verbose get-cert args, as a YAML list (one arg per line)
-for c8s.getCertContainers' extraArgs. tls-lb owns its own cert provisioning,
+router's discovery + verbose get-cert args, as a YAML list (one arg per line)
+for c8s.getCertContainers' extraArgs. router owns its own cert provisioning,
 so it adds discovery output and verbose logging to the shared get-cert flow.
 */}}
-{{- define "tls-lb.getCertCommonArgs" -}}
-{{- if .Values.tlsLb.discovery.enabled }}
-- --discovery-out={{ include "tls-lb.discoveryFilePath" . }}
-- --discovery-cds-cert-url={{ .Values.tlsLb.discovery.cdsCertPath }}
-- --discovery-public-tls-mode={{ include "tls-lb.publicTLSMode" . }}
-{{- if .Values.tlsLb.meshCA.expose }}
-- --discovery-mesh-ca-url={{ .Values.tlsLb.discovery.meshCAPath }}
+{{- define "router.getCertCommonArgs" -}}
+{{- if .Values.router.discovery.enabled }}
+- --discovery-out={{ include "router.discoveryFilePath" . }}
+- --discovery-cds-cert-url={{ .Values.router.discovery.cdsCertPath }}
+- --discovery-public-tls-mode={{ include "router.publicTLSMode" . }}
+{{- if .Values.router.meshCA.expose }}
+- --discovery-mesh-ca-url={{ .Values.router.discovery.meshCAPath }}
 {{- end }}
 {{- end }}
-{{- with .Values.tlsLb.certProvisioning.caWatchInterval }}
+{{- with .Values.router.certProvisioning.caWatchInterval }}
 - --ca-watch-interval={{ . }}
 {{- end }}
-{{- if .Values.tlsLb.certProvisioning.verbose }}
+{{- if .Values.router.certProvisioning.verbose }}
 - --verbose
 {{- end }}
 {{- end }}
 
 {{/*
-"true" when the tls-lb pod must mount the node inventory's socket directory:
+"true" when the router pod must mount the node inventory's socket directory:
 the readiness gate is on and this is the node-CVM shape.
 
 The condition mirrors the operator's own inventory condition
@@ -551,8 +551,8 @@ ContainerCreating. validations.yaml (kind=require_host_image_policy) makes that
 condition true in every renderable shape today; the condition is spelled out
 anyway so the two consumers of the socket stay on one rule.
 */}}
-{{- define "tls-lb.mountInventorySocket" -}}
-{{- if and .Values.tlsLb.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+{{- define "router.mountInventorySocket" -}}
+{{- if and .Values.router.attest.expectedWorkload (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
 true
 {{- end -}}
 {{- end -}}
@@ -562,16 +562,16 @@ c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
 and renews it on a ticker, SIGHUP-ing nginx after each renewal. Caller nindents into the Pod spec's initContainers
 list.
 */}}
-{{- define "tls-lb.getCertContainers" -}}
+{{- define "router.getCertContainers" -}}
 {{- $mounts := list -}}
-{{- if .Values.tlsLb.discovery.enabled -}}
-{{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
+{{- if .Values.router.discovery.enabled -}}
+{{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.router.discovery.mountPath) -}}
 {{- end -}}
 {{- if .Values.attestationApi.enabled -}}
 {{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
 {{- end -}}
-{{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
-{{- if .Values.tlsLb.attest.expectedWorkload -}}
+{{- $extraArgs := include "router.getCertCommonArgs" . | fromYamlArray -}}
+{{- if .Values.router.attest.expectedWorkload -}}
 
 {{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
        stamp on the mesh leaf, which only exists when get-cert redeems a
@@ -583,27 +583,27 @@ list.
        volume and the socket's supplemental group
        (workloadclaims.InventorySocketGID) on the same condition. */ -}}
 {{- $extraArgs = append $extraArgs "--workload-claims" -}}
-{{- if eq (include "tls-lb.mountInventorySocket" .) "true" -}}
+{{- if eq (include "router.mountInventorySocket" .) "true" -}}
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
 {{- end -}}
 {{- end -}}
-{{- if eq (include "tls-lb.publicTLSMode" .) "webpki" -}}
-{{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath) -}}
-{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) -}}
-{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicKeyPath" .)) -}}
+{{- if eq (include "router.publicTLSMode" .) "webpki" -}}
+{{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.router.publicTLS.mountPath) -}}
+{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "router.publicCertPath" .)) -}}
+{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "router.publicKeyPath" .)) -}}
 {{- end -}}
 {{- include "c8s.getCertContainers" (dict
   "root" .
-  "san" (include "tls-lb.san" .)
-  "certOut" (printf "%s/cert.pem" .Values.tlsLb.tlsMountPath)
-  "keyOut" (printf "%s/key.pem" .Values.tlsLb.tlsMountPath)
-  "caOut" (printf "%s/ca.pem" .Values.tlsLb.tlsMountPath)
+  "san" (include "router.san" .)
+  "certOut" (printf "%s/cert.pem" .Values.router.tlsMountPath)
+  "keyOut" (printf "%s/key.pem" .Values.router.tlsMountPath)
+  "caOut" (printf "%s/ca.pem" .Values.router.tlsMountPath)
   "volume" "tls-certs"
-  "mountPath" .Values.tlsLb.tlsMountPath
-  "renewInterval" .Values.tlsLb.certProvisioning.renewInterval
-  "runAsUser" .Values.tlsLb.nginx.runAsUser
-  "runAsGroup" .Values.tlsLb.nginx.runAsGroup
-  "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot
+  "mountPath" .Values.router.tlsMountPath
+  "renewInterval" .Values.router.certProvisioning.renewInterval
+  "runAsUser" .Values.router.nginx.runAsUser
+  "runAsGroup" .Values.router.nginx.runAsGroup
+  "runAsNonRoot" .Values.router.nginx.runAsNonRoot
   "reloadNginx" "true"
   "extraArgs" $extraArgs
   "extraMounts" (join "\n" $mounts)
@@ -611,16 +611,16 @@ list.
 {{- end }}
 
 {{/*
-tls-lb.meshWrappedUpstream — "true" when the address is an operator-managed
+router.meshWrappedUpstream — "true" when the address is an operator-managed
 headless Service (c8s-<id>.<ns>.svc.cluster.local:<port>, the exact
 webhook.WorkloadServiceFQDN form). c8s-<id> is a DNS-1035 label, <ns> a
 DNS-1123 label. That shape is the one upstream whose backing pod IPs churn, so
 it is dialed through a variable and re-resolved per request; every other
 address gets a static upstream block resolved once at startup. validations.yaml
-(kind=workload_https_upstream, kind=tlslb_unsecured_upstream) branches on the
+(kind=workload_https_upstream, kind=router_unsecured_upstream) branches on the
 same predicate. Call with the address string.
 */}}
-{{- define "tls-lb.meshWrappedUpstream" -}}
+{{- define "router.meshWrappedUpstream" -}}
 {{- if regexMatch "^c8s-[a-z]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.svc\\.cluster\\.local:[0-9]+$" . -}}
 true
 {{- end -}}

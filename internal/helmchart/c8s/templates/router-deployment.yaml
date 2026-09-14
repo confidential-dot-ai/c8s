@@ -1,46 +1,46 @@
-{{- if .Values.tlsLb.enabled }}
-{{- if not (kindIs "bool" .Values.tlsLb.hostPort.enabled) -}}
+{{- if .Values.router.enabled }}
+{{- if not (kindIs "bool" .Values.router.hostPort.enabled) -}}
 {{- /* A string "false" is truthy and would both bind the node port and force
 Recreate, silently defeating the operator's opt-out. */ -}}
-{{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
+{{- fail (printf "router.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.router.hostPort.enabled) -}}
 {{- end -}}
 
-{{- if .Values.tlsLb.attest.expectedWorkload -}}
-{{- if not .Values.tlsLb.attest.enabled -}}
+{{- if .Values.router.attest.expectedWorkload -}}
+{{- if not .Values.router.attest.enabled -}}
 {{- /* The gate *is* the cds-attest sidecar's /readyz. Without the sidecar
 nothing renders it, yet the claims wiring it pulls in (get-cert's
 --workload-claims, the inventory hostPath, the supplemental group) still would
 — cost and hostPath surface for a gate that does not exist. */ -}}
-{{- fail "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload" -}}
+{{- fail "router.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set router.attest.enabled=true or clear expectedWorkload" -}}
 {{- end -}}
-{{- if .Values.tlsLb.hostPort.enabled -}}
+{{- if .Values.router.hostPort.enabled -}}
 {{- /* Readiness only withdraws Service endpoints. The hostPort is published by
 the CNI portmap plugin, wired at sandbox creation and independent of pod
 readiness, so an unnamed front door would keep serving external traffic on the
 node port while the operator watched a NotReady pod and believed traffic was
 withheld. */ -}}
-{{- fail "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload" -}}
+{{- fail "router.attest.expectedWorkload cannot gate ingress while router.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set router.hostPort.enabled=false and route through the Service, or clear expectedWorkload" -}}
 {{- end -}}
 {{- end -}}
-{{- $publicTLSMode := include "tls-lb.publicTLSMode" . -}}
-{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
-{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
-{{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
-{{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
-{{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
-{{- $renderAllowlistProxy := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
+{{- $publicTLSMode := include "router.publicTLSMode" . -}}
+{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.router.tlsMountPath -}}
+{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.router.upstream.tls.trustedCAPath -}}
+{{- $attestUsesHTTPSUpstream := and .Values.router.attest.enabled (eq .Values.router.upstream.protocol "https") -}}
+{{- $upstreamAddress := .Values.router.upstream.address -}}
+{{- $attestUpstreamServerName := default (include "router.serverNameFromAddress" $upstreamAddress) .Values.router.upstream.tls.serverName -}}
+{{- $renderAllowlistProxy := eq (include "router.renderAllowlistRoute" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "tls-lb.fullname" . }}
+  name: {{ include "router.fullname" . }}
   labels:
-    {{- include "tls-lb.labels" . | nindent 4 }}
+    {{- include "router.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.tlsLb.nginx.replicas }}
+  replicas: {{ .Values.router.nginx.replicas }}
   strategy:
-    {{- if .Values.tlsLb.strategy }}
-    {{- toYaml .Values.tlsLb.strategy | nindent 4 }}
-    {{- else if .Values.tlsLb.hostPort.enabled }}
+    {{- if .Values.router.strategy }}
+    {{- toYaml .Values.router.strategy | nindent 4 }}
+    {{- else if .Values.router.hostPort.enabled }}
     {{- /* Two pods on a node would collide on the host port; on a single-node
     cluster a surge pod could never schedule, deadlocking the roll. */}}
     type: Recreate
@@ -54,24 +54,24 @@ spec:
     {{- end }}
   selector:
     matchLabels:
-      {{- include "tls-lb.selectorLabels" . | nindent 6 }}
+      {{- include "router.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "tls-lb.selectorLabels" . | nindent 8 }}
+        {{- include "router.selectorLabels" . | nindent 8 }}
       annotations:
-        checksum/nginx-config: {{ include (print $.Template.BasePath "/tls-lb-configmap.yaml") . | sha256sum }}
+        checksum/nginx-config: {{ include (print $.Template.BasePath "/router-configmap.yaml") . | sha256sum }}
         {{- if .Values.cds.measurementsConfig }}
         # A ConfigMap edit alone does not change the pod template, so without
-        # this a tightened pin would not roll the load balancer.
+        # this a tightened pin would not roll the router.
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
 
-      {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
+      {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.router.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
       initContainers:
-        {{- include "tls-lb.getCertContainers" . | nindent 8 }}
+        {{- include "router.getCertContainers" . | nindent 8 }}
         {{- if eq $publicTLSMode "acme" }}
         # Native sidecar (restartPolicy: Always): issues one multi-SAN ACME
         # leaf for the sanList domains, answers HTTP-01 on loopback behind the
@@ -84,52 +84,52 @@ spec:
           restartPolicy: Always
           args:
             - acme
-            - --domains={{ include "tls-lb.sanList" . | fromJsonArray | join "," }}
-            {{- with .Values.tlsLb.acme.email }}
+            - --domains={{ include "router.sanList" . | fromJsonArray | join "," }}
+            {{- with .Values.router.acme.email }}
             - --acme-email={{ . }}
             {{- end }}
-            {{- with .Values.tlsLb.acme.directoryURL }}
+            {{- with .Values.router.acme.directoryURL }}
             - --acme-directory-url={{ . }}
             {{- end }}
-            - --challenge-port={{ include "tls-lb.acmeChallengePort" . }}
-            - --http-port={{ include "tls-lb.acmeHTTPPort" . }}
-            - --cert-dir={{ include "tls-lb.acmeCertDir" . }}
+            - --challenge-port={{ include "router.acmeChallengePort" . }}
+            - --http-port={{ include "router.acmeHTTPPort" . }}
+            - --cert-dir={{ include "router.acmeCertDir" . }}
           # nginx's config names the acme cert files, so nginx must not start
           # before the bootstrap placeholder exists; regular containers wait
           # for a native sidecar's startup probe. Probing cert.pem suffices:
           # the sidecar writes key before cert.
           startupProbe:
             exec:
-              command: ["/c8s", "probe-file", "{{ include "tls-lb.acmeCertDir" . }}/cert.pem"]
+              command: ["/c8s", "probe-file", "{{ include "router.acmeCertDir" . }}/cert.pem"]
             periodSeconds: 1
             failureThreshold: 60
           volumeMounts:
             - name: acme-tls
-              mountPath: {{ include "tls-lb.acmeCertDir" . }}
+              mountPath: {{ include "router.acmeCertDir" . }}
           securityContext:
             {{- include "c8s.getCertSecurityContext" (dict
-              "runAsUser" .Values.tlsLb.nginx.runAsUser
-              "runAsGroup" .Values.tlsLb.nginx.runAsGroup
-              "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot
+              "runAsUser" .Values.router.nginx.runAsUser
+              "runAsGroup" .Values.router.nginx.runAsGroup
+              "runAsNonRoot" .Values.router.nginx.runAsNonRoot
             ) | nindent 12 }}
         {{- end }}
       containers:
         - name: nginx
-          image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}
-          imagePullPolicy: {{ .Values.tlsLb.nginx.image.pullPolicy }}
+          image: {{ include "c8s-common.image" .Values.router.nginx.image }}
+          imagePullPolicy: {{ .Values.router.nginx.image.pullPolicy }}
           ports:
             - name: https
-              containerPort: {{ .Values.tlsLb.nginx.httpsPort }}
-              {{- if .Values.tlsLb.hostPort.enabled }}
-              hostPort: {{ .Values.tlsLb.hostPort.https | default 443 }}
+              containerPort: {{ .Values.router.nginx.httpsPort }}
+              {{- if .Values.router.hostPort.enabled }}
+              hostPort: {{ .Values.router.hostPort.https | default 443 }}
               {{- end }}
               protocol: TCP
             {{- if eq $publicTLSMode "acme" }}
             {{- /* HTTP-01 arrives on public :80; hostPort follows the same
             gating as :443. */}}
             - name: http
-              containerPort: {{ include "tls-lb.acmeHTTPPort" . }}
-              {{- if .Values.tlsLb.hostPort.enabled }}
+              containerPort: {{ include "router.acmeHTTPPort" . }}
+              {{- if .Values.router.hostPort.enabled }}
               hostPort: 80
               {{- end }}
               protocol: TCP
@@ -137,9 +137,9 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
-            runAsUser: {{ include "c8s.int" .Values.tlsLb.nginx.runAsUser }}
-            runAsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
+            runAsNonRoot: {{ .Values.router.nginx.runAsNonRoot }}
+            runAsUser: {{ include "c8s.int" .Values.router.nginx.runAsUser }}
+            runAsGroup: {{ include "c8s.int" .Values.router.nginx.runAsGroup }}
             capabilities:
               drop:
                 - ALL
@@ -161,21 +161,21 @@ spec:
 
           volumeMounts:
             - name: tls-certs
-              mountPath: {{ .Values.tlsLb.tlsMountPath }}
+              mountPath: {{ .Values.router.tlsMountPath }}
               readOnly: true
             {{- if eq $publicTLSMode "webpki" }}
             - name: public-tls
-              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+              mountPath: {{ .Values.router.publicTLS.mountPath }}
               readOnly: true
             {{- end }}
             {{- if eq $publicTLSMode "acme" }}
             - name: acme-tls
-              mountPath: {{ include "tls-lb.acmeCertDir" . }}
+              mountPath: {{ include "router.acmeCertDir" . }}
               readOnly: true
             {{- end }}
-            {{- if .Values.tlsLb.discovery.enabled }}
+            {{- if .Values.router.discovery.enabled }}
             - name: discovery
-              mountPath: {{ .Values.tlsLb.discovery.mountPath }}
+              mountPath: {{ .Values.router.discovery.mountPath }}
               readOnly: true
             {{- end }}
             - name: nginx-config
@@ -186,11 +186,11 @@ spec:
               mountPath: /var/cache/nginx
             - name: nginx-tmp
               mountPath: /tmp
-          {{- with .Values.tlsLb.nginx.resources }}
+          {{- with .Values.router.nginx.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if .Values.tlsLb.attest.enabled }}
+        {{- if .Values.router.attest.enabled }}
         - name: cds-attest
           image: {{ include "c8s.image" . }}
           imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
@@ -202,10 +202,10 @@ spec:
             with no NetworkPolicy in front of it. The readiness probe reaches
             /readyz through nginx instead (location = /readyz). */}}
             - --host=127.0.0.1
-            - --port={{ .Values.tlsLb.attest.port }}
-            - --platform={{ .Values.tlsLb.attest.platform }}
-            - --generation={{ .Values.tlsLb.attest.generation }}
-            - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
+            - --port={{ .Values.router.attest.port }}
+            - --platform={{ .Values.router.attest.platform }}
+            - --generation={{ .Values.router.attest.generation }}
+            - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.router.attest.attestationApiURL }}
             # attest-lb needs a TEE-held serving key (cds, acme); webpki's
             # host-visible Secret key stays attest-pq-only.
             - --front-door-mode={{ $publicTLSMode }}
@@ -215,17 +215,17 @@ spec:
             # direct-TLS client actually sees: the mesh leaf (cds), the Secret
             # cert (webpki), or the ACME leaf (acme). Re-read per request, so
             # renewals are picked up.
-            - --serving-cert-file={{ include "tls-lb.publicCertPath" . }}
-            {{- if .Values.tlsLb.attest.expectedWorkload }}
-            - --expected-workload={{ .Values.tlsLb.attest.expectedWorkload }}
+            - --serving-cert-file={{ include "router.publicCertPath" . }}
+            {{- if .Values.router.attest.expectedWorkload }}
+            - --expected-workload={{ .Values.router.attest.expectedWorkload }}
             {{- end }}
             # The identity-bound PQ flow must use the TEE-held mesh
             # credential, never the optional publicTLS Secret: report_data
             # commits the X-Wing key exchange to this leaf and the sidecar
             # proves possession with its matching private key.
-            - --mesh-identity-cert-file={{ .Values.tlsLb.tlsMountPath }}/cert.pem
-            - --mesh-identity-key-file={{ .Values.tlsLb.tlsMountPath }}/key.pem
-            - --mesh-identity-ca-file={{ .Values.tlsLb.tlsMountPath }}/ca.pem
+            - --mesh-identity-cert-file={{ .Values.router.tlsMountPath }}/cert.pem
+            - --mesh-identity-key-file={{ .Values.router.tlsMountPath }}/key.pem
+            - --mesh-identity-ca-file={{ .Values.router.tlsMountPath }}/ca.pem
             # Terminate over-encryption here and forward to the same workload
             # backend nginx proxies to. An http upstream is plaintext at the
             # app layer; pointed at a headless Service (an adopted workload),
@@ -235,12 +235,12 @@ spec:
             # entirely; the sidecar then serves attestation with its echo
             # backend instead of crashing on a scheme-only URL.
             {{- if $upstreamAddress }}
-            - --upstream={{ .Values.tlsLb.upstream.protocol }}://{{ $upstreamAddress }}
+            - --upstream={{ .Values.router.upstream.protocol }}://{{ $upstreamAddress }}
             {{- if $attestUsesHTTPSUpstream }}
             - --upstream-ca={{ $upstreamTrustedCAPath }}
-            {{- if .Values.tlsLb.upstream.tls.useCDSClientCert }}
-            - --upstream-cert={{ .Values.tlsLb.tlsMountPath }}/cert.pem
-            - --upstream-key={{ .Values.tlsLb.tlsMountPath }}/key.pem
+            {{- if .Values.router.upstream.tls.useCDSClientCert }}
+            - --upstream-cert={{ .Values.router.tlsMountPath }}/cert.pem
+            - --upstream-key={{ .Values.router.tlsMountPath }}/key.pem
             {{- end }}
             - --upstream-server-name={{ $attestUpstreamServerName }}
             {{- end }}
@@ -251,7 +251,7 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
-          {{- if .Values.tlsLb.attest.expectedWorkload }}
+          {{- if .Values.router.attest.expectedWorkload }}
           # Workload-verified ingress gate (docs/getcert-workload-binding.md):
           # ready only while the installed mesh identity leaf is a usable
           # credential carrying a matched-workload stamp naming
@@ -274,19 +274,19 @@ spec:
           {{- end }}
           volumeMounts:
             - name: tls-certs
-              mountPath: {{ .Values.tlsLb.tlsMountPath }}
+              mountPath: {{ .Values.router.tlsMountPath }}
               readOnly: true
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
             {{- if eq $publicTLSMode "webpki" }}
             # cds-attest reads the same public leaf nginx serves
             # (--serving-cert-file).
             - name: public-tls
-              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+              mountPath: {{ .Values.router.publicTLS.mountPath }}
               readOnly: true
             {{- end }}
             {{- if eq $publicTLSMode "acme" }}
             - name: acme-tls
-              mountPath: {{ include "tls-lb.acmeCertDir" . }}
+              mountPath: {{ include "router.acmeCertDir" . }}
               readOnly: true
             {{- end }}
           securityContext:
@@ -296,13 +296,13 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- with .Values.tlsLb.attest.resources }}
+          {{- with .Values.router.attest.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
         {{- if $renderAllowlistProxy }}
-        # nginx terminates the public, tls-lb-attested connection and forwards
+        # nginx terminates the public, router-attested connection and forwards
         # /allowlist over pod loopback. This sidecar establishes the second
         # trust hop: it verifies CDS's RA-TLS evidence before proxying.
         - name: allowlist-proxy
@@ -311,7 +311,7 @@ spec:
           args:
             - allowlist-proxy
             - --host=127.0.0.1
-            - --port={{ include "c8s.int" .Values.tlsLb.allowlist.proxyPort }}
+            - --port={{ include "c8s.int" .Values.router.allowlist.proxyPort }}
             - --cds-url={{ include "c8s.cdsURL" . }}
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             {{- if .Values.cds.measurementsConfig }}
@@ -348,7 +348,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- with .Values.tlsLb.allowlist.resources }}
+          {{- with .Values.router.allowlist.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -366,12 +366,12 @@ spec:
         {{- if eq $publicTLSMode "webpki" }}
         - name: public-tls
           secret:
-            secretName: {{ .Values.tlsLb.publicTLS.secretName }}
+            secretName: {{ .Values.router.publicTLS.secretName }}
             items:
-              - key: {{ .Values.tlsLb.publicTLS.certKey }}
-                path: {{ .Values.tlsLb.publicTLS.certKey }}
-              - key: {{ .Values.tlsLb.publicTLS.keyKey }}
-                path: {{ .Values.tlsLb.publicTLS.keyKey }}
+              - key: {{ .Values.router.publicTLS.certKey }}
+                path: {{ .Values.router.publicTLS.certKey }}
+              - key: {{ .Values.router.publicTLS.keyKey }}
+                path: {{ .Values.router.publicTLS.keyKey }}
         {{- end }}
         {{- if eq $publicTLSMode "acme" }}
         # ACME key, cert, and account state. Memory-medium: TEE-protected and
@@ -382,7 +382,7 @@ spec:
             medium: Memory
             sizeLimit: 1Mi
         {{- end }}
-        {{- if .Values.tlsLb.discovery.enabled }}
+        {{- if .Values.router.discovery.enabled }}
         - name: discovery
           emptyDir:
             medium: Memory
@@ -398,11 +398,11 @@ spec:
             sizeLimit: 16Mi
         - name: nginx-config
           configMap:
-            name: {{ include "tls-lb.fullname" . }}-nginx
-        {{- if eq (include "tls-lb.mountInventorySocket" .) "true" }}
+            name: {{ include "router.fullname" . }}-nginx
+        {{- if eq (include "router.mountInventorySocket" .) "true" }}
         # The readiness gate needs a stamped mesh leaf, so get-cert redeems a
         # sandbox token over the node inventory's Unix socket (see
-        # tls-lb.getCertContainers). Read-only: the sidecar only connects.
+        # router.getCertContainers). Read-only: the sidecar only connects.
         - name: workload-claims
           hostPath:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
@@ -411,9 +411,9 @@ spec:
         {{- /* Shares the admission inventory's socket directory — see c8s.attestationApiSocket. */}}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
       securityContext:
-        runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
-        fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
-        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") .Values.attestationApi.enabled }}
+        runAsNonRoot: {{ .Values.router.nginx.runAsNonRoot }}
+        fsGroup: {{ include "c8s.int" .Values.router.nginx.runAsGroup }}
+        {{- if or (eq (include "router.mountInventorySocket" .) "true") .Values.attestationApi.enabled }}
         # workloadclaims.InventorySocketGID: the inventory and attest-proxy
         # chgrp their sockets to this group so the non-root get-cert sidecar
         # (on the nginx uid) can connect. get-cert must stay on the nginx uid —

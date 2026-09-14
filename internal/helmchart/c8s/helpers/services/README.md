@@ -27,7 +27,7 @@ with the placeholder intact, so its own container must leave `HOST_IP` unset.
 to it. `c8s.nriCDSURL` uses `nriImagePolicy.cds.url` when supplied, otherwise
 `https://127.0.0.1:<cds.service.nodePort>` for the host plugin.
 
-`c8s.tlsLb.resolver` honors `tlsLb.nginx.resolver`. Otherwise `nriImagePolicy.distro=rke2`
+`c8s.router.resolver` honors `router.nginx.resolver`. Otherwise `nriImagePolicy.distro=rke2`
 selects `rke2-coredns-rke2-coredns.kube-system.svc.cluster.local`;
 the default is `kube-dns.kube-system.svc.cluster.local`. Nginx must resolve this
 name at startup.

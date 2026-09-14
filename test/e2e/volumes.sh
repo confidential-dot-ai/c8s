@@ -38,7 +38,7 @@
 #                       c8s volume create --source preserves those modes.
 #   E2E_CDS_LOCAL_PORT  local port for the CDS port-forward (default 18443)
 #   E2E_MESH_CA         path to a pinned mesh CA bundle (default: read from the
-#                       tls-lb pod, which serves the live CA on its cert volume)
+#                       router pod, which serves the live CA on its cert volume)
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -85,7 +85,7 @@ cleanup() {
 trap cleanup EXIT
 cw_namespace "$ns"
 
-# Every CDS call goes over a port-forward: tls-lb fronts /allowlist but not
+# Every CDS call goes over a port-forward: router fronts /allowlist but not
 # /secrets, and the RA-TLS client verifies attestation rather than PKI
 # hostnames, so one channel serves both APIs (README.md "Operator access").
 kubectl -n c8s-system port-forward svc/c8s-cds "$CDS_PORT:8443" >/dev/null 2>&1 &
@@ -124,10 +124,10 @@ curl_poll() {
 MESH_CA=${E2E_MESH_CA:-}
 if [ -z "$MESH_CA" ]; then
   MESH_CA=$(mktemp)
-  # The tls-lb get-cert sidecar writes the live mesh CA onto its cert volume
+  # The router get-cert sidecar writes the live mesh CA onto its cert volume
   # (values tlsMountPath /tls); the same bytes back every workload leaf.
-  kubectl -n c8s-system exec deploy/c8s-tls-lb -c nginx -- cat /tls/ca.pem >"$MESH_CA" \
-    || fail "could not read the mesh CA from the tls-lb pod"
+  kubectl -n c8s-system exec deploy/c8s-router -c nginx -- cat /tls/ca.pem >"$MESH_CA" \
+    || fail "could not read the mesh CA from the router pod"
 fi
 
 c8s_conn secrets put "$IMM_PATH" --from-file "$E2E_VOL_IMM_ESCROW" \

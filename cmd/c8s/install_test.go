@@ -240,7 +240,7 @@ func TestParseWorkloadRef(t *testing.T) {
 			want: workloadRef{kind: "nodeset.example.net", name: "worker", namespace: "workloads"},
 		},
 		{
-			// An optional :<port> suffix is the tls-lb upstream port.
+			// An optional :<port> suffix is the router upstream port.
 			ref:  "vllm/deployment/router:8000",
 			want: workloadRef{kind: "deployment", name: "router", namespace: "vllm", port: 8000},
 		},
@@ -359,7 +359,7 @@ func TestValidateWorkloadAdoptionFlags(t *testing.T) {
 }
 
 // TestUpstreamAddress drives the derivation buildValueArgs uses to set
-// tlsLb.upstream.address, so it guards the address the chart receives against
+// router.upstream.address, so it guards the address the chart receives against
 // divergence from the RunE's --upstream validation. The port comes from the
 // selected ref's :<port> suffix, not a separate flag.
 func TestUpstreamAddress(t *testing.T) {
@@ -762,7 +762,7 @@ func TestValuesFilesSetDistro(t *testing.T) {
 		want bool
 	}{
 		{"nri distro set", "nriImagePolicy:\n  distro: rke2\n", true},
-		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"unrelated value only", "router:\n  enabled: false\n", false},
 		{"distro key absent under section", "nriImagePolicy:\n  enabled: true\n", false},
 		{"empty distro string is not a choice", "nriImagePolicy:\n  distro: \"\"\n", false},
 		{"empty file", "", false},
@@ -786,7 +786,7 @@ func TestValuesFilesSetDistro(t *testing.T) {
 	})
 
 	t.Run("one of several files sets it", func(t *testing.T) {
-		a := write(t, "tlsLb:\n  enabled: false\n")
+		a := write(t, "router:\n  enabled: false\n")
 		b := write(t, "nriImagePolicy:\n  distro: rke2\n")
 		got, err := valuesFilesSetDistro([]string{a, b})
 		if err != nil || !got {
@@ -795,9 +795,9 @@ func TestValuesFilesSetDistro(t *testing.T) {
 	})
 }
 
-func TestTLSLBHostPort(t *testing.T) {
+func TestRouterHostPort(t *testing.T) {
 	hp := func(https any) map[string]any {
-		return map[string]any{"tlsLb": map[string]any{"hostPort": map[string]any{"https": https}}}
+		return map[string]any{"router": map[string]any{"hostPort": map[string]any{"https": https}}}
 	}
 	for _, tc := range []struct {
 		name string
@@ -805,14 +805,14 @@ func TestTLSLBHostPort(t *testing.T) {
 		want int32
 	}{
 		{"empty string derives 443", hp(""), 443},
-		{"no hostPort map", map[string]any{"tlsLb": map[string]any{}}, 443},
+		{"no hostPort map", map[string]any{"router": map[string]any{}}, 443},
 		{"string override", hp("8443"), 8443},
 		{"int override", hp(9443), 9443},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tlsLBHostPort(tc.tree)
+			got, err := routerHostPort(tc.tree)
 			if err != nil || got != tc.want {
-				t.Fatalf("tlsLBHostPort = (%d, %v), want (%d, nil)", got, err, tc.want)
+				t.Fatalf("routerHostPort = (%d, %v), want (%d, nil)", got, err, tc.want)
 			}
 		})
 	}
@@ -827,7 +827,7 @@ func TestTLSLBHostPort(t *testing.T) {
 		{"zero is not a port", 0},
 	} {
 		t.Run(tc.name+" errors", func(t *testing.T) {
-			if _, err := tlsLBHostPort(hp(tc.https)); err == nil {
+			if _, err := routerHostPort(hp(tc.https)); err == nil {
 				t.Fatalf("want error for %v", tc.https)
 			}
 		})
@@ -884,7 +884,7 @@ func TestHostPortConflict(t *testing.T) {
 		},
 		{
 			name:        "holder only in ignored namespace",
-			pods:        []corev1.Pod{pod(ignoreNS, "c8s-tls-lb", "node-a", 443)},
+			pods:        []corev1.Pod{pod(ignoreNS, "c8s-router", "node-a", 443)},
 			nodes:       []string{"node-a"},
 			wantBlocked: false,
 		},
@@ -959,18 +959,18 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		switch {
 		case mode == "aks" && platform == "tdx":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-tdx",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=az-tdx",
+				"--set-string", "router.attest.generation=",
 			)
 		case mode == "aks":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-snp",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=az-snp",
+				"--set-string", "router.attest.generation=",
 			)
 		case platform == "tdx":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=tdx",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=tdx",
+				"--set-string", "router.attest.generation=",
 			)
 		}
 		// node: the node image bakes attestation-api + nri-image-policy, so the
@@ -1428,7 +1428,7 @@ func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 			"enabled": false,
 			"image":   map[string]any{"repository": "ghcr.io/confidential-dot-ai/volumed", "tag": ""},
 		},
-		"tlsLb": map[string]any{"enabled": true},
+		"router": map[string]any{"enabled": true},
 	}
 	overlay := map[string]any{
 		"volumed": map[string]any{"enabled": true},
@@ -1445,8 +1445,8 @@ func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	if !ok || img["repository"] != "ghcr.io/confidential-dot-ai/volumed" {
 		t.Errorf("overlay wiped volumed.image; got %v", vol["image"])
 	}
-	if !boolAtPath(base, "tlsLb.enabled") {
-		t.Error("unrelated tlsLb.enabled was disturbed by the overlay")
+	if !boolAtPath(base, "router.enabled") {
+		t.Error("unrelated router.enabled was disturbed by the overlay")
 	}
 }
 
@@ -1488,7 +1488,7 @@ func TestMaterializeStdinValues(t *testing.T) {
 	})
 
 	t.Run("dash becomes a temp file holding the piped bytes, in order", func(t *testing.T) {
-		payload := "tlsLb:\n  enabled: false\n"
+		payload := "router:\n  enabled: false\n"
 		got, cleanup, err := materializeStdinValues([]string{"base.yaml", "-", "last.yaml"}, strings.NewReader(payload))
 		if err != nil {
 			t.Fatalf("materializeStdinValues: %v", err)
@@ -1600,7 +1600,7 @@ func TestValuesFilesSetExemptNamespaces(t *testing.T) {
 		{"null is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces:\n", true},
 		{"sibling policy key only", "nriImagePolicy:\n  policy:\n    mode: audit\n", false},
 		{"wrong nesting level", "nriImagePolicy:\n  exemptNamespaces: [kube-system]\n", false},
-		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"unrelated value only", "router:\n  enabled: false\n", false},
 		{"empty file", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1622,7 +1622,7 @@ func TestValuesFilesSetExemptNamespaces(t *testing.T) {
 	})
 
 	t.Run("one of several files sets it", func(t *testing.T) {
-		a := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		a := writeValuesFile(t, "router:\n  enabled: false\n")
 		b := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [kube-system]\n")
 		got, err := valuesFilesSetExemptNamespaces([]string{a, b})
 		if err != nil || !got {
@@ -1657,7 +1657,7 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 	})
 
 	t.Run("an unrelated -f file does not suppress the default", func(t *testing.T) {
-		f := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		f := writeValuesFile(t, "router:\n  enabled: false\n")
 		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
 		if err != nil {
 			t.Fatalf("appendExemptNamespacesInstallArgs: %v", err)

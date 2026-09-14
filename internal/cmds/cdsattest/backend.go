@@ -58,7 +58,7 @@ func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.Tu
 // is plaintext HTTP by default — the cluster's transparent raTLS mesh wraps the
 // sidecar→backend hop, exactly like every other c8s workload. When the upstream
 // is https it does mTLS with the LB's CDS-issued client cert and verifies the
-// peer against the mesh CA (mirroring the tls-lb nginx proxy_ssl_* config).
+// peer against the mesh CA (mirroring the router nginx proxy_ssl_* config).
 type HTTPBackend struct {
 	base   string // upstream base URL, e.g. http://vllm-router-service.vllm.svc.cluster.local
 	client *http.Client

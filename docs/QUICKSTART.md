@@ -41,11 +41,11 @@ openssl ecparam -genkey -name prime256v1 -noout -out operator.key
 openssl ec -in operator.key -pubout -out operator-pub.pem
 ```
 
-tls-lb ships no default upstream: `--upstream` (with the port on its
-`--workload-ref`) points tls-lb at an adopted workload's mesh-wrapped headless Service.
-Without an upstream choice, tls-lb renders no catch-all route until one is
+router ships no default upstream: `--upstream` (with the port on its
+`--workload-ref`) points router at an adopted workload's mesh-wrapped headless Service.
+Without an upstream choice, router renders no catch-all route until one is
 attached rather than shipping an unencrypted inference hop. Alternatives and details: the
-[Upstream](operator.md#tls-lb-upstream).
+[Upstream](operator.md#router-upstream).
 
 For existing workloads, use `--workload-ref <cw-id>=<namespace>/<kind>/<name>` so install
 adopts them as CWs and resolves their images into the NRI bootstrap allowlist.

@@ -216,10 +216,10 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 	}
 }
 
-func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
+func TestMutatePodSupportsRouterProfile(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			AnnotationWorkload:               "c8s-tls-lb.c8s-system.svc",
+			AnnotationWorkload:               "c8s-router.c8s-system.svc",
 			AnnotationCertVolume:             "tls-certs",
 			AnnotationCertDir:                "/tls",
 			AnnotationCertFile:               "cert.pem",
@@ -268,7 +268,7 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 		t.Fatalf("shareProcessNamespace = %v, want true", pod.Spec.ShareProcessNamespace)
 	}
 	if len(pod.Spec.Volumes) != 3 {
-		t.Fatalf("volumes = %#v, want existing tls-lb volumes only", pod.Spec.Volumes)
+		t.Fatalf("volumes = %#v, want existing router volumes only", pod.Spec.Volumes)
 	}
 	if len(pod.Spec.InitContainers) != 2 {
 		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
@@ -455,7 +455,7 @@ func TestWorkloadSAN(t *testing.T) {
 		want      string
 	}{
 		{"bare id gets managed service dns name", "api", "default", "c8s-api.default.svc"},
-		{"dotted id passes through", "c8s-tls-lb.c8s-system.svc", "c8s-system", "c8s-tls-lb.c8s-system.svc"},
+		{"dotted id passes through", "c8s-router.c8s-system.svc", "c8s-system", "c8s-router.c8s-system.svc"},
 		{"empty namespace falls back to id", "api", "", "api"},
 		{"id too long for a service name passes through", strings.Repeat("a", 60), "default", strings.Repeat("a", 60)},
 		{"empty id stays empty", "", "default", ""},

@@ -48,7 +48,7 @@ func writeTestServingLeaf(t *testing.T) (path string, der []byte) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "c8s-tls-lb.c8s-system.svc"},
+		Subject:      pkix.Name{CommonName: "c8s-router.c8s-system.svc"},
 	}
 	der, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

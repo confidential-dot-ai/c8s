@@ -1,4 +1,4 @@
-// Package allowlistproxy implements the loopback proxy used by tls-lb to
+// Package allowlistproxy implements the loopback proxy used by router to
 // publish CDS's allowlist API. The public TLS connection terminates at nginx;
 // this process establishes the second trust hop by verifying CDS's RA-TLS
 // serving certificate before forwarding the original request.
@@ -42,13 +42,13 @@ type config struct {
 	readHeaderTimeout  time.Duration
 }
 
-// NewCmd returns the internal allowlist-proxy subcommand used by the tls-lb
+// NewCmd returns the internal allowlist-proxy subcommand used by the router
 // chart. It listens only on pod loopback; nginx is the public front door.
 func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:          "allowlist-proxy",
-		Short:        "Proxy tls-lb allowlist requests to an RA-TLS-verified CDS",
+		Short:        "Proxy router allowlist requests to an RA-TLS-verified CDS",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -101,7 +101,7 @@ func runContext(ctx context.Context, cfg config, listen listenFunc) error {
 	defer listener.Close()
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
-	slog.Info("tls-lb allowlist proxy listening", "addr", addr, "cds_url", cfg.cdsURL)
+	slog.Info("router allowlist proxy listening", "addr", addr, "cds_url", cfg.cdsURL)
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}

@@ -62,7 +62,7 @@ Because it lives in the chart, this runs for both `c8s install` and GitOps
 | ratls-mesh | Node DaemonSet |
 | nri-image-policy | Node process launched by containerd; baked binary in `node` mode |
 | get-cert injection (`confidential.ai/cw` pods) | Webhook at admission time |
-| tls-lb | Ordinary pod inside the node CVM |
+| router | Ordinary pod inside the node CVM |
 
 ---
 
@@ -227,8 +227,8 @@ already deleted. See [`operator.md`](operator.md#uninstall).
 # Every flow below also requires --hardware-platform (the nodes' CPU TEE:
 # sev-snp or tdx). --operator-keys authorizes `c8s allowlist` writes; a -f
 # values file may carry the keys instead, and --force installs without.
-# --upstream (with the port on its --workload-ref) points tls-lb at an adopted
-# workload's mesh-wrapped headless Service (see operator.md, "tls-lb upstream").
+# --upstream (with the port on its --workload-ref) points router at an adopted
+# workload's mesh-wrapped headless Service (see operator.md, "router upstream").
 
 # Base — normal cluster, host-side components, no per-pod confidentiality.
 c8s install --cvm-mode=node --hardware-platform=sev-snp --operator-keys operator-pub.pem \

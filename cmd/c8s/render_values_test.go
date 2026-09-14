@@ -447,7 +447,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 }
 
-// --upstream derives tlsLb.upstream.address from an adopted --workload-ref (a
+// --upstream derives router.upstream.address from an adopted --workload-ref (a
 // c8s-<id> headless-Service address the chart recognizes as mesh-wrapped). A
 // duplicate ref dedups to one adoption, so --upstream still resolves it.
 func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
@@ -473,8 +473,8 @@ func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}
-	if !slices.Contains(args, "tlsLb.upstream.address=c8s-infer.vllm.svc.cluster.local:8000") {
-		t.Fatalf("want derived tlsLb.upstream.address, got %v", args)
+	if !slices.Contains(args, "router.upstream.address=c8s-infer.vllm.svc.cluster.local:8000") {
+		t.Fatalf("want derived router.upstream.address, got %v", args)
 	}
 }
 

@@ -22,7 +22,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// defaultDiscoveryPath is the path the tls-lb serves its discovery document on.
+// defaultDiscoveryPath is the path the router serves its discovery document on.
 const defaultDiscoveryPath = "/v1/discovery"
 
 // frontDoorObservation is what a discovery gather's live TLS handshake showed
@@ -45,7 +45,7 @@ const (
 	frontDoorOther
 )
 
-// gatherFromDiscovery fetches the tls-lb discovery document and builds evidence
+// gatherFromDiscovery fetches the router discovery document and builds evidence
 // from the embedded attestation, bound to the CDS cert key + the issuance
 // challenge. The challenge is fixed at issuance time, so this is NOT a freshness
 // proof (fresh=false) — but it ships the VCEK, so it verifies offline.
@@ -104,10 +104,10 @@ func dialFrontDoor(ctx context.Context, addr, serverName string, timeout time.Du
 
 // singleConnClient serves requests over the one dialed connection and never
 // redials: the handshake leaf the gather compares is this connection's, so a
-// second dial could reach a different tls-lb replica serving a different cert.
+// second dial could reach a different router replica serving a different cert.
 // Redirects are not followed for the same reason — a non-200, including a
 // redirect, is a fetch failure (connectError).
-// dialFrontDoor + this guard are a sibling of internal/lbdiscovery's
+// dialFrontDoor + this guard are a sibling of internal/routerdiscovery's
 // dialFrontDoor + newSingleConnClient — port fixes both ways.
 func singleConnClient(conn *tls.Conn, timeout time.Duration) *http.Client {
 	var dialed atomic.Bool
@@ -117,7 +117,7 @@ func singleConnClient(conn *tls.Conn, timeout time.Duration) *http.Client {
 		Transport: &http.Transport{
 			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
 				if dialed.Swap(true) {
-					return nil, errors.New("the attested connection was lost and redialing could reach a different tls-lb replica; re-run the command")
+					return nil, errors.New("the attested connection was lost and redialing could reach a different router replica; re-run the command")
 				}
 				return conn, nil
 			},

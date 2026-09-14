@@ -2,7 +2,7 @@ package types
 
 import "encoding/json"
 
-// DiscoveryDocument is the /v1/discovery preflight document the tls-lb serves
+// DiscoveryDocument is the /v1/discovery preflight document the router serves
 // (written by get-cert): the CDS-issued serving certificate plus the attestation
 // evidence captured at issuance. It is the wire contract shared between the
 // producer (get-cert) and consumers (c8s verify, c8s-verify-js).

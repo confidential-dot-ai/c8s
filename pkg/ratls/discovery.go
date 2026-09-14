@@ -10,13 +10,13 @@ import (
 )
 
 // AttestedCertFromDiscovery validates the attestation carrier fields of a
-// tls-lb discovery document and returns the attested CDS serving certificate
+// router discovery document and returns the attested CDS serving certificate
 // together with the expected REPORTDATA: SHA-384(cert pubkey ‖ challenge),
 // get-cert's issuance binding (ReportDataForKey).
 //
 // Policy stays with the caller — public_tls.mode handling, platform
 // defaulting, and verifying the evidence. Both consumers fetch the document
-// over one live connection and bind it to that connection's leaf: lbdiscovery
+// over one live connection and bind it to that connection's leaf: routerdiscovery
 // refuses a mismatched leaf (and webpki mode) outright, while `c8s verify`
 // records the observation and lets its verdict policy demote.
 func AttestedCertFromDiscovery(d *types.DiscoveryDocument) (*x509.Certificate, [64]byte, error) {

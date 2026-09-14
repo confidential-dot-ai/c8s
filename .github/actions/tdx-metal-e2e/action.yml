@@ -544,7 +544,7 @@ runs:
       bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
 
   - name: assert the image floor denies, then opens to a signed write
-    # tls-lb fronts /allowlist on hostPort 443, and node mode puts CDS in
+    # router fronts /allowlist on hostPort 443, and node mode puts CDS in
     # the node CVM, so the endpoint pins to the node MRTD.
     shell: bash
     run: |

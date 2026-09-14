@@ -51,7 +51,7 @@ var renderValuesDistro string
 // preflight, and no namespace apply.
 //
 // What it does NOT emit: the per-cluster overrides a consumer layers on top
-// (dnsSanPatterns, tls-lb SAN/LB IP/CORS, nodeSelectors) and anything the chart
+// (dnsSanPatterns, router SAN/LB IP/CORS, nodeSelectors) and anything the chart
 // renders off these values internally (e.g. the AKS webhook annotation off
 // attestationApi.cvmMode). The output is the install-computed base, not a full
 // per-cluster values file.
@@ -62,7 +62,7 @@ var renderValuesCmd = &cobra.Command{
 to resolve — resolved image digests, --cvm-mode TEE devices, --single-node node
 selector, and the NRI allowlist derivation — and writes them to
 stdout as a values.yaml, without contacting a cluster. Per-cluster tuning a
-consumer already owns (webhook cert settings, tls-lb, nodeSelectors, …) is not
+consumer already owns (webhook cert settings, router, nodeSelectors, …) is not
 emitted; layer it in the consuming HelmRelease values.
 
 Use it to feed a GitOps consumer: a Flux HelmRelease can valuesFrom the bundle
@@ -196,7 +196,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	// http. Empty means "not plumbed" so an operator's -f (or the chart's
 	// no-catch-all install-then-attach state) stands.
 	if upstream != "" {
-		setArgs = append(setArgs, "--set-string", "tlsLb.upstream.address="+upstream)
+		setArgs = append(setArgs, "--set-string", "router.upstream.address="+upstream)
 	}
 	if installImagePullSecret != "" {
 		setArgs = append(setArgs, "--set-string", "imagePullSecret="+installImagePullSecret)
@@ -400,7 +400,7 @@ func init() {
 	renderValuesCmd.Flags().StringVar(&installMeasurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Emits cds.measurementsConfig + ratlsMesh.measurementsConfig and the flat pins alongside. Cannot be combined with --measurements or --rtmrs")
 	renderValuesCmd.Flags().StringSliceVar(&installRTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> completing --measurements on --hardware-platform=tdx (repeatable/comma-separated). Emits cds.rtmrs + ratlsMesh.rtmrs; ignored for SNP evidence")
 	renderValuesCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "adopted workload as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Used here only to derive --upstream's address (render-values patches nothing)")
-	renderValuesCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives tlsLb.upstream.address c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>")
+	renderValuesCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload router routes its catch-all to; derives router.upstream.address c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>")
 	renderValuesCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each component image tag to its registry digest (via crane), pin it, and enable the NRI allowlist derivation")
 	renderValuesCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing dockerconfigjson Secret the chart wires into every component's imagePullSecrets")
 	renderValuesCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main'). Override to pin a specific branch/tag/release")
