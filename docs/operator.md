@@ -335,7 +335,7 @@ Two operational notes:
 `c8s verify` (and `c8s cds verify`, shorthand for `c8s verify --kind cds`) fetches
 a component's TEE attestation evidence — AMD SEV-SNP or Intel TDX — and verifies it
 against the hardware signature chain plus a pinned launch measurement. Use it to
-confirm CDS — or the load balancer — is a genuine TEE running the expected code
+confirm CDS — or the router — is a genuine TEE running the expected code
 after install.
 
 It verifies **in-process** with `attestation-go` — the Go port of the same

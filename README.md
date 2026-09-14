@@ -174,7 +174,7 @@ kubectl label node <cds-node> role=cds
 openssl ecparam -name prime256v1 -genkey -noout -out operator.key
 openssl ec -in operator.key -pubout -out operator.pub
 
-# Install the platform (node-as-CVM) and point the bundled TLS load balancer
+# Install the platform (node-as-CVM) and point the bundled router
 # at your workload
 c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
   --operator-keys operator.pub \

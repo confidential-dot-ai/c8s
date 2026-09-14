@@ -1,5 +1,5 @@
 // Package overenc implements the c8s-verify post-quantum over-encryption channel
-// that terminates inside the Load Balancer's TEE. This package's key schedule and
+// that terminates inside the router's TEE. This package's key schedule and
 // record layer are the canonical contract (pinned by the golden vectors under
 // testdata/); the c8s-verify-js client and its PROTOCOL.md follow it.
 //

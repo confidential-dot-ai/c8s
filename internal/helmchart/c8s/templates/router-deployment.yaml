@@ -63,7 +63,7 @@ spec:
         checksum/nginx-config: {{ include (print $.Template.BasePath "/router-configmap.yaml") . | sha256sum }}
         {{- if .Values.cds.measurementsConfig }}
         # A ConfigMap edit alone does not change the pod template, so without
-        # this a tightened pin would not roll the load balancer.
+        # this a tightened pin would not roll the router.
         checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
         {{- end }}
     spec:
