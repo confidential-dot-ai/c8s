@@ -1,6 +1,9 @@
 package allowlist
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // RunningContainer holds the launch characteristics observed by an enforcer.
 // Missing Env is unavailable evidence and fails exact/deny policies.
@@ -124,12 +127,9 @@ func admittedBy(declared []Container, r RunningContainer) bool {
 // anyRunning reports whether a declared container is satisfied by something
 // running.
 func anyRunning(running []RunningContainer, c Container) bool {
-	for _, r := range running {
-		if c.admits(r) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(running, func(r RunningContainer) bool {
+		return c.admits(r)
+	})
 }
 
 // admits reports whether this declared container permits the running one.
@@ -148,10 +148,7 @@ func (c Container) admitsProcess(r RunningContainer) bool {
 		return false
 	}
 	rest, ok := c.Command.matchCommand(r.Argv)
-	if !ok || !c.Args.matchArgs(rest) {
-		return false
-	}
-	return true
+	return ok && c.Args.matchArgs(rest)
 }
 
 // admits reports whether every bind destination is one this policy names.
