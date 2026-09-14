@@ -82,7 +82,7 @@ func TestPluginRun_StopsOnContextCancel(t *testing.T) {
 func TestRemoveContainer_EvictsFromInventory(t *testing.T) {
 	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
 	p.inventory = newAdmissionInventory(t.TempDir())
-	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil)
+	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil, nil)
 
 	ctr := &api.Container{Id: cidApp1, PodSandboxId: "sandbox-1", Name: "app"}
 	if err := p.RemoveContainer(context.Background(), &api.PodSandbox{Id: "sandbox-1"}, ctr); err != nil {
@@ -103,6 +103,8 @@ func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 	}
 	var want api.EventMask
 	want.Set(api.Event_CREATE_CONTAINER)
+	want.Set(api.Event_START_CONTAINER)
+	want.Set(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
 	want.Set(api.Event_REMOVE_CONTAINER)
 	// The inventory also needs the pod-sandbox lifecycle for its sandbox set.
 	want.Set(api.Event_RUN_POD_SANDBOX)

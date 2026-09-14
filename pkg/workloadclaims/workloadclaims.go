@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"io"
 	"net"
 	"net/http"
@@ -164,7 +165,7 @@ type SandboxTokenRequest struct {
 //
 // Digests is the deduplicated digest set cert issuance gates on. Containers
 // carries each container's effective argv, deduplicated by SandboxContainer.Key
-// (the whole (digest, argv) pair, not the digest alone), so a consumer can hold
+// (the whole (digest, argv, env) tuple, not the digest alone), so a consumer can hold
 // a sandbox to the pair each container actually ran with.
 //
 // Digests is [] (never null) for a known sandbox with no containers. Containers
@@ -176,9 +177,10 @@ type SandboxDigestsResponse struct {
 }
 
 // SandboxContainer is one admitted container: the bytes, and what they were
-// told to run.
+// told to run, plus an optional commitment to its final OCI environment.
 type SandboxContainer struct {
-	Digest string `json:"digest"`
+	Env    *allowlist.EnvObservation `json:"env,omitempty"`
+	Digest string                    `json:"digest"`
 	// Argv is the effective OCI process.args — the merged image-config and
 	// pod-spec command, which is what the argv policy is written against.
 	Argv []string `json:"argv,omitempty"`

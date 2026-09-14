@@ -215,6 +215,8 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 
 	var mask api.EventMask
 	mask.Set(api.Event_CREATE_CONTAINER)
+	mask.Set(api.Event_START_CONTAINER)
+	mask.Set(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
 	if p.inventory != nil {
 		// The inventory needs eviction on stop to stay correct across pod churn,
 		// and the pod-sandbox lifecycle to keep its sandbox set (the /sandbox
@@ -288,7 +290,8 @@ func (p *plugin) recordDigest(ctr *api.Container, digest string) {
 	if p.inventory == nil {
 		return
 	}
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs())
+	env := containerEnv(ctr)
+	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), env)
 }
 
 // resolveDigest returns the canonical store digest for imageRef using the same
@@ -348,7 +351,15 @@ func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName stri
 // container's effective OCI process.args (NRI api.Container.Args): always_allow
 // digests are admitted regardless of it, served digests only when it satisfies
 // an entry's entrypoint/cmd policy. Returns the verdict and an error string.
-func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string) (imageVerdict, string) {
+func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, env ...*allowlist.EnvObservation) (imageVerdict, string) {
+	var observed *allowlist.EnvObservation
+	if len(env) > 0 {
+		observed = env[0]
+	}
+	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, true)
+}
+
+func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, final bool) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
 		"pod", podName,
@@ -416,20 +427,22 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		return verdictDeny, fmt.Sprintf("no allowlist available for %s", imageRef)
 	}
 
-	// always_allow digests admit regardless of argv; served digests require
-	// the effective argv to satisfy some entry's entrypoint/cmd policy. Mount
-	// and env policy are left unobserved here: this plugin gates images on a
-	// node CVM, where it sees the CRI container rather than a guest's mount
-	// table, and an unobserved field is not a violation
-	// (allowlist.RunningContainer).
-	if !p.policy.alwaysAllows(digest) && !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	// always_allow is the explicit platform bootstrap exemption. Served entries
+	// are matched against the final OCI argv and environment; mounts remain
+	// unobserved on this backend.
+	rc := allowlist.RunningContainer{Digest: digest, Argv: argv, Env: observed}
+	admitted := snap.index.AdmitsProcess(rc)
+	if final {
+		admitted = snap.index.AdmitsContainer(rc)
+	}
+	if !p.policy.alwaysAllows(digest) && !admitted {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.
 		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
 		if listed := snap.index.AdmitsDigest(digest); listed {
-			reason = "argv_not_admitted"
-			denial = fmt.Sprintf("image %s is allowlisted, but its command satisfies no workload entry's argv policy", imageRef)
+			reason = "launch_not_admitted"
+			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args or env policy", imageRef)
 		}
 		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
 		p.audit.Log(audit.Event{
@@ -465,11 +478,19 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 // then. The exemption runs last, only downgrades, and is keyed on the resolved
 // digest — a local fact — not the namespace name the control plane chooses.
 func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
+	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, true)
+}
+
+func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool) (imageVerdict, string) {
+	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, final, containerEnv(ctr))
+}
+
+func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool, env *allowlist.EnvObservation) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
+		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, final)
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
@@ -725,27 +746,41 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 	return nil
 }
 
-// CreateContainer is called when a container is being created.
-// Returning an error will reject the container creation.
+// CreateContainer supplies the socket mount and checks digest/argv early.
+// Final admission is at StartContainer, where containerd reports the persisted
+// OCI spec after all NRI/CDI edits.
+// Nothing is added to the admission history until that final check.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	cfg := p.cfg
-	imageRef := ctr.GetAnnotations()[annotationImageName]
-
-	if !p.Ready() {
-		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
-			return nil, nil, err
+	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], false)
+	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
+		if !p.Ready() {
+			return nil, nil, fmt.Errorf("image policy plugin initializing: %s", reason)
 		}
-		p.recordUncheckedForInventory(ctr, imageRef)
-		return p.socketDirAdjustment(pod, ctr), nil, nil
-	}
-
-	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
-	if verdict == verdictDeny && cfg.Policy.Mode != ModeAudit {
 		return nil, nil, fmt.Errorf("%s", reason)
 	}
-
-	p.recordForInventory(ctx, ctr, imageRef)
 	return p.socketDirAdjustment(pod, ctr), nil, nil
+}
+
+// StartContainer runs before task.Start/execve. Its environment is the final
+// persisted OCI spec, unlike CreateContainer (or adjustment validation), which
+// precedes other plugins and runtime CDI injection. Start updates cannot edit
+// argv/env. Failed checks leave no admitted-container evidence.
+func (p *plugin) StartContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
+	cfg := p.cfg
+	imageRef := ctr.GetAnnotations()[annotationImageName]
+	if !p.Ready() {
+		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
+			return err
+		}
+		p.recordUncheckedForInventory(ctr, imageRef)
+		return nil
+	}
+	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
+	if verdict == verdictDeny && cfg.Policy.Mode != ModeAudit {
+		return fmt.Errorf("%s", reason)
+	}
+	p.recordForInventory(ctx, ctr, imageRef)
+	return nil
 }
 
 // socketDirAdjustment bind-mounts the inventory's socket directory, read-only,
@@ -787,4 +822,15 @@ func extractDigest(imageRef string) string {
 		return ""
 	}
 	return d.String()
+}
+
+// containerEnv refuses an incomplete OCI process. containerd can report an
+// empty spec after a failed spec read; that must not look like observed-empty.
+// A runnable OCI process has at least one argument, even when its env is empty.
+func containerEnv(ctr *api.Container) *allowlist.EnvObservation {
+	if len(ctr.GetArgs()) == 0 {
+		return nil
+	}
+	env, _ := allowlist.ObserveEnv(ctr.GetEnv())
+	return env
 }

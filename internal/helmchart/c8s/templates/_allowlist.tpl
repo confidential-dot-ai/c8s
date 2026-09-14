@@ -73,7 +73,7 @@
 {{- $digests := dict -}}
 {{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}
 {{- range $c := concat (default list $entry.initContainers) (default list $entry.containers) -}}
-{{- if and (eq (dig "command" "policy" "" $c) "any") (eq (dig "args" "policy" "" $c) "any") -}}
+{{- if and (eq (dig "command" "policy" "" $c) "any") (eq (dig "args" "policy" "" $c) "any") (eq (dig "env" "policy" "any" $c) "any") (eq (dig "mounts" "policy" "any" $c) "any") -}}
 {{- $_ := set $digests $c.digest (default $entry.label $c.image | default "") -}}
 {{- end -}}
 {{- end -}}
@@ -95,7 +95,7 @@
 {{- $workloads := dict -}}
 {{- range $digest, $image := (include "c8s.imageAllowlist" . | fromJson) -}}
 {{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
-{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") "env" (dict "policy" "any") -}}
 {{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
 {{- end -}}
 {{- range $name, $entry := (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) -}}

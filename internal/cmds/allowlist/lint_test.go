@@ -165,7 +165,7 @@ func entryPair(t *testing.T, a, b string) *pkgallowlist.Allowlist {
 func ambiguityErrors(findings []finding) []string {
 	var out []string
 	for _, f := range findings {
-		if f.err && strings.Contains(f.msg, "same containers with the same argv policy") {
+		if f.err && strings.Contains(f.msg, "same containers with the same command, args and env policy") {
 			out = append(out, f.msg)
 		}
 	}

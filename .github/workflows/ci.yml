@@ -199,8 +199,8 @@ jobs:
       # kind is not on the runner image; pin the release binary by sha256.
       - name: Install kind
         run: |
-          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  kind" | sha256sum -c -
+          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum -c -
           sudo install kind /usr/local/bin/kind
 
       - name: Run the cluster integration harness

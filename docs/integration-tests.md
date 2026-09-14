@@ -98,7 +98,10 @@ make test-integration-cluster
 Needs docker (or podman with `KIND_EXPERIMENTAL_PROVIDER=podman`), kind,
 kubectl, helm, go, openssl, curl, python3. The kind node image is pinned by
 digest in run.sh; bump it with the kind release. CI installs kind itself
-(`.github/workflows/ci.yml`, pinned binary sha256).
+(`.github/workflows/ci.yml`, pinned binary sha256). Custom node images must
+provide NRI `ValidateContainerAdjustment` support (the pinned image uses
+containerd 2.3.4 / NRI 0.12.0); older runtimes reject the env-enforcing plugin
+at registration.
 
 ### Failure notes
 
