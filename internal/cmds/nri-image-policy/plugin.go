@@ -293,7 +293,8 @@ func (p *plugin) recordDigest(ctr *api.Container, digest string) {
 		return
 	}
 	env := containerEnv(ctr)
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), env)
+	mounts := observeMounts(ctr)
+	p.inventory.recordObserved(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), env, mounts)
 }
 
 // resolveDigest returns the canonical store digest for imageRef using the same
@@ -359,14 +360,21 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	if len(env) > 0 {
 		observed = env[0]
 	}
-	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, nil, true)
+	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, nil, launchFinal)
 }
+
+type launchPhase uint8
+
+const (
+	launchPreliminary launchPhase = iota
+	launchFinal
+)
 
 // mounts is the container's classified bind-mount table (observeMounts). Like
 // the environment it is read only in the final phase, where the spec is the
 // persisted one: CreateContainer runs before other plugins and CDI injection,
 // so a mount table observed there is not the one the container starts with.
-func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, mounts []allowlist.ObservedMount, final bool) (imageVerdict, string) {
+func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, mounts []allowlist.ObservedMount, phase launchPhase) (imageVerdict, string) {
 	log := p.logger.With(
 		"namespace", namespace,
 		"pod", podName,
@@ -439,7 +447,7 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 	// OCI argv, mount table and environment.
 	rc := allowlist.RunningContainer{Digest: digest, Argv: argv, Mounts: mounts, Env: observed}
 	admitted := snap.index.AdmitsProcess(rc)
-	if final {
+	if phase == launchFinal {
 		admitted = snap.index.AdmitsContainer(rc)
 	}
 	if !p.policy.baseAdmits(digest, argv) && !admitted {
@@ -486,19 +494,19 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 // then. The exemption runs last, only downgrades, and is keyed on the resolved
 // digest — a local fact — not the namespace name the control plane chooses.
 func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
-	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, true)
+	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, launchFinal)
 }
 
-func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool) (imageVerdict, string) {
-	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, final, containerEnv(ctr))
+func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase) (imageVerdict, string) {
+	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr))
 }
 
-func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool, env *allowlist.EnvObservation) (imageVerdict, string) {
+func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase, env *allowlist.EnvObservation) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, observeMounts(ctr), final)
+		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, observeMounts(ctr), phase)
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
@@ -759,7 +767,7 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 // OCI spec after all NRI/CDI edits.
 // Nothing is added to the admission history until that final check.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], false)
+	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], launchPreliminary)
 	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
 		if !p.Ready() {
 			return nil, nil, fmt.Errorf("image policy plugin initializing: %s", reason)

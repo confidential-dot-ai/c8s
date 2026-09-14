@@ -2,6 +2,8 @@ package nriimagepolicy
 
 import (
 	"fmt"
+	"path"
+	"slices"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
@@ -21,9 +23,7 @@ const (
 	kubeletRoot = "/var/lib/kubelet"
 	// podVolumeSegment precedes <plugin>/<volume name> under a pod's directory.
 	podVolumeSegment = "/volumes/"
-	// sandboxSegment appears in containerd's per-sandbox directory, under
-	// whichever root and state dir containerd was configured with. Matching the
-	// segment rather than an absolute prefix keeps this independent of that.
+	// sandboxSegment appears in containerd's per-sandbox directory.
 	sandboxSegment = "/io.containerd.grpc.v1.cri/sandboxes/"
 	// emptyDirPlugin names the kubelet volume plugin directory for emptyDir.
 	emptyDirPlugin = "kubernetes.io~empty-dir"
@@ -42,12 +42,9 @@ const serviceAccountDestination = "/var/run/secrets/kubernetes.io/serviceaccount
 // mount is platform only when its source is node-staged AND it lands on one of
 // these: a node-staged file bound anywhere else is the redirect this check
 // exists to refuse.
-var platformDestinations = map[string]bool{
-	"/etc/hosts":           true,
-	"/etc/hostname":        true,
-	"/etc/resolv.conf":     true,
-	"/dev/termination-log": true,
-	"/dev/shm":             true,
+var containerdRoots = []string{
+	"/var/lib/rancher/rke2/agent/containerd",
+	"/run/k3s/containerd",
 }
 
 // observeMounts classifies a container's bind mounts for the allowlist matcher.
@@ -56,7 +53,7 @@ var platformDestinations = map[string]bool{
 // filesystem type (proc, sysfs, tmpfs, devpts, mqueue, cgroup) and carries
 // nothing in.
 func observeMounts(ctr *api.Container) []allowlist.ObservedMount {
-	var out []allowlist.ObservedMount
+	out := []allowlist.ObservedMount{}
 	for _, m := range ctr.GetMounts() {
 		source, destination := m.GetSource(), m.GetDestination()
 		if !strings.HasPrefix(source, "/") {
@@ -69,7 +66,11 @@ func observeMounts(ctr *api.Container) []allowlist.ObservedMount {
 			// meaning "the node made this for every pod".
 			continue
 		}
-		out = append(out, allowlist.ObservedMount{Destination: destination, Source: source, Class: class})
+		storage := allowlist.MountUnknown
+		if class == allowlist.MountEmptyDir || class == allowlist.MountData {
+			storage = mountStorage(source)
+		}
+		out = append(out, allowlist.ObservedMount{Destination: destination, Source: source, Class: class, Storage: storage})
 	}
 	return out
 }
@@ -85,28 +86,37 @@ func floorPinsHostMount(_ *api.Container, _ *api.Mount) bool { return false }
 
 // classifyMount attributes one bind mount by the path the node staged its
 // source at. It is fail-closed by construction: every shape it does not
-// recognise is MountHost, which no sandboxed entry admits.
+// recognise is MountHost, which no exact entry admits.
 func classifyMount(destination, source string) allowlist.MountClass {
+	if path.Clean(source) != source || path.Clean(destination) != destination {
+		return allowlist.MountHost
+	}
 	if plugin, ok := kubeletVolumePlugin(source); ok {
 		switch {
 		case plugin == emptyDirPlugin:
 			return allowlist.MountEmptyDir
-		case plugin == projectedPlugin && destination == serviceAccountDestination:
+		case plugin == projectedPlugin && destination == serviceAccountDestination && serviceAccountSource(source):
 			return allowlist.MountPlatform
 		default:
 			return allowlist.MountData
 		}
 	}
+	if platformMount(destination, source) {
+		return allowlist.MountPlatform
+	}
 	if !nodeStaged(source) {
 		return allowlist.MountHost
-	}
-	if platformDestinations[destination] {
-		return allowlist.MountPlatform
 	}
 	// Node-staged but landing somewhere the node never puts it: a subPath of an
 	// operator volume (<pod>/volume-subpaths/...), or a platform file redirected
 	// over an image path. Both are operator-chosen content.
 	return allowlist.MountData
+}
+
+func serviceAccountSource(source string) bool {
+	segment := "/volumes/" + projectedPlugin + "/"
+	_, name, ok := strings.Cut(source, segment)
+	return ok && strings.HasPrefix(name, "kube-api-access-") && !strings.Contains(name, "/")
 }
 
 // kubeletVolumePlugin returns the volume plugin directory name of a source the
@@ -132,7 +142,51 @@ func kubeletVolumePlugin(source string) (string, bool) {
 // per-container termination log, volume subpaths) and containerd's per-sandbox
 // directory (hostname, resolv.conf, shm).
 func nodeStaged(source string) bool {
-	return strings.HasPrefix(source, kubeletRoot+"/pods/") || strings.Contains(source, sandboxSegment)
+	return strings.HasPrefix(source, kubeletRoot+"/pods/") ||
+		slices.ContainsFunc(containerdRoots, func(root string) bool {
+			return strings.HasPrefix(source, root+sandboxSegment)
+		})
+}
+
+func platformMount(destination, source string) bool {
+	podPath, podSource := podPathAfterUID(source)
+	switch destination {
+	case "/etc/hosts":
+		return podSource && podPath == "etc-hosts"
+	case "/dev/termination-log":
+		return podSource && strings.HasPrefix(podPath, "containers/") && strings.Count(podPath, "/") == 2
+	case "/etc/hostname":
+		return containerdSandboxFile(source, "hostname")
+	case "/etc/resolv.conf":
+		return containerdSandboxFile(source, "resolv.conf")
+	case "/dev/shm":
+		return containerdSandboxFile(source, "shm")
+	default:
+		return false
+	}
+}
+
+// containerdSandboxFile accepts only <root>/.../sandboxes/<id>/<file>. Exact
+// matching rejects nested lookalike suffixes and paths that merely contain the
+// sandbox segment.
+func containerdSandboxFile(source, file string) bool {
+	return slices.ContainsFunc(containerdRoots, func(root string) bool {
+		rest, ok := strings.CutPrefix(source, root+sandboxSegment)
+		if !ok {
+			return false
+		}
+		id, leaf, ok := strings.Cut(rest, "/")
+		return ok && id != "" && leaf == file
+	})
+}
+
+func podPathAfterUID(source string) (string, bool) {
+	rest, ok := strings.CutPrefix(source, kubeletRoot+"/pods/")
+	if !ok {
+		return "", false
+	}
+	uid, after, ok := strings.Cut(rest, "/")
+	return after, ok && uid != ""
 }
 
 // mountObservation renders a classified mount table for a deny log: every bind

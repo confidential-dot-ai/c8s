@@ -180,8 +180,10 @@ type SandboxDigestsResponse struct {
 // SandboxContainer is one admitted container: the bytes, and what they were
 // told to run, plus an optional commitment to its final OCI environment.
 type SandboxContainer struct {
-	Env    *allowlist.EnvObservation `json:"env,omitempty"`
-	Digest string                    `json:"digest"`
+	Env            *allowlist.EnvObservation `json:"env,omitempty"`
+	Mounts         []allowlist.ObservedMount `json:"mounts,omitempty"`
+	MountsObserved bool                      `json:"mountsObserved,omitempty"`
+	Digest         string                    `json:"digest"`
 	// Argv is the effective OCI process.args — the merged image-config and
 	// pod-spec command, which is what the argv policy is written against.
 	Argv []string `json:"argv,omitempty"`

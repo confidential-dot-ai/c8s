@@ -37,6 +37,7 @@ func anyAllowlist(digests map[string]string) *allowlist.Allowlist {
 			Image:   image,
 			Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 			Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+			Mounts:  allowlist.MountPolicy{Policy: allowlist.PolicyAny},
 		}}}
 	}
 	return al

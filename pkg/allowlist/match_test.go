@@ -27,7 +27,7 @@ func dig(t *testing.T, s string) types.Digest {
 // exactly builds a container pinned to one digest and argv.
 func exactly(t *testing.T, digest string, argv ...string) Container {
 	t.Helper()
-	c := Container{Digest: dig(t, digest), Command: ArgvPolicy{Policy: PolicyAny}, Args: ArgvPolicy{Policy: PolicyAny}}
+	c := Container{Digest: dig(t, digest), Command: ArgvPolicy{Policy: PolicyAny}, Args: ArgvPolicy{Policy: PolicyAny}, Mounts: MountPolicy{Policy: PolicyAny}}
 	if len(argv) > 0 {
 		c.Command = ArgvPolicy{Policy: PolicyExact, Argv: argv}
 		c.Args = ArgvPolicy{Policy: PolicyDeny}
@@ -133,6 +133,27 @@ func TestMatchWorkloadDistinguishesByArgv(t *testing.T) {
 	idx := al.BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: dApp, Argv: []string{"/serve", "--model", "a"}}) {
 		t.Fatal("precondition: Index should admit either argv for the shared digest")
+	}
+}
+
+func TestMatchWorkloadDistinguishesMountPolicies(t *testing.T) {
+	entry := func(destination string) Workload {
+		c := exactly(t, dApp, "/serve")
+		c.Mounts = MountPolicy{Policy: PolicyExact, Destinations: []string{destination}}
+		return Workload{Containers: []Container{c}}
+	}
+	al := &Allowlist{Workloads: map[string]Workload{"a": entry("/a"), "b": entry("/b")}}
+	container := run(dApp, "/serve")
+	container.Mounts = []ObservedMount{{Destination: "/a", Class: MountEmptyDir, Storage: MountMemory}}
+	if name, _, err := al.MatchWorkload([]RunningContainer{container}); err != nil || name != "a" {
+		t.Fatalf("mount-specific entry = %q, %v", name, err)
+	}
+	container.Mounts[0].Destination = "/b"
+	if name, _, err := al.MatchWorkload([]RunningContainer{container}); err != nil || name != "b" {
+		t.Fatalf("mount-specific entry = %q, %v", name, err)
+	}
+	if _, _, err := al.MatchWorkload([]RunningContainer{{Digest: dApp, Argv: []string{"/serve"}}}); !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("missing mount evidence matched: %v", err)
 	}
 }
 

@@ -3,33 +3,37 @@ package allowlist
 import (
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // RunningContainer holds the launch characteristics observed by an enforcer.
 // Missing Env is unavailable evidence and fails exact/deny policies.
 //
-// Mounts and BindMounts are the same bind-mount observation at two resolutions:
-// BindMounts is destinations alone, Mounts also says who staged each source. An
-// enforcer fills whichever it can produce, and Mounts wins when both are set.
-// The NRI plugin recognises the node's own staging paths, so it fills Mounts.
+// Mounts is the node's classified bind-mount observation. Nil means unavailable
+// evidence; a non-nil empty slice means no bind mounts were present.
 type RunningContainer struct {
-	Digest     string
-	Argv       []string
-	BindMounts []string
-	Mounts     []ObservedMount
-	Env        *EnvObservation
+	Digest string
+	Argv   []string
+	Mounts []ObservedMount
+	Env    *EnvObservation
 }
 
-// ObservedMount is one bind mount an enforcer can attribute: where it lands and
-// who staged the bytes behind it. Source is diagnostic — it is what the
-// enforcer classified, and what a deny log has to name for a reviewer to act on
-// it — never a value policy matches against.
+// ObservedMount is one bind mount an enforcer can attribute: where it lands,
+// who staged it, and the backing storage. Source is node-local diagnostic
+// detail and is deliberately omitted from the inventory wire format.
 type ObservedMount struct {
-	Destination string
-	Source      string
-	Class       MountClass
+	Destination string       `json:"destination"`
+	Source      string       `json:"-"`
+	Class       MountClass   `json:"class"`
+	Storage     MountStorage `json:"storage"`
 }
+
+type MountStorage string
+
+const (
+	MountMemory    MountStorage = "memory"
+	MountEncrypted MountStorage = "encrypted"
+	MountUnknown   MountStorage = "unknown"
+)
 
 // MountClass says who chose the bytes behind a bind mount, which is what
 // decides whether it can carry code into a container the allowlist admitted.
@@ -40,9 +44,8 @@ const (
 	// says: /etc/hosts, /etc/hostname, /etc/resolv.conf, /dev/termination-log,
 	// /dev/shm and the serviceaccount projection. No entry lists it.
 	MountPlatform MountClass = "platform"
-	// MountEmptyDir is an emptyDir of either medium. The operator picks the
-	// destination but never the bytes, so a listed destination is the whole
-	// check.
+	// MountEmptyDir is a kubelet emptyDir. Its destination and backing storage
+	// are checked separately; a disk-backed emptyDir is not trusted by name.
 	MountEmptyDir MountClass = "emptyDir"
 	// MountData is operator-supplied content: configMap, secret, projected, PVC,
 	// CSI, local volume, or a subPath of one.
@@ -192,26 +195,42 @@ func (c Container) admitsProcess(r RunningContainer) bool {
 
 // admits reports whether the container's bind mounts satisfy this policy.
 //
-// A sandboxed policy meets a classified observation with the node-as-CVM rule
-// (admitsMount). Everything else — a non-sandboxed exact policy, or an enforcer
-// that reports destinations without saying who staged them — is plain
-// containment, which is what the field meant before Sandboxed existed.
+// Exact policies require the node's classified observation and the complete
+// listed set. A destination-only view cannot distinguish an emptyDir from a
+// hostPath at the same destination.
 func (p MountPolicy) admits(r RunningContainer) bool {
-	if p.Policy != PolicyExact {
+	if p.Policy == PolicyAny {
 		return true
 	}
-	if !p.Sandboxed || r.Mounts == nil {
-		return everyIn(observedDestinations(r), p.Destinations)
+	if r.Mounts == nil {
+		return false
 	}
+	if p.Policy == PolicyDeny || p.Policy == "" {
+		return r.Mounts != nil && !slices.ContainsFunc(r.Mounts, func(m ObservedMount) bool { return m.Class != MountPlatform })
+	}
+	if p.Policy != PolicyExact {
+		return false
+	}
+	seen := make(map[string]bool, len(p.Destinations))
 	for _, m := range r.Mounts {
 		if !p.admitsMount(m) {
 			return false
 		}
+		if m.Class == MountPlatform {
+			if slices.Contains(p.Destinations, m.Destination) {
+				seen[m.Destination] = true
+			}
+			continue
+		}
+		if seen[m.Destination] {
+			return false
+		}
+		seen[m.Destination] = true
 	}
-	return true
+	return len(seen) == len(p.Destinations)
 }
 
-// admitsMount applies the sandboxed-workload rule to one classified mount.
+// admitsMount applies the node-CVM rule to one classified mount.
 // Unknown classes fall to the default and are refused: an enforcer that grew a
 // class this policy has never heard of is reporting something nothing reviewed.
 func (p MountPolicy) admitsMount(m ObservedMount) bool {
@@ -219,48 +238,18 @@ func (p MountPolicy) admitsMount(m ObservedMount) bool {
 	case MountPlatform:
 		return true
 	case MountEmptyDir:
-		return slices.Contains(p.Destinations, m.Destination)
+		return slices.Contains(p.Destinations, m.Destination) && p.Reviews[m.Destination] == "" && secureMountStorage(m.Storage)
 	case MountData:
-		return slices.Contains(p.Destinations, m.Destination) &&
-			strings.HasPrefix(m.Destination, DataMountPrefix) &&
-			p.Reviews[m.Destination] != ""
+		return slices.Contains(p.Destinations, m.Destination) && p.Reviews[m.Destination] != "" && secureMountStorage(m.Storage)
 	default:
 		return false
 	}
 }
 
-// observedDestinations is the destination list the containment check reads,
-// from whichever resolution the enforcer filled.
-func observedDestinations(r RunningContainer) []string {
-	if r.Mounts == nil {
-		return r.BindMounts
-	}
-	out := make([]string, 0, len(r.Mounts))
-	for _, m := range r.Mounts {
-		out = append(out, m.Destination)
-	}
-	return out
+func secureMountStorage(storage MountStorage) bool {
+	return storage == MountMemory || storage == MountEncrypted
 }
 
 func (p EnvPolicy) matches(r RunningContainer) bool {
 	return p.admitsObservation(r.Env)
-}
-
-// everyIn reports whether every observed value appears in allowed. An empty
-// observation is vacuously true — see RunningContainer on enforcers that cannot
-// see a field.
-func everyIn(observed, allowed []string) bool {
-	if len(observed) == 0 {
-		return true
-	}
-	set := make(map[string]struct{}, len(allowed))
-	for _, a := range allowed {
-		set[a] = struct{}{}
-	}
-	for _, o := range observed {
-		if _, ok := set[o]; !ok {
-			return false
-		}
-	}
-	return true
 }

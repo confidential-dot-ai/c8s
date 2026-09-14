@@ -161,8 +161,8 @@ func TestRender_ParsesAsBaseWorkloads(t *testing.T) {
 		if name != "a-"+strings.Repeat("a", 12) {
 			t.Errorf("entry name = %q, want the DigestEntryName form", name)
 		}
-		if len(w.Containers) != 1 || w.Containers[0].Digest.String() != digestA || !w.Containers[0].AnyArgv() {
-			t.Errorf("entry = %#v, want %s under any command and args", w, digestA)
+		if len(w.Containers) != 1 || w.Containers[0].Digest.String() != digestA || !w.Containers[0].AnyArgv() || w.Containers[0].Mounts.Policy != allowlist.PolicyAny {
+			t.Errorf("entry = %#v, want %s under any command, args, and mounts", w, digestA)
 		}
 		if w.Label != "example.com/a:1" {
 			t.Errorf("label = %q", w.Label)

@@ -754,6 +754,7 @@ func workloadAllowlist(t *testing.T, anyDigest, wlDigest string, entrypoint []st
 		Digest:  mustDigest(t, wlDigest),
 		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: entrypoint},
 		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Mounts:  allowlist.MountPolicy{Policy: allowlist.PolicyAny},
 	}}}
 	return al
 }
@@ -1557,8 +1558,8 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 }
 
-// The NRI path leaves bind mounts unobserved.
-func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+// A final decision cannot satisfy a constrained policy without mount evidence.
+func TestCheckImage_ExactMountsRequireObservation(t *testing.T) {
 	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 	c := al.Workloads["w"].Containers[0]
 	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
@@ -1569,16 +1570,15 @@ func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 
 	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
-	if verdict != verdictAllow {
-		t.Fatalf("host path must leave mounts unobserved, got verdict %d (reason=%q)", verdict, reason)
+	if verdict != verdictDeny {
+		t.Fatalf("unobserved mounts satisfied exact policy: verdict %d (reason=%q)", verdict, reason)
 	}
 
-	// Non-vacuity: the same entry refuses a container that does report one, so
-	// the admit above is this plugin's silence rather than a dead policy.
+	// A reported foreign bind mount is also refused.
 	if p.policy.current().index.AdmitsContainer(allowlist.RunningContainer{
-		Digest:     pushDigestB,
-		Argv:       []string{"/bin/app", "--serve"},
-		BindMounts: []string{"/injected"},
+		Digest: pushDigestB,
+		Argv:   []string{"/bin/app", "--serve"},
+		Mounts: []allowlist.ObservedMount{{Destination: "/injected", Class: allowlist.MountEmptyDir}},
 	}) {
 		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
 	}
@@ -1586,9 +1586,8 @@ func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 
 // --- mount policy: the plugin observes the CRI mount table ---
 
-// sandboxedMountAllowlist pins wlDigest to a sandboxed mount policy: one
-// reviewed data destination and one emptyDir destination.
-func sandboxedMountAllowlist(t *testing.T, wlDigest string) *allowlist.Allowlist {
+// exactMountAllowlist pins one reviewed data destination and one emptyDir.
+func exactMountAllowlist(t *testing.T, wlDigest string) *allowlist.Allowlist {
 	t.Helper()
 	al := &allowlist.Allowlist{Schema: allowlist.Schema, Workloads: map[string]allowlist.Workload{}}
 	al.Workloads["w"] = allowlist.Workload{Containers: []allowlist.Container{{
@@ -1597,7 +1596,6 @@ func sandboxedMountAllowlist(t *testing.T, wlDigest string) *allowlist.Allowlist
 		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 		Mounts: allowlist.MountPolicy{
 			Policy:       allowlist.PolicyExact,
-			Sandboxed:    true,
 			Destinations: []string{"/mnt/c8s-data/config", "/var/cache/nginx"},
 			Reviews:      map[string]string{"/mnt/c8s-data/config": "yaml the app parses; loads no modules"},
 		},
@@ -1609,7 +1607,10 @@ func bindMount(destination, source string) *api.Mount {
 	return &api.Mount{Destination: destination, Source: source, Type: "bind", Options: []string{"rbind", "ro"}}
 }
 
-func TestCheckContainer_SandboxedMountPolicy(t *testing.T) {
+func TestCheckContainer_ExactMountPolicy(t *testing.T) {
+	previous := mountStorage
+	mountStorage = func(string) allowlist.MountStorage { return allowlist.MountMemory }
+	t.Cleanup(func() { mountStorage = previous })
 	const uid = "/var/lib/kubelet/pods/0b30e735"
 	platform := []*api.Mount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
@@ -1623,14 +1624,17 @@ func TestCheckContainer_SandboxedMountPolicy(t *testing.T) {
 		mounts []*api.Mount
 		want   imageVerdict
 	}{
-		{"platform mounts need no entry", platform, verdictAllow},
-		{"reviewed configMap under the data prefix", append(platform,
-			bindMount("/mnt/c8s-data/config", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictAllow},
+		{"missing listed mounts", platform, verdictDeny},
+		{"reviewed configMap at a listed destination", append(platform,
+			bindMount("/mnt/c8s-data/config", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictDeny},
 		{"emptyDir at a listed destination", append(platform,
+			bindMount("/var/cache/nginx", uid+"/volumes/kubernetes.io~empty-dir/cache")), verdictDeny},
+		{"all listed mounts", append(append([]*api.Mount{}, platform...),
+			bindMount("/mnt/c8s-data/config", uid+"/volumes/kubernetes.io~configmap/cfg"),
 			bindMount("/var/cache/nginx", uid+"/volumes/kubernetes.io~empty-dir/cache")), verdictAllow},
 		{"configMap over the loader preload file", append(platform,
 			bindMount("/etc/ld.so.preload", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictDeny},
-		{"configMap outside the data prefix", append(platform,
+		{"configMap at an unlisted destination", append(platform,
 			bindMount("/etc/ld.so.conf.d", uid+"/volumes/kubernetes.io~configmap/cfg")), verdictDeny},
 		{"emptyDir at an unlisted destination", append(platform,
 			bindMount("/usr/local/lib", uid+"/volumes/kubernetes.io~empty-dir/cache")), verdictDeny},
@@ -1642,7 +1646,7 @@ func TestCheckContainer_SandboxedMountPolicy(t *testing.T) {
 			p, _ := newCachedPlugin(&config{
 				Allowlist: allowlistConfig{Pull: pullConfig{URL: "https://cds"}},
 				Policy:    policyConfig{Mode: ModeFailClosed},
-			}, sandboxedMountAllowlist(t, pushDigestB))
+			}, exactMountAllowlist(t, pushDigestB))
 			pod := makePod("default", "pod")
 			ctr := makeCtrWithImage(pod.Id, "app", "registry/repo@"+pushDigestB)
 			ctr.Mounts = tc.mounts
@@ -1658,18 +1662,16 @@ func TestCheckContainer_SandboxedMountPolicy(t *testing.T) {
 			// CreateContainer runs before other NRI plugins and CDI injection,
 			// so the mount table it sees is not the one the container starts
 			// with. The preliminary phase checks digest and argv only.
-			if verdict, reason := p.checkContainerPhase(context.Background(), p.cfg, pod, ctr, ctr.Annotations[annotationImageName], false); verdict != verdictAllow {
+			if verdict, reason := p.checkContainerPhase(context.Background(), p.cfg, pod, ctr, ctr.Annotations[annotationImageName], launchPreliminary); verdict != verdictAllow {
 				t.Errorf("the preliminary phase denied on mounts: %d (reason=%q)", verdict, reason)
 			}
 		})
 	}
 }
 
-// The chart's own entries carry no mount policy: they mount ConfigMaps and host
-// paths outside the data prefix, and `helm install` has to keep working on a
-// fresh node. An absent policy means any, so observing the mount table changes
-// nothing for them.
-func TestCheckContainer_AbsentMountPolicyAdmitsChartMounts(t *testing.T) {
+// Bootstrap entries explicitly allow mounts until they are pinned. The chart
+// generates that policy for components with ConfigMap and host mounts.
+func TestCheckContainer_BootstrapMountPolicyAdmitsChartMounts(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{Pull: pullConfig{URL: "https://cds"}},
 		Policy:    policyConfig{Mode: ModeFailClosed},

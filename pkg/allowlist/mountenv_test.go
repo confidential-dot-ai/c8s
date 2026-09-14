@@ -36,7 +36,11 @@ func containerWith(t *testing.T, mounts MountPolicy, env EnvPolicy) Container {
 
 func running(digest string, mounts, env []string) RunningContainer {
 	observed, _ := ObserveEnv(env)
-	return RunningContainer{Digest: digest, BindMounts: mounts, Env: observed}
+	classified := []ObservedMount{}
+	for _, destination := range mounts {
+		classified = append(classified, ObservedMount{Destination: destination, Class: MountEmptyDir, Storage: MountMemory})
+	}
+	return RunningContainer{Digest: digest, Mounts: classified, Env: observed}
 }
 
 // The threat this policy exists for: the host stages bytes in the sandbox
@@ -46,7 +50,7 @@ func running(digest string, mounts, env []string) RunningContainer {
 func TestMountPolicyRefusesAnUndeclaredDestination(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts", "/var/run/secrets/kubernetes.io/serviceaccount"}},
+		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}},
 		EnvPolicy{Policy: PolicyAny})
 
 	if !c.admits(running(digest, []string{"/etc/hosts"}, nil)) {
@@ -57,17 +61,33 @@ func TestMountPolicyRefusesAnUndeclaredDestination(t *testing.T) {
 	}
 }
 
-// An absent policy has to mean "unconstrained": every container carries a mount
-// table it never declared, so a Deny default would refuse every real pod.
-func TestAbsentMountAndEnvPolicyAreUnconstrained(t *testing.T) {
+// An absent mount policy permits only node-required mounts.
+func TestAbsentMountPolicyDefaultsToDeny(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t, MountPolicy{}, EnvPolicy{})
 
-	if c.Mounts.Policy != PolicyAny || c.Env.Policy != PolicyAny {
-		t.Fatalf("normalized to %q/%q, want %q", c.Mounts.Policy, c.Env.Policy, PolicyAny)
+	if c.Mounts.Policy != PolicyDeny || c.Env.Policy != PolicyAny {
+		t.Fatalf("normalized to %q/%q, want deny/any", c.Mounts.Policy, c.Env.Policy)
 	}
-	if !c.admits(running(digest, []string{"/anything", "/at/all"}, []string{"LD_PRELOAD"})) {
-		t.Error("an absent policy refused a container")
+	if c.admits(running(digest, []string{"/anything", "/at/all"}, nil)) {
+		t.Error("an absent policy admitted an operator mount")
+	}
+}
+
+func TestDenyMountPolicyAdmitsOnlyObservedPlatformMounts(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	c := containerWith(t, MountPolicy{Policy: PolicyDeny}, EnvPolicy{Policy: PolicyAny})
+	if c.admits(RunningContainer{Digest: digest}) {
+		t.Fatal("missing mount evidence satisfied deny")
+	}
+	if !c.admits(RunningContainer{Digest: digest, Mounts: []ObservedMount{}}) {
+		t.Fatal("observed empty mount table was refused")
+	}
+	if !c.admits(observed(digest, ObservedMount{Destination: "/etc/hosts", Class: MountPlatform})) {
+		t.Fatal("required node mount was refused")
+	}
+	if c.admits(observed(digest, ObservedMount{Destination: "/config", Class: MountEmptyDir, Storage: MountMemory})) {
+		t.Fatal("operator-selected mount satisfied deny")
 	}
 }
 
@@ -86,17 +106,15 @@ func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 	}
 }
 
-// An enforcer that cannot see a field leaves it nil. That is not a violation —
-// the host-side NRI plugin gates images on a node CVM and never sees a guest's
-// mount table, and refusing there would deny every pod it checks.
-func TestUnobservedMountsAreNotViolations(t *testing.T) {
+// A constrained mount policy requires mount evidence at release time.
+func TestUnobservedMountsCannotSatisfyExact(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
 		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}},
 		EnvPolicy{Policy: PolicyAny})
 
-	if !c.admits(RunningContainer{Digest: digest}) {
-		t.Error("an enforcer that observes neither field was refused")
+	if c.admits(RunningContainer{Digest: digest}) {
+		t.Error("an unobserved mount table satisfied exact policy")
 	}
 }
 
@@ -147,12 +165,11 @@ func TestServedParseIgnoresUnknownFields(t *testing.T) {
 	}
 }
 
-// sandboxedContainer builds a container whose mount policy is the node-as-CVM
-// rule over destinations, with reviews attached to the ones named.
-func sandboxedContainer(t *testing.T, destinations []string, reviews map[string]string) Container {
+// exactMountContainer builds a classified policy with reviewed data destinations.
+func exactMountContainer(t *testing.T, destinations []string, reviews map[string]string) Container {
 	t.Helper()
 	return containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: destinations, Sandboxed: true, Reviews: reviews},
+		MountPolicy{Policy: PolicyExact, Destinations: destinations, Reviews: reviews},
 		EnvPolicy{Policy: PolicyAny})
 }
 
@@ -162,10 +179,10 @@ func observed(digest string, mounts ...ObservedMount) RunningContainer {
 
 // The threat the classification exists for: a ConfigMap the operator writes,
 // bound over a path the loader reads before the reviewed code runs.
-func TestSandboxedMountPolicy(t *testing.T) {
+func TestExactMountPolicy(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
-	const dataDest = DataMountPrefix + "config"
-	c := sandboxedContainer(t,
+	const dataDest = "/mnt/c8s-data/config"
+	c := exactMountContainer(t,
 		[]string{dataDest, "/var/cache/nginx"},
 		map[string]string{dataDest: "yaml the app parses; loads no modules"})
 
@@ -174,17 +191,28 @@ func TestSandboxedMountPolicy(t *testing.T) {
 		mount ObservedMount
 		admit bool
 	}{
-		{"reviewed data destination", ObservedMount{Destination: dataDest, Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/cfg", Class: MountData}, true},
-		{"configmap over the loader preload file", ObservedMount{Destination: "/etc/ld.so.preload", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/cfg", Class: MountData}, false},
-		{"data outside the prefix", ObservedMount{Destination: "/var/cache/nginx", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~secret/s", Class: MountData}, false},
-		{"emptyDir at a listed destination", ObservedMount{Destination: "/var/cache/nginx", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~empty-dir/cache", Class: MountEmptyDir}, true},
-		{"emptyDir at an unlisted destination", ObservedMount{Destination: "/usr/local/lib", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~empty-dir/cache", Class: MountEmptyDir}, false},
+		{"reviewed data destination", ObservedMount{Destination: dataDest, Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/cfg", Class: MountData, Storage: MountMemory}, true},
+		{"emptyDir cannot replace reviewed data", ObservedMount{Destination: dataDest, Class: MountEmptyDir, Storage: MountMemory}, false},
+		{"encrypted data destination", ObservedMount{Destination: dataDest, Class: MountData, Storage: MountEncrypted}, true},
+		{"unproven data storage", ObservedMount{Destination: dataDest, Class: MountData, Storage: MountUnknown}, false},
+		{"configmap over the loader preload file", ObservedMount{Destination: "/etc/ld.so.preload", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~configmap/cfg", Class: MountData, Storage: MountMemory}, false},
+		{"data outside the prefix", ObservedMount{Destination: "/var/cache/nginx", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~secret/s", Class: MountData, Storage: MountMemory}, false},
+		{"emptyDir at a listed destination", ObservedMount{Destination: "/var/cache/nginx", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~empty-dir/cache", Class: MountEmptyDir, Storage: MountMemory}, true},
+		{"plaintext emptyDir at a listed destination", ObservedMount{Destination: "/var/cache/nginx", Class: MountEmptyDir, Storage: MountUnknown}, false},
+		{"emptyDir at an unlisted destination", ObservedMount{Destination: "/usr/local/lib", Source: "/var/lib/kubelet/pods/u/volumes/kubernetes.io~empty-dir/cache", Class: MountEmptyDir, Storage: MountMemory}, false},
 		{"platform mount needs no entry", ObservedMount{Destination: "/etc/hosts", Source: "/var/lib/kubelet/pods/u/etc-hosts", Class: MountPlatform}, true},
 		{"host path at a listed destination", ObservedMount{Destination: dataDest, Source: "/etc", Class: MountHost}, false},
 		{"class this policy has never heard of", ObservedMount{Destination: dataDest, Source: "/x", Class: MountClass("gadget")}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := c.admits(observed(digest, tc.mount)); got != tc.admit {
+			mounts := []ObservedMount{tc.mount}
+			if tc.mount.Destination != dataDest || tc.mount.Class == MountPlatform {
+				mounts = append(mounts, ObservedMount{Destination: dataDest, Class: MountData, Storage: MountMemory})
+			}
+			if tc.mount.Destination != "/var/cache/nginx" || tc.mount.Class == MountPlatform {
+				mounts = append(mounts, ObservedMount{Destination: "/var/cache/nginx", Class: MountEmptyDir, Storage: MountMemory})
+			}
+			if got := c.admits(observed(digest, mounts...)); got != tc.admit {
 				t.Errorf("admits(%+v) = %v, want %v", tc.mount, got, tc.admit)
 			}
 		})
@@ -193,60 +221,50 @@ func TestSandboxedMountPolicy(t *testing.T) {
 
 // A destination listed with no review can hold an emptyDir but never operator
 // content: the review is what says bytes there cannot name code.
-func TestSandboxedDataNeedsAReview(t *testing.T) {
+func TestExactDataNeedsAReview(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
-	const dest = DataMountPrefix + "config"
-	c := sandboxedContainer(t, []string{dest}, nil)
+	const dest = "/mnt/c8s-data/config"
+	c := exactMountContainer(t, []string{dest}, nil)
 
-	if c.admits(observed(digest, ObservedMount{Destination: dest, Class: MountData})) {
+	if c.admits(observed(digest, ObservedMount{Destination: dest, Class: MountData, Storage: MountMemory})) {
 		t.Error("operator content was admitted at an unreviewed destination")
 	}
-	if !c.admits(observed(digest, ObservedMount{Destination: dest, Class: MountEmptyDir})) {
+	if !c.admits(observed(digest, ObservedMount{Destination: dest, Class: MountEmptyDir, Storage: MountMemory})) {
 		t.Error("an emptyDir was refused at a listed destination")
 	}
 }
 
-// An enforcer that reports destinations without saying who staged them gets the
-// containment check the field meant before Sandboxed existed, so a served
-// document carrying the marker stays enforceable on a node image that predates
-// it rather than denying everything it describes.
-func TestSandboxedFallsBackToContainmentForAnUnclassifiedObservation(t *testing.T) {
+// A destination-only or absent observation cannot satisfy exact policy.
+func TestExactRequiresClassifiedObservation(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
-	c := sandboxedContainer(t, []string{"/etc/hosts"}, nil)
+	c := exactMountContainer(t, []string{"/etc/hosts"}, nil)
 
-	if !c.admits(RunningContainer{Digest: digest, BindMounts: []string{"/etc/hosts"}}) {
-		t.Error("a listed destination was refused")
-	}
-	if c.admits(RunningContainer{Digest: digest, BindMounts: []string{"/etc/ld.so.preload"}}) {
-		t.Error("an unlisted destination was admitted")
+	if c.admits(RunningContainer{Digest: digest}) {
+		t.Error("missing classification satisfied exact policy")
 	}
 }
 
-// A non-sandboxed exact policy keeps plain containment even against a
-// classified observation, so an entry written for the guest monitor is not
-// newly refused by the node plugin.
-func TestExactWithoutSandboxedIsContainment(t *testing.T) {
+func TestExactAlwaysRequiresDataReview(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
 		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts", "/config"}},
 		EnvPolicy{Policy: PolicyAny})
 
-	if !c.admits(observed(digest,
+	if c.admits(observed(digest,
 		ObservedMount{Destination: "/etc/hosts", Class: MountPlatform},
-		ObservedMount{Destination: "/config", Class: MountData})) {
-		t.Error("a destination-listing entry was refused")
+		ObservedMount{Destination: "/config", Class: MountData, Storage: MountMemory})) {
+		t.Error("unreviewed data was admitted")
 	}
-	if c.admits(observed(digest, ObservedMount{Destination: "/etc/ld.so.preload", Class: MountData})) {
+	if c.admits(observed(digest, ObservedMount{Destination: "/etc/ld.so.preload", Class: MountData, Storage: MountMemory})) {
 		t.Error("an unlisted destination was admitted")
 	}
 }
 
-func TestSandboxedMountPolicyValidation(t *testing.T) {
+func TestExactMountPolicyValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		p    MountPolicy
 	}{
-		{"sandboxed on an any policy", MountPolicy{Policy: PolicyAny, Sandboxed: true}},
 		{"reviews on an any policy", MountPolicy{Policy: PolicyAny, Reviews: map[string]string{"/x": "why"}}},
 		{"review for an unlisted destination", MountPolicy{Policy: PolicyExact, Destinations: []string{"/a"}, Reviews: map[string]string{"/b": "why"}}},
 		{"blank review", MountPolicy{Policy: PolicyExact, Destinations: []string{"/a"}, Reviews: map[string]string{"/a": "  "}}},

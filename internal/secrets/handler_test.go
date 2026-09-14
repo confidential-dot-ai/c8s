@@ -76,8 +76,9 @@ type fakeInventory struct {
 	keys       map[string]*ecdsa.PublicKey
 	containers []workloadclaims.SandboxContainer
 	// bySandbox overrides containers for the sandboxes it names.
-	bySandbox map[string][]workloadclaims.SandboxContainer
-	err       error
+	bySandbox    map[string][]workloadclaims.SandboxContainer
+	err          error
+	legacyMounts bool
 }
 
 func (f *fakeInventory) InventoryKey(_ context.Context, host string) (*ecdsa.PublicKey, error) {
@@ -94,6 +95,12 @@ func (f *fakeInventory) FetchSandbox(_ context.Context, _, sandboxID string) (wo
 	containers, ok := f.bySandbox[sandboxID]
 	if !ok {
 		containers = f.containers
+	}
+	containers = slices.Clone(containers)
+	if !f.legacyMounts {
+		for i := range containers {
+			containers[i].MountsObserved = true
+		}
 	}
 	digests := make([]string, 0, len(containers))
 	for _, c := range containers {
@@ -991,6 +998,32 @@ func TestSecretReleaseEnforcesEnvEvidence(t *testing.T) {
 			if !tc.unknown {
 				hn.inv.containers[0].Env, _ = pkgallowlist.ObserveEnv(tc.env)
 			}
+			w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body)
+			}
+		})
+	}
+}
+
+func TestSecretReleaseEnforcesMountEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mounts   []pkgallowlist.ObservedMount
+		observed bool
+		want     int
+	}{
+		{"listed", []pkgallowlist.ObservedMount{{Destination: "/config", Class: pkgallowlist.MountData, Storage: pkgallowlist.MountMemory}}, true, http.StatusCreated},
+		{"foreign", []pkgallowlist.ObservedMount{{Destination: "/etc/ld.so.preload", Class: pkgallowlist.MountData, Storage: pkgallowlist.MountMemory}}, true, http.StatusForbidden},
+		{"old inventory", nil, false, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			al := hn.h.Policy.(fakePolicy).al
+			al.Workloads["api"].Containers[0].Mounts = pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyExact, Destinations: []string{"/config"}, Reviews: map[string]string{"/config": "data only"}}
+			hn.inv.containers[0].Mounts = tc.mounts
+			hn.inv.containers[0].MountsObserved = tc.observed
+			hn.inv.legacyMounts = !tc.observed
 			w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body)

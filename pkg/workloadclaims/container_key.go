@@ -27,6 +27,17 @@ func (c SandboxContainer) Key() string {
 		field(c.Env.Format)
 		field(c.Env.Digest)
 	}
+	if !c.MountsObserved {
+		b = append(b, 0)
+	} else {
+		b = append(b, 1)
+		b = binary.AppendUvarint(b, uint64(len(c.Mounts)))
+		for _, m := range c.Mounts {
+			field(m.Destination)
+			field(string(m.Class))
+			field(string(m.Storage))
+		}
+	}
 	return string(b)
 }
 

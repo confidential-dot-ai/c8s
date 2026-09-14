@@ -73,6 +73,13 @@ func TestParseJSON_SecretsRequirePinnedArgv(t *testing.T) {
 	}
 }
 
+func TestParseJSON_SecretsRequirePinnedMounts(t *testing.T) {
+	doc := `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},"mounts":{"policy":"any"}}],"secrets":{"policy":"allow","read":["/s"]}}}}`
+	if _, err := ParseJSON([]byte(doc)); err == nil || !strings.Contains(err.Error(), "mounts policy to be exact or deny") {
+		t.Fatalf("unrestricted mounts granted secrets: %v", err)
+	}
+}
+
 // DigestEntryName must agree with the chart's c8s.digestWorkloadName for the
 // same inputs; the chart test renders the same table.
 func TestDigestEntryName(t *testing.T) {

@@ -30,6 +30,7 @@ func TestClassifyMount(t *testing.T) {
 		{"resolv.conf", "/etc/resolv.conf", sandboxDir + "/resolv.conf", allowlist.MountPlatform},
 		{"shm", "/dev/shm", stateSbxDir + "/shm", allowlist.MountPlatform},
 		{"serviceaccount projection", serviceAccountDestination, podDir + "/volumes/kubernetes.io~projected/kube-api-access-4hfr8", allowlist.MountPlatform},
+		{"operator projection at serviceaccount destination", serviceAccountDestination, podDir + "/volumes/kubernetes.io~projected/custom", allowlist.MountData},
 
 		{"emptyDir", "/var/cache/nginx", podDir + "/volumes/kubernetes.io~empty-dir/cache", allowlist.MountEmptyDir},
 		{"configMap", "/mnt/c8s-data/config", podDir + "/volumes/kubernetes.io~configmap/config-volume", allowlist.MountData},
@@ -41,6 +42,12 @@ func TestClassifyMount(t *testing.T) {
 		// somewhere the node never puts it.
 		{"projection redirected off its destination", "/etc/ld.so.conf.d", podDir + "/volumes/kubernetes.io~projected/kube-api-access-4hfr8", allowlist.MountData},
 		{"etc-hosts redirected over the loader preload file", "/etc/ld.so.preload", podDir + "/etc-hosts", allowlist.MountData},
+		{"subPath over hosts", "/etc/hosts", podDir + "/volume-subpaths/x/containers/app/log", allowlist.MountData},
+		{"subPath named etc-hosts", "/etc/hosts", podDir + "/volume-subpaths/x/etc-hosts", allowlist.MountData},
+		{"fake sandbox path outside containerd", "/etc/hostname", "/tmp" + sandboxSegment + "fake/hostname", allowlist.MountHost},
+		{"nested hostname lookalike", "/etc/hostname", sandboxDir + "/nested/hostname", allowlist.MountData},
+		{"sandbox path without id", "/etc/hostname", "/var/lib/rancher/rke2/agent/containerd" + sandboxSegment + "hostname", allowlist.MountData},
+		{"unclean source", "/etc/hosts", podDir + "/x/../etc-hosts", allowlist.MountHost},
 
 		{"hostPath", "/host", "/", allowlist.MountHost},
 		{"hostPath at a platform destination", "/etc/resolv.conf", "/etc/c8s/resolv.conf", allowlist.MountHost},
@@ -64,7 +71,7 @@ func TestObserveMountsDropsNonBinds(t *testing.T) {
 	}}
 
 	got := observeMounts(ctr)
-	want := []allowlist.ObservedMount{{Destination: "/etc/hosts", Source: podDir + "/etc-hosts", Class: allowlist.MountPlatform}}
+	want := []allowlist.ObservedMount{{Destination: "/etc/hosts", Source: podDir + "/etc-hosts", Class: allowlist.MountPlatform, Storage: allowlist.MountUnknown}}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Errorf("observeMounts() = %+v, want %+v", got, want)
 	}

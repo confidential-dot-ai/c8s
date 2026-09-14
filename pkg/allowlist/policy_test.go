@@ -4,7 +4,7 @@ import "testing"
 
 func TestIndex_AnyArgvEntryAdmitsAnyArgv(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"cds":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsDigest(digestA) {
 		t.Fatal("digest not admitted")
 	}
@@ -17,7 +17,7 @@ func TestIndex_AnyArgvEntryAdmitsAnyArgv(t *testing.T) {
 // free. This is the case an entrypoint like "/docker-entrypoint.sh nginx" needs.
 func TestIndex_MultiTokenCommandPrefix(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/docker-entrypoint.sh","nginx"]},
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"exact","argv":["/docker-entrypoint.sh","nginx"]},
 		 "args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: []string{"/docker-entrypoint.sh", "nginx", "-g", "daemon off;"}}) {
 		t.Fatal("argv starting with the command prefix should be admitted")
@@ -32,7 +32,7 @@ func TestIndex_MultiTokenCommandPrefix(t *testing.T) {
 
 func TestIndex_FullExact(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},
 		 "args":{"policy":"exact","argv":["--serve","--port=8080"]}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: []string{"/app", "--serve", "--port=8080"}}) {
 		t.Fatal("exact command+args should match the concatenation")
@@ -47,7 +47,7 @@ func TestIndex_FullExact(t *testing.T) {
 
 func TestIndex_ArgsDenyMeansNoArgs(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`).BuildIndex()
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: []string{"/app"}}) {
 		t.Fatal("args:deny should admit the command with no extra args")
 	}
@@ -58,7 +58,7 @@ func TestIndex_ArgsDenyMeansNoArgs(t *testing.T) {
 
 func TestIndex_CommandDenyMeansEmptyArgv(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"deny"},"args":{"policy":"any"}}]}}}`).BuildIndex()
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"deny"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: nil}) {
 		t.Fatal("command:deny should admit an empty argv")
 	}
@@ -71,8 +71,8 @@ func TestIndex_CommandDenyMeansEmptyArgv(t *testing.T) {
 // union across entries.
 func TestIndex_SharedDigestUnion(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
-		"a":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","sleep"]},"args":{"policy":"exact","argv":["1"]}}]},
-		"b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","echo"]},"args":{"policy":"any"}}]}}}`).BuildIndex()
+		"a":{"containers":[{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","sleep"]},"args":{"policy":"exact","argv":["1"]}}]},
+		"b":{"containers":[{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","echo"]},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(RunningContainer{Digest: digestA, Argv: []string{"busybox", "sleep", "1"}}) {
 		t.Fatal("first entry's argv should be admitted")
 	}
@@ -86,7 +86,7 @@ func TestIndex_SharedDigestUnion(t *testing.T) {
 
 func TestIndex_UnknownDigestDenied(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
+		{"mounts":{"policy":"any"},"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if idx.AdmitsDigest(digestB) || idx.AdmitsContainer(RunningContainer{Digest: digestB, Argv: nil}) {
 		t.Fatal("unknown digest must be denied")
 	}

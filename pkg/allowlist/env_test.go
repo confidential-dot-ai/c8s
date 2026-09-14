@@ -99,8 +99,8 @@ func TestEnvPolicyParsing(t *testing.T) {
 
 func TestEnvDistinguishesWorkloadsAndHistory(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
- "a":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"a"}}}]},
- "b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"b"}}}]}}}`)
+ "a":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"a"}}}]},
+ "b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"b"}}}]}}}`)
 	a, _ := ObserveEnv([]string{"MODE=a"})
 	b, _ := ObserveEnv([]string{"MODE=b"})
 	running := []RunningContainer{{Digest: digestA, Env: a}}

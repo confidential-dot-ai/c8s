@@ -85,49 +85,20 @@ type ArgvPolicy struct {
 	Argv   []string `json:"argv,omitempty" yaml:"argv,omitempty"`
 }
 
-// MountPolicy governs where the host may bind content into the container.
-//
-// It constrains BIND mounts only — a mount whose source is an absolute guest
-// path. The rest of a container's mount table names filesystem types (proc,
-// sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing in, so pinning it
-// would make an operator restate the OCI base set to say nothing.
-//
-// Exact requires every bind destination to appear in Destinations, which is the
-// set an operator recognises: it is what the pod spec's volumeMounts declare,
-// plus the handful the kubelet always adds (/etc/hosts, /etc/hostname,
-// /etc/resolv.conf, /dev/termination-log, /dev/shm, the serviceaccount token).
-// Any leaves them unconstrained, and is what an absent policy means — unlike
-// argv, a Deny default would refuse every real pod, since the base set is never
-// empty.
-//
-// Sandboxed narrows Exact to the node-as-CVM rule, for an enforcer that can also
-// see who staged each source (RunningContainer.Mounts): the platform's own
-// mounts need no entry, an emptyDir needs a listed destination and nothing else,
-// operator-supplied content is admitted only at a listed destination under
-// DataMountPrefix that carries a Reviews string, and a host path is refused
-// outright. An enforcer that reports destinations without saying who staged
-// them falls back to plain containment, so a served document carrying the
-// marker stays enforceable on a node image that predates it.
+// MountPolicy governs bind mounts observed at final OCI launch. An omitted
+// policy is Deny: only mounts the node requires for every pod are admitted.
+// Any must be explicit. Exact lists extra destinations. A destination without
+// a review pins an emptyDir; one with a review pins operator-supplied data and
+// explains why its bytes cannot execute as code. Host paths are
+// refused unless a measured node floor rule permits them.
 type MountPolicy struct {
 	Policy       string   `json:"policy" yaml:"policy"`
 	Destinations []string `json:"destinations,omitempty" yaml:"destinations,omitempty"`
-	// Sandboxed opts an exact policy into the classification above. It is a
-	// separate field rather than a fourth policy value so a consumer that
-	// predates it keeps parsing the document instead of failing every pull.
-	Sandboxed bool `json:"sandboxed,omitempty" yaml:"sandboxed,omitempty"`
-	// Reviews maps a destination to why bytes arriving there cannot name code —
-	// no configuration that loads modules, plugins or scripts, no dotfile a
-	// loader or interpreter reads. The reviewer decides that; the string makes
-	// the decision auditable, and under Sandboxed its absence is what refuses
-	// operator-supplied content at a destination.
+	// Reviews maps operator-supplied destinations to the reason their content
+	// cannot execute as code. Its presence also pins the source class: reviewed
+	// destinations permit data; other listed destinations permit emptyDir.
 	Reviews map[string]string `json:"reviews,omitempty" yaml:"reviews,omitempty"`
 }
-
-// DataMountPrefix is the one destination subtree operator-supplied content may
-// land in under a sandboxed policy. A single prefix is cheaper to reason about
-// than a denylist of loader paths: no executable, library, loader configuration
-// or interpreter module path lives beneath it.
-const DataMountPrefix = "/mnt/c8s-data/"
 
 // EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
@@ -212,6 +183,9 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	if w.Secrets != nil && !w.ArgvPinned() {
 		return nil, fmt.Errorf("entry: %w", errGrantUnpinned)
 	}
+	if w.Secrets != nil && !w.MountsPinned() {
+		return nil, fmt.Errorf("entry: %w", errGrantMountsUnpinned)
+	}
 	sortContainers(w.InitContainers)
 	sortContainers(w.Containers)
 	return &w, nil
@@ -221,6 +195,7 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 // container's argv to the host: the value would be released to whatever
 // command line the host chose.
 var errGrantUnpinned = fmt.Errorf("a secrets grant requires every container's command and args policy to be exact or deny")
+var errGrantMountsUnpinned = fmt.Errorf("a secrets grant requires every container's mounts policy to be exact or deny")
 
 // Digests returns every container digest in the workload (init and main), for
 // building a digest index.
@@ -247,6 +222,17 @@ func (c Container) AnyArgv() bool {
 func (w Workload) ArgvPinned() bool {
 	for _, c := range w.containers() {
 		if c.Command.Policy == PolicyAny || c.Args.Policy == PolicyAny {
+			return false
+		}
+	}
+	return true
+}
+
+// MountsPinned reports whether every container excludes an unrestricted mount
+// policy. An omitted policy is deny after normalization.
+func (w Workload) MountsPinned() bool {
+	for _, c := range w.containers() {
+		if c.Mounts.Policy == PolicyAny {
 			return false
 		}
 	}
@@ -290,6 +276,7 @@ func DigestEntry(digest types.Digest, image string) Workload {
 			Command: ArgvPolicy{Policy: PolicyAny},
 			Args:    ArgvPolicy{Policy: PolicyAny},
 			Env:     EnvPolicy{Policy: PolicyAny},
+			Mounts:  MountPolicy{Policy: PolicyAny},
 		}},
 	}
 }
@@ -370,6 +357,9 @@ func (a *Allowlist) normalize(strict bool) error {
 		if strict && w.Secrets != nil && !w.ArgvPinned() {
 			return fmt.Errorf("workload %q: %w", name, errGrantUnpinned)
 		}
+		if strict && w.Secrets != nil && !w.MountsPinned() {
+			return fmt.Errorf("workload %q: %w", name, errGrantMountsUnpinned)
+		}
 		sortContainers(w.InitContainers)
 		sortContainers(w.Containers)
 		a.Workloads[name] = w
@@ -399,20 +389,20 @@ func normalizeContainers(workload, field string, cs []Container) error {
 	return nil
 }
 
-// normalizeMounts validates a mount policy. An absent policy canonicalizes to
-// Any: every container has a mount table it did not ask for (the OCI base set,
-// /etc/hosts, the serviceaccount token), so Deny would refuse every real pod and
-// an operator adopting this field would be opting into an outage.
+// normalizeMounts validates a mount policy. An absent policy permits only the
+// node's required pod mounts.
 func normalizeMounts(p *MountPolicy) error {
 	switch p.Policy {
-	case PolicyAny, "":
+	case PolicyAny, PolicyDeny, "":
 		if len(p.Destinations) != 0 {
-			return fmt.Errorf("any policy takes no destinations")
+			return fmt.Errorf("%s policy takes no destinations", p.Policy)
 		}
-		if p.Sandboxed || len(p.Reviews) != 0 {
-			return fmt.Errorf("any policy takes no sandboxed marker or reviews")
+		if len(p.Reviews) != 0 {
+			return fmt.Errorf("%s policy takes no reviews", p.Policy)
 		}
-		p.Policy = PolicyAny
+		if p.Policy == "" {
+			p.Policy = PolicyDeny
+		}
 		p.Destinations = nil
 		p.Reviews = nil
 	case PolicyExact:
@@ -423,13 +413,16 @@ func normalizeMounts(p *MountPolicy) error {
 			if !path.IsAbs(d) {
 				return fmt.Errorf("destination %q is not an absolute path", d)
 			}
+			if path.Clean(d) != d {
+				return fmt.Errorf("destination %q is not clean", d)
+			}
 		}
 		p.Destinations = sortedUnique(p.Destinations)
 		if err := normalizeReviews(p); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+		return fmt.Errorf("unknown mount policy %q (want deny, any or exact)", p.Policy)
 	}
 	return nil
 }
@@ -438,10 +431,6 @@ func normalizeMounts(p *MountPolicy) error {
 // policy. A review for a destination the policy does not list is a typo that
 // would otherwise sit in the document doing nothing, so it is refused rather
 // than dropped.
-//
-// A review outside DataMountPrefix is NOT refused here: the prefix is where the
-// enforcer refuses, and rejecting the whole document over one destination would
-// cost every other entry in it. `c8s allowlist lint` reports it as an error.
 func normalizeReviews(p *MountPolicy) error {
 	if len(p.Reviews) == 0 {
 		p.Reviews = nil

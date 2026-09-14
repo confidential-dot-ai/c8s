@@ -92,7 +92,7 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
-	var envMode, envFile string
+	var envMode, envFile, mountsFile string
 	cmd := &cobra.Command{
 		Use:   "derive <name> <file|->",
 		Short: "Build an entry from a live Kubernetes object",
@@ -111,6 +111,10 @@ Environment policy must be supplied using --env=any|deny or --env-file, a JSON
 map of container names to env policies. Exact values describe the complete OCI
 launch environment, including image/runtime additions. Pod env/envFrom alone
 cannot establish it. Value policies require a v2 allowlist on CDS.
+
+Use --mounts-file with a JSON map of container names to mount policies to pin
+bind mounts for every init and main container. The pod spec alone cannot prove
+which sources are node-provided or how persistent storage is protected.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
@@ -139,6 +143,17 @@ deliberately absent from the derived entry.`,
 				return fmt.Errorf("specify exactly one of --env=any|deny or --env-file")
 			}
 			var policies map[string]allowlist.EnvPolicy
+			var mountPolicies map[string]allowlist.MountPolicy
+			if mountsFile != "" {
+				data, err := os.ReadFile(mountsFile)
+				if err != nil {
+					return err
+				}
+				mountPolicies, err = allowlist.ParseMountPoliciesJSON(data)
+				if err != nil {
+					return err
+				}
+			}
 			if envFile != "" {
 				data, err := os.ReadFile(envFile)
 				if err != nil {
@@ -152,6 +167,7 @@ deliberately absent from the derived entry.`,
 				return fmt.Errorf("--env must be any or deny; use --env-file for exact values")
 			}
 			used := map[string]bool{}
+			usedMounts := map[string]bool{}
 			type derivedContainerGroup struct {
 				templates  []templateContainer
 				containers []allowlist.Container
@@ -168,11 +184,24 @@ deliberately absent from the derived entry.`,
 						used[c.Name] = true
 					}
 					part.containers[i].Env = p
+					if mountsFile != "" {
+						mount, ok := mountPolicies[c.Name]
+						if !ok {
+							return fmt.Errorf("missing mount policy for container %q", c.Name)
+						}
+						part.containers[i].Mounts = mount
+						usedMounts[c.Name] = true
+					}
 				}
 			}
 			for name := range policies {
 				if !used[name] {
 					return fmt.Errorf("env policy names unknown container %q", name)
+				}
+			}
+			for name := range mountPolicies {
+				if !usedMounts[name] {
+					return fmt.Errorf("mount policy names unknown container %q", name)
 				}
 			}
 			w := allowlist.Workload{
@@ -195,6 +224,7 @@ deliberately absent from the derived entry.`,
 		"grant read on this secret path (repeatable); omit for no secrets block")
 	cmd.Flags().StringVar(&envMode, "env", "", "environment policy for every container: any or deny")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "JSON map of container names to explicit env policies (including exact values)")
+	cmd.Flags().StringVar(&mountsFile, "mounts-file", "", "JSON map of container names to explicit mount policies")
 	cmd.Flags().StringVar(&label, "label", "", "optional entry label")
 	return cmd
 }

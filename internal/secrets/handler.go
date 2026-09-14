@@ -350,6 +350,9 @@ func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (
 	if !workload.ArgvPinned() {
 		return grant{}, deny("workload %q holds a secret grant but leaves a container's argv unconstrained", name)
 	}
+	if !workload.MountsPinned() {
+		return grant{}, deny("workload %q holds a secret grant but leaves a container's mounts unconstrained", name)
+	}
 	return grant{workload: name, secrets: workload.Secrets}, nil
 }
 
@@ -458,7 +461,14 @@ func WorkloadContainers(al *pkgallowlist.Allowlist, reported []workloadclaims.Sa
 		if isInjected(al, c) {
 			continue
 		}
-		out = append(out, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env})
+		r := pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env}
+		if c.MountsObserved {
+			r.Mounts = c.Mounts
+			if r.Mounts == nil {
+				r.Mounts = []pkgallowlist.ObservedMount{}
+			}
+		}
+		out = append(out, r)
 	}
 	return out
 }

@@ -2,11 +2,12 @@
 package admissionhistory
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -19,7 +20,15 @@ type History struct {
 
 // Record adds an admission; only a resolved record for the same ID clears an
 // unresolved container. History owns its copy of argv.
-func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObservation) {
+func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObservation, mounts ...allowlist.ObservedMount) {
+	h.record(id, digest, argv, env, mounts, mounts != nil)
+}
+
+func (h *History) RecordObserved(id, digest string, argv []string, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) {
+	h.record(id, digest, argv, env, mounts, true)
+}
+
+func (h *History) record(id, digest string, argv []string, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount, observed bool) {
 	if h.byKey == nil {
 		h.byKey = map[string]workloadclaims.SandboxContainer{}
 		h.unresolved = map[string]struct{}{}
@@ -29,7 +38,10 @@ func (h *History) Record(id, digest string, argv []string, env *allowlist.EnvObs
 		return
 	}
 	delete(h.unresolved, id)
-	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone()}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: slices.Clone(argv), Env: env.Clone(), Mounts: slices.Clone(mounts), MountsObserved: observed}
+	slices.SortFunc(c.Mounts, func(a, b allowlist.ObservedMount) int {
+		return cmp.Or(strings.Compare(a.Destination, b.Destination), strings.Compare(string(a.Class), string(b.Class)), strings.Compare(string(a.Storage), string(b.Storage)))
+	})
 	h.byKey[c.Key()] = c
 }
 
@@ -45,6 +57,7 @@ func (h History) Snapshot() ([]string, []workloadclaims.SandboxContainer, error)
 		digests = append(digests, c.Digest)
 		c.Argv = slices.Clone(c.Argv)
 		c.Env = c.Env.Clone()
+		c.Mounts = slices.Clone(c.Mounts)
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)

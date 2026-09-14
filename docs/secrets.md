@@ -333,6 +333,9 @@ actually released.
   runs whatever command line the host chose, and the value would be released
   to it. The write path refuses the entry, and release refuses an entry stored
   before it did.
+- A grant also requires each container's `mounts` policy to be `exact` or
+  `deny`. An explicit `any` permits the host to add code-bearing mounts before
+  the secret is released.
 - Paths are absolute, clean, and the only wildcard is a trailing `/**`, which
   matches strictly beneath its base — `/a/**` does not grant `/a`.
 - `write` requires `read`. The only client creates with `POST`, then re-reads;
@@ -364,7 +367,7 @@ kept for operator-authored input, where an unknown field is a typo.
 | field | shape | used by |
 |---|---|---|
 | `digests` | deduplicated digest set | cert issuance (membership) |
-| `containers` | `[{digest, argv}]`, **not** deduplicated | secret release |
+| `containers` | `[{digest, argv, env, mounts, mountsObserved}]`, deduplicated by the full observation | secret release |
 
 `argv` is the effective OCI `process.args` a container runs, so release can hold
 a sandbox to the `(digest, argv)` pairs that ran in it rather than to a digest
@@ -373,6 +376,12 @@ Without it, two entries differing only in argv are indistinguishable, and the
 argv admission enforces is a **union across every entry listing the digest** — so
 an entry that pins `command: exact` gives no guarantee at release time if another
 entry widens the same digest.
+
+`mounts` records the final classified bind mounts, including their backing
+storage classification. `mountsObserved` distinguishes an observed empty table
+from an older inventory that has no mount evidence. A workload with `mounts:
+deny` or `mounts: exact` cannot match that older inventory, so secret release
+does not silently skip a mount pin.
 
 `containers` is absent on an inventory older than the field. A consumer that
 needs it must treat that as "cannot answer" rather than "no containers"

@@ -178,6 +178,7 @@ func render(entries []entry, excludes []string) (string, error) {
             image: %q
             command: {policy: any}
             args: {policy: any}
+            mounts: {policy: any}
 `, f.name, f.ref, f.digest, f.ref)
 	}
 	return b.String(), nil

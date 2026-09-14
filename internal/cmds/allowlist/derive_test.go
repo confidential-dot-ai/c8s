@@ -3,6 +3,7 @@ package allowlist
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -103,6 +104,21 @@ func TestDeriveSecretsOnlyWhenAsked(t *testing.T) {
 	}
 	if s.Policy != pkgallowlist.PolicyAllow || len(s.Read) != 1 || s.Read[0] != "/dynamo/volumes/w235" {
 		t.Errorf("secrets = %+v", s)
+	}
+}
+
+func TestDeriveMountPolicies(t *testing.T) {
+	file := t.TempDir() + "/mounts.json"
+	data := `{"seed":{"policy":"deny"},"frontend":{"policy":"exact","destinations":["/config"]},"worker":{"policy":"deny"}}`
+	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts-file", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := got["dynamo"].Containers[0].Mounts; p.Policy != pkgallowlist.PolicyExact || len(p.Destinations) != 1 || p.Destinations[0] != "/config" {
+		t.Fatalf("frontend mounts = %+v", p)
 	}
 }
 

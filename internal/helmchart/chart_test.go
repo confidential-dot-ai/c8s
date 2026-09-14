@@ -5218,6 +5218,7 @@ func anyArgvEntryArgs(name, digest, image string) []string {
 		"--set-string", p + "containers[0].image=" + image,
 		"--set-string", p + "containers[0].command.policy=any",
 		"--set-string", p + "containers[0].args.policy=any",
+		"--set-string", p + "containers[0].mounts.policy=any",
 	}
 }
 
@@ -6016,6 +6017,19 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 	}
 	if kind := parseValidationErrorKind(out); kind != "uncovered_component_digest" {
 		t.Fatalf("validation error kind = %q, want uncovered_component_digest\n%s", kind, out)
+	}
+
+	// Omitted mounts now mean deny, so an any-argv entry without an explicit
+	// mount exemption cannot silently enter always_allow.
+	out, err = helmTemplate(t,
+		"--set-string", "image.digest="+opD,
+		"--set", "nriImagePolicy.policy.mode=fail-closed",
+		"--set-string", p+"digest="+opD,
+		"--set-string", p+"command.policy=any",
+		"--set-string", p+"args.policy=any",
+	)
+	if err == nil || parseValidationErrorKind(out) != "uncovered_component_digest" {
+		t.Fatalf("entry with omitted mounts bypassed bootstrap coverage: %v\n%s", err, out)
 	}
 }
 

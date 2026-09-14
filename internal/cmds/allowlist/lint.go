@@ -19,15 +19,14 @@ import (
 
 func newLintCmd(o *options) *cobra.Command {
 	var online, strict bool
-	var cvmMode string
 	cmd := &cobra.Command{
 		Use:   "lint <file|->",
 		Short: "Validate an allowlist file and report semantic warnings",
 		Long: `Parse and validate an allowlist file (or stdin with '-') and report semantic
 findings: entries with no containers, a container that can never start, digests
 whose effective policy is unconstrained, tag-form image labels (TOCTOU),
-root-subtree path grants, a sandboxed mount policy no enforcer can admit, and a
-sealed search path that reaches the sandboxed data prefix. --online additionally
+root-subtree path grants, and sealed search paths that overlap reviewed mounts.
+--online additionally
 checks each digest exists in its registry via crane.
 
 Two entries declaring the same containers with the same argv policy are an
@@ -70,11 +69,6 @@ same.`,
 	}
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
-	// Inert since the NRI plugin began observing the mount table and the
-	// environment: nothing is left that only a guest enforcer could see. Kept
-	// accepted so an existing CI invocation does not fail on an unknown flag.
-	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deprecated and ignored")
-	_ = cmd.Flags().MarkDeprecated("cvm-mode", "every policy field is now observed by the enforcer, so this silences nothing")
 	return cmd
 }
 
@@ -208,7 +202,6 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 
 	warnings = append(warnings, indistinguishableEntries(al)...)
 	warnings = append(warnings, shadowedEntries(al)...)
-	warnings = append(warnings, mountPolicyFindings(al)...)
 	warnings = append(warnings, searchPathFindings(al)...)
 	return warnings
 }
@@ -246,7 +239,7 @@ func shadowPairs(al *pkgallowlist.Allowlist) [][2]string {
 
 func shadowFinding(wide, narrow string) finding {
 	return errorf(
-		"workload %q can never be the unique match: %q admits every container it declares under any argv and needs nothing more running, so every pod %q describes matches both (edit %q instead of adding a narrower entry beside it, or delete it)",
+		"workload %q can never be the unique match: %q admits every container it declares under unconstrained argv, mounts and env and needs nothing more running, so every pod %q describes matches both (edit %q instead of adding a narrower entry beside it, or delete it)",
 		narrow, wide, narrow, wide)
 }
 
@@ -277,48 +270,12 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 	return true
 }
 
-// mountPolicyFindings reports sandboxed mount policy an enforcer will refuse at
-// admission, so an operator sees it at write time instead of at the first pod.
-//
-// A review says why bytes at a destination cannot name code, so a destination
-// carrying one is where operator-supplied content lands — and a sandboxed
-// policy admits that only beneath DataMountPrefix. The reverse is just as
-// wrong: a destination under the prefix with no review can never admit the
-// content it was carved out for.
-func mountPolicyFindings(al *pkgallowlist.Allowlist) []finding {
-	var out []finding
-	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
-		for _, c := range allContainers(al.Workloads[name]) {
-			m := c.Mounts
-			if !m.Sandboxed {
-				if len(m.Reviews) > 0 {
-					out = append(out, warnf("workload %q container %s carries mount reviews but is not sandboxed; the reviews are documentation only and no enforcer reads them", name, c.Digest.String()))
-				}
-				continue
-			}
-			for _, d := range m.Destinations {
-				_, reviewed := m.Reviews[d]
-				underPrefix := strings.HasPrefix(d, pkgallowlist.DataMountPrefix)
-				switch {
-				case reviewed && !underPrefix:
-					out = append(out, errorf("workload %q container %s reviews mount destination %q as operator-supplied content, but a sandboxed policy admits that only under %s; move the volume there", name, c.Digest.String(), d, pkgallowlist.DataMountPrefix))
-				case !reviewed && underPrefix:
-					out = append(out, errorf("workload %q container %s lists mount destination %q under %s with no review; a sandboxed policy refuses operator-supplied content at an unreviewed destination", name, c.Digest.String(), d, pkgallowlist.DataMountPrefix))
-				}
-			}
-		}
-	}
-	return out
-}
-
 // searchPathVars are the environment variables a loader or interpreter reads a
 // list of directories from before the reviewed code runs.
 var searchPathVars = []string{"PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "NODE_PATH"}
 
-// searchPathFindings refuses a sealed search path that reaches the sandboxed
-// data prefix. The prefix keeps operator-supplied content off every path a
-// loader resolves through; a PATH entry under it puts it back, and the exact
-// command that was reviewed then resolves to a file the operator wrote.
+// searchPathFindings refuses a sealed search path that overlaps a reviewed
+// mount. Otherwise operator-supplied bytes could become executable code.
 func searchPathFindings(al *pkgallowlist.Allowlist) []finding {
 	var out []finding
 	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
@@ -328,24 +285,25 @@ func searchPathFindings(al *pkgallowlist.Allowlist) []finding {
 			}
 			for _, v := range searchPathVars {
 				value, set := c.Env.Values[v]
-				if !set || !searchPathReachesData(value) {
+				if !set {
 					continue
 				}
-				out = append(out, errorf("workload %q container %s pins %s to a value containing %s; operator-supplied content is admitted there precisely because no loader resolves through it", name, c.Digest.String(), v, pkgallowlist.DataMountPrefix))
+				for destination := range c.Mounts.Reviews {
+					if searchPathReachesMount(value, destination) {
+						out = append(out, errorf("workload %q container %s pins %s to a search path containing reviewed mount %q; operator-supplied content could be loaded as code", name, c.Digest.String(), v, destination))
+					}
+				}
 			}
 		}
 	}
 	return out
 }
 
-// searchPathReachesData reports whether a colon-separated search path has an
-// element at or beneath DataMountPrefix. The prefix's own trailing slash is
-// stripped first so a bare "/mnt/c8s-data" element is caught too.
-func searchPathReachesData(value string) bool {
-	prefix := strings.TrimSuffix(pkgallowlist.DataMountPrefix, "/")
+func searchPathReachesMount(value, destination string) bool {
+	destination = path.Clean(destination)
 	for _, element := range strings.Split(value, ":") {
 		element = path.Clean(element)
-		if element == prefix || strings.HasPrefix(element, prefix+"/") {
+		if element == destination || strings.HasPrefix(element, destination+"/") || strings.HasPrefix(destination, element+"/") {
 			return true
 		}
 	}
@@ -394,7 +352,7 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 
 func ambiguousGroupFinding(names []string) finding {
 	return errorf(
-		"workloads [%s] declare the same containers with the same command, args and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
+		"workloads [%s] declare the same containers with the same command, args, mounts and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
 		strings.Join(names, ", "))
 }
 
@@ -404,10 +362,11 @@ func ambiguousGroupFinding(names []string) finding {
 // case, since the grant an operator intended is the thing that never resolves.
 func entryShape(w pkgallowlist.Workload) (string, error) {
 	type containerShape struct {
-		Digest  string                  `json:"digest"`
-		Command pkgallowlist.ArgvPolicy `json:"command"`
-		Args    pkgallowlist.ArgvPolicy `json:"args"`
-		Env     pkgallowlist.EnvPolicy  `json:"env"`
+		Digest  string                   `json:"digest"`
+		Command pkgallowlist.ArgvPolicy  `json:"command"`
+		Args    pkgallowlist.ArgvPolicy  `json:"args"`
+		Env     pkgallowlist.EnvPolicy   `json:"env"`
+		Mounts  pkgallowlist.MountPolicy `json:"mounts"`
 	}
 	shape := func(cs []pkgallowlist.Container) ([]string, error) {
 		out := make([]string, 0, len(cs))
@@ -416,7 +375,17 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 			if env.Policy == "" {
 				env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyAny}
 			}
-			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env})
+			mounts := c.Mounts
+			if mounts.Policy == "" {
+				mounts = pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}
+			}
+			if len(mounts.Reviews) > 0 {
+				mounts.Reviews = maps.Clone(mounts.Reviews)
+				for destination := range mounts.Reviews {
+					mounts.Reviews[destination] = "reviewed"
+				}
+			}
+			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env, Mounts: mounts})
 			if err != nil {
 				return nil, err
 			}
@@ -482,6 +451,6 @@ func isTagForm(image string) bool {
 }
 
 func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
-	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
+	return c.AnyArgv() && c.Mounts.Policy == pkgallowlist.PolicyAny &&
 		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
 }

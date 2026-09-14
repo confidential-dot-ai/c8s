@@ -119,3 +119,29 @@ func TestHistoryEnvVariantsAndOwnership(t *testing.T) {
 		seen[c.Key()] = true
 	}
 }
+
+func TestHistoryMountEvidenceAndOwnership(t *testing.T) {
+	var h History
+	mounts := []allowlist.ObservedMount{{Destination: "/config", Class: allowlist.MountData, Storage: allowlist.MountMemory}}
+	h.RecordObserved("c", "sha256:a", []string{"run"}, nil, mounts)
+	h.Record("legacy", "sha256:a", []string{"run"}, nil)
+	mounts[0].Destination = "/changed"
+	_, cs, err := h.Snapshot()
+	if err != nil || len(cs) != 2 {
+		t.Fatalf("history lost observed and legacy variants: %v %v", cs, err)
+	}
+	for _, c := range cs {
+		if c.MountsObserved {
+			if len(c.Mounts) != 1 || c.Mounts[0].Destination != "/config" {
+				t.Fatalf("history borrowed mount observation: %+v", c)
+			}
+			c.Mounts[0].Destination = "/mutated"
+		}
+	}
+	_, again, _ := h.Snapshot()
+	for _, c := range again {
+		if c.MountsObserved && c.Mounts[0].Destination != "/config" {
+			t.Fatal("snapshot borrowed history's mount slice")
+		}
+	}
+}

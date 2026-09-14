@@ -184,93 +184,64 @@ secret release.
 
 ## Mount policy (`mounts`)
 
-A digest pins the bytes and `command`/`args` pin what runs them, but neither
-says anything about what the node lays *over* those bytes at start-up. A volume
-bound over `/etc/ld.so.preload`, `/etc/ld.so.conf.d/`, an interpreter's site
-directory or a dotfile the shell reads runs operator-supplied bytes as code
-inside a reviewed image, and every digest still reports as admitted. Client-side
-verification does not catch it: the pod keeps its genuine identity.
+The policy covers bind mounts in the final OCI container specification. An
+omitted policy means `deny`: only the node's required pod mounts, such as
+`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm`, the termination
+log and the service-account projection at its normal destination, are allowed.
+An explicit `any` permits other mounts and is used by bootstrap entries that
+are not yet pinned. Non-bind filesystem entries such as `proc` and `tmpfs` do
+not import operator-selected bytes and are outside this policy.
 
-`mounts` constrains **bind** mounts only. The rest of a mount table names
-filesystem types (`proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`, `cgroup`) and
-carries nothing in, so pinning it would only make an operator restate the OCI
-base set to say nothing.
-
-```json
-"mounts": { "policy": "exact", "destinations": ["/etc/hosts", "/config"] }
-```
-
-`exact` requires every observed bind destination to appear in `destinations`:
-what the pod's `volumeMounts` declare, plus the handful the node always adds
-(`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/dev/termination-log`,
-`/dev/shm`, the serviceaccount token). `any` is the default when the field is
-absent — unlike argv, which defaults to `deny`, because a container always
-carries a mount table it never declared and a `deny` default would refuse every
-real pod. That makes the field opt-in: a digest with no policy is constrained
-exactly as much as it was before.
-
-### Sandboxed mounts (node-as-CVM)
-
-Destination containment alone still trusts the operator's choice of *what*
-lands at a destination. Add `"sandboxed": true` to an `exact` policy and the
-node enforcer classifies each bind mount by the path the node staged its source
-at, then applies one rule per class:
+An `exact` policy requires every listed additional destination and refuses
+duplicates or extras. The node classifies each source, so naming a destination
+alone cannot turn a hostPath or an unreviewed ConfigMap into an allowed
+emptyDir:
 
 ```json
 "mounts": {
   "policy": "exact",
-  "sandboxed": true,
-  "destinations": ["/mnt/c8s-data/config", "/var/cache/nginx"],
-  "reviews": { "/mnt/c8s-data/config": "yaml the app parses; loads no modules" }
+  "destinations": ["/run/cache", "/etc/app/config.yaml"],
+  "reviews": {"/etc/app/config.yaml": "configuration only; no modules or scripts"}
 }
 ```
 
-| Class | Source the node staged it at | Rule |
-|---|---|---|
-| platform | the kubelet's per-pod `etc-hosts` and termination log, containerd's per-sandbox `hostname`, `resolv.conf` and `shm`, the serviceaccount projection at its own destination | admitted, listed or not |
-| `emptyDir` | `<kubelet root>/pods/<uid>/volumes/kubernetes.io~empty-dir/` | destination must be listed |
-| data | every other kubelet volume plugin — configMap, secret, projected, CSI, local — and volume subpaths | destination must be listed, lie under `/mnt/c8s-data/`, and carry a `reviews` string |
-| host | a hostPath volume, or any source the enforcer cannot attribute | refused |
+| Source | Admission rule |
+|---|---|
+| Required node mount | Allowed at its expected destination without an entry |
+| `emptyDir` | Destination listed **without** a review; backing storage proven memory-backed or c8s-encrypted |
+| ConfigMap, Secret, projected or other operator volume | Destination listed **with** a nonempty review; backing storage proven memory-backed or c8s-encrypted |
+| hostPath or unrecognised source | Refused unless a measured node floor rule pins it |
 
-The data prefix is the point of the rule, and it is what takes the destinations
-above off the table. At a listed destination the bytes are untrusted application
-input, and one prefix is cheaper to reason about than a denylist of loader
-paths: no executable, library, loader configuration or interpreter module path
-lives under `/mnt/c8s-data/`.
+The review is an operator assertion about code loading, not a storage-encryption
+claim. The node checks storage separately. It recognises tmpfs and devices in
+the c8s dm-crypt stack, including a dm-verity layer over dm-crypt. Unknown or
+ordinary disk storage is refused by `exact`. This includes volumes whose
+encryption is external to c8s and cannot be proven by this node check. The
+node's own required mounts are exempt because they are part of the measured
+platform, not workload-selected volumes.
 
-The `reviews` string says *why* bytes at that destination cannot name code — no
-configuration that loads modules, plugins or scripts, no dotfile a loader or
-interpreter reads. The reviewer decides that, not the schema; the string makes
-the decision auditable, and its absence is what refuses operator content at a
-destination. `lint` refuses a review outside the prefix and a prefix
-destination with no review.
+The check runs before the container starts. A volume attached through mount
+propagation later in the pod lifecycle is admitted only if its emptyDir backing
+is already proven memory-backed or c8s-encrypted at that point. Otherwise
+`exact` refuses the start; a future integration must bind the later encrypted
+attachment to the admission observation before such a volume can be pinned.
 
-Two limits worth stating:
+`c8s allowlist derive --mounts-file policies.json` accepts a JSON map from
+container name to a mount policy for every init and main container. Derivation
+does not infer secure backing storage from a Pod's `volumeMounts`: the pod spec
+names destinations but does not prove the source bytes or encryption. `lint`
+rejects a pinned loader search path that overlaps a reviewed mount.
 
-- **hostPath is refused outright**, including for c8s's own measured platform
-  containers. Pinning a host source to a node-TCB rule attaches at
-  `floorPinsHostMount` in `internal/cmds/nri-image-policy/mounts.go`; nothing is
-  floor until that marker lands.
-- **The kubelet root is the constant `/var/lib/kubelet`** (RKE2's default; the
-  node image sets no `root-dir` kubelet-arg). A node that moved it would
-  classify every mount as host and refuse every sandboxed entry — fail-closed,
-  and bounded by the fact that only entries carrying the marker are affected.
+The node currently runs RKE2 with kubelet root `/var/lib/kubelet`; its source
+classifier uses that root and fails closed on unrecognised paths. Azure/GKE
+kubelet layouts require a separate measured node configuration before this
+classifier can admit their workload volumes. Host-mount exceptions belong in
+the node floor policy tracked by PR #585; no hostPath exception is added here.
 
-The marker is a field rather than a fourth `policy` value so a node image that
-predates it keeps parsing the served document — it ignores the field and applies
-plain containment — instead of failing every pull. An enforcer that reports
-destinations without saying who staged them gets that same containment check.
-
-A sealed `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH` or `NODE_PATH` that names a
-directory under the prefix undoes all of it: the reviewed exact command would
-then resolve to a file the operator wrote. `lint` refuses that too.
-
-The c8s chart's own pods mount ConfigMaps and host paths outside the prefix
-(attestation-api at `/etc/attestation-api`, the router's acme directory, the
-node-agent host mounts). Their entries carry no `mounts` policy at all, which
-means `any`, so observing the mount table changes nothing for them and a fresh
-`helm install` is unaffected. Moving those volumes under `/mnt/c8s-data/` and
-deriving sandboxed entries for the chart is separate work.
+The chart's generated bootstrap entries explicitly use `mounts: any`, since
+c8s components currently mount ConfigMaps and host paths. Workload entries
+that omit `mounts` now mean `deny`; operators must explicitly list and review
+non-platform mounts or use `any` while migrating.
 
 ## Secret grants (`secrets`)
 
@@ -481,9 +452,7 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 shared digest whose union is widened to `any` by some entry — an `any`-policy
 entry for a digest silently makes every narrower entry for it unenforced at the
 per-container gate — tag-form labels (which can move under the operator), a
-[sandboxed mount policy](#sandboxed-mounts-node-as-cvm) whose destinations no
-enforcer can admit, and a sealed search path reaching the sandboxed data
-prefix. `--online` cross-checks digests against the registry with
+sealed search paths that overlap a reviewed mount. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an

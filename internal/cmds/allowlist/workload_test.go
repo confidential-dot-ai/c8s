@@ -201,7 +201,7 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 // document too.
 func TestWorkloadApplyRefusesEntryShadowedByLive(t *testing.T) {
 	live := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{
-		"app-aaaaaaaaaaaa":{"containers":[{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+		"app-aaaaaaaaaaaa":{"containers":[{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}}}`)
 	url, methods := servingAllowlistCDS(t, live)
 
 	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1","workloads":{
