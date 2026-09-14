@@ -19,10 +19,9 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -78,7 +77,7 @@ var (
 // rke2-server Requires, and a failed first attempt fails rke2-server's start
 // job for good regardless of how many times systemd restarts the oneshot.
 func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error {
-	client := attestationclient.NewClient(attestationAPIURL)
+	client := remote.NewClient(attestationAPIURL)
 	deadline := time.Now().Add(attestationReadyTimeout)
 	var lastErr error
 	for {
@@ -128,8 +127,8 @@ func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetype
 	if err != nil {
 		return nil, fmt.Errorf("attest self: %w", err)
 	}
-	verified, err := attestationclient.NewClient(attestationAPIURL).VerifyEvidence(ctx,
-		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+	verified, err := remote.NewClient(attestationAPIURL).VerifyEvidence(ctx,
+		resp.Envelope(), remote.Policy{ExpectedReportData: reportData[:sha512.Size384]})
 	if err != nil {
 		return nil, fmt.Errorf("verify self-report: %w", err)
 	}
@@ -229,7 +228,7 @@ func ownLaunchMeasurement(r *teetypes.VerificationResult, platform string) ([]by
 // non-operator boot (pubErr wrapping ErrNoOperatorKey) still needs it for
 // cds/ratlsMesh measurements, so pub/pubErr come back alongside
 // measurement/rtmrs rather than short-circuiting the whole call. The caller
-// (launchvalues.Render) distinguishes "no key staged" from every other
+// (launchconfig.Stage) distinguishes "no key staged" from every other
 // pubErr via errors.Is(pubErr, ErrNoOperatorKey). err is set only when the
 // self-report itself, or the measurement read off it, fails.
 func LoadMeasuredOperatorKeyAndOwnMeasurement(ctx context.Context, platform, attestationAPIURL string) (pub []byte, pubErr error, measurement []byte, rtmrs map[int][]byte, err error) {

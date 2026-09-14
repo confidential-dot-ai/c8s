@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -65,10 +66,10 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 		t.Errorf("--rtmrs = %q, want the shared register pins", c.rtmrs)
 	}
 	// The filled fields must parse with the same helpers run() uses.
-	if _, err := ratls.ParseHexMeasurements(c.measurements); err != nil {
+	if _, err := refvalues.ParseHexMeasurements(c.measurements); err != nil {
 		t.Errorf("flat measurements do not parse: %v", err)
 	}
-	if _, err := ratls.ParseRTMRPinsString(c.rtmrs); err != nil {
+	if _, err := refvalues.ParseRTMRPinsString(c.rtmrs); err != nil {
 		t.Errorf("flat rtmrs do not parse: %v", err)
 	}
 }
@@ -91,9 +92,9 @@ func TestResolveDropsDivergentRTMRs(t *testing.T) {
 	if strings.Count(c.measurements, ",") != 1 {
 		t.Errorf("--measurements = %q, want both digests", c.measurements)
 	}
-	for _, e := range set.Entries {
-		if len(e.RTMRs) == 0 {
-			t.Errorf("entry %s lost its register pins", e.Name)
+	for _, img := range set.Entries {
+		if len(img.RTMRs) == 0 {
+			t.Errorf("entry %s lost its register pins", img.Name)
 		}
 	}
 }

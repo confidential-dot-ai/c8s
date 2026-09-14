@@ -5,16 +5,20 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 var operatorPub = []byte("operator public key bytes")
@@ -56,11 +60,11 @@ type selfReport struct {
 
 // stubAttester serves a fake attestation-api answering r as this guest's
 // verified self-report.
-func stubAttester(t *testing.T, r selfReport) *testattest.Stub {
+func stubAttester(t *testing.T, r selfReport) *mockapi.Stub {
 	t.Helper()
-	stub := testattest.New(t)
-	stub.SetPlatform(types.Platform(r.platform))
-	v := testattest.PassingVerdict(hex.EncodeToString(r.launchDigest))
+	stub := mockapi.New(t)
+	stub.SetPlatform(r.platform)
+	v := mockapi.PassingVerdict(hex.EncodeToString(r.launchDigest))
 	if r.platform.IsTDX() {
 		pd := map[string]any{}
 		for k, b := range map[string][]byte{"rtmr_1": r.rtmr1, "rtmr_2": r.rtmr2, "rtmr_3": r.binding} {
@@ -81,7 +85,7 @@ func stubAttester(t *testing.T, r selfReport) *testattest.Stub {
 // path now, so both are exercised by varying only the platform and the claim.
 func attester(t *testing.T, platform teetypes.PlatformType, binding []byte) string {
 	t.Helper()
-	return stubAttester(t, selfReport{platform: platform, binding: binding}).URL
+	return stubAttester(t, selfReport{platform: platform, binding: binding}).URL()
 }
 
 func tdxBinding(pub []byte) []byte { v := runtimemeasure.Seed(pub); return v[:] }
@@ -193,13 +197,13 @@ func TestLoadMeasuredOperatorKeyRefusesUnknownPlatform(t *testing.T) {
 // fresh nonce, and a stub reporting success without one would pass a replay.
 func TestSelfReportBindsAFreshNonce(t *testing.T) {
 	stageOperatorPubkey(t, operatorPub)
-	stub := testattest.New(t)
-	stub.SetPlatform(types.Platform(teetypes.PlatformSNP))
-	v := testattest.PassingVerdict("")
+	stub := mockapi.New(t)
+	stub.SetPlatform(teetypes.PlatformType(teetypes.PlatformSNP))
+	v := mockapi.PassingVerdict("")
 	v.Claims.InitData = snpBinding(operatorPub)
 	stub.SetVerdict(v)
 
-	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL); err != nil {
+	if _, err := LoadMeasuredOperatorKey(context.Background(), stub.URL()); err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
 	reqs := stub.VerifyRequests()
@@ -207,11 +211,11 @@ func TestSelfReportBindsAFreshNonce(t *testing.T) {
 		t.Fatalf("verify requests = %d, want 1", len(reqs))
 	}
 	sent := reqs[0].Params.ExpectedReportData
-	if sent == nil || len(sent.Bytes()) == 0 {
+	if len(sent) == 0 {
 		t.Fatal("no expected report data sent; a self-report with no nonce is replayable")
 	}
 	var zero [64]byte
-	if string(sent.Bytes()) == string(zero[:len(sent.Bytes())]) {
+	if string(sent) == string(zero[:len(sent)]) {
 		t.Fatal("expected report data is all zero, so it is not a fresh nonce")
 	}
 }
@@ -223,16 +227,29 @@ func TestSelfReportBindsAFreshNonce(t *testing.T) {
 func TestSelfReportWaitsForAttestationAPI(t *testing.T) {
 	launchDigest := fill(0x5a)
 	stub := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: launchDigest})
-	stub.SetHealthFailures(3)
+	target, err := url.Parse(stub.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	var healthRequests atomic.Int32
+	delayed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" && healthRequests.Add(1) <= 3 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer delayed.Close()
 
-	measurement, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", stub.URL)
+	measurement, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", delayed.URL)
 	if err != nil {
 		t.Fatalf("OwnLaunchMeasurement: %v", err)
 	}
 	if !bytes.Equal(measurement, launchDigest) {
 		t.Errorf("measurement = %x, want %x", measurement, launchDigest)
 	}
-	if n := stub.HealthRequests(); n < 4 {
+	if n := healthRequests.Load(); n < 4 {
 		t.Errorf("/health called %d times, want at least 4 (3 failures then success)", n)
 	}
 	if n := len(stub.AttestRequests()); n != 1 {
@@ -255,7 +272,7 @@ func TestSelfReportFailsWhenAttestationAPINeverReady(t *testing.T) {
 func TestOwnLaunchMeasurement(t *testing.T) {
 	t.Run("tdx", func(t *testing.T) {
 		mrtd, rtmr1, rtmr2 := fill(0xaa), fill(0xbb), fill(0xcc)
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformTDX, launchDigest: mrtd, rtmr1: rtmr1, rtmr2: rtmr2}).URL
+		url := stubAttester(t, selfReport{platform: teetypes.PlatformTDX, launchDigest: mrtd, rtmr1: rtmr1, rtmr2: rtmr2}).URL()
 
 		measurement, rtmrs, err := OwnLaunchMeasurement(context.Background(), "tdx", url)
 		if err != nil {
@@ -277,7 +294,7 @@ func TestOwnLaunchMeasurement(t *testing.T) {
 
 	t.Run("snp", func(t *testing.T) {
 		want := fill(0xab)
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: want}).URL
+		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: want}).URL()
 
 		measurement, rtmrs, err := OwnLaunchMeasurement(context.Background(), "sev-snp", url)
 		if err != nil {
@@ -312,7 +329,7 @@ func TestOwnLaunchMeasurementFailsClosed(t *testing.T) {
 		{"unknown platform in the report", "tdx", selfReport{platform: "nonsense", launchDigest: fill(0xab)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			url := stubAttester(t, tc.report).URL
+			url := stubAttester(t, tc.report).URL()
 			if _, _, err := OwnLaunchMeasurement(context.Background(), tc.platform, url); err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -320,17 +337,17 @@ func TestOwnLaunchMeasurementFailsClosed(t *testing.T) {
 	}
 
 	t.Run("launch_digest not hex", func(t *testing.T) {
-		stub := testattest.New(t)
-		v := testattest.PassingVerdict("")
+		stub := mockapi.New(t)
+		v := mockapi.PassingVerdict("")
 		v.Claims.LaunchDigest = "not-hex-zz"
 		stub.SetVerdict(v)
-		if _, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", stub.URL); err == nil {
+		if _, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", stub.URL()); err == nil {
 			t.Fatal("expected error, got nil")
 		}
 	})
 
 	t.Run("unknown platform in config", func(t *testing.T) {
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: fill(0xab)}).URL
+		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: fill(0xab)}).URL()
 		if _, _, err := OwnLaunchMeasurement(context.Background(), "no-such-platform", url); err == nil {
 			t.Fatal("want an error for an unknown platform")
 		} else if !strings.Contains(err.Error(), "no-such-platform") {
@@ -365,7 +382,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementAttestsOnce(t *testing.T) {
 			launchDigest := fill(0xab)
 			stub := stubAttester(t, operatorReport(p.platform, launchDigest))
 
-			gotPub, pubErr, gotMeasurement, gotRTMRs, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, stub.URL)
+			gotPub, pubErr, gotMeasurement, gotRTMRs, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, stub.URL())
 			if err != nil {
 				t.Fatalf("LoadMeasuredOperatorKeyAndOwnMeasurement: %v", err)
 			}
@@ -401,7 +418,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementNonOperatorBoot(t *testing.T) {
 			launchDigest := fill(0xcd)
 			r := operatorReport(p.platform, launchDigest)
 			r.binding = make([]byte, len(r.binding)) // keyless launch: zero binding
-			url := stubAttester(t, r).URL
+			url := stubAttester(t, r).URL()
 
 			pub, pubErr, measurement, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, url)
 			if err != nil {
@@ -428,7 +445,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementSubstitutedKey(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			stageOperatorPubkey(t, []byte("a different key the host swapped in"))
 			launchDigest := fill(0xef)
-			url := stubAttester(t, operatorReport(p.platform, launchDigest)).URL
+			url := stubAttester(t, operatorReport(p.platform, launchDigest)).URL()
 
 			gotPub, pubErr, measurement, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), p.name, url)
 			if err != nil {
@@ -457,7 +474,7 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementFailsClosedOnUnresolvableMeasur
 		stageOperatorPubkey(t, operatorPub)
 		r := operatorReport(teetypes.PlatformTDX, fill(0xaa))
 		r.rtmr2 = nil
-		url := stubAttester(t, r).URL
+		url := stubAttester(t, r).URL()
 		if _, _, _, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), "tdx", url); err == nil {
 			t.Fatal("want an error when this guest's own launch measurement cannot be resolved")
 		}

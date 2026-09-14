@@ -4,7 +4,8 @@
 #
 # Needs kubectl pointed at a cluster with c8s installed. Under fail-closed image
 # admission the workload digest must be allowlisted first: set C8S_OPERATOR_KEY
-# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this applies an entry for it.
+# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS_CONFIG (or C8S_MEASUREMENTS)
+# and this applies an entry for it.
 # Audit mode admits it without them.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -19,7 +20,9 @@ deploy=demo-nginx
 cleanup() {
   local rc=$?
   [ "$rc" -eq 0 ] || return 0
-  kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if cw_namespace_owned "$ns"; then
+    kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 cw_namespace "$ns"

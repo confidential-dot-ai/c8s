@@ -42,8 +42,6 @@ var managedChains = []managedChain{
 	{"nat", preroutingChainName},
 	{"filter", cwChainName},
 	{"filter", cwEgressChainName},
-	{"filter", guestFilterOutputChain},
-	{"filter", guestFilterInputChain},
 }
 
 // iptablesV4 and iptablesV6 are the per-protocol netfilter clients used for

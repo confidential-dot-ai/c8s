@@ -7,22 +7,21 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // installPins resolves the pins install fans into the chart, from either the
 // flat flags or a measurements config. In config mode the file travels to the
 // components that match whole images, and the same values are also fanned out
-// flat so the consumers that read a plain digest list — the NRI plugin, the
-// operator's initdata — keep pinning exactly what they pin today.
+// flat for consumers that read a plain digest list, such as the NRI plugin.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
 	if installMeasurementsConfig == "" {
-		digests, err = ratls.ParseHexMeasurementsList(installMeasurements)
+		digests, err = refvalues.ParseHexMeasurementsList(installMeasurements)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("--measurements: %w", err)
 		}
-		rtmrs, err = ratls.ParseRTMRPins(installRTMRs)
+		rtmrs, err = refvalues.ParseRTMRPins(installRTMRs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("--rtmrs: %w", err)
 		}
@@ -59,13 +58,4 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 		"--set-file", "ratlsMesh.measurementsConfig=" + path,
 	}
 	return set.Digests(), common, helmArgs, nil
-}
-
-// installPinnedMeasurementArgs reports the pins the preflights count, so a
-// config satisfies them exactly as the flat flag does.
-func installPinnedMeasurementArgs() []string {
-	if installMeasurementsConfig != "" {
-		return []string{installMeasurementsConfig}
-	}
-	return installMeasurements
 }

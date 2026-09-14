@@ -6,8 +6,9 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // resolveMeasurementsConfig loads --measurements-config and fills the flat
@@ -27,17 +28,24 @@ func resolveMeasurementsConfig(cfg *config) (measurements.ReferenceValues, error
 	}
 	// Reference values for the other platform would refuse every peer at
 	// runtime. An empty platform is validateConfig's error to report.
-	if platform := ratls.NormalizePlatform(cfg.ratlsPlatform); platform != "" && platform != set.TEE {
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil && string(family) != set.TEE {
 		return measurements.ReferenceValues{}, fmt.Errorf(
-			"--measurements-config declares tee %q but --ratls-platform is %q", set.TEE, platform)
+			"--measurements-config declares tee %q but --ratls-platform is %q", set.TEE, family)
 	}
-	cfg.measurements = set.HexDigests()
 
-	common, _ := set.CommonRTMRs()
+	hexDigests := set.HexDigests()
+	common, uniform := set.CommonRTMRs()
+	cfg.measurements = hexDigests
+	if !uniform {
+		// Gates keyed on a single register set cannot express per-image
+		// tuples; say so rather than appearing to pin them.
+		slog.Warn("measurements config pins different registers per image: /attest matches whole images, but legacy flat diagnostics are digest-only",
+			"images", len(set.Entries))
+	}
 	for _, idx := range sortedIndices(common) {
 		cfg.rtmrs = append(cfg.rtmrs, fmt.Sprintf("%d=%x", idx, common[idx]))
 	}
-	if _, err := ratls.ParseRTMRPins(cfg.rtmrs); err != nil {
+	if _, err := refvalues.ParseRTMRPins(cfg.rtmrs); err != nil {
 		return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config: %w", err)
 	}
 	slog.Info("measurements config loaded", "tee", set.TEE, "images", len(set.Entries))
@@ -53,13 +61,13 @@ func sortedIndices(m map[int][]byte) []int {
 	return out
 }
 
-// servedTEE names the platform the served document declares. The flat flags
+// servedFamily names the platform the served document declares. The flat flags
 // carry no platform of their own, so it comes from the one CDS attests on.
-func servedTEE(ratlsPlatform string) string {
-	if ratls.NormalizePlatform(ratlsPlatform) == measurements.TEETDX {
-		return measurements.TEETDX
+func servedFamily(ratlsPlatform string) teetypes.Family {
+	if fam, err := teetypes.ParseFamily(ratlsPlatform); err == nil {
+		return fam
 	}
-	return measurements.TEESNP
+	return teetypes.FamilySNP
 }
 
 // measurementBytes decodes the flat allowlist back into digests for the

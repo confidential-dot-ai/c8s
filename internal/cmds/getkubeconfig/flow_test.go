@@ -18,17 +18,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // tdxEnvelope is a minimal self-describing evidence envelope; the actual
@@ -44,7 +43,7 @@ func newAttestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}
+	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -56,13 +55,13 @@ func newAttestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
-// newAttestStub starts the shared fake attestation-api (internal/testattest)
+// newAttestStub starts the shared fake attestation-api (remote/mockapi)
 // reporting the TDX platform the trust gate requires; the recorded requests
 // let tests pin what production code sent.
-func newAttestStub(t *testing.T) *testattest.Stub {
+func newAttestStub(t *testing.T) *mockapi.Stub {
 	t.Helper()
-	stub := testattest.New(t)
-	stub.SetPlatform(types.PlatformTdx)
+	stub := mockapi.New(t)
+	stub.SetPlatform(teetypes.PlatformTDX)
 	return stub
 }
 
@@ -114,7 +113,7 @@ type testEnv struct {
 	attestURL    string
 	releaseURL   string
 	outPath      string
-	exp          tdxMeasuredPolicy
+	exp          measuredPolicy
 }
 
 func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody string) testEnv {
@@ -138,7 +137,7 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 	if err != nil {
 		t.Fatal(err)
 	}
-	exp := requireTDXPolicy(t, policy)
+	exp := policy
 	stubVerify(t, verifiedResultFor(exp), nil)
 
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
@@ -173,7 +172,7 @@ func (e testEnv) config() Config {
 // gate, RA-TLS dial (verified via the stub), operator-signed CSR exchange, and
 // kubeconfig assembly on disk.
 func TestRunEndToEnd(t *testing.T) {
-	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
 
 	if err := Run(context.Background(), env.config()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -205,7 +204,7 @@ func TestAttestNonceIsFreshPerRun(t *testing.T) {
 	rec := stubVerify(t, verifiedResultFor(exp), nil)
 
 	for i := 0; i < 2; i++ {
-		if err := attestAndVerify(context.Background(), attest.URL+"/attest", exp); err != nil {
+		if err := attestAndVerify(context.Background(), attest.URL()+"/attest", exp); err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}
 	}
@@ -216,7 +215,7 @@ func TestAttestNonceIsFreshPerRun(t *testing.T) {
 		t.Fatalf("attest requests = %d, verifier calls = %d, want 2 each", len(reqs), len(calls))
 	}
 	for i := range reqs {
-		nonce := reqs[i].ReportData.Bytes()
+		nonce := reqs[i].ReportData
 		if len(nonce) != 32 {
 			t.Errorf("run %d: /attest nonce is %d bytes, want 32", i, len(nonce))
 		}
@@ -225,7 +224,7 @@ func TestAttestNonceIsFreshPerRun(t *testing.T) {
 				i, calls[i].params.ExpectedReportData, nonce)
 		}
 	}
-	if bytes.Equal(reqs[0].ReportData.Bytes(), reqs[1].ReportData.Bytes()) {
+	if bytes.Equal(reqs[0].ReportData, reqs[1].ReportData) {
 		t.Error("the attest nonce is constant across runs — a recorded genuine quote replays forever")
 	}
 }
@@ -241,7 +240,7 @@ func TestRunErrors(t *testing.T) {
 	})
 
 	t.Run("release failure", func(t *testing.T) {
-		cfg := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusForbidden, goodRelease).config()
+		cfg := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusForbidden, goodRelease).config()
 		err := Run(context.Background(), cfg)
 		if err == nil || !strings.Contains(err.Error(), "credential release") ||
 			!strings.Contains(err.Error(), "release HTTP 403") {
@@ -254,9 +253,9 @@ func TestRunErrors(t *testing.T) {
 // verifies but rtmr_3 doesn't match the operator-key chain, so Run must stop
 // before ever contacting cred-release.
 func TestRunRejectsWrongRTMR3(t *testing.T) {
-	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
 	res := verifiedResultFor(env.exp)
-	res.Claims.PlatformData["rtmr_3"] = "00"
+	res.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
 	stubVerify(t, res, nil) // overrides the env's stub
 
 	// Count cred-release hits on a plain-HTTP server so any request — even one
@@ -271,8 +270,8 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	cfg.ReleaseBaseURL = release.URL
 
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "RTMR[3] mismatch") {
-		t.Fatalf("want RTMR[3] mismatch, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not bound to the expected anchor") {
+		t.Fatalf("want an anchor-binding refusal, got %v", err)
 	}
 	if n := releaseHits.Load(); n != 0 {
 		t.Fatalf("cred-release hits = %d, want 0 (Run must stop at the trust gate)", n)
@@ -282,15 +281,15 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 // TestRATLSClientRejectsPlainCert confirms the RA-TLS dial fails closed
 // against a server whose cert carries no attestation envelope (a host MITM).
 func TestRATLSClientRejectsPlainCert(t *testing.T) {
-	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
 	plain := httptest.NewTLSServer(releaseHandler(t, http.StatusOK, goodRelease))
 	t.Cleanup(plain.Close)
 
 	cfg := env.config()
 	cfg.ReleaseBaseURL = plain.URL
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "missing RA-TLS extension") {
-		t.Fatalf("want RA-TLS handshake failure (missing RA-TLS extension), got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "carries no RA-TLS attestation extension") {
+		t.Fatalf("want RA-TLS handshake failure (no RA-TLS extension), got %v", err)
 	}
 }
 
@@ -412,26 +411,25 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, bare).rtmr3 != runtimemeasure.Seed(pub) {
-		t.Error("with no workload images the expected register must equal the bare operator-key seed")
+	if got := bare.workloadDigests; len(got) != 0 {
+		t.Errorf("workloadDigests = %v, want none so the expected register is the bare operator-key seed", got)
 	}
 
 	chained, err := policyFor(manifest, pub, []string{digA, digB})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub),
-		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
-	if requireTDXPolicy(t, chained).rtmr3 != want {
-		t.Error("workload images must chain onto the operator-key seed via the shared convention")
+	want := []string{digA, "sha256:" + strings.Repeat("bb", 32)}
+	if got := chained.workloadDigests; !slices.Equal(got, want) {
+		t.Errorf("workloadDigests = %v, want %v (canonicalized, in first-extend order)", got, want)
 	}
 
 	reversed, err := policyFor(manifest, pub, []string{digB, digA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, reversed).rtmr3 == requireTDXPolicy(t, chained).rtmr3 {
-		t.Error("extend order must change the expected register — the chain is ordered")
+	if got := reversed.workloadDigests; slices.Equal(got, want) {
+		t.Error("extend order must reach the chain unchanged — the register is ordered")
 	}
 
 	for _, bad := range []string{"nginx:latest", "ghcr.io/acme/api:v1", "sha256:" + strings.Repeat("AB", 32)} {
@@ -471,8 +469,8 @@ func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requireTDXPolicy(t, single).rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(pub), []string{dig}) {
-		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
+	if got := single.workloadDigests; !slices.Equal(got, []string{dig}) {
+		t.Errorf("workloadDigests = %v, want [%s]", got, dig)
 	}
 }
 

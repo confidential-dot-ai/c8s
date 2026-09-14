@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -235,10 +235,10 @@ func TestHealthServerServe(t *testing.T) {
 }
 
 func TestHealthReadyCertProvisioningGates(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	_, mgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:   "sev-snp",
-		AttestFunc: makeAttestFunc(attestclient.NewClient(""), stub.URL),
+		AttestFunc: makeAttestFunc(attestclient.NewClient(""), stub.URL()),
 		CertTTL:    time.Hour,
 	})
 	if err != nil {

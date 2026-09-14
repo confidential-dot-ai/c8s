@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // EvidenceProvider yields TEE attestation evidence whose report_data equals
@@ -25,8 +25,8 @@ var _ EvidenceProvider = LiveEvidenceProvider{}
 // bound to reportData. This is the production path; it requires a reachable
 // attestation-api and runs inside the LB's CVM.
 type LiveEvidenceProvider struct {
-	Client   attestationclient.Client
-	Platform types.Platform // e.g. types.PlatformSnp
+	Client   remote.Client
+	Platform teetypes.PlatformType // e.g. teetypes.PlatformSNP
 	// Generation is the AMD processor generation the browser's bare-SNP
 	// verifier needs. It is meaningful only for PlatformSnp; the other
 	// platforms auto-detect (az-snp) or have no generation concept (TDX),
@@ -36,19 +36,19 @@ type LiveEvidenceProvider struct {
 
 // Evidence implements EvidenceProvider against the attestation-api.
 func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (json.RawMessage, string, string, error) {
-	resp, err := p.Client.Attest(ctx, types.AttestRequest{
-		ReportData: types.NewBase64Bytes(reportData),
+	resp, err := p.Client.Attest(ctx, remote.AttestRequest{
+		ReportData: reportData,
 		Platform:   p.Platform,
 	})
 	if err != nil {
 		return nil, "", "", fmt.Errorf("attestation-api: %w", err)
 	}
-	platform := resp.Platform
+	platform := string(resp.Platform)
 	if platform == "" {
 		platform = string(p.Platform)
 	}
 	generation := p.Generation
-	if platform != string(types.PlatformSnp) {
+	if platform != string(teetypes.PlatformSNP) {
 		generation = ""
 	}
 	return resp.Evidence, platform, generation, nil
@@ -86,7 +86,7 @@ func LoadFixtureEvidence(path, platform, generation string) (FixtureEvidenceProv
 	if platform == "" {
 		platform = "snp"
 	}
-	if platform != string(types.PlatformSnp) {
+	if platform != string(teetypes.PlatformSNP) {
 		generation = ""
 	}
 	return FixtureEvidenceProvider{Raw: evidence, Platform: platform, Generation: generation}, nil

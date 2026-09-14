@@ -18,19 +18,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
+	nodepolicy "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -59,7 +59,10 @@ func run(cfg config) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
+	// Empty stays empty: it selects the plain-HTTP path below.
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil {
+		cfg.ratlsPlatform = family.String()
+	}
 
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
@@ -118,7 +121,7 @@ func run(cfg config) error {
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
-	rtmrPins, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	rtmrPins, err := refvalues.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
 		return fmt.Errorf("--rtmrs: %w", err)
 	}
@@ -133,10 +136,10 @@ func run(cfg config) error {
 	// from disk: re-reading would attest the file rather than the policy.
 	served := pinned
 	if served.Empty() {
-		served = measurementspkg.FromFlags(measurementBytes(measurements), rtmrPins)
+		served = nodepolicy.FromFlags(measurementBytes(measurements), rtmrPins)
 	}
-	served.TEE = servedTEE(cfg.ratlsPlatform)
-	measurementsDoc, err := measurementspkg.Serve(served)
+	served.TEE = string(servedFamily(cfg.ratlsPlatform))
+	measurementsDoc, err := nodepolicy.Format(served)
 	if err != nil {
 		return fmt.Errorf("render /measurements document: %w", err)
 	}
@@ -150,26 +153,7 @@ func run(cfg config) error {
 		return err
 	}
 
-	earKeyPEM, err := earsigner.Generate()
-	if err != nil {
-		return fmt.Errorf("generate token-signing key: %w", err)
-	}
-	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
-	if err != nil {
-		return fmt.Errorf("create EAR issuer: %w", err)
-	}
-
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: cfg.rotationInterval,
-		Overlap:  cfg.rotationOverlap,
-		Jitter:   cfg.rotationJitter,
-		Logger:   slog.Default(),
-	}, earKeyPEM, earIssuer.SwapKey)
-	if err != nil {
-		return fmt.Errorf("create EAR key rotator: %w", err)
-	}
-
-	asClient := attestationclient.NewClient(cfg.attestationApiURL)
+	asClient := remote.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
 	// A separate pool for /secrets: sharing one would make a nonce minted for
 	// issuance redeemable against a secret, and vice versa.
@@ -293,7 +277,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
-			Entries:           pinned.Entries,
+			NodeEntries:       pinned.Entries,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
@@ -308,8 +292,6 @@ func run(cfg config) error {
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:         earIssuer,
-		JWKSFunc:          rotator.JWKSetJSON,
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
 		MeasurementsDoc:   measurementsDoc,
@@ -320,9 +302,6 @@ func run(cfg config) error {
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
-	}
-	if cfg.rotationInterval > 0 {
-		go rotator.Run(ctx)
 	}
 	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 	go challengeLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)

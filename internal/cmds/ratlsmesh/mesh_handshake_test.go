@@ -5,6 +5,7 @@ package ratlsmesh
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -14,21 +15,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"strings"
+
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"strings"
 )
 
 // attestedMeshTLSConfigs returns server and client TLS configs wired like
-// runProxy's: both sides mint self-signed RA-TLS certs from testattest
+// runProxy's: both sides mint self-signed RA-TLS certs from mockapi
 // evidence and verify the peer through the production VerifyPeerCertificate
 // against the policy meshVerifyPolicy builds from the measurements string.
-func attestedMeshTLSConfigs(t *testing.T, stub *testattest.Stub, measurements string) (server, client *tls.Config) {
+func attestedMeshTLSConfigs(t *testing.T, stub *mockapi.Stub, measurements string) (server, client *tls.Config) {
 	t.Helper()
-	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL())
 
-	policy, err := meshVerifyPolicy(stub.URL, measurements, "")
+	policy, err := meshVerifyPolicy(stub.URL(), measurements, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +80,8 @@ func serveAttested(ln net.Listener) {
 // one /verify call each.
 func TestMeshHandshakeAcceptsAttestedPeer(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(measurement)))
 
 	serverTLS, clientTLS := attestedMeshTLSConfigs(t, stub, hex.EncodeToString(measurement))
 
@@ -124,11 +126,12 @@ func TestMeshHandshakeAcceptsAttestedPeer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if reqs[i].Params == nil || reqs[i].Params.ExpectedReportData == nil {
+		if reqs[i].Params == nil || len(reqs[i].Params.ExpectedReportData) == 0 {
 			t.Fatalf("/verify call %d: missing expected report data", i)
 		}
-		if got := reqs[i].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:]) {
-			t.Fatalf("/verify call %d: expected_report_data = %x, want %x (peer key binding)", i, got, want[:])
+		// The 48-byte digest travels; the service zero-extends it.
+		if got := reqs[i].Params.ExpectedReportData; !bytes.Equal(got, want[:sha512.Size384]) {
+			t.Fatalf("/verify call %d: expected_report_data = %x, want %x (peer key binding)", i, got, want[:sha512.Size384])
 		}
 	}
 }
@@ -138,8 +141,8 @@ func TestMeshHandshakeAcceptsAttestedPeer(t *testing.T) {
 func TestMeshHandshakeRejectsUnpinnedMeasurement(t *testing.T) {
 	served := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 	pinned := bytes.Repeat([]byte{0x99}, ratls.SNPMeasurementSize)
-	stub := testattest.New(t)
-	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(served)))
+	stub := mockapi.New(t)
+	stub.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(served)))
 
 	serverTLS, clientTLS := attestedMeshTLSConfigs(t, stub, hex.EncodeToString(pinned))
 
@@ -168,8 +171,8 @@ func TestMeshVerifyPolicyParsesRTMRPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("meshVerifyPolicy: %v", err)
 	}
-	if len(policy.RTMRs) != 2 {
-		t.Fatalf("policy.RTMRs = %v, want RTMR[1] and RTMR[2]", policy.RTMRs)
+	if len(policy.Policy.RTMRs) != 2 {
+		t.Fatalf("policy.Policy.RTMRs = %v, want RTMR[1] and RTMR[2]", policy.Policy.RTMRs)
 	}
 	if _, err := meshVerifyPolicy("http://127.0.0.1:8400", "", "0="+hex48); err == nil {
 		t.Fatal("RTMR[0] pin accepted; it varies with the pod shape and must be refused")

@@ -50,12 +50,18 @@ func TestNodeImageRender(t *testing.T) {
 				"Deployment/c8s-operator", "MutatingWebhookConfiguration/c8s-pod-injector",
 				"ValidatingAdmissionPolicy/c8s-cw-label-integrity", "ValidatingAdmissionPolicyBinding/c8s-cw-label-integrity",
 				"ValidatingAdmissionPolicy/c8s-deny-host-namespaces", "ValidatingAdmissionPolicyBinding/c8s-deny-host-namespaces",
+				"ValidatingAdmissionPolicy/c8s-deny-host-namespaces-ephemeral", "ValidatingAdmissionPolicyBinding/c8s-deny-host-namespaces-ephemeral",
 				"ValidatingAdmissionPolicy/deny-ratls-mesh-uid", "ValidatingAdmissionPolicyBinding/deny-ratls-mesh-uid",
 				"ValidatingAdmissionPolicy/deny-ratls-mesh-uid-ephemeral", "ValidatingAdmissionPolicyBinding/deny-ratls-mesh-uid-ephemeral",
 				"NetworkPolicy/ratls-mesh-tcp-only-egress", "NetworkPolicy/c8s-operator-ingress",
 			} {
 				if docs[key] == nil {
 					t.Errorf("missing %s", key)
+				}
+			}
+			for _, name := range []string{"c8s-deny-host-namespaces", "c8s-deny-host-namespaces-ephemeral"} {
+				if !bytes.Contains(docs["ValidatingAdmissionPolicy/"+name], []byte("AppArmor must not")) {
+					t.Errorf("baked node image lost AppArmor admission in %s", name)
 				}
 			}
 			for key := range docs {

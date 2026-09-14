@@ -24,6 +24,7 @@ const (
 	nodeImageCredReleaseService = "../../../node-guest-image/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 	nodeImageCredReleaseDropIns = nodeImageCredReleaseService + ".d/*.conf"
 	nodeImageCredReleaseRBAC    = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/cred-release-rbac.yaml"
+	nodeImagePSAReadyScript     = "../../../node-guest-image/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 )
 
 func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
@@ -40,6 +41,12 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 	}
 	// Join continuation lines, then take the single ExecStart.
 	joined := strings.ReplaceAll(string(unit), "\\\n", " ")
+	if n := strings.Count(joined, "\nExecStartPre="); n != 1 {
+		t.Fatalf("ExecStartPre directive count = %d, want exactly 1", n)
+	}
+	if !strings.Contains(joined, "\nExecStartPre=/usr/local/bin/psa-ready.sh\n") {
+		t.Fatal("cred-release.service must gate startup on /usr/local/bin/psa-ready.sh")
+	}
 	if n := strings.Count(joined, "\nExecStart="); n != 1 {
 		t.Fatalf("ExecStart directive count = %d, want exactly 1", n)
 	}
@@ -122,10 +129,39 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 	if binding.APIVersion != "rbac.authorization.k8s.io/v1" || binding.Kind != "ClusterRoleBinding" {
 		t.Errorf("typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRoleBinding", binding.APIVersion, binding.Kind)
 	}
-	// The unit's ExecStartPre waits for this binding by name so a released
-	// credential is never ahead of its authorization.
-	if binding.Name == "" || !strings.Contains(joined, "get clusterrolebinding "+binding.Name+" ") {
-		t.Errorf("cred-release.service does not wait for ClusterRoleBinding %q before serving", binding.Name)
+	gate, err := os.ReadFile(filepath.Clean(nodeImagePSAReadyScript))
+	if err != nil {
+		t.Fatalf("read node-image PodSecurity readiness gate: %v", err)
+	}
+	gateInfo, err := os.Stat(filepath.Clean(nodeImagePSAReadyScript))
+	if err != nil {
+		t.Fatalf("stat node-image PodSecurity readiness gate: %v", err)
+	}
+	if gateInfo.Mode().Perm()&0o111 == 0 {
+		t.Error("psa-ready.sh is not executable")
+	}
+	// The production gate must wait for both AddOns that authorize and
+	// constrain the released credential, then exercise the real admission
+	// chain as a non-granter. node-guest-image/tests/psa-ready-test.sh executes
+	// this exact script and proves these are behavior, not inert strings.
+	gateText := string(gate)
+	for _, want := range []string{
+		"get clusterrolebinding \"$operator_binding\"",
+		"get validatingadmissionpolicy \"$policy\"",
+		"get validatingadmissionpolicybinding \"$policy\"",
+		"--as=\"$probe_user\" create --dry-run=server",
+		"probe_namespace restricted",
+		"probe_namespace privileged",
+		"pod-security.kubernetes.io/enforce may not be set below restricted",
+	} {
+		if !strings.Contains(gateText, want) {
+			t.Errorf("psa-ready.sh does not contain required gate %q", want)
+		}
+	}
+	// The gate waits for this binding by name so a released credential is
+	// never ahead of its authorization.
+	if binding.Name == "" || !strings.Contains(gateText, "operator_binding="+binding.Name) {
+		t.Errorf("psa-ready.sh does not wait for ClusterRoleBinding %q before serving", binding.Name)
 	}
 	wantRef := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "cluster-admin"}
 	if binding.RoleRef != wantRef {

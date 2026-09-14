@@ -1,11 +1,12 @@
 // Package attestproxy implements the node-local front door to the
 // attestation-api. The attestation-api binds pod loopback only; this proxy
-// serves its API on a hostPath Unix socket so exactly the on-node consumers
-// (the host NRI plugin, c8s node components, and pods the webhook mounts the
-// socket directory into) can request evidence, while nothing routable —
-// another pod, or an off-node host — can reach /attest. Socket ownership and
+// serves its API on a hostPath Unix socket so only on-node consumers (the
+// host NRI plugin, c8s node components, and pods with the socket directory
+// mounted in) can request evidence, while nothing routable — another pod, or
+// an off-node host — can reach /attest. Reachability is not authorization:
+// the socket must stay safe against any on-node caller. Socket ownership and
 // mode gate reachability; callers additionally re-check them on every dial
-// (pkg/attestationclient).
+// (attestation-go/remote).
 package attestproxy
 
 import (
@@ -24,8 +25,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -83,7 +84,7 @@ func newHealthcheckCmd() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
 			defer cancel()
-			if _, err := attestationclient.NewClient("unix://" + socket).Health(ctx); err != nil {
+			if _, err := remote.NewClient("unix://" + socket).Health(ctx); err != nil {
 				return fmt.Errorf("healthcheck over %s: %w", socket, err)
 			}
 			return nil

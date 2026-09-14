@@ -34,7 +34,6 @@
         "challengeTTL": {},
         "cnPattern": {},
         "dnsSanPatterns": {},
-        "earIssuer": {},
         "image": {
           "type": [
             "object",
@@ -131,10 +130,7 @@
               ]
             }
           }
-        },
-        "tokenSignerOverlap": {},
-        "tokenSignerRotationInterval": {},
-        "tokenSignerRotationJitter": {}
+        }
       }
     },
     "nriImagePolicy": {
@@ -575,7 +571,6 @@
     "hostNamespacePolicy": {},
     "webhook": {},
     "attestationApi": {},
-    "kata": {},
     "ratlsMesh": {},
     "podSecurityContext": {},
     "teeProxy": {

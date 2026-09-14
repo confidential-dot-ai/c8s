@@ -10,14 +10,14 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	psaapi "k8s.io/pod-security-admission/api"
+	psapolicy "k8s.io/pod-security-admission/policy"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -52,7 +52,7 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 	}
 	cert := pod.Spec.InitContainers[0]
 	if cert.Name != "c8s-cert" {
-		t.Fatalf("init container[0] name = %q, want c8s-cert (single sidecar that anchors shareProcessNamespace under kata)", cert.Name)
+		t.Fatalf("init container[0] name = %q, want c8s-cert", cert.Name)
 	}
 	for _, want := range []string{
 		"--cds-url=http://cds.c8s-system.svc:8443",
@@ -60,7 +60,6 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		"--out=/etc/c8s/certs/tls.crt",
 		"--key-out=/etc/c8s/certs/tls.key",
 		"--ca-out=/etc/c8s/certs/ca.crt",
-		"--key-mode=0640",
 		"--renew-interval=2h0m0s",
 		"--reload-nginx=false",
 		"--continue-on-initial-error",
@@ -70,13 +69,12 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		}
 	}
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		t.Fatalf("c8s-cert restartPolicy = %#v, want Always (native sidecar so the pidns anchor stays alive under kata)", cert.RestartPolicy)
+		t.Fatalf("c8s-cert restartPolicy = %#v, want Always", cert.RestartPolicy)
 	}
 	// The workload is gated by the c8s-cert-wait init container, not an exec
-	// startupProbe on the sidecar — the locked kata guest denies exec, so a
-	// probe could never pass there. The sidecar must carry no startupProbe.
+	// startupProbe on the sidecar. The sidecar must carry no startupProbe.
 	if cert.StartupProbe != nil {
-		t.Fatalf("c8s-cert must NOT carry a startupProbe (exec is denied on locked kata guests); got %#v", cert.StartupProbe)
+		t.Fatalf("c8s-cert must NOT carry a startupProbe; got %#v", cert.StartupProbe)
 	}
 	wait := pod.Spec.InitContainers[1]
 	if wait.Name != reservedCertWaitContainerName {
@@ -191,7 +189,6 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		AttestationApiURL:   "http://attestation-api",
 		CertDir:             "/etc/c8s/certs",
 		CertFSGroup:         ptr.To(int64(4242)),
-		CertKeyMode:         "0440",
 		CertRenewInterval:   time.Hour,
 		GetCertRunAsUser:    ptr.To(int64(0)),
 		GetCertRunAsGroup:   ptr.To(int64(0)),
@@ -205,9 +202,6 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
 	}
 	cert := pod.Spec.InitContainers[0]
-	if !hasArg(cert.Args, "--key-mode=0440") {
-		t.Fatalf("c8s-cert args %v missing --key-mode=0440", cert.Args)
-	}
 	if !hasArg(cert.Args, "--renew-interval=1h0m0s") {
 		t.Fatalf("c8s-cert args %v missing configured renewal interval", cert.Args)
 	}
@@ -451,215 +445,6 @@ func hasMount(mounts []corev1.VolumeMount, name, path string, readOnly bool) boo
 		}
 	}
 	return false
-}
-
-// kataEnforceConfig is a withDefaults-resolved Config with kata enforcement
-// on, so the kata-qemu / kata-qemu-snp class defaults are exercised too.
-func kataEnforceConfig() Config {
-	return Config{KataEnforce: true}.withDefaults()
-}
-
-func TestKataRuntimeClassForInjectsDefaultClass(t *testing.T) {
-	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu for a plain workload pod", got)
-	}
-}
-
-func TestKataRuntimeClassForConfidentialPodGetsSNP(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-	}
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp for a confidential.ai/cw pod", got)
-	}
-}
-
-func TestKataRuntimeClassForRespectsExplicitRuntimeClass(t *testing.T) {
-	existing := "kata-clh"
-	pod := &corev1.Pod{Spec: corev1.PodSpec{
-		RuntimeClassName: &existing,
-		Containers:       []corev1.Container{{Name: "app"}},
-	}}
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "" {
-		t.Fatalf("kataRuntimeClassFor = %q, want \"\" — an operator's explicit runtimeClassName must not be overridden", got)
-	}
-}
-
-func TestKataRuntimeClassForExemptsHostNamespacePods(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		spec corev1.PodSpec
-	}{
-		{"hostNetwork", corev1.PodSpec{HostNetwork: true}},
-		{"hostPID", corev1.PodSpec{HostPID: true}},
-		{"hostIPC", corev1.PodSpec{HostIPC: true}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Also annotate confidential.ai/cw to prove the host-namespace
-			// exemption wins over the confidential-class path.
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-				Spec:       tc.spec,
-			}
-			if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "" {
-				t.Fatalf("kataRuntimeClassFor = %q, want \"\" — a %s pod cannot run as a VM", got, tc.name)
-			}
-		})
-	}
-}
-
-func TestKataRuntimeClassForDisabled(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-	}
-	if got := kataRuntimeClassFor(pod, Config{KataEnforce: false}.withDefaults()); got != "" {
-		t.Fatalf("kataRuntimeClassFor = %q, want \"\" when kata enforcement is off", got)
-	}
-}
-
-// gpuPod builds a pod whose first container requests one unit of the given
-// per-model GPU resource (the shape the sandbox-device-plugin advertises).
-func gpuPod(resourceName string, annotations map[string]string) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{
-			Name: "app",
-			Resources: corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					corev1.ResourceName(resourceName): resource.MustParse("1"),
-				},
-			},
-		}}},
-	}
-}
-
-func TestKataRuntimeClassForGpuRequestGetsConfidentialGpuClass(t *testing.T) {
-	// Per-model resource name, no confidential.ai/cw annotation: a GPU request
-	// alone selects the confidential-GPU class.
-	pod := gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION", nil)
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp-nvidia" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp-nvidia for an nvidia.com/* GPU pod", got)
-	}
-}
-
-func TestKataRuntimeClassForGpuWinsOverConfidentialAnnotation(t *testing.T) {
-	// confidential.ai/cw would give kata-qemu-snp; the GPU request upgrades it
-	// to the GPU variant (still confidential).
-	pod := gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION",
-		map[string]string{AnnotationWorkload: "api"})
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp-nvidia" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp-nvidia (GPU implies confidential)", got)
-	}
-}
-
-func TestKataRuntimeClassForGpuRequestInInitContainer(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			InitContainers: []corev1.Container{{
-				Name: "warmup",
-				Resources: corev1.ResourceRequirements{
-					Limits: corev1.ResourceList{
-						"nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION": resource.MustParse("1"),
-					},
-				},
-			}},
-			Containers: []corev1.Container{{Name: "app"}},
-		},
-	}
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp-nvidia" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp-nvidia for a GPU init container", got)
-	}
-}
-
-func TestKataRuntimeClassForGpuExemptsHostNamespacePods(t *testing.T) {
-	// A host-namespace GPU pod cannot be a VM; the exemption wins over the GPU
-	// path just as it does over the confidential path.
-	pod := gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION", nil)
-	pod.Spec.HostNetwork = true
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "" {
-		t.Fatalf("kataRuntimeClassFor = %q, want \"\" — a host-namespace GPU pod cannot run as a VM", got)
-	}
-}
-
-func TestKataRuntimeClassForGpuRespectsExplicitRuntimeClass(t *testing.T) {
-	pod := gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION", nil)
-	existing := "kata-qemu-snp"
-	pod.Spec.RuntimeClassName = &existing
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "" {
-		t.Fatalf("kataRuntimeClassFor = %q, want \"\" — an explicit runtimeClassName must not be overridden", got)
-	}
-}
-
-// tdxEnforceConfig mirrors kataEnforceConfig for a --hardware-platform=tdx
-// operator: the confidential (CPU, GPU) pair resolves to the TDX classes.
-func tdxEnforceConfig() Config {
-	return Config{KataEnforce: true, HardwarePlatform: HardwarePlatformTDX}.withDefaults()
-}
-
-func TestKataRuntimeClassForTDXPlatform(t *testing.T) {
-	t.Run("confidential.ai/cw pod gets kata-qemu-tdx", func(t *testing.T) {
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-		}
-		if got := kataRuntimeClassFor(pod, tdxEnforceConfig()); got != "kata-qemu-tdx" {
-			t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-tdx on a TDX install", got)
-		}
-	})
-
-	t.Run("GPU pod gets kata-qemu-tdx-nvidia", func(t *testing.T) {
-		pod := gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION", nil)
-		if got := kataRuntimeClassFor(pod, tdxEnforceConfig()); got != "kata-qemu-tdx-nvidia" {
-			t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-tdx-nvidia on a TDX install", got)
-		}
-	})
-
-	t.Run("plain workload pod still gets kata-qemu", func(t *testing.T) {
-		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
-		if got := kataRuntimeClassFor(pod, tdxEnforceConfig()); got != "kata-qemu" {
-			t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu — the non-confidential default is platform-independent", got)
-		}
-	})
-}
-
-func TestConfigDefaultsHardwarePlatformToSNP(t *testing.T) {
-	if got := (Config{KataEnforce: true}).withDefaults().HardwarePlatform; got != HardwarePlatformSNP {
-		t.Fatalf("withDefaults().HardwarePlatform = %q, want %q", got, HardwarePlatformSNP)
-	}
-}
-
-func TestPodRequestsNvidiaGpu(t *testing.T) {
-	cases := []struct {
-		name string
-		pod  *corev1.Pod
-		want bool
-	}{
-		{"no resources", &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}, false},
-		{"per-model GPU", gpuPod("nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION", nil), true},
-		{"generic GPU", gpuPod("nvidia.com/gpu", nil), true},
-		{"zero quantity", gpuPod("nvidia.com/gpu", nil), true}, // overwritten below
-		{"non-nvidia vendor", gpuPod("amd.com/gpu", nil), false},
-		{"cpu only", gpuPod("cpu", nil), false},
-	}
-	// Patch the zero-quantity case to a real zero request — a 0 GPU request is
-	// not a GPU pod.
-	cases[3].pod = &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-		Name: "app",
-		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("0")},
-		},
-	}}}}
-	cases[3].want = false
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := podRequestsNvidiaGpu(tc.pod); got != tc.want {
-				t.Fatalf("podRequestsNvidiaGpu = %v, want %v", got, tc.want)
-			}
-		})
-	}
 }
 
 func TestWorkloadSAN(t *testing.T) {
@@ -1154,43 +939,7 @@ func runtimeClassPatch(t *testing.T, resp admission.Response) string {
 	return ""
 }
 
-// A pod with no c8s annotations at all (nil annotation map) must still get a
-// kata runtimeClassName under enforcement, and the injected marker with it.
-func TestHandleKataOnlyPodGetsRuntimeClass(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	m := &podMutator{
-		decoder: admission.NewDecoder(scheme),
-		cfg:     Config{KataEnforce: true}.withDefaults(),
-	}
-	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
-	raw, err := json.Marshal(pod)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp := m.Handle(context.Background(), admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
-	})
-	if !resp.Allowed {
-		t.Fatalf("Handle denied: %v", resp.Result)
-	}
-	if got := runtimeClassPatch(t, resp); got != "kata-qemu" {
-		t.Fatalf("runtimeClassName patch = %q, want kata-qemu", got)
-	}
-	var marked bool
-	for _, op := range resp.Patches {
-		if strings.HasPrefix(op.Path, "/metadata/annotations") {
-			marked = true
-		}
-	}
-	if !marked {
-		t.Fatal("kata-only mutation did not stamp the injected marker annotation")
-	}
-}
-
-// Without kata enforcement, get-cert injection must not touch runtimeClassName.
+// Get-cert injection must not touch runtimeClassName.
 func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -1221,113 +970,8 @@ func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
 		t.Fatal("expected get-cert injection to run")
 	}
 	if got := runtimeClassPatch(t, resp); got != "" {
-		t.Fatalf("runtimeClassName patch = %q, want none without kata enforcement", got)
+		t.Fatalf("runtimeClassName patch = %q, want none", got)
 	}
-}
-
-// The kata shim applies io.katacontainers.config.hypervisor.* pod annotations
-// to the guest on every kata class, so under kata enforcement the webhook
-// rejects them — on the injection path and the explicit-runtimeClassName path
-// alike. cc_init_data stays governed by stampInitData alone.
-func TestHandleRejectsKataHypervisorAnnotations(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	m := &podMutator{
-		decoder: admission.NewDecoder(scheme),
-		cfg: Config{
-			GetCertImage:    "ghcr.io/confidential-dot-ai/c8s-operator:test",
-			CDSURL:          "http://cds.c8s-system.svc:8443",
-			KataEnforce:     true,
-			CDSMeasurements: testMeasurements,
-		}.withDefaults(),
-	}
-	handle := func(t *testing.T, pod *corev1.Pod) admission.Response {
-		t.Helper()
-		raw, err := json.Marshal(pod)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return m.Handle(context.Background(), admission.Request{
-			AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
-		})
-	}
-	podWith := func(annotations map[string]string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-		}
-	}
-
-	for _, key := range []string{
-		"io.katacontainers.config.hypervisor.kernel_params",
-		"io.katacontainers.config.hypervisor.enable_iommu",
-		"io.katacontainers.config.hypervisor.default_vcpus",
-		"io.katacontainers.config.hypervisor.kernel_verity_params",
-	} {
-		t.Run("rejects "+key, func(t *testing.T) {
-			resp := handle(t, podWith(map[string]string{key: "1"}))
-			if resp.Allowed {
-				t.Fatalf("Handle admitted a pod setting %s; want denial", key)
-			}
-			if resp.Result == nil || !strings.Contains(resp.Result.Message, key) {
-				t.Fatalf("denial message = %+v, want it to name %s", resp.Result, key)
-			}
-		})
-	}
-
-	// A pod requesting its own kata class skips injection (and stampInitData)
-	// but still runs under the shim: same rejection.
-	t.Run("rejects on explicit runtimeClassName", func(t *testing.T) {
-		pod := podWith(map[string]string{"io.katacontainers.config.hypervisor.kernel_params": "agent.debug_console"})
-		pod.Spec.RuntimeClassName = ptr.To(kataSnpRuntimeClass)
-		if resp := handle(t, pod); resp.Allowed {
-			t.Fatal("Handle admitted an explicit-class pod setting kernel_params; want denial")
-		}
-	})
-
-	// cc_init_data is unchanged: the webhook's own stamp passes, an
-	// author-chosen document is still rejected by stampInitData.
-	t.Run("accepts the stamped cc_init_data value", func(t *testing.T) {
-		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pod := podWith(map[string]string{AnnotationWorkload: "api", initdata.AnnotationKey: want})
-		if resp := handle(t, pod); !resp.Allowed {
-			t.Fatalf("Handle denied a pod carrying the webhook's own cc_init_data stamp: %+v", resp.Result)
-		}
-	})
-	t.Run("rejects an author-supplied cc_init_data value", func(t *testing.T) {
-		pod := podWith(map[string]string{AnnotationWorkload: "api", initdata.AnnotationKey: "rogue"})
-		if resp := handle(t, pod); resp.Allowed {
-			t.Fatal("Handle admitted an author-supplied cc_init_data document; want denial")
-		}
-	})
-
-	t.Run("allows an annotation-free pod", func(t *testing.T) {
-		if resp := handle(t, podWith(nil)); !resp.Allowed {
-			t.Fatalf("Handle denied an annotation-free pod: %+v", resp.Result)
-		}
-	})
-	t.Run("allows an explicit-class pod with no hypervisor annotations", func(t *testing.T) {
-		pod := podWith(nil)
-		pod.Spec.RuntimeClassName = ptr.To(kataSnpRuntimeClass)
-		if resp := handle(t, pod); !resp.Allowed {
-			t.Fatalf("Handle denied an explicit-class pod: %+v", resp.Result)
-		}
-	})
-
-	// Host-namespace pods are exempt like they are from class injection: the
-	// shim never launches them, so the annotations are inert.
-	t.Run("allows a host-namespace pod", func(t *testing.T) {
-		pod := podWith(map[string]string{"io.katacontainers.config.hypervisor.kernel_params": "quiet"})
-		pod.Spec.HostNetwork = true
-		if resp := handle(t, pod); !resp.Allowed {
-			t.Fatalf("Handle denied an exempt host-namespace pod: %+v", resp.Result)
-		}
-	})
 }
 
 func TestWorkloadServiceFQDN(t *testing.T) {
@@ -1345,26 +989,6 @@ func TestWorkloadServiceFQDN(t *testing.T) {
 				t.Fatalf("WorkloadServiceFQDN(%q, %q) = %q, want %q", tc.cwID, tc.namespace, got, tc.want)
 			}
 		})
-	}
-}
-
-// A pod whose only containers are init containers (e.g. a run-once GPU job
-// shape) must still be classified by its init-container GPU request.
-func TestKataRuntimeClassForGpuPodWithOnlyInitContainers(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			InitContainers: []corev1.Container{{
-				Name: "gpu-job",
-				Resources: corev1.ResourceRequirements{
-					Limits: corev1.ResourceList{
-						"nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION": resource.MustParse("1"),
-					},
-				},
-			}},
-		},
-	}
-	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp-nvidia" {
-		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp-nvidia", got)
 	}
 }
 
@@ -1482,25 +1106,21 @@ func TestCertWaitContainerTimeout(t *testing.T) {
 	}
 }
 
-// get-cert refuses to reach an unpinned CDS from inside a kata guest
-// (cmdsutil.CheckCDSPinned), so the guest shape must carry the pin. It spells
-// the flag --cds-measurements and takes it comma-joined, where the secret and
-// volume fetchers take a repeatable --measurements.
+// Get-cert spells the pin flag --cds-measurements and takes it comma-joined,
+// where the secret and volume fetchers take a repeatable --measurements.
 func TestCertContainerCarriesCDSMeasurements(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		measurements []string
-		guest        bool
 		want         string
 	}{
-		{"guest shape pins CDS", []string{"aa", "bb"}, true, "--cds-measurements=aa,bb"},
-		{"node shape pins CDS", []string{"aa"}, false, "--cds-measurements=aa"},
+		{"multiple pins", []string{"aa", "bb"}, "--cds-measurements=aa,bb"},
+		{"node shape pins CDS", []string{"aa"}, "--cds-measurements=aa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := podWithApp()
 			cfg := secretsConfig()
 			cfg.CDSMeasurements = tc.measurements
-			cfg.WorkloadClaimsGuest = tc.guest
 			mutatePod(pod, &injection{WorkloadID: "api"}, cfg)
 
 			args := containerNamed(pod, reservedCertContainerName).Args
@@ -1574,11 +1194,12 @@ func TestCertContainerGetsRebasedAttestationURL(t *testing.T) {
 	}
 }
 
-// Every injected fetcher (cert, secret, volume) must carry the rebased
-// socket URL AND the mount that makes it reachable in the same container —
-// a rebased URL without the c8s-workload-claims mount dials a path nothing
-// serves.
-func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
+// Every injected fetcher (cert, secret, volume) must carry the rebased socket
+// URL, be named so the inventory's NRI plugin mounts the socket directory into
+// it (workloadclaims.IsSidecarContainer), and declare no pod-spec mount of its
+// own at that path — the pod spec stays free of hostPath so PodSecurity
+// restricted admits it.
+func TestFetchersCarryRebasedURLAsNRIMountTargets(t *testing.T) {
 	cfg := secretsConfig()
 	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
 	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
@@ -1589,21 +1210,138 @@ func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
 		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
 	}, cfg)
 
+	// The mount contract is split across components: the webhook emits the
+	// rebased URL, the inventory's NRI plugin mounts the directory into the
+	// containers matching its published predicate. So the set of containers
+	// carrying the rebased URL must equal the predicate's match set exactly,
+	// and the pod must carry the annotation the plugin keys on.
 	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
+	carrying := map[string]bool{}
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if hasArg(c.Args, want) {
+			carrying[c.Name] = true
+		}
+		if workloadclaims.IsSidecarContainer(c.Name) != carrying[c.Name] {
+			t.Errorf("container %q: carries rebased URL %v but IsSidecarContainer %v; the NRI mount would miss or overshoot", c.Name, carrying[c.Name], workloadclaims.IsSidecarContainer(c.Name))
+		}
+		if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.MountPath == workloadclaims.SidecarSocketDir
+		}) {
+			t.Errorf("%s declares a pod-spec mount at %s; the socket directory arrives by NRI mount only, mounts %+v", c.Name, workloadclaims.SidecarSocketDir, c.VolumeMounts)
+		}
+	}
 	for _, name := range []string{reservedCertContainerName, reservedSecretContainerName, reservedVolumeContainerName} {
-		c := containerNamed(pod, name)
-		if c == nil {
-			t.Fatalf("injected pod missing container %q", name)
+		if !carrying[name] {
+			t.Errorf("injected pod missing fetcher %q with the rebased URL", name)
 		}
-		if !hasArg(c.Args, want) {
-			t.Errorf("%s args %v missing rebased %q", name, c.Args, want)
+	}
+	if pod.Annotations[workloadclaims.AnnotationInjected] != "true" {
+		t.Errorf("pod annotation %s = %q; the NRI plugin mounts only under it", workloadclaims.AnnotationInjected, pod.Annotations[workloadclaims.AnnotationInjected])
+	}
+	for _, v := range pod.Spec.Volumes {
+		if v.HostPath != nil {
+			t.Errorf("mutated pod declares hostPath volume %q; PodSecurity baseline and restricted reject it", v.Name)
 		}
-		hasMount := slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == workloadClaimsVolumeName && m.MountPath == workloadclaims.SidecarSocketDir
-		})
-		if !hasMount {
-			t.Errorf("%s carries the rebased socket URL but no %s mount at %s; mounts %+v", name, workloadClaimsVolumeName, workloadclaims.SidecarSocketDir, c.VolumeMounts)
-		}
+	}
+}
+
+// A pod without the cw annotation passes through untouched even when it
+// pre-sets the injected annotation and names a sidecar container itself. This
+// pins the forgeable NRI-mount trigger deliberately: such a pod can obtain the
+// RO socket-directory mount on the node, and the sockets behind it must stay
+// safe against any on-node caller (peer-credential binding) — the annotation
+// is scoping, not a security boundary.
+func TestHandleLeavesNonCWPodWithForgedInjectedAnnotationAlone(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationInjected: "true"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: reservedCertContainerName}}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: secretsConfig()}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "tenant", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if !resp.Allowed {
+		t.Fatalf("non-cw pod denied: %+v", resp.Result)
+	}
+	if len(resp.Patches) != 0 {
+		t.Fatalf("non-cw pod mutated: %+v", resp.Patches)
+	}
+}
+
+// evaluateRestricted runs the same checks the PodSecurity admission plugin
+// enforces at restricted/latest.
+func evaluateRestricted(t *testing.T, pod *corev1.Pod) psapolicy.AggregateCheckResult {
+	t.Helper()
+	evaluator, err := psapolicy.NewEvaluator(psapolicy.DefaultChecks(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return psapolicy.AggregateCheckResults(evaluator.EvaluatePod(
+		psaapi.LevelVersion{Level: psaapi.LevelRestricted, Version: psaapi.LatestVersion()},
+		&pod.ObjectMeta, &pod.Spec))
+}
+
+// The acceptance bar for hardened clusters: a restricted-compliant cw pod must
+// STAY restricted-admissible after the full node-CVM mutation (cert, wait,
+// secret and volume fetchers, nginx reload). The socket directory reaches the
+// sidecars by NRI mount, so nothing the webhook adds may name a hostPath.
+// Default injection shape only: a pod overriding c8s-get-cert-run-as-* to root
+// fails restricted by its own choice.
+func TestMutatePodStaysRestrictedAdmissible(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot:   ptr.To(true),
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			Containers: []corev1.Container{{
+				Name: "app",
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr.To(false),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+			}},
+		},
+	}
+	// Guard against a vacuous pass: the input fixture itself must be
+	// restricted-admissible, and the evaluator must actually reject the old
+	// injected shape (a hostPath claims volume).
+	if agg := evaluateRestricted(t, pod); !agg.Allowed {
+		t.Fatalf("input fixture violates PodSecurity restricted before mutation: %s: %s", agg.ForbiddenReason(), agg.ForbiddenDetail())
+	}
+	legacy := pod.DeepCopy()
+	hpType := corev1.HostPathDirectory
+	legacy.Spec.Volumes = append(legacy.Spec.Volumes, corev1.Volume{
+		Name: "c8s-workload-claims",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/nri-image-policy", Type: &hpType},
+		},
+	})
+	if agg := evaluateRestricted(t, legacy); agg.Allowed {
+		t.Fatal("evaluator admitted a hostPath claims volume; the control proves nothing")
+	}
+
+	cfg := secretsConfig()
+	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
+	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Reload:     reloadSpec{Nginx: true},
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	if agg := evaluateRestricted(t, pod); !agg.Allowed {
+		t.Fatalf("mutated cw pod violates PodSecurity restricted: %s: %s", agg.ForbiddenReason(), agg.ForbiddenDetail())
 	}
 }
 

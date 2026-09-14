@@ -31,8 +31,6 @@ func TestNewCmdDurationFlagDefaults(t *testing.T) {
 		{"min-ca-validity", "1h0m0s"},
 		{"rate-limiter-evict-interval", "1m0s"},
 		{"rate-limiter-idle-timeout", "5m0s"},
-		{"token-signer-rotation-interval", "720h0m0s"},
-		{"token-signer-overlap", "25h0m0s"},
 		{"ratls-cert-ttl", "24h0m0s"},
 	} {
 		t.Run(tc.flag, func(t *testing.T) {

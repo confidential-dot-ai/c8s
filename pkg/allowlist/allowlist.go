@@ -101,13 +101,10 @@ type MountPolicy struct {
 	Destinations []string `json:"destinations,omitempty"`
 }
 
-// EnvPolicy governs the environment variable NAMES a container may run with.
-// Values are not matched: they carry secrets, and an allowlist is served to
-// every enforcer. Exact requires every name to appear in Names; Any, the
-// default, leaves them unconstrained.
+// EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
-	Policy string   `json:"policy"`
-	Names  []string `json:"names,omitempty"`
+	Policy string            `json:"policy"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -139,6 +136,9 @@ func ParseServedJSON(data []byte) (*Allowlist, error) {
 }
 
 func parseJSON(data []byte, strict bool) (*Allowlist, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if strict {
 		dec.DisallowUnknownFields()
@@ -157,6 +157,9 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 // a PUT /allowlist/workloads/{name} — applying the same normalization as
 // ParseJSON so a stored entry is canonical.
 func ParseWorkloadJSON(data []byte) (*Workload, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var w Workload
@@ -252,6 +255,7 @@ func DigestEntry(digest types.Digest, image string) Workload {
 			Image:   image,
 			Command: ArgvPolicy{Policy: PolicyAny},
 			Args:    ArgvPolicy{Policy: PolicyAny},
+			Env:     EnvPolicy{Policy: PolicyAny},
 		}},
 	}
 }
@@ -389,28 +393,30 @@ func normalizeMounts(p *MountPolicy) error {
 	return nil
 }
 
-// normalizeEnv validates an env policy, canonicalizing an absent policy to Any
-// for the same reason as mounts: a container inherits names it did not declare.
 func normalizeEnv(p *EnvPolicy) error {
 	switch p.Policy {
-	case PolicyAny, "":
-		if len(p.Names) != 0 {
-			return fmt.Errorf("any policy takes no names")
+	case PolicyAny, "", PolicyDeny:
+		if p.Values != nil {
+			return fmt.Errorf("%s env policy takes no values", p.Policy)
 		}
-		p.Policy = PolicyAny
-		p.Names = nil
+		if p.Policy == "" {
+			p.Policy = PolicyAny
+		}
 	case PolicyExact:
-		if len(p.Names) == 0 {
-			return fmt.Errorf("exact policy requires at least one name")
+		if p.Values == nil {
+			return fmt.Errorf("exact env requires values")
 		}
-		for _, n := range p.Names {
-			if n == "" || strings.ContainsRune(n, '=') {
-				return fmt.Errorf("environment name %q is empty or contains '='", n)
+		for n, v := range p.Values {
+			if !validEnvPair(n, v) {
+				return fmt.Errorf("invalid environment name or value")
 			}
 		}
-		p.Names = sortedUnique(p.Names)
+		if len(p.Values) == 0 {
+			p.Policy = PolicyDeny
+			p.Values = nil
+		}
 	default:
-		return fmt.Errorf("unknown env policy %q (want any or exact)", p.Policy)
+		return fmt.Errorf("unknown env policy %q (want deny, any, or exact)", p.Policy)
 	}
 	return nil
 }
@@ -539,7 +545,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env})
 	return string(b)
 }
 

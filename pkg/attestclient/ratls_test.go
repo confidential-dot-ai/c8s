@@ -10,33 +10,59 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-func TestTEETypeForPlatform(t *testing.T) {
-	cases := map[string]struct {
-		want    ratls.TEEType
-		wantErr bool
+// TestRATLSEvidenceShapes pins which platforms embed a raw report and which
+// keep their envelope. The split follows the vTPM boundary, not the tag: gcp-snp
+// attests through the hardware report alone, so it embeds the raw report like
+// bare-metal snp, while az-snp keeps the envelope its quote lives in.
+func TestRATLSEvidenceShapes(t *testing.T) {
+	report := base64.StdEncoding.EncodeToString(make([]byte, ratls.SNPReportSize))
+	for _, tc := range []struct {
+		platform teetypes.PlatformType
+		evidence string
+		wantRaw  bool
 	}{
-		"snp":     {ratls.TEETypeSEVSNP, false},
-		"az-snp":  {ratls.TEETypeSEVSNP, false},
-		"gcp-snp": {ratls.TEETypeSEVSNP, false},
-		"tdx":     {ratls.TEETypeTDX, false},
-		"az-tdx":  {ratls.TEETypeTDX, false},
-		"auto":    {0, true},
-		"":        {0, true},
+		{teetypes.PlatformSNP, `{"attestation_report":"` + report + `"}`, true},
+		{teetypes.PlatformGcpSNP, `{"attestation_report":"` + report + `"}`, true},
+		{teetypes.PlatformAzSNP, `{"hcl_report":"AAAA"}`, false},
+		{teetypes.PlatformTDX, `{"quote":"abc"}`, false},
+		{teetypes.PlatformGcpTDX, `{"quote":"abc"}`, false},
+	} {
+		t.Run(string(tc.platform), func(t *testing.T) {
+			out, err := RATLSEvidence(remote.AttestResponse{
+				Platform: tc.platform,
+				Evidence: json.RawMessage(tc.evidence),
+			})
+			if err != nil {
+				t.Fatalf("RATLSEvidence: %v", err)
+			}
+			if gotRaw := len(out) == ratls.SNPReportSize; gotRaw != tc.wantRaw {
+				t.Fatalf("raw report = %t (payload %d bytes), want %t", gotRaw, len(out), tc.wantRaw)
+			}
+		})
 	}
-	for platform, tc := range cases {
-		got, err := TEETypeForPlatform(platform)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("%q: err = %v, wantErr %t", platform, err, tc.wantErr)
-		}
-		if got != tc.want {
-			t.Fatalf("%q: TEEType = %d, want %d", platform, got, tc.want)
-		}
+}
+
+// TestRATLSEvidenceGcpTDXStripsEventlog: gcp-tdx attests through its hardware
+// quote, so like bare-metal tdx it loses the event log that would push the
+// certificate past a TLS handshake record.
+func TestRATLSEvidenceGcpTDXStripsEventlog(t *testing.T) {
+	out, err := RATLSEvidence(remote.AttestResponse{
+		Platform: teetypes.PlatformGcpTDX,
+		Evidence: json.RawMessage(`{"quote":"abc","cc_eventlog":"AAAA"}`),
+	})
+	if err != nil {
+		t.Fatalf("RATLSEvidence: %v", err)
+	}
+	if strings.Contains(out, "cc_eventlog") {
+		t.Fatalf("cc_eventlog survived the strip: %s", out)
 	}
 }
 
@@ -49,13 +75,13 @@ func attestSpy(t *testing.T, gotReportData *[]byte) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode attest request: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		*gotReportData = req.ReportData.Bytes()
+		*gotReportData = req.ReportData
 		report := base64.StdEncoding.EncodeToString(make([]byte, ratls.SNPReportSize))
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"platform": "snp",
@@ -97,16 +123,16 @@ func TestAttestationExtension_BindsKeyAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extension does not parse as an attestation: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %d, want SEV-SNP", att.TEEType)
+	if att.Family != ratls.TEETypeSEVSNP {
+		t.Fatalf("Family = %q, want %q", att.Family, ratls.TEETypeSEVSNP)
 	}
 }
 
 // TestRATLSEvidenceTDXStripsEventlog: bare-metal TDX evidence must be embedded
 // as the envelope with cc_eventlog dropped and the quote kept.
 func TestRATLSEvidenceTDXStripsEventlog(t *testing.T) {
-	resp := types.AttestResponse{
-		Platform: string(types.PlatformTdx),
+	resp := remote.AttestResponse{
+		Platform: teetypes.PlatformTDX,
 		Evidence: json.RawMessage(`{"quote":"abc","cc_eventlog":"AAAA"}`),
 	}
 	out, err := RATLSEvidence(resp)
@@ -120,7 +146,7 @@ func TestRATLSEvidenceTDXStripsEventlog(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
 		t.Fatalf("unmarshal envelope %q: %v", out, err)
 	}
-	if envelope.Platform != string(types.PlatformTdx) {
+	if envelope.Platform != string(teetypes.PlatformTDX) {
 		t.Errorf("platform = %q, want tdx", envelope.Platform)
 	}
 	if got := string(envelope.Evidence["quote"]); got != `"abc"` {
@@ -135,8 +161,8 @@ func TestRATLSEvidenceTDXStripsEventlog(t *testing.T) {
 }
 
 func TestRATLSEvidenceTDXBadEvidence(t *testing.T) {
-	resp := types.AttestResponse{
-		Platform: string(types.PlatformTdx),
+	resp := remote.AttestResponse{
+		Platform: teetypes.PlatformTDX,
 		Evidence: json.RawMessage(`not-json`),
 	}
 	if _, err := RATLSEvidence(resp); err == nil {

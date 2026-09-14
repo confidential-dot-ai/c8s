@@ -172,7 +172,6 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		attestationApiURL:          attestationURL,
 		caCommonName:               "test ca",
 		caCertValidity:             24 * time.Hour,
-		earIssuerName:              "cds",
 		jwtClockSkew:               30,
 		certTTL:                    time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
@@ -296,8 +295,8 @@ func TestRun_ErrorPaths(t *testing.T) {
 	}
 }
 
-// Full plain-HTTP startup: operator keys, measurements, seed, and key
-// rotation all enabled. run() must serve /healthz and exit cleanly on SIGTERM.
+// Full plain-HTTP startup: operator keys, measurements, seed, and
+// SAN validation enabled. run() must serve /healthz and exit cleanly on SIGTERM.
 func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 
@@ -314,8 +313,6 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	cfg.allowedCNPattern = `^.*$`
 	cfg.operatorKeys = writeOperatorKeysPEM(t)
 	cfg.allowlistSeed = seedPath
-	cfg.rotationInterval = time.Hour
-	cfg.rotationOverlap = time.Minute
 	cfg.sanValidation = true
 
 	errCh := make(chan error, 1)
@@ -506,35 +503,6 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT /allowlist = %d (%s), want 204", resp.StatusCode, respBody)
-	}
-}
-
-// TestRun_NoRotationWhenIntervalZero: --token-signer-rotation-interval 0 must
-// disable the rotation loop entirely; with a long overlap any rotation would
-// leave extra keys in the served JWKS.
-func TestRun_NoRotationWhenIntervalZero(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.port = freePort(t)
-	cfg.rotationInterval = 0
-	cfg.rotationOverlap = time.Hour
-	base := startRunServer(t, cfg)
-
-	resp, err := http.Get(base + "/.well-known/jwks.json")
-	if err != nil {
-		t.Fatalf("GET jwks: %v", err)
-	}
-	defer resp.Body.Close()
-	var jwks struct {
-		Keys []struct {
-			Kid string `json:"kid"`
-		} `json:"keys"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		t.Fatalf("decode jwks: %v", err)
-	}
-	if len(jwks.Keys) != 1 {
-		t.Fatalf("JWKS has %d keys, want exactly 1 (rotation must be disabled)", len(jwks.Keys))
 	}
 }
 

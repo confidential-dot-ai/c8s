@@ -13,9 +13,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // setCDSPinsVerb selects the pin patcher instead of the plugin daemon.
@@ -44,11 +44,11 @@ func runSetCDSPins(stdout io.Writer, args []string) error {
 		return err
 	}
 
-	measurements, err := ratls.ParseHexMeasurements(*rawMeasurements)
+	measurements, err := refvalues.ParseHexMeasurements(*rawMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	rtmrs, err := ratls.ParseRTMRPinsString(*rawRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPinsString(*rawRTMRs)
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}

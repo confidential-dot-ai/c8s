@@ -168,7 +168,7 @@ func TestParseRejects(t *testing.T) {
 		{"duplicate key inside an entry", tdxFile(`{"name":"a","mrtd":"` + d1 + `","mrtd":"` + d2 + `"}`), "duplicate key"},
 		{"uppercase hex", snpFile(`{"name":"a","measurement":"` + strings.ToUpper(d1) + `"}`), "lowercase"},
 		{"short digest", snpFile(`{"name":"a","measurement":"c1e0a7"}`), "hex chars"},
-		{"non-hex digest", snpFile(`{"name":"a","measurement":"` + strings.Repeat("z", 96) + `"}`), "not hex"},
+		{"non-hex digest", snpFile(`{"name":"a","measurement":"` + strings.Repeat("z", 96) + `"}`), "hex chars"},
 		{"missing name", snpFile(`{"measurement":"` + d1 + `"}`), "name is required"},
 		{"blank name", snpFile(`{"name":"  ","measurement":"` + d1 + `"}`), "name is required"},
 		{"missing measurement", snpFile(`{"name":"a"}`), "measurement is required"},

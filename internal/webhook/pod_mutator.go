@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,8 +44,9 @@ const (
 	AnnotationWorkload = "confidential.ai/cw"
 
 	// AnnotationInjected is stamped on pods after a successful mutation
-	// so re-invocations of the webhook are no-ops.
-	AnnotationInjected = "confidential.ai/c8s-injected"
+	// so re-invocations of the webhook are no-ops. Shared with the node's
+	// admission inventory, which keys its socket mount on it.
+	AnnotationInjected = workloadclaims.AnnotationInjected
 
 	// LabelWorkload mirrors AnnotationWorkload as a pod label so the
 	// operator-managed headless Service (one per annotated workload) can
@@ -99,9 +99,8 @@ var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation
 
 // defaultCertFSGroup is the shared group used for the injected EmptyDir
 // when the pod does not already specify an fsGroup. The c8s image runs as
-// the distroless nonroot UID/GID 65532, and get-cert writes tls.key 0640.
+// the distroless nonroot UID/GID 65532, and get-cert creates tls.key 0640 in the setgid certificate volume.
 const defaultCertFSGroup int64 = 65532
-const defaultCertKeyMode = "0640"
 
 // defaultCertRenewInterval must stay strictly below issuer.MaxNamedLeafTTL, the
 // shortest TTL CDS issues: a leaf carrying a matched-workload stamp is capped
@@ -117,7 +116,7 @@ const discoveryPublicTLSModeWebPKI = "webpki"
 // reservedSecretContainerName is the injected secret fetcher. Reserved like
 // the cert containers: a pod that declared the name itself would have the
 // webhook's container silently replace or collide with it.
-const reservedSecretContainerName = "c8s-secret"
+const reservedSecretContainerName = workloadclaims.SecretContainerName
 
 // defaultCertVolumeName is the injected cert volume when a pod does not name
 // its own with AnnotationCertVolume.
@@ -132,7 +131,7 @@ const defaultSecretDir = "/run/c8s/secrets"
 
 // reservedVolumeContainerName is the injected volume fetcher. Reserved like the
 // cert containers.
-const reservedVolumeContainerName = "c8s-volume"
+const reservedVolumeContainerName = workloadclaims.VolumeContainerName
 
 // defaultVolumeDir is where opened volumes are mounted, one directory each.
 const defaultVolumeDir = "/run/c8s/volumes"
@@ -142,49 +141,13 @@ const defaultVolumeDir = "/run/c8s/volumes"
 // webhook rebuilds the sidecar every call (injectInitContainers) and rejects
 // the name in the regular/ephemeral lists (rejectReservedCertContainer); the
 // cw-label-integrity VAP enforces its presence in the API server.
-const reservedCertContainerName = "c8s-cert"
+const reservedCertContainerName = workloadclaims.CertContainerName
 
 // reservedCertWaitContainerName is the injected gate init container that blocks
 // the workload until c8s-cert has written the initial cert (see
 // certWaitContainer). Operator-reserved like c8s-cert: a pod may not declare
 // its own container under it.
 const reservedCertWaitContainerName = "c8s-cert-wait"
-
-// runtimeClassName values injected by kata enforcement. kata-qemu is a
-// VM-isolated (non-confidential) pod; the confidential classes come in a
-// (CPU, GPU) pair per hardware platform, selected by Config.HardwarePlatform.
-// These are NOT configurable: the names are a fixed contract with the
-// RuntimeClasses the c8s chart installs (internal/helmchart/c8s/templates/kata.yaml)
-// AND with the kata-enforcement ValidatingAdmissionPolicy allowlist, so a custom
-// class would be rejected by the policy and have no matching shim or measurement.
-const kataRuntimeClass = "kata-qemu"
-
-const (
-	kataSnpRuntimeClass    = "kata-qemu-snp"
-	kataSnpGpuRuntimeClass = "kata-qemu-snp-nvidia"
-	kataTdxRuntimeClass    = "kata-qemu-tdx"
-	kataTdxGpuRuntimeClass = "kata-qemu-tdx-nvidia"
-)
-
-// Hardware platforms the kata confidential classes target. Values match the
-// install CLI's --hardware-platform flag; the chart forwards its platform
-// choice to the operator so webhook injection and the rendered RuntimeClasses
-// stay in lockstep.
-const (
-	HardwarePlatformSNP = "sev-snp"
-	HardwarePlatformTDX = "tdx"
-)
-
-// nvidiaGpuResourcePrefix is the vendor prefix every NVIDIA GPU extended
-// resource carries. The sandbox-device-plugin advertises per-model names
-// (e.g. nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION), so the
-// webhook matches the prefix rather than a fixed resource name.
-const nvidiaGpuResourcePrefix = "nvidia.com/"
-
-// GuestReadyNodeLabel marks a node whose kata-image-puller has reconciled the
-// c8s guest. Without it kata-runtime still resolves the stock guest for a
-// kata pod placed before the guest drop-in exists.
-const GuestReadyNodeLabel = "confidential.ai/kata-guest-ready"
 
 // Config tunes the injector.
 type Config struct {
@@ -220,9 +183,6 @@ type Config struct {
 	// fsGroup. A negative value disables fsGroup mutation.
 	CertFSGroup *int64
 
-	// CertKeyMode is passed to get-cert for the generated tls.key.
-	CertKeyMode string
-
 	// CertRenewInterval is passed to the renewal sidecar. Non-positive
 	// values use the default interval.
 	CertRenewInterval time.Duration
@@ -232,39 +192,13 @@ type Config struct {
 	GetCertRunAsGroup   *int64
 	GetCertRunAsNonRoot *bool
 
-	// KataEnforce turns on kata runtimeClass injection. When set, the webhook
-	// injects a runtimeClassName into every in-scope workload pod that does
-	// not already request one. Independent of get-cert injection — a pod with
-	// no confidential.ai/cw annotation is still given a runtimeClassName. The
-	// injected classes are fixed constants, not configurable;
-	// kataRuntimeClassFor picks between them per HardwarePlatform.
-	KataEnforce bool
-
-	// HardwarePlatform selects which confidential (CPU, GPU) class pair kata
-	// enforcement injects: HardwarePlatformSNP (kata-qemu-snp /
-	// kata-qemu-snp-nvidia, the default) or HardwarePlatformTDX
-	// (kata-qemu-tdx / kata-qemu-tdx-nvidia). Set from the operator's
-	// --hardware-platform flag, which the chart derives from the same values
-	// that pick the RuntimeClasses it renders.
-	HardwarePlatform string
-
 	// WorkloadClaimsHostDir, when set (node-CVM), is the host directory holding
-	// the nri-image-policy inventory socket. The webhook mounts it read-only at
-	// workloadclaims.SidecarSocketDir in the c8s-cert sidecar and injects
-	// --workload-claims so get-cert redeems a sandbox token over that socket
-	// (docs/ratls.md).
+	// the nri-image-policy inventory socket. That plugin bind-mounts the
+	// directory at workloadclaims.SidecarSocketDir into the injected sidecars
+	// (an NRI mount, never a pod-spec hostPath — PodSecurity baseline and
+	// restricted forbid hostPath); the webhook injects --workload-claims so
+	// get-cert redeems a sandbox token over that socket (docs/ratls.md).
 	WorkloadClaimsHostDir string
-
-	// KataGuestReadyGate makes kata runtimeClass injection also require
-	// GuestReadyNodeLabel. Only valid where the image-puller is deployed:
-	// nothing else sets the label, so pods would stay Pending forever.
-	KataGuestReadyGate bool
-
-	// WorkloadClaimsGuest selects the kata shape: the inventory is
-	// policy-monitor inside the guest, reached on the guest's loopback address
-	// rather than a mounted socket, so no volume is injected. Mutually
-	// exclusive with WorkloadClaimsHostDir — the chart sets exactly one.
-	WorkloadClaimsGuest bool
 }
 
 // Register wires the pod mutator onto the manager's webhook server.
@@ -696,23 +630,22 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
 			errInvalidInjectionAnnotation, AnnotationWorkload))
 	}
-	// The fetcher redeems a sandbox token from an inventory: the mounted
-	// nri-image-policy socket on node-CVM, or policy-monitor on guest loopback
-	// under kata. An operator with neither has nothing to point it at, so
+	// The fetcher redeems a sandbox token from the mounted nri-image-policy
+	// socket. An operator without it has nothing to point the fetcher at, so
 	// injecting would produce a Running pod whose fetcher CrashLoops while the
 	// workload blocks forever on a file that never lands. Refuse at admission.
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	hasWorkloadClaimsEndpoint := m.cfg.WorkloadClaimsHostDir != ""
+	if inj != nil && len(inj.Secrets.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
-			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
+			"%w: %s needs an admission inventory, which this operator is not configured with (node inventory not configured); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
 	}
-	// Same for volumes: the fetcher hands the key to volumed, over the mounted
-	// socket directory on node-CVM or on guest loopback under kata. An operator
-	// with neither shape has no daemon to hand it to, so the workload would wait
-	// on a mount that can never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
+	// Same for volumes: the fetcher hands the key to volumed over the mounted
+	// socket directory. An operator without it has no daemon to hand it to,
+	// so the workload would wait on a mount that can never land (docs/volumes.md).
+	if inj != nil && len(inj.Volumes.Specs) > 0 && !hasWorkloadClaimsEndpoint {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
-			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
+			"%w: %s needs a volume daemon, which this operator is not configured with (node inventory not configured); see docs/volumes.md",
 			errInvalidInjectionAnnotation, AnnotationVolumes))
 	}
 	if inj != nil && inj.SAN == "" {
@@ -721,32 +654,11 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		inj.SAN = workloadSAN(inj.WorkloadID, req.Namespace)
 	}
 
-	// confidential.ai/cw drives both get-cert injection and confidential
-	// class selection: a pod that opts in to a c8s workload identity also
-	// gets a confidential VM (the platform's CPU class). Kata-only injection
-	// (no annotation) under --kata-enforce gives kata-qemu. A pod that
-	// requests an nvidia.com/* GPU gets the platform's confidential-GPU class
-	// — GPU implies confidential, regardless of the annotation. An
-	// operator-set runtimeClassName is always honored — an explicit
-	// confidential class without the annotation runs as a confidential VM
-	// without c8s identity (the bring-your-own-attestation path; see
-	// docs/kata.md).
 	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
 	// every call), so it no longer keys off the confidential.ai/c8s-injected
 	// marker: an author cannot skip injection by pre-setting it.
 	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
-	kataClass := kataRuntimeClassFor(pod, m.cfg)
-
-	// Covers a pod that set its own runtimeClassName too: injection skips it,
-	// but the shim still honors the annotations. Host-namespace pods are
-	// exempt like they are from class injection (kataIncompatible).
-	if m.cfg.KataEnforce && !kataIncompatible(pod) {
-		if err := rejectKataHypervisorAnnotations(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
-	}
-
-	if inj == nil && kataClass == "" {
+	if inj == nil {
 		return admission.Allowed("no c8s annotation — passthrough")
 	}
 
@@ -774,32 +686,11 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if err := rejectReservedSecretsVolume(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		if err := rejectReservedVolumeVolume(pod, m.cfg.WorkloadClaimsGuest); err != nil {
+		if err := rejectReservedVolumeVolume(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
 		mutatePod(pod, inj, m.cfg)
-	}
-	if kataClass != "" {
-		l.Info("injecting kata runtimeClassName", "runtimeClass", kataClass)
-		pod.Spec.RuntimeClassName = &kataClass
-		if m.cfg.KataGuestReadyGate {
-			requireGuestReadyNode(pod)
-		}
-		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements, m.cfg.CDSRTMRs); err != nil {
-			if errors.Is(err, errInvalidInjectionAnnotation) {
-				return admission.Errored(http.StatusBadRequest, err)
-			}
-			return admission.Errored(http.StatusInternalServerError, err)
-		}
-		// Stamp AnnotationInjected here too — mutatePod only runs when
-		// get-cert is needed, but a kata-only mutation is still a mutation
-		// and the alreadyInjected short-circuit above must see it on
-		// reinvocation (reinvocationPolicy: IfNeeded).
-		if pod.Annotations == nil {
-			pod.Annotations = map[string]string{}
-		}
-		pod.Annotations[AnnotationInjected] = "true"
 	}
 
 	raw, err := json.Marshal(pod)
@@ -886,116 +777,6 @@ func validateWorkloadLabel(pod *corev1.Pod) error {
 	return nil
 }
 
-// kataRuntimeClassFor returns the runtimeClassName the webhook should inject
-// into pod, or "" to leave the pod's runtime unchanged. It returns "" when
-// kata enforcement is off, when the pod already requests a runtimeClassName
-// (an explicit operator choice the ValidatingAdmissionPolicy still checks),
-// or when the pod uses a host namespace (a VM cannot share the host's
-// namespaces, so such a pod can only run as an ordinary container).
-//
-// A pod that requests an nvidia.com/* GPU gets the platform's confidential-GPU
-// class: c8s has no non-confidential GPU runtime, so a GPU request alone means
-// a confidential VM with the device passed through — independent of
-// confidential.ai/cw. The GPU runtime ships with every kata install, so this
-// needs no separate gate. A pod annotated confidential.ai/cw gets the
-// platform's confidential CPU class: opting in to a c8s workload identity also
-// means running as a confidential VM. Any other in-scope pod gets the
-// non-confidential kata class.
-func kataRuntimeClassFor(pod *corev1.Pod, cfg Config) string {
-	if !cfg.KataEnforce {
-		return ""
-	}
-	if pod.Spec.RuntimeClassName != nil && *pod.Spec.RuntimeClassName != "" {
-		return ""
-	}
-	if kataIncompatible(pod) {
-		return ""
-	}
-	tdx := cfg.HardwarePlatform == HardwarePlatformTDX
-	if podRequestsNvidiaGpu(pod) {
-		if tdx {
-			return kataTdxGpuRuntimeClass
-		}
-		return kataSnpGpuRuntimeClass
-	}
-	if pod.Annotations[AnnotationWorkload] != "" {
-		if tdx {
-			return kataTdxRuntimeClass
-		}
-		return kataSnpRuntimeClass
-	}
-	return kataRuntimeClass
-}
-
-// requireGuestReadyNode pins a confidential pod to a node carrying
-// GuestReadyNodeLabel.
-//
-// INVARIANT: the requirement lands in every nodeSelectorTerm. Terms are OR-ed,
-// so a term of its own would leave the affinity satisfiable without it.
-func requireGuestReadyNode(pod *corev1.Pod) {
-	if pod.Spec.Affinity == nil {
-		pod.Spec.Affinity = &corev1.Affinity{}
-	}
-	if pod.Spec.Affinity.NodeAffinity == nil {
-		pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
-	}
-	na := pod.Spec.Affinity.NodeAffinity
-	if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-		na.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{}
-	}
-	terms := na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
-	if len(terms) == 0 {
-		terms = []corev1.NodeSelectorTerm{{}}
-	}
-	for i := range terms {
-		if slices.ContainsFunc(terms[i].MatchExpressions, func(e corev1.NodeSelectorRequirement) bool {
-			return e.Key == GuestReadyNodeLabel
-		}) {
-			continue
-		}
-		terms[i].MatchExpressions = append(terms[i].MatchExpressions, corev1.NodeSelectorRequirement{
-			Key:      GuestReadyNodeLabel,
-			Operator: corev1.NodeSelectorOpIn,
-			Values:   []string{"true"},
-		})
-	}
-	na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms = terms
-}
-
-// podRequestsNvidiaGpu reports whether any container (regular or init) asks
-// for an nvidia.com/* extended resource. Extended resources must appear in
-// Limits (kubernetes copies the value into Requests), but a hand-written pod
-// can set Requests directly, so both maps are scanned. Sidecar containers
-// live in InitContainers, so they are scanned too.
-func podRequestsNvidiaGpu(pod *corev1.Pod) bool {
-	containers := make([]corev1.Container, 0, len(pod.Spec.Containers)+len(pod.Spec.InitContainers))
-	containers = append(containers, pod.Spec.Containers...)
-	containers = append(containers, pod.Spec.InitContainers...)
-	for _, c := range containers {
-		if resourceListHasNvidiaGpu(c.Resources.Limits) || resourceListHasNvidiaGpu(c.Resources.Requests) {
-			return true
-		}
-	}
-	return false
-}
-
-func resourceListHasNvidiaGpu(list corev1.ResourceList) bool {
-	for name, qty := range list {
-		if strings.HasPrefix(string(name), nvidiaGpuResourcePrefix) && !qty.IsZero() {
-			return true
-		}
-	}
-	return false
-}
-
-// kataIncompatible reports whether pod uses a host namespace. Kata launches
-// each pod as its own VM, which cannot join the host's network, PID, or IPC
-// namespace — such a pod can only run as an ordinary container, so kata
-// enforcement leaves it alone instead of forcing a class it cannot honor.
-func kataIncompatible(pod *corev1.Pod) bool {
-	return pod.Spec.HostNetwork || pod.Spec.HostPID || pod.Spec.HostIPC
-}
-
 // mutatePod is pure — easy to unit test.
 func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	cfg = cfg.withDefaults()
@@ -1004,8 +785,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		ensureFSGroup(pod, *cfg.CertFSGroup)
 	}
 	ensureVolume(pod, certsVolume(effective.Cert.Volume))
-	if vol, ok := workloadClaimsVolume(cfg); ok {
-		ensureVolume(pod, vol)
+	if cfg.WorkloadClaimsHostDir != "" {
 		// The inventory socket is group-owned by InventorySocketGID and the non-root
 		// get-cert sidecar connects to it; without this supplemental group the
 		// connect fails closed and the pod hangs on its initial cert.
@@ -1041,7 +821,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		// host-authored spec could pre-declare the volume or the mount and
 		// choose where the decrypted plaintext lands.
 		for _, name := range volumeNames(effective.Volumes.Specs) {
-			replaceVolume(pod, openedVolume(name, cfg.WorkloadClaimsGuest))
+			replaceVolume(pod, openedVolume(name))
 			remountAll(pod, corev1.VolumeMount{
 				Name:      volume.KubeVolumeName(name),
 				MountPath: filepath.Join(effective.Volumes.Dir, name),
@@ -1069,15 +849,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 // cert from CDS on startup and keeps it fresh on a --renew-interval, SIGHUP-ing
 // nginx after each renewal when --reload-nginx is on.
 //
-// Native sidecar (restartPolicy: Always) so it stays resident — that's what
-// makes nginx reload work under kata. Kata has no in-guest pause container,
-// so the kata-agent anchors shareProcessNamespace on the first container's
-// pidns (sandbox.rs:update_shared_pidns), and a PID namespace dies the
-// moment its last process exits (kata's namespace.rs explicitly rejects
-// persisting pidns via bind mount). A run-once init container would let the
-// anchor die before the workload joined it, and the SIGHUP-by-PID path
-// would never see nginx in /proc. As the sole, long-lived first init
-// container the sidecar plays the same role runc's pause container does.
+// Native sidecar (restartPolicy: Always) so it stays resident.
 //
 // --key-out is idempotent (load if a key already exists at the path, else
 // generate-and-write); a fresh key on every restart would invalidate every
@@ -1095,7 +867,6 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		// doing VERIFY_CA against the mesh) reads it directly instead of
 		// splitting the bundle in an entrypoint.
 		"--ca-out=" + certPath(inj.Cert.Dir, inj.Cert.CAFile),
-		"--key-mode=" + cfg.CertKeyMode,
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
@@ -1105,12 +876,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
 	args = append(args, cdsPinArgs(cfg, true)...)
-	// get-cert redeems a sandbox token from the node's inventory: over the
-	// mounted socket on node-CVM, or the guest's loopback address under kata,
-	// where policy-monitor is in the same guest and there is nothing to mount.
+	// get-cert redeems a sandbox token from the node's inventory over the
+	// mounted socket.
 	switch {
-	case cfg.WorkloadClaimsGuest:
-		args = append(args, "--workload-claims", "--workload-claims-guest")
 	case cfg.WorkloadClaimsHostDir != "":
 		args = append(args, "--workload-claims")
 	}
@@ -1126,14 +894,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		RestartPolicy:   &always,
 		Args:            args,
 		Env:             getCertEnv(inj),
-		VolumeMounts:    append(getCertVolumeMounts(inj, true), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    getCertVolumeMounts(inj, true),
 		SecurityContext: getCertSecurityContext(inj),
 		// The workload is gated on the initial cert by the c8s-cert-wait
 		// init container (certWaitContainer), not a startupProbe here: a
-		// native sidecar is "started" the moment its process launches, and
-		// an exec startupProbe is denied by the locked kata-qemu-snp guest
-		// (ExecProcessRequest := false), so it could never pass there and
-		// the workload would hang in Init forever. See certWaitContainer.
+		// native sidecar is "started" the moment its process launches.
 	}
 }
 
@@ -1147,12 +912,8 @@ const certWaitTimeout = 3 * time.Minute
 // certWaitContainer gates the workload on the initial cert being written by the
 // c8s-cert sidecar. It is a plain (run-once) init container that blocks on the
 // cert file and exits 0 once it appears, so normal init-completion ordering
-// holds the workload until the attested cert exists — fail-closed. It replaces
-// the exec startupProbe that used to sit on the sidecar: the locked
-// kata-qemu-snp guest denies ExecProcessRequest, so an exec probe can never
-// pass there, whereas a container running its own entrypoint is a
-// CreateContainerRequest the guest allows. It must be ordered after c8s-cert
-// (the pidns anchor) and before the workload; injectInitContainers does that.
+// holds the workload until the attested cert exists — fail-closed. It must be
+// ordered after c8s-cert and before the workload; injectInitContainers does that.
 func certWaitContainer(inj *injection, cfg Config) corev1.Container {
 	return corev1.Container{
 		Name:            reservedCertWaitContainerName,
@@ -1282,9 +1043,6 @@ func (cfg Config) withDefaults() Config {
 	if cfg.CertFSGroup == nil {
 		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
 	}
-	if cfg.CertKeyMode == "" {
-		cfg.CertKeyMode = defaultCertKeyMode
-	}
 	if cfg.CertRenewInterval <= 0 {
 		cfg.CertRenewInterval = defaultCertRenewInterval
 	}
@@ -1296,9 +1054,6 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.GetCertRunAsNonRoot == nil {
 		cfg.GetCertRunAsNonRoot = ptr.To(defaultGetCertRunAsNonRoot)
-	}
-	if cfg.HardwarePlatform == "" {
-		cfg.HardwarePlatform = HardwarePlatformSNP
 	}
 	return cfg
 }
@@ -1430,21 +1185,10 @@ func volumeNames(specs []string) []string {
 
 // openedVolume is the mount point volumed mounts a decrypted volume over. It
 // holds nothing itself — the plaintext lives on the opened device mounted over
-// it.
-//
-// The medium differs by shape, and each is load-bearing:
-//
-//   - node-CVM: default. The placeholder must share the pod directory's
-//     filesystem, because volumed resolves the target with RESOLVE_NO_XDEV.
-//   - kata: Memory. A default-medium emptyDir is turned into a disk.img block
-//     device by the shim under shared_fs="none", whereas a memory-backed one
-//     stays a guest tmpfs at kata's ephemeral path, which is what GuestTargets
-//     resolves.
-func openedVolume(name string, guest bool) corev1.Volume {
+// it. The default-medium placeholder must share the pod directory's filesystem,
+// because volumed resolves the target with RESOLVE_NO_XDEV.
+func openedVolume(name string) corev1.Volume {
 	src := &corev1.EmptyDirVolumeSource{}
-	if guest {
-		src.Medium = corev1.StorageMediumMemory
-	}
 	return corev1.Volume{
 		Name:         volume.KubeVolumeName(name),
 		VolumeSource: corev1.VolumeSource{EmptyDir: src},
@@ -1486,11 +1230,8 @@ func remountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 // Reserved by prefix rather than by re-deriving names from the annotation: the
 // annotation is host-written, so a guard that reads it can be steered away from
 // the name it is meant to protect.
-func rejectReservedVolumeVolume(pod *corev1.Pod, guest bool) error {
+func rejectReservedVolumeVolume(pod *corev1.Pod) error {
 	want := corev1.StorageMediumDefault
-	if guest {
-		want = corev1.StorageMediumMemory
-	}
 	for i := range pod.Spec.Volumes {
 		v := &pod.Spec.Volumes[i]
 		if !strings.HasPrefix(v.Name, volume.KubeVolumePrefix) {
@@ -1528,11 +1269,6 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--volume="+spec)
 	}
 	args = append(args, cdsPinArgs(cfg, false)...)
-	// Under kata both the inventory and volumed are inside this guest, on
-	// compiled loopback ports, with nothing mounted to reach them by.
-	if cfg.WorkloadClaimsGuest {
-		args = append(args, "--workload-claims-guest")
-	}
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1544,7 +1280,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		// It reads the leaf and talks to the node agent's socket; the volumes
 		// themselves are mounted into the workload, not into this.
-		VolumeMounts:    append(getCertVolumeMounts(inj, false), workloadClaimsMounts(cfg)...),
+		VolumeMounts:    getCertVolumeMounts(inj, false),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1569,11 +1305,6 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--secret="+spec)
 	}
 	args = append(args, cdsPinArgs(cfg, false)...)
-	// Unlike get-cert the token is not optional here, so only the shape is
-	// selected: the mounted socket on node-CVM, guest loopback under kata.
-	if cfg.WorkloadClaimsGuest {
-		args = append(args, "--workload-claims-guest")
-	}
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1586,12 +1317,10 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 		// The only container with write access: the shared directory is
 		// readable pod-wide by design, but a workload able to write it could
 		// replace a value another container has yet to read.
-		VolumeMounts: append(
-			append(getCertVolumeMounts(inj, false), corev1.VolumeMount{
-				Name:      secretsVolumeName,
-				MountPath: inj.Secrets.Dir,
-			}),
-			workloadClaimsMounts(cfg)...),
+		VolumeMounts: append(getCertVolumeMounts(inj, false), corev1.VolumeMount{
+			Name:      secretsVolumeName,
+			MountPath: inj.Secrets.Dir,
+		}),
 		SecurityContext: getCertSecurityContext(inj),
 	}
 }
@@ -1605,49 +1334,16 @@ func certsVolume(name string) corev1.Volume {
 	}
 }
 
-// workloadClaimsVolumeName is the injected volume that mounts the node-CVM
-// inventory socket directory into the c8s-cert sidecar.
-const workloadClaimsVolumeName = "c8s-workload-claims"
-
-// workloadClaimsVolume returns a read-only hostPath volume over the inventory
-// socket's host directory, for node-CVM only (WorkloadClaimsHostDir set). Under
-// kata the guest bind-mounts the inventory socket itself, so the webhook injects
-// no volume.
-func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
-	if cfg.WorkloadClaimsHostDir == "" {
-		return corev1.Volume{}, false
-	}
-	hpType := corev1.HostPathDirectory
-	return corev1.Volume{
-		Name: workloadClaimsVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{Path: cfg.WorkloadClaimsHostDir, Type: &hpType},
-		},
-	}, true
-}
-
 // sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
-// the inventory's host directory onto the sidecar's mount of that directory
-// (workloadClaimsMounts); every other shape passes through verbatim.
+// the inventory's host directory onto the sidecar's NRI-injected mount of that
+// directory (workloadclaims.SidecarSocketDir); every other shape passes
+// through verbatim.
 func (cfg Config) sidecarAttestationApiURL() string {
 	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
 	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
 		return cfg.AttestationApiURL
 	}
 	return "unix://" + workloadclaims.SidecarSocketDir + "/" + strings.TrimPrefix(cfg.AttestationApiURL, hostPrefix)
-}
-
-// workloadClaimsMounts returns the sidecar mount for the inventory socket
-// directory (node-CVM only), read-only.
-func workloadClaimsMounts(cfg Config) []corev1.VolumeMount {
-	if cfg.WorkloadClaimsHostDir == "" {
-		return nil
-	}
-	return []corev1.VolumeMount{{
-		Name:      workloadClaimsVolumeName,
-		MountPath: workloadclaims.SidecarSocketDir,
-		ReadOnly:  true,
-	}}
 }
 
 func ensureVolume(pod *corev1.Pod, v corev1.Volume) {
@@ -1689,8 +1385,7 @@ func ensureSupplementalGroup(pod *corev1.Pod, gid int64) {
 // name. Injection is therefore idempotent (a reinvocation rebuilds the same
 // list) and a pre-declared c8s-cert/c8s-cert-wait cannot shed or shadow the
 // real ones — the operator-built containers always win. Order matters:
-// c8s-cert leads (it anchors shareProcessNamespace under kata — see
-// certContainer), then c8s-cert-wait gates the workload on the initial cert
+// c8s-cert leads, then c8s-cert-wait gates the workload on the initial cert
 // (see certWaitContainer), then the pod's own init containers.
 func injectInitContainers(existing []corev1.Container, injected ...corev1.Container) []corev1.Container {
 	reserved := make(map[string]struct{}, len(injected))

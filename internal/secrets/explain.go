@@ -23,9 +23,10 @@ const ExplainRoute = "/secrets-explain/{sandboxID}"
 // ReportedContainer is one container the inventory named, and whether the
 // release path drops it as a platform-injected one.
 type ReportedContainer struct {
-	Digest   string   `json:"digest"`
-	Argv     []string `json:"argv"`
-	Injected bool     `json:"injected"`
+	Env      *pkgallowlist.EnvObservation `json:"env,omitempty"`
+	Digest   string                       `json:"digest"`
+	Argv     []string                     `json:"argv"`
+	Injected bool                         `json:"injected"`
 }
 
 // EntryVerdict is one workload entry measured against the candidate set.
@@ -157,13 +158,13 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 	var candidates []pkgallowlist.RunningContainer
 	for _, c := range reported {
 		injected := isInjected(al, c)
-		entry := ReportedContainer{Digest: c.Digest, Argv: c.Argv, Injected: injected}
+		entry := ReportedContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env, Injected: injected}
 		resp.Reported = append(resp.Reported, entry)
 		if injected {
 			continue
 		}
 		resp.Candidates = append(resp.Candidates, entry)
-		candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
+		candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env})
 	}
 	if len(candidates) == 0 {
 		resp.Refusal = "every container the sandbox reports is a platform-injected one, so there is nothing to match"
@@ -179,7 +180,7 @@ func (h ExplainHandler) explain(ctx context.Context, sandboxID string) ExplainRe
 			HasGrant: al.Workloads[name].Secrets != nil,
 		}
 		for _, f := range d.Foreign {
-			v.Foreign = append(v.Foreign, ReportedContainer{Digest: f.Digest, Argv: f.Argv})
+			v.Foreign = append(v.Foreign, ReportedContainer{Digest: f.Digest, Argv: f.Argv, Env: f.Env})
 		}
 		for _, m := range d.MissingMains {
 			v.MissingMains = append(v.MissingMains, MissingContainer{Digest: m.Digest.String(), Image: m.Image})

@@ -10,10 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// TestWriteDecodeErrorShapes mirrors internal/testattest.TestStubRejectsUndecodableBody:
+// TestWriteDecodeErrorShapes mirrors internal/mockapi.TestStubRejectsUndecodableBody:
 // axum splits the rejection 400 for a body that is not valid JSON, 422 for one
 // that does not fit the request type; both text/plain with no error code, so
 // callers see UnexpectedError, not APIError. Wired into /attest and /verify.
@@ -49,7 +51,7 @@ func TestWriteDecodeErrorShapes(t *testing.T) {
 				if !strings.HasPrefix(string(body), tc.wantPrefix) {
 					t.Fatalf("body = %q, want prefix %q", body, tc.wantPrefix)
 				}
-				var er types.ErrorResponse
+				var er remote.ErrorResponse
 				if json.Unmarshal(body, &er) == nil && er.Error != "" {
 					t.Fatalf("decode error carried code %q, want none", er.Error)
 				}
@@ -79,10 +81,9 @@ func TestVerifyRefusesMismatchAndGarbage(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := types.VerifyRequest{Platform: string(types.PlatformSnp), Evidence: tc.evidence}
+			req := remote.VerifyRequest{Platform: teetypes.PlatformSNP, Evidence: tc.evidence}
 			if tc.expected != nil {
-				rd := types.NewBase64Bytes(tc.expected)
-				req.Params = &types.VerifyParams{ExpectedReportData: &rd}
+				req.Params = &remote.VerifyParams{ExpectedReportData: tc.expected}
 			}
 			body, err := json.Marshal(req)
 			if err != nil {
@@ -99,7 +100,7 @@ func TestVerifyRefusesMismatchAndGarbage(t *testing.T) {
 			if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 				t.Fatalf("content-type = %q, want application/json", ct)
 			}
-			var er types.ErrorResponse
+			var er remote.ErrorResponse
 			if err := json.Unmarshal(raw, &er); err != nil {
 				t.Fatalf("body %q is not an error envelope: %v", raw, err)
 			}

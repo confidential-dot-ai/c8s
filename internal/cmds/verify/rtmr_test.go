@@ -9,7 +9,7 @@ import (
 
 func sha384Hex(b byte) string { return strings.Repeat(hex.EncodeToString([]byte{b}), 48) }
 
-// Pin parsing itself is ratls.ParseRTMRPins, tested with pkg/ratls; the tests
+// Pin parsing itself is refvalues.ParseRTMRPins, tested in attestation-go; the tests
 // here cover the flag rules this command layers on top.
 
 func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
@@ -17,15 +17,15 @@ func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPolicy: %v", err)
 	}
-	if len(p.policy.RTMRs) != 1 || hex.EncodeToString(p.policy.RTMRs[2]) != sha384Hex(0x22) {
-		t.Fatalf("policy RTMRs = %v, want RTMR[2] pinned", p.policy.RTMRs)
+	if len(p.policy.Policy.RTMRs) != 1 || hex.EncodeToString(p.policy.Policy.RTMRs[2]) != sha384Hex(0x22) {
+		t.Fatalf("policy RTMRs = %v, want RTMR[2] pinned", p.policy.Policy.RTMRs)
 	}
 }
 
 // A --rtmr pin must be enforced against the verified claims, not merely
 // carried on the policy. It was carried and never read: `c8s verify` verifies
 // in process, and localverify.Params has no register field, so the only reader
-// of VerifyPolicy.RTMRs (pkg/attestationclient) sits on a path this command
+// of VerifyPolicy.RTMRs (attestation-go/remote) sits on a path this command
 // never takes. The flag parsed, validated, and did nothing.
 func TestRTMRFlagIsEnforcedNotJustCarried(t *testing.T) {
 	plan, err := buildPolicy(config{rtmrs: []string{"1=" + testRTMR1, "2=" + testRTMR2}})

@@ -127,6 +127,52 @@ c8s volume create --mutable \
   --operator-key ./operator.key
 ```
 
+### Ownership for a non-root consumer
+
+The consumer pod runs under the Restricted controls, so it declares a numeric
+UID (`runAsUser`, not a user name; the admission check cannot resolve names)
+and the volume's filesystem has to be usable by that UID already. `c8s volume
+create` copies the source tree's ownership and modes into the image unchanged,
+and nothing on the node adjusts them at mount time: volumed mounts the device
+as it is, and `fsGroup` does not reach a mount that lands after the pod has
+started. So pick the UID first and prepare the tree for it. The simplest choice
+is the UID that owns the tree on the machine you build on (`id -u`); anything
+else needs `chown` as root, or the whole build run under `fakeroot`.
+
+```sh
+# Immutable: every file readable by the UID.
+chown -R 1000:1000 ./weights
+c8s volume create --name weights --source ./weights ...
+
+# Mutable: the UID must be able to create files at the mount root, so seed the
+# image from a directory that UID owns, even an empty one.
+mkdir scratch-seed && chown 1000:1000 scratch-seed
+c8s volume create --mutable --name scratch --source ./scratch-seed --size 50Gi ...
+```
+
+A mutable image built without `--source` has a root-owned `/`: a non-root pod
+can read it but cannot create anything at the mount root. The pod side is the
+usual Restricted shape, with the same UID:
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+```
+
+Do not make the pod root or privileged to get around volume permissions; the
+chart's `deny-host-namespaces` policy rejects both.
+
 `--size` takes a byte count or a quantity like `50Gi`. Omitted with a
 `--source`, it is inferred — the tree's bytes plus a block per entry, grown by
 half — and printed, so you can see what was chosen and pin it on the next run.
@@ -262,37 +308,17 @@ one replica, or a `Recreate` strategy — a rolling update of a single-device
 workload briefly runs two pods against it. Immutable volumes share a device
 freely, as they always have.
 
-Where volumed runs, and how the sidecar reaches it, depends on the shape:
-
-| | node-CVM | kata |
-|---|---|---|
-| volumed | a privileged DaemonSet on every node | `volumed --guest`, baked into the guest rootfs |
-| reached over | a unix socket in the inventory's socket directory | the guest's loopback `127.0.0.1:8402` |
-| mounts into | the pod's kubelet directory | kata's ephemeral directory inside the VM |
-| `emptyDir` medium | default — volumed resolves with `RESOLVE_NO_XDEV` | `Memory`, so kata keeps it a guest tmpfs; with `shared_fs="none"` a default-medium one becomes a `disk.img` block device |
+Volumed runs as a privileged DaemonSet on every node. The sidecar reaches it
+via a unix socket in the inventory's socket directory, and it mounts volumes
+into the pod's kubelet directory. The `emptyDir` medium is the default because
+volumed resolves the mount point with `RESOLVE_NO_XDEV`.
 
 The node-CVM DaemonSet is **off by default**: it runs privileged, with `hostPID`
 and a writable bind of the kubelet directory. Turn it on with
 `c8s install --volumes` where volumes are served, or `volumed.enabled=true` for a
-chart consumer. Under kata the flag deploys nothing — the guest image carries the
-daemon — so it is safe to pass in either shape. A pod requesting a volume on a
-cluster with neither shape — `nri-image-policy` disabled and not kata — is
-refused at admission rather than left waiting on a mount that can never land.
-
-Under kata the device must also reach the guest. A c8s volume carries ciphertext
-under a key CDS releases to the pod, and the only block storage kata-agent opens
-rather than mounts is one marked `encryption_key=ephemeral`, which CDH formats
-under a key the guest generates — so direct-volume assignment is not usable; the
-qemu wrapper
-(`kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh`) attaches this pod's
-volume devices to its VM instead, with the serial preserved. Which volumes it
-attaches comes from the pod's annotation — a selector, not a trust input, on
-the same reasoning as the serial: attaching another tenant's device hands the
-guest ciphertext the host already holds, and it still cannot be opened without
-the key CDS releases against the grant. Devices reach the VM writable — the
-host cannot tell a mutable volume from an immutable one, since the mode lives
-in the key blob it never sees — so an immutable volume's writes are refused in
-the guest, at its dm-crypt mapping.
+chart consumer. A pod requesting a volume without the node inventory socket
+configured is refused at admission rather than left waiting on a mount that
+can never land.
 
 What decides whether a mount happens, in order:
 
@@ -334,23 +360,15 @@ entitled to — any pod that reaches it presenting a well-formed blob has that
 volume opened into its own directory.
 
 What makes that sound is that the daemon's reach is confined to one tenant:
+node-CVM rests on the node being single-tenant. Every pod on it belongs to the
+same tenant, so a blob one of them can obtain is one they are all entitled to.
 
-- **node-CVM** rests on the node being single-tenant. Every pod on it belongs to
-  the same tenant, so a blob one of them can obtain is one they are all entitled
-  to.
-- **kata** rests on the guest holding exactly one pod. The daemon serves only
-  that guest's loopback, so the only caller that can present a blob is the pod
-  the blob was released to — and with no second pod there is nothing to
-  disambiguate, which is why `--guest` needs no peer credentials, the same
-  reasoning as the token route on `:8401`.
-
-A node shared between tenants breaks the first and needs a daemon-side check
+A node shared between tenants breaks this assumption and needs a daemon-side check
 restored. That needs the caller's *sandbox*, which the node daemon cannot
 resolve for itself — the inventory's socket answers only for the process asking
 it — so the sandbox would have to arrive as an inventory-signed token bound to a
 nonce the daemon issued, because such a token is otherwise transferable between
-pods. The kata shape does not need this: moving the daemon inside the guest
-removes the second caller instead of authenticating it.
+pods.
 
 ## Uninstalling, and what is left behind
 

@@ -35,7 +35,8 @@ func containerWith(t *testing.T, mounts MountPolicy, env EnvPolicy) Container {
 }
 
 func running(digest string, mounts, env []string) RunningContainer {
-	return RunningContainer{Digest: digest, BindMounts: mounts, EnvNames: env}
+	observed, _ := ObserveEnv(env)
+	return RunningContainer{Digest: digest, BindMounts: mounts, Env: observed}
 }
 
 // The threat this policy exists for: the host stages bytes in the sandbox
@@ -75,12 +76,12 @@ func TestAbsentMountAndEnvPolicyAreUnconstrained(t *testing.T) {
 func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t, MountPolicy{Policy: PolicyAny},
-		EnvPolicy{Policy: PolicyExact, Names: []string{"PATH", "HOME"}})
+		EnvPolicy{Policy: PolicyExact, Values: map[string]string{"PATH": "/bin", "HOME": "/"}})
 
-	if !c.admits(running(digest, nil, []string{"PATH", "HOME"})) {
+	if !c.admits(running(digest, nil, []string{"PATH=/bin", "HOME=/"})) {
 		t.Error("declared names were refused")
 	}
-	if c.admits(running(digest, nil, []string{"PATH", "LD_PRELOAD"})) {
+	if c.admits(running(digest, nil, []string{"PATH=/bin", "HOME=/", "LD_PRELOAD=/evil.so"})) {
 		t.Error("an injected environment name was admitted")
 	}
 }
@@ -88,11 +89,11 @@ func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 // An enforcer that cannot see a field leaves it nil. That is not a violation —
 // the host-side NRI plugin gates images on a node CVM and never sees a guest's
 // mount table, and refusing there would deny every pod it checks.
-func TestUnobservedFieldsAreNotViolations(t *testing.T) {
+func TestUnobservedMountsAreNotViolations(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
 		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}},
-		EnvPolicy{Policy: PolicyExact, Names: []string{"PATH"}})
+		EnvPolicy{Policy: PolicyAny})
 
 	if !c.admits(RunningContainer{Digest: digest}) {
 		t.Error("an enforcer that observes neither field was refused")
@@ -108,9 +109,9 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 		{"any mounts carrying destinations", Container{Mounts: MountPolicy{Policy: PolicyAny, Destinations: []string{"/x"}}}},
 		{"relative destination", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"etc/hosts"}}}},
 		{"unknown mount policy", Container{Mounts: MountPolicy{Policy: "sometimes"}}},
-		{"exact env with no names", Container{Env: EnvPolicy{Policy: PolicyExact}}},
-		{"any env carrying names", Container{Env: EnvPolicy{Policy: PolicyAny, Names: []string{"PATH"}}}},
-		{"name containing =", Container{Env: EnvPolicy{Policy: PolicyExact, Names: []string{"PATH=/bin"}}}},
+		{"exact env with no values", Container{Env: EnvPolicy{Policy: PolicyExact}}},
+		{"any env carrying values", Container{Env: EnvPolicy{Policy: PolicyAny, Values: map[string]string{"PATH": "/bin"}}}},
+		{"name containing =", Container{Env: EnvPolicy{Policy: PolicyExact, Values: map[string]string{"PATH=/bin": ""}}}},
 		{"unknown env policy", Container{Env: EnvPolicy{Policy: "sometimes"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,16 +126,13 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 
 // Canonical is compared byte-for-byte across pulls, so the lists have to be a
 // function of content rather than of the order an operator wrote them.
-func TestMountAndEnvListsAreOrderIndependent(t *testing.T) {
+func TestMountDestinationsAreOrderIndependent(t *testing.T) {
 	c := containerWith(t,
 		MountPolicy{Policy: PolicyExact, Destinations: []string{"/b", "/a", "/b"}},
-		EnvPolicy{Policy: PolicyExact, Names: []string{"B", "A", "B"}})
+		EnvPolicy{Policy: PolicyAny})
 
 	if got := strings.Join(c.Mounts.Destinations, ","); got != "/a,/b" {
 		t.Errorf("destinations = %q, want sorted and deduplicated", got)
-	}
-	if got := strings.Join(c.Env.Names, ","); got != "A,B" {
-		t.Errorf("names = %q, want sorted and deduplicated", got)
 	}
 }
 

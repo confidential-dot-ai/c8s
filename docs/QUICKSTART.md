@@ -29,8 +29,7 @@ c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
-`--cvm-mode` is required — one of `pod` (per-pod kata CVMs, multi-tenant),
-`node` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
+`--cvm-mode` is required — one of `node` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
 single-tenant), `gke`, or `aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
 `tdx` (under `aks` it selects the Azure vTPM shape instead). `--operator-keys`
 takes a PEM bundle of EC public keys that authorize
@@ -142,18 +141,6 @@ rotating the credential is a plain Secret update with no helm interaction.
 Note this is the cluster-side (kubelet) credential: `--resolve-digests` runs
 `crane` on your workstation and uses your local docker login, not this
 Secret.
-
-Under `--cvm-mode=pod`, the same Secret also feeds the kata-image-puller's in-pod
-`oras pull` of the kata-guest-base artifact, which reads
-`/root/.docker/config.json` rather than kubelet pull secrets (set
-`kata.guestImage.pullerAuthSecret` if that artifact needs a different
-credential).
-
-On kata clusters, also raise kubelet's `runtime-request-timeout` (default
-2 m): the effective ceiling on kata pod creation is `min(kubelet timeout,
-kata timeout)`, and a slow path — cold registry, a multi-GB model image
-guest-pulled inside the VM — hits the 2 m wall with the cause hidden. RKE2:
-`kubelet-arg: runtime-request-timeout=20m` in `/etc/rancher/rke2/config.yaml`.
 
 ## Certificate path
 

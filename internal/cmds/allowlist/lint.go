@@ -172,7 +172,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 				entriesByDigest[d] = map[string]bool{}
 			}
 			entriesByDigest[d][name] = true
-			if c.AnyArgv() {
+			if hasUnconstrainedRuntimePolicy(c) {
 				fullyAny[d] = true
 			}
 			if argvPolicyName(c.Command) == pkgallowlist.PolicyDeny {
@@ -183,6 +183,11 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 			}
 		}
 		if w.Secrets != nil {
+			for _, c := range allContainers(w) {
+				if c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "" {
+					warnings = append(warnings, warnf("workload %q grants secrets without pinning environment values for container %s", name, c.Digest))
+				}
+			}
 			for _, g := range append(append([]string{}, w.Secrets.Read...), w.Secrets.Write...) {
 				if g == "/**" {
 					warnings = append(warnings, warnf("workload %q grants the root secret subtree %q (every secret in the store)", name, g))
@@ -245,7 +250,7 @@ func shadowFinding(wide, narrow string) finding {
 func shadows(wide, narrow pkgallowlist.Workload) bool {
 	unconstrained := map[string]bool{}
 	for _, c := range allContainers(wide) {
-		if c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact && c.Env.Policy != pkgallowlist.PolicyExact {
+		if hasUnconstrainedRuntimePolicy(c) {
 			unconstrained[c.Digest.String()] = true
 		}
 	}
@@ -266,11 +271,7 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 	return true
 }
 
-// unobservedFieldPolicies reports mount and env policy that the deployment's
-// enforcer cannot see. Only the in-guest policy-monitor reads the guest OCI
-// spec; the host NRI plugin sees the CRI container, reports neither field, and
-// an unobserved field is vacuously satisfied — so outside pod mode such a
-// policy admits every container with no signal at write, install or deny time.
+// unobservedFieldPolicies reports mount restrictions outside pod mode.
 func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
 	if cvmMode == "pod" {
 		return nil
@@ -281,9 +282,6 @@ func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []findi
 			var fields []string
 			if c.Mounts.Policy == pkgallowlist.PolicyExact {
 				fields = append(fields, "mounts")
-			}
-			if c.Env.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "env")
 			}
 			if fields == nil {
 				continue
@@ -336,7 +334,7 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 
 func ambiguousGroupFinding(names []string) finding {
 	return errorf(
-		"workloads [%s] declare the same containers with the same argv policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the argv policy so a running pod resolves to one)",
+		"workloads [%s] declare the same containers with the same command, args and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
 		strings.Join(names, ", "))
 }
 
@@ -349,11 +347,16 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 		Digest  string                  `json:"digest"`
 		Command pkgallowlist.ArgvPolicy `json:"command"`
 		Args    pkgallowlist.ArgvPolicy `json:"args"`
+		Env     pkgallowlist.EnvPolicy  `json:"env"`
 	}
 	shape := func(cs []pkgallowlist.Container) ([]string, error) {
 		out := make([]string, 0, len(cs))
 		for _, c := range cs {
-			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args})
+			env := c.Env
+			if env.Policy == "" {
+				env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyAny}
+			}
+			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env})
 			if err != nil {
 				return nil, err
 			}
@@ -416,4 +419,9 @@ func isTagForm(image string) bool {
 	}
 	_, digested := named.(reference.Digested)
 	return !digested
+}
+
+func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
+	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
+		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
 }

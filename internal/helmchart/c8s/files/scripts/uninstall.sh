@@ -30,8 +30,7 @@ main_config="$CONTAINERD_DIR/config.toml"
 #    drop-in file is ours — delete it from whichever schema-versioned dir
 #    it landed in (config-v3.toml.d or config.toml.d). patch: strip the
 #    sentinel-delimited block. The shared `imports` line is left in place:
-#    kata-deploy may still need it, and the containerd-prep initContainer
-#    owns it.
+#    the containerd-prep initContainer owns it.
 config_changed=0
 if [ "${CONTAINERD_CONFIG_MODE}" = "dropin" ]; then
   for d in config-v3.toml.d config.toml.d; do

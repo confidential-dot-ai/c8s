@@ -185,7 +185,8 @@ func (l *upstreamCertLoader) getClientCertificate(*tls.CertificateRequestInfo) (
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.cached != nil && now.Before(l.recheckAt) && certutil.CheckValidity(l.cached.Leaf, now) == nil {
+	canReuseCachedCertificate := l.cached != nil && now.Before(l.recheckAt) && certutil.CheckValidity(l.cached.Leaf, now) == nil
+	if canReuseCachedCertificate {
 		return l.cached, nil
 	}
 

@@ -20,7 +20,7 @@ func TestEveryInjectedFetcherRetainsCompleteCDSPolicy(t *testing.T) {
 	cfg.CDSMeasurementsConfigJSON = string(doc)
 	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
 	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
-	// The operator still has flat fields for legacy initdata. They must not
+	// The operator still accepts legacy flat flags. They must not
 	// become conflicting flags or a policy without the operator identity.
 	cfg.CDSMeasurements = []string{strings.Repeat("ab", 48)}
 	cfg.CDSRTMRs = []string{"1=" + strings.Repeat("cd", 48)}
@@ -34,10 +34,10 @@ func TestEveryInjectedFetcherRetainsCompleteCDSPolicy(t *testing.T) {
 			if !slices.Contains(container.Args, "--attestation-api-url=unix://"+workloadclaims.SidecarSocketDir+"/attestation-api.sock") {
 				t.Fatalf("sidecar did not use the local attestation socket: %v", container.Args)
 			}
-			if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
-				return m.Name == workloadClaimsVolumeName && m.ReadOnly
+			if slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
+				return m.MountPath == workloadclaims.SidecarSocketDir
 			}) {
-				t.Fatal("sidecar did not mount the inventory socket read-only")
+				t.Fatal("sidecar socket must arrive through NRI; a pod-spec hostPath would fail restricted PSA")
 			}
 			if !slices.Contains(container.Args, "--measurements-config-json="+string(doc)) {
 				t.Fatal("injected fetcher lost the complete policy")

@@ -7,9 +7,11 @@
 # other namespace, `default` included, inherits restricted. The baked
 # ../../../var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml stops
 # a namespace label from lowering that level unless the caller may grant
-# PodSecurity exemptions. Namespaces hosting confidential workloads need
-# that grant in node mode (the injected sidecar mounts a hostPath); see
-# node-guest-image/README.md, "Workload isolation".
+# PodSecurity exemptions. Confidential workloads remain Restricted: NRI
+# supplies the credential sidecars' inventory socket below the Pod spec,
+# without a hostPath volume. The chart also enforces Restricted-equivalent
+# checks and denies all workload hostPaths. See node-guest-image/README.md,
+# "Workload isolation".
 apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration
 plugins:

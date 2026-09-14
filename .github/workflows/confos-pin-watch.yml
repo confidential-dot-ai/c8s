@@ -8,7 +8,6 @@
 #
 # One matrix leg per measurement domain, so each roll is its own PR:
 #   node-image: node rootfs / RTMR + SNP digests
-#   kata-guest: kata guest + kernel-snapshot lineage
 #
 # Authentication prefers a short-lived, repository-scoped GitHub App token.
 # Checkout, push, and gh use one credential; an unconfigured App falls back to
@@ -36,7 +35,6 @@ jobs:
       matrix:
         include:
           - domain: node-image
-          - domain: kata-guest
     steps:
       - name: Create pin-watch GitHub App token
         id: pin-watch-app-token

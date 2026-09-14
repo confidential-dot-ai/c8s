@@ -37,8 +37,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
-// claimPayloadBodyHash binds a token to a specific request body. Same wire name
-// and base64url(SHA-256(body)) semantics as CDS's EAR issuer `pbh` claim.
+// claimPayloadBodyHash binds a token to a specific request body using
+// base64url(SHA-256(body)).
 const claimPayloadBodyHash = "pbh"
 
 // claimHTTPMethod and claimHTTPPath bind a token to the request's method and

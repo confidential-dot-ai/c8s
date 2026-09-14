@@ -1,24 +1,17 @@
 package allowlist
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
-// RunningContainer is one container as an enforcer observes it: the bytes, the
-// effective argv they were told to run, the destinations of its BIND mounts
-// (the ones that can carry host-supplied content in), and its environment
-// variable names without values.
-//
-// A local type rather than the inventory's own keeps this package a pure
-// function of the allowlist — the caller converts.
-//
-// An enforcer that cannot observe a field leaves it nil, which an exact policy
-// treats as "nothing to refuse" rather than as a violation. The in-guest
-// policy-monitor reads the guest OCI spec and fills all four; the host-side NRI
-// plugin gates images on a node CVM and fills Digest and Argv only.
+// RunningContainer holds the launch characteristics observed by an enforcer.
+// Missing Env is unavailable evidence and fails exact/deny policies.
 type RunningContainer struct {
 	Digest     string
 	Argv       []string
 	BindMounts []string
-	EnvNames   []string
+	Env        *EnvObservation
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -134,12 +127,9 @@ func admittedBy(declared []Container, r RunningContainer) bool {
 // anyRunning reports whether a declared container is satisfied by something
 // running.
 func anyRunning(running []RunningContainer, c Container) bool {
-	for _, r := range running {
-		if c.admits(r) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(running, func(r RunningContainer) bool {
+		return c.admits(r)
+	})
 }
 
 // admits reports whether this declared container permits the running one.
@@ -147,11 +137,18 @@ func (c Container) admits(r RunningContainer) bool {
 	if c.Digest.String() != r.Digest {
 		return false
 	}
-	rest, ok := c.Command.matchCommand(r.Argv)
-	if !ok || !c.Args.matchArgs(rest) {
+	if !c.admitsProcess(r) {
 		return false
 	}
-	return c.Mounts.admits(r.BindMounts) && c.Env.admits(r.EnvNames)
+	return c.Mounts.admits(r.BindMounts) && c.Env.matches(r)
+}
+
+func (c Container) admitsProcess(r RunningContainer) bool {
+	if c.Digest.String() != r.Digest {
+		return false
+	}
+	rest, ok := c.Command.matchCommand(r.Argv)
+	return ok && c.Args.matchArgs(rest)
 }
 
 // admits reports whether every bind destination is one this policy names.
@@ -162,12 +159,8 @@ func (p MountPolicy) admits(destinations []string) bool {
 	return everyIn(destinations, p.Destinations)
 }
 
-// admits reports whether every environment name is one this policy names.
-func (p EnvPolicy) admits(names []string) bool {
-	if p.Policy != PolicyExact {
-		return true
-	}
-	return everyIn(names, p.Names)
+func (p EnvPolicy) matches(r RunningContainer) bool {
+	return p.admitsObservation(r.Env)
 }
 
 // everyIn reports whether every observed value appears in allowed. An empty

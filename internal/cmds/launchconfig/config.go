@@ -23,11 +23,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 const (
@@ -120,8 +120,8 @@ type Verified struct {
 // Verify checks the signature before parsing host input and compares all image
 // pins against one verified, fresh self-report. A keyless boot fails closed.
 func Verify(ctx context.Context, cfg Config) (*Verified, error) {
-	platform := ratls.NormalizePlatform(cfg.Platform)
-	if err := ratls.ValidatePlatform(platform); err != nil || platform == "" {
+	platform := teetypes.NormalizePlatform(cfg.Platform)
+	if platform != teetypes.PlatformTDX && platform != teetypes.PlatformSNP {
 		return nil, fmt.Errorf("platform must be tdx or snp")
 	}
 	if cfg.DocumentPath == "" || cfg.SignaturePath == "" {
@@ -139,7 +139,7 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	if api == "" {
 		api = DefaultAttestationAPIURL
 	}
-	pub, pubErr, digest, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, platform, api)
+	pub, pubErr, digest, rtmrs, err := loadMeasuredOperatorKeyAndOwnMeasurement(ctx, string(platform), api)
 	if err != nil {
 		return nil, fmt.Errorf("verify this boot's identity: %w", err)
 	}
@@ -157,7 +157,7 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ratls.NormalizePlatform(doc.Image.Platform) != platform {
+	if teetypes.NormalizePlatform(doc.Image.Platform) != platform {
 		return nil, fmt.Errorf("launch image platform does not match this boot")
 	}
 	if !bytes.Equal(mustDecodeHex(doc.Image.Measurement), digest) {

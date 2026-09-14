@@ -99,7 +99,7 @@ func workloadEntry(t *testing.T, initDigests, mainDigests []string) pkgallowlist
 // the token named.
 func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = anyArgvStore(wlDigestA, wlDigestB)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
@@ -116,7 +116,7 @@ func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
 // first one, where a self-reported claim used to be empty.
 func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
@@ -132,7 +132,7 @@ func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
 // establish what the pod runs, which is exactly when it must not issue.
 func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}, key: signer.PublicKey()} // knows no sandbox
 
@@ -146,12 +146,10 @@ func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 
 // An inventory reporting an empty sandbox is fail-closed. "No containers" is
 // not "nothing to check": looping over it would pass the gate vacuously, and a
-// sandbox always runs at least the sidecar that is asking. The kata inventory
-// reaches this state legitimately while it is still syncing, so issuance must
-// wait rather than proceed unchecked.
+// sandbox always runs at least the sidecar that is asking.
 func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {}}, key: signer.PublicKey()}
 
@@ -175,7 +173,7 @@ func TestAttest_SandboxWorkload_RejectsWhenGateUnwired(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newStubAttestationApi(t, "deadbeef")
-			h, signer := newSandboxTestEnv(t, stub.URL)
+			h, signer := newSandboxTestEnv(t, stub.URL())
 			tc.wire(&h)
 
 			csrPEM, _ := generateCSR(t)
@@ -213,7 +211,7 @@ func TestAttest_SandboxWorkload_PartialLifecycleStatesIssue(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newStubAttestationApi(t, "deadbeef")
-			h, signer := newSandboxTestEnv(t, stub.URL)
+			h, signer := newSandboxTestEnv(t, stub.URL())
 			h.AllowlistStore = store
 			h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: tc.running}, key: signer.PublicKey()}
 
@@ -235,7 +233,7 @@ func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 		workloads: map[string]pkgallowlist.Workload{"api": workloadEntry(t, []string{wlDigestA}, nil)},
 	}
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = store
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestC, wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
@@ -251,7 +249,7 @@ func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 // the workload gate: it gets a leaf no workload authorizer will accept.
 func TestAttest_SandboxWorkload_NoTokenSkipsGate(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, stub.URL)
+	h, _ := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = anyArgvStore() // admits nothing
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}}
 
@@ -269,7 +267,7 @@ func TestAttest_SandboxWorkload_NoTokenSkipsGate(t *testing.T) {
 // flow here would break issuance for every workload on an unpinned cluster.
 func TestAttest_SandboxWorkload_UnpinnedMeasurementsStillIssue(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.Measurements = nil // dev: --measurements empty
 	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}, key: signer.PublicKey()}
@@ -294,7 +292,7 @@ func TestAttest_SandboxWorkload_UnpinnedMeasurementsStillIssue(t *testing.T) {
 // measurement pin must not also drop the image check.
 func TestAttest_SandboxWorkload_UnpinnedStillEnforcesAllowlist(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.Measurements = nil
 	h.AllowlistStore = anyArgvStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}

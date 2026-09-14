@@ -4,8 +4,8 @@
 #
 # Inputs (env):
 #   CONFOS_REF   pinned confos ref the workflow resolved; names the pass line.
-#   EXPECT_IMMUTABLE_ROOT  1 once CONFOS_REF carries confos's immutable root
-#                (state.d in its initrd); makes its absence an error.
+#   EXPECT_IMMUTABLE_ROOT  defaults to 1; requires state.d in confos's initrd.
+#                Set to 0 only when inspecting a legacy confos checkout.
 
 set -euo pipefail
 
@@ -118,16 +118,25 @@ if grep -q -- '--cloud-init' "$ngi/build"; then
   echo "::error::$ngi/build bakes a cloud-init seed; the node image disables cloud-init instead"
   exit 1
 fi
-# tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
-# tripwire are a c8s-local patch until the source takes the same
-# edit — a re-vendor would silently delete them.
+# The shared TDX lifecycle originated in confidential-ci, with c8s-local
+# cidata, AppArmor and private-import checks. Preserve them on re-vendor.
+# Exact-source checkout/evidence stay in the automatic-only wrapper:
+# staged testing must not gain a path to that privileged checkout boundary.
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
-# The signed launch document and runtime ConfigMap replace the old c8s
-# Helm install job. Re-vendoring must retain this node-owned boot path.
+tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
-              'launch.yaml' 'c8s-node-runtime'; do
-  if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
-    echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
+              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json' \
+              'bash node-guest-image/tests/apparmor-runtime-test.sh' \
+              'import the exact published image into a private root PVC' \
+              'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
+  if ! grep -qF "$marker" "$tdx_runtime"; then
+    echo "::error::$tdx_runtime lost '$marker': re-vendoring dropped a c8s-local patch — re-apply it"
+    exit 1
+  fi
+done
+for marker in 'image_acceptance_artifact:' 'bash .github/scripts/tdx-image-acceptance.sh validate'; do
+  if ! grep -qF "$marker" .github/workflows/tdx-image-acceptance.yml; then
+    echo "::error::tdx-image-acceptance.yml lost '$marker': exact-image evidence is required"
     exit 1
   fi
 done
@@ -174,8 +183,11 @@ covered() {
   return 1
 }
 writes=$( {
-  grep -hE '(>|tee |mkdir |install |cp |mv |touch |rm |^FRAG[A-Z]*=)' \
-       "$ngi"/c8s/mkosi.extra/usr/local/bin/*.sh "$ngi"/tests/lib.sh \
+  # Numeric descriptor duplication does not write a filesystem path. Remove
+  # only that token; keep other redirects and write verbs on the same line.
+  sed -E 's/[0-9]*[<>]&[0-9]+([[:space:];|&()]|$)/\1/g' \
+      "$ngi"/c8s/mkosi.extra/usr/local/bin/*.sh "$ngi"/tests/lib.sh \
+    | grep -E '(>|tee |mkdir |install |cp |mv |touch |rm |^FRAG[A-Z]*=)' \
     | grep -vE '^[[:space:]]*#' | grep -oE '/(etc|opt|usr|srv|boot)/[A-Za-z0-9_./-]+' || true
   grep -hE '^[dDfFwLpc]\+? ' "$ngi"/c8s/mkosi.extra/etc/tmpfiles.d/*.conf \
     | awk '{print $2}' | grep -E '^/(etc|opt|usr|srv|boot)/' || true
@@ -191,10 +203,8 @@ for w in $writes; do
 done
 
 # confos side. The parser this lint mirrors is pinned like the dm name
-# above. Until CONFOS_REF carries the immutable root the declaration is
-# inert (warning only); the bump PR sets EXPECT_IMMUTABLE_ROOT=1 in
-# node-guest-image-lint.yml so a later confos drop of state.d fails here
-# instead of reading as "older confos".
+# above. Missing immutable-root support fails by default, including local
+# runs; the explicit compatibility override only supports legacy inspection.
 init=confos/mkosi/initrd/mkosi.extra/init
 if grep -qF '/usr/lib/confai/state.d' "$init"; then
   for pin in '[ -d "/sysroot/$dir" ]' 'while read -r dir || [ -n "$dir" ]'; do
@@ -203,11 +213,11 @@ if grep -qF '/usr/lib/confai/state.d' "$init"; then
       exit 1
     fi
   done
-elif [ "${EXPECT_IMMUTABLE_ROOT:-0}" = 1 ]; then
+elif [ "${EXPECT_IMMUTABLE_ROOT:-1}" = 1 ]; then
   echo "::error::EXPECT_IMMUTABLE_ROOT=1 but confos at CONFOS_REF $CONFOS_REF has no state.d in its initrd"
   exit 1
 else
-  echo "::warning::confos at CONFOS_REF $CONFOS_REF predates the immutable root (no state.d in its initrd): the state.d declaration is inert until the ref is bumped — then set EXPECT_IMMUTABLE_ROOT=1 in node-guest-image-lint.yml"
+  echo "::warning::EXPECT_IMMUTABLE_ROOT=$EXPECT_IMMUTABLE_ROOT permits confos at CONFOS_REF $CONFOS_REF without state.d in its initrd; the profile's state.d declaration is inert"
 fi
 
 # The scratch floor is prose in the README and a sector count in the gate;
@@ -223,6 +233,8 @@ fi
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
 vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
+cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
 if [ "$exempt" != "$(printf 'kube-system\nlocal-path-storage')" ]; then
   echo "::error::$psa must exempt exactly kube-system and local-path-storage from restricted PodSecurity; got: $(echo "$exempt" | tr '\n' ' ')"
@@ -249,6 +261,36 @@ if ! grep -q '^    - Deny$' "$vap"; then
   echo "::error::$vap binding must deny, not warn or audit"
   exit 1
 fi
+if [ ! -x "$psa_gate" ]; then
+  echo "::error::$psa_gate must be executable"
+  exit 1
+fi
+if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
+  echo "::error::$cred_release must keep credential release behind the measured PodSecurity readiness gate"
+  exit 1
+fi
+for required in \
+  'get validatingadmissionpolicy "$policy"' \
+  'get validatingadmissionpolicybinding "$policy"' \
+  '--as="$probe_user" create --dry-run=server' \
+  'probe_namespace restricted' \
+  'probe_namespace privileged'; do
+  if ! grep -qF -- "$required" "$psa_gate"; then
+    echo "::error::$psa_gate is missing required live admission probe: $required"
+    exit 1
+  fi
+done
+
+# Check requested and resolved settings, including CONFIG_LSM and duplicates.
+# The build uses the same checker on its .config; apparmor-enforce.service
+# separately gates RKE2 on the booted LSM/parser.
+for config in c8s.config c8s-dev.config config-x86_64-c8s.snapshot; do
+  bash "$ngi/check-apparmor-config.sh" "$ngi/kernel/$config"
+done
+grep -qE '^\s*apparmor\s*$' "$ngi/c8s/mkosi.conf" \
+  || { echo "::error::$ngi/c8s/mkosi.conf must ship the apparmor package (apparmor_parser)"; exit 1; }
+grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset" \
+  || { echo "::error::50-rke2.preset must disable apparmor.service (only the parser is wanted)"; exit 1; }
 
 # The image renders Kubernetes integration from its staged binary at BUILD
 # time. It must not revive a c8s HelmChart or boot-time values merge.

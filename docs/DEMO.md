@@ -18,7 +18,7 @@ tlsLb:
 EOF
 ```
 
-`--cvm-mode` is required (`pod`, `node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`node`, `gke`, or `aks` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to
@@ -34,15 +34,20 @@ kubectl apply -f samples/confidentialworkload.yaml
 
 ## 3. Deploy an annotated workload
 
-The node image enforces the restricted PodSecurity standard in every tenant
-namespace. In node mode the injected sidecar mounts the node's inventory
-socket as a hostPath, which restricted forbids, so a namespace that hosts
-confidential workloads is opened by the operator. Only a credential allowed
-to grant PodSecurity exemptions can set this label; tenants cannot.
+The node image enforces the Restricted PodSecurity standard in every tenant
+namespace, including namespaces hosting confidential workloads. In node mode,
+`nri-image-policy` mounts the inventory socket directory read-only into credential
+sidecars through NRI, below the Pod spec. The chart also enforces Restricted
+controls and denies every tenant `hostPath` volume. Keep enforcement, warning,
+and audit at Restricted:
 
 ```sh
 kubectl create namespace demo
-kubectl label namespace demo pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace demo \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
 kubectl -n demo apply -f samples/nginx-confidential-pod.yaml
 ```
 
@@ -72,6 +77,4 @@ kubectl delete -f samples/confidentialworkload.yaml
 c8s uninstall
 ```
 
-`c8s uninstall` wraps `helm uninstall c8s -n c8s-system`; on a `--cvm-mode=pod`
-install it also sweeps the kata runtime artifacts off the nodes (see
-[`kata.md`](kata.md#uninstalling)).
+`c8s uninstall` wraps `helm uninstall c8s -n c8s-system`.

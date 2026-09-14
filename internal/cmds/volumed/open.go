@@ -90,8 +90,7 @@ type mount struct {
 // Opener opens volumes and remembers what it has open.
 type Opener struct {
 	Ops DeviceOps
-	// Targets resolves where a volume is mounted: kubelet's pod directory on
-	// node-CVM, the guest's ephemeral directory under kata.
+	// Targets resolves the volume mount within kubelet's pod directory.
 	Targets Targets
 	// MaxMounts caps live volumes; zero means DefaultMaxMounts.
 	MaxMounts int
@@ -193,7 +192,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 // deviceConflict reports whether opening device in mode mutable conflicts with
 // a live mount or an in-flight open. Caller holds mu.
 func (o *Opener) deviceConflict(device string, mutable bool) bool {
-	if m, inFlight := o.opening[device]; inFlight && (m || mutable) {
+	if openingMutable, inFlight := o.opening[device]; inFlight && (openingMutable || mutable) {
 		return true
 	}
 	for _, m := range o.mounts {

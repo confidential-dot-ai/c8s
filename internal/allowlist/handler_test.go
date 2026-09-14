@@ -17,11 +17,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -71,7 +71,7 @@ func testAllowlistApp(t *testing.T) (http.Handler, *readiness.Checker, *operator
 
 	signer, pub := testOperatorCredential(t)
 
-	asClient := attestationclient.NewClient("http://localhost:0")
+	asClient := remote.NewClient("http://localhost:0")
 	checker := readiness.NewChecker(asClient, 10*time.Second)
 
 	// Writes authorize through the production operatorauth.Verifier, so these
@@ -382,7 +382,7 @@ func TestWorkloadPutRejectsBodyOverConfiguredCap(t *testing.T) {
 		t.Fatalf("open in-memory store: %v", err)
 	}
 	signer, pub := testOperatorCredential(t)
-	asClient := attestationclient.NewClient("http://localhost:0")
+	asClient := remote.NewClient("http://localhost:0")
 	checker := readiness.NewChecker(asClient, 10*time.Second)
 	wh := allowlist.Handler{
 		Store:             &store,

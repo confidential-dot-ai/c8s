@@ -25,7 +25,7 @@ func attestedCert(t *testing.T, sandboxID string) *x509.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -44,8 +44,8 @@ func attestedCert(t *testing.T, sandboxID string) *x509.Certificate {
 // and sandbox-ID extensions — the shape CDS produces, minus the CA signature.
 func reissueWithSandboxID(t *testing.T, key *ecdsa.PrivateKey, sandboxID string) []byte {
 	t.Helper()
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
-	attExt, err := att.MarshalExtension()
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+	attExt, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}

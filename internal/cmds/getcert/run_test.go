@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -26,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -64,40 +67,6 @@ func TestCDSHTTPClientUsesRATLSForHTTPS(t *testing.T) {
 	}
 	if !transport.TLSClientConfig.InsecureSkipVerify {
 		t.Fatal("TLSClientConfig.InsecureSkipVerify = false, want RA-TLS verification path")
-	}
-}
-
-func TestParseFileMode(t *testing.T) {
-	tests := []struct {
-		name    string
-		mode    string
-		want    os.FileMode
-		wantErr bool
-	}{
-		{name: "owner-only", mode: "0600", want: 0600},
-		{name: "group-readable", mode: "0640", want: 0640},
-		{name: "without-leading-zero", mode: "640", want: 0640},
-		{name: "invalid-octal", mode: "0999", wantErr: true},
-		{name: "special-bits", mode: "1777", wantErr: true},
-		{name: "empty", mode: "", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseFileMode(tt.mode)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("parseFileMode(%q) succeeded, want error", tt.mode)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseFileMode(%q): %v", tt.mode, err)
-			}
-			if got != tt.want {
-				t.Fatalf("parseFileMode(%q) = %#o, want %#o", tt.mode, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -744,11 +713,11 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Errorf("attestation-api path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode attest request: %v", err)
 		}
-		sawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		sawReportData = append([]byte(nil), req.ReportData...)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"platform":"az-snp","evidence":{"quote":"abc"}}`)
 	}))
@@ -771,8 +740,8 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal extension: %v", err)
 	}
-	if att.TEEType != ratls.TEETypeSEVSNP {
-		t.Fatalf("TEEType = %v, want SEV-SNP", att.TEEType)
+	if att.Family != ratls.TEETypeSEVSNP {
+		t.Fatalf("TEEType = %v, want SEV-SNP", att.Family)
 	}
 }
 
@@ -806,7 +775,6 @@ func TestWriteOutputsAllArtifacts(t *testing.T) {
 		OutPath:                filepath.Join(dir, "cert.pem"),
 		CAOutPath:              filepath.Join(dir, "ca.pem"),
 		KeyOutPath:             filepath.Join(dir, "key.pem"),
-		KeyMode:                "0600",
 		DiscoveryOutPath:       filepath.Join(dir, "discovery.json"),
 		DiscoveryPublicTLSMode: "cds",
 	}
@@ -852,10 +820,49 @@ func TestWriteOutputsAllArtifacts(t *testing.T) {
 	}
 }
 
-func TestWriteOutputsBadKeyMode(t *testing.T) {
-	err := writeOutputs(config{KeyOutPath: filepath.Join(t.TempDir(), "k"), KeyMode: "abc"}, []byte("k"), attestclient.CertificateResult{})
-	if err == nil {
-		t.Fatal("writeOutputs succeeded, want error for bad key mode")
+func TestWriteOutputsKeyPermissions(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		for _, existing := range []os.FileMode{0, 0600, 0640, 0666} {
+			t.Run(fmt.Sprintf("shared=%t/existing=%04o", shared, existing), func(t *testing.T) {
+				dir := t.TempDir()
+				dirMode := os.FileMode(0700)
+				want := os.FileMode(0600)
+				if shared {
+					dirMode = 0770 | os.ModeSetgid
+					want = 0640
+				}
+				if err := os.Chmod(dir, dirMode); err != nil {
+					t.Fatal(err)
+				}
+				keyPath := filepath.Join(dir, "key.pem")
+				if existing != 0 {
+					if err := os.WriteFile(keyPath, []byte("old key"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(keyPath, existing); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cfg := config{KeyOutPath: keyPath, OutPath: filepath.Join(dir, "cert.pem")}
+				// Check both initial issuance and renewal.
+				for _, content := range []string{"new key", "renewed key"} {
+					if err := writeOutputs(cfg, []byte(content), attestclient.CertificateResult{}); err != nil {
+						t.Fatal(err)
+					}
+					info, err := os.Stat(keyPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().Perm() != want {
+						t.Fatalf("key mode = %#o, want %#o", info.Mode().Perm(), want)
+					}
+					key, err := os.ReadFile(keyPath)
+					if err != nil || string(key) != content {
+						t.Fatalf("key = %q, err = %v; want %q", key, err, content)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -941,12 +948,11 @@ func startFakeServersRefusing(t *testing.T, issuedChain string, refusals int) (c
 			http.NotFound(w, r)
 			return
 		}
-		// snp evidence must carry attestation_report; the CSR extension
-		// build extracts the raw report bytes for the on-cert form.
-		fakeReport := base64.StdEncoding.EncodeToString([]byte("fake-snp-report"))
+		// snp evidence must carry a full-size attestation_report; the CSR
+		// extension build extracts the raw report bytes for the on-cert form.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"platform": "snp",
-			"evidence": json.RawMessage(`{"attestation_report":"` + fakeReport + `"}`),
+			"evidence": mockapi.FakeSNPEvidence(nil),
 		})
 	}))
 	t.Cleanup(att.Close)
@@ -1004,7 +1010,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 
 func TestObtainCertCDSError(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1054,7 +1060,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 	chain := testIssuedChainPEM(t)
 
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 
@@ -1097,7 +1103,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 
 func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": json.RawMessage(`{"attestation_report":"ZmFrZS1zbnAtcmVwb3J0"}`)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"platform": "snp", "evidence": mockapi.FakeSNPEvidence(nil)})
 	}))
 	t.Cleanup(att.Close)
 	var calls int
@@ -1120,6 +1126,25 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 func TestRunValidationError(t *testing.T) {
 	if err := run(config{CDSURL: "", AttestationApiURL: "http://a", SAN: "h"}); err == nil {
 		t.Fatal("run succeeded, want validation error")
+	}
+}
+
+// The socket directory is a mount injected at container creation: absent means
+// it cannot appear within this container's lifetime, so run must fail (and the
+// process exit, prompting a restart that replays the mount injection) rather
+// than idle behind --continue-on-initial-error.
+func TestRunFailsFastWithoutClaimsSocketDir(t *testing.T) {
+	if _, err := os.Stat(workloadclaims.SidecarSocketDir); err == nil {
+		t.Skipf("%s exists on this host", workloadclaims.SidecarSocketDir)
+	}
+	err := run(config{
+		CDSURL:            "https://cds:8443",
+		AttestationApiURL: "http://attestation-api:8400",
+		SAN:               "host.example.com",
+		WorkloadClaims:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "inventory socket directory") {
+		t.Fatalf("run() = %v, want the missing socket-directory failure", err)
 	}
 }
 

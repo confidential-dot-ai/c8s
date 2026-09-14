@@ -23,11 +23,9 @@ func renderNodeImagePolicy(t *testing.T) string {
 	}
 	digest := func(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
 	repl := map[string]string{
-		"@NRI_DIGEST@": digest('a'),
-		"@NRI_IMAGE@":  "ghcr.io/confidential-dot-ai/nri-image-policy@" + digest('a'),
-		"@CDS_DIGEST@": digest('b'),
-		"@CDS_IMAGE@":  "ghcr.io/confidential-dot-ai/cds@" + digest('b'),
-		"@PLATFORM@":   "snp",
+		"@OPERATOR_DIGEST@": digest('a'),
+		"@OPERATOR_IMAGE@":  "ghcr.io/confidential-dot-ai/c8s-operator@" + digest('a'),
+		"@PLATFORM@":        "snp",
 	}
 	out := string(body)
 	for k, v := range repl {
@@ -96,11 +94,10 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		}
 	}
 
-	// always_allow is the generated floor plus the two rendered tokens (the
-	// nri plugin self-allow and cds), so the exact count catches an entry a
-	// regen adds or drops.
-	if want := len(floor) + 2; len(cfg.Allowlist.AlwaysAllow) != want {
-		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + nri + cds)",
+	// The generated floor plus the operator exemption covers every container;
+	// the remaining core services are baked binaries.
+	if want := len(floor) + 1; len(cfg.Allowlist.AlwaysAllow) != want {
+		t.Errorf("baked floor has %d always_allow entries, want %d (%d system floor + operator)",
 			len(cfg.Allowlist.AlwaysAllow), want, len(floor))
 	}
 

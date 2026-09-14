@@ -23,7 +23,7 @@ import (
 
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -149,13 +149,13 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(testPod("web", "default", "10.244.0.7", nodeIP, nil)), nil)
 	t.Setenv("NODE_IP", "")
-	attest := testattest.New(t)
+	attest := mockapi.New(t)
 
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
-	cfg.attestationApiURL = attest.URL
+	cfg.attestationApiURL = attest.URL()
 	bindProxyPorts(t, cfg)
 	cfg.rotationTimeout = 5 * time.Second
 	cfg.metricsUpdateInterval = 10 * time.Millisecond
@@ -215,7 +215,7 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	// dialer verifies the mesh server normally; its own junk cert is what
 	// the server must reject.
 	junkClientTLS, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:       &ratls.VerifyPolicy{AttestationApiURL: attest.URL},
+		Policy:       &ratls.VerifyPolicy{AttestationApiURL: attest.URL()},
 		CertProvider: staticCertProvider{junkClientCert(t)},
 	})
 	if err != nil {

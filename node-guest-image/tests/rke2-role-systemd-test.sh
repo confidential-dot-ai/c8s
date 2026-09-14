@@ -41,6 +41,9 @@ UNITDIR=/usr/local/lib/systemd/system
 mkdir -p "$UNITDIR" /dev/disk/by-label
 
 for p in etc/systemd/system/rke2-role.service \
+         etc/systemd/system/apparmor-enforce.service \
+         etc/systemd/system/rke2-server.service.d/no-modprobe.conf \
+         etc/systemd/system/rke2-agent.service.d/no-modprobe.conf \
          etc/systemd/system/rke2-server.service.d/20-role.conf \
          etc/systemd/system/rke2-agent.service.d/20-role.conf \
          etc/tmpfiles.d/confos-rke2.conf \
@@ -53,6 +56,27 @@ install -D -m644 /dev/stdin /etc/systemd/system/rke2-role.service.d/90-test.conf
 [Service]
 Environment=CRED_PLATFORM=tdx
 Environment=C8S_ROLE_FIXTURE=$C8S_ROLE_FIXTURE
+EOF
+
+# Exercise the production dependency/preset wiring without changing the
+# test host's AppArmor policy or letting FailureAction power it off. The
+# isolated apparmor-enforce-test.sh separately executes the unchanged probe.
+install -D -m644 /dev/stdin /etc/systemd/system/apparmor-enforce.service.d/test.conf <<'EOF'
+[Unit]
+FailureAction=none
+[Service]
+ExecStart=
+ExecStart=/bin/test ! -e /run/apparmor-enforce-test-fail
+EOF
+install -D -m644 /dev/stdin "$UNITDIR/apparmor.service" <<'EOF'
+[Unit]
+Description=fake stock AppArmor loader
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
 EOF
 
 # RKE2's tarball units and the external attester are the only units not
@@ -100,10 +124,10 @@ not_active() { ! active "$1"; }
 cond_skipped() { [[ $(systemctl show -p ConditionResult --value "$1") == no ]]; }
 boot_roles() { systemctl start "${payload_units[@]}"; }
 scenario_reset() {
-    systemctl stop "${payload_units[@]}" rke2-role.service attestation-api.service >/dev/null 2>&1 || true
+    systemctl stop "${payload_units[@]}" rke2-role.service attestation-api.service apparmor-enforce.service >/dev/null 2>&1 || true
     systemctl reset-failed >/dev/null 2>&1 || true
     reset_launch_fixture
-    rm -f /dev/disk/by-label/opkeydata
+    rm -f /dev/disk/by-label/opkeydata /run/apparmor-enforce-test-fail
     systemd-tmpfiles --create /etc/tmpfiles.d/confos-rke2.conf
     # Paths mounted read-only by production hardening normally exist after
     # RKE2 initializes. Payload stubs need empty equivalents for its sandbox.
@@ -112,9 +136,17 @@ scenario_reset() {
 }
 
 CASE=presets
-ok "production preset applies" systemctl preset rke2-role.service "${payload_units[@]}"
-for unit in rke2-role.service "${payload_units[@]}"; do
+systemctl enable apparmor.service >/dev/null 2>&1
+ok "production preset applies" systemctl preset rke2-role.service apparmor-enforce.service apparmor.service "${payload_units[@]}"
+for unit in rke2-role.service apparmor-enforce.service "${payload_units[@]}"; do
     ok "$unit enabled" systemctl is-enabled --quiet "$unit"
+done
+
+ok "preset disables the stock AppArmor loader" \
+    test "$(systemctl is-enabled apparmor.service 2>/dev/null || true)" = disabled
+for role in server agent; do
+    ok "AppArmor is required by rke2-$role" \
+        test -L "/etc/systemd/system/rke2-$role.service.requires/apparmor-enforce.service"
 done
 
 for role in leader follower; do
@@ -124,6 +156,7 @@ for role in leader follower; do
     : > /dev/disk/by-label/opkeydata
     ok "selected role boots" boot_roles
     ok "launch verification is active" active rke2-role.service
+    ok "AppArmor gate is active" active apparmor-enforce.service
     selected=rke2-server.service; skipped=rke2-agent.service
     if [[ $role == follower ]]; then selected=rke2-agent.service; skipped=rke2-server.service; fi
     ok "$selected active" active "$selected"
@@ -154,6 +187,18 @@ for scenario in missing-launch invalid-signature prepare-failure; do
     ok "launch unit failed" systemctl is-failed --quiet rke2-role.service
     ok "no role authorized" no_launch_markers
     for unit in "${payload_units[@]}"; do ok "$unit stayed down" not_active "$unit"; done
+done
+
+for role in leader follower; do
+    CASE="boot-$role-AppArmor-failure"
+    scenario_reset
+    launch_media "$role"
+    : > /dev/disk/by-label/opkeydata
+    : > /run/apparmor-enforce-test-fail
+    ok "failed AppArmor gate blocks boot" not boot_roles
+    ok "AppArmor failure is visible" systemctl is-failed --quiet apparmor-enforce.service
+    ok "server stays down" not_active rke2-server.service
+    ok "agent stays down" not_active rke2-agent.service
 done
 
 scenario_reset

@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 const (
@@ -42,18 +44,18 @@ func TestDeriveSNPEntryPerVariant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if set.TEE != measurements.TEESNP {
-		t.Errorf("tee = %q, want %q", set.TEE, measurements.TEESNP)
+	if set.Family != teetypes.FamilySNP {
+		t.Errorf("tee = %q, want %q", set.Family, teetypes.FamilySNP)
 	}
-	if len(set.Entries) != 4 {
-		t.Fatalf("got %d entries, want one per snp_variants entry", len(set.Entries))
+	if len(set.Images) != 4 {
+		t.Fatalf("got %d entries, want one per snp_variants entry", len(set.Images))
 	}
 	for _, want := range []string{"c8s-worker-smp2", "c8s-worker-smp4", "c8s-worker-smp8", "c8s-worker-smp16"} {
-		if !hasEntry(set.Entries, want) {
-			t.Errorf("no entry named %q; got %v", want, names(set.Entries))
+		if !hasEntry(set.Images, want) {
+			t.Errorf("no entry named %q; got %v", want, names(set.Images))
 		}
 	}
-	for _, e := range set.Entries {
+	for _, e := range set.Images {
 		if len(e.RTMRs) != 0 {
 			t.Errorf("SNP entry %s carries RTMR pins", e.Name)
 		}
@@ -69,13 +71,13 @@ func TestDeriveTDXPinsTheTuple(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if set.TEE != measurements.TEETDX {
-		t.Errorf("tee = %q, want %q", set.TEE, measurements.TEETDX)
+	if set.Family != teetypes.FamilyTDX {
+		t.Errorf("tee = %q, want %q", set.Family, teetypes.FamilyTDX)
 	}
-	if len(set.Entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(set.Entries))
+	if len(set.Images) != 1 {
+		t.Fatalf("got %d entries, want 1", len(set.Images))
 	}
-	e := set.Entries[0]
+	e := set.Images[0]
 	if e.Name != "c8s-broker" {
 		t.Errorf("name = %q, want the image directory name", e.Name)
 	}
@@ -86,8 +88,8 @@ func TestDeriveTDXPinsTheTuple(t *testing.T) {
 		t.Error("RTMR[3] pinned: it is extended by in-guest software")
 	}
 	for _, idx := range []int{1, 2} {
-		if len(e.RTMRs[idx]) != measurements.DigestSize {
-			t.Errorf("RTMR[%d] = %d bytes, want %d", idx, len(e.RTMRs[idx]), measurements.DigestSize)
+		if len(e.RTMRs[idx]) != refvalues.DigestSize {
+			t.Errorf("RTMR[%d] = %d bytes, want %d", idx, len(e.RTMRs[idx]), refvalues.DigestSize)
 		}
 	}
 }
@@ -104,17 +106,17 @@ func TestDeriveOutputParses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("derive: %v", err)
 			}
-			doc, err := measurements.Format(set)
+			doc, err := refvalues.Format(set)
 			if err != nil {
 				t.Fatalf("format: %v", err)
 			}
-			reparsed, err := measurements.Parse(doc)
+			reparsed, err := refvalues.Parse(doc)
 			if err != nil {
 				t.Fatalf("derived config does not parse: %v\n%s", err, doc)
 			}
-			if len(reparsed.Entries) != len(set.Entries) || reparsed.TEE != set.TEE {
+			if len(reparsed.Images) != len(set.Images) || reparsed.Family != set.Family {
 				t.Errorf("round trip changed the config: %d/%s vs %d/%s",
-					len(reparsed.Entries), reparsed.TEE, len(set.Entries), set.TEE)
+					len(reparsed.Images), reparsed.Family, len(set.Images), set.Family)
 			}
 		})
 	}
@@ -139,11 +141,11 @@ func TestDeriveMergesImagesOfOnePlatform(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if len(set.Entries) != 2 {
-		t.Fatalf("got %d entries, want one per image", len(set.Entries))
+	if len(set.Images) != 2 {
+		t.Fatalf("got %d entries, want one per image", len(set.Images))
 	}
-	if !hasEntry(set.Entries, "leader") || !hasEntry(set.Entries, "worker") {
-		t.Errorf("entries = %v, want both image names", names(set.Entries))
+	if !hasEntry(set.Images, "leader") || !hasEntry(set.Images, "worker") {
+		t.Errorf("entries = %v, want both image names", names(set.Images))
 	}
 }
 
@@ -162,7 +164,7 @@ func TestDeriveMultiPlatformNeedsTEE(t *testing.T) {
 	if !strings.Contains(err.Error(), "--tee") {
 		t.Errorf("error %q does not name the flag that resolves it", err)
 	}
-	if _, err := derive([]string{dir}, measurements.TEESNP); err != nil {
+	if _, err := derive([]string{dir}, string(teetypes.FamilySNP)); err != nil {
 		t.Fatalf("--tee did not resolve the ambiguity: %v", err)
 	}
 }
@@ -201,8 +203,8 @@ func TestDeriveAcceptsManifestPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if set.Entries[0].Name != "direct" {
-		t.Errorf("name = %q, want %q", set.Entries[0].Name, "direct")
+	if set.Images[0].Name != "direct" {
+		t.Errorf("name = %q, want %q", set.Images[0].Name, "direct")
 	}
 }
 
@@ -215,7 +217,7 @@ func TestLintReportsAProblem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := measurements.Format(set)
+	doc, err := refvalues.Format(set)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +252,7 @@ func TestDeriveCmdWritesTheOutFile(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if _, err := measurements.Load(out); err != nil {
+	if _, err := refvalues.Load(out); err != nil {
 		t.Fatalf("written config does not load: %v", err)
 	}
 }
@@ -276,19 +278,19 @@ func patchManifest(t *testing.T, dir string, edit func(map[string]any)) {
 	}
 }
 
-func hasEntry(entries []measurements.Entry, name string) bool {
-	for _, e := range entries {
-		if e.Name == name {
+func hasEntry(images []remote.ImagePin, name string) bool {
+	for _, img := range images {
+		if img.Name == name {
 			return true
 		}
 	}
 	return false
 }
 
-func names(entries []measurements.Entry) []string {
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.Name)
+func names(images []remote.ImagePin) []string {
+	out := make([]string, 0, len(images))
+	for _, img := range images {
+		out = append(out, img.Name)
 	}
 	return out
 }
@@ -302,7 +304,7 @@ func TestDeriveCmdWritesStdout(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	if _, err := measurements.Parse([]byte(out.String())); err != nil {
+	if _, err := refvalues.Parse([]byte(out.String())); err != nil {
 		t.Fatalf("stdout is not a loadable config: %v\n%s", err, out.String())
 	}
 }

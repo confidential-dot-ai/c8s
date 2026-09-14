@@ -1,9 +1,6 @@
-// Package measurements is the schema for a measurements config file: the set
-// of VM images a cluster accepts, each pinned as one atomic tuple. A launch
-// digest and its RTMRs only mean anything together — two images built against
-// the same TDVF firmware share an MRTD — so an entry is matched whole or not
-// at all, and the flat flag forms convert into entries rather than being
-// enforced alongside them.
+// Package measurements extends shared image reference values with c8s launch
+// identities. Image parsing and verification belong to attestation-go; this
+// package only keeps the operator PEM bound atomically to each image.
 package measurements
 
 import (
@@ -18,59 +15,39 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 const (
-	// SchemaVersion1 is the only schema version this package accepts.
 	SchemaVersion1 = "1"
-
-	// TEESNP and TEETDX are the platforms a file may declare. One file
-	// describes one platform: a cluster mixing SNP and TDX images is not
-	// supported.
-	TEESNP = "sev-snp"
-	TEETDX = "tdx"
-
-	// DigestSize is the SHA-384 width of every pinned register.
-	DigestSize = 48
-
-	// MaxRTMRs is the number of TDX runtime measurement registers.
-	MaxRTMRs = 4
+	TEESNP         = string(teetypes.FamilySNP)
+	TEETDX         = string(teetypes.FamilyTDX)
+	DigestSize     = refvalues.DigestSize
+	MaxRTMRs       = 4
 )
 
-// Entry is one accepted VM image and, optionally, its launch-bound operator.
+// Entry pins an image and, optionally, its exact launch-bound operator PEM.
 type Entry struct {
-	// Name identifies the image in diagnostics and on accept. It carries no
-	// matching semantics.
-	Name string
-
-	// Digest is the SNP LAUNCH_DIGEST or the TDX MRTD.
-	Digest []byte
-
-	// RTMRs pins TDX runtime measurement registers by index. An absent index
-	// is unchecked; an all-zero value pins the register to zero.
-	RTMRs map[int][]byte
-
-	// OperatorKey pins the exact PEM bytes bound at launch. When absent,
-	// only the image is pinned, preserving non-node policy behavior.
+	Name        string
+	Digest      []byte
+	RTMRs       map[int][]byte
 	OperatorKey []byte
 }
 
-// ReferenceValues is what a verifier compares evidence against: the images an
-// inbound gate accepts. Gates that cannot express a tuple flatten these back
-// to the flat shapes, so none is left reading a form the operator did not set.
-type ReferenceValues struct {
-	// TEE is the declared platform.
-	TEE string
+func (e Entry) image() remote.ImagePin {
+	return remote.ImagePin{Name: e.Name, Digest: e.Digest, RTMRs: e.RTMRs}
+}
 
-	// Entries are the accepted images. Empty means the set pins nothing.
+// ReferenceValues is a c8s policy on one hardware family.
+type ReferenceValues struct {
+	TEE     string
 	Entries []Entry
 }
 
-// Empty reports whether the set pins nothing, i.e. accepts any attested peer.
 func (s ReferenceValues) Empty() bool { return len(s.Entries) == 0 }
-
-// PinsOperatorKeys reports whether a policy requires launch-bound operator
-// identities. Consumers that can carry only flat pins must refuse these.
 func (s ReferenceValues) PinsOperatorKeys() bool {
 	for _, e := range s.Entries {
 		if len(e.OperatorKey) > 0 {
@@ -79,312 +56,170 @@ func (s ReferenceValues) PinsOperatorKeys() bool {
 	}
 	return false
 }
-
-// Digests returns every reference launch digest, for gates that match on
-// the digest alone.
-func (s ReferenceValues) Digests() [][]byte {
-	out := make([][]byte, 0, len(s.Entries))
+func (s ReferenceValues) images() refvalues.ReferenceValues {
+	rv := refvalues.ReferenceValues{Family: teetypes.Family(s.TEE)}
 	for _, e := range s.Entries {
-		out = append(out, e.Digest)
+		rv.Images = append(rv.Images, e.image())
 	}
-	return out
+	return rv
 }
-
-// DigestSet returns the pinned digests as lowercase hex, for gates that hold
-// them as a string set.
+func (s ReferenceValues) Digests() [][]byte    { return s.images().Digests() }
+func (s ReferenceValues) HexDigests() []string { d, _, _ := s.images().Flatten(); return d }
 func (s ReferenceValues) DigestSet() map[string]bool {
-	out := make(map[string]bool, len(s.Entries))
-	for _, e := range s.Entries {
-		out[hex.EncodeToString(e.Digest)] = true
+	out := map[string]bool{}
+	for _, d := range s.HexDigests() {
+		out[d] = true
 	}
 	return out
 }
-
-// CommonRTMRs returns the RTMR pins shared by every entry, and whether the
-// entries agree. Gates that cannot express per-entry tuples take this; when
-// ok is false they must say so rather than silently dropping the pins.
-func (s ReferenceValues) CommonRTMRs() (map[int][]byte, bool) {
-	if len(s.Entries) == 0 {
-		return nil, true
-	}
-	first := s.Entries[0].RTMRs
-	for _, e := range s.Entries[1:] {
-		if !sameRTMRs(first, e.RTMRs) {
-			return nil, false
-		}
-	}
-	return first, true
-}
-
-func sameRTMRs(a, b map[int][]byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for idx, want := range a {
-		got, ok := b[idx]
-		if !ok || !bytes.Equal(got, want) {
-			return false
-		}
-	}
-	return true
-}
-
-// HexDigests returns the pinned digests as lowercase hex, for the flag and
-// values shapes that carry a plain list.
-func (s ReferenceValues) HexDigests() []string {
-	out := make([]string, 0, len(s.Entries))
-	for _, e := range s.Entries {
-		out = append(out, hex.EncodeToString(e.Digest))
-	}
-	return out
-}
-
-// FromFlags converts the legacy flat pins into entries: every digest carries
-// the same RTMR map, which is what the flat form enforced. Registers pinned
-// without any digest have no entry form and stay on the flat path.
+func (s ReferenceValues) CommonRTMRs() (map[int][]byte, bool) { return s.images().CommonRTMRs() }
 func FromFlags(digests [][]byte, rtmrs map[int][]byte) ReferenceValues {
-	entries := make([]Entry, 0, len(digests))
-	for _, d := range digests {
-		// Each entry owns its map: callers mutate policy pins in place.
-		own := make(map[int][]byte, len(rtmrs))
-		for i, v := range rtmrs {
-			own[i] = v
-		}
-		if len(own) == 0 {
-			own = nil
-		}
-		entries = append(entries, Entry{Digest: d, RTMRs: own})
+	var out ReferenceValues
+	for _, e := range refvalues.FromFlags(digests, rtmrs).Images {
+		out.Entries = append(out.Entries, Entry{Name: e.Name, Digest: e.Digest, RTMRs: e.RTMRs})
 	}
-	return ReferenceValues{Entries: entries}
+	return out
 }
-
-// Load reads and validates a measurements config file. A missing or malformed
-// file is an error, never an empty policy: the caller asked for pinning.
 func Load(path string) (ReferenceValues, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ReferenceValues{}, fmt.Errorf("read measurements config: %w", err)
 	}
-	s, err := Parse(data)
+	rv, err := Parse(data)
 	if err != nil {
 		return ReferenceValues{}, fmt.Errorf("measurements config %s: %w", path, err)
 	}
-	return s, nil
+	return rv, nil
 }
 
-// Format renders a set as a measurements config document. The result is
-// re-parsed by the caller, so a set that formats is a set that loads.
-func Format(s ReferenceValues) ([]byte, error) {
-	f := wire{SchemaVersion: SchemaVersion1, TEE: s.TEE}
-	for _, e := range s.Entries {
-		we := wireEntry{Name: e.Name}
-		if len(e.OperatorKey) > 0 {
-			// Marshaling a string cannot fail.
-			we.OperatorKey, _ = json.Marshal(string(e.OperatorKey))
-		}
-		d := hex.EncodeToString(e.Digest)
-		switch s.TEE {
-		case TEESNP:
-			we.Measurement = &d
-		case TEETDX:
-			we.MRTD = &d
-			if len(e.RTMRs) > 0 {
-				we.RTMR = make([]*string, MaxRTMRs)
-				for idx, v := range e.RTMRs {
-					h := hex.EncodeToString(v)
-					we.RTMR[idx] = &h
-				}
-			}
-		default:
-			return nil, fmt.Errorf("tee %q, want %q or %q", s.TEE, TEESNP, TEETDX)
-		}
-		f.Measurements = append(f.Measurements, we)
-	}
-	out, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode measurements config: %w", err)
-	}
-	return append(out, '\n'), nil
-}
-
-// wire mirrors the file exactly; validation happens against these fields so an
-// absent value stays distinguishable from an empty one.
 type wire struct {
-	SchemaVersion string      `json:"schema_version"`
-	TEE           string      `json:"tee"`
-	Measurements  []wireEntry `json:"measurements"`
+	SchemaVersion string            `json:"schema_version"`
+	TEE           string            `json:"tee"`
+	Measurements  []json.RawMessage `json:"measurements"`
 }
 
-type wireEntry struct {
-	Name        string          `json:"name"`
-	Measurement *string         `json:"measurement,omitempty"`
-	MRTD        *string         `json:"mrtd,omitempty"`
-	RTMR        []*string       `json:"rtmr,omitempty"`
-	OperatorKey json.RawMessage `json:"operator_key,omitempty"`
-}
-
-// Parse validates a measurements config document. Parsing and linting are the
-// same strictness, so a file that lints clean is the file every component
-// loads.
+// Parse removes only operator_key before delegating each image to the shared
+// strict parser. Per-entry delegation permits one image with several operators;
+// the complete tuple, including its exact key bytes, must still be unique.
 func Parse(data []byte) (ReferenceValues, error) {
 	if err := rejectDuplicateKeys(data); err != nil {
 		return ReferenceValues{}, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	var f wire
-	if err := dec.Decode(&f); err != nil {
+	var doc wire
+	if err := dec.Decode(&doc); err != nil {
 		return ReferenceValues{}, fmt.Errorf("decode: %w", err)
 	}
 	if dec.More() {
 		return ReferenceValues{}, fmt.Errorf("trailing data after the JSON object")
 	}
-	return f.validate()
-}
-
-func (f wire) validate() (ReferenceValues, error) {
-	if f.SchemaVersion != SchemaVersion1 {
-		return ReferenceValues{}, fmt.Errorf("schema_version %q, want %q", f.SchemaVersion, SchemaVersion1)
+	if len(doc.Measurements) == 0 {
+		_, err := refvalues.Parse(data)
+		return ReferenceValues{}, err
 	}
-	if f.TEE != TEESNP && f.TEE != TEETDX {
-		return ReferenceValues{}, fmt.Errorf("tee %q, want %q or %q", f.TEE, TEESNP, TEETDX)
-	}
-	// An empty list would pin nothing while reading as a pinned config;
-	// omitting the flag is how an operator asks for no pinning.
-	if len(f.Measurements) == 0 {
-		return ReferenceValues{}, fmt.Errorf("measurements is empty: a config file must pin at least one image")
-	}
-
-	set := ReferenceValues{TEE: f.TEE, Entries: make([]Entry, 0, len(f.Measurements))}
-	names := make(map[string]bool, len(f.Measurements))
-	tuples := make(map[string]int, len(f.Measurements))
-	for i, we := range f.Measurements {
-		e, err := we.validate(f.TEE, i)
+	out := ReferenceValues{TEE: doc.TEE}
+	names := map[string]bool{}
+	tuples := map[string]int{}
+	for i, raw := range doc.Measurements {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return ReferenceValues{}, fmt.Errorf("measurements[%d]: %w", i, err)
+		}
+		key, err := parseOperatorKey(fields["operator_key"], i)
 		if err != nil {
 			return ReferenceValues{}, err
 		}
+		delete(fields, "operator_key")
+		imageJSON, err := json.Marshal(fields)
+		if err != nil {
+			return ReferenceValues{}, err
+		}
+		imageDoc, err := json.Marshal(wire{SchemaVersion: doc.SchemaVersion, TEE: doc.TEE, Measurements: []json.RawMessage{imageJSON}})
+		if err != nil {
+			return ReferenceValues{}, err
+		}
+		rv, err := refvalues.Parse(imageDoc)
+		if err != nil {
+			return ReferenceValues{}, fmt.Errorf("measurements[%d]: %w", i, err)
+		}
+		img := rv.Images[0]
+		e := Entry{Name: img.Name, Digest: img.Digest, RTMRs: img.RTMRs, OperatorKey: key}
 		if names[e.Name] {
 			return ReferenceValues{}, fmt.Errorf("measurements[%d]: duplicate name %q", i, e.Name)
 		}
 		names[e.Name] = true
-		key := tupleKey(e)
-		if prev, dup := tuples[key]; dup {
+		tuple := tupleKey(e)
+		if prev, ok := tuples[tuple]; ok {
 			return ReferenceValues{}, fmt.Errorf("measurements[%d] pins the same tuple as measurements[%d]", i, prev)
 		}
-		tuples[key] = i
-		set.Entries = append(set.Entries, e)
-	}
-	return set, nil
-}
-
-func (we wireEntry) validate(tee string, i int) (Entry, error) {
-	at := fmt.Sprintf("measurements[%d]", i)
-	if strings.TrimSpace(we.Name) == "" {
-		return Entry{}, fmt.Errorf("%s: name is required", at)
-	}
-	e := Entry{Name: we.Name}
-	if we.OperatorKey != nil {
-		var text string
-		if err := json.Unmarshal(we.OperatorKey, &text); err != nil {
-			return Entry{}, fmt.Errorf("%s.operator_key: %w", at, err)
-		}
-		key := []byte(text)
-		block, rest := pem.Decode(key)
-		if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 || !bytes.HasPrefix(bytes.TrimSpace(key), []byte("-----BEGIN PUBLIC KEY-----")) {
-			return Entry{}, fmt.Errorf("%s.operator_key: want one PEM PUBLIC KEY", at)
-		}
-		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-		if err != nil {
-			return Entry{}, fmt.Errorf("%s.operator_key: %w", at, err)
-		}
-		ec, ok := pub.(*ecdsa.PublicKey)
-		if !ok || ec.Curve != elliptic.P256() {
-			return Entry{}, fmt.Errorf("%s.operator_key: want an ECDSA P-256 key", at)
-		}
-		e.OperatorKey = key
-	}
-
-	switch tee {
-	case TEESNP:
-		if we.MRTD != nil || we.RTMR != nil {
-			return Entry{}, fmt.Errorf("%s: mrtd and rtmr are tdx fields, but tee is %q", at, TEESNP)
-		}
-		if we.Measurement == nil {
-			return Entry{}, fmt.Errorf("%s: measurement is required", at)
-		}
-		d, err := decodeRegister(*we.Measurement)
-		if err != nil {
-			return Entry{}, fmt.Errorf("%s.measurement: %w", at, err)
-		}
-		e.Digest = d
-	case TEETDX:
-		if we.Measurement != nil {
-			return Entry{}, fmt.Errorf("%s: measurement is a sev-snp field, but tee is %q", at, TEETDX)
-		}
-		if we.MRTD == nil {
-			return Entry{}, fmt.Errorf("%s: mrtd is required", at)
-		}
-		d, err := decodeRegister(*we.MRTD)
-		if err != nil {
-			return Entry{}, fmt.Errorf("%s.mrtd: %w", at, err)
-		}
-		e.Digest = d
-		rtmrs, err := decodeRTMRs(we.RTMR, at)
-		if err != nil {
-			return Entry{}, err
-		}
-		e.RTMRs = rtmrs
-	}
-	return e, nil
-}
-
-func decodeRTMRs(raw []*string, at string) (map[int][]byte, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	if len(raw) > MaxRTMRs {
-		return nil, fmt.Errorf("%s.rtmr has %d entries, want at most %d", at, len(raw), MaxRTMRs)
-	}
-	out := make(map[int][]byte, len(raw))
-	for idx, v := range raw {
-		if v == nil {
-			continue
-		}
-		// RTMR[0] mixes the TD HOB and VMM ACPI tables, so it varies with the
-		// VM shape and can never be pinned to a stable value.
-		if idx == 0 {
-			return nil, fmt.Errorf("%s.rtmr[0]: must be null — RTMR[0] varies with vCPU and memory shape", at)
-		}
-		if *v == "" {
-			out[idx] = make([]byte, DigestSize)
-			continue
-		}
-		d, err := decodeRegister(*v)
-		if err != nil {
-			return nil, fmt.Errorf("%s.rtmr[%d]: %w", at, idx, err)
-		}
-		out[idx] = d
-	}
-	if len(out) == 0 {
-		return nil, nil
+		tuples[tuple] = i
+		out.Entries = append(out.Entries, e)
 	}
 	return out, nil
 }
 
-// decodeRegister requires lowercase hex of exactly one register width.
-// Uppercase is rejected rather than folded so one register has one spelling.
-func decodeRegister(s string) ([]byte, error) {
-	if s != strings.ToLower(s) {
-		return nil, fmt.Errorf("%q is not lowercase hex", s)
+func parseOperatorKey(raw json.RawMessage, i int) ([]byte, error) {
+	at := fmt.Sprintf("measurements[%d]", i)
+	if raw != nil {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil, fmt.Errorf("%s.operator_key: %w", at, err)
+		}
+		key := []byte(text)
+		block, rest := pem.Decode(key)
+		if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 || !bytes.HasPrefix(bytes.TrimSpace(key), []byte("-----BEGIN PUBLIC KEY-----")) {
+			return nil, fmt.Errorf("%s.operator_key: want one PEM PUBLIC KEY", at)
+		}
+		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("%s.operator_key: %w", at, err)
+		}
+		ec, ok := pub.(*ecdsa.PublicKey)
+		if !ok || ec.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("%s.operator_key: want an ECDSA P-256 key", at)
+		}
+		return key, nil
 	}
-	if len(s) != hex.EncodedLen(DigestSize) {
-		return nil, fmt.Errorf("is %d hex chars, want %d", len(s), hex.EncodedLen(DigestSize))
+
+	return nil, nil
+}
+
+// Format uses the shared image formatter before adding exact operator PEM bytes.
+func Format(s ReferenceValues) ([]byte, error) {
+	doc := wire{SchemaVersion: SchemaVersion1, TEE: s.TEE, Measurements: []json.RawMessage{}}
+	for _, e := range s.Entries {
+		data, err := refvalues.Format(refvalues.ReferenceValues{Family: teetypes.Family(s.TEE), Images: []remote.ImagePin{e.image()}})
+		if err != nil {
+			return nil, err
+		}
+		var imageDoc wire
+		if err := json.Unmarshal(data, &imageDoc); err != nil {
+			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(imageDoc.Measurements[0], &fields); err != nil {
+			return nil, err
+		}
+		if len(e.OperatorKey) > 0 {
+			fields["operator_key"], _ = json.Marshal(string(e.OperatorKey))
+		}
+		raw, err := json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		doc.Measurements = append(doc.Measurements, raw)
 	}
-	d, err := hex.DecodeString(s)
+	if len(s.Entries) == 0 {
+		if _, err := refvalues.Format(s.images()); err != nil {
+			return nil, err
+		}
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("is not hex: %w", err)
+		return nil, err
 	}
-	return d, nil
+	return append(data, '\n'), nil
 }
 
 func tupleKey(e Entry) string {
@@ -467,49 +302,6 @@ func duplicateKey(obj []byte) (string, error) {
 	return "", nil
 }
 
-// ParseServed decodes a document a component serves to describe the reference
-// values it is enforcing. Unlike [Parse] it tolerates an empty set — a
-// component enforcing nothing is a report a verifier must be able to read and
-// act on, not a document to reject — and it is not the path an operator's own
-// file takes. See pkg/allowlist ParseJSON vs ParseServedJSON for the same split.
-func ParseServed(data []byte) (ReferenceValues, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	var f wire
-	if err := dec.Decode(&f); err != nil {
-		return ReferenceValues{}, fmt.Errorf("decode served measurements: %w", err)
-	}
-	if f.SchemaVersion != SchemaVersion1 {
-		return ReferenceValues{}, fmt.Errorf("served schema_version %q, want %q", f.SchemaVersion, SchemaVersion1)
-	}
-	if f.TEE != TEESNP && f.TEE != TEETDX {
-		return ReferenceValues{}, fmt.Errorf("served tee %q, want %q or %q", f.TEE, TEESNP, TEETDX)
-	}
-	set := ReferenceValues{TEE: f.TEE}
-	for i, we := range f.Measurements {
-		e, err := we.validate(f.TEE, i)
-		if err != nil {
-			return ReferenceValues{}, err
-		}
-		set.Entries = append(set.Entries, e)
-	}
-	return set, nil
-}
-
-// Serve renders the set as a document describing what is being enforced. It
-// accepts an empty set, which [Format] does not: "pinning nothing" is exactly
-// the state a verifier most needs reported.
-func Serve(s ReferenceValues) ([]byte, error) {
-	if len(s.Entries) == 0 {
-		f := wire{SchemaVersion: SchemaVersion1, TEE: s.TEE, Measurements: []wireEntry{}}
-		out, err := json.MarshalIndent(f, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("encode served measurements: %w", err)
-		}
-		return append(out, '\n'), nil
-	}
-	return Format(s)
-}
-
 // Diff reports the entries each side pins and the other does not, matched on
 // what decides admission — the digest, registers, and operator. Names are diagnostic
 // only, so two entries naming one image differently are still the same pin.
@@ -540,3 +332,23 @@ func Diff(want, got ReferenceValues) (missing, extra []Entry) {
 func sortEntries(e []Entry) {
 	sort.Slice(e, func(i, j int) bool { return tupleKey(e[i]) < tupleKey(e[j]) })
 }
+
+// ParseServed reads an enforced policy, permitting the empty set a verifier
+// must be able to report as unpinned. Non-empty node policies stay strict.
+func ParseServed(data []byte) (ReferenceValues, error) {
+	var doc wire
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return ReferenceValues{}, err
+	}
+	if len(doc.Measurements) != 0 {
+		return Parse(data)
+	}
+	rv, err := refvalues.ParseRendered(data)
+	if err != nil {
+		return ReferenceValues{}, err
+	}
+	return ReferenceValues{TEE: string(rv.Family)}, nil
+}
+
+// Serve renders the exact enforced node policy, including an empty set.
+func Serve(s ReferenceValues) ([]byte, error) { return Format(s) }

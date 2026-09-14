@@ -15,6 +15,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"github.com/containerd/nri/pkg/api"
 )
 
@@ -172,7 +173,7 @@ func TestCreateContainer_NotReady_DeniesNonFloorImage(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtrWithImage(pod.Id, "myctr", "registry/repo@"+pushDigestB)
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err == nil {
 		t.Fatal("expected error when plugin not ready and the image is not in the floor")
 	}
@@ -189,7 +190,7 @@ func TestCreateContainer_NotReady_AdmitsFloorDigest(t *testing.T) {
 	pod := makePod("kube-system", "coredns")
 	ctr := makeCtrWithImage(pod.Id, "coredns", "registry/repo@"+pushDigestA)
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 		t.Fatalf("a floor digest should be admitted while initializing, got: %v", err)
 	}
 }
@@ -204,7 +205,7 @@ func TestCreateContainer_NotReady_AuditModeAllows(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtr(pod.Id, "myctr")
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err != nil {
 		t.Fatalf("expected audit mode to allow during init, got error: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtr(pod.Id, "myctr")
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err == nil {
 		t.Fatal("expected error from normal allowlist check path")
 	}
@@ -307,6 +308,128 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	expected := "container has no image annotation"
 	if err.Error() != expected {
 		t.Fatalf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+// The claims socket directory reaches injected sidecars as an NRI mount — a
+// pod-spec hostPath would fail PodSecurity restricted — so CreateContainer
+// must adjust exactly the webhook-injected sidecars of an injected pod, on the
+// ready and initializing paths alike.
+//
+// The pods here carry only the annotation, never a real injection, so this
+// also pins the forged-trigger posture: any pod that fakes the annotation and
+// a sidecar name gets the RO mount, by design — the sockets behind it bind
+// callers by kernel peer credentials, not by who holds the mount.
+func TestCreateContainer_MountsSocketDirIntoInjectedSidecars(t *testing.T) {
+	const socketDir = "/var/run/nri-image-policy"
+	for name, ready := range map[string]bool{"ready": true, "initializing": false} {
+		t.Run(name, func(t *testing.T) {
+			p := newTestPlugin(&config{
+				Policy:         policyConfig{Mode: ModeAudit},
+				WorkloadClaims: workloadClaimsConfig{SocketDir: socketDir},
+			})
+			p.inventory = newAdmissionInventory(t.TempDir())
+			if ready {
+				p.SetReady()
+				p.policy = newPolicyStore(map[string]string{})
+			}
+			pod := makePod("default", "pod1")
+			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+
+			for _, ctrName := range []string{
+				workloadclaims.CertContainerName,
+				workloadclaims.SecretContainerName,
+				workloadclaims.VolumeContainerName,
+			} {
+				adjust, _, err := createAndStart(p, context.Background(), pod, makeCtr(pod.Id, ctrName))
+				if err != nil {
+					t.Fatalf("%s: %v", ctrName, err)
+				}
+				if adjust == nil || len(adjust.Mounts) != 1 {
+					t.Fatalf("%s: adjustment = %+v, want exactly the socket-dir mount", ctrName, adjust)
+				}
+				m := adjust.Mounts[0]
+				if m.Source != socketDir || m.Destination != workloadclaims.SidecarSocketDir {
+					t.Fatalf("%s: mount %s -> %s, want %s -> %s", ctrName, m.Source, m.Destination, socketDir, workloadclaims.SidecarSocketDir)
+				}
+				if !slices.Contains(m.Options, "ro") {
+					t.Fatalf("%s: socket-dir mount not read-only: %v", ctrName, m.Options)
+				}
+			}
+		})
+	}
+}
+
+// Everything else gets no mount: a workload container in an injected pod, a
+// sidecar-named container in a pod the webhook never touched, and any
+// container when the inventory is disabled.
+func TestCreateContainer_NoSocketDirMountOutsideInjectedSidecars(t *testing.T) {
+	injected := makePod("default", "pod1")
+	injected.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+	plain := makePod("default", "pod2")
+	halfway := makePod("default", "pod3")
+	halfway.Annotations = map[string]string{workloadclaims.AnnotationInjected: "false"}
+
+	for name, tc := range map[string]struct {
+		inventory bool
+		pod       *api.PodSandbox
+		ctr       string
+	}{
+		"workload container":     {true, injected, "app"},
+		"cert-wait is no dialer": {true, injected, "c8s-cert-wait"},
+		"uninjected pod":         {true, plain, workloadclaims.CertContainerName},
+		"annotation not true":    {true, halfway, workloadclaims.CertContainerName},
+		"inventory disabled":     {false, injected, workloadclaims.CertContainerName},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config{Policy: policyConfig{Mode: ModeAudit}}
+			if tc.inventory {
+				cfg.WorkloadClaims = workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"}
+			}
+			p := newTestPlugin(cfg)
+			if tc.inventory {
+				p.inventory = newAdmissionInventory(t.TempDir())
+			}
+			p.SetReady()
+			p.policy = newPolicyStore(map[string]string{})
+
+			adjust, _, err := createAndStart(p, context.Background(), tc.pod, makeCtr(tc.pod.Id, tc.ctr))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adjust != nil {
+				t.Fatalf("adjustment = %+v, want none", adjust)
+			}
+		})
+	}
+}
+
+// A denied container gets no adjustment alongside its error, on the ready and
+// initializing paths alike.
+func TestCreateContainer_DeniedContainerGetsNoAdjustment(t *testing.T) {
+	for name, ready := range map[string]bool{"ready": true, "initializing": false} {
+		t.Run(name, func(t *testing.T) {
+			p := newTestPlugin(&config{
+				Allowlist:      allowlistConfig{Pull: pullConfig{URL: "http://wl.local:8080", Timeout: 30}},
+				Policy:         policyConfig{Mode: ModeFailClosed, DenyMissingAnnotation: true},
+				WorkloadClaims: workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"},
+			})
+			p.inventory = newAdmissionInventory(t.TempDir())
+			if ready {
+				p.SetReady()
+				p.policy = newPolicyStore(map[string]string{})
+			}
+			pod := makePod("default", "pod1")
+			pod.Annotations = map[string]string{workloadclaims.AnnotationInjected: "true"}
+
+			adjust, _, err := createAndStart(p, context.Background(), pod, makeCtr(pod.Id, workloadclaims.CertContainerName))
+			if err == nil {
+				t.Fatal("denied container admitted")
+			}
+			if adjust != nil {
+				t.Fatalf("denied container got adjustment %+v", adjust)
+			}
+		})
 	}
 }
 
@@ -491,7 +614,7 @@ func TestCreateContainer_LabelRuleDeny_FailClosed(t *testing.T) {
 	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "evil"})
 	ctr := makeCtr(pod.Id, "myctr")
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err == nil {
 		t.Fatal("expected error from label rule denial")
 	}
@@ -516,7 +639,7 @@ func TestCreateContainer_LabelRuleDeny_AuditMode(t *testing.T) {
 	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "evil"})
 	ctr := makeCtr(pod.Id, "myctr")
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err != nil {
 		t.Fatalf("expected audit mode to allow, got error: %v", err)
 	}
@@ -541,7 +664,7 @@ func TestCreateContainer_AllowlistDisabled_SkipsImageCheck(t *testing.T) {
 	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "acme"})
 	ctr := makeCtr(pod.Id, "myctr")
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err != nil {
 		t.Fatalf("expected no error with allowlist disabled, got: %v", err)
 	}
@@ -695,7 +818,7 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 
 	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if !strings.Contains(argvMismatch, "satisfies no workload entry's argv policy") {
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args or env policy") {
 		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
 	}
 
@@ -716,12 +839,12 @@ func TestCreateContainer_WorkloadArgv_MatchAndMismatch(t *testing.T) {
 	pod := makePod("default", "mypod")
 
 	match := makeCtrWithImageArgs(pod.Id, "match", "registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
-	if _, _, err := p.CreateContainer(context.Background(), pod, match); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, match); err != nil {
 		t.Fatalf("matching argv should be admitted, got: %v", err)
 	}
 
 	mismatch := makeCtrWithImageArgs(pod.Id, "mismatch", "registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if _, _, err := p.CreateContainer(context.Background(), pod, mismatch); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, mismatch); err == nil {
 		t.Fatal("non-matching argv should be denied")
 	}
 }
@@ -755,7 +878,7 @@ func TestCreateContainer_DigestNotInAllowlist_FailClosed(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtrWithImage(pod.Id, "myctr", "registry/repo@"+pushDigestB)
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err == nil {
 		t.Fatal("expected denial for image not in allowlist")
 	}
@@ -771,7 +894,7 @@ func TestCreateContainer_DigestNotInAllowlist_AuditAllows(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtrWithImage(pod.Id, "myctr", "registry/repo@"+pushDigestB)
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err != nil {
 		t.Fatalf("audit mode should allow despite deny verdict, got: %v", err)
 	}
@@ -787,7 +910,7 @@ func TestCreateContainer_DigestInAllowlist_Allows(t *testing.T) {
 	pod := makePod("default", "mypod")
 	ctr := makeCtrWithImage(pod.Id, "myctr", "registry/repo@"+pushDigestA)
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err != nil {
 		t.Fatalf("expected allow for allowlisted digest, got: %v", err)
 	}
@@ -806,7 +929,7 @@ func TestCreateContainer_PodAnnotationDoesNotSupplyImage(t *testing.T) {
 	pod.Annotations = map[string]string{annotationImageName: "registry/repo@" + pushDigestA}
 	ctr := makeCtr(pod.Id, "myctr") // no annotations
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	_, _, err := createAndStart(p, context.Background(), pod, ctr)
 	if err == nil {
 		t.Fatal("expected denial: the container carries no image annotation")
 	}
@@ -1076,12 +1199,12 @@ func TestFloorContainerIsRecordedOnEveryPath(t *testing.T) {
 	}{
 		{"create hook", func(t *testing.T, p *plugin) {
 			p.SetReady()
-			if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+			if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 				t.Fatalf("floor digest should be admitted: %v", err)
 			}
 		}},
 		{"create hook while initializing", func(t *testing.T, p *plugin) {
-			if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+			if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 				t.Fatalf("floor digest should be admitted: %v", err)
 			}
 		}},
@@ -1188,10 +1311,10 @@ func TestCreateContainer_NotReady_ResolvesForAdmission_RecordsInlineOnly(t *test
 	pod := makePod("kube-system", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest") // no inline digest
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 		t.Fatalf("a tag resolving to the floor should be admitted: %v", err)
 	}
-	if len(resolved) != 1 {
+	if len(resolved) != 3 {
 		t.Fatalf("admission did not resolve the tag: %v", resolved)
 	}
 	rec, ok := p.inventory.containers[ctr.Id]
@@ -1217,7 +1340,7 @@ func TestCreateContainer_NotReady_TagOutsideFloor_Denied(t *testing.T) {
 	pod := makePod("kube-system", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest")
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err == nil {
 		t.Fatal("a tag resolving outside the floor must be denied while initializing")
 	}
 }
@@ -1234,7 +1357,7 @@ func TestCreateContainer_NotReady_ResolveFails_Denied(t *testing.T) {
 	pod := makePod("kube-system", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest")
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err == nil {
 		t.Fatal("a tag that fails to resolve while initializing must be denied")
 	}
 }
@@ -1251,7 +1374,7 @@ func TestCreateContainer_AuditModeDenial_IsRecorded(t *testing.T) {
 	pod := makePod("default", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestB)
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 		t.Fatalf("audit mode should admit: %v", err)
 	}
 	rec, ok := p.inventory.containers[ctr.Id]
@@ -1386,7 +1509,7 @@ func TestCreateContainer_RecordsTheContainerArgv(t *testing.T) {
 	argv := []string{"/bin/app", "--serve"}
 	ctr := makeCtrWithImageArgs(pod.Id, "ctr1", "registry/repo@"+pushDigestA, argv)
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err != nil {
 		t.Fatalf("allowlisted digest should be admitted: %v", err)
 	}
 	if rec := p.inventory.containers[ctr.Id]; !slices.Equal(rec.argv, argv) {
@@ -1409,7 +1532,7 @@ func TestCreateContainer_DeniedContainerIsNotRecorded(t *testing.T) {
 	pod := makePod("default", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestB)
 
-	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, ctr); err == nil {
 		t.Fatal("expected denial for an image not in the floor")
 	}
 	if _, ok := p.inventory.containers[ctr.Id]; ok {
@@ -1427,22 +1550,19 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 	var want api.EventMask
 	want.Set(api.Event_CREATE_CONTAINER)
+	want.Set(api.Event_START_CONTAINER)
+	want.Set(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
 	if mask != want {
 		t.Fatalf("mask = %v, want %v", mask, want)
 	}
 }
 
-// TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath pins the host
-// path's field scope. Both policies are `exact` with an empty list, so an
-// enforcer that reported any bind destination or any environment name would
-// refuse this container; admitting it is the assertion that this plugin passes
-// neither. Node-as-CVM operators are warned about the consequence by
-// `c8s allowlist lint`.
-func TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+// The NRI path leaves bind mounts unobserved.
+func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 	c := al.Workloads["w"].Containers[0]
 	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
-	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact}
+	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
 	al.Workloads["w"].Containers[0] = c
 
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}}, al)
@@ -1450,7 +1570,7 @@ func TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath(t *testing.T) {
 	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
 	if verdict != verdictAllow {
-		t.Fatalf("host path must leave mounts and env unobserved, got verdict %d (reason=%q)", verdict, reason)
+		t.Fatalf("host path must leave mounts unobserved, got verdict %d (reason=%q)", verdict, reason)
 	}
 
 	// Non-vacuity: the same entry refuses a container that does report one, so

@@ -6,12 +6,12 @@ import (
 	"crypto/sha512"
 	"crypto/x509/pkix"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // MakeSNPRATLSAttestFunc returns an RA-TLS AttestFunc (matching
@@ -39,21 +39,6 @@ func MakeSNPRATLSAttestFunc(client Client, attestationApiURL string) func(contex
 	}
 }
 
-// TEETypeForPlatform maps an attestation-api platform string to the RA-TLS
-// extension's TEEType: the SNP variants (bare-metal, Azure, GCP) are SEV-SNP,
-// the TDX variants are TDX. The RA-TLS extension records only the family; the
-// per-variant evidence shape is auto-detected by ratls.UnmarshalExtension.
-func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
-	switch teetypes.NormalizePlatform(platform).Family() {
-	case teetypes.FamilySNP:
-		return ratls.TEETypeSEVSNP, nil
-	case teetypes.FamilyTDX:
-		return ratls.TEETypeTDX, nil
-	default:
-		return 0, fmt.Errorf("attestclient: no RA-TLS TEE type for platform %q", platform)
-	}
-}
-
 // AttestationExtension builds a nonce-free RA-TLS attestation extension
 // binding pub via the local attestation-api, for embedding in a CSR
 // (docs/ratls.md). CDS copies the extension onto the issued leaf, which is how
@@ -63,7 +48,7 @@ func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
 // cert carries no per-request nonce, so [ratls.VerifyCert] recomputes the
 // anchor with nonce=nil.
 func (c Client) AttestationExtension(ctx context.Context, attestationApiURL string, pub crypto.PublicKey) (pkix.Extension, error) {
-	reportData, err := ratls.ReportDataForKey(pub, nil)
+	reportData, err := agratls.ReportDataForKey(pub, nil)
 	if err != nil {
 		return pkix.Extension{}, err
 	}
@@ -71,52 +56,31 @@ func (c Client) AttestationExtension(ctx context.Context, attestationApiURL stri
 	if err != nil {
 		return pkix.Extension{}, fmt.Errorf("attestation-api: %w", err)
 	}
-	report, err := RATLSEvidence(resp)
+	att, err := agratls.NewAttestation(evidenceEnvelope(resp))
 	if err != nil {
 		return pkix.Extension{}, err
 	}
-	teeType, err := TEETypeForPlatform(resp.Platform)
-	if err != nil {
-		return pkix.Extension{}, err
-	}
-	att := &ratls.Attestation{TEEType: teeType, Report: []byte(report)}
-	return att.MarshalExtension()
+	return ratls.MarshalExtension(att)
 }
 
 // RATLSEvidence returns the payload to embed in an RA-TLS certificate
-// extension. Two shapes exist by design:
-//
-//   - Bare-metal SNP: raw SNP report bytes (extractable offline from an SNP
-//     verifier). Kept as raw bytes for wire-compat + so bare-metal callers
-//     don't need a running attestation-api at verify time.
-//   - Everything else (az-snp, tdx, az-tdx): the attestation-api evidence
-//     envelope. Verification forwards the envelope back to a local
-//     attestation-api /verify — the source of truth for the quote's
-//     signature + REPORTDATA match. Keeping a second in-process quote
-//     parser in Go would silently drift from attestation-rs.
-//
-// For TDX, cc_eventlog is stripped from the envelope before embedding —
-// see stripTDXEventlog for why.
-//
-// UnmarshalExtension auto-detects the envelope form (JSON leading '{')
-// vs raw report bytes, so the two shapes coexist behind the same OID.
-func RATLSEvidence(resp types.AttestResponse) (string, error) {
-	if resp.Platform == string(types.PlatformSnp) {
-		return ExtractSNPReport(resp)
-	}
-
-	envelope := types.AttestationEvidence(resp)
-	if resp.Platform == string(types.PlatformTdx) {
-		stripped, err := stripTDXEventlog(envelope.Evidence)
-		if err != nil {
-			return "", err
-		}
-		envelope.Evidence = stripped
-	}
-
-	evidence, err := json.Marshal(envelope)
+// extension: the raw report for native SEV-SNP (snp, gcp-snp), the evidence
+// envelope for everything else. See attestation-go/ratls.EvidenceForExtension
+// for why the two shapes exist and what native TDX loses on the way in.
+func RATLSEvidence(resp remote.AttestResponse) (string, error) {
+	evidence, err := agratls.EvidenceForExtension(evidenceEnvelope(resp))
 	if err != nil {
-		return "", fmt.Errorf("marshal RA-TLS attestation evidence: %w", err)
+		return "", err
 	}
 	return string(evidence), nil
+}
+
+// evidenceEnvelope re-tags an /attest response as the library's evidence
+// envelope. The two carry the same JSON; only the platform tag's Go type
+// differs.
+func evidenceEnvelope(resp remote.AttestResponse) teetypes.AttestationEvidence {
+	return teetypes.AttestationEvidence{
+		Platform: teetypes.NormalizePlatform(string(resp.Platform)),
+		Evidence: resp.Evidence,
+	}
 }

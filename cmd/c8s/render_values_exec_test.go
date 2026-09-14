@@ -45,10 +45,7 @@ func TestRenderValuesEmitsComputedBundle(t *testing.T) {
 			t.Errorf("%s = %#v, want main", strings.Join(prefix, "."), got)
 		}
 	}
-	// --distro plumbs both component distro keys.
-	if got := treeAt(t, tree, "kata", "distro"); got != "rke2" {
-		t.Errorf("kata.distro = %#v, want rke2", got)
-	}
+	// --distro configures the NRI installer.
 	if got := treeAt(t, tree, "nriImagePolicy", "distro"); got != "rke2" {
 		t.Errorf("nriImagePolicy.distro = %#v, want rke2", got)
 	}
@@ -64,15 +61,6 @@ func TestRenderValuesRequiresCvmMode(t *testing.T) {
 	})
 	if out != "" {
 		t.Errorf("failed render must emit no bundle, got:\n%s", out)
-	}
-}
-
-func TestRenderValuesRejectsDebugOutsidePod(t *testing.T) {
-	f := newFakeBin(t)
-	f.tool(t, "helm", helmShowValuesBody)
-	err := runC8s(t, "render-values", "--cvm-mode=node", "--debug", "--resolve-digests=false")
-	if err == nil || !strings.Contains(err.Error(), "--cvm-mode=pod") {
-		t.Fatalf("want the debug-outside-pod error, got %v", err)
 	}
 }
 
@@ -94,7 +82,6 @@ func TestRenderValuesHostedLaneExemptNamespaces(t *testing.T) {
 	}{
 		{"aks", []any{"kube-system"}},
 		{"gke", []any{"kube-system"}},
-		{"pod", []any{"kube-system"}},
 		// node's baked floor already carries the system digests.
 		{"node", nil},
 	} {

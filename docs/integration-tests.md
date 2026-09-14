@@ -31,6 +31,15 @@ survives. The install-time bootstrap entries are generated from the node
 containerd's image store, because `policy.enforceExisting` checks
 already-running containers against them.
 
+Tenant fixtures satisfy the Restricted controls: workload and adoption
+Deployments use digest-pinned `nginxinc/nginx-unprivileged` on port 8080;
+curl Pods run as UID 1000. All use non-root execution, RuntimeDefault seccomp,
+no privilege escalation, and dropped ALL capabilities. `pod-fixture.py` is the
+shared JSON renderer used by the shell harness and Go admission regression tests,
+so negative fixtures violate only their intended label or host-network rule.
+Workload pre-pulls, the allowlist floor, mesh probes, Service target ports, and
+adoption routing use the same image and backend-port settings.
+
 Two operator-facing commands verify evidence **in-process** with real hardware
 cryptography, which synthetic evidence cannot pass: `c8s verify` and the `c8s
 allowlist` CLI. Those stay on the metal lanes. The harness still exercises the
@@ -75,7 +84,7 @@ a port-forward).
 ## Deliberately out of scope
 
 No TEE properties are asserted: hardware verification, measurements that mean
-anything, kata guests, encrypted volumes (volumed needs device-mapper control
+anything, encrypted volumes (volumed needs device-mapper control
 of the node kernel), `get-kubeconfig` (SNP-gated), and the
 `c8s allowlist`/`c8s verify` CLIs (in-process hardware verification, above).
 The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those.
@@ -89,7 +98,10 @@ make test-integration-cluster
 Needs docker (or podman with `KIND_EXPERIMENTAL_PROVIDER=podman`), kind,
 kubectl, helm, go, openssl, curl, python3. The kind node image is pinned by
 digest in run.sh; bump it with the kind release. CI installs kind itself
-(`.github/workflows/ci.yml`, pinned binary sha256).
+(`.github/workflows/ci.yml`, pinned binary sha256). Custom node images must
+provide NRI `ValidateContainerAdjustment` support (the pinned image uses
+containerd 2.3.4 / NRI 0.12.0); older runtimes reject the env-enforcing plugin
+at registration.
 
 ### Failure notes
 

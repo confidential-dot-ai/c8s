@@ -33,7 +33,6 @@ func TestMeshEnvironmentRouting(t *testing.T) {
 		allowUnknown bool
 	}{
 		{"host", hostMesh{c: cfg, resolver: resolver}, "10.0.0.2", false},
-		{"guest", guestMesh{c: &inGuestConfig{}, podIP: localPod}, remotePod, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &meshRuntime{metrics: newMetrics()}

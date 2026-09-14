@@ -23,12 +23,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
+
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -205,7 +206,7 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
-	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
 	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
@@ -551,7 +552,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(hexes)
+	measurements, err := refvalues.ParseHexMeasurementsList(hexes)
 	if err != nil {
 		return nil, err
 	}
@@ -625,12 +626,11 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
-		policy: &ratls.VerifyPolicy{
-			Entries:      refValues.Entries,
+		policy: &ratls.VerifyPolicy{Entries: refValues.Entries, Policy: remote.Policy{
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
-		},
+		}},
 		pins:         pins,
 		meshCA:       caPool,
 		initDataHash: initDataHash,
@@ -648,8 +648,8 @@ func parseInitDataPin(flag string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--init-data is not hex: %v", err)
 	}
-	if len(digest) != initdata.DigestSize {
-		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), initdata.DigestSize)
+	if len(digest) != sha256.Size {
+		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), sha256.Size)
 	}
 	return digest, nil
 }
@@ -667,11 +667,11 @@ func parseInitDataPin(flag string) ([]byte, error) {
 // two would otherwise pin RTMR[1]/[2] from different sources and a
 // disagreement is a policy no guest can satisfy.
 type rtmrPins struct {
-	image *runtimemeasure.ImagePins
+	image runtimemeasure.ImageIdentity
 	rtmr3 []byte
 	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
-	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
-	// read only by pkg/attestationclient, on the delegated attestation-api
+	// other two, rather than left to ratls.VerifyPolicy.Policy.RTMRs: that field is
+	// read only by attestation-go/remote, on the delegated attestation-api
 	// path, and `c8s verify` always verifies in process (verifyInProcess ->
 	// localverify.Verify, whose Params carries no registers). Setting the
 	// policy field alone made the flag a silent no-op.
@@ -712,7 +712,7 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := ratls.ParseRTMRPins(cfg.rtmrs)
+	manual, err := refvalues.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
 		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
@@ -740,7 +740,14 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		if err != nil {
 			return rtmrPins{}, fmt.Errorf("--image-manifest: %w", err)
 		}
-		pins.image = &img
+		// The pins below (MRTD, RTMR[1], RTMR[2]) exist only on TDX, so an
+		// SNP manifest would load and then pin nothing. Refuse it here rather
+		// than report an enforcement that never ran.
+		if img.Family() != teetypes.FamilyTDX {
+			return rtmrPins{}, fmt.Errorf("--image-manifest: %s pins a %s image; c8s verify pins the TDX image tuple (MRTD + RTMR[1] + RTMR[2]) and has no gate for another family",
+				cfg.imageManifest, img.Family())
+		}
+		pins.image = img
 	}
 	if cfg.expectedRTMR3Hex != "" {
 		b, err := hex.DecodeString(strings.TrimSpace(cfg.expectedRTMR3Hex))
@@ -1247,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil || !plan.refValues.Empty()
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1285,6 +1292,29 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		return oc
 	}
 
+	fullImagePinned := plan.pins.image != nil
+	if !plan.refValues.Empty() {
+		if teetypes.NormalizePlatform(plan.refValues.TEE) != teetypes.NormalizePlatform(oc.Platform) {
+			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.TEE, oc.Platform)
+			return oc
+		}
+		response := remote.VerifyResponse{Result: *result}
+		if err := measurementspkg.EnforceEntries(response, plan.refValues.Entries, oc.Platform); err != nil {
+			oc.Error = fmt.Sprintf("--measurements-config: %v", err)
+			return oc
+		}
+		// A TDX tuple covers the guest only when the matching entry pins both
+		// kernel and rootfs registers. A weak alternative must not borrow the
+		// completeness of an unrelated entry in the same policy.
+		for _, entry := range plan.refValues.Entries {
+			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+				measurementspkg.EnforceEntries(response, []measurementspkg.Entry{entry}, oc.Platform) == nil {
+				fullImagePinned = true
+				break
+			}
+		}
+	}
+
 	if pinned {
 		launch := strings.ToLower(strings.TrimSpace(result.Claims.LaunchDigest))
 		mb, err := hex.DecodeString(launch)
@@ -1296,17 +1326,23 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		// allowlist: RTMR[1]/[2] are pinned against THIS manifest, so an MRTD
 		// that merely appears somewhere in --measurements would let a launch
 		// digest from a different build satisfy the tuple. Same rule as
-		// getkubeconfig.checkMeasuredIdentity — one manifest, one meaning.
+		// getkubeconfig's measuredPolicy.checkIdentity — one manifest, one
+		// meaning.
 		// buildPolicy now refuses a manifest and an allowlist in the same run,
 		// so the two compares below cannot both fire on a CLI-built plan; the
 		// exact compare stays exact anyway, because widening it is precisely
 		// the bypass this rule exists to close.
-		if plan.pins.image != nil && !bytes.Equal(mb, plan.pins.image.MRTD[:]) {
-			oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
-				launch, hex.EncodeToString(plan.pins.image.MRTD[:]))
-			return oc
+		if plan.pins.image != nil {
+			// A TDX identity has exactly one launch digest, its MRTD;
+			// buildPolicy refuses any other family.
+			mrtd := plan.pins.image.LaunchDigests()[0].Digest
+			if !bytes.Equal(mb, mrtd[:]) {
+				oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
+					launch, hex.EncodeToString(mrtd[:]))
+				return oc
+			}
 		}
-		if len(plan.policy.Measurements) > 0 && !attestationclient.MeasurementAllowed(mb, plan.policy.Measurements) {
+		if len(plan.policy.Policy.Measurements) > 0 && !remote.MeasurementAllowed(mb, plan.policy.Policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}
@@ -1324,7 +1360,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// anchor) does not downgrade this: chosen by the responder, it anchors
 	// nothing the operator asked about — the same rule the JS verifier applies
 	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
+	if isTDX(oc.Platform) && pinned && !fullImagePinned {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
 		if plan.meshCA == nil {
 			oc.Verified = false
@@ -1419,8 +1455,14 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 		return true
 	}
 	if pins.image != nil {
-		if !check(1, "guest kernel", pins.image.RTMR1[:]) || !check(2, "guest rootfs", pins.image.RTMR2[:]) {
-			return false
+		regs := pins.image.RTMRs()
+		// Ascending index, for the same reproducibility reason as the manual
+		// pins below.
+		for _, idx := range slices.Sorted(maps.Keys(regs)) {
+			want := regs[idx]
+			if !check(idx, imageRTMRMeaning(idx), want[:]) {
+				return false
+			}
 		}
 	}
 	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
@@ -1436,7 +1478,21 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
-// rtmrMeaning labels a register in operator-facing output. ratls.ParseRTMRPins
+// imageRTMRMeaning labels the registers an image manifest pins. RTMR[2] reads
+// differently here than in [rtmrMeaning]: the manifest measures the rootfs the
+// command line names, so name the thing the pin identifies.
+func imageRTMRMeaning(idx int) string {
+	switch idx {
+	case 1:
+		return "guest kernel"
+	case 2:
+		return "guest rootfs"
+	default:
+		return rtmrMeaning(idx)
+	}
+}
+
+// rtmrMeaning labels a register in operator-facing output. refvalues.ParseRTMRPins
 // admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {

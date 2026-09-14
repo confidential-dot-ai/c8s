@@ -477,3 +477,32 @@ func TestGenerationMovesOnEveryMutation(t *testing.T) {
 		t.Fatal("a read moved the generation")
 	}
 }
+
+func TestEnvironmentValuesPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","env":{"policy":"exact","values":{"MODE":"production"}}}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceAll(al); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	store, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	got, _, err := store.LoadAll()
+	if err != nil || got.Schema != pkgallowlist.Schema || got.Workloads["w"].Containers[0].Env.Values["MODE"] != "production" {
+		t.Fatalf("schema lost: %v %v", got, err)
+	}
+	if err := store.PutWorkload("w", al.Workloads["w"]); err != nil {
+		t.Fatal(err)
+	}
+
+}

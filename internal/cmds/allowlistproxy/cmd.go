@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -130,20 +131,21 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 		return nil, err
 	}
 	// Resolve before the flat fields are read: they feed the pin below.
-	pinned, err := cmdsutil.LoadMeasurementsConfig(cfg.measurementsConfig,
-		"--measurements-config", "--cds-measurements", "--cds-rtmrs",
-		&cfg.cdsMeasurements, &cfg.cdsRTMRs)
+	if cfg.measurementsConfig != "" && (len(cfg.cdsMeasurements) > 0 || len(cfg.cdsRTMRs) > 0) {
+		return nil, fmt.Errorf("--measurements-config cannot be combined with --cds-measurements or --cds-rtmrs")
+	}
+	pinned, err := cmdsutil.LoadMeasurementsSource(cfg.measurementsConfig, "")
 	if err != nil {
 		return nil, err
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.cdsMeasurements)
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.cdsMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if len(measurements) == 0 {
+	if len(measurements) == 0 && pinned.Empty() {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	rtmrs, err := ratls.ParseRTMRPins(cfg.cdsRTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.cdsRTMRs)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
 	}

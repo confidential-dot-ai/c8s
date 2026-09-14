@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +34,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -56,10 +56,10 @@ type config struct {
 	CAOutPath              string
 	KeyPath                string
 	KeyOutPath             string
-	KeyMode                string
 	SAN                    string
 	Verbose                bool
 	RenewInterval          time.Duration
+	RenewJitterPercent     int
 	InitialRetryTimeout    time.Duration
 	InitialRetryInterval   time.Duration
 	ReloadNginx            bool
@@ -72,7 +72,6 @@ type config struct {
 	DiscoveryMeshCAURL     string
 	DiscoveryPublicTLSMode string
 	WorkloadClaims         bool
-	WorkloadClaimsGuest    bool
 	WorkloadClaimsTimeout  time.Duration
 	UnnamedRenewInterval   time.Duration
 }
@@ -91,6 +90,7 @@ var (
 	errInvalidCAWatchInterval                    = errors.New("invalid CA watch interval")
 	errInvalidReloadWatchInterval                = errors.New("invalid reload watch interval")
 	errInvalidUnnamedRenewInterval               = errors.New("invalid unnamed renew interval")
+	errInvalidRenewJitterPercent                 = errors.New("invalid renew jitter percent")
 	errReloadWatchRequiresRenewInterval          = errors.New("reload watch requires renew interval")
 	errContinueOnInitialErrorRequiresRenewalLoop = errors.New("continue on initial error requires renewal loop")
 )
@@ -131,11 +131,11 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
-	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM (reused on restart if already present); must be on a memory-backed filesystem")
-	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
+	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the private key PEM with mode 0600 (0640 in shared setgid directories; key reused on restart); must be on a memory-backed filesystem")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
+	flags.IntVar(&cfg.RenewJitterPercent, "renew-jitter-percent", defaultRenewJitterPercent, "Shorten each renewal delay by a random fraction of itself, up to this percent, so certificates issued together do not refresh in lockstep (0 = no jitter)")
 	flags.DurationVar(&cfg.InitialRetryTimeout, "initial-retry-timeout", 2*time.Minute, "Retry the first certificate request in-process for up to this long before failing, so a transient CDS/mesh outage during a roll does not crash the init container into kubelet backoff (0 = try once)")
 	flags.DurationVar(&cfg.InitialRetryInterval, "initial-retry-interval", 2*time.Second, "Delay between in-process retries of the first certificate request")
 	flags.BoolVar(&cfg.ReloadNginx, "reload-nginx", true, "SIGHUP nginx after certificate renewal or watched file changes")
@@ -147,8 +147,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds, webpki, or acme)")
-	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM, policy-monitor in the kata guest (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
-	flags.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
+	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
 	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory request")
 	flags.DurationVar(&cfg.UnnamedRenewInterval, "unnamed-renew-interval", 30*time.Second, "With --workload-claims and --renew-interval, renew this often (plus jitter) while the installed leaf carries no matched-workload stamp, so a pod picks up its name at the first post-completion renewal instead of waiting a full interval; settles to --renew-interval once named, and backs off toward it for a pod that stays unnamed. Poll timing never changes the match decision. 0 disables the fast poll")
 
@@ -213,15 +212,12 @@ func cdsPins(cfg config) (ratls.Pins, error) {
 		}
 		return ratls.Pins{Entries: set.Entries}, nil
 	}
-	measurements, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
+	measurements, err := refvalues.ParseHexMeasurements(cfg.CDSMeasurements)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), cfg.WorkloadClaimsGuest,
-		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
-		return ratls.Pins{}, err
-	}
-	rtmrs, err := ratls.ParseRTMRPinsString(cfg.CDSRTMRs)
+	cmdsutil.WarnIfCDSUnpinned(len(measurements), "--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
+	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--cds-rtmrs: %w", err)
 	}
@@ -236,6 +232,15 @@ func run(cfg config) error {
 
 	if err := validateConfig(cfg); err != nil {
 		return err
+	}
+	// Fail fast, never retry: a missing socket directory means the mount was
+	// not injected at container creation and no in-process wait can produce
+	// it, while the retry loop below would idle forever behind
+	// --continue-on-initial-error (see workloadclaims.RequireSidecarSocketDir).
+	if cfg.WorkloadClaims {
+		if err := workloadclaims.RequireSidecarSocketDir(); err != nil {
+			return err
+		}
 	}
 
 	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
@@ -359,14 +364,12 @@ func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf
 				// close to expiry. Sleeping out --renew-interval here would
 				// leave the workload serving a dead certificate.
 				failures++
-				if leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter) {
+				if shouldRestartAfterRenewalFailures(leaf, failures) {
 					// The installed leaf is dead and renewal from this process
 					// keeps failing, so retrying in-process serves an expired
 					// certificate indefinitely. Exit instead: as a native
 					// sidecar (restartPolicy: Always) the container restarts
-					// with fresh client state and re-runs the full issuance —
-					// the recovery a locked guest cannot get from an exec
-					// liveness probe (ExecProcessRequest is policy-denied).
+					// with fresh client state and re-runs the full issuance.
 					return fmt.Errorf("installed certificate expired at %s and %d consecutive renewals failed (last: %w); exiting for a clean restart", leaf.NotAfter.Format(time.RFC3339), failures, err)
 				}
 				retry := renewalRetryInterval(cfg, leaf, failures)
@@ -430,6 +433,8 @@ const (
 	// up — and must not run a full attestation every --unnamed-renew-interval
 	// for its whole lifetime.
 	unnamedBackoffAfter = 10
+
+	defaultRenewJitterPercent = 20
 )
 
 // renewalRetryBase is the first delay after a failed renewal; consecutive
@@ -460,6 +465,12 @@ func renewalInterval(cfg config, leaf *x509.Certificate, unnamedRuns int) time.D
 		if half := time.Until(leaf.NotAfter) / 2; half < delay {
 			delay = half
 		}
+	}
+	// Renew early by up to --renew-jitter-percent so certificates issued
+	// together do not refresh in lockstep. Keep the already-jittered unnamed
+	// fast poll and delay floor.
+	if spread := int64(delay) * int64(cfg.RenewJitterPercent) / 100; spread > 0 {
+		delay -= time.Duration(mrand.Int64N(spread + 1))
 	}
 	if fast := unnamedPollInterval(cfg, leaf, unnamedRuns); fast > 0 && fast < delay {
 		delay = fast
@@ -505,6 +516,10 @@ func renewalRetryInterval(cfg config, leaf *x509.Certificate, failures int) time
 		delay *= 2
 	}
 	return min(delay, ceiling)
+}
+
+func shouldRestartAfterRenewalFailures(leaf *x509.Certificate, failures int) bool {
+	return leaf != nil && failures >= expiredExitFailures && time.Now().After(leaf.NotAfter)
 }
 
 // isNamedLeaf reports whether the installed leaf carries a valid
@@ -615,20 +630,11 @@ func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, no
 		return nil, nil
 	}
 	endpoint := inventoryEndpoint()
-	if cfg.WorkloadClaimsGuest {
-		endpoint = workloadclaims.GuestInventoryEndpoint()
-	}
 	token, err := workloadclaims.FetchSandboxToken(ctx, endpoint, cfg.WorkloadClaimsTimeout, pub, nonce)
 	switch {
 	case errors.Is(err, workloadclaims.ErrSandboxUnsupported):
 		slog.Info("inventory does not serve the sandbox route; issuing without a sandbox ID")
 		return nil, nil
-	case errors.Is(err, workloadclaims.ErrSandboxNotReady):
-		// Retryable, not a shape to settle for. CDS binds sandbox to inventory
-		// first-write-wins at issuance, so a leaf taken without a sandbox ID
-		// keeps that binding until it is re-issued — and the injected renewal
-		// is hours away. The caller's initial-retry loop does the waiting.
-		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	case err != nil:
 		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	}
@@ -680,6 +686,9 @@ func validateConfig(cfg config) error {
 	// never what an operator means; 0 is the documented "disabled".
 	if cfg.UnnamedRenewInterval != 0 && cfg.UnnamedRenewInterval < time.Second {
 		return fmt.Errorf("%w: --unnamed-renew-interval must be 0 (disabled) or at least 1s, got %v", errInvalidUnnamedRenewInterval, cfg.UnnamedRenewInterval)
+	}
+	if cfg.RenewJitterPercent < 0 || cfg.RenewJitterPercent >= 100 {
+		return fmt.Errorf("%w: --renew-jitter-percent must be between 0 (disabled) and 99, got %d", errInvalidRenewJitterPercent, cfg.RenewJitterPercent)
 	}
 	if cfg.ContinueOnInitialError && cfg.RenewInterval <= 0 {
 		return fmt.Errorf("%w: --continue-on-initial-error requires --renew-interval", errContinueOnInitialErrorRequiresRenewalLoop)
@@ -908,14 +917,26 @@ func servedCAStale(ctx context.Context, client attestclient.Client, caOutPath st
 	return false, nil
 }
 
+// privateKeyMode returns 0640 for setgid directories, 0600 otherwise.
+func privateKeyMode(path string) (os.FileMode, error) {
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeSetgid != 0 {
+		return 0640, nil
+	}
+	return 0600, nil
+}
+
 // writeOutputs writes the certificate, key, and optional discovery metadata.
 func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult) error {
 	if cfg.KeyOutPath != "" {
-		keyMode, err := parseFileMode(cfg.KeyMode)
+		mode, err := privateKeyMode(cfg.KeyOutPath)
 		if err != nil {
-			return fmt.Errorf("--key-mode: %w", err)
+			return fmt.Errorf("determine key permissions for %s: %w", cfg.KeyOutPath, err)
 		}
-		if err := fileutil.WriteAtomic(cfg.KeyOutPath, keyPEM, keyMode); err != nil {
+		if err := fileutil.WriteAtomic(cfg.KeyOutPath, keyPEM, mode); err != nil {
 			return fmt.Errorf("failed to write key to %s: %w", cfg.KeyOutPath, err)
 		}
 		slog.Info("private key written", "path", cfg.KeyOutPath)
@@ -987,7 +1008,7 @@ func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (
 		},
 		Attestation: types.AttestationDiscovery{
 			Challenge: result.Challenge,
-			Platform:  result.Platform,
+			Platform:  string(result.Platform),
 			Evidence:  result.Evidence,
 		},
 	}, nil
@@ -1040,18 +1061,4 @@ func reloadWatchChanged(previous map[string]fileSnapshot, paths []string) (bool,
 		}
 	}
 	return false, next, nil
-}
-
-func parseFileMode(mode string) (os.FileMode, error) {
-	if mode == "" {
-		return 0, fmt.Errorf("must not be empty")
-	}
-	parsed, err := strconv.ParseUint(mode, 8, 32)
-	if err != nil {
-		return 0, fmt.Errorf("%q is not an octal mode: %w", mode, err)
-	}
-	if parsed&^uint64(0777) != 0 {
-		return 0, fmt.Errorf("%q sets bits outside file permissions", mode)
-	}
-	return os.FileMode(parsed), nil
 }

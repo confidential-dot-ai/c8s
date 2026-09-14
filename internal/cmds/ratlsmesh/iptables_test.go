@@ -205,7 +205,6 @@ func TestJumpRules(t *testing.T) {
 // the regression here instead of in a noisy production race.
 func TestJumpRulesArgsShape(t *testing.T) {
 	jumps := append(append(jumpRules(), cwJumpRule()), cwEgressJumpRule())
-	jumps = append(jumps, guestFilterJumps()...)
 	for i, jump := range jumps {
 		if len(jump.args) != 2 || jump.args[0] != "-j" {
 			t.Fatalf("jump %d args = %v; parseJumpBlockAtHead requires {\"-j\", <chain>}", i, jump.args)

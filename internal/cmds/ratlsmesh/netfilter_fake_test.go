@@ -722,18 +722,6 @@ func TestCleanupPodIPSetsForNamesWarnsOnDestroyFailure(t *testing.T) {
 	}
 }
 
-// The in-guest setup installs the fail-closed rules including the DNS
-// carve-out for the cluster DNS server.
-func TestSetupInGuestIptablesInstallsFailClosed(t *testing.T) {
-	nf := installFakeNetfilter(t)
-	if err := setupInGuestIptables(slog.New(slog.DiscardHandler), "10.0.0.5", nil); err != nil {
-		t.Fatalf("setupInGuestIptables: %v", err)
-	}
-	if len(callsContaining(nf.calls(), "iptables ", "--dport 53")) == 0 {
-		t.Error("no in-guest rule carves out UDP/53; the guest cannot resolve")
-	}
-}
-
 func TestReadIPSetMaxElemStates(t *testing.T) {
 	nf := installFakeNetfilter(t)
 	nf.set("ipset_list_"+podIPSetName4, `Name: `+podIPSetName4+`

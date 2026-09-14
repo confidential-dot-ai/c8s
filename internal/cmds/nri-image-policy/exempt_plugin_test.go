@@ -60,7 +60,7 @@ func TestExempt_CaptureAtSyncAdmitsLaterCreate(t *testing.T) {
 	}
 
 	next := makeCtrWithImage(pod.Id, "coredns-2", "registry/repo@"+pushDigestB)
-	if _, _, err := p.CreateContainer(context.Background(), pod, next); err != nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, next); err != nil {
 		t.Fatalf("a captured kube-system image must be admitted on create: %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestExempt_UncapturedDigestDeniedInExemptNamespace(t *testing.T) {
 	}
 
 	uncaptured := makeCtrWithImage(pod.Id, "evil", "registry/repo@"+pushDigestB)
-	if _, _, err := p.CreateContainer(context.Background(), pod, uncaptured); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), pod, uncaptured); err == nil {
 		t.Fatal("an uncaptured non-floor image in an exempt namespace must be denied")
 	}
 }
@@ -98,7 +98,7 @@ func TestExempt_CapturedDigestNotAdmittedInTenantNamespace(t *testing.T) {
 
 	tenantPod := makePod("default", "tenant")
 	tenant := makeCtrWithImage(tenantPod.Id, "c", "registry/repo@"+pushDigestB)
-	if _, _, err := p.CreateContainer(context.Background(), tenantPod, tenant); err == nil {
+	if _, _, err := createAndStart(p, context.Background(), tenantPod, tenant); err == nil {
 		t.Fatal("a kube-system-captured digest must not admit in a tenant namespace")
 	}
 }

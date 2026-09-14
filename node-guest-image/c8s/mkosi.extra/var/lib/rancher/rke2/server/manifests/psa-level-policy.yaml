@@ -1,7 +1,7 @@
 # Keeps the restricted PodSecurity floor from psa-config.yaml an invariant:
 # PodSecurity admission reads its level from namespace labels, so whoever can
 # label a namespace could hand its pods `privileged`, or pin `enforce-version`
-# to an old standard that lacks the seccomp, capability and non-root checks.
+# to an older, weaker standard (for example, without required seccomp).
 # A namespace may carry an `enforce` label other than `restricted`, or an
 # `enforce-version` other than `latest`, only when the caller passes an RBAC
 # check for a virtual resource (`podsecurityexemptions.confidential.ai`, verb
@@ -11,9 +11,12 @@
 # check, so a controller that touches an operator-labelled namespace's
 # annotations or status is not denied. The status and finalize subresources
 # are matched because their update strategies keep the labels a writer sends.
-# RKE2 applies this AddOn at server start, before any tenant can reach the
-# API. The tenancy assumption and the cluster-admin caveat are in
-# node-guest-image/README.md, "Workload isolation".
+# RKE2 reconciles this AddOn asynchronously after kube-apiserver starts.
+# cred-release.service runs the measured psa-ready.sh gate and exposes no
+# externally attested credential until both objects exist and live server-side
+# probes prove this policy admits restricted and denies privileged. The
+# tenancy assumption and cluster-admin caveat are in node-guest-image/README.md,
+# "Workload isolation".
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

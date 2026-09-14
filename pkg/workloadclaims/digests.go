@@ -172,14 +172,10 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		return nil, nil, err
 	}
 	return ratls.NewServerTLSConfig(&ratls.ServerConfig{
-		Platform:   ratls.NormalizePlatform(platform),
-		AttestFunc: attestFunc,
-		CertTTL:    certTTL,
-		ClientPolicy: &ratls.VerifyPolicy{
-			Measurements:      cdsPins.Measurements,
-			RTMRs:             cdsPins.RTMRs,
-			AttestationApiURL: attestationApiURL,
-		},
+		Platform:     platform,
+		AttestFunc:   attestFunc,
+		CertTTL:      certTTL,
+		ClientPolicy: cdsPins.VerifyPolicy(attestationApiURL),
 	})
 }
 
@@ -195,8 +191,7 @@ func requireAttestationApi(url string) error {
 }
 
 // StartDigestsEndpoint binds DigestsPort and serves the identity and digests
-// routes on it. Shared by both inventories, which differ only in where their
-// configuration comes from.
+// routes for the node's NRI inventory.
 //
 // The listener is bound before the certificate warm-up so a token never names a
 // port nothing is listening on, and so a port conflict surfaces immediately
@@ -252,12 +247,8 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy: &ratls.VerifyPolicy{
-			Measurements:      pins.Measurements,
-			RTMRs:             pins.RTMRs,
-			AttestationApiURL: attestationApiURL,
-		},
-		Platform:   ratls.NormalizePlatform(platform),
+		Policy:     pins.VerifyPolicy(attestationApiURL),
+		Platform:   platform,
 		AttestFunc: attestFunc,
 	})
 	if err != nil {
@@ -439,33 +430,7 @@ func (c *DigestsClient) FetchSandbox(ctx context.Context, host, sandboxID string
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return out, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
 	}
-	// Carry the inventory's degraded posture into the caller's log — a kata
-	// guest's own journal is unreadable, so this is where it becomes visible.
-	// Diagnostic: it never changes the answer.
-	if r := out.AllowlistRefresh; r != nil && !r.Enabled {
-		slog.Warn("inventory reports a frozen image allowlist; operator allowlist additions are NOT reaching it",
-			"host", host, "sandbox", sandboxID, "reason", safeReason(r.Reason), "entries", r.Entries)
-	}
 	return out, nil
-}
-
-// maxReasonLen bounds a logged reason. The field crosses a trust boundary from
-// an inventory this client may not pin, so it is truncated and stripped of
-// control characters — an unbounded raw string could forge lines under a
-// non-JSON slog handler.
-const maxReasonLen = 200
-
-func safeReason(s string) string {
-	cleaned := []rune(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s))
-	if len(cleaned) > maxReasonLen {
-		return string(cleaned[:maxReasonLen]) + "…"
-	}
-	return string(cleaned)
 }
 
 // RequireContainers returns the per-container detail, refusing an answer that

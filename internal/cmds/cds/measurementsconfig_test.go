@@ -85,9 +85,9 @@ func TestResolveMeasurementsConfigDropsDivergentRTMRs(t *testing.T) {
 	if len(cfg.measurements) != 2 {
 		t.Errorf("flat measurements = %v, want both digests", cfg.measurements)
 	}
-	for _, e := range set.Entries {
-		if len(e.RTMRs) == 0 {
-			t.Errorf("entry %s lost its register pins", e.Name)
+	for _, img := range set.Entries {
+		if len(img.RTMRs) == 0 {
+			t.Errorf("entry %s lost its register pins", img.Name)
 		}
 	}
 }

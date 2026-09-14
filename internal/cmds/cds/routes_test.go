@@ -5,33 +5,24 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"golang.org/x/time/rate"
 )
 
 func newStubRouter(t *testing.T) http.Handler {
 	t.Helper()
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
 		t.Fatalf("allowlist: %v", err)
@@ -46,7 +37,6 @@ func newStubRouter(t *testing.T) http.Handler {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -56,8 +46,6 @@ func newStubRouter(t *testing.T) http.Handler {
 }
 
 func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -71,7 +59,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -98,8 +85,6 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 // the same per-IP limiter as the attestation endpoints: token verification
 // costs ECDSA verifies before any authentication.
 func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -110,7 +95,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	deps := dependencies{
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -138,8 +122,6 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 // is authenticated at that point. Its budget is its own, so spending it leaves
 // the /attest that redeems the challenge servable.
 func TestRouter_RateLimitsAuthenticate(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -161,7 +143,6 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
 		ChallengeLimiter: challengeRL,
@@ -223,7 +204,7 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}{
 		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/readyz", http.StatusOK},
-		{http.MethodGet, "/.well-known/jwks.json", http.StatusOK},
+		{http.MethodGet, "/.well-known/jwks.json", http.StatusNotFound},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/ca", http.StatusOK},
 		{http.MethodGet, "/allowlist", http.StatusOK},
@@ -258,8 +239,6 @@ func TestRouter_AttestKeyRemoved(t *testing.T) {
 }
 
 func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
-	keyPEM, _ := earsigner.Generate()
-	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
 	store, _ := allowlist.OpenInMemory()
 	t.Cleanup(func() { _ = store.Close() })
 	ca, _ := issuer.NewCA("test ca", time.Hour)
@@ -268,7 +247,6 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
 		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
 		ReadyFn:          func() bool { return true },
-		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
 		ChallengeLimiter: newTestRateLimiter(t),
@@ -515,13 +493,13 @@ func TestNewRouter_PanicsOnASharedChallengeLimiter(t *testing.T) {
 // set rather than hiding it: "admits any measurement" is the finding a
 // verifier most needs.
 func TestHandleMeasurements(t *testing.T) {
-	set, err := measurements.Parse([]byte(
+	set, err := refvalues.Parse([]byte(
 		`{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"` +
 			strings.Repeat("ab", 48) + `"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := measurements.Serve(set)
+	doc, err := refvalues.Render(set)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,15 +509,15 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	served, err := measurements.ParseServed(w.Body.Bytes())
+	served, err := refvalues.ParseRendered(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("served body does not parse: %v", err)
 	}
-	if len(served.Entries) != 1 || served.TEE != measurements.TEESNP {
+	if len(served.Images) != 1 || served.Family != teetypes.FamilySNP {
 		t.Errorf("served set = %+v, want the one pinned image", served)
 	}
 
-	empty, err := measurements.Serve(measurements.ReferenceValues{TEE: measurements.TEESNP})
+	empty, err := refvalues.Render(refvalues.ReferenceValues{Family: teetypes.FamilySNP})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,11 +526,11 @@ func TestHandleMeasurements(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("empty set status = %d, want 200 (not a 404)", w.Code)
 	}
-	servedEmpty, err := measurements.ParseServed(w.Body.Bytes())
+	servedEmpty, err := refvalues.ParseRendered(w.Body.Bytes())
 	if err != nil {
 		t.Fatalf("empty served body does not parse: %v", err)
 	}
-	if len(servedEmpty.Entries) != 0 {
-		t.Errorf("empty set served %d entries", len(servedEmpty.Entries))
+	if len(servedEmpty.Images) != 0 {
+		t.Errorf("empty set served %d entries", len(servedEmpty.Images))
 	}
 }

@@ -8,8 +8,8 @@
 
   THREAT MODEL: privileged, hostPID, and a writable bind of the kubelet
   directory. That is inherent to opening a device and mounting into another
-  pod's directory — it is a host-side operator component, outside the guest TEE
-  boundary. Which pod a mount lands in comes from the caller's kernel peer
+  pod's directory. The agent runs inside the node CVM's trust boundary.
+  Which pod a mount lands in comes from the caller's kernel peer
   credentials, never from the request.
 */}}
 apiVersion: apps/v1
@@ -93,8 +93,8 @@ spec:
               mountPath: {{ .Values.volumed.hostPaths.cgroupRoot }}
               readOnly: true
             # The daemon's socket must live in the inventory's socket directory:
-            # the deny-host-namespaces VAP carves out that exact path by string
-            # equality, and it is what the webhook mounts into cw pods.
+            # that is the one directory nri-image-policy NRI-mounts into cw-pod
+            # sidecars.
             - name: inventory-socket-dir
               mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
           resources:

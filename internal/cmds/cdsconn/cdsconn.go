@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,13 +25,11 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // EnvOperatorKey supplies the operator private key when the flag is unset.
@@ -159,7 +158,7 @@ func (o *Options) pinnedVerifier(pins measurements.ReferenceValues) localverify.
 		if result == nil {
 			return nil, fmt.Errorf("endpoint verifier returned no result")
 		}
-		if err := attestationclient.EnforceEntries(types.VerifyResponse{Result: *result}, pins.Entries, platform); err != nil {
+		if err := measurements.EnforceEntries(remote.VerifyResponse{Result: *result}, pins.Entries, platform); err != nil {
 			return nil, fmt.Errorf("endpoint identity: %w", err)
 		}
 		return result, nil
@@ -177,7 +176,7 @@ func (o *Options) loadMeasurements() ([][]byte, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	return ratls.ParseHexMeasurementsList(hexes)
+	return refvalues.ParseHexMeasurementsList(hexes)
 }
 
 // Signer builds the operator credential from the flag or the environment. The
