@@ -78,6 +78,10 @@ func failingAttest(t *testing.T, status int) *httptest.Server {
 
 // releaseHandler serves POST /release-credential with the given status; on 200
 // it checks the operator JWT + CSR shape and returns cert/ca PEMs.
+// wantReleaseRole, when set, is the role the fake cred-release expects in the
+// request body (the CLI's --role must reach the wire).
+var wantReleaseRole atomic.Value
+
 func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +98,9 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 		}
 		if !strings.Contains(req.CSRPEM, "CERTIFICATE REQUEST") {
 			t.Errorf("release csr = %q, want a CSR PEM", req.CSRPEM)
+		}
+		if want := wantReleaseRole.Load(); want != nil && req.Role != want.(string) {
+			t.Errorf("release role = %q, want %q", req.Role, want.(string))
 		}
 		if status != http.StatusOK {
 			http.Error(w, "release boom", status)
@@ -311,7 +318,7 @@ func TestRequestCredentialErrors(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("bad operator key", func(t *testing.T) {
-		_, err := requestCredential(ctx, client, "http://127.0.0.1:0", []byte("junk"), csr)
+		_, err := requestCredential(ctx, client, "http://127.0.0.1:0", []byte("junk"), csr, "")
 		if err == nil || !strings.Contains(err.Error(), "operator key") {
 			t.Fatalf("want operator-key error, got %v", err)
 		}
@@ -325,7 +332,7 @@ func TestRequestCredentialErrors(t *testing.T) {
 
 	t.Run("bad response JSON", func(t *testing.T) {
 		srv := serve(http.StatusOK, "not json")
-		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr)
+		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr, "")
 		if err == nil || !strings.Contains(err.Error(), "parse release response") {
 			t.Fatalf("want parse error, got %v", err)
 		}
@@ -333,7 +340,7 @@ func TestRequestCredentialErrors(t *testing.T) {
 
 	t.Run("missing ca", func(t *testing.T) {
 		srv := serve(http.StatusOK, `{"cert":"CERTPEM"}`)
-		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr)
+		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr, "")
 		if err == nil || !strings.Contains(err.Error(), "missing cert or ca") {
 			t.Fatalf("want missing-field error, got %v", err)
 		}

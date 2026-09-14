@@ -35,6 +35,10 @@ type Config struct {
 	// expected to have extended into RTMR[3], in first-extend order. Empty
 	// means the register must equal the bare operator-key seed.
 	WorkloadImages []string
+	// Role selects the identity cred-release stamps on the cert:
+	// credrelease.RoleOperator (the bounded operator role; "" means the same) or
+	// credrelease.RoleLogReader (pods and their logs only).
+	Role string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -102,7 +106,7 @@ func Run(ctx context.Context, cfg Config) error {
 	releaseDeadline := time.Now().Add(cfg.ReleaseWait)
 	for {
 		relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
-		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
+		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM, cfg.Role)
 		cancel2()
 		if !shouldRetryCredentialRelease(err, releaseDeadline) {
 			break
@@ -123,7 +127,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
+	role := cfg.Role
+	if role == "" {
+		role = credrelease.RoleOperator
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s (context %q, role %s) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName, role)
 	return nil
 }
 

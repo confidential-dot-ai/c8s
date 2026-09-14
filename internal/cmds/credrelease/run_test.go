@@ -60,6 +60,9 @@ func runnableConfig(t *testing.T) Config {
 		CertTTL:           defaultCertTTL,
 		CertOrg:           defaultCertOrg,
 		CertCN:            defaultCertCN,
+		LogCertTTL:        defaultLogCertTTL,
+		LogCertOrg:        defaultLogCertOrg,
+		LogCertCN:         defaultLogCertCN,
 	}
 }
 

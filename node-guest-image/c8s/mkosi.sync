@@ -100,13 +100,27 @@ printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
 printf '# Self-label so c8s install --hardware-platform %s finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
-# C8S_DEV=1 builds turn the kubelet debugging handlers back on so `kubectl
-# exec`/`attach`/`logs` work. The base config.yaml pins them off; rke2 passes
-# both flags and the kubelet takes the last one. Rendered only for dev so the
-# locked image has no such drop-in at all.
+# Reference copies of the guard AddOns on the read-only root. RKE2 must be
+# able to write server/manifests (it stages its bundled charts there), so
+# that directory lives on the writable overlay and a root process could
+# shadow a guard. psa-ready.sh compares every live guard object against these
+# copies before cred-release serves; a drifted guard keeps :8443 closed. The
+# profile tree is the single source: this copies, never edits.
+GUARDS_SRC="$SRCDIR/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+GUARDS_DST="$STAGE_DIR/usr/lib/confai/guards"
+for guard in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do
+    install -D -m 0444 "$GUARDS_SRC/$guard.yaml" "$GUARDS_DST/$guard.yaml"
+done
+
+# C8S_DEV=1 builds skip the baked pod-exec-policy AddOn so `kubectl exec`/
+# `attach`/`port-forward` work for debugging: RKE2 ignores a server/manifests
+# AddOn whose name has a `.skip` sibling. The locked image keeps the policy
+# (the kubelet debugging handlers are on in both builds, for `kubectl logs`).
+# Rendered only for dev so the locked image has no such marker at all.
 if [ "$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)" = 1 ]; then
-    printf '# DEV build: kubectl exec/attach/logs allowed. Never ship.\nkubelet-arg+:\n  - enable-debugging-handlers=true\n' \
-        > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/60-dev-debugging-handlers.yaml"
+    mkdir -p "$STAGE_DIR/var/lib/rancher/rke2/server/manifests"
+    printf '# DEV build: pod-exec-policy AddOn skipped. Never ship.\n' \
+        > "$STAGE_DIR/var/lib/rancher/rke2/server/manifests/pod-exec-policy.yaml.skip"
 fi
 
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)

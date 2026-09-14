@@ -87,15 +87,57 @@ if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
   exit 1
 fi
 
-# The locked image must keep the kubelet debugging handlers off (no kubectl
-# exec/attach/logs for the kubeconfig holder); only the C8S_DEV=1 build may
-# turn them back on, and only through the sync-rendered drop-in.
-if ! grep -qxF '  - enable-debugging-handlers=false' "$rke2_config"; then
-  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=false"
+# The kubelet debugging handlers stay on (they back kubectl logs, which the
+# log-reader credential exists for); exec/attach/port-forward/ephemeral
+# containers are closed at the apiserver by the baked pod-exec-policy AddOn.
+# Only the C8S_DEV=1 build may skip that AddOn, and only through the
+# sync-rendered .skip marker.
+manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+if ! grep -qxF '  - enable-debugging-handlers=true' "$rke2_config"; then
+  echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=true (kubectl logs)"
   exit 1
 fi
-if grep -rq 'enable-debugging-handlers=true' "$ngi/c8s/mkosi.extra"; then
-  echo "::error::a baked file re-enables the kubelet debugging handlers; only mkosi.sync may, for dev=1"
+if [ ! -f "$manifests/pod-exec-policy.yaml" ]; then
+  echo "::error::$manifests/pod-exec-policy.yaml must close exec/attach/port-forward at the apiserver"
+  exit 1
+fi
+for sub in pods/exec pods/attach pods/portforward pods/ephemeralcontainers; do
+  if ! grep -q "\"$sub\"" "$manifests/pod-exec-policy.yaml"; then
+    echo "::error::$manifests/pod-exec-policy.yaml does not match $sub"
+    exit 1
+  fi
+done
+# cred-release identities are bounded: the operator binding must not name
+# cluster-admin, and the operator-scope policy that keeps every c8s:* group
+# away from the guards must be baked next to it.
+if grep -q 'name: cluster-admin' "$manifests/cred-release-rbac.yaml"; then
+  echo "::error::$manifests/cred-release-rbac.yaml binds the operator to cluster-admin; the baked guards must hold against the credential holder"
+  exit 1
+fi
+if [ ! -f "$manifests/operator-scope-policy.yaml" ] || ! grep -q "g.startsWith('c8s:')" "$manifests/operator-scope-policy.yaml"; then
+  echo "::error::$manifests/operator-scope-policy.yaml must deny guard-reaching writes for every c8s:* group"
+  exit 1
+fi
+# Every guard AddOn must have a reference copy staged onto the read-only root
+# by mkosi.sync, and the gate must compare against it.
+for guard in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do
+  if [ ! -f "$manifests/$guard.yaml" ]; then
+    echo "::error::$manifests/$guard.yaml is missing"
+    exit 1
+  fi
+done
+if ! grep -q 'for guard in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do' "$ngi/c8s/mkosi.sync" \
+   || ! grep -q 'usr/lib/confai/guards' "$ngi/c8s/mkosi.sync"; then
+  echo "::error::$ngi/c8s/mkosi.sync must stage every guard AddOn under /usr/lib/confai/guards"
+  exit 1
+fi
+if ! grep -q 'GUARDS_DIR=\${GUARDS_DIR:-/usr/lib/confai/guards}' "$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh" \
+   || ! grep -q 'replace --dry-run=server -f "\$file"' "$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"; then
+  echo "::error::psa-ready.sh must compare the live guards against /usr/lib/confai/guards"
+  exit 1
+fi
+if find "$ngi/c8s/mkosi.extra" -name '*.skip' | grep -q .; then
+  echo "::error::a baked .skip marker disables an RKE2 AddOn; only mkosi.sync may render one, for dev=1"
   exit 1
 fi
 if ! grep -q -- '--sync-input "dev=\${C8S_DEV:-0}"' "$ngi/build" \

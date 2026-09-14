@@ -21,12 +21,51 @@ const maxBodyBytes = 1 << 16 // 64 KiB
 // exact shapes; the server package owns the protocol.
 const ReleasePath = "/release-credential"
 
+// Roles the operator may request. The operator key authorizes every release,
+// so the role is a choice of how much of the operator's own authority the
+// issued cert carries, not a second gate: RoleOperator manages tenant
+// workloads cluster-wide (the node image binds it to a bounded role that
+// cannot reach the baked guards, never cluster-admin), RoleLogReader reads
+// pods and their logs and nothing else. Each maps to a
+// distinct cert Subject (group + user) the cluster's RBAC binds.
+const (
+	RoleOperator  = "operator"
+	RoleLogReader = "log-reader"
+)
+
 // ReleaseRequest is the POST ReleasePath body: a PEM CERTIFICATE REQUEST the
-// operator generated locally. The operator authorizes the request with an
-// operatorauth Bearer token whose pbh binds this exact body, so the CSR
-// cannot be swapped in transit.
+// operator generated locally plus the role the cert should carry (empty means
+// RoleOperator, the pre-role wire format). The operator authorizes the request
+// with an operatorauth Bearer token whose pbh binds this exact body, so
+// neither the CSR nor the role can be swapped in transit.
 type ReleaseRequest struct {
 	CSRPEM string `json:"csr"`
+	Role   string `json:"role,omitempty"`
+}
+
+// Identity is the Subject and lifetime cred-release stamps on a cert for one
+// role. Org becomes the Kubernetes group, CN the user.
+type Identity struct {
+	Org string
+	CN  string
+	TTL time.Duration
+}
+
+// Roles maps each requestable role to its Identity.
+type Roles struct {
+	Operator  Identity
+	LogReader Identity
+}
+
+// lookup resolves a wire role name; "" is RoleOperator for compatibility.
+func (r Roles) lookup(name string) (Identity, bool) {
+	switch name {
+	case "", RoleOperator:
+		return r.Operator, true
+	case RoleLogReader:
+		return r.LogReader, true
+	}
+	return Identity{}, false
 }
 
 // ReleaseResponse returns the signed client cert and the cluster CA so the
@@ -43,17 +82,20 @@ type ReleaseResponse struct {
 type Handler struct {
 	verifier operatorauth.Verifier
 	ca       *clusterCA
-	certTTL  time.Duration
-	certOrg  string // Kubernetes group (O) for the issued cert
-	certCN   string // Kubernetes user (CN)
+	roles    Roles
 	now      func() time.Time
 }
 
-// NewHandler builds the release handler from the measured operator pubkey (PEM)
-// and the loaded cluster CA. The pubkey MUST already have been verified against
-// the launch binding by LoadMeasuredOperatorKey — NewHandler trusts it as
-// authorized.
-func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.Duration) (*Handler, error) {
+// NewHandler builds the release handler from the measured operator pubkey (PEM),
+// the loaded cluster CA and the per-role identities. The pubkey MUST already
+// have been verified against the launch binding by LoadMeasuredOperatorKey —
+// NewHandler trusts it as authorized.
+func NewHandler(operatorPubPEM []byte, ca *clusterCA, roles Roles) (*Handler, error) {
+	for name, id := range map[string]Identity{RoleOperator: roles.Operator, RoleLogReader: roles.LogReader} {
+		if id.Org == "" || id.CN == "" || id.TTL <= 0 {
+			return nil, fmt.Errorf("role %s: org, cn and a positive ttl are required", name)
+		}
+	}
 	keys, err := operatorauth.ParsePublicKeysPEM(operatorPubPEM)
 	if err != nil {
 		return nil, fmt.Errorf("operator pubkey (must be ECDSA PKIX PEM): %w", err)
@@ -66,9 +108,7 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 		// window meaningfully.
 		verifier: operatorauth.Verifier{Keys: keys, ClockSkew: 60 * time.Second},
 		ca:       ca,
-		certTTL:  ttl,
-		certOrg:  org,
-		certCN:   cn,
+		roles:    roles,
 		now:      time.Now,
 	}, nil
 }
@@ -103,6 +143,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The role is a closed set: anything else is a client fault, never a
+	// fallback to the operator identity.
+	id, ok := h.roles.lookup(req.Role)
+	if !ok {
+		http.Error(w, fmt.Sprintf("bad request: unknown role %q (want %s or %s)", req.Role, RoleOperator, RoleLogReader), http.StatusBadRequest)
+		return
+	}
 	csr, err := parseCSR([]byte(req.CSRPEM))
 	if err != nil {
 		http.Error(w, "bad CSR: "+err.Error(), http.StatusBadRequest)
@@ -111,9 +158,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	certPEM, err := h.ca.signOperatorCert(signParams{
 		csr: csr,
-		org: h.certOrg,
-		cn:  h.certCN,
-		ttl: h.certTTL,
+		org: id.Org,
+		cn:  id.CN,
+		ttl: id.TTL,
 	}, h.now())
 	if err != nil {
 		http.Error(w, "sign: "+err.Error(), http.StatusInternalServerError)

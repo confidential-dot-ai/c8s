@@ -623,7 +623,8 @@ Caveats the output surfaces:
   TEE with this measurement" but not "freshly now" (`fresh: false`).
 ### Trust gate: `c8s get-kubeconfig`
 
-`c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
+`c8s get-kubeconfig` obtains an operator kubeconfig (or, with `--role
+log-reader`, a logs-only one) from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
 and it enforces the identical policy twice — on the initial attestation gate
 and again on the RA-TLS credential-release connection:
@@ -651,10 +652,46 @@ and again on the RA-TLS credential-release connection:
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
 node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
-that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC.
+that group to the baked `c8s-node-operator` ClusterRole through ordinary
+RBAC. That role is deliberately not `cluster-admin`: the operator manages
+tenant workloads, namespaces, namespaced RBAC, ConfidentialWorkloads and
+network policy cluster-wide, and reads everything else, but holds no
+wildcard and nothing that reaches the guards or the host. See "Bounded
+operator" below.
+
+`--role log-reader` asks cred-release for `CN=log-reader, O=c8s:log-readers`
+instead, with a 24-hour default TTL. The baked `log-reader-rbac` AddOn binds
+that group to the `c8s-log-reader` ClusterRole: get/list/watch on pods and
+`pods/log`, namespaces and events, and nothing else (no ConfigMaps or
+Secrets, no exec). The role travels in the token-bound request body, so the
+same operator key authorizes both and neither the CSR nor the role can be
+swapped in transit; an unknown role is refused, never downgraded. Use it to
+hand `kubectl logs` access to someone who should not hold the operator role:
+
+```bash
+c8s get-kubeconfig --node "$GUEST_IP" --operator-key operator.key \
+  --image-manifest image-manifest.json --role log-reader --out logs.kubeconfig
+```
+
+The holder cannot renew the file; only the operator key can release another.
+`kubectl exec`, `attach`, `port-forward` and ephemeral containers are denied
+in admission for every credential by the baked `confos-pod-exec` policy
+(the kubelet's debugging handlers stay on for logs and have no logs-only
+switch).
+
 RKE2 reconciles AddOns asynchronously, so `cred-release.service` keeps its
-listener closed until `psa-ready.sh` sees that binding plus the baked
-`confos-psa-level` policy and binding. The gate then uses a temporary,
+listener closed until `psa-ready.sh` sees both bindings plus the baked
+`confos-psa-level`, `confos-operator-scope` and `confos-pod-exec` policies
+and bindings, and proves the operator-scope deny path with a server-side
+dry-run as a synthetic principal carrying the operator group. The gate also
+compares every live guard object against a reference copy of its manifest
+that mkosi.sync stages under `/usr/lib/confai/guards` on the read-only
+verity root: `server/manifests` sits on the writable scratch overlay
+because RKE2 stages its bundled charts there, so a shadowed or edited AddOn
+is caught by the comparison and keeps the listener closed. Root inside the
+guest can still edit live objects after the gate has passed; what it cannot
+do is change the reference the gate checks against without changing the
+image measurement. The gate then uses a temporary,
 namespace-create-only synthetic principal for two server-side dry-runs: a
 Restricted namespace must be admitted and a privileged namespace must be
 denied by that exact policy and validation. A released credential is therefore
@@ -666,13 +703,41 @@ is only meaningful where such a binding exists: on a cluster that is not the
 c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
 for a group that cluster already authorizes.
 
-Do not read the binding as a privilege boundary. In this node cluster
-`cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
-PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
-`kubectl` away. RBAC is used for revocability and policy, not containment; the
-credential's blast radius is bounded by who can obtain it (the attestation gate
-above), by the one-hour TTL, and by the verity root and per-boot ephemeral
-writable state of the guest.
+#### Bounded operator
+
+The guards (`confos-psa-level`, `confos-pod-exec`, `confos-operator-scope`,
+the two RBAC bindings) exist to hold against the credential holder, so no
+released credential may be able to disable them. Two independent layers
+enforce that:
+
+- **RBAC.** `c8s-node-operator` is an enumerated allowlist with no `*` in any
+  group, resource or verb. It grants no `bind`, `escalate` or `impersonate`,
+  no cluster-scoped RBAC writes, no admission-policy or webhook writes, no
+  `nodes/proxy`, `pods/proxy` or `services/proxy` (the kubelet-proxy
+  subresources reach the kubelet's exec endpoint without a `pods/exec`
+  admission check), no exec, attach, port-forward or ephemeral containers,
+  no `serviceaccounts/token`, no `podsecurityexemptions` grant, no
+  PersistentVolume, StorageClass, HelmChart, Node, APIService or CSR-approval
+  writes. Namespaced Roles and RoleBindings are allowed, and the apiserver's
+  escalation check keeps them within the operator's own permissions.
+- **Admission.** `confos-operator-scope` re-checks the same exclusions for
+  every principal in a `c8s:` group, whatever RBAC says: no write at all in
+  the PodSecurity-exempt namespaces (`kube-system`, `local-path-storage`),
+  where a pod, an edited DaemonSet, a HelmChart or a service-account token
+  secret is root on the node; and none of the cluster-scoped resources
+  listed above. It short-circuits for every other principal, so system
+  components and the in-guest `rke2.yaml` are unaffected.
+
+The role therefore cannot lower a namespace below restricted, cannot exec,
+cannot write where PodSecurity does not apply, cannot mount the host through
+a PersistentVolume or a `nodePath` StorageClass, and cannot edit or delete
+any guard or binding. A credential leaked or over-shared is bounded by the
+same rules. Root-equivalent access to the guest exists only through the
+in-guest `rke2.yaml`, which never leaves the node.
+
+Every other bound still applies: who can obtain the credential (the
+attestation gate above), the TTL, and the verity root and per-boot
+ephemeral writable state of the guest.
 
 Revocation is a launch-time decision. Deleting or editing the live
 ClusterRoleBinding cuts access immediately, but only until the next boot: the
