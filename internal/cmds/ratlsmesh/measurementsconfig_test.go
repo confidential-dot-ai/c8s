@@ -42,12 +42,12 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 			`{"name":"b","mrtd":"00`+meshDigestB+`","rtmr":[null,"`+meshReg1+`","`+meshReg2+`"]}`))
 
 	c := &proxyConfig{measurementsConfig: path}
-	set, err := resolveMeasurementsConfig(c)
+	set, cdsSet, err := resolveMeasurementsConfig(c)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(set.Images) != 2 {
-		t.Fatalf("got %d entries, want 2", len(set.Images))
+	if len(set.Images) != 2 || len(cdsSet.Images) != 2 {
+		t.Fatalf("got %d peer and %d cds images, want 2 each", len(set.Images), len(cdsSet.Images))
 	}
 	if c.measurements == "" || c.cdsMeasurements == "" {
 		t.Fatalf("a pin field was left empty: peers=%q cds=%q", c.measurements, c.cdsMeasurements)
@@ -79,7 +79,7 @@ func TestResolveDropsDivergentRTMRs(t *testing.T) {
 			`{"name":"b","mrtd":"00`+meshDigestB+`","rtmr":[null,"`+meshReg2+`"]}`))
 
 	c := &proxyConfig{measurementsConfig: path}
-	set, err := resolveMeasurementsConfig(c)
+	set, _, err := resolveMeasurementsConfig(c)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestResolveRejectsMixedFlags(t *testing.T) {
 		{"with --cds-rtmrs", proxyConfig{measurementsConfig: path, cdsRTMRs: "1=" + meshReg1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := resolveMeasurementsConfig(&tc.cfg)
+			_, _, err := resolveMeasurementsConfig(&tc.cfg)
 			if err == nil {
 				t.Fatal("accepted a mixed configuration")
 			}
@@ -122,7 +122,7 @@ func TestResolveRejectsMixedFlags(t *testing.T) {
 
 func TestResolveFailsClosed(t *testing.T) {
 	c := &proxyConfig{measurementsConfig: filepath.Join(t.TempDir(), "absent.json")}
-	if _, err := resolveMeasurementsConfig(c); err == nil {
+	if _, _, err := resolveMeasurementsConfig(c); err == nil {
 		t.Fatal("a missing config started unpinned")
 	}
 	if c.measurements != "" || c.cdsMeasurements != "" {
@@ -153,5 +153,73 @@ func TestCheckTEEMatchesPlatform(t *testing.T) {
 	}
 	if err := checkTEEMatchesPlatform(refvalues.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
 		t.Errorf("an unset config reported a mismatch: %v", err)
+	}
+}
+
+// A second file scopes the CDS dial to its own entries while the peer set
+// keeps every image.
+func TestResolveScopesCDSWithSecondFile(t *testing.T) {
+	peerPath := writeMeshConfig(t, snpDoc(
+		`{"name":"leader","measurement":"00`+meshDigestA+`"},`+
+			`{"name":"follower","measurement":"00`+meshDigestB+`"}`))
+	cdsPath := writeMeshConfig(t, snpDoc(`{"name":"leader","measurement":"00`+meshDigestA+`"}`))
+
+	c := &proxyConfig{measurementsConfig: peerPath, cdsMeasurementsConfig: cdsPath}
+	peer, cds, err := resolveMeasurementsConfig(c)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(peer.Images) != 2 || len(cds.Images) != 1 {
+		t.Fatalf("peer=%d cds=%d images, want 2/1", len(peer.Images), len(cds.Images))
+	}
+	if strings.Count(c.measurements, ",") != 1 {
+		t.Errorf("--measurements = %q, want both digests", c.measurements)
+	}
+	if strings.Contains(c.cdsMeasurements, ",") || !strings.HasPrefix(c.cdsMeasurements, "00"+meshDigestA[:8]) {
+		t.Errorf("--cds-measurements = %q, want the leader digest only", c.cdsMeasurements)
+	}
+}
+
+// The CDS file alone scopes the dial while flat peer flags stay usable.
+func TestResolveCDSFileAloneKeepsFlatPeerFlags(t *testing.T) {
+	cdsPath := writeMeshConfig(t, snpDoc(`{"name":"leader","measurement":"00`+meshDigestA+`"}`))
+
+	c := &proxyConfig{cdsMeasurementsConfig: cdsPath, measurements: "00" + meshDigestB}
+	peer, cds, err := resolveMeasurementsConfig(c)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !peer.Empty() || len(cds.Images) != 1 {
+		t.Fatalf("peer empty=%v cds=%d, want true/1", peer.Empty(), len(cds.Images))
+	}
+	if c.measurements != "00"+meshDigestB {
+		t.Errorf("flat --measurements changed: %q", c.measurements)
+	}
+}
+
+func TestResolveRejectsCDSFileWithFlatCDSFlags(t *testing.T) {
+	cdsPath := writeMeshConfig(t, snpDoc(`{"name":"leader","measurement":"00`+meshDigestA+`"}`))
+	for _, tc := range []struct {
+		name string
+		cfg  proxyConfig
+	}{
+		{"with --cds-measurements", proxyConfig{cdsMeasurementsConfig: cdsPath, cdsMeasurements: "00" + meshDigestB}},
+		{"with --cds-rtmrs", proxyConfig{cdsMeasurementsConfig: cdsPath, cdsRTMRs: "1=" + meshReg1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := resolveMeasurementsConfig(&tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "--cds-measurements-config cannot be combined") {
+				t.Fatalf("err = %v, want cds-file conflict", err)
+			}
+		})
+	}
+}
+
+func TestResolveRejectsTEEDisagreementBetweenFiles(t *testing.T) {
+	peerPath := writeMeshConfig(t, snpDoc(`{"name":"a","measurement":"00`+meshDigestA+`"}`))
+	cdsPath := writeMeshConfig(t, tdxDoc(`{"name":"a","mrtd":"00`+meshDigestA+`"}`))
+	c := &proxyConfig{measurementsConfig: peerPath, cdsMeasurementsConfig: cdsPath}
+	if _, _, err := resolveMeasurementsConfig(c); err == nil || !strings.Contains(err.Error(), "tee") {
+		t.Fatalf("err = %v, want TEE disagreement", err)
 	}
 }

@@ -186,6 +186,22 @@ func TestRunProxyConfigErrors(t *testing.T) {
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = valid48 + ",zz"
 		}, "invalid measurement hex"},
+		{"invalid peer init-data", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.initData = "zz"
+		}, "--init-data"},
+		{"init-data of the wrong width", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.initData = strings.Repeat("aa", 31)
+		}, "--init-data"},
+		{"invalid cds init-data", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.platform = "sev-snp"
+			c.cdsInitData = strings.Repeat("aa", 64)
+		}, "--cds-init-data"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -391,5 +407,35 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("runProxy did not shut down after cancel")
+	}
+}
+
+// --platform=auto must reach the TLS configs as the probed concrete platform:
+// a TDX config against an auto-resolved SNP node fails the TEE match, which
+// only runs after resolution.
+func TestRunProxyResolvesAutoPlatform(t *testing.T) {
+	orig := teeDeviceStat
+	teeDeviceStat = func(path string) (os.FileInfo, error) {
+		if path == "/dev/sev-guest" {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { teeDeviceStat = orig })
+	stubKubeClientset(t, k8sfake.NewClientset(), nil)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "m.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"schema_version":"1","tee":"tdx","measurements":[{"name":"a","mrtd":"`+strings.Repeat("ab", 48)+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultTestProxyConfig(t)
+	cfg.attestationApiURL = "http://127.0.0.1:1"
+	cfg.nodeIP = "127.0.0.1"
+	cfg.measurementsConfig = cfgPath
+
+	err := runProxy(t.Context(), cfg)
+	if err == nil || !strings.Contains(err.Error(), `this node attests as "sev-snp"`) {
+		t.Fatalf("err = %v, want TEE mismatch proving auto resolved to sev-snp", err)
 	}
 }

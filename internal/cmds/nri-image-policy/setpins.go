@@ -16,6 +16,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // setCDSPinsVerb selects the pin patcher instead of the plugin daemon.
@@ -40,6 +41,7 @@ func runSetCDSPins(stdout io.Writer, args []string) error {
 	path := fs.String("config", defaultConfigPath, "plugin config to patch in place")
 	rawMeasurements := fs.String("cds-measurements", "", "comma-separated SHA-384 hex CDS launch measurements; empty clears the pins")
 	rawRTMRs := fs.String("cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex>; empty clears the pins")
+	rawInitData := fs.String("cds-init-data", "", "hex launch-time init-data (SNP HOST_DATA / TDX MRCONFIGID) the CDS node must carry; empty clears the pin")
 	if err := cmdsutil.ParseFlags(fs, args); err != nil {
 		return err
 	}
@@ -52,6 +54,11 @@ func runSetCDSPins(stdout io.Writer, args []string) error {
 	if err != nil {
 		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
+	initData, err := ratls.ParseHexInitData(*rawInitData)
+	if err != nil {
+		return fmt.Errorf("--cds-init-data: %w", err)
+	}
+	wantInitData := hex.EncodeToString(initData)
 	wantMeasurements := make([]string, 0, len(measurements))
 	for _, m := range measurements {
 		wantMeasurements = append(wantMeasurements, hex.EncodeToString(m))
@@ -73,12 +80,13 @@ func runSetCDSPins(stdout io.Writer, args []string) error {
 		return fmt.Errorf("%s: %w", *path, err)
 	}
 	if slices.Equal(normalizeHex(cfg.Allowlist.Pull.CDSMeasurements), wantMeasurements) &&
-		slices.Equal(normalizeHex(cfg.Allowlist.Pull.CDSRTMRs), wantRTMRs) {
+		slices.Equal(normalizeHex(cfg.Allowlist.Pull.CDSRTMRs), wantRTMRs) &&
+		strings.ToLower(strings.TrimSpace(cfg.Allowlist.Pull.CDSInitData)) == wantInitData {
 		fmt.Fprintln(stdout, pinsUnchanged)
 		return nil
 	}
 
-	patched, err := patchCDSPins(data, wantMeasurements, wantRTMRs)
+	patched, err := patchCDSPins(data, wantMeasurements, wantRTMRs, wantInitData)
 	if err != nil {
 		return fmt.Errorf("%s: %w", *path, err)
 	}
@@ -106,10 +114,10 @@ func normalizeHex(vals []string) []string {
 	return out
 }
 
-// patchCDSPins replaces allowlist.pull.cds_measurements and cds_rtmrs in a
-// config document, editing the parsed node tree so every other key, and the
-// comments the node image ships, survive the round-trip.
-func patchCDSPins(data []byte, measurements, rtmrs []string) ([]byte, error) {
+// patchCDSPins replaces allowlist.pull.cds_measurements, cds_rtmrs and
+// cds_init_data in a config document, editing the parsed node tree so every
+// other key, and the comments the node image ships, survive the round-trip.
+func patchCDSPins(data []byte, measurements, rtmrs []string, initData string) ([]byte, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -123,6 +131,7 @@ func patchCDSPins(data []byte, measurements, rtmrs []string) ([]byte, error) {
 	}
 	setMappingValue(pull, "cds_measurements", stringSeq(measurements))
 	setMappingValue(pull, "cds_rtmrs", stringSeq(rtmrs))
+	setMappingValue(pull, "cds_init_data", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: initData, Style: yaml.DoubleQuotedStyle})
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)

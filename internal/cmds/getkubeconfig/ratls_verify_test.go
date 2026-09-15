@@ -23,6 +23,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
+	"github.com/confidential-dot-ai/c8s/internal/launchdata"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -64,7 +65,7 @@ func snpManifest() string {
 // key, with no workload images (bare-seed RTMR[3]).
 func testPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, tdxManifest()), operatorPubPEM, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,7 @@ func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
 	mrtd := exp.identity.LaunchDigests()[0].Digest
 	rtmrs := exp.identity.RTMRs()
 	rtmr1, rtmr2 := rtmrs[1], rtmrs[2]
-	return &teetypes.VerificationResult{
+	res := &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformTDX,
 		ReportDataMatch: teetypes.Ptr(true),
@@ -183,6 +184,11 @@ func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
 			},
 		},
 	}
+	if exp.launchData != nil {
+		mrconfigID := launchdata.LaunchDataMRConfigID(exp.launchData)
+		res.Claims.InitData = teetypes.HexBytes(mrconfigID[:])
+	}
+	return res
 }
 
 func TestVerifyEvidenceRejectsPlatformMismatch(t *testing.T) {
@@ -380,7 +386,7 @@ func TestVerifyServerCertAuthenticatesBody(t *testing.T) {
 // snpTestPolicy builds an SNP gate from a two-variant manifest.
 func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	t.Helper()
-	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil)
+	exp, err := policyFor(writeTestManifest(t, snpManifest()), operatorPubPEM, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +477,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 // usage error rather than a silently-ignored flag.
 func TestSNPPolicyRejectsWorkloadImages(t *testing.T) {
 	p := writeTestManifest(t, snpManifest())
-	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)})
+	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)}, "")
 	if err == nil || !strings.Contains(err.Error(), "requires a TDX node") {
 		t.Fatalf("want workload-image rejection, got %v", err)
 	}
@@ -650,16 +656,27 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 	}
 }
 
-// expectedRTMR3 is the register a node satisfying exp must report: the
-// operator-key seed extended by exp's workload chain. VerifyBinding derives
-// the same value inside the gate; here it builds the claims to feed it.
+// expectedRTMR3 is the register a node satisfying exp must report: exp's
+// launch seed extended by its workload chain. The gate derives the same value;
+// here it builds the claims to feed it. Under --launch-data nothing seeds the
+// register — the binding is MRCONFIGID — so the chain starts from Zero.
 func expectedRTMR3(exp measuredPolicy) []byte {
-	reg := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(exp.operatorPubPEM), exp.workloadDigests)
+	seed := runtimemeasure.Seed(exp.operatorPubPEM)
+	if exp.launchData != nil {
+		seed = runtimemeasure.Zero
+	}
+	reg := runtimemeasure.FromDigestsSeeded(seed, exp.workloadDigests)
 	return reg[:]
 }
 
-// expectedHostData is the HOSTDATA a node satisfying exp must report.
+// expectedHostData is the HOSTDATA a node satisfying exp must report: the
+// launchdata commitment when one is pinned, the bare operator-key binding
+// otherwise.
 func expectedHostData(exp measuredPolicy) []byte {
-	hd := runtimemeasure.HostData(exp.operatorPubPEM)
+	anchor := exp.operatorPubPEM
+	if exp.launchData != nil {
+		anchor = exp.launchData
+	}
+	hd := runtimemeasure.HostData(anchor)
 	return hd[:]
 }
