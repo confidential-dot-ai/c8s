@@ -12,9 +12,14 @@ import (
 // fail CI rather than leave the measured image in a systemd restart loop.
 func TestNodeServiceArgumentsMatchCommands(t *testing.T) {
 	doc := &launchconfig.Document{Role: launchconfig.Server, Image: launchconfig.Image{Platform: "tdx"}, Server: launchconfig.ServerConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
-	for _, name := range []string{"cds", "mesh", "mesh-sync", "get-cert", "cds-attest", "allowlist-proxy", "attest-proxy"} {
+	for _, name := range []string{"cds", "mesh", "mesh-sync", "get-cert", "cds-attest", "allowlist-proxy", "attest-proxy", "join-release", "join"} {
 		t.Run(name, func(t *testing.T) {
-			args, err := nodeservices.Arguments(name, doc, "192.0.2.10")
+			roleDoc := *doc
+			roleDoc.AgentOperatorPublicKeys = []string{"authorized agent"}
+			if name == "join" {
+				roleDoc.Role = launchconfig.Agent
+			}
+			args, err := nodeservices.Arguments(name, &roleDoc, "192.0.2.10")
 			if err != nil {
 				t.Fatal(err)
 			}

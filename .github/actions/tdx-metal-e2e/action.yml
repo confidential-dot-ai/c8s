@@ -168,7 +168,7 @@ runs:
         v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
         [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
         case "$k" in
-          launchConfigVersion) [[ "$v" == c8s-launch/v1 ]] ;;
+          launchConfigVersion) [[ "$v" == c8s-launch/v2 ]] ;;
           image) [[ "$v" =~ ^ghcr[.]io/[a-zA-Z0-9_./:@-]+$ ]] ;;
           rootPvc) [[ "$v" =~ ^[a-z0-9][a-z0-9.-]*$ ]] ;;
           mrtd|rtmr1|rtmr2) [[ "$v" =~ ^[0-9a-f]{96}$ ]] ;;

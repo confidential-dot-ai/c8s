@@ -52,9 +52,11 @@ func clearOutputs(cfg Config) error {
 	// Clear authorization verdicts first, even when removing another stale
 	// output fails. Collect errors so a blocked first marker never prevents
 	// attempting to remove the other.
+	// The locally generated agent token belongs to the running cluster. Keep
+	// it across retries, including failed verification; role gates still close.
 	var errs []error
-	paths := []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, rke2FragmentPath, runtimeManifestPath}
-	for _, name := range []string{"peers.json", "cds.json", "operator-pubkey", "config.json", "workloads.json"} {
+	paths := []string{serverMarker, agentMarker, serverTokenPath, rke2FragmentPath, runtimeManifestPath}
+	for _, name := range []string{"peers.json", "cds.json", "agents.json", "operator-pubkey", "config.json", "workloads.json"} {
 		paths = append(paths, Dir+"/"+name)
 	}
 	for _, path := range paths {
@@ -108,7 +110,6 @@ func stageVerified(cfg Config, v *Verified) error {
 		{Dir + "/cds.json", cds},
 		{Dir + "/operator-pubkey", v.operatorPub},
 		{Dir + "/config.json", append(encoded, '\n')},
-		{agentTokenPath, []byte(doc.RKE2.AgentToken)},
 		{rke2FragmentPath, fragment},
 	}
 	if doc.Workloads != "" {
@@ -120,15 +121,24 @@ func stageVerified(cfg Config, v *Verified) error {
 		if err != nil {
 			return err
 		}
-		outputs = append(outputs,
-			outputFile{serverTokenPath, []byte(doc.RKE2.ServerToken)},
-			outputFile{runtimeManifestPath, manifest},
-		)
+		if err := initializeAgentToken(cfg.path(agentTokenPath)); err != nil {
+			return err
+		}
+		outputs = append(outputs, outputFile{runtimeManifestPath, manifest})
+		if len(v.pins.Images) > 1 {
+			agents, err := refvalues.Format(refvalues.ReferenceValues{
+				Family: v.pins.Family, Images: v.pins.Images[1:],
+			})
+			if err != nil {
+				return fmt.Errorf("format agent enrollment policy: %w", err)
+			}
+			outputs = append(outputs, outputFile{Dir + "/agents.json", agents})
+		}
 		marker = serverMarker
 	}
 	for _, out := range outputs {
 		path := cfg.path(out.path)
-		// /run/confos/launch contains a copy of the signed join credentials.
+		// /run/confos/launch contains the authenticated public boot policy.
 		// Existing parent directories retain their established permissions.
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("create output parent: %w", err)
@@ -142,7 +152,7 @@ func stageVerified(cfg Config, v *Verified) error {
 }
 
 type roleFragment struct {
-	TokenFile      string `yaml:"token-file"`
+	TokenFile      string `yaml:"token-file,omitempty"`
 	AgentTokenFile string `yaml:"agent-token-file,omitempty"`
 	Server         string `yaml:"server,omitempty"`
 	NodeName       string `yaml:"node-name"`
@@ -153,7 +163,8 @@ type roleFragment struct {
 func rke2Fragment(doc *Document) roleFragment {
 	out := roleFragment{TokenFile: agentTokenPath, NodeName: doc.Node.Name, NodeIP: doc.Node.IP, NodeExternalIP: doc.Node.ExternalIP}
 	if doc.Role == Server {
-		out.TokenFile = serverTokenPath
+		// Omit token-file so RKE2 generates its privileged token inside the guest.
+		out.TokenFile = ""
 		out.AgentTokenFile = agentTokenPath
 	} else {
 		out.Server = "https://" + doc.Server.Address + ":9345"

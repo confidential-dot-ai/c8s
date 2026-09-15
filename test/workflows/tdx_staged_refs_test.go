@@ -48,13 +48,14 @@ esac
 	for _, tc := range []struct {
 		name, imageTag, override, missing, version string
 	}{
-		{"tag present", "rke2-tdx-manifest", "", "", "c8s-launch/v1"},
-		{"tag absent", "", "", "", "c8s-launch/v1"},
-		{"tag present with override", "rke2-tdx-manifest", "caller-ref", "", "c8s-launch/v1"},
-		{"tag absent with override", "", "caller-ref", "", "c8s-launch/v1"},
-		{"required measurement missing", "rke2-tdx-manifest", "caller-ref", "mrtd", "c8s-launch/v1"},
+		{"tag present", "rke2-tdx-manifest", "", "", "c8s-launch/v2"},
+		{"tag absent", "", "", "", "c8s-launch/v2"},
+		{"tag present with override", "rke2-tdx-manifest", "caller-ref", "", "c8s-launch/v2"},
+		{"tag absent with override", "", "caller-ref", "", "c8s-launch/v2"},
+		{"required measurement missing", "rke2-tdx-manifest", "caller-ref", "mrtd", "c8s-launch/v2"},
 		{"launch version missing", "", "", "launchConfigVersion", ""},
 		{"legacy image", "", "", "", "legacy"},
+		{"plaintext-token image", "", "", "", "c8s-launch/v1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "environment")
@@ -72,7 +73,7 @@ esac
 				}
 				return
 			}
-			if tc.version != "c8s-launch/v1" {
+			if tc.version != "c8s-launch/v2" {
 				if err == nil || !strings.Contains(string(log), "invalid 'launchConfigVersion'") {
 					t.Fatalf("legacy image was not rejected: err=%v log=%s", err, log)
 				}
@@ -97,7 +98,7 @@ esac
 				"image": "ghcr.io/confidential-dot-ai/node-guest-base:staged", "rootPvc": "staged-root",
 				"mrtd": strings.Repeat("0", 96), "rtmr1": strings.Repeat("0", 95) + "1",
 				"rtmr2": strings.Repeat("0", 95) + "2", "c8sRef": "abcdef0",
-				"launchConfigVersion": "c8s-launch/v1",
+				"launchConfigVersion": "c8s-launch/v2",
 			}
 			if tc.imageTag != "" {
 				want["imageTag"] = tc.imageTag

@@ -359,7 +359,7 @@ if grep -qE 'joindata|defaulting to server|set_legacy_server_role' "$role_sh"; t
   exit 1
 fi
 
-for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy; do
+for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy join-release; do
   mapfile -t service_files < <(grep -lE "^ExecStart=.*node-services run $command$" "$units"/*.service)
   if [ "${#service_files[@]}" != 1 ]; then
     echo "::error::expected one baked systemd unit for node-services run $command"
@@ -384,6 +384,38 @@ for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-pro
       fi ;;
   esac
 done
+# Enrollment must not depend on the mesh or kubelet, which need RKE2 first.
+join_unit="$units/c8s-join.service"
+release_unit="$units/c8s-join-release.service"
+require_launch_dependency "$join_unit"
+for setting in 'ConditionPathExists=/run/confos/role-agent' 'Wants=rke2-agent.service' 'Type=oneshot' \
+               'RemainAfterExit=yes' 'StartLimitIntervalSec=0' \
+               'Restart=on-failure' 'RestartSec=5' \
+               'ExecStart=/usr/local/bin/c8s node-services run join'; do
+  grep -qxF "$setting" "$join_unit" || { echo "::error::$join_unit lost enrollment gate: $setting"; exit 1; }
+done
+if ! grep -qxF 'enable c8s-join.service' "$preset" \
+   || ! grep -qE '^Requires=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf" \
+   || ! grep -qE '^After=.*c8s-join[.]service' "$units/rke2-agent.service.d/20-role.conf"; then
+  echo "::error::RKE2 agent must require and start after the enabled enrollment gate"
+  exit 1
+fi
+for enrollment_unit in "$join_unit" "$release_unit"; do
+  if ! grep -qE '^Requires=.*attestation-api[.]service' "$enrollment_unit" \
+     || ! grep -qE '^After=.*attestation-api[.]service' "$enrollment_unit"; then
+    echo "::error::$enrollment_unit must require and start after local attestation"
+    exit 1
+  fi
+  if grep -qE '^(After|Requires|Wants)=.*(ratls-mesh|cds[.]|kubelet)' "$enrollment_unit"; then
+    echo "::error::$enrollment_unit must be independent of the mesh, CDS and kubelet"
+    exit 1
+  fi
+done
+if ! grep -qxF 'ConditionPathExists=/run/confos/launch/agents.json' "$release_unit" \
+   || ! grep -qE '^After=.*rke2-server[.]service' "$release_unit"; then
+  echo "::error::join release must wait for the server and require authorized agents"
+  exit 1
+fi
 mapfile -t nginx_files < <(grep -lE '^ExecStart=.*/nginx ' "$units"/*.service)
 if [ "${#nginx_files[@]}" != 1 ]; then
   echo "::error::expected one baked nginx service"

@@ -17,7 +17,6 @@ import (
 	"io"
 	"net/netip"
 	"os"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -32,7 +31,7 @@ import (
 )
 
 const (
-	SchemaVersion            = "c8s-launch/v1"
+	SchemaVersion            = "c8s-launch/v2"
 	DefaultAttestationAPIURL = "http://127.0.0.1:8400"
 	// Dir holds the root-only artifacts Stage writes for the node services.
 	Dir               = "/run/confos/launch"
@@ -51,22 +50,20 @@ const (
 	Agent  Role = "agent"
 )
 
-// Document is the signed launch.yaml wire contract. All secrets are boot
-// inputs; agent documents must never carry the control-plane server token.
+// Document is the public signed launch.yaml wire contract. Join credentials
+// are generated inside the guest and never accepted from launch media.
 type Document struct {
 	SchemaVersion           string       `yaml:"schemaVersion" json:"schemaVersion"`
 	ClusterID               string       `yaml:"clusterID" json:"clusterID"`
 	Role                    Role         `yaml:"role" json:"role"`
 	Image                   Image        `yaml:"image" json:"image"`
 	Node                    Node         `yaml:"node" json:"node"`
-	RKE2                    RKE2         `yaml:"rke2" json:"rke2"`
 	Server                  ServerConfig `yaml:"server" json:"server"`
 	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agentOperatorPublicKeys"`
 	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tlsSAN"`
 	// Workloads is an optional strict c8s.allowlist/v1 JSON document. Keeping
 	// its existing wire schema avoids an independent YAML policy language.
-	Workloads          string `yaml:"workloads,omitempty" json:"workloads,omitempty"`
-	serverTokenPresent bool
+	Workloads string `yaml:"workloads,omitempty" json:"workloads,omitempty"`
 }
 
 // Image pins this boot's complete software identity; RTMR[0] varies by VM
@@ -81,11 +78,6 @@ type Node struct {
 	Name       string `yaml:"name" json:"name"`
 	IP         string `yaml:"ip,omitempty" json:"ip,omitempty"`
 	ExternalIP string `yaml:"externalIP,omitempty" json:"externalIP,omitempty"`
-}
-
-type RKE2 struct {
-	ServerToken string `yaml:"serverToken,omitempty" json:"serverToken,omitempty"`
-	AgentToken  string `yaml:"agentToken" json:"agentToken"`
 }
 
 type ServerConfig struct {
@@ -207,29 +199,10 @@ func Parse(data []byte) (*Document, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode launch configuration: %w", err)
 	}
-	doc.serverTokenPresent = yamlPathPresent(&tree, "rke2", "serverToken")
 	if err := doc.validate(); err != nil {
 		return nil, err
 	}
 	return &doc, nil
-}
-
-func yamlPathPresent(n *yaml.Node, path ...string) bool {
-	if n.Kind == yaml.DocumentNode && len(n.Content) == 1 {
-		return yamlPathPresent(n.Content[0], path...)
-	}
-	if len(path) == 0 {
-		return true
-	}
-	if n.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i < len(n.Content); i += 2 {
-		if n.Content[i].Value == path[0] {
-			return yamlPathPresent(n.Content[i+1], path[1:]...)
-		}
-	}
-	return false
 }
 
 func singleDocument(dec *yaml.Decoder) error {
@@ -272,8 +245,6 @@ func checkYAML(n *yaml.Node, depth int) error {
 	}
 	return nil
 }
-
-var tokenRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (d *Document) validate() error {
 	if d.SchemaVersion != SchemaVersion {
@@ -318,19 +289,6 @@ func (d *Document) validate() error {
 		if err := ValidateIPv4(d.Node.ExternalIP, true); err != nil {
 			return fmt.Errorf("node.externalIP: %w", err)
 		}
-	}
-	if !tokenRE.MatchString(d.RKE2.AgentToken) {
-		return fmt.Errorf("rke2.agentToken must be 64 lowercase hex characters")
-	}
-	if d.Role == Server {
-		if !tokenRE.MatchString(d.RKE2.ServerToken) {
-			return fmt.Errorf("server requires a 64-character lowercase hex rke2.serverToken")
-		}
-		if d.RKE2.ServerToken == d.RKE2.AgentToken {
-			return fmt.Errorf("server and agent tokens must differ")
-		}
-	} else if d.RKE2.ServerToken != "" || d.serverTokenPresent {
-		return fmt.Errorf("agent must not carry rke2.serverToken")
 	}
 	server, err := parseLaunchKey(d.Server.OperatorPublicKey)
 	if err != nil {
