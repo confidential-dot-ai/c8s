@@ -9,12 +9,15 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Keep the start job pending through bounded retries, so dependent RKE2
-# starts when the leader recovers instead of retaining a failed start job.
-ExecStart=/bin/sh -c 'until /usr/local/bin/c8s node-services run join; do sleep 5; done'
+# Retry via systemd's own restart semantics rather than a shell loop: a real
+# failed state stays observable (systemctl is-failed, OnFailure=), and each
+# attempt is a fresh start job rather than a child this unit must reap.
+# StartLimitIntervalSec=0 keeps the restarts unbounded, so dependent RKE2
+# still starts whenever the leader recovers.
+ExecStart=/usr/local/bin/c8s node-services run join
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=infinity
+TimeoutStartSec=300
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict

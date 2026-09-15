@@ -389,8 +389,9 @@ join_unit="$units/c8s-join.service"
 release_unit="$units/c8s-join-release.service"
 require_launch_dependency "$join_unit"
 for setting in 'ConditionPathExists=/run/confos/role-agent' 'Type=oneshot' \
-               'RemainAfterExit=yes' 'TimeoutStartSec=infinity' \
-               "ExecStart=/bin/sh -c 'until /usr/local/bin/c8s node-services run join; do sleep 5; done'"; do
+               'RemainAfterExit=yes' 'StartLimitIntervalSec=0' \
+               'Restart=on-failure' 'RestartSec=5' \
+               'ExecStart=/usr/local/bin/c8s node-services run join'; do
   grep -qxF "$setting" "$join_unit" || { echo "::error::$join_unit lost enrollment gate: $setting"; exit 1; }
 done
 if ! grep -qxF 'enable c8s-join.service' "$preset" \

@@ -211,7 +211,7 @@ for _ in $(seq 1 80); do
     sleep 0.1
 done
 ok "failed enrollment retries automatically" test "$(cat /run/confos/test-join-attempts)" -ge 2
-ok "enrollment keeps start job pending" test "$(systemctl show -p ActiveState --value c8s-join.service)" = activating
+ok "enrollment never satisfies the agent gate" not_active c8s-join.service
 ok "failed enrollment cannot start agent" not_active rke2-agent.service
 ok "agent payload never executed" test ! -e /run/confos/test-agent-started
 ok "no credential was staged" test ! -e /run/confos/rke2-agent-token
@@ -219,7 +219,7 @@ ok "stop cancels pending enrollment" systemctl stop c8s-join.service
 attempts=$(cat /run/confos/test-join-attempts)
 sleep 0.2
 ok "stopped enrollment stays inactive" not_active c8s-join.service
-ok "stop leaves no retry child" test "$(systemctl show -p ControlPID --value c8s-join.service)" = 0
+ok "stop leaves no running process" test "$(systemctl show -p MainPID --value c8s-join.service)" = 0
 ok "stop prevents additional attempts" test "$(cat /run/confos/test-join-attempts)" = "$attempts"
 
 CASE=enrollment-retry

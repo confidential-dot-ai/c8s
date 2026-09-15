@@ -250,8 +250,8 @@ Only the agent credential with its RKE2 CA pin is released, and the follower
 stages it in root-only `/run/confos/rke2-agent-token` before RKE2 may start.
 A leader without authorized followers does not start the release listener.
 
-Enrollment waits indefinitely while the leader is unavailable, using bounded
-attempts with a five-second backoff. Until it succeeds,
+Enrollment waits indefinitely while the leader is unavailable: the unit
+restarts on failure with a five-second backoff. Until it succeeds,
 RKE2 agent startup remains blocked; enrollment does not depend on CDS, the
 mesh, Kubernetes or kubelet. Nodes in different datacenters need follower-to-
 leader TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
