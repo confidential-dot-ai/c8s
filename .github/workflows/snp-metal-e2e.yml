@@ -481,6 +481,13 @@ jobs:
           POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name 2>/dev/null | head -1)
           [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" --all-containers --tail=40 2>&1 | grep -iE 'igvm|host-data|hostData|sev|error' | tail -20
           echo "::endgroup::"
+          # The guest's serial console is read-only here (no autologin), but its
+          # boot log names the unit that did not come up.
+          echo "::group::guest console (systemd units, cred-release, psa-ready, initrd)"
+          [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" -c guest-console-log --tail=400 2>/dev/null \
+            | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+            | grep -iE 'initrd|opkey|HOSTDATA|cred-release|psa-ready|rke2|Failed|failed|error' | tail -40
+          echo "::endgroup::"
           # Guest-side state exists only once the attested kubeconfig was issued.
           [ -s /tmp/guest.kubeconfig ] || exit 0
           export KUBECONFIG=/tmp/guest.kubeconfig
