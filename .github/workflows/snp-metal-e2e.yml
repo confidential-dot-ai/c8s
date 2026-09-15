@@ -77,7 +77,9 @@ env:
   NS: confai-images
   REFS_CM: snp-node-image-refs
   VM: c8s-snp-${{ github.run_id }}-${{ github.run_attempt }}
-  SIDECAR: ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:7450bb136bfc4d9434a7c1eb9e478ab3237e7d9acf5c211e7d080f2008b01ba0
+  # The snp-hostdata build (confidential-metal#137): the dev build the other
+  # cells pin predates the host-data annotation and silently ignores it.
+  SIDECAR: ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:9bb4a027bb1b800b2af01625bf5525f45d6953cd088fb9f7526fb58521e5bf98
 
 jobs:
   e2e:
@@ -470,6 +472,13 @@ jobs:
         if: failure() || cancelled()
         run: |
           set +e
+          echo "::group::host-side VMI and launcher"
+          kubectl -n "$NS" describe vmi "$VM" 2>&1 | tail -30
+          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name 2>/dev/null | head -1)
+          [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" --all-containers --tail=40 2>&1 | grep -iE 'igvm|host-data|hostData|sev|error' | tail -20
+          echo "::endgroup::"
+          # Guest-side state exists only once the attested kubeconfig was issued.
+          [ -s /tmp/guest.kubeconfig ] || exit 0
           export KUBECONFIG=/tmp/guest.kubeconfig
           echo "::group::c8s-system pods and events"
           kubectl -n c8s-system get pods -o wide 2>&1
@@ -482,9 +491,6 @@ jobs:
             kubectl -n c8s-system logs "$p" --all-containers --previous --tail=20 2>&1
             echo "::endgroup::"
           done
-          echo "::group::host-side VMI"
-          kubectl -n "$NS" describe vmi "$VM" 2>&1 | tail -30
-          echo "::endgroup::"
           exit 0
 
       - name: summary
