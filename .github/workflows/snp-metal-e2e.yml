@@ -541,8 +541,16 @@ jobs:
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
           set -euo pipefail
-          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
-          [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
+          # cred-release opens :8443 a little before its release handler can
+          # serve (first RA-TLS quote, client CA); that window answers a POST
+          # with EOF. Retry a bounded number of times and print each failure.
+          ok=""
+          for attempt in 1 2 3 4 5 6; do
+            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
+            echo "get-kubeconfig attempt $attempt failed; retrying in 20s"
+            sleep 20
+          done
+          [ -n "$ok" ] && [ -s /tmp/guest.kubeconfig ] || { echo "::error::no attested kubeconfig after 6 attempts"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
           echo "OK: attested kubeconfig (MEASUREMENT in snp_variants, HOSTDATA = this run's key), identity=$WHO"
