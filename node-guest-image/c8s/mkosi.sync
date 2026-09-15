@@ -100,14 +100,35 @@ printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
 printf '# Self-label so c8s install --hardware-platform %s finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
     > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
 
-# C8S_DEV=1 builds turn the kubelet debugging handlers back on so `kubectl
-# exec`/`attach`/`logs` work. The base config.yaml pins them off; rke2 passes
-# both flags and the kubelet takes the last one. Rendered only for dev so the
-# locked image has no such drop-in at all.
-if [ "$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)" = 1 ]; then
-    printf '# DEV build: kubectl exec/attach/logs allowed. Never ship.\nkubelet-arg+:\n  - enable-debugging-handlers=true\n' \
-        > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/60-dev-debugging-handlers.yaml"
-fi
+# Reference copies of the guard AddOns on the read-only root. RKE2 must be
+# able to write server/manifests (it stages its bundled charts there), so
+# that directory lives on the writable overlay and a root process could
+# shadow a guard. psa-ready.sh waits for every guard staged here and compares
+# the live objects against the copy before cred-release serves; a drifted
+# guard keeps :8443 closed. GUARDS is the single statement of what is a
+# guard (node-guest-image-invariants.sh reads it); the profile tree is the
+# single source of each: this copies, never edits.
+#
+# C8S_DEV=1 builds skip the baked pod-exec-policy AddOn so `kubectl exec`/
+# `attach`/`port-forward` work for debugging: RKE2 ignores a server/manifests
+# AddOn whose name has a `.skip` sibling, and leaving its reference copy out
+# keeps psa-ready.sh from waiting for objects that never appear. The locked
+# image keeps the policy (the kubelet debugging handlers are on in both
+# builds, for `kubectl logs`) and has no such marker at all.
+GUARDS="psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac"
+GUARDS_SRC="$SRCDIR/mkosi.profiles/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+GUARDS_DST="$STAGE_DIR/usr/lib/confai/guards"
+DEV=$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)
+for guard in $GUARDS; do
+    [ -f "$GUARDS_SRC/$guard.yaml" ] || { echo "c8s sync: FATAL guard AddOn $GUARDS_SRC/$guard.yaml missing" >&2; exit 1; }
+    if [ "$DEV" = 1 ] && [ "$guard" = pod-exec-policy ]; then
+        mkdir -p "$STAGE_DIR/var/lib/rancher/rke2/server/manifests"
+        printf '# DEV build: pod-exec-policy AddOn skipped. Never ship.\n' \
+            > "$STAGE_DIR/var/lib/rancher/rke2/server/manifests/$guard.yaml.skip"
+        continue
+    fi
+    install -D -m 0444 "$GUARDS_SRC/$guard.yaml" "$GUARDS_DST/$guard.yaml"
+done
 
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.

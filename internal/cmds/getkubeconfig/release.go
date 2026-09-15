@@ -55,13 +55,13 @@ func (id *clientIdentity) csrPEM() ([]byte, error) {
 // body, POSTs the CSR to the cred-release endpoint, and returns the issued
 // cert + cluster CA. httpClient is the (RA-TLS or plain) transport to :8443;
 // operatorKeyPEM is the operator PRIVATE key that authorizes the release.
-func requestCredential(ctx context.Context, httpClient *http.Client, baseURL string, operatorKeyPEM, csrPEM []byte) (*credrelease.ReleaseResponse, error) {
+func requestCredential(ctx context.Context, httpClient *http.Client, baseURL string, operatorKeyPEM, csrPEM []byte, role string) (*credrelease.ReleaseResponse, error) {
 	signer, err := operatorauth.NewSignerFromKeyPEM(operatorKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("operator key: %w", err)
 	}
 
-	body, err := json.Marshal(credrelease.ReleaseRequest{CSRPEM: string(csrPEM)})
+	body, err := json.Marshal(credrelease.ReleaseRequest{CSRPEM: string(csrPEM), Role: role})
 	if err != nil {
 		return nil, err
 	}

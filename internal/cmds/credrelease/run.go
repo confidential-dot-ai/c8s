@@ -36,10 +36,25 @@ type Config struct {
 	CertTTL time.Duration
 	// CertOrg / CertCN are the Kubernetes group / user the issued cert carries.
 	// Authorization is ordinary RBAC on that group: the node image's baked
-	// cred-release-rbac AddOn binds defaultCertOrg to cluster-admin. Revocation
+	// cred-release-rbac AddOn binds defaultCertOrg to the bounded
+	// c8s-node-operator ClusterRole (never cluster-admin). Revocation
 	// semantics are in docs/operator.md.
 	CertOrg string
 	CertCN  string
+	// LogCertTTL / LogCertOrg / LogCertCN are the same for the log-reader
+	// role (RoleLogReader); the node image binds defaultLogCertOrg to the
+	// baked c8s-log-reader ClusterRole.
+	LogCertTTL time.Duration
+	LogCertOrg string
+	LogCertCN  string
+}
+
+// roles is the per-role identity set the handler issues from this Config.
+func (cfg Config) roles() Roles {
+	return Roles{
+		RoleOperator:  {Org: cfg.CertOrg, CN: cfg.CertCN, TTL: cfg.CertTTL},
+		RoleLogReader: {Org: cfg.LogCertOrg, CN: cfg.LogCertCN, TTL: cfg.LogCertTTL},
+	}
 }
 
 // Run loads the measured operator key and cluster CA, then serves the
@@ -53,7 +68,7 @@ type Config struct {
 //  3. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
 func Run(ctx context.Context, cfg Config) error {
-	// RA-TLS is mandatory here: this endpoint hands out cluster-admin creds,
+	// RA-TLS is mandatory here: this endpoint hands out operator creds,
 	// so serving without an attested cert (empty platform => plain HTTP in the
 	// ratls package) would let a host MITM impersonate the guest. Reject it.
 	if strings.TrimSpace(cfg.Platform) == "" {
@@ -76,7 +91,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}
 
-	handler, err := NewHandler(operatorPub, ca, cfg.CertOrg, cfg.CertCN, cfg.CertTTL)
+	handler, err := NewHandler(operatorPub, ca, cfg.roles())
 	if err != nil {
 		return fmt.Errorf("build handler: %w", err)
 	}
