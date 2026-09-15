@@ -172,7 +172,7 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 				entriesByDigest[d] = map[string]bool{}
 			}
 			entriesByDigest[d][name] = true
-			if hasUnconstrainedRuntimePolicy(c) {
+			if c.IsUnconstrained() {
 				fullyAny[d] = true
 			}
 			if argvPolicyName(c.Command) == pkgallowlist.PolicyDeny {
@@ -250,7 +250,7 @@ func shadowFinding(wide, narrow string) finding {
 func shadows(wide, narrow pkgallowlist.Workload) bool {
 	unconstrained := map[string]bool{}
 	for _, c := range allContainers(wide) {
-		if hasUnconstrainedRuntimePolicy(c) {
+		if c.IsUnconstrained() {
 			unconstrained[c.Digest.String()] = true
 		}
 	}
@@ -419,9 +419,4 @@ func isTagForm(image string) bool {
 	}
 	_, digested := named.(reference.Digested)
 	return !digested
-}
-
-func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
-	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
-		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
 }
