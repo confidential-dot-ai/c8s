@@ -58,10 +58,11 @@ func defaultKDSCacheDir() string {
 	return filepath.Join(base, "c8s", "kds")
 }
 
-// vcekPath matches the KDS endorsement-certificate path: /vcek/v1/<product>/<128 hex chip id>
-// (the TCB comes in the query). The CRL lives beside it at /vcek/v1/<product>/crl
-// and must never be cached.
-var vcekPath = regexp.MustCompile(`^/v[cl]ek/v1/[^/]+/[0-9a-fA-F]{128}$`)
+// endorsementPath matches the two KDS endorsement-certificate shapes go-sev-guest
+// builds (kds.VCEKCertURL, kds.VLEKCertURL): /vcek/v1/<product>/<128 hex chip id>
+// and /vlek/v1/<product>/cert, the TCB in the query. The CRL (/crl) and the
+// ASK/ARK chain (/cert_chain) live beside them and are never cached.
+var endorsementPath = regexp.MustCompile(`^/(vcek/v1/[^/]+/[0-9a-fA-F]{128}|vlek/v1/[^/]+/cert)$`)
 
 // cacheable reports whether rawURL names an immutable endorsement certificate.
 func cacheable(rawURL string) bool {
@@ -69,7 +70,7 @@ func cacheable(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	return vcekPath.MatchString(u.Path)
+	return endorsementPath.MatchString(u.Path)
 }
 
 func (c *cachingGetter) path(rawURL string) string {
