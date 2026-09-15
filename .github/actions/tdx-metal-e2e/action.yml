@@ -529,7 +529,12 @@ runs:
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
-      c8s install --cvm-mode bare-metal --single-node --hardware-platform tdx \
+      # The CLI was built at the paired ref, which can predate the node ->
+      # bare-metal rename (#607). Ask it which name it takes.
+      mode=bare-metal
+      c8s install --help 2>&1 | grep -q -- '--cvm-mode.*bare-metal' || mode=node
+      echo "cvm-mode for c8s@$c8sRef: $mode"
+      c8s install --cvm-mode "$mode" --single-node --hardware-platform tdx \
         --image-tag "$c8sRef" \
         --operator-keys /tmp/op.pub \
         --measurements "$mrtd" \
