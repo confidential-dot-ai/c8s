@@ -125,9 +125,24 @@ func TestRender_DedupesAliasedDigests(t *testing.T) {
 		{digest: "sha256:aaa", ref: "example.com/a:1"},
 		{digest: "sha256:aaa", ref: "example.com/a:2"},
 		{digest: "sha256:bbb", ref: "example.com/b:1"},
-	})
+	}, nil)
 	if strings.Count(out, `"sha256:aaa"`) != 1 || strings.Count(out, `"sha256:bbb"`) != 1 {
 		t.Fatalf("aliased digest produced duplicate keys:\n%s", out)
+	}
+}
+
+func TestRender_ExcludesRefs(t *testing.T) {
+	// The local-path helper's busybox is argv-pinned by the served allowlist;
+	// floor-listing it would admit any command line on any pod.
+	out := render([]entry{
+		{digest: "sha256:aaa", ref: "busybox:1.38.0@sha256:aaa"},
+		{digest: "sha256:bbb", ref: "rancher/local-path-provisioner:v0.0.36@sha256:bbb"},
+	}, []string{"busybox"})
+	if strings.Contains(out, "busybox") {
+		t.Fatalf("excluded ref rendered:\n%s", out)
+	}
+	if !strings.Contains(out, `"sha256:bbb"`) {
+		t.Fatalf("non-excluded ref dropped:\n%s", out)
 	}
 }
 

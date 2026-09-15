@@ -63,8 +63,8 @@ type workloadClaimsConfig struct {
 // allowlistConfig groups the digest-source mechanisms.
 //
 // AlwaysAllow is a static baseline, always merged into the cache at
-// startup (the chart's floor: self-allows the installer + the CDS digest,
-// so a floor-rewrite roll admits the new images without a network round-trip).
+// startup (the chart's floor: the CDS digest and any operator digests —
+// never a shell-carrying image, which the chart seeds argv-pinned instead).
 // Pull is the runtime-update source: every plugin polls CDS.
 type allowlistConfig struct {
 	AlwaysAllow map[string]string `yaml:"always_allow"`

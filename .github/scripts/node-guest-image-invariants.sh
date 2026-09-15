@@ -66,7 +66,7 @@ fi
 policy="$ngi/c8s/image-policy.yaml.in"
 [ -f "$policy" ] || { echo "::error::NRI floor template $policy not found"; exit 1; }
 if sed '/# BEGIN rke2 system floor/,/# END rke2 system floor/d' "$policy"               | grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:'; then
-  echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
+  echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use the @CDS_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
   exit 1
 fi
 
