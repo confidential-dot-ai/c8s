@@ -85,7 +85,6 @@ jobs:
     uses: ./.github/workflows/snp-metal-e2e.yml
     with:
       c8s_ref: ${{ inputs.c8s_ref }}
-      aa_ref: ${{ inputs.aa_ref }}
 
   tdx-metal:
     # Staged-stack regression only. Exact-image AppArmor acceptance is called
