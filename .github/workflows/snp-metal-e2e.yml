@@ -189,9 +189,15 @@ jobs:
       - name: preflight, SEV-SNP device capacity
         run: |
           set -uo pipefail
-          N=$(kubectl get node -l confidential.ai/sev-snp=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/sev}' 2>/dev/null)
-          echo "devices.kubevirt.io/sev = ${N:-unknown}"
-          [ "${N:-0}" != "0" ] || { echo "::error::the SNP node advertises no devices.kubevirt.io/sev: the VMI would sit Scheduling forever"; exit 1; }
+          # The launcher's bm-e2e SA is namespace-scoped; node reads are a
+          # nicety it may not have, so the check is skipped without them.
+          if kubectl auth can-i get nodes >/dev/null 2>&1; then
+            N=$(kubectl get node -l confidential.ai/sev-snp=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/sev}' 2>/dev/null)
+            echo "devices.kubevirt.io/sev = ${N:-unknown}"
+            [ "${N:-0}" != "0" ] || { echo "::error::the SNP node advertises no devices.kubevirt.io/sev: the VMI would sit Scheduling forever"; exit 1; }
+          else
+            echo "no node read permission; skipping the SEV device capacity preflight"
+          fi
 
       # The initrd mounts the ISO labelled "opkeydata", SHA-256s the file named
       # `pubkey` and refuses to boot unless the report's HOSTDATA equals it.
