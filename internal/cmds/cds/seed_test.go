@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -32,6 +33,20 @@ const (
 	digestB = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 )
 
+// anySeed renders a seed document with one any-argv entry per (name, digest).
+func anySeed(entries map[string]string) string {
+	body := `{"schema":"c8s.allowlist/v1","workloads":{`
+	first := true
+	for name, d := range entries {
+		if !first {
+			body += ","
+		}
+		first = false
+		body += `"` + name + `":{"label":"ghcr.io/x/` + name + `:v1","containers":[{"digest":"` + d + `","command":{"policy":"any"},"args":{"policy":"any"}}]}`
+	}
+	return body + `}}`
+}
+
 func TestSeedStore_AddsAllEntries(t *testing.T) {
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
@@ -39,35 +54,8 @@ func TestSeedStore_AddsAllEntries(t *testing.T) {
 	}
 	defer store.Close()
 
-	path := writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1","`+digestB+`":"ghcr.io/x/as:v1"}}`)
+	path := writeSeed(t, anySeed(map[string]string{"cds": digestA, "as": digestB}))
 	if err := seedStore(&store, path); err != nil {
-		t.Fatalf("seedStore: %v", err)
-	}
-
-	_, got, err := store.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("seeded %d digests, want 2: %v", len(got), got)
-	}
-	if got[digest(t, digestA)] != "ghcr.io/x/cds:v1" {
-		t.Errorf("digestA image = %q, want ghcr.io/x/cds:v1", got[digest(t, digestA)])
-	}
-}
-
-// A seed document carrying workloads seeds both layers: the floor and the named
-// workload entries (additive, before serving).
-func TestSeedStore_SeedsWorkloads(t *testing.T) {
-	store, err := allowlist.OpenInMemory()
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-
-	seed := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"},` +
-		`"workloads":{"web":{"containers":[{"digest":"` + digestB + `"}]}}}`
-	if err := seedStore(&store, writeSeed(t, seed)); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
@@ -75,12 +63,17 @@ func TestSeedStore_SeedsWorkloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
 	}
-	if _, ok := doc.Workloads["web"]; !ok {
-		t.Fatalf("seeded workload missing: %#v", doc.Workloads)
+	if len(doc.Workloads) != 2 {
+		t.Fatalf("seeded %d entries, want 2: %v", len(doc.Workloads), doc.Workloads)
 	}
-	// The workload's container digest is admitted via the workload index.
-	if ok, err := store.Contains(digest(t, digestB)); err != nil || !ok {
-		t.Fatalf("Contains(workload digest) = %t, %v; want true, nil", ok, err)
+	if got := doc.Workloads["cds"].Label; got != "ghcr.io/x/cds:v1" {
+		t.Errorf("cds label = %q, want ghcr.io/x/cds:v1", got)
+	}
+	// Each seeded container digest is admitted via the workload index.
+	for _, d := range []string{digestA, digestB} {
+		if ok, err := store.Contains(digest(t, d)); err != nil || !ok {
+			t.Fatalf("Contains(%s) = %t, %v; want true, nil", d, ok, err)
+		}
 	}
 }
 
@@ -94,29 +87,29 @@ func TestSeedStore_IdempotentDoesNotBumpVersion(t *testing.T) {
 	}
 	defer store.Close()
 
-	path := writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	path := writeSeed(t, anySeed(map[string]string{"cds": digestA}))
 	if err := seedStore(&store, path); err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
-	v1, _, err := store.ListAll()
+	_, v1, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("ListAll: %v", err)
+		t.Fatalf("LoadAll: %v", err)
 	}
 
 	if err := seedStore(&store, path); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
-	v2, _, err := store.ListAll()
+	_, v2, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("ListAll: %v", err)
+		t.Fatalf("LoadAll: %v", err)
 	}
 	if v1 != v2 {
 		t.Fatalf("version bumped on re-seed: %q -> %q (would force worker re-pull)", v1, v2)
 	}
 }
 
-// Seeding is additive: an entry an operator added at runtime (via POST
-// /allowlist) must survive a restart's re-seed.
+// Seeding is additive: an entry an operator wrote at runtime must survive a
+// restart's re-seed, and a seeded name it already holds is not overwritten.
 func TestSeedStore_PreservesExistingEntries(t *testing.T) {
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
@@ -124,24 +117,25 @@ func TestSeedStore_PreservesExistingEntries(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.Add(digest(t, digestB), "ghcr.io/x/runtime:v1"); err != nil {
-		t.Fatalf("pre-add: %v", err)
+	runtime := pkgallowlist.Workload{Containers: []pkgallowlist.Container{{Digest: digest(t, digestB)}}}
+	if err := store.PutWorkload("runtime", runtime); err != nil {
+		t.Fatalf("pre-put: %v", err)
 	}
 
-	path := writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	path := writeSeed(t, anySeed(map[string]string{"cds": digestA, "runtime": digestA}))
 	if err := seedStore(&store, path); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
-	_, got, err := store.ListAll()
+	doc, _, err := store.LoadAll()
 	if err != nil {
-		t.Fatalf("ListAll: %v", err)
+		t.Fatalf("LoadAll: %v", err)
 	}
-	if _, ok := got[digest(t, digestB)]; !ok {
-		t.Errorf("runtime-added digest was dropped by seed: %v", got)
+	if _, ok := doc.Workloads["cds"]; !ok {
+		t.Errorf("seed entry missing: %v", doc.Workloads)
 	}
-	if _, ok := got[digest(t, digestA)]; !ok {
-		t.Errorf("seed digest missing: %v", got)
+	if got := doc.Workloads["runtime"].Containers[0].Digest.String(); got != digestB {
+		t.Errorf("runtime-added entry overwritten by seed: digest = %s, want %s", got, digestB)
 	}
 }
 
@@ -153,7 +147,7 @@ func TestSeedStore_FailsClosedOnBadDigest(t *testing.T) {
 	defer store.Close()
 
 	// "sha256:bad" fails ParseJSON's digest validation.
-	path := writeSeed(t, `{"schema":"c8s.allowlist/v1","digests":{"sha256:bad":"ghcr.io/x/cds:v1"}}`)
+	path := writeSeed(t, anySeed(map[string]string{"cds": "sha256:bad"}))
 	if err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore accepted a malformed digest; want fail-closed error")
 	}
@@ -179,7 +173,7 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	}
 	_ = store.Close()
 
-	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	path := writeSeed(t, anySeed(map[string]string{"cds": digestA}))
 	if err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
 	}

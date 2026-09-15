@@ -15,12 +15,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // testHandler builds a releaseHandler over a fake attestation-api and a token
@@ -33,9 +35,11 @@ func testHandler(t *testing.T, api *fakeAPI, token string) *releaseHandler {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(tokenPath), "token"), []byte(testCA+"::server:privileged-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return &releaseHandler{
-		api:           attestationclient.NewClient(api.URL),
-		own:           mustRefs(t, digestA, rtmr1A, rtmr2A),
+		policy:        testPolicy(t, teetypes.PlatformTDX, testOperator, api.URL),
 		tokenPath:     tokenPath,
 		verifyTimeout: 5 * time.Second,
 		verifySlots:   make(chan struct{}, maxConcurrentVerifications),
@@ -55,11 +59,11 @@ func doTLS(h http.Handler, method, path string, peers []*x509.Certificate) *http
 
 func TestReleaseHandler(t *testing.T) {
 	okAPI := func(t *testing.T) *fakeAPI {
-		return newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
+		return newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
 	}
 
-	t.Run("attested same-image peer gets the token", func(t *testing.T) {
-		h := testHandler(t, okAPI(t), "K10cafe::node:secret\n")
+	t.Run("attested authorized follower gets the token", func(t *testing.T) {
+		h := testHandler(t, okAPI(t), testToken+"\n")
 		rec := doTLS(h, http.MethodGet, "/join-token", []*x509.Certificate{attestedLeaf(t, tdxEnvelope)})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
@@ -68,14 +72,14 @@ func TestReleaseHandler(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatal(err)
 		}
-		if resp.Token != "K10cafe::node:secret" {
+		if resp.Token != testToken {
 			t.Errorf("token = %q, want trimmed staged token", resp.Token)
 		}
 	})
 
 	t.Run("policy mismatch denied", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestB, rtmr1A, rtmr2A, true, true)))
-		h := testHandler(t, api, "K10cafe::node:secret")
+		api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, operatorKey(t))))
+		h := testHandler(t, api, testToken)
 		rec := doTLS(h, http.MethodGet, "/join-token", []*x509.Certificate{attestedLeaf(t, tdxEnvelope)})
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403", rec.Code)
@@ -120,7 +124,7 @@ func TestReleaseHandler(t *testing.T) {
 		if rec := doTLS(h, http.MethodGet, "/join-token", leaf); rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("first status = %d, want 503", rec.Code)
 		}
-		if err := os.WriteFile(h.tokenPath, []byte("K10cafe::node:late-token"), 0o600); err != nil {
+		if err := os.WriteFile(h.tokenPath, []byte(testCA+"::node:late-token"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if rec := doTLS(h, http.MethodGet, "/join-token", leaf); rec.Code != http.StatusOK {
@@ -129,7 +133,7 @@ func TestReleaseHandler(t *testing.T) {
 	})
 
 	t.Run("server token is never released", func(t *testing.T) {
-		h := testHandler(t, okAPI(t), "K10cafe::server:secret")
+		h := testHandler(t, okAPI(t), testCA+"::server:secret")
 		rec := doTLS(h, http.MethodGet, "/join-token", []*x509.Certificate{attestedLeaf(t, tdxEnvelope)})
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503", rec.Code)
@@ -159,13 +163,13 @@ func TestReleaseHandlerBoundsConcurrentVerification(t *testing.T) {
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 
-	api := newFakeAPI(t, func(int, types.VerifyRequest) types.VerifyResponse {
+	api := newFakeAPI(t, func(int, remote.VerifyRequest) remote.VerifyResponse {
 		entered <- struct{}{}
 		<-release
-		return verifyResp(digestA, rtmr1A, rtmr2A, true, true)
+		return verifyResp(teetypes.PlatformTDX, testOperator)
 	})
 	t.Cleanup(unblock)
-	h := testHandler(t, api, "K10cafe::node:secret")
+	h := testHandler(t, api, testToken)
 	leaf := []*x509.Certificate{attestedLeaf(t, tdxEnvelope)}
 
 	var wg sync.WaitGroup
@@ -210,10 +214,10 @@ func TestIsSecureAgentToken(t *testing.T) {
 		token string
 		want  bool
 	}{
-		{name: "agent token", token: "K10cafe::node:secret", want: true},
-		{name: "server token", token: "K10cafe::server:secret", want: false},
-		{name: "node marker inside server secret", token: "K10cafe::server:secret::node:forged", want: false},
-		{name: "missing secret", token: "K10cafe::node:", want: false},
+		{name: "agent token", token: testToken, want: true},
+		{name: "server token", token: testCA + "::server:secret", want: false},
+		{name: "node marker inside server secret", token: testCA + "::server:secret::node:forged", want: false},
+		{name: "missing secret", token: testCA + "::node:", want: false},
 		{name: "short token", token: "secret", want: false},
 	}
 	for _, tt := range tests {
@@ -228,13 +232,14 @@ func TestIsSecureAgentToken(t *testing.T) {
 // releaseConfig returns a ReleaseConfig RunRelease can fully start from.
 func releaseConfig(t *testing.T) ReleaseConfig {
 	t.Helper()
-	api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
+	api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
 	return ReleaseConfig{
-		ListenAddr:        "127.0.0.1:0",
-		AttestationAPIURL: api.URL,
-		Platform:          "tdx",
-		TokenPath:         filepath.Join(t.TempDir(), "agent-token"),
-		VerifyTimeout:     5 * time.Second,
+		ListenAddr:         "127.0.0.1:0",
+		AttestationAPIURL:  api.URL,
+		Platform:           "tdx",
+		MeasurementsConfig: policyFile(t, teetypes.PlatformTDX, policyEntry(t, teetypes.PlatformTDX, testOperator)),
+		TokenPath:          filepath.Join(t.TempDir(), "agent-token"),
+		VerifyTimeout:      5 * time.Second,
 	}
 }
 
@@ -249,14 +254,9 @@ func TestRunReleaseStartupErrors(t *testing.T) {
 			cfg.VerifyTimeout = 0
 			return cfg
 		}},
-		{"attestation-api down at own-refs", func(t *testing.T) ReleaseConfig {
+		{"attestation-api down at provisioning", func(t *testing.T) ReleaseConfig {
 			cfg := releaseConfig(t)
 			cfg.AttestationAPIURL = "http://127.0.0.1:1"
-			return cfg
-		}},
-		{"own evidence fails verification", func(t *testing.T) ReleaseConfig {
-			cfg := releaseConfig(t)
-			cfg.AttestationAPIURL = newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, false, true))).URL
 			return cfg
 		}},
 	}
@@ -369,5 +369,117 @@ func TestRunReleaseListenError(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunRelease did not surface the bind error")
+	}
+}
+
+func TestReleaseRefusesPrivilegedTokenAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name, agent, server string
+		symlink             bool
+		accept              bool
+	}{
+		{name: "distinct agent", agent: testToken, server: testCA + "::server:privileged-secret", accept: true},
+		{name: "default symlink", server: testCA + "::server:privileged-secret", symlink: true},
+		{name: "same secret rewritten role", agent: testCA + "::node:privileged-secret", server: testCA + "::server:privileged-secret"},
+		{name: "missing privileged token", agent: testToken},
+		{name: "wrong privileged role", agent: testToken, server: testCA + "::node:other"},
+		{name: "different CA pin", agent: testToken, server: "K10" + strings.Repeat("dc", 32) + "::server:other"},
+		{name: "short hash", agent: "K10cafe::node:secret", server: testCA + "::server:other"},
+		{name: "nonhex hash", agent: "K10" + strings.Repeat("zz", 32) + "::node:secret", server: testCA + "::server:other"},
+		{name: "newline secret", agent: testCA + "::node:secret\nother", server: testCA + "::server:other"},
+		{name: "oversized token", agent: testCA + "::node:" + strings.Repeat("a", maxTokenRespBytes), server: testCA + "::server:other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "agent-token")
+			if tc.server != "" {
+				if err := os.WriteFile(filepath.Join(dir, "token"), []byte(tc.server), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.symlink {
+				if err := os.Symlink("token", path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(path, []byte(tc.agent), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			token, err := readAgentToken(path)
+			if (err == nil) != tc.accept {
+				t.Fatalf("err=%v accept=%v", err, tc.accept)
+			}
+			if tc.accept && token != testToken {
+				t.Fatal("wrong agent token")
+			}
+		})
+	}
+}
+
+func TestReleaseVerificationTimeout(t *testing.T) {
+	unblock := make(chan struct{})
+	api := newFakeAPI(t, func(_ int, _ remote.VerifyRequest) remote.VerifyResponse {
+		<-unblock
+		return verifyResp(teetypes.PlatformTDX, testOperator)
+	})
+	defer close(unblock)
+	h := testHandler(t, api, testToken)
+	h.verifyTimeout = 20 * time.Millisecond
+	start := time.Now()
+	rec := doTLS(h, http.MethodGet, "/join-token", []*x509.Certificate{attestedLeaf(t, tdxEnvelope)})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("request verification did not obey configured bound")
+	}
+}
+
+// Even a replayed certificate whose evidence the verifier accepts cannot fetch
+// the token without proving possession of that certificate's private key in TLS.
+func TestReleaseRequiresAttestedPrivateKeyPossession(t *testing.T) {
+	key, _, err := ratls.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, _, err := ratls.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		private *ecdsa.PrivateKey
+		accept  bool
+	}{{"matching key", key, true}, {"replayed certificate", wrong, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
+			srv := httptest.NewUnstartedServer(testHandler(t, api, testToken))
+			srv.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
+			srv.StartTLS()
+			defer srv.Close()
+			client := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: tc.private}}}}}
+			defer client.CloseIdleConnections()
+			resp, err := client.Get(srv.URL + "/join-token")
+			if resp != nil {
+				defer resp.Body.Close()
+			}
+			if tc.accept {
+				if err != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("valid possession denied: response=%v err=%v", resp, err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("replayed certificate accepted without its private key")
+				}
+				if api.verifyCalls.Load() != 0 {
+					t.Fatal("handler reached without proof of private key possession")
+				}
+			}
+		})
 	}
 }

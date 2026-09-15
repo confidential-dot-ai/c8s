@@ -46,13 +46,20 @@ func TestExemptSnapshot_NilAdmitsNothing(t *testing.T) {
 }
 
 func TestExemptSnapshot_PersistLoadRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "exempt-snapshot.json")
+	path := filepath.Join(t.TempDir(), "state", "exempt-snapshot.json")
 	s := newExemptSnapshot([]string{"kube-system", "gmp-system"})
 	s.add("kube-system", pushDigestA)
 	s.add("kube-system", pushDigestB)
 	s.add("gmp-system", pushDigestC)
 	if err := s.persist(path); err != nil {
 		t.Fatalf("persist: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("snapshot mode = %o, want 600", got)
 	}
 
 	loaded, err := loadExemptSnapshot(path)

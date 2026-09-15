@@ -99,12 +99,12 @@ func TestImageManifestMRTDIsNotWidenedByMeasurements(t *testing.T) {
 	cfg := config{imageManifest: writeTestManifest(t)}
 	plan := mustPlan(t, cfg)
 
-	if len(plan.policy.Measurements) != 0 {
-		t.Fatalf("--image-manifest must contribute nothing to the allowlist, got %d entries", len(plan.policy.Measurements))
+	if len(plan.policy.Policy.Measurements) != 0 {
+		t.Fatalf("--image-manifest must contribute nothing to the allowlist, got %d entries", len(plan.policy.Policy.Measurements))
 	}
 
 	// Graft an allowlist onto the manifest plan by hand.
-	plan.policy.Measurements = mustPlan(t, config{measurements: []string{otherLaunch}}).policy.Measurements
+	plan.policy.Policy.Measurements = mustPlan(t, config{measurements: []string{otherLaunch}}).policy.Policy.Measurements
 
 	oc := newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(otherLaunch, matchingRTMRs()), nil, plan)
 	if oc.Verified {
@@ -188,8 +188,8 @@ func TestMeasurementsWithImageManifestIsAUsageError(t *testing.T) {
 		}
 	})
 	for _, cfg := range []config{{measurements: []string{testMRTD}}, {measurementsFile: measFile}} {
-		if plan := mustPlan(t, cfg); len(plan.policy.Measurements) != 1 {
-			t.Errorf("%+v: an allowlist alone must still build, got %d entries", cfg, len(plan.policy.Measurements))
+		if plan := mustPlan(t, cfg); len(plan.policy.Policy.Measurements) != 1 {
+			t.Errorf("%+v: an allowlist alone must still build, got %d entries", cfg, len(plan.policy.Policy.Measurements))
 		}
 	}
 }

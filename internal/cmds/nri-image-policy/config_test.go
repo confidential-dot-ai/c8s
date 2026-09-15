@@ -584,3 +584,21 @@ func writeAndLoad(t *testing.T, body string) *config {
 	}
 	return cfg
 }
+
+func TestValidateRejectsBadCDSRTMRs(t *testing.T) {
+	cfg := validConfig()
+	cfg.Allowlist.Pull.CDSRTMRs = []string{"0=" + strings.Repeat("ab", 48)}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cds_rtmrs") {
+		t.Fatalf("err = %v, want a cds_rtmrs parse failure", err)
+	}
+}
+
+// A malformed RTMR pin fails the pull-client build rather than silently
+// unpinning the registers.
+func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
+	cfg := validConfig().Allowlist.Pull
+	cfg.CDSRTMRs = []string{"1=zz"}
+	if _, err := allowlistPullHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "RTMR") {
+		t.Fatalf("err = %v, want an RTMR parse failure", err)
+	}
+}

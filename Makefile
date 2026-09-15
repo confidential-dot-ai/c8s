@@ -1,13 +1,7 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
-       build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
-       manifests generate check-crd-chart install-controller-gen require-controller-gen \
-       policy-test print-opa-version
-
-OPA                ?= opa
-OPA_VERSION        ?= v1.9.0
-KATA_POLICY        ?= kata-guest-base/extra/etc/kata-opa/default-policy.rego
-KATA_POLICY_TESTS  ?= kata-guest-base/tests/default-policy_test.rego
+       build-nri-image-policy \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-gpu-label test-node-guest-image-gpu-cc test-node-guest-image-scratch test-node-guest-image-psa-ready test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-allowlist-enforcement test-e2e-components-ready test-e2e-cw-workload mutation-check mutation-full vet fmt lint clean \
+       manifests generate check-crd-chart install-controller-gen require-controller-gen
 
 CONTROLLER_GEN         ?= controller-gen
 CONTROLLER_GEN_VERSION ?= v0.20.1
@@ -54,44 +48,6 @@ build-c8s-node:
 		-o $(BUILD_DIR)/c8s-node ./cmd/c8s
 	@echo "Built $(BUILD_DIR)/c8s-node"
 
-# --- Policy-monitor (in-kata-guest image-digest enforcer) ---
-# Standalone binary baked into kata-guest-base. It watches kata-agent's
-# container bundles and SIGKILLs any container whose image digest isn't
-# on the allowlist baked into the dm-verity guest rootfs. Static build
-# with the same flags as the other in-guest binaries so the kata-guest
-# osbuilder can copy it into the rootfs.
-build-policy-monitor:
-	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
-		-o $(BUILD_DIR)/policy-monitor ./cmd/policy-monitor
-	@echo "Built $(BUILD_DIR)/policy-monitor"
-
-# --- Volumed (in-kata-guest encrypted-volume opener) ---
-# Standalone binary baked into kata-guest-base, run as `volumed --guest`. The
-# node-side DaemonSet runs `c8s volumed` from the multi-mode binary instead;
-# the guest gets its own so only this command sits on the dm-verity root.
-build-volumed:
-	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
-		-o $(BUILD_DIR)/volumed ./cmd/volumed
-	@echo "Built $(BUILD_DIR)/volumed"
-
-# --- RTMR3-measurer (in-kata-guest per-workload RTMR[3] measurer) ---
-# Standalone daemon baked into kata-guest-base. Scans kata-agent's container
-# bundles and extends TDX RTMR[3] with each deployed workload's image digest,
-# binding the workload into the guest's attestation quote (measurement-only;
-# independent of policy-monitor's allowlist). Requires a guest kernel with the
-# TDX RTMR-extend sysfs (mainline >= 6.16). Static build like the other in-guest
-# binaries so osbuilder can copy it into the rootfs.
-build-rtmr3-measurer:
-	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
-		-o $(BUILD_DIR)/rtmr3-measurer ./cmd/rtmr3-measurer
-	@echo "Built $(BUILD_DIR)/rtmr3-measurer"
-
 # --- Get-Cert ---
 
 build-get-cert:
@@ -137,10 +93,35 @@ test-integration:
 test-integration-cluster:
 	./test/integration/cluster/run.sh
 
-# The byte-exact rke2-role.sh against real ISO9660 loop devices. Root (loop
-# mounts, writes /run/confos) — sudo on a disposable box.
+# The byte-exact launch script with device and c8s stubs in disposable Linux.
+# Needs Docker; host files are mounted read-only and no privileges are added.
 test-node-guest-image-role:
 	./node-guest-image/tests/rke2-role-test.sh
+
+# GPU-node label logic (root-free unit test; fakes the PCI tree).
+test-node-guest-image-gpu-label:
+	./node-guest-image/tests/gpu-node-label-test.sh
+
+test-node-guest-image-gpu-cc:
+	./node-guest-image/tests/gpu-cc-enforce-test.sh
+
+test-node-guest-image-scratch:
+	./node-guest-image/tests/scratch-enforce-test.sh
+
+# AppArmor configuration and byte-exact boot-gate regression tests.
+# Needs Docker and CONFOS_RELEASE from the pinned confos base configuration.
+.PHONY: test-node-guest-image-apparmor test-node-guest-image-apparmor-runtime
+test-node-guest-image-apparmor:
+	bash test/e2e/lib-test.sh
+	bash node-guest-image/tests/apparmor-config-test.sh
+	bash node-guest-image/tests/apparmor-enforce-test.sh
+
+# Disposable single-node c8s image and its operator kubeconfig.
+test-node-guest-image-apparmor-runtime:
+	bash node-guest-image/tests/apparmor-runtime-test.sh
+
+test-node-guest-image-psa-ready:
+	./node-guest-image/tests/psa-ready-test.sh
 
 # Role-gated unit wiring under real systemd in a privileged container.
 # Needs only docker.
@@ -150,6 +131,12 @@ test-node-guest-image-role-systemd:
 # Needs root (private mount namespace) and a ./confos checkout.
 test-node-guest-image-cloud-init:
 	./node-guest-image/tests/cloud-init-disabled.sh
+
+# Needs root on disposable Linux and a ./confos checkout (or CONFOS_DIR).
+# Executes the pinned initrd with real overlays; stops before systemd/TEE boot.
+.PHONY: test-node-guest-image-immutable-root
+test-node-guest-image-immutable-root:
+	bash node-guest-image/tests/immutable-root-test.sh
 
 # Advisory mutation testing of code changed vs BASE (default origin/main).
 mutation-check:
@@ -176,36 +163,32 @@ test-e2e-cw-label-policy:
 test-e2e-mesh-cw-enforcement:
 	./test/e2e/mesh-cw-enforcement.sh
 
-# Live-cluster check that attested CA handoff works end to end: an attested
-# probe pulls the mesh CA over /handoff and proves it is the live trust root.
-# Needs kubectl pointed at a node-as-CVM cluster with cds.handoff.enabled=true.
-# Also runs post-merge in the snp-metal-e2e lane's in-guest payload.
-test-e2e-ca-handoff:
-	./test/e2e/ca-handoff.sh
+# Live-cluster check that image admission is fail-closed and that a signed
+# allowlist write opens it. Needs kubectl pointed at a cluster with c8s
+# installed, plus C8S_ALLOWLIST_URL, C8S_MEASUREMENTS and C8S_OPERATOR_KEY.
+# Also runs post-merge in the tdx-metal-e2e lane.
+test-e2e-allowlist-enforcement:
+	./test/e2e/allowlist-enforcement.sh
 
-# Parse + decision tests for the baked kata-agent policy. The guest evaluates
-# it with regorus, which reads Rego v0 plus the future keywords, so the checks
-# run with --v0-compatible. The fmt gate keeps the policy's layout normalised
-# for the Go lockstep tests that read its text. Install with:
-#   curl -fsSL -o opa https://openpolicyagent.org/downloads/$(OPA_VERSION)/opa_linux_amd64_static && chmod +x opa
-# Single source of the pinned version for CI's installer step.
-print-opa-version:
-	@echo $(OPA_VERSION)
+# Live-cluster check that every c8s-system pod is Running and Ready. Needs
+# kubectl pointed at a cluster with c8s installed. Also runs post-merge in
+# the tdx-metal-e2e lane.
+test-e2e-components-ready:
+	./test/e2e/components-ready.sh
 
-policy-test:
-	@command -v $(OPA) >/dev/null 2>&1 || { echo "opa not found; see the policy-test comment in the Makefile"; exit 1; }
-	$(OPA) fmt --v0-compatible --diff --fail $(KATA_POLICY) $(KATA_POLICY_TESTS)
-	$(OPA) check --v0-compatible --strict $(KATA_POLICY)
-	$(OPA) test --v0-compatible $(KATA_POLICY) $(KATA_POLICY_TESTS)
+# Live-cluster check that the sample confidential workload runs with the
+# injected c8s-cert sidecar. Needs kubectl pointed at a cluster with c8s
+# installed; under a fail-closed floor also C8S_OPERATOR_KEY,
+# C8S_ALLOWLIST_URL and C8S_MEASUREMENTS. Runs post-merge in both metal lanes.
+test-e2e-cw-workload:
+	./test/e2e/cw-workload.sh
 
 # --- Linting ---
 
 vet:
 	go vet ./...
 
-# gofmt over tracked Go files only — scanning `.` recurses into the gitignored
-# kata-guest-base/.build/ (fetched kata source + a root-owned rootfs tree) and
-# fails on permission-denied.
+# gofmt over tracked Go files only.
 fmt:
 	@test -z "$$(git ls-files '*.go' | xargs gofmt -l)" || (echo "files need formatting:"; git ls-files '*.go' | xargs gofmt -l; exit 1)
 

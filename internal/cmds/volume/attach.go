@@ -92,7 +92,12 @@ func (a Attacher) Attach(ctx context.Context, name, image string) (serial string
 
 	store := a.backstore(name)
 	if _, err := os.Stat(store); err == nil {
-		return "", fmt.Errorf("volume: %q is already attached; detach it first", name)
+		// The kernel opened the image once, at the attach that built this
+		// backstore, and serves that file for as long as the backstore lives.
+		// Replacing the image at the same path since then — kubectl cp, or any
+		// mv into place — left the device on the old file, where hashing the
+		// path confirms bytes nothing is reading.
+		return "", fmt.Errorf("volume: %q is already attached, and the device serves the file that attach opened rather than whatever is at its path now; detach it first, then attach again", name)
 	}
 
 	var undo []func()
@@ -294,9 +299,9 @@ func loopbackWWN(name string) string {
 
 // checkImage resolves the image and returns its size.
 //
-// A size that is not a whole number of verity blocks is a truncated or
-// corrupted copy. Attaching it would defer the failure to a verity error on
-// first read, which says nothing about what went wrong.
+// A size that is not a whole number of image blocks is a truncated or
+// corrupted copy. Attaching it would defer the failure to a read error deep
+// inside a consumer, which says nothing about what went wrong.
 func checkImage(image string) (string, int64, error) {
 	abs, err := filepath.Abs(image)
 	if err != nil {
@@ -310,9 +315,9 @@ func checkImage(image string) (string, int64, error) {
 		return "", 0, fmt.Errorf("volume: %s is not a regular file", abs)
 	}
 	size := fi.Size()
-	if size == 0 || size%VerityBlockSize != 0 {
+	if size == 0 || size%ImageBlockSize != 0 {
 		return "", 0, fmt.Errorf("volume: %s is %d bytes, not a whole number of %d-byte blocks; truncated copy?",
-			abs, size, VerityBlockSize)
+			abs, size, ImageBlockSize)
 	}
 	return abs, size, nil
 }
@@ -345,7 +350,11 @@ Hyper-V exposes no virtio bus, and a cloud disk's serial is the provider's, so
 this drives LIO's loopback target to build a local SCSI disk instead.
 
 The image is ciphertext and this does not read it. Pointing a pod at the wrong
-device fails closed — the key will not decrypt it, and verity will refuse it.`,
+device fails closed — the key will not decrypt it to anything that mounts.
+
+The device serves the file this command opens, not the path. Replace an image
+by 'detach', overwrite, then 'attach' again: writing a new file over the path
+of an attached image leaves the device on the old one.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

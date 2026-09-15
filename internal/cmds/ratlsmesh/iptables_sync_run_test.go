@@ -215,22 +215,6 @@ func TestSelectMissingFamilyNodeIPsRejectsAggregate(t *testing.T) {
 	}
 }
 
-func TestClusterDNSIPsByFamily(t *testing.T) {
-	byFam, err := clusterDNSIPsByFamily([]string{"10.53.0.10", "fd00::10"})
-	if err != nil {
-		t.Fatalf("clusterDNSIPsByFamily: %v", err)
-	}
-	if got := byFam[iptablesFamilyIPv4]; len(got) != 1 || got[0] != "10.53.0.10" {
-		t.Errorf("v4 group = %v, want [10.53.0.10]", got)
-	}
-	if got := byFam[iptablesFamilyIPv6]; len(got) != 1 || got[0] != "fd00::10" {
-		t.Errorf("v6 group = %v, want [fd00::10]", got)
-	}
-	if _, err := clusterDNSIPsByFamily([]string{"not-an-ip"}); err == nil {
-		t.Error("malformed IP: want an error so the egress carve-out fails closed")
-	}
-}
-
 // A link-local-only family presence is not a host address: the selector must
 // skip it and report the family as genuinely absent (single-stack), not error.
 func TestSelectMissingFamilyNodeIPsSkipsLinkLocal(t *testing.T) {

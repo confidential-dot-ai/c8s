@@ -2,7 +2,6 @@ package cds
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,15 +25,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/confidential-dot-ai/c8s/internal/allowlist"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
-
-const testOperatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestCompilePattern(t *testing.T) {
 	t.Run("empty returns nil", func(t *testing.T) {
@@ -90,67 +82,6 @@ func TestCompilePatterns(t *testing.T) {
 			t.Fatal("expected error for invalid regex in list, got nil")
 		}
 	})
-}
-
-func TestBuildHandoffHandler_DisabledWhenNoMeasurements(t *testing.T) {
-	cfg := config{} // handoffMeasurements empty
-	hh, err := buildHandoffHandler(
-		context.Background(),
-		cfg,
-		nil,          // mesh unused on the disabled path
-		nil,          // allowlist store unused on the disabled path
-		"",           // operator policy unused on the disabled path
-		nil,          // keyProvider unused
-		ear.Issuer{}, // earIssuer unused on the disabled path
-		attestationclient.NewClient(""),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error on disabled handoff: %v", err)
-	}
-	if hh != nil {
-		t.Fatalf("expected nil handler when --handoff-measurements unset, got %v", hh)
-	}
-}
-
-func TestBuildHandoffHandler_EnabledReturnsHandler(t *testing.T) {
-	// Cancel the context up front so the background refresh/expiry goroutines
-	// the enabled path spawns return immediately instead of leaking.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("ear key: %v", err)
-	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatalf("ear issuer: %v", err)
-	}
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
-	if err != nil {
-		t.Fatalf("rotator: %v", err)
-	}
-	ca, err := issuer.NewCA("test ca", time.Hour)
-	if err != nil {
-		t.Fatalf("ca: %v", err)
-	}
-	store, err := allowlist.OpenInMemory()
-	if err != nil {
-		t.Fatalf("allowlist: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	cfg := config{
-		handoffMeasurements: []string{"deadbeef"},
-		earIssuerName:       "cds",
-	}
-	hh, err := buildHandoffHandler(ctx, cfg, ca, &store, testOperatorKeysHash, rotator, earIss, attestationclient.NewClient(""))
-	if err != nil {
-		t.Fatalf("buildHandoffHandler: %v", err)
-	}
-	if hh == nil {
-		t.Fatal("expected a non-nil handoff handler when measurements are set")
-	}
 }
 
 func TestNormalizeHTTPServerConfig_FillsZeroDefaults(t *testing.T) {
@@ -241,9 +172,7 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		attestationApiURL:          attestationURL,
 		caCommonName:               "test ca",
 		caCertValidity:             24 * time.Hour,
-		earIssuerName:              "cds",
 		jwtClockSkew:               30,
-		maxTTL:                     time.Hour,
 		certTTL:                    time.Hour,
 		namedCertTTL:               issuer.MaxNamedLeafTTL,
 		challengeTTL:               time.Minute,
@@ -261,7 +190,6 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		rateLimiterMax:             1000,
 		rateLimiterEvictInterval:   time.Minute,
 		rateLimiterIdleTimeout:     5 * time.Minute,
-		handoffPeerTimeout:         2 * time.Minute,
 		ratlsPlatform:              "",
 	}
 }
@@ -279,7 +207,6 @@ func freePort(t *testing.T) int {
 
 func TestRun_ErrorPaths(t *testing.T) {
 	api := newHealthyAttestationApi(t)
-	opKeys := writeOperatorKeysPEM(t)
 
 	for _, tc := range []struct {
 		name    string
@@ -298,8 +225,8 @@ func TestRun_ErrorPaths(t *testing.T) {
 		},
 		{
 			name:    "invalid config",
-			mutate:  func(_ *testing.T, cfg *config) { cfg.maxTTL = 0 },
-			wantSub: "--max-ttl",
+			mutate:  func(_ *testing.T, cfg *config) { cfg.namedCertTTL = 0 },
+			wantSub: "--named-cert-ttl",
 		},
 		{
 			name:    "rate limiter max entries",
@@ -330,16 +257,6 @@ func TestRun_ErrorPaths(t *testing.T) {
 				cfg.allowlistDB = filepath.Join(t.TempDir(), "no-such-dir", "allowlist.db")
 			},
 			wantSub: "allowlist database",
-		},
-		{
-			name: "handoff peer unreachable fails closed",
-			mutate: func(_ *testing.T, cfg *config) {
-				cfg.operatorKeys = opKeys
-				cfg.handoffMeasurements = []string{"deadbeef"}
-				cfg.handoffPeerURL = "https://127.0.0.1:1"
-				cfg.handoffPeerTimeout = 100 * time.Millisecond
-			},
-			wantSub: "provision mesh CA",
 		},
 		{
 			name:    "invalid dns san pattern",
@@ -378,13 +295,13 @@ func TestRun_ErrorPaths(t *testing.T) {
 	}
 }
 
-// Full plain-HTTP startup: operator keys, measurements, seed, handoff, and key
-// rotation all enabled. run() must serve /healthz and exit cleanly on SIGTERM.
+// Full plain-HTTP startup: operator keys, measurements, seed, and
+// SAN validation enabled. run() must serve /healthz and exit cleanly on SIGTERM.
 func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 
 	seedPath := filepath.Join(t.TempDir(), "seed.json")
-	seedJSON := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`
+	seedJSON := anySeed(map[string]string{"cds": digestA})
 	if err := os.WriteFile(seedPath, []byte(seedJSON), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
@@ -396,9 +313,6 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	cfg.allowedCNPattern = `^.*$`
 	cfg.operatorKeys = writeOperatorKeysPEM(t)
 	cfg.allowlistSeed = seedPath
-	cfg.handoffMeasurements = []string{"deadbeef"}
-	cfg.rotationInterval = time.Hour
-	cfg.rotationOverlap = time.Minute
 	cfg.sanValidation = true
 
 	errCh := make(chan error, 1)
@@ -436,15 +350,15 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 	}
 	body := resp.Body
 	var listing struct {
-		Digests map[string]string `json:"digests"`
+		Workloads map[string]json.RawMessage `json:"workloads"`
 	}
 	decodeErr := json.NewDecoder(body).Decode(&listing)
 	_ = body.Close()
 	if decodeErr != nil {
 		t.Fatalf("decode /allowlist: %v", decodeErr)
 	}
-	if _, ok := listing.Digests[digestA]; !ok {
-		t.Errorf("seeded digest missing from /allowlist: %v", listing.Digests)
+	if _, ok := listing.Workloads["cds"]; !ok {
+		t.Errorf("seeded entry missing from /allowlist: %v", listing.Workloads)
 	}
 
 	// Operator keys are pinned, so /operator-keys must serve the bundle.
@@ -514,22 +428,6 @@ func startRunServer(t *testing.T, cfg config) string {
 	return base
 }
 
-// TestRun_SetsJWTClockSkew: --jwt-clock-skew is seconds; run() must convert it
-// before any request can be served. The rate-limiter failure exits right after
-// the conversion, keeping the test hermetic.
-func TestRun_SetsJWTClockSkew(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.jwtClockSkew = 7
-	cfg.rateLimiterMax = 0
-	if err := run(cfg); err == nil {
-		t.Fatal("run() with rateLimiterMax=0 should fail")
-	}
-	if issuer.JWTClockSkew != 7*time.Second {
-		t.Fatalf("issuer.JWTClockSkew = %v, want %v", issuer.JWTClockSkew, 7*time.Second)
-	}
-}
-
 // TestRun_LogsMeasurementPinning: with --measurements set, startup must log the
 // pinning-enabled line, not the UNSAFE empty-allowlist warning. The bad DNS
 // pattern exits startup right after that log line.
@@ -567,60 +465,6 @@ func TestRun_LogsMeasurementPinning(t *testing.T) {
 	}
 }
 
-// postAttestKeyPolicyProbe sends an /attest-key request carrying a well-formed
-// but wrong operator-key hash and returns status plus error code.
-func postAttestKeyPolicyProbe(t *testing.T, base string) (int, string) {
-	t.Helper()
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge:        "!!", // fails challenge decoding when the policy gate passes
-		OperatorKeysHash: strings.Repeat("a", 64),
-	})
-	if err != nil {
-		t.Fatalf("marshal attest-key request: %v", err)
-	}
-	resp, err := http.Post(base+"/attest-key", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /attest-key: %v", err)
-	}
-	defer resp.Body.Close()
-	var errResp types.ErrorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-		t.Fatalf("decode /attest-key error: %v", err)
-	}
-	return resp.StatusCode, errResp.Error
-}
-
-// TestRun_AttestKeyOperatorPolicyGate: /attest-key must require the caller to
-// attest the operator-key policy exactly when handoff replicas are configured.
-func TestRun_AttestKeyOperatorPolicyGate(t *testing.T) {
-	t.Run("enforced with handoff measurements", func(t *testing.T) {
-		api := newHealthyAttestationApi(t)
-		cfg := validRunConfig(t, api.URL)
-		cfg.port = freePort(t)
-		cfg.operatorKeys = writeOperatorKeysPEM(t)
-		cfg.handoffMeasurements = []string{"deadbeef"}
-		base := startRunServer(t, cfg)
-
-		status, code := postAttestKeyPolicyProbe(t, base)
-		if status != http.StatusForbidden || code != "operator_policy_mismatch" {
-			t.Fatalf("got %d %q, want 403 operator_policy_mismatch", status, code)
-		}
-	})
-
-	t.Run("not enforced without handoff measurements", func(t *testing.T) {
-		api := newHealthyAttestationApi(t)
-		cfg := validRunConfig(t, api.URL)
-		cfg.port = freePort(t)
-		cfg.operatorKeys = writeOperatorKeysPEM(t)
-		base := startRunServer(t, cfg)
-
-		status, code := postAttestKeyPolicyProbe(t, base)
-		if status != http.StatusBadRequest || code != "invalid_challenge" {
-			t.Fatalf("got %d %q, want 400 invalid_challenge", status, code)
-		}
-	})
-}
-
 // TestRun_AllowlistWriteAcceptsClockSkewedToken: the operator-token verifier
 // must apply --jwt-clock-skew as leeway, so a token stamped by a slightly-fast
 // operator clock still authorizes the write.
@@ -632,7 +476,7 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	cfg.operatorKeys = keysPath
 	base := startRunServer(t, cfg)
 
-	body := []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`)
+	body := []byte(anySeed(map[string]string{"cds": digestA}))
 	sum := sha256.Sum256(body)
 	issued := time.Now().Add(10 * time.Second) // inside the 30s leeway
 	token, err := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
@@ -659,35 +503,6 @@ func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT /allowlist = %d (%s), want 204", resp.StatusCode, respBody)
-	}
-}
-
-// TestRun_NoRotationWhenIntervalZero: --token-signer-rotation-interval 0 must
-// disable the rotation loop entirely; with a long overlap any rotation would
-// leave extra keys in the served JWKS.
-func TestRun_NoRotationWhenIntervalZero(t *testing.T) {
-	api := newHealthyAttestationApi(t)
-	cfg := validRunConfig(t, api.URL)
-	cfg.port = freePort(t)
-	cfg.rotationInterval = 0
-	cfg.rotationOverlap = time.Hour
-	base := startRunServer(t, cfg)
-
-	resp, err := http.Get(base + "/.well-known/jwks.json")
-	if err != nil {
-		t.Fatalf("GET jwks: %v", err)
-	}
-	defer resp.Body.Close()
-	var jwks struct {
-		Keys []struct {
-			Kid string `json:"kid"`
-		} `json:"keys"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		t.Fatalf("decode jwks: %v", err)
-	}
-	if len(jwks.Keys) != 1 {
-		t.Fatalf("JWKS has %d keys, want exactly 1 (rotation must be disabled)", len(jwks.Keys))
 	}
 }
 

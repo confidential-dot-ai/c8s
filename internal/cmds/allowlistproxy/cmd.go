@@ -1,4 +1,4 @@
-// Package allowlistproxy implements the loopback proxy used by tls-lb to
+// Package allowlistproxy implements the loopback proxy used by router to
 // publish CDS's allowlist API. The public TLS connection terminates at nginx;
 // this process establishes the second trust hop by verifying CDS's RA-TLS
 // serving certificate before forwarding the original request.
@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -30,22 +31,24 @@ const (
 )
 
 type config struct {
-	host              string
-	port              int
-	cdsURL            string
-	cdsMeasurements   []string
-	attestationAPIURL string
-	requestTimeout    time.Duration
-	readHeaderTimeout time.Duration
+	measurementsConfig string
+	host               string
+	port               int
+	cdsURL             string
+	cdsMeasurements    []string
+	cdsRTMRs           []string
+	attestationAPIURL  string
+	requestTimeout     time.Duration
+	readHeaderTimeout  time.Duration
 }
 
-// NewCmd returns the internal allowlist-proxy subcommand used by the tls-lb
+// NewCmd returns the internal allowlist-proxy subcommand used by the router
 // chart. It listens only on pod loopback; nginx is the public front door.
 func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:          "allowlist-proxy",
-		Short:        "Proxy tls-lb allowlist requests to an RA-TLS-verified CDS",
+		Short:        "Proxy router allowlist requests to an RA-TLS-verified CDS",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -57,6 +60,8 @@ func NewCmd() *cobra.Command {
 	f.IntVarP(&cfg.port, "port", "p", 8801, "listen port")
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
+	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
+	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Any listed image may serve as CDS. Cannot be combined with --cds-measurements or --cds-rtmrs")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -96,7 +101,7 @@ func runContext(ctx context.Context, cfg config, listen listenFunc) error {
 	defer listener.Close()
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
-	slog.Info("tls-lb allowlist proxy listening", "addr", addr, "cds_url", cfg.cdsURL)
+	slog.Info("router allowlist proxy listening", "addr", addr, "cds_url", cfg.cdsURL)
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -125,14 +130,26 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.cdsMeasurements)
+	// Resolve before the flat fields are read: they feed the pin below.
+	if cfg.measurementsConfig != "" && (len(cfg.cdsMeasurements) > 0 || len(cfg.cdsRTMRs) > 0) {
+		return nil, fmt.Errorf("--measurements-config cannot be combined with --cds-measurements or --cds-rtmrs")
+	}
+	pinned, err := cmdsutil.LoadMeasurementsSource(cfg.measurementsConfig, "")
+	if err != nil {
+		return nil, err
+	}
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.cdsMeasurements)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if len(measurements) == 0 {
+	if len(measurements) == 0 && pinned.Empty() {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.attestationAPIURL)
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.cdsRTMRs)
+	if err != nil {
+		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Entries: pinned.Entries}, cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

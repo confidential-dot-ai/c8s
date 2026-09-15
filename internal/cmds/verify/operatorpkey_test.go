@@ -63,7 +63,7 @@ func operatorKeypair(t *testing.T) (pubPath string, keyPaths []string, pubPEM []
 
 // operatorSeed recomputes the register an initrd leaves behind —
 // SHA-384(0x00*48 ‖ SHA-384(pubkey)) — straight from the convention documented
-// in pkg/runtimemeasure, deliberately WITHOUT calling the helper the code under
+// in the runtimemeasure package, deliberately WITHOUT calling the helper the code under
 // test calls. Comparing that helper against itself would pin nothing; this is
 // the arithmetic an operator would otherwise have to do by hand, which is the
 // chore --operator-pkey exists to remove.

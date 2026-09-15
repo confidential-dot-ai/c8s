@@ -2,10 +2,6 @@ package attestclient
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -140,6 +137,42 @@ func TestAttestTransportError(t *testing.T) {
 	}
 }
 
+func TestMeshCA(t *testing.T) {
+	t.Run("returns the served bundle", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/ca" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte("CA-PEM"))
+		}))
+		defer srv.Close()
+
+		c := NewClientWithHTTP(srv.URL, srv.Client())
+		got, err := c.MeshCA(context.Background())
+		if err != nil {
+			t.Fatalf("MeshCA: %v", err)
+		}
+		if string(got) != "CA-PEM" {
+			t.Fatalf("MeshCA = %q, want CA-PEM", got)
+		}
+	})
+
+	t.Run("non-2xx is a StatusError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "gone", http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+
+		c := NewClientWithHTTP(srv.URL, srv.Client())
+		_, err := c.MeshCA(context.Background())
+		var statusErr *StatusError
+		if !errors.As(err, &statusErr) || statusErr.Status != http.StatusServiceUnavailable {
+			t.Fatalf("error = %v, want StatusError 503", err)
+		}
+	})
+}
+
 func TestHealthzNotReady(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -191,19 +224,19 @@ func TestGenerateEvidenceSuccess(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Fatalf("path = %s, want /attest", r.URL.Path)
 		}
-		var req types.AttestRequest
+		var req remote.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if string(req.ReportData.Bytes()) != "report-data" {
-			t.Fatalf("report data = %q", req.ReportData.Bytes())
+		if string(req.ReportData) != "report-data" {
+			t.Fatalf("report data = %q", req.ReportData)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"platform":"snp","evidence":{"q":1}}`))
 	}))
 	defer srv.Close()
 
-	// httpClient is shared by GenerateEvidence's inner attestationclient.
+	// httpClient is shared by GenerateEvidence's inner remote.
 	c := NewClientWithHTTP("http://cds.invalid", srv.Client())
 	resp, err := c.GenerateEvidence(srv.URL, []byte("report-data"))
 	if err != nil {
@@ -222,8 +255,8 @@ func TestGenerateEvidenceError(t *testing.T) {
 }
 
 // fullFlowServers wires up a CDS mux and an attestation-api server that
-// together satisfy ObtainCertificate / AttestKey. The cds handler for
-// /attest and /attest-key is supplied by the caller.
+// together satisfy ObtainCertificate. The CDS handler for
+// /attest is supplied by the caller.
 func fullFlowServers(t *testing.T, challenge string, cdsHandler http.Handler) (cdsURL, apiURL string) {
 	t.Helper()
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +271,6 @@ func fullFlowServers(t *testing.T, challenge string, cdsHandler http.Handler) (c
 		_ = json.NewEncoder(w).Encode(types.ChallengeResponse{Challenge: challenge})
 	})
 	mux.Handle("/attest", cdsHandler)
-	mux.Handle("/attest-key", cdsHandler)
 	cds := httptest.NewServer(mux)
 	t.Cleanup(cds.Close)
 
@@ -361,124 +393,6 @@ func TestReportDataForCSRBadPEM(t *testing.T) {
 	}
 }
 
-func testPubKeyDER(t *testing.T) []byte {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("marshal pkix: %v", err)
-	}
-	return der
-}
-
-func TestAttestKeySuccess(t *testing.T) {
-	const challenge = "dGVzdC1jaGFsbGVuZ2U="
-	const ear = "header.payload.sig"
-	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	pubDER := testPubKeyDER(t)
-
-	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/attest-key" {
-			t.Fatalf("path = %s, want /attest-key", r.URL.Path)
-		}
-		var body types.AttestKeyRequestBody
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if body.Challenge != challenge {
-			t.Fatalf("challenge = %q", body.Challenge)
-		}
-		if body.PublicKey != base64.StdEncoding.EncodeToString(pubDER) {
-			t.Fatal("public key not round-tripped")
-		}
-		if body.OperatorKeysHash != operatorKeysHash {
-			t.Fatalf("operator_keys_hash = %q, want %q", body.OperatorKeysHash, operatorKeysHash)
-		}
-		if body.Evidence.Platform != "snp" {
-			t.Fatalf("platform = %q, want snp", body.Evidence.Platform)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestKeyResponseBody{EAR: ear})
-	}))
-
-	c := NewClient(cdsURL)
-	got, err := c.AttestKeyWithOperatorKeysHash(context.Background(), apiURL, pubDER, operatorKeysHash)
-	if err != nil {
-		t.Fatalf("AttestKey: %v", err)
-	}
-	if got != ear {
-		t.Fatalf("ear = %q, want %q", got, ear)
-	}
-}
-
-func TestAttestKeyMissingEAR(t *testing.T) {
-	const challenge = "dGVzdC1jaGFsbGVuZ2U="
-	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-
-	c := NewClient(cdsURL)
-	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
-	if err == nil || !strings.Contains(err.Error(), "missing ear") {
-		t.Fatalf("error = %v, want missing ear", err)
-	}
-}
-
-func TestAttestKeyNon2xx(t *testing.T) {
-	const challenge = "dGVzdC1jaGFsbGVuZ2U="
-	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte("denied"))
-	}))
-
-	c := NewClient(cdsURL)
-	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
-	var statusErr *StatusError
-	if !errors.As(err, &statusErr) {
-		t.Fatalf("expected StatusError, got %T: %v", err, err)
-	}
-	if statusErr.Status != http.StatusForbidden || statusErr.Body != "denied" {
-		t.Fatalf("statusErr = %+v", statusErr)
-	}
-}
-
-func TestAttestKeyBadPubKey(t *testing.T) {
-	const challenge = "dGVzdC1jaGFsbGVuZ2U="
-	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("attest-key should not be reached with an invalid public key")
-	}))
-
-	c := NewClient(cdsURL)
-	_, err := c.AttestKey(context.Background(), apiURL, []byte("not-pkix-der"))
-	if err == nil || !strings.Contains(err.Error(), "parse public key") {
-		t.Fatalf("error = %v, want parse public key", err)
-	}
-}
-
-func TestAttestKeyBadChallenge(t *testing.T) {
-	cdsURL, apiURL := fullFlowServers(t, "!!!bad!!!", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("attest-key should not be reached")
-	}))
-
-	c := NewClient(cdsURL)
-	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
-	if err == nil || !strings.Contains(err.Error(), "invalid base64 in challenge") {
-		t.Fatalf("error = %v, want invalid base64", err)
-	}
-}
-
-func TestAttestKeyAuthenticateError(t *testing.T) {
-	c := NewClient(unreachableURL)
-	_, err := c.AttestKey(context.Background(), unreachableURL, testPubKeyDER(t))
-	if err == nil || !strings.Contains(err.Error(), "authenticate") {
-		t.Fatalf("error = %v, want authenticate failure", err)
-	}
-}
-
 func TestMakeSNPRATLSAttestFuncSuccess(t *testing.T) {
 	// attestation-api returns bare-metal SNP evidence; the AttestFunc should
 	// extract the raw SNP report.
@@ -489,7 +403,7 @@ func TestMakeSNPRATLSAttestFuncSuccess(t *testing.T) {
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: "snp", Evidence: evidenceJSON})
+		_ = json.NewEncoder(w).Encode(remote.AttestResponse{Platform: "snp", Evidence: evidenceJSON})
 	}))
 	defer api.Close()
 
@@ -572,22 +486,4 @@ func TestRedirectStatusIsNotSuccess(t *testing.T) {
 			t.Fatal("Readyz reported ready on a 300 response")
 		}
 	})
-}
-
-func TestAttestKeyRedirectStatusIsError(t *testing.T) {
-	const challenge = "dGVzdC1jaGFsbGVuZ2U="
-	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusMultipleChoices)
-		_, _ = w.Write([]byte(`{"ear":"x"}`))
-	}))
-
-	c := NewClient(cdsURL)
-	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
-	var statusErr *StatusError
-	if !errors.As(err, &statusErr) {
-		t.Fatalf("expected StatusError, got %T: %v", err, err)
-	}
-	if statusErr.Status != http.StatusMultipleChoices {
-		t.Fatalf("status = %d, want 300", statusErr.Status)
-	}
 }

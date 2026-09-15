@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -53,7 +53,7 @@ func TestNewClientDefaultTransport(t *testing.T) {
 }
 
 func TestCreateCSRDNSSAN(t *testing.T) {
-	as := testattest.New(t)
+	as := mockapi.New(t)
 
 	tests := []struct {
 		name   string
@@ -67,7 +67,7 @@ func TestCreateCSRDNSSAN(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := NewClient(&Config{
 				CDSURL:            "http://unused.invalid",
-				AttestationApiURL: as.URL,
+				AttestationApiURL: as.URL(),
 				CDSCAURL:          "http://unused.invalid",
 				NodeIP:            "10.0.0.1",
 				TEEType:           ratls.TEETypeSEVSNP,

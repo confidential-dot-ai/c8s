@@ -20,14 +20,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/internal/version"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -66,8 +67,11 @@ func startupSourceMode(cfg *config) string {
 // Run executes the nri-image-policy binary. args is the slice of CLI args
 // after the program name.
 func Run(args []string) error {
+	if len(args) > 0 && args[0] == setCDSPinsVerb {
+		return runSetCDSPins(os.Stdout, args[1:])
+	}
 	fs := flag.NewFlagSet("nri-image-policy", flag.ContinueOnError)
-	configPath := fs.String("config", "/etc/nri/conf.d/image-policy.yaml", "path to config file")
+	configPath := fs.String("config", defaultConfigPath, "path to config file")
 	healthAddr := fs.String("health-addr", ":8080", "health check listen address")
 	readTimeout := fs.Duration("read-timeout", 5*time.Second, "HTTP server read timeout")
 	writeTimeout := fs.Duration("write-timeout", 10*time.Second, "HTTP server write timeout")
@@ -104,8 +108,7 @@ func Run(args []string) error {
 
 	auditLogger := audit.NewLogger()
 
-	bootstrap := alwaysAllowAllowlist(cfg.Allowlist.AlwaysAllow)
-	store := newPolicyStore(bootstrap)
+	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
 
 	var wlClient allowlistclient.Client
 	if cfg.PullEnabled() {
@@ -133,7 +136,7 @@ func Run(args []string) error {
 		cancel()
 	}()
 
-	logger.Info("policy store seeded", "always_allow_entries", entriesOf(bootstrap))
+	logger.Info("policy store seeded", "always_allow_entries", len(cfg.Allowlist.AlwaysAllow))
 
 	addr := *healthAddr
 	if cfg.Plugin.HealthAddr != "" {
@@ -185,7 +188,13 @@ func Run(args []string) error {
 		})
 		if err != nil {
 			switch {
-			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			// INVARIANT: shutdown is read off the parent context, never off
+			// the error chain. pullInitial gives every attempt its own
+			// deadline, so a merely slow CDS returns an error wrapping
+			// context.DeadlineExceeded that is indistinguishable from a
+			// SIGTERM by inspection — and taking that branch parks the
+			// process on pluginErrCh forever, never ready and never pulling.
+			case ctx.Err() != nil:
 				logger.Info("shutdown before plugin became ready")
 				if perr := <-pluginErrCh; perr != nil {
 					logger.Error("plugin error during shutdown", "error", perr)
@@ -236,14 +245,14 @@ func Run(args []string) error {
 // URL is always https (enforced by config.Validate), so this always verifies
 // the CDS attestation handshake.
 func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	pins, err := cfg.cdsPins()
 	if err != nil {
-		return nil, fmt.Errorf("parse CDS measurements: %w", err)
+		return nil, err
 	}
-	if len(measurements) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
@@ -251,55 +260,27 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	return client, nil
 }
 
-// alwaysAllowAllowlist builds the static floor from the config's AlwaysAllow
-// map: chart-managed digests (typically the installer image so chart upgrades
-// can roll) admitted by digest alone.
-func alwaysAllowAllowlist(entries map[string]string) *allowlist.Allowlist {
-	wl := &allowlist.Allowlist{
-		Schema:  allowlist.Schema,
-		Digests: make(map[string]string, len(entries)),
-	}
-	for d, image := range entries {
-		wl.Digests[d] = image
-	}
-	return wl
-}
-
-func entriesOf(wl *allowlist.Allowlist) int {
-	if wl == nil {
-		return 0
-	}
-	return len(wl.Digests)
-}
-
-// mergeAllowlists unions the floor (a) with a pulled document (b): b's floor
-// digests and workloads overlay a's. Either may be nil. Floor entries in a
-// cannot be removed by b — they are the static always_allow floor. The result
-// feeds BuildIndex, so a's digests stay digest-only-admissible while b's
-// workloads carry their argv policy.
-func mergeAllowlists(a, b *allowlist.Allowlist) *allowlist.Allowlist {
-	out := &allowlist.Allowlist{
-		Schema:    allowlist.Schema,
-		Digests:   map[string]string{},
-		Workloads: map[string]allowlist.Workload{},
-	}
-	if a != nil {
-		for k, v := range a.Digests {
-			out.Digests[k] = v
+// cdsPins is shared by outbound pulls and the CDS-only inventory endpoint.
+func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
+	if cfg.CDSMeasurementsConfig != "" {
+		if len(cfg.CDSMeasurements) != 0 || len(cfg.CDSRTMRs) != 0 {
+			return ratls.Pins{}, fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
 		}
-		for k, v := range a.Workloads {
-			out.Workloads[k] = v
+		set, err := measurements.Load(cfg.CDSMeasurementsConfig)
+		if err != nil {
+			return ratls.Pins{}, err
 		}
+		return ratls.Pins{Entries: set.Entries}, nil
 	}
-	if b != nil {
-		for k, v := range b.Digests {
-			out.Digests[k] = v
-		}
-		for k, v := range b.Workloads {
-			out.Workloads[k] = v
-		}
+	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS measurements: %w", err)
 	}
-	return out
+	rtmrs, err := refvalues.ParseRTMRPins(cfg.CDSRTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("parse CDS RTMR pins: %w", err)
+	}
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
 }
 
 type pullArgs struct {
@@ -313,7 +294,7 @@ type pullArgs struct {
 // pullInitial fetches the startup allowlist with bounded retries and
 // returns the response ETag for the steady-state poll loop.
 //
-// INVARIANT: a nil error return means args.store holds floor ∪ pulled.
+// INVARIANT: a nil error return means args.store holds the pulled document.
 // Context cancellation surfaces as ctx.Err(); callers must not mark the
 // plugin ready on that path.
 func pullInitial(ctx context.Context, args pullArgs) (string, error) {
@@ -341,7 +322,6 @@ func pullInitial(ctx context.Context, args pullArgs) (string, error) {
 				version := parseVersion(etag)
 				args.store.apply(wl, version)
 				args.logger.Info("initial allowlist pulled from CDS",
-					"floor_entries", len(wl.Digests),
 					"workloads", len(wl.Workloads),
 					"version", version,
 					"etag", etag,
@@ -374,8 +354,8 @@ type pullLoopArgs struct {
 	logger   *slog.Logger
 }
 
-// runPullLoop polls CDS with If-None-Match. 200 rebuilds the index as floor ∪
-// pulled and advances the ETag — unless the pulled version is below the applied
+// runPullLoop polls CDS with If-None-Match. 200 rebuilds the index from the
+// pulled document and advances the ETag — unless the pulled version is below the applied
 // one (epoch rollback), which is ignored so the ETag keeps re-fetching until a
 // forward version arrives. 304 and errors leave the index untouched.
 func runPullLoop(ctx context.Context, args pullLoopArgs) {
@@ -413,7 +393,6 @@ func runPullLoop(ctx context.Context, args pullLoopArgs) {
 		}
 		etag = newETag
 		args.logger.Info("pull loop: allowlist refreshed",
-			"floor_entries", len(wl.Digests),
 			"workloads", len(wl.Workloads),
 			"version", version,
 			"etag", etag,
@@ -529,11 +508,11 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 // startSandboxDigests serves the CDS-facing digests endpoint over
 // mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
 func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
+	pins, err := cfg.Allowlist.Pull.cdsPins()
 	if err != nil {
-		return fmt.Errorf("parse CDS measurements: %w", err)
+		return err
 	}
-	if len(measurements) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
@@ -542,7 +521,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, measurements)
+		attestationApiURL, pins)
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).
@@ -551,13 +530,11 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 	if err != nil {
 		return err
 	}
-	// The node's signer is resolved before this point, so the holder is
-	// answering from the start: a nil one means this deployment issues no
-	// tokens at all, not that one is still coming.
-	signers := workloadclaims.NewSignerHolder(signer)
+	// The node's signer is resolved before this point: a nil one means
+	// this deployment issues no tokens at all, not that one is still coming.
 	go func() {
-		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signers.Ready())
-		if err := workloadclaims.ServeTokens(ctx, l, inventory, signers); err != nil {
+		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
+		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
 	}()

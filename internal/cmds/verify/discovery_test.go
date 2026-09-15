@@ -17,8 +17,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 )
 
 func TestEvidenceFromDiscovery_Malformed(t *testing.T) {
@@ -336,8 +334,8 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 // the state that reaches the verdict on that path.
 func TestNonDiscoveryEvidencePresentsNoFrontDoor(t *testing.T) {
 	nonce := make([]byte, nonceSize)
-	endpointJSON := buildEndpointJSON(t, mintEndpointIdentity(t), nonce, make([]byte, 64), []byte("vcek"),
-		make([]byte, overenc.X25519PubBytes), make([]byte, overenc.MLKEM768EKBytes))
+	sess := fakeSession(0x02)
+	endpointJSON := buildEndpointJSON(t, mintEndpointIdentity(t), nonce, make([]byte, 64), []byte("vcek"), sess)
 
 	for _, tc := range []struct {
 		name        string
@@ -349,7 +347,7 @@ func TestNonDiscoveryEvidencePresentsNoFrontDoor(t *testing.T) {
 			return gatherFromRATLSCert(context.Background(), strings.TrimPrefix(srv.URL, "https://"), "", 5*time.Second, leafTrust{})
 		}, "verified"},
 		{"attest-pq endpoint", func(*testing.T) (*evidence, error) {
-			return evidenceFromEndpointJSON(endpointJSON, nonce, "attestation endpoint")
+			return evidenceFromEndpointJSON(endpointJSON, nonce, sess.ek, "attestation endpoint")
 		}, "partial"},
 		{"saved bare evidence", func(*testing.T) (*evidence, error) {
 			return evidenceFromBareJSON([]byte(`{"evidence":{"attestation_report":"AAAA"}}`), make([]byte, 48), "file")
@@ -403,7 +401,7 @@ func verdictShape(oc Outcome) string {
 
 // The document and the observed handshake leaf must ride ONE connection:
 // serving certs are per replica, so a second dial can reach a different
-// replica — or, for an adversarial host, a proxied attested tls-lb pod — and
+// replica — or, for an adversarial host, a proxied attested router pod — and
 // make a WebPKI door look attested. The server below is that host: the door
 // clients reach (first connection) serves a WebPKI stand-in, every later
 // connection gets the attested cert. The observation must be the dialed

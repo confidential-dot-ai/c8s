@@ -1,7 +1,6 @@
 package getkubeconfig
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -67,18 +66,11 @@ func requestCredential(ctx context.Context, httpClient *http.Client, baseURL str
 		return nil, err
 	}
 
-	// The JWT binds method/path/body (pbh) — must match exactly what we send.
-	authz, err := signer.Authorization(http.MethodPost, credrelease.ReleasePath, body)
-	if err != nil {
-		return nil, fmt.Errorf("sign operator token: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+credrelease.ReleasePath, bytes.NewReader(body))
+	req, err := operatorauth.NewRequest(ctx, http.MethodPost, baseURL+credrelease.ReleasePath, body, signer)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authz)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

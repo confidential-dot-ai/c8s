@@ -1,0 +1,25 @@
+[Unit]
+Description=Enroll the measured follower with its authorized leader
+Requires=rke2-role.service attestation-api.service
+After=rke2-role.service attestation-api.service
+Before=rke2-agent.service
+ConditionPathExists=/run/confos/role-agent
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Keep the start job pending through bounded retries, so dependent RKE2
+# starts when the leader recovers instead of retaining a failed start job.
+ExecStart=/bin/sh -c 'until /usr/local/bin/c8s node-services run join; do sleep 5; done'
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=infinity
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

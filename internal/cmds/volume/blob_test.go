@@ -39,7 +39,7 @@ func TestBlobRoundTrips(t *testing.T) {
 	if len(key) != KeyBytes {
 		t.Fatalf("key is %d bytes, want %d", len(key), KeyBytes)
 	}
-	if got.Verity != validVerity() {
+	if got.Verity == nil || *got.Verity != validVerity() {
 		t.Fatalf("verity: got %+v, want %+v", got.Verity, validVerity())
 	}
 }
@@ -110,5 +110,73 @@ func TestDecodeKeyFailsOnCorruptKey(t *testing.T) {
 	b.Key = "not base64"
 	if _, err := b.DecodeKey(); err == nil {
 		t.Fatal("accepted a non-base64 key")
+	}
+}
+
+func TestMutableBlobRoundTrips(t *testing.T) {
+	b, err := NewMutableBlob(testKey())
+	if err != nil {
+		t.Fatalf("new mutable blob: %v", err)
+	}
+	raw, err := b.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// A mutable blob carries nothing but the key: there is no tree to
+	// describe, and a "verity" key left in the JSON would invite a reader to
+	// expect one.
+	if strings.Contains(string(raw), "verity") {
+		t.Fatalf("mutable blob names verity: %s", raw)
+	}
+	got, err := DecodeBlob(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Mutable || got.Verity != nil {
+		t.Fatalf("decoded %+v, want mutable with no verity", got)
+	}
+}
+
+// A pre-mutable blob — type, key, verity — decodes as immutable: escrow files
+// written before this field existed must keep opening their volumes.
+func TestBlobWithoutMutableFieldDecodesImmutable(t *testing.T) {
+	raw, err := validBlob(t).Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "mutable") {
+		t.Fatalf("immutable blob names mutable: %s", raw)
+	}
+	got, err := DecodeBlob(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Mutable {
+		t.Fatal("a blob without the field decoded as mutable")
+	}
+}
+
+// The mode and the tree are one invariant: both present or both absent is a
+// blob whose author's intent is unknowable, refused rather than disambiguated.
+func TestValidateRejectsModeAndTreeMismatch(t *testing.T) {
+	both := validBlob(t)
+	both.Mutable = true
+	if err := both.Validate(); err == nil {
+		t.Error("accepted mutable with verity geometry")
+	}
+
+	neither, err := NewMutableBlob(testKey())
+	if err != nil {
+		t.Fatalf("new mutable blob: %v", err)
+	}
+	neither.Mutable = false
+	if err := neither.Validate(); err == nil {
+		t.Error("accepted immutable without verity geometry")
+	}
+}
+
+func TestNewMutableBlobRejectsWrongKeyLength(t *testing.T) {
+	if _, err := NewMutableBlob(make([]byte, 32)); err == nil {
+		t.Fatal("accepted a 32-byte key")
 	}
 }

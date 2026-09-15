@@ -1,4 +1,4 @@
-{{- if .Values.ratlsMesh.enabled }}
+{{- if and .Values.ratlsMesh.enabled (not .Values.node.bakedServices) }}
 {{- $attestationApiURL := include "c8s.attestationApiURL" . -}}
 {{/*
   cds mode points a single --cds-url at the unified CDS, which serves both
@@ -7,7 +7,7 @@
 {{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
 {{- /*
-The release namespace is deliberately NOT excluded: tls-lb's egress to
+The release namespace is deliberately NOT excluded: router's egress to
 workload pod IPs (via the operator-managed headless Services) must be
 interceptable so that hop gets attested mTLS. Control-plane traffic inside the
 release namespace dials Service VIPs, which are never in the pod-destination
@@ -53,6 +53,11 @@ spec:
       labels:
         {{- include "ratls-mesh.selectorLabels" . | nindent 8 }}
       annotations:
+        {{- if .Values.ratlsMesh.measurementsConfig }}
+        # A ConfigMap edit alone does not change the pod template, so without
+        # this a tightened pin would not roll the DaemonSet.
+        checksum/measurements-config: {{ .Values.ratlsMesh.measurementsConfig | sha256sum }}
+        {{- end }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.ratlsMesh.ports.health | quote }}
         prometheus.io/path: "/metrics"
@@ -70,7 +75,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+        {{- if .Values.attestationApi.enabled }}
         # workloadclaims.InventorySocketGID: the attest-proxy's socket is
         # group-owned by it; the mesh runs as uid 1337 and needs the group to
         # connect.
@@ -83,6 +88,11 @@ spec:
         - operator: "Exists"
           effect: "NoSchedule"
       volumes:
+        {{- if .Values.ratlsMesh.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            name: {{ include "c8s.fullname" . }}-measurements
+        {{- end }}
         - name: xtables-lock
           hostPath:
             path: {{ .Values.ratlsMesh.xtablesLockPath }}
@@ -173,8 +183,6 @@ spec:
             - {{ $excludeSourceNamespaces | quote }}
             - --node-ip
             - $(NODE_IP)
-            - --cluster-dns-ip
-            - {{ .Values.ratlsMesh.clusterDNSIP | quote }}
             - --resync-period
             - {{ .Values.ratlsMesh.iptablesSync.resyncPeriod | quote }}
             - --watchdog-period
@@ -232,6 +240,11 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- if .Values.ratlsMesh.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
           args:
             - --platform
             - {{ .Values.ratlsMesh.platform | quote }}
@@ -257,9 +270,18 @@ spec:
             - --rotation-timeout
             - {{ .Values.ratlsMesh.rotationTimeout | quote }}
             {{- end }}
+            {{- if .Values.ratlsMesh.measurementsConfig }}
+            - --measurements-config
+            - /etc/c8s-measurements/ratls-mesh.json
+            {{- else }}
             {{- if .Values.ratlsMesh.measurements }}
             - --measurements
             - {{ .Values.ratlsMesh.measurements | join "," | quote }}
+            {{- end }}
+            {{- with .Values.ratlsMesh.rtmrs }}
+            - --rtmrs
+            - {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
             - --max-conns
@@ -286,9 +308,15 @@ spec:
             - {{ printf "ratls-mesh.%s.svc" .Release.Namespace | quote }}
             - --ca-poll-interval
             - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
+            {{- if not .Values.ratlsMesh.measurementsConfig }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements
             - {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.cds.rtmrs }}
+            - --cds-rtmrs
+            - {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
           env:
@@ -296,7 +324,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
-            {{- /* cvmMode=node: HOST_IP expands $(HOST_IP) in
+            {{- /* cvmMode=bare-metal: HOST_IP expands $(HOST_IP) in
                    --attestation-api-url. hostNetwork, so the node IP is this
                    pod's own — the node-baked host attestation-api. */}}
             {{- with (include "c8s.attestationApiHostIPEnv" .) }}

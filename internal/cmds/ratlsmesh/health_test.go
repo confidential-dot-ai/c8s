@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -198,10 +198,11 @@ func TestHealthReadyGatesOnCertUsable(t *testing.T) {
 func TestHealthServerServe(t *testing.T) {
 	h := newHealthServer(testMetrics(), nil, nil, 10, time.Second, time.Second)
 	h.ready.Store(true)
-	port := freePort(t)
+	ln := bindLoopback(t)
+	port := listenerPort(ln)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- h.serve(ctx, fmt.Sprintf("127.0.0.1:%d", port)) }()
+	go func() { errCh <- h.serve(ctx, ln.Addr().String(), ln) }()
 
 	assertEventually(t, 5*time.Second, func() bool {
 		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/live", port))
@@ -223,21 +224,21 @@ func TestHealthServerServe(t *testing.T) {
 	}
 
 	// A second serve on an already-bound port errors immediately.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
-	if err := h.serve(context.Background(), ln.Addr().String()); err == nil {
+	defer held.Close()
+	if err := h.serve(context.Background(), held.Addr().String(), nil); err == nil {
 		t.Fatal("serve on a bound port should error")
 	}
 }
 
 func TestHealthReadyCertProvisioningGates(t *testing.T) {
-	stub := testattest.New(t)
+	stub := mockapi.New(t)
 	_, mgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:   "sev-snp",
-		AttestFunc: makeAttestFunc(attestclient.NewClient(""), stub.URL),
+		AttestFunc: makeAttestFunc(attestclient.NewClient(""), stub.URL()),
 		CertTTL:    time.Hour,
 	})
 	if err != nil {

@@ -8,13 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // healthServer returns an httptest server whose /health returns the given
-// status string, plus an attestationclient.Client pointed at it.
-func healthServer(t *testing.T, status string, code int) attestationclient.Client {
+// status string, plus an remote.Client pointed at it.
+func healthServer(t *testing.T, status string, code int) remote.Client {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -23,16 +22,16 @@ func healthServer(t *testing.T, status string, code int) attestationclient.Clien
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(types.HealthResponse{Status: status})
+		json.NewEncoder(w).Encode(remote.HealthResponse{Status: status})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return attestationclient.NewClientWithHTTP(srv.URL, srv.Client())
+	return remote.NewClientWithHTTP(srv.URL, srv.Client())
 }
 
 // hangingHealthServer accepts the request and never answers, the shape a
 // wedged attestation-api takes on the wire.
-func hangingHealthServer(t *testing.T) attestationclient.Client {
+func hangingHealthServer(t *testing.T) remote.Client {
 	t.Helper()
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -44,7 +43,7 @@ func hangingHealthServer(t *testing.T) attestationclient.Client {
 	// Cleanup is LIFO: release the handler before Close waits on it.
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(release) })
-	return attestationclient.NewClientWithHTTP(srv.URL, srv.Client())
+	return remote.NewClientWithHTTP(srv.URL, srv.Client())
 }
 
 // TestCheckBoundsAHungProbe pins the per-check deadline: without one, check

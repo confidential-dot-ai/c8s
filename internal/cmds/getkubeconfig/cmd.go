@@ -77,6 +77,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")
 	f.StringVar(&cfg.OutPath, "out", "", "output kubeconfig path (required)")
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
+	f.DurationVar(&cfg.ReleaseWait, "release-wait", 2*time.Minute, "how long to keep retrying while cred-release is not yet listening (it comes up after attest); 0 fails on the first refused dial")
 	cmd.MarkFlagsMutuallyExclusive("node", "vmi")
 	return cmd
 }

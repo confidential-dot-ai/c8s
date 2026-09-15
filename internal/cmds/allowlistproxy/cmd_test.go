@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"strings"
 )
 
 func TestProxyPreservesAuthorizedRequests(t *testing.T) {
@@ -40,8 +41,8 @@ func TestProxyPreservesAuthorizedRequests(t *testing.T) {
 		{
 			name:       "delete body",
 			method:     http.MethodDelete,
-			requestURI: "/allowlist/digests",
-			body:       []byte(`{"digests":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}`),
+			requestURI: "/allowlist/workloads/model",
+			body:       []byte(`{"reason":"rotated"}`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,7 +130,7 @@ func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
 		want int
 	}{
 		{path: "/allowlist", want: http.StatusNoContent},
-		{path: "/allowlist/digests", want: http.StatusNoContent},
+		{path: "/allowlist/workloads/model", want: http.StatusNoContent},
 		{path: "/allowlisted", want: http.StatusNotFound},
 		{path: "/", want: http.StatusNotFound},
 	} {
@@ -201,7 +202,7 @@ func TestListenAddressRequiresLoopback(t *testing.T) {
 
 func TestNewHandlerRejectsBadMeasurement(t *testing.T) {
 	bad := []string{"not-hex"}
-	_, parseErr := ratls.ParseHexMeasurementsList(bad)
+	_, parseErr := refvalues.ParseHexMeasurementsList(bad)
 	_, err := newHandler(config{
 		cdsURL:            "https://c8s-cds:8443",
 		cdsMeasurements:   bad,
@@ -345,5 +346,17 @@ func validConfig() config {
 		attestationAPIURL: "http://attestation-api.c8s-system.svc:8400",
 		requestTimeout:    time.Second,
 		readHeaderTimeout: time.Second,
+	}
+}
+
+func TestNewHandlerRejectsBadRTMRPin(t *testing.T) {
+	_, err := newHandler(config{
+		cdsURL:            "https://c8s-cds:8443",
+		cdsRTMRs:          []string{"1=zz"},
+		attestationAPIURL: "http://attestation-api:8400",
+		requestTimeout:    time.Second,
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "--cds-rtmrs") {
+		t.Fatalf("error = %v, want an RTMR parse failure naming the flag", err)
 	}
 }

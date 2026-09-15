@@ -3,6 +3,13 @@
   "$comment": "The root key set is closed, and the four subtrees operators hand-write are sealed, so an unknown or misspelled key is a render-time error instead of a silently dropped value. Every key of those subtrees in values.yaml must appear here. Leaf types stay unconstrained except where a wrong value is otherwise accepted silently (see the enums and ranges below). Maps whose keys belong to the consumer (label maps, digest maps, resources) are left open.",
   "type": "object",
   "properties": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bakedServices": { "type": "boolean" }
+      }
+    },
     "cds": {
       "type": [
         "object",
@@ -27,19 +34,6 @@
         "challengeTTL": {},
         "cnPattern": {},
         "dnsSanPatterns": {},
-        "earIssuer": {},
-        "expectedIssuer": {},
-        "handoff": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {},
-            "peerUrl": {}
-          }
-        },
         "image": {
           "type": [
             "object",
@@ -56,8 +50,10 @@
         "jwtClockSkew": {},
         "logLevel": {},
         "maxRequestSize": {},
-        "maxTTL": {},
         "measurements": {},
+        "measurementsConfig": {
+          "type": "string"
+        },
         "namedCertTTL": {},
         "node": {
           "type": [
@@ -106,6 +102,7 @@
         "requestTimeout": {},
         "resources": {},
         "sanValidation": {},
+        "rtmrs": {},
         "sandboxInventoryCIDRs": {},
         "secretsMaxPaths": {},
         "secretsMaxPathsPerWorkload": {},
@@ -133,10 +130,7 @@
               ]
             }
           }
-        },
-        "tokenSignerOverlap": {},
-        "tokenSignerRotationInterval": {},
-        "tokenSignerRotationJitter": {}
+        }
       }
     },
     "nriImagePolicy": {
@@ -146,6 +140,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "baked": {},
         "bootstrapAllowlist": {
           "type": [
             "object",
@@ -154,7 +149,6 @@
           "additionalProperties": false,
           "properties": {
             "deriveComponents": {},
-            "digests": {},
             "workloads": {}
           }
         },
@@ -300,13 +294,24 @@
         }
       }
     },
-    "tlsLb": {
+    "router": {
       "type": [
         "object",
         "null"
       ],
       "additionalProperties": false,
       "properties": {
+        "acme": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "directoryURL": {},
+            "email": {}
+          }
+        },
         "allowlist": {
           "type": [
             "object",
@@ -366,6 +371,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "caWatchInterval": {},
             "renewInterval": {},
             "verbose": {}
           }
@@ -464,6 +470,7 @@
           "properties": {
             "certKey": {},
             "keyKey": {},
+            "mode": {},
             "mountPath": {},
             "secretName": {}
           }
@@ -564,7 +571,6 @@
     "hostNamespacePolicy": {},
     "webhook": {},
     "attestationApi": {},
-    "kata": {},
     "ratlsMesh": {},
     "podSecurityContext": {},
     "teeProxy": {

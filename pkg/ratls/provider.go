@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"time"
+
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 )
 
 // CertProvider abstracts certificate provisioning. Implementations handle
@@ -43,9 +45,9 @@ func (p *SelfSignedProvider) Provision(ctx context.Context) (*tls.Certificate, t
 		return nil, 0, err
 	}
 
-	teeType, err := parseTEEType(p.Platform)
+	teeType, err := teetypes.ParseFamily(p.Platform)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("%w: %v", ErrUnsupportedTEE, err)
 	}
 
 	reportData, err := ReportDataForKey(&key.PublicKey, nil)
@@ -59,7 +61,7 @@ func (p *SelfSignedProvider) Provision(ctx context.Context) (*tls.Certificate, t
 		return nil, 0, fmt.Errorf("ratls: get attestation: %w", err)
 	}
 
-	att := &Attestation{TEEType: teeType, Report: []byte(evidence)}
+	att := &Attestation{Family: teeType, Report: []byte(evidence)}
 	certDER, err := CreateAttestedCert(key, att, p.Opts)
 	if err != nil {
 		return nil, 0, err

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
@@ -171,34 +170,39 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		{"app.kubernetes.io/component", "cds"},
 		{"app.kubernetes.io/name", "ratls-mesh"},
 		{"app.kubernetes.io/name", "nri-image-policy"},
-		{"app.kubernetes.io/name", "tls-lb"},
+		{"app.kubernetes.io/name", "router"},
 	} {
 		if !renderedManifestHasLabel(t, out, label[0], label[1]) {
 			t.Fatalf("default chart missing a manifest labelled %s: %s", label[0], label[1])
 		}
 	}
-	renderedTLSLBNginxConfig(t, out).server(t).assertDirective(t, "server_name", "c8s-tls-lb.c8s-system.svc")
-	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	renderedRouterNginxConfig(t, out).server(t).assertDirective(t, "server_name", "c8s-router.c8s-system.svc")
+	cert := routerGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert,
 		"get-cert",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock",
-		"--san=c8s-tls-lb.c8s-system.svc",
+		"--san=c8s-router.c8s-system.svc",
 		"--out=/tls/cert.pem",
 		"--key-out=/tls/key.pem",
 		"--renew-interval=1h",
 		"--reload-nginx=true",
 		"--continue-on-initial-error",
+		// The CA watch keeps the served mesh CA tracking the live CDS CA: a
+		// CDS restart regenerates the mesh CA in-memory, and without the watch
+		// the /.well-known/mesh-ca.pem discovery endpoint serves the dead CA
+		// until the next scheduled renewal.
+		"--ca-watch-interval=1m",
 	)
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		t.Fatalf("c8s-cert restartPolicy = %v, want Always (single long-lived sidecar so its pidns anchors shareProcessNamespace under kata)", cert.RestartPolicy)
+		t.Fatalf("c8s-cert restartPolicy = %v, want Always", cert.RestartPolicy)
 	}
 	// nginx is gated by the c8s-cert-wait init container, not an exec
-	// startupProbe on the sidecar — the locked kata guest denies exec.
+	// startupProbe on the sidecar.
 	if cert.StartupProbe != nil {
-		t.Fatalf("c8s-cert must NOT carry a startupProbe (exec is denied on locked kata guests); got %+v", cert.StartupProbe)
+		t.Fatalf("c8s-cert must NOT carry a startupProbe; got %+v", cert.StartupProbe)
 	}
-	wait := tlsLBGetCertContainer(t, out, "c8s-cert-wait")
+	wait := routerGetCertContainer(t, out, "c8s-cert-wait")
 	if got := strings.Join(wait.Command, " "); !strings.Contains(got, "probe-file") || !strings.Contains(got, "--wait") || !strings.Contains(got, "/tls/cert.pem") {
 		t.Fatalf("c8s-cert-wait command = %q, want `/c8s probe-file --wait --timeout=... /tls/cert.pem`", got)
 	}
@@ -235,7 +239,7 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		{"--ipset-maxelem", "262144"},
 		{"--ready-file", "/tmp/ratls-iptables-ready"},
 		{"--iptables-metrics-file", "/tmp/ratls-iptables-metrics.json"},
-		// The release namespace must NOT be excluded: tls-lb egress to
+		// The release namespace must NOT be excluded: router egress to
 		// workload pod IPs (headless-Service dials) needs mesh interception.
 		{"--exclude-source-namespaces", "kube-system"},
 	} {
@@ -294,7 +298,7 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		"ratls-mesh-tcp-only-egress",
 		"c8s-cds-ingress",
 		"c8s-operator-ingress",
-		"c8s-tls-lb-ingress",
+		"c8s-router-ingress",
 	}
 	kinds := renderedKinds(t, out)
 	if kinds["NetworkPolicy"] != len(wantPolicies) {
@@ -554,8 +558,8 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 //   - native sidecars (SidecarContainers default-on from 1.29): with the
 //     gate off, iptables-cleanup is invalid as a native sidecar, its preStop
 //     cannot run, and the host leaks managed chains/ipsets across restarts;
-//   - ValidatingAdmissionPolicy v1 (GA from 1.30): the chart ships two
-//     default-on policies (deny-ratls-mesh-uid, cw-label-integrity), so a
+//   - ValidatingAdmissionPolicy v1 (GA from 1.30): the chart ships default-on
+//     UID, workload-integrity, and Restricted pod-security policies, so a
 //     pre-1.30 apply fails mid-install on unknown kinds anyway — the
 //     kubeVersion constraint makes helm fail early and clearly instead.
 func TestChartRATLSKubeVersionPinned(t *testing.T) {
@@ -625,51 +629,105 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 	}
 }
 
-// workloadclaims.DigestsPort (1019) is the admission inventory's identity: CDS
-// resolves the inventory's signing key by dialling it at the node's address, so
-// anything that can answer there can have its own key accepted as the
-// inventory's and mint tokens naming any sandbox. hostNetwork is not the only
-// way to get there — a hostPort publishes a pod on the node's address with no
-// host namespace at all — so the VAP must deny both. PodSecurity baseline also
-// denies hostPort, but a namespace hosting CW pods cannot run at baseline (the
-// injected hostPath forces privileged), so this policy is the only control.
-func TestChartHostNamespacePolicyDeniesHostPort(t *testing.T) {
-	out, err := helmTemplate(t)
+// Both admission paths enforce host isolation and Pod security defaults.
+// The ephemeral policy otherwise checks only debugger containers, leaving
+// unrelated preserved container fields alone.
+func TestChartHostSecurityPoliciesSplitPodAndEphemeral(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "hostNamespacePolicy.exemptNamespaces={tenant-platform}")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	var vap admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+	var podPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &podPolicy) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var expr string
-	for _, v := range vap.Spec.Validations {
+	var ephemeralPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces-ephemeral", &ephemeralPolicy) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces-ephemeral not rendered")
+	}
+
+	resources := func(p admissionregv1.ValidatingAdmissionPolicy) []string {
+		var got []string
+		for _, rule := range p.Spec.MatchConstraints.ResourceRules {
+			got = append(got, rule.Resources...)
+		}
+		return got
+	}
+	if got := resources(podPolicy); !slices.Contains(got, "pods") {
+		t.Errorf("pod security policy resources = %v, want pods", got)
+	} else if slices.Contains(got, "pods/ephemeralcontainers") {
+		t.Errorf("pod security policy must not match the separately validated ephemeral subresource: %v", got)
+	}
+	if got := resources(ephemeralPolicy); !slices.Contains(got, "pods/ephemeralcontainers") {
+		t.Errorf("ephemeral security policy resources = %v, want pods/ephemeralcontainers", got)
+	} else if slices.Contains(got, "pods") {
+		t.Errorf("ephemeral security policy must not match pods: %v", got)
+	}
+
+	var hostPortExpr string
+	for _, v := range podPolicy.Spec.Validations {
 		if strings.Contains(v.Expression, "hostPort") {
-			expr = v.Expression
+			hostPortExpr = v.Expression
 		}
 	}
-	if expr == "" {
+	if hostPortExpr == "" {
 		t.Fatal("no hostPort validation in c8s-deny-host-namespaces: a tenant pod with hostPort 1019 impersonates the admission inventory")
 	}
-	// Every container list, or the check is bypassed by putting the port on an
-	// init or ephemeral container.
 	for _, want := range []string{"spec.containers", "spec.initContainers", "spec.ephemeralContainers"} {
-		if !strings.Contains(expr, want) {
-			t.Errorf("hostPort validation does not cover %s; expression=%q", want, expr)
+		if !strings.Contains(hostPortExpr, want) {
+			t.Errorf("hostPort validation does not cover %s; expression=%q", want, hostPortExpr)
 		}
 	}
-	// An ephemeral container is an UPDATE on the subresource; "pods" alone
-	// leaves it unevaluated by this policy entirely.
-	var subresource bool
-	for _, r := range vap.Spec.MatchConstraints.ResourceRules {
-		for _, res := range r.Resources {
-			if res == "pods/ephemeralcontainers" {
-				subresource = true
+	for _, v := range ephemeralPolicy.Spec.Validations {
+		// Host isolation stays a full-Pod invariant on subresource updates.
+		if slices.ContainsFunc([]string{"hostNetwork", "hostPID", "hostIPC", "hostPort", "hostPath", "sysctls"}, func(field string) bool {
+			return strings.Contains(v.Expression, field)
+		}) {
+			continue
+		}
+		if !strings.Contains(v.Expression, "object.spec.ephemeralContainers") {
+			t.Errorf("ephemeral security expression does not inspect debuggers: %s", v.Expression)
+		}
+		for _, preservedField := range []string{"object.spec.containers", "object.spec.initContainers", "object.spec.volumes"} {
+			if strings.Contains(v.Expression, preservedField) {
+				t.Errorf("ephemeral security expression revalidates unrelated preserved field %s: %s", preservedField, v.Expression)
 			}
 		}
 	}
-	if !subresource {
-		t.Error("matchConstraints does not name pods/ephemeralcontainers, so ephemeral containers bypass this policy")
+
+	for _, policy := range []admissionregv1.ValidatingAdmissionPolicy{podPolicy, ephemeralPolicy} {
+		selector := policy.Spec.MatchConstraints.NamespaceSelector
+		if selector == nil {
+			t.Errorf("%s has no namespaceSelector", policy.Name)
+			continue
+		}
+		var excluded []string
+		for _, requirement := range selector.MatchExpressions {
+			if requirement.Key == "kubernetes.io/metadata.name" &&
+				requirement.Operator == metav1.LabelSelectorOpNotIn {
+				excluded = append(excluded, requirement.Values...)
+			}
+		}
+		for _, want := range []string{"c8s-system", "kube-system", "local-path-storage", "tenant-platform"} {
+			if !slices.Contains(excluded, want) {
+				t.Errorf("%s namespace exclusions = %v, missing %q", policy.Name, excluded, want)
+			}
+		}
+	}
+
+	for _, name := range []string{"c8s-deny-host-namespaces", "c8s-deny-host-namespaces-ephemeral"} {
+		var binding admissionregv1.ValidatingAdmissionPolicyBinding
+		if !findDoc(t, out, "ValidatingAdmissionPolicyBinding", name, &binding) {
+			t.Errorf("ValidatingAdmissionPolicyBinding %s not rendered", name)
+			continue
+		}
+		if binding.Spec.PolicyName != name {
+			t.Errorf("%s binding policyName = %q, want %q", name, binding.Spec.PolicyName, name)
+		}
+		if len(binding.Spec.ValidationActions) != 1 ||
+			binding.Spec.ValidationActions[0] != admissionregv1.Deny {
+			t.Errorf("%s binding actions = %v, want [Deny]", name, binding.Spec.ValidationActions)
+		}
 	}
 }
 
@@ -779,12 +837,10 @@ func TestChartTCPEgressPolicyDefaultOnRendersNoNamespaces(t *testing.T) {
 	}
 }
 
-// The webhook injects a read-only hostPath mount of the inventory socket dir
-// (nriImagePolicy.hostPaths.runtimeDir) into every CW pod, so the
-// deny-host-namespaces VAP must carve out exactly that dir — a blanket
-// hostPath deny rejects every confidential workload the platform itself
-// mutates.
-func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
+// The claims socket directory reaches CW pods as an NRI mount, not a pod-spec
+// volume, so the deny-host-namespaces VAP denies hostPath outright: any
+// carve-out would let a tenant reach the node filesystem.
+func TestChartHostNamespacePolicyDeniesAllHostPath(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -793,22 +849,22 @@ func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
 	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var hostPathExpr string
+	var hostPathExprs []string
 	for _, v := range vap.Spec.Validations {
 		if strings.Contains(v.Expression, "hostPath") {
-			hostPathExpr = v.Expression
+			hostPathExprs = append(hostPathExprs, v.Expression)
 		}
 	}
-	if hostPathExpr == "" {
+	if len(hostPathExprs) == 0 {
 		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
 	}
-	for _, want := range []string{
-		`"/var/run/nri-image-policy"`, // the claims dir, and nothing wider
-		`'Directory'`,                 // the exact type the webhook injects
-		"m.readOnly",                  // every referencing mount must be read-only
-	} {
-		if !strings.Contains(hostPathExpr, want) {
-			t.Errorf("hostPath validation missing %s; expression=%q", want, hostPathExpr)
+	// Absence, not presence: a leftover carve-out would pass a "some hostPath
+	// deny renders" check.
+	for _, v := range vap.Spec.Validations {
+		for _, stale := range []string{"/var/run/nri-image-policy", "readOnly", "hostPath.type"} {
+			if strings.Contains(v.Expression, stale) {
+				t.Errorf("validation still carves out the claims dir (%q); expression=%q", stale, v.Expression)
+			}
 		}
 	}
 }
@@ -880,17 +936,6 @@ func findContainer(containers []corev1.Container, name string) (corev1.Container
 	return corev1.Container{}, false
 }
 
-// envValue returns the value of the named env var on a container, or "" if it
-// is absent (or set via valueFrom rather than a literal value).
-func envValue(env []corev1.EnvVar, name string) string {
-	for _, e := range env {
-		if e.Name == name {
-			return e.Value
-		}
-	}
-	return ""
-}
-
 func containerNames(containers []corev1.Container) []string {
 	names := make([]string, 0, len(containers))
 	for _, c := range containers {
@@ -899,14 +944,14 @@ func containerNames(containers []corev1.Container) []string {
 	return names
 }
 
-// tlsLBGetCertContainer returns the named tls-lb get-cert init container
+// routerGetCertContainer returns the named router get-cert init container
 // (c8s-cert), failing if absent.
-func tlsLBGetCertContainer(t *testing.T, manifest, name string) corev1.Container {
+func routerGetCertContainer(t *testing.T, manifest, name string) corev1.Container {
 	t.Helper()
-	init := renderedDeploymentInitContainers(t, manifest, "c8s-tls-lb")
+	init := renderedDeploymentInitContainers(t, manifest, "c8s-router")
 	c, ok := findContainer(init, name)
 	if !ok {
-		t.Fatalf("tls-lb init container %q missing; have %v", name, containerNames(init))
+		t.Fatalf("router init container %q missing; have %v", name, containerNames(init))
 	}
 	return c
 }
@@ -1229,7 +1274,7 @@ func TestChartWebhookInjectsWorkloadsAndExcludesSystemNamespaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	// tls-lb now self-renders get-cert, so the platform-pods rule that only
+	// router now self-renders get-cert, so the platform-pods rule that only
 	// existed to inject it is gone: one workload webhook remains.
 	names := renderedMutatingWebhookNames(t, out)
 	if !slices.Equal(names, []string{"pods.c8s.confidential.ai"}) {
@@ -1637,37 +1682,17 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
-// On a cluster that is neither kata nor node-baked, host nri-image-policy is the
-// only image-admission enforcement, so disabling it must be rejected — otherwise
-// confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (pod/aks behave the same). kata and cvmMode=node
-// carry their own admission and are exempt (enforce_host_components requires nri
-// off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
-func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
-		"--set", "nriImagePolicy.enabled=false",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with nriImagePolicy disabled on a non-kata, non-node cluster, want failure\n%s", out)
-	}
-	if kind := parseValidationErrorKind(out); kind != "require_host_image_policy" {
-		t.Fatalf("validation error kind = %q, want require_host_image_policy\n%s", kind, out)
-	}
-}
-
-// The require_host_image_policy guard exempts cvmMode=node: the node image bakes
+// The require_host_image_policy guard exempts cvmMode=bare-metal: the node image bakes
 // its own fail-closed nri-image-policy, so nri off there is not an unenforced
-// cluster (unlike gke/aks — TestChartRejectsImagePolicyOffOnNonKata). This is the
-// exact shape `c8s install --cvm-mode=node` produces; the served seed under it is
-// TestChartServesAllowlistSeedInNodeMode.
-func TestChartAllowsImagePolicyOffInNodeMode(t *testing.T) {
+// cluster. The served seed under this shape is covered by
+// TestChartServesAllowlistSeedInBareMetalMode.
+func TestChartAllowsImagePolicyOffInBareMetalMode(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "nriImagePolicy.enabled=false",
 	)
 	if err != nil {
-		t.Fatalf("helm template rejected cvmMode=node with nri off, want success (the node image bakes the plugin)\n%s", out)
+		t.Fatalf("helm template rejected cvmMode=bare-metal with nri off, want success (the node image bakes the plugin)\n%s", out)
 	}
 }
 
@@ -1679,21 +1704,6 @@ func TestChartRejectsPlaintextNRIAllowlist(t *testing.T) {
 		t.Fatalf("helm template succeeded, want plaintext NRI allowlist failure\n%s", out)
 	}
 	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the allowlist over RA-TLS`)
-}
-
-// Off kata and node mode the host DaemonSet is the only evidence source, so
-// disabling it must fail like disabling the image policy does.
-func TestChartRejectsAttestationApiOffOnNonKata(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=gke",
-		"--set", "attestationApi.enabled=false",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with attestationApi disabled on a non-kata, non-node cluster, want failure\n%s", out)
-	}
-	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
-		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
-	}
 }
 
 // parseValidationErrorKind extracts kind=<id> from helm's stderr when the
@@ -1793,22 +1803,6 @@ func renderedPodSpecs(t *testing.T, manifest string) []renderedWorkload {
 	return out
 }
 
-// kataEnforcementExpressions returns the joined CEL validation expressions of
-// the c8s-kata-enforcement policy; the runtime-class allowlist lives there.
-func kataEnforcementExpressions(t *testing.T, manifest string) string {
-	t.Helper()
-	var policy admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, manifest, "ValidatingAdmissionPolicy", "c8s-kata-enforcement", &policy) {
-		t.Fatalf("missing c8s-kata-enforcement ValidatingAdmissionPolicy\n%s", manifest)
-	}
-	var sb strings.Builder
-	for _, v := range policy.Spec.Validations {
-		sb.WriteString(v.Expression)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
 // findKey returns a dotted path to the first occurrence of key anywhere in a
 // decoded YAML tree, or "" if absent.
 func findKey(node any, key string) string {
@@ -1874,13 +1868,12 @@ func durationArg(t *testing.T, args []string, prefix string) time.Duration {
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "webhook.certVolume.fsGroup=4242",
-		"--set-string", "webhook.certVolume.keyMode=0440",
 		"--set-string", "webhook.getCert.renewInterval=3h",
 		"--set", "webhook.getCert.runAsUser=0",
 		"--set", "webhook.getCert.runAsGroup=0",
 		"--set", "webhook.getCert.runAsNonRoot=false",
 		"--set", "ratlsMesh.enabled=false",
-		"--set", "tlsLb.enabled=false",
+		"--set", "router.enabled=false",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1892,7 +1885,6 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	for _, want := range []string{
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--cert-fs-group=4242",
-		"--cert-key-mode=0440",
 		"--get-cert-renew-interval=3h",
 		"--get-cert-run-as-user=0",
 		"--get-cert-run-as-group=0",
@@ -1914,7 +1906,7 @@ func TestChartIntValuesFromValuesFileRenderPlain(t *testing.T) {
 	vals := filepath.Join(dir, "vals.yaml")
 	if err := os.WriteFile(vals, []byte(
 		"ratlsMesh:\n  uid: 7000000\n"+
-			"tlsLb:\n  nginx:\n    runAsUser: 7000000\n    runAsGroup: 7000000\n"+
+			"router:\n  nginx:\n    runAsUser: 7000000\n    runAsGroup: 7000000\n"+
 			"webhook:\n  certVolume:\n    fsGroup: 1500000\n  getCert:\n    runAsUser: 2000000000\n",
 	), 0o600); err != nil {
 		t.Fatal(err)
@@ -1928,7 +1920,7 @@ func TestChartIntValuesFromValuesFileRenderPlain(t *testing.T) {
 	args := renderedOperatorArgs(t, out)
 	assertContainerHasArg(t, "operator", args, "--cert-fs-group=1500000")
 	assertContainerHasArg(t, "operator", args, "--get-cert-run-as-user=2000000000")
-	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	nginx := renderedDeploymentContainer(t, out, "c8s-router", "nginx")
 	if got := nginx.SecurityContext.RunAsUser; got == nil || *got != 7000000 {
 		t.Errorf("nginx runAsUser = %v, want 7000000", got)
 	}
@@ -1987,7 +1979,7 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 		// least-privilege capabilities map (the modes are either/or, not merged).
 		noCapabilities bool
 	}{
-		{mode: "node", useDefault: true},
+		{mode: "bare-metal", useDefault: true},
 		{mode: "gke"},
 		{mode: "aks", noCapabilities: true},
 	} {
@@ -2016,20 +2008,20 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	for _, mode := range []string{"bogus", "baremetal"} {
+	for _, mode := range []string{"bogus", "baremetal", "pod"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
 			if err == nil {
 				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 			}
-			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of bare-metal, gke, aks (got %q)`, mode))
 		})
 	}
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
 // from the status.hostIP downward-API field — the substitution source for the
-// $(HOST_IP) placeholder in the node-mode attestation-api URL.
+// $(HOST_IP) placeholder in the bare-metal-mode attestation-api URL.
 func hasHostIPEnv(c corev1.Container) bool {
 	for _, e := range c.Env {
 		if e.Name == "HOST_IP" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
@@ -2040,41 +2032,41 @@ func hasHostIPEnv(c corev1.Container) bool {
 	return false
 }
 
-// TestChartNodeModeAttestationApiURLUsesHostIP proves cvmMode=node points the
-// pod-netns components (cds, tls-lb's cert sidecar, ratls-mesh) at the
+// TestChartBareMetalModeAttestationApiURLUsesHostIP proves cvmMode=bare-metal points the
+// pod-netns components (cds, router's cert sidecar, ratls-mesh) at the
 // node-baked host attestation-api via the $(HOST_IP) downward-API env var, since
 // there is no in-cluster Service and pods cannot reach host loopback. The
 // operator is the exception: it forwards its --attestation-api-url verbatim into
 // the tenant get-cert sidecars it injects, so the placeholder must stay
 // UNEXPANDED there — the operator container deliberately omits HOST_IP so each
 // tenant pod expands it against its own node.
-// KNOWN-GAP (ATTEST-ORACLE, node mode): the http://$(HOST_IP):8400 wiring
+// KNOWN-GAP (ATTEST-ORACLE, bare-metal mode): the http://$(HOST_IP):8400 wiring
 // this test pins reaches the node image's baked attestation-api, which still
 // binds 0.0.0.0:8400 with no auth — the oracle shape this branch removes
-// everywhere the chart controls. Closing node mode needs the
+// everywhere the chart controls. Closing bare-metal mode needs the
 // confidential-os-builder companion (loopback bind + baked attest-proxy
 // systemd unit + image-policy socket URL), tracked cross-repo; when it
-// lands, the chart's node-mode branch and this test flip to the socket shape
+// lands, the chart's bare-metal-mode branch and this test flip to the socket shape
 // together.
-func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
+func TestChartBareMetalModeAttestationApiURLUsesHostIP(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
-	// The exact shape `c8s install --cvm-mode=node` produces: the node image
+	// The exact shape `c8s install --cvm-mode=bare-metal` produces: the node image
 	// bakes attestation-api and nri-image-policy, so both chart components
 	// are off and consumers dial the baked host service via $(HOST_IP).
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
-		"--set", "tlsLb.attest.enabled=true",
+		"--set", "router.attest.enabled=true",
 	)
 	if err != nil {
-		t.Fatalf("helm template (cvmMode=node): %v\n%s", err, out)
+		t.Fatalf("helm template (cvmMode=bare-metal): %v\n%s", err, out)
 	}
 
 	// No chart-managed evidence source renders in this shape at all.
 	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") ||
 		renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
-		t.Fatalf("cvmMode=node install shape renders no attestation-api Service or DaemonSet\n%s", out)
+		t.Fatalf("cvmMode=bare-metal install shape renders no attestation-api Service or DaemonSet\n%s", out)
 	}
 
 	// cds: pod-netns, dials the host attestation-api via $(HOST_IP).
@@ -2084,26 +2076,26 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 		t.Errorf("cds container missing HOST_IP downward-API env; have %+v", cds.Env)
 	}
 
-	// tls-lb c8s-cert sidecar (via c8s.getCertContainers).
-	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	// router c8s-cert sidecar (via c8s.getCertContainers).
+	cert := routerGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert, hostIPURL)
 	if !hasHostIPEnv(cert) {
-		t.Errorf("tls-lb c8s-cert missing HOST_IP downward-API env; have %+v", cert.Env)
+		t.Errorf("router c8s-cert missing HOST_IP downward-API env; have %+v", cert.Env)
 	}
 
-	// tls-lb cds-attest sidecar (rendered under tlsLb.attest.enabled).
-	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	// router cds-attest sidecar (rendered under router.attest.enabled).
+	attest := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	assertContainerArgs(t, attest, hostIPURL)
 	if !hasHostIPEnv(attest) {
-		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
+		t.Errorf("router cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
 	}
 
-	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
+	// router allowlist proxy: pod-netns, uses the same verifier endpoint for
 	// the RA-TLS hop to CDS.
-	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy")
 	assertContainerArgs(t, allowlistProxy, hostIPURL)
 	if !hasHostIPEnv(allowlistProxy) {
-		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
+		t.Errorf("router allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
 	}
 
 	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.
@@ -2126,15 +2118,15 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	}
 }
 
-// TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
-// not leak into the other cvmModes: pod/gke/aks dial the on-node Unix socket
+// TestChartNonBareMetalModeUsesAttestationSocket proves the bare-metal-mode wiring does
+// not leak into the other cvmModes: gke/aks dial the on-node Unix socket
 // and render no HOST_IP env anywhere. The consumers that must carry both the
 // socket URL and the socket-directory mount are asserted per shape.
-func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
+func TestChartNonBareMetalModeUsesAttestationSocket(t *testing.T) {
 	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
-	for _, mode := range []string{"pod", "gke", "aks"} {
+	for _, mode := range []string{"gke", "aks"} {
 		t.Run(mode, func(t *testing.T) {
-			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
+			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "router.attest.enabled=true")
 			if err != nil {
 				t.Fatalf("helm template (cvmMode=%s): %v\n%s", mode, err, out)
 			}
@@ -2171,9 +2163,9 @@ func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 			if sc := renderedDaemonSet(t, out, "c8s-ratls-mesh").Spec.Template.Spec.SecurityContext; sc == nil || !slices.Contains(sc.SupplementalGroups, int64(65532)) {
 				t.Errorf("ratls-mesh pod must carry supplementalGroups [65532] to connect to the socket; got %+v", sc)
 			}
-			assertHasSocketMount(tlsLBGetCertContainer(t, out, "c8s-cert"))
-			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"))
-			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy"))
+			assertHasSocketMount(routerGetCertContainer(t, out, "c8s-cert"))
+			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-router", "cds-attest"))
+			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy"))
 			for _, w := range renderedPodSpecs(t, out) {
 				for _, c := range append(append([]corev1.Container{}, w.spec.InitContainers...), w.spec.Containers...) {
 					for _, e := range c.Env {
@@ -2217,7 +2209,7 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 func TestChartGlobalImagePullSecrets(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "imagePullSecrets[0].name=ghcr-pull",
-		"--set", "tlsLb.imagePullSecrets[0].name=lb-special",
+		"--set", "router.imagePullSecrets[0].name=lb-special",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -2227,10 +2219,10 @@ func TestChartGlobalImagePullSecrets(t *testing.T) {
 	if !hasPullSecret(rm.Spec.Template.Spec.ImagePullSecrets, "ghcr-pull") {
 		t.Errorf("ratls-mesh missing global pull secret: %v", rm.Spec.Template.Spec.ImagePullSecrets)
 	}
-	// tlsLb's own value overrides the global.
-	lb := renderedDeployment(t, out, "c8s-tls-lb")
+	// router's own value overrides the global.
+	lb := renderedDeployment(t, out, "c8s-router")
 	if hasPullSecret(lb.Spec.Template.Spec.ImagePullSecrets, "ghcr-pull") || !hasPullSecret(lb.Spec.Template.Spec.ImagePullSecrets, "lb-special") {
-		t.Errorf("tls-lb should use its override, not the global: %v", lb.Spec.Template.Spec.ImagePullSecrets)
+		t.Errorf("router should use its override, not the global: %v", lb.Spec.Template.Spec.ImagePullSecrets)
 	}
 }
 
@@ -2243,22 +2235,23 @@ func hasPullSecret(refs []corev1.LocalObjectReference, name string) bool {
 	return false
 }
 
-func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
+func TestChartRendersRouterPublicTLSAndDiscovery(t *testing.T) {
 	out, err := helmTemplate(t, noUpstreamArgs(
-		"--set-string", "tlsLb.publicTLS.secretName=tls-lb-public-tls",
-		"--set-string", "tlsLb.publicTLS.mountPath=/edge-tls",
-		"--set-string", "tlsLb.publicTLS.certKey=public.crt",
-		"--set-string", "tlsLb.publicTLS.keyKey=public.key",
-		"--set", "tlsLb.discovery.enabled=true",
-		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
-		"--set", "tlsLb.upstream.protocol=https",
-		"--set", "tlsLb.upstream.tls.verify=true",
-		"--set-string", "tlsLb.upstream.tls.serverName=my-backend.other-ns.svc.cluster.local",
+		"--set-string", "router.publicTLS.mode=webpki",
+		"--set-string", "router.publicTLS.secretName=router-public-tls",
+		"--set-string", "router.publicTLS.mountPath=/edge-tls",
+		"--set-string", "router.publicTLS.certKey=public.crt",
+		"--set-string", "router.publicTLS.keyKey=public.key",
+		"--set", "router.discovery.enabled=true",
+		"--set-string", "router.upstream.address=my-backend.other-ns.svc:8443",
+		"--set", "router.upstream.protocol=https",
+		"--set", "router.upstream.tls.verify=true",
+		"--set-string", "router.upstream.tls.serverName=my-backend.other-ns.svc.cluster.local",
 	)...)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	server := cfg.server(t)
 	server.assertDirective(t, "ssl_certificate", "/edge-tls/public.crt")
 	server.assertDirective(t, "ssl_certificate_key", "/edge-tls/public.key")
@@ -2276,15 +2269,16 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 	defaultRoute.assertDirective(t, "proxy_ssl_verify", "on")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/cert.pem")
-	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
+	defaultRoute.assertDirective(t, "proxy_pass", "https://catch_all")
+	cfg.upstream(t, "catch_all").assertServer(t, "my-backend.other-ns.svc:8443")
 
-	spec := renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec
+	spec := renderedDeployment(t, out, "c8s-router").Spec.Template.Spec
 	if _, ok := podVolume(spec, "tls-certs"); !ok {
-		t.Fatalf("tls-lb missing tls-certs volume; volumes=%v", spec.Volumes)
+		t.Fatalf("router missing tls-certs volume; volumes=%v", spec.Volumes)
 	}
 	pub, ok := podVolume(spec, "public-tls")
-	if !ok || pub.Secret == nil || pub.Secret.SecretName != "tls-lb-public-tls" {
-		t.Fatalf("tls-lb public-tls volume must source Secret tls-lb-public-tls; got %+v", pub)
+	if !ok || pub.Secret == nil || pub.Secret.SecretName != "router-public-tls" {
+		t.Fatalf("router public-tls volume must source Secret router-public-tls; got %+v", pub)
 	}
 	wantItems := []corev1.KeyToPath{
 		{Key: "public.crt", Path: "public.crt"},
@@ -2294,13 +2288,13 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		t.Fatalf("public-tls secret items = %v, want %v", pub.Secret.Items, wantItems)
 	}
 	if _, ok := podVolume(spec, "discovery"); !ok {
-		t.Fatalf("tls-lb missing discovery volume; volumes=%v", spec.Volumes)
+		t.Fatalf("router missing discovery volume; volumes=%v", spec.Volumes)
 	}
-	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	nginx := renderedDeploymentContainer(t, out, "c8s-router", "nginx")
 	if m, ok := containerVolumeMount(nginx, "public-tls"); !ok || m.MountPath != "/edge-tls" {
 		t.Fatalf("nginx public-tls mount = (%+v, %v), want mountPath /edge-tls", m, ok)
 	}
-	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	cert := routerGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert,
 		"--discovery-out=/discovery/discovery.json",
 		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
@@ -2311,74 +2305,266 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	)
 	// A WebPKI-secret front door is attest-pq-only: its host-visible serving
 	// key cannot support attest-lb's transport binding.
-	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	attest := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	assertContainerArgs(t, attest, "--front-door-mode=webpki")
-	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	deployment := renderedDeployment(t, out, "c8s-router")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
-		t.Fatalf("tls-lb shareProcessNamespace = %v, want true", got)
+		t.Fatalf("router shareProcessNamespace = %v, want true", got)
 	}
 }
 
-// assertTLSLBReadyzProbe pins the readiness gate's routing invariant in every
-// shape: the probe goes through nginx over HTTPS on the named `https` port —
-// never at the sidecar's own port, which is loopback-only and, under kata,
-// redirected into the guest's mutual-RA-TLS proxy that rejects the certless
-// kubelet prober — and nginx exact-matches /readyz onto the sidecar.
-func assertTLSLBReadyzProbe(t *testing.T, out string) {
+// TestChartRouterACMEMode pins the acme front door: the `c8s acme` native
+// sidecar issues one multi-SAN leaf for the sanList into a Memory emptyDir it
+// alone writes, nginx and cds-attest read it, the :80 server proxies HTTP-01
+// to the sidecar's loopback challenge port and 301s everything else, and the
+// mode string rides the attested surfaces (--front-door-mode,
+// --discovery-public-tls-mode).
+func TestChartRouterACMEMode(t *testing.T) {
+	acmeArgs := []string{
+		"--set-string", "router.publicTLS.mode=acme",
+		"--set", "router.san={lb.example.com,api.lb.example.com}",
+		"--set-string", "router.acme.email=ops@example.com",
+		"--set-string", "router.acme.directoryURL=https://acme-staging-v02.api.letsencrypt.org/directory",
+	}
+	out, err := helmTemplate(t, acmeArgs...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	acme := routerGetCertContainer(t, out, "acme")
+	if len(acme.Args) == 0 || acme.Args[0] != "acme" {
+		t.Fatalf("acme sidecar args must start with the acme subcommand, got %v", acme.Args)
+	}
+	assertContainerArgs(t, acme,
+		"--domains=lb.example.com,api.lb.example.com",
+		"--acme-email=ops@example.com",
+		"--acme-directory-url=https://acme-staging-v02.api.letsencrypt.org/directory",
+		"--challenge-port=8402",
+		"--cert-dir=/etc/c8s-acme-tls",
+	)
+	if acme.RestartPolicy == nil || *acme.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("acme must be a native sidecar (restartPolicy Always), got %v", acme.RestartPolicy)
+	}
+	// SIGHUP-ing nginx across the shared PID namespace needs the nginx uid.
+	if got := acme.SecurityContext.RunAsUser; got == nil || *got != 101 {
+		t.Fatalf("acme runAsUser = %v, want the nginx uid 101", got)
+	}
+	if m, ok := containerVolumeMount(acme, "acme-tls"); !ok || m.MountPath != "/etc/c8s-acme-tls" || m.ReadOnly {
+		t.Fatalf("acme must mount acme-tls read-write at /etc/c8s-acme-tls, got (%+v, %v)", m, ok)
+	}
+
+	spec := renderedDeployment(t, out, "c8s-router").Spec.Template.Spec
+	vol, ok := podVolume(spec, "acme-tls")
+	if !ok || vol.EmptyDir == nil || vol.EmptyDir.Medium != corev1.StorageMediumMemory {
+		t.Fatalf("acme-tls must be a Memory-medium emptyDir, got %+v", vol)
+	}
+
+	nginx := renderedDeploymentContainer(t, out, "c8s-router", "nginx")
+	if m, ok := containerVolumeMount(nginx, "acme-tls"); !ok || !m.ReadOnly {
+		t.Fatalf("nginx must mount acme-tls read-only, got (%+v, %v)", m, ok)
+	}
+	httpPort, ok := findContainerPort(nginx, "http")
+	if !ok || httpPort.ContainerPort != 8080 || httpPort.HostPort != 80 {
+		t.Fatalf("nginx http port = (%+v, %v), want containerPort 8080 hostPort 80", httpPort, ok)
+	}
+
+	attest := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
+	assertContainerArgs(t, attest,
+		"--front-door-mode=acme",
+		"--serving-cert-file=/etc/c8s-acme-tls/cert.pem",
+	)
+	if m, ok := containerVolumeMount(attest, "acme-tls"); !ok || !m.ReadOnly {
+		t.Fatalf("cds-attest must mount acme-tls read-only, got (%+v, %v)", m, ok)
+	}
+
+	cert := routerGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert, "--discovery-public-tls-mode=acme")
+	// The acme sidecar SIGHUPs nginx itself; get-cert watches nothing extra.
+	for _, a := range cert.Args {
+		if strings.HasPrefix(a, "--reload-watch=") {
+			t.Fatalf("get-cert must not watch the acme certs, got %v", cert.Args)
+		}
+	}
+
+	cfg := renderedRouterNginxConfig(t, out)
+	if len(cfg.servers) != 2 {
+		t.Fatalf("nginx config has %d server blocks, want the :443 and :80 pair", len(cfg.servers))
+	}
+	cfg.servers[0].assertDirective(t, "ssl_certificate", "/etc/c8s-acme-tls/cert.pem")
+	cfg.servers[0].assertDirective(t, "ssl_certificate_key", "/etc/c8s-acme-tls/key.pem")
+	cfg.servers[1].assertDirective(t, "listen", "8080")
+	cfg.location(t, "prefix", "/.well-known/acme-challenge/").
+		assertDirective(t, "proxy_pass", "http://127.0.0.1:8402")
+	// The :80 server renders last, so its catch-all is the "/" the parser
+	// keeps: everything but the challenge upgrades.
+	cfg.location(t, "prefix", "/").assertDirective(t, "return", "301", "https://$host$request_uri")
+
+	// The Service and the ingress policy must open the :80 path the
+	// validators arrive on.
+	svc := renderedService(t, out, "c8s-router")
+	var httpSvcPort *corev1.ServicePort
+	for i, p := range svc.Spec.Ports {
+		if p.Name == "http" {
+			httpSvcPort = &svc.Spec.Ports[i]
+		}
+	}
+	if httpSvcPort == nil || httpSvcPort.Port != 80 || httpSvcPort.TargetPort.StrVal != "http" {
+		t.Fatalf("router Service must expose port 80 -> http, got %+v", svc.Spec.Ports)
+	}
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-router-ingress", &np) {
+		t.Fatal("render is missing the router ingress policy")
+	}
+	var npPorts []int32
+	for _, rule := range np.Spec.Ingress {
+		for _, p := range rule.Ports {
+			npPorts = append(npPorts, int32(p.Port.IntValue()))
+		}
+	}
+	if !slices.Contains(npPorts, int32(8080)) {
+		t.Fatalf("router ingress policy must admit the http port 8080, got %v", npPorts)
+	}
+
+	// hostPort follows the existing gating: disabling it drops both binds.
+	// A reachable front door must remain, so the LB Service takes over.
+	out, err = helmTemplate(t, append([]string{
+		"--set", "router.hostPort.enabled=false",
+		"--set", "router.service.type=LoadBalancer",
+	}, acmeArgs...)...)
+	if err != nil {
+		t.Fatalf("helm template (hostPort off): %v\n%s", err, out)
+	}
+	nginx = renderedDeploymentContainer(t, out, "c8s-router", "nginx")
+	httpPort, ok = findContainerPort(nginx, "http")
+	if !ok || httpPort.HostPort != 0 {
+		t.Fatalf("hostPort.enabled=false must not bind the node's :80, got (%+v, %v)", httpPort, ok)
+	}
+}
+
+// findContainerPort returns the named container port.
+func findContainerPort(c corev1.Container, name string) (corev1.ContainerPort, bool) {
+	for _, p := range c.Ports {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return corev1.ContainerPort{}, false
+}
+
+// TestChartRouterPublicTLSModeGuards pins the fail-closed mode/values
+// invariants: each rejected shape would silently serve the wrong credential
+// or an ACME order that can never complete.
+func TestChartRouterPublicTLSModeGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "webpki without the Secret",
+			args: []string{"--set-string", "router.publicTLS.mode=webpki"},
+			want: "router.publicTLS.mode=webpki requires router.publicTLS.secretName",
+		},
+		{
+			// The pre-mode values shape (secretName alone implied webpki)
+			// must not silently fall back to serving the mesh leaf.
+			name: "secret without webpki mode",
+			args: []string{"--set-string", "router.publicTLS.secretName=edge"},
+			want: `router.publicTLS.secretName is set but router.publicTLS.mode is "cds"; set mode=webpki to serve the Secret, or clear secretName`,
+		},
+		{
+			name: "acme with a Secret",
+			args: []string{"--set-string", "router.publicTLS.mode=acme", "--set-string", "router.publicTLS.secretName=edge"},
+			want: `router.publicTLS.secretName is set but router.publicTLS.mode is "acme"; set mode=webpki to serve the Secret, or clear secretName`,
+		},
+		{
+			name: "unknown mode",
+			args: []string{"--set-string", "router.publicTLS.mode=webpki-tee"},
+			want: "router.publicTLS.mode must be cds, webpki, or acme, got: webpki-tee",
+		},
+		{
+			// The ACME account and serving keys live in pod memory; outside a
+			// TEE the host reads them.
+			name: "acme without a confidential runtime",
+			args: []string{"--set-string", "router.publicTLS.mode=acme", "--set", "attestationApi.cvmMode=gke"},
+			want: "VALIDATION_ERROR kind=router_acme_runtime: router.publicTLS.mode=acme requires a confidential runtime (attestationApi.cvmMode=bare-metal) so the ACME account and serving keys are TEE-held",
+		},
+		{
+			name: "acme with a wildcard san",
+			args: []string{"--set-string", "router.publicTLS.mode=acme", "--set", "router.san={*.example.com}"},
+			want: `router.publicTLS.mode=acme cannot issue for wildcard san "*.example.com": HTTP-01 forbids wildcards`,
+		},
+		{
+			// No hostPort and no LB/NodePort Service: the CA could never
+			// reach the challenge.
+			name: "acme without a reachable front door",
+			args: []string{"--set-string", "router.publicTLS.mode=acme", "--set", "router.hostPort.enabled=false"},
+			want: "VALIDATION_ERROR kind=router_acme_front_door: router.publicTLS.mode=acme needs an internet-reachable front door for the HTTP-01 challenge: set router.service.type=LoadBalancer (any LB implementation: cloud controller, MetalLB, kube-vip, ...) or router.hostPort.enabled=true",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("render succeeded, want a fail\n%s", out)
+			}
+			assertHelmFailMessage(t, out, tc.want)
+		})
+	}
+}
+
+// assertRouterReadyzProbe pins the readiness gate's routing invariant: the probe
+// goes through nginx over HTTPS on the named `https` port, since the sidecar's
+// own port is loopback-only. Nginx exact-matches /readyz onto the sidecar.
+func assertRouterReadyzProbe(t *testing.T, out string) {
 	t.Helper()
-	rp := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest").ReadinessProbe
+	rp := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest").ReadinessProbe
 	if rp == nil || rp.HTTPGet == nil {
 		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe, got %+v", rp)
 	}
 	if rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.StrVal != "https" || rp.HTTPGet.Scheme != corev1.URISchemeHTTPS {
 		t.Fatalf("readiness probe must be HTTPS /readyz on the nginx port, got %+v", rp.HTTPGet)
 	}
-	renderedTLSLBNginxConfig(t, out).location(t, "exact", "/readyz").
+	renderedRouterNginxConfig(t, out).location(t, "exact", "/readyz").
 		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
 }
 
-// TestChartTLSLBAttestFrontDoorModeAndReadinessGate pins the endpoint-split
+// TestChartRouterAttestFrontDoorModeAndReadinessGate pins the endpoint-split
 // wiring: a default (mesh-issued serving leaf) front door runs cds-attest in
-// cds front-door mode with no readiness gate, and tlsLb.attest.expectedWorkload
+// cds front-door mode with no readiness gate, and router.attest.expectedWorkload
 // wires the /readyz matched-workload gate — probed through nginx, because the
 // sidecar stays on loopback in every shape.
-func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
+func TestChartRouterAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	attest := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	assertContainerArgs(t, attest, "--front-door-mode=cds", "--host=127.0.0.1")
 	if attest.ReadinessProbe != nil {
 		t.Fatalf("no expectedWorkload: cds-attest must keep today's probe-less shape, got %+v", attest.ReadinessProbe)
 	}
 
 	// Readiness can only gate ingress that flows through the Service, so the
-	// gate requires the node port off (see TestChartTLSLBReadinessGateGuards).
-	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
+	// gate requires the node port off (see TestChartRouterReadinessGateGuards).
+	out, err = helmTemplate(t, "--set-string", "router.attest.expectedWorkload=infer", "--set", "router.hostPort.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template with expectedWorkload: %v\n%s", err, out)
 	}
-	attest = renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	attest = renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	// The sidecar's single listener also carries the attestation, handshake and
 	// tunnel routes; the gate must never move it off loopback.
 	assertContainerArgs(t, attest, "--front-door-mode=cds", "--expected-workload=infer", "--host=127.0.0.1")
-	assertTLSLBReadyzProbe(t, out)
+	assertRouterReadyzProbe(t, out)
 
 	// The gate is satisfiable only if get-cert can earn the stamp: the
 	// claims flow must be wired on the same condition. Node-CVM shape:
 	// --workload-claims, the inventory socket mounted read-only at the
 	// compiled path, and the socket's supplemental group on the pod.
-	cert, ok := findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
+	cert, ok := findContainer(renderedDeploymentInitContainers(t, out, "c8s-router"), "c8s-cert")
 	if !ok {
 		t.Fatal("c8s-cert init container missing")
 	}
 	assertContainerArgs(t, cert, "--workload-claims")
-	for _, a := range cert.Args {
-		if a == "--workload-claims-guest" {
-			t.Fatal("node-CVM get-cert must use the socket, not the guest loopback")
-		}
-	}
 	var mount *corev1.VolumeMount
 	for i, m := range cert.VolumeMounts {
 		if m.Name == "workload-claims" {
@@ -2388,7 +2574,7 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 	if mount == nil || mount.MountPath != "/run/c8s/workload-claims" || !mount.ReadOnly {
 		t.Fatalf("get-cert must mount the inventory socket read-only at the compiled path, got %+v", cert.VolumeMounts)
 	}
-	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	dep := renderedDeployment(t, out, "c8s-router")
 	sc := dep.Spec.Template.Spec.SecurityContext
 	if sc == nil || len(sc.SupplementalGroups) != 1 || sc.SupplementalGroups[0] != 65532 {
 		t.Fatalf("pod must carry the inventory socket's supplemental group 65532, got %+v", sc)
@@ -2403,42 +2589,14 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 		t.Fatalf("workload-claims hostPath volume missing or wrong, got %+v", dep.Spec.Template.Spec.Volumes)
 	}
 
-	// Kata: the guest serves the inventory on loopback — guest flag, no mount.
-	out, err = helmTemplateKata(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template with expectedWorkload under kata: %v\n%s", err, out)
-	}
-	cert, ok = findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
-	if !ok {
-		t.Fatal("c8s-cert init container missing under kata")
-	}
-	assertContainerArgs(t, cert, "--workload-claims", "--workload-claims-guest")
-	for _, m := range cert.VolumeMounts {
-		if m.Name == "workload-claims" {
-			t.Fatal("kata get-cert must not mount the node socket")
-		}
-	}
-	assertContainerArgs(t, renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"), "--host=127.0.0.1")
-	// The probe shape is the whole reason this gate is reachable under kata:
-	// the guest exempts only the nginx port from the inbound mesh redirect.
-	assertTLSLBReadyzProbe(t, out)
-	dep = renderedDeployment(t, out, "c8s-tls-lb")
-	for _, v := range dep.Spec.Template.Spec.Volumes {
-		if v.Name == "workload-claims" {
-			t.Fatal("kata pod must not carry the node inventory hostPath volume")
-		}
-	}
-	if sc := dep.Spec.Template.Spec.SecurityContext; sc != nil && len(sc.SupplementalGroups) != 0 {
-		t.Fatalf("kata pod needs no inventory socket group, got %+v", sc.SupplementalGroups)
-	}
 }
 
-// TestChartTLSLBReadinessGateGuards pins the render-time guards around the
+// TestChartRouterReadinessGateGuards pins the render-time guards around the
 // readiness gate. Each rejected shape is one where the gate silently gates
 // nothing, or where the front door it protects is unreachable to begin with.
-func TestChartTLSLBReadinessGateGuards(t *testing.T) {
-	gate := []string{"--set-string", "tlsLb.attest.expectedWorkload=infer"}
-	noHostPort := []string{"--set", "tlsLb.hostPort.enabled=false"}
+func TestChartRouterReadinessGateGuards(t *testing.T) {
+	gate := []string{"--set-string", "router.attest.expectedWorkload=infer"}
+	noHostPort := []string{"--set", "router.hostPort.enabled=false"}
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -2449,23 +2607,14 @@ func TestChartTLSLBReadinessGateGuards(t *testing.T) {
 			// published by CNI portmap at sandbox creation and keeps serving.
 			name: "hostPort defeats the gate",
 			args: gate,
-			want: "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload",
+			want: "router.attest.expectedWorkload cannot gate ingress while router.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set router.hostPort.enabled=false and route through the Service, or clear expectedWorkload",
 		},
 		{
 			// Without the sidecar there is no /readyz to gate on, yet the
 			// claims wiring the gate pulls in would still render.
 			name: "gate without the sidecar it gates",
-			args: append(append([]string{}, gate...), append(noHostPort, "--set", "tlsLb.attest.enabled=false")...),
-			want: "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload",
-		},
-		{
-			// The probe and every external client reach nginx only on the one
-			// port the guest exempts from the inbound mesh redirect.
-			name: "kata with a non-exempt nginx port",
-			args: []string{"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest,
-				"--set", "tlsLb.nginx.httpsPort=9443"},
-			want: "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: 9443",
+			args: append(append([]string{}, gate...), append(noHostPort, "--set", "router.attest.enabled=false")...),
+			want: "router.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set router.attest.enabled=true or clear expectedWorkload",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2478,10 +2627,10 @@ func TestChartTLSLBReadinessGateGuards(t *testing.T) {
 	}
 }
 
-// TestChartTLSLBServiceType pins that the Service type is exactly what the
+// TestChartRouterServiceType pins that the Service type is exactly what the
 // operator sets: default ClusterIP, explicit LoadBalancer/NodePort honored.
 // Public exposure is an explicit type=LoadBalancer, not inferred.
-func TestChartTLSLBServiceType(t *testing.T) {
+func TestChartRouterServiceType(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		args       []string
@@ -2489,23 +2638,23 @@ func TestChartTLSLBServiceType(t *testing.T) {
 		wantPolicy corev1.ServiceExternalTrafficPolicy
 	}{
 		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
-		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
-		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "explicit LoadBalancer", args: []string{"--set", "router.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "explicit NodePort", args: []string{"--set", "router.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		// The attestation sidecar keys its limiter on the same public peer
 		// address, so it holds the policy on its own.
-		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "LoadBalancer without allowlist route", args: []string{"--set", "router.service.type=LoadBalancer", "--set", "router.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		// With neither, nothing keys on the source address, so the default
 		// must not regress reachability through nodes that do not run the
-		// tls-lb pod.
-		{name: "LoadBalancer with neither limiter", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false", "--set", "tlsLb.attest.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
-		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		// router pod.
+		{name: "LoadBalancer with neither limiter", args: []string{"--set", "router.service.type=LoadBalancer", "--set", "router.allowlist.enabled=false", "--set", "router.attest.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		{name: "explicit policy override wins", args: []string{"--set", "router.service.type=NodePort", "--set", "router.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			svc := renderedService(t, out, "c8s-tls-lb")
+			svc := renderedService(t, out, "c8s-router")
 			if svc.Spec.Type != tc.wantType {
 				t.Fatalf("service type = %q, want %q", svc.Spec.Type, tc.wantType)
 			}
@@ -2516,29 +2665,29 @@ func TestChartTLSLBServiceType(t *testing.T) {
 	}
 }
 
-func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
+func TestChartRouterServiceRejectsInvalidTrafficPolicy(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "tlsLb.service.type=LoadBalancer",
-		"--set-string", "tlsLb.service.externalTrafficPolicy=bogus",
+		"--set", "router.service.type=LoadBalancer",
+		"--set-string", "router.service.externalTrafficPolicy=bogus",
 	)
 	if err == nil {
 		t.Fatalf("expected render to fail on invalid externalTrafficPolicy; got success\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
+	assertHelmFailMessage(t, out, "router.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
 }
 
 // With no adopted workload the upstream address is empty; the sidecar must
 // render without any --upstream* flag (its echo backend takes over) instead
 // of a scheme-only "--upstream=http://" that crash-loops the container.
-func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
+func TestChartRouterAttestSidecarNoUpstream(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "tlsLb.attest.enabled=true",
-		"--set-string", "tlsLb.upstream.address=",
+		"--set", "router.attest.enabled=true",
+		"--set-string", "router.upstream.address=",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	sidecar := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	for _, arg := range sidecar.Args {
 		if strings.HasPrefix(arg, "--upstream") {
 			t.Fatalf("cds-attest must omit %q when no upstream address is set: %v", arg, sidecar.Args)
@@ -2546,11 +2695,11 @@ func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
 	}
 }
 
-func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
+func TestChartRendersRouterAttestSidecar(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "tlsLb.attest.enabled=true",
-		"--set", "tlsLb.attest.port=8800",
-		"--set-string", "tlsLb.attest.generation=milan",
+		"--set", "router.attest.enabled=true",
+		"--set", "router.attest.port=8800",
+		"--set-string", "router.attest.generation=milan",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -2558,8 +2707,8 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 
 	// The cds-attest sidecar runs the operator multi-mode image with the
 	// cds-attest subcommand, bound to loopback for nginx to proxy to.
-	deployment := renderedDeployment(t, out, "c8s-tls-lb")
-	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	deployment := renderedDeployment(t, out, "c8s-router")
+	sidecar := renderedDeploymentContainer(t, out, "c8s-router", "cds-attest")
 	if len(sidecar.Args) == 0 || sidecar.Args[0] != "cds-attest" {
 		t.Fatalf("cds-attest args = %v, want first arg 'cds-attest'", sidecar.Args)
 	}
@@ -2583,17 +2732,17 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		t.Fatalf("cds-attest should not mount mesh-ca with the default /tls/cert.pem trust; mounts=%v", sidecar.VolumeMounts)
 	}
 	if got := len(deployment.Spec.Template.Spec.Containers); got != 3 {
-		t.Fatalf("tls-lb should have nginx + cds-attest + allowlist-proxy, got %d containers", got)
+		t.Fatalf("router should have nginx + cds-attest + allowlist-proxy, got %d containers", got)
 	}
 
 	// nginx reverse-proxies the dynamic well-known prefix to the sidecar.
-	renderedTLSLBNginxConfig(t, out).
+	renderedRouterNginxConfig(t, out).
 		location(t, "prefix", "/.well-known/c8s/").
 		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
-	renderedTLSLBNginxConfig(t, out).
+	renderedRouterNginxConfig(t, out).
 		location(t, "prefix", "/.well-known/c8s/").
 		assertDirective(t, "proxy_set_header", "X-Real-IP", "$remote_addr")
-	renderedTLSLBNginxConfig(t, out).
+	renderedRouterNginxConfig(t, out).
 		location(t, "exact", "/readyz").
 		assertDirective(t, "proxy_set_header", "X-Real-IP", "$remote_addr")
 
@@ -2601,14 +2750,14 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	// verifies the upstream against the CA chain get-cert writes to
 	// /tls/cert.pem, mirroring the nginx proxy_ssl_* config.
 	httpsOut, err := helmTemplate(t, noUpstreamArgs(
-		"--set", "tlsLb.attest.enabled=true",
-		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
-		"--set", "tlsLb.upstream.protocol=https",
+		"--set", "router.attest.enabled=true",
+		"--set-string", "router.upstream.address=my-backend.other-ns.svc:8443",
+		"--set", "router.upstream.protocol=https",
 	)...)
 	if err != nil {
 		t.Fatalf("helm template (https upstream): %v\n%s", err, httpsOut)
 	}
-	httpsSidecar := renderedDeploymentContainer(t, httpsOut, "c8s-tls-lb", "cds-attest")
+	httpsSidecar := renderedDeploymentContainer(t, httpsOut, "c8s-router", "cds-attest")
 	assertContainerArgs(t, httpsSidecar,
 		"--upstream=https://my-backend.other-ns.svc:8443",
 		"--upstream-ca=/tls/cert.pem",
@@ -2624,41 +2773,42 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		t.Fatalf("helm template (defaults): %v\n%s", err, defOut)
 	}
 	wellKnown := nginxLocationKey{match: "prefix", path: "/.well-known/c8s/"}
-	defContainers := renderedDeployment(t, defOut, "c8s-tls-lb").Spec.Template.Spec.Containers
+	defContainers := renderedDeployment(t, defOut, "c8s-router").Spec.Template.Spec.Containers
 	if _, ok := findContainer(defContainers, "cds-attest"); !ok {
-		t.Fatal("cds-attest sidecar should render by default (tlsLb.attest.enabled defaults true)")
+		t.Fatal("cds-attest sidecar should render by default (router.attest.enabled defaults true)")
 	}
-	if _, ok := renderedTLSLBNginxConfig(t, defOut).locations[wellKnown]; !ok {
-		t.Fatal("well-known proxy location should render by default (tlsLb.attest.enabled defaults true)")
+	if _, ok := renderedRouterNginxConfig(t, defOut).locations[wellKnown]; !ok {
+		t.Fatal("well-known proxy location should render by default (router.attest.enabled defaults true)")
 	}
 
 	// Explicit opt-out: no sidecar, no well-known proxy.
-	offOut, err := helmTemplate(t, "--set", "tlsLb.attest.enabled=false")
+	offOut, err := helmTemplate(t, "--set", "router.attest.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template (attest disabled): %v\n%s", err, offOut)
 	}
-	offContainers := renderedDeployment(t, offOut, "c8s-tls-lb").Spec.Template.Spec.Containers
+	offContainers := renderedDeployment(t, offOut, "c8s-router").Spec.Template.Spec.Containers
 	if _, ok := findContainer(offContainers, "cds-attest"); ok {
-		t.Fatal("cds-attest sidecar should not render when tlsLb.attest.enabled=false")
+		t.Fatal("cds-attest sidecar should not render when router.attest.enabled=false")
 	}
-	if _, ok := renderedTLSLBNginxConfig(t, offOut).locations[wellKnown]; ok {
-		t.Fatal("well-known proxy location should not render when tlsLb.attest.enabled=false")
+	if _, ok := renderedRouterNginxConfig(t, offOut).locations[wellKnown]; ok {
+		t.Fatal("well-known proxy location should not render when router.attest.enabled=false")
 	}
 }
 
-func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
+func TestRouterCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",
-		"--set", "tlsLb.certProvisioning.verbose=true",
-		"--set", "tlsLb.nginx.runAsUser=201",
-		"--set", "tlsLb.nginx.runAsGroup=202",
-		"--set", "tlsLb.nginx.runAsNonRoot=false",
+		"--set-string", "router.certProvisioning.renewInterval=30m",
+		"--set-string", "router.certProvisioning.caWatchInterval=2m",
+		"--set", "router.certProvisioning.verbose=true",
+		"--set", "router.nginx.runAsUser=201",
+		"--set", "router.nginx.runAsGroup=202",
+		"--set", "router.nginx.runAsNonRoot=false",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
-	assertContainerArgs(t, cert, "--verbose", "--renew-interval=30m")
+	cert := routerGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert, "--verbose", "--renew-interval=30m", "--ca-watch-interval=2m")
 	if got := cert.SecurityContext.RunAsUser; got == nil || *got != 201 {
 		t.Fatalf("c8s-cert runAsUser = %v, want 201", got)
 	}
@@ -2668,11 +2818,11 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	if got := cert.SecurityContext.RunAsNonRoot; got == nil || *got {
 		t.Fatalf("c8s-cert runAsNonRoot = %v, want false", got)
 	}
-	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	deployment := renderedDeployment(t, out, "c8s-router")
 	if got := deployment.Spec.Template.Spec.SecurityContext.FSGroup; got == nil || *got != 202 {
-		t.Fatalf("tls-lb fsGroup = %v, want 202", got)
+		t.Fatalf("router fsGroup = %v, want 202", got)
 	}
-	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	nginx := renderedDeploymentContainer(t, out, "c8s-router", "nginx")
 	if got := nginx.SecurityContext.RunAsUser; got == nil || *got != 201 {
 		t.Fatalf("nginx runAsUser = %v, want 201", got)
 	}
@@ -2684,76 +2834,20 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	}
 }
 
-// TestTLSLBProbesAvoidMTLSHandshakeUnderKata: under kata the RA-TLS mesh moves
-// into the guest, so the pod's serving port is fronted by the in-guest inbound
-// proxy that expects mutual attested TLS. The kubelet prober presents no
-// attested client cert, so an httpGet probe is rejected at the handshake ("tls:
-// certificate required") and the container CrashLoopBackOffs on failed probes.
-// The chart must fall back to a tcpSocket probe under kata (same pattern and
-// rationale as cds.yaml); the base shape — where the host-side mesh excludes
-// kubelet's UID and it reaches nginx directly — keeps the richer httpGet
-// /healthz check.
-func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
-	type namedProbe struct {
-		name  string
-		probe *corev1.Probe
-	}
-
-	base, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, base)
-	}
-	nginx := renderedDeploymentContainer(t, base, "c8s-tls-lb", "nginx")
-	for _, p := range []namedProbe{
-		{"readiness", nginx.ReadinessProbe},
-		{"liveness", nginx.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.HTTPGet == nil {
-			t.Fatalf("base shape: tls-lb %s probe should be httpGet; got %+v", p.name, p.probe)
-		}
-		if got := p.probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
-			t.Errorf("base shape: tls-lb %s probe scheme = %q, want HTTPS", p.name, got)
-		}
-		if got := p.probe.HTTPGet.Path; got != "/healthz" {
-			t.Errorf("base shape: tls-lb %s probe path = %q, want /healthz", p.name, got)
-		}
-	}
-
-	kata, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template --cvm-mode=pod: %v\n%s", err, kata)
-	}
-	nginx = renderedDeploymentContainer(t, kata, "c8s-tls-lb", "nginx")
-	for _, p := range []namedProbe{
-		{"readiness", nginx.ReadinessProbe},
-		{"liveness", nginx.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.TCPSocket == nil {
-			t.Fatalf("kata shape: tls-lb %s probe should be tcpSocket (an httpGet hits the in-guest mTLS handshake); got %+v", p.name, p.probe)
-		}
-		if got := p.probe.TCPSocket.Port.String(); got != "https" {
-			t.Errorf("kata shape: tls-lb %s probe tcpSocket port = %q, want https", p.name, got)
-		}
-		if p.probe.HTTPGet != nil {
-			t.Errorf("kata shape: tls-lb %s probe must not be httpGet under kata", p.name)
-		}
-	}
-}
-
-// TestChartDefaultTLSLBUpstreamIsWorkloadDirect pins the default front-door
-// path: tls-lb proxies straight to the workload over plain HTTP at the app
+// TestChartDefaultRouterUpstreamIsWorkloadDirect pins the default front-door
+// path: router proxies straight to the workload over plain HTTP at the app
 // layer (the node mesh wraps pod-IP hops in attested mTLS), with no
 // proxy_ssl_* directives on the default route. The upstream is dialed via a
 // variable with a resolver so nginx re-resolves per DNS TTL: a headless
 // Service (an adopted workload) returns pod IPs that change on pod churn, and
 // a static upstream block would pin the startup-time IPs and 502 until the
 // next config reload.
-func TestChartTLSLBMeshWrappedUpstreamIsWorkloadDirect(t *testing.T) {
+func TestChartRouterMeshWrappedUpstreamIsWorkloadDirect(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	cfg.http.assertDirective(t, "resolver", "kube-dns.kube-system.svc.cluster.local")
 	defaultRoute := cfg.location(t, "prefix", "/")
 	// The baseline mesh-wrapped upstream is the operator-managed headless
@@ -2766,22 +2860,40 @@ func TestChartTLSLBMeshWrappedUpstreamIsWorkloadDirect(t *testing.T) {
 	cfg.assertNoDirectivePrefix(t, "proxy_ssl_")
 }
 
+// A manual upstream is dialed through a static upstream block, so nginx
+// resolves it once at startup instead of per request. Per-request resolution
+// asks cluster DNS -- plaintext UDP the mesh does not intercept -- where to
+// send every request, so a forged answer retargets the hop mid-session; a
+// loose tls.serverName or a wildcard SAN pattern leaves nothing to catch it.
+// Only the mesh-wrapped headless shape keeps the variable dial, because its
+// pod IPs churn; the resolver is rendered for that shape alone.
+func TestChartRouterManualUpstreamResolvesAtStartup(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "router.upstream.address=my-backend.other-ns.svc:8443",
+		"--set", "router.upstream.protocol=https",
+		"--set", "router.upstream.tls.verify=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedRouterNginxConfig(t, out)
+	cfg.upstream(t, "catch_all").assertServer(t, "my-backend.other-ns.svc:8443")
+	route := cfg.location(t, "prefix", "/")
+	route.assertDirective(t, "proxy_pass", "https://catch_all")
+	route.assertNoDirective(t, "set")
+	cfg.http.assertNoDirective(t, "resolver")
+}
+
 // nginx exits at startup on a resolver name that does not resolve, and RKE2
 // names its CoreDNS Service rke2-coredns-rke2-coredns — the kube-dns default
-// crash-loops tls-lb on every RKE2 cluster. The resolver therefore derives
+// crash-loops router on every RKE2 cluster. The resolver therefore derives
 // from the distro values (which every RKE2 install already sets for the
-// containerd layout); an explicit tlsLb.nginx.resolver still wins.
-func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
+// containerd layout); an explicit router.nginx.resolver still wins.
+func TestChartRouterResolverDerivesFromDistro(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 		want string
 	}{
-		{
-			name: "rke2 via kata.distro",
-			args: []string{"--set-string", "kata.distro=rke2"},
-			want: "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local",
-		},
 		{
 			name: "rke2 via nriImagePolicy.distro",
 			args: []string{"--set-string", "nriImagePolicy.distro=rke2"},
@@ -2790,8 +2902,8 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 		{
 			name: "explicit resolver wins over distro",
 			args: []string{
-				"--set-string", "kata.distro=rke2",
-				"--set-string", "tlsLb.nginx.resolver=my-dns.dns-ns.svc.cluster.local",
+				"--set-string", "nriImagePolicy.distro=rke2",
+				"--set-string", "router.nginx.resolver=my-dns.dns-ns.svc.cluster.local",
 			},
 			want: "my-dns.dns-ns.svc.cluster.local",
 		},
@@ -2801,7 +2913,7 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			cfg := renderedTLSLBNginxConfig(t, out)
+			cfg := renderedRouterNginxConfig(t, out)
 			if cfg.http == nil {
 				t.Fatal("nginx config missing http block")
 			}
@@ -2810,8 +2922,8 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 	}
 }
 
-func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "upstream.address=my-backend.other-ns.svc.cluster.local:443",
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
@@ -2819,23 +2931,23 @@ func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
 	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 }
 
-func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
+func TestRouterCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	// Browser clients send X-C8s-Session on the /tunnel request, so the default
 	// CORS allow-headers must include it or the over-encrypted channel breaks
 	// cross-origin.
-	out, err := helmTemplateTLSLB(t,
+	out, err := helmTemplateRouter(t,
 		"--set", "cors.enabled=true",
 		"--set", "cors.allowOrigins={https://example.github.io}",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	conf := renderedTLSLBNginxConf(t, out)
+	conf := renderedRouterNginxConf(t, out)
 	if !strings.Contains(conf, "X-C8s-Session") {
 		t.Fatalf("CORS Access-Control-Allow-Headers missing X-C8s-Session:\n%s", conf)
 	}
@@ -2854,15 +2966,15 @@ var protocolCORSLocations = []struct{ match, path string }{
 	{"prefix", "/.well-known/c8s/"},
 }
 
-func TestTLSLBProtocolEndpointsCORSByDefault(t *testing.T) {
+func TestRouterProtocolEndpointsCORSByDefault(t *testing.T) {
 	// With no CORS configuration at all, the protocol-owned endpoints must be
 	// callable from a browser on any origin — that is the whole point of
 	// in-browser attestation — while workload locations stay untouched.
-	out, err := helmTemplateTLSLB(t)
+	out, err := helmTemplateRouter(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	for _, loc := range protocolCORSLocations {
 		block := cfg.location(t, loc.match, loc.path)
 		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", `"*"`, "always")
@@ -2872,59 +2984,59 @@ func TestTLSLBProtocolEndpointsCORSByDefault(t *testing.T) {
 	// The built-in policy is self-contained: none of the global CORS
 	// http-level maps are rendered.
 	if _, ok := cfg.maps[nginxMapKey{source: "$http_origin", target: "$cors_origin"}]; ok {
-		t.Fatal("global CORS maps rendered without tlsLb.cors.enabled")
+		t.Fatal("global CORS maps rendered without router.cors.enabled")
 	}
 }
 
-func TestTLSLBProtocolEndpointsCORSOptOut(t *testing.T) {
-	out, err := helmTemplateTLSLB(t, "--set", "cors.protocolEndpoints=false")
+func TestRouterProtocolEndpointsCORSOptOut(t *testing.T) {
+	out, err := helmTemplateRouter(t, "--set", "cors.protocolEndpoints=false")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	conf := renderedTLSLBNginxConf(t, out)
+	conf := renderedRouterNginxConf(t, out)
 	if strings.Contains(conf, "Access-Control") {
 		t.Fatalf("CORS directives rendered with cors.protocolEndpoints=false:\n%s", conf)
 	}
 }
 
-func TestTLSLBGlobalCORSCoversProtocolEndpoints(t *testing.T) {
+func TestRouterGlobalCORSCoversProtocolEndpoints(t *testing.T) {
 	// An enabled global CORS block is an explicit operator policy; it covers
 	// the protocol endpoints too (as it always has), and the built-in
 	// wide-open block steps aside rather than double-emitting headers.
-	out, err := helmTemplateTLSLB(t,
+	out, err := helmTemplateRouter(t,
 		"--set", "cors.enabled=true",
 		"--set", "cors.allowOrigins={https://example.github.io}",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	for _, loc := range protocolCORSLocations {
 		block := cfg.location(t, loc.match, loc.path)
 		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", "$cors_out_origin", "always")
 	}
-	if conf := renderedTLSLBNginxConf(t, out); strings.Contains(conf, `Access-Control-Allow-Origin  "*"`) ||
+	if conf := renderedRouterNginxConf(t, out); strings.Contains(conf, `Access-Control-Allow-Origin  "*"`) ||
 		strings.Contains(conf, `Access-Control-Allow-Origin "*"`) {
 		t.Fatalf("wide-open protocol CORS rendered alongside an enabled global block:\n%s", conf)
 	}
 }
 
-func TestTLSLBRejectsStringProtocolEndpoints(t *testing.T) {
-	out, err := helmTemplateTLSLB(t, "--set-string", "cors.protocolEndpoints=false")
+func TestRouterRejectsStringProtocolEndpoints(t *testing.T) {
+	out, err := helmTemplateRouter(t, "--set-string", "cors.protocolEndpoints=false")
 	if err == nil {
 		t.Fatal("helm template succeeded with string cors.protocolEndpoints, want error")
 	}
-	if !strings.Contains(out, "tlsLb.cors.protocolEndpoints must be a boolean") {
+	if !strings.Contains(out, "router.cors.protocolEndpoints must be a boolean") {
 		t.Fatalf("unexpected error output:\n%s", out)
 	}
 }
 
-func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
-	out, err := helmTemplateTLSLB(t)
+func TestRouterExposesAllowlistThroughCDSByDefault(t *testing.T) {
+	out, err := helmTemplateRouter(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	if cfg.http == nil {
 		t.Fatal("nginx config missing http block")
 	}
@@ -2964,7 +3076,7 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		location.assertNoDirective(t, "proxy_ssl_verify")
 	}
 
-	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	proxy := renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy")
 	for _, want := range []string{
 		"allowlist-proxy",
 		"--host=127.0.0.1",
@@ -2983,8 +3095,8 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	}
 }
 
-func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterAllowlistRateLimitsAreConfigurable(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "allowlist.rateLimit.requestsPerSecond=2",
 		"--set", "allowlist.rateLimit.burst=7",
 		"--set", "allowlist.rateLimit.totalRequestsPerSecond=9",
@@ -2995,7 +3107,7 @@ func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	if cfg.http == nil {
 		t.Fatal("nginx config missing http block")
 	}
@@ -3013,7 +3125,7 @@ func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
 	}
 }
 
-func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
+func TestRouterAllowlistProxyPinsCDSMeasurements(t *testing.T) {
 	measurement := strings.Repeat("ab", ratls.SNPMeasurementSize)
 	out, err := helmTemplate(t,
 		"--set-string", "cds.measurements[0]="+measurement,
@@ -3021,16 +3133,16 @@ func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	proxy := renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy")
 	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--cds-measurements="+measurement)
 }
 
-func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
-	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+func TestRouterBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
+	out, err := helmTemplateRouter(t, "--set", "allowlist.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	for _, key := range []nginxLocationKey{
 		{match: "exact", path: "/allowlist"},
 		{match: "prefix", path: "/allowlist/"},
@@ -3043,14 +3155,14 @@ func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
 		t.Fatal("disabled built-in allowlist route still renders its rate-limit map")
 	}
 	cfg.http.assertNoDirective(t, "limit_req_zone")
-	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	deployment := renderedDeployment(t, out, "c8s-router")
 	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
 		t.Fatal("disabled built-in allowlist route still renders allowlist-proxy")
 	}
 }
 
-func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
@@ -3060,7 +3172,7 @@ func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	cfg.location(t, "exact", "/allowlist").assertDirective(t, "proxy_pass", "https://route_0")
 	if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/allowlist/"}]; ok {
 		t.Fatal("built-in /allowlist/ route rendered alongside explicit allowlist route")
@@ -3069,16 +3181,16 @@ func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
 		t.Fatal("explicit allowlist route still renders the built-in rate-limit map")
 	}
 	cfg.http.assertNoDirective(t, "limit_req_zone")
-	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	deployment := renderedDeployment(t, out, "c8s-router")
 	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
 		t.Fatal("explicit allowlist route still renders the built-in allowlist-proxy")
 	}
 }
 
-func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
+func TestRouterAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	// Route backends must be secured (https + verify); the location/upstream
 	// wiring under test is protocol-independent.
-	out, err := helmTemplateTLSLB(t,
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
@@ -3092,7 +3204,7 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 
 	for _, tt := range []struct {
 		name     string
@@ -3120,8 +3232,8 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	}
 
 	defaultRoute := cfg.location(t, "prefix", "/")
-	defaultRoute.assertDirective(t, "set", "$backend_addr", "vllm:8000")
-	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
+	defaultRoute.assertDirective(t, "proxy_pass", "https://catch_all")
+	cfg.upstream(t, "catch_all").assertServer(t, "vllm:8000")
 	cfg.upstream(t, "route_0").assertServer(t, "cds.c8s-system.svc:8080")
 	cfg.upstream(t, "route_1").assertServer(t, "tenant-router.c8s-system.svc:8080")
 }
@@ -3129,8 +3241,8 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 // A route backend forwards X-Forwarded-Proto to the origin regardless of the
 // backend protocol; the backend must be secured (https + verify), so a client
 // cert is presented but no proxy_ssl client cert is required for that header.
-func TestTLSLBRouteForwardsProto(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterRouteForwardsProto(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/tenant/",
 		"--set-string", "routes[0].backend.address=tenant-router.c8s-system.svc:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3139,15 +3251,15 @@ func TestTLSLBRouteForwardsProto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	cfg.upstream(t, "route_0").assertServer(t, "tenant-router.c8s-system.svc:8080")
 	route := cfg.location(t, "prefix", "/tenant/")
 	route.assertDirective(t, "proxy_pass", "https://route_0")
 	route.assertDirective(t, "proxy_set_header", "X-Forwarded-Proto", "$scheme")
 }
 
-func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
@@ -3158,7 +3270,7 @@ func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	cfg.upstream(t, "route_0").assertServer(t, "cds.c8s-system.svc.cluster.local:8080")
 	route := cfg.location(t, "exact", "/allowlist")
 	route.assertDirective(t, "proxy_ssl_server_name", "on")
@@ -3171,8 +3283,8 @@ func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 	route.assertNoDirective(t, "proxy_ssl_certificate_key")
 }
 
-func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3182,7 +3294,7 @@ func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	route := cfg.location(t, "prefix", "/allowlist")
 	route.assertDirective(t, "proxy_ssl_certificate", "/tls/cert.pem")
 	route.assertDirective(t, "proxy_ssl_certificate_key", "/tls/key.pem")
@@ -3190,8 +3302,8 @@ func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
 	route.assertDirective(t, "proxy_pass", "https://route_0")
 }
 
-func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3201,18 +3313,18 @@ func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	route := cfg.location(t, "prefix", "/allowlist")
 	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/etc/ssl/certs/ca-certificates.crt")
-	assertNoTLSLBMeshCAVolume(t, out)
+	assertNoRouterMeshCAVolume(t, out)
 }
 
-func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
+func renderedRouterNginxConf(t *testing.T, manifest string) string {
 	t.Helper()
-	cm := renderedConfigMap(t, manifest, "c8s-tls-lb-nginx")
+	cm := renderedConfigMap(t, manifest, "c8s-router-nginx")
 	conf, ok := cm.Data["nginx.conf"]
 	if !ok || conf == "" {
-		t.Fatalf("tls-lb nginx ConfigMap missing nginx.conf\n%s", manifest)
+		t.Fatalf("router nginx ConfigMap missing nginx.conf\n%s", manifest)
 	}
 	return conf
 }
@@ -3240,9 +3352,9 @@ type nginxBlock struct {
 	directives map[string][][]string
 }
 
-func renderedTLSLBNginxConfig(t *testing.T, manifest string) nginxConfig {
+func renderedRouterNginxConfig(t *testing.T, manifest string) nginxConfig {
 	t.Helper()
-	return parseNginxConfig(t, renderedTLSLBNginxConf(t, manifest))
+	return parseNginxConfig(t, renderedRouterNginxConf(t, manifest))
 }
 
 func parseNginxConfig(t *testing.T, conf string) nginxConfig {
@@ -3380,17 +3492,17 @@ func (block *nginxBlock) assertNoDirective(t *testing.T, name string) {
 	}
 }
 
-func assertNoTLSLBMeshCAVolume(t *testing.T, manifest string) {
+func assertNoRouterMeshCAVolume(t *testing.T, manifest string) {
 	t.Helper()
-	dep := renderedDeployment(t, manifest, "c8s-tls-lb")
+	dep := renderedDeployment(t, manifest, "c8s-router")
 	for _, volume := range dep.Spec.Template.Spec.Volumes {
 		if volume.Name == "mesh-ca" {
-			t.Fatalf("Deployment/tls-lb has mesh-ca volume, want absent: %#v", volume)
+			t.Fatalf("Deployment/router has mesh-ca volume, want absent: %#v", volume)
 		}
 	}
 }
 
-func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
+func TestRouterRejectsUnsafeProxyTLS(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -3401,84 +3513,84 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 			args: []string{
 				"--set-string", "allowlist.enabled=false",
 			},
-			want: "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: false",
+			want: "router.allowlist.enabled must be a boolean; do not set it via --set-string, got: false",
 		},
 		{
 			name: "allowlist-proxy-port-out-of-range",
 			args: []string{
 				"--set", "allowlist.proxyPort=0",
 			},
-			want: "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: 0",
+			want: "router.allowlist.proxyPort must be between 1 and 65535, got: 0",
 		},
 		{
 			name: "allowlist-proxy-port-collides-with-attestation",
 			args: []string{
 				"--set", "allowlist.proxyPort=8800",
 			},
-			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: 8800",
+			want: "router.allowlist.proxyPort must differ from router.attest.port, got: 8800",
 		},
 		{
 			name: "allowlist-proxy-port-collides-with-nginx",
 			args: []string{
 				"--set", "allowlist.proxyPort=8443",
 			},
-			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: 8443",
+			want: "router.allowlist.proxyPort must differ from router.nginx.httpsPort, got: 8443",
 		},
 		{
 			name: "allowlist-write-rate-not-positive",
 			args: []string{
 				"--set", "allowlist.rateLimit.requestsPerSecond=0",
 			},
-			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
+			want: "router.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
 		},
 		{
 			name: "allowlist-write-rate-exceeds-total",
 			args: []string{
 				"--set", "allowlist.rateLimit.requestsPerSecond=9",
 			},
-			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
+			want: "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
 		},
 		{
 			name: "allowlist-write-burst-not-positive",
 			args: []string{
 				"--set", "allowlist.rateLimit.burst=0",
 			},
-			want: "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: 0",
+			want: "router.allowlist.rateLimit.burst must be a positive integer, got: 0",
 		},
 		{
 			name: "allowlist-write-burst-exceeds-total",
 			args: []string{
 				"--set", "allowlist.rateLimit.burst=16",
 			},
-			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
+			want: "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
 		},
 		{
 			name: "allowlist-write-total-rate-consumes-cds-capacity",
 			args: []string{
 				"--set", "allowlist.rateLimit.totalRequestsPerSecond=10",
 			},
-			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
+			want: "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
 		},
 		{
 			name: "allowlist-write-total-burst-consumes-cds-capacity",
 			args: []string{
 				"--set", "allowlist.rateLimit.totalBurst=20",
 			},
-			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
+			want: "VALIDATION_ERROR kind=router_allowlist_rate_budget: router.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
 		},
 		{
 			name: "allowlist-read-rate-not-positive",
 			args: []string{
 				"--set", "allowlist.readRateLimit.requestsPerSecond=0",
 			},
-			want: "tlsLb.allowlist.readRateLimit.requestsPerSecond must be a positive integer, got: 0",
+			want: "router.allowlist.readRateLimit.requestsPerSecond must be a positive integer, got: 0",
 		},
 		{
 			name: "allowlist-read-burst-not-positive",
 			args: []string{
 				"--set", "allowlist.readRateLimit.burst=0",
 			},
-			want: "tlsLb.allowlist.readRateLimit.burst must be a positive integer, got: 0",
+			want: "router.allowlist.readRateLimit.burst must be a positive integer, got: 0",
 		},
 		{
 			name: "route-verifyDepth-injection",
@@ -3489,7 +3601,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set", "routes[0].backend.tls.verify=true",
 				"--set-string", "routes[0].backend.tls.verifyDepth=9; return 444",
 			},
-			want: "tlsLb.routes[0].backend.tls.verifyDepth must be a non-negative integer, got: 9; return 444",
+			want: "router.routes[0].backend.tls.verifyDepth must be a non-negative integer, got: 9; return 444",
 		},
 		{
 			name: "route-tls-on-http-backend",
@@ -3498,7 +3610,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set", "routes[0].backend.tls.verify=true",
 			},
-			want: "tlsLb.routes[0].backend.tls.verify and useCDSClientCert require backend.protocol: https",
+			want: "router.routes[0].backend.tls.verify and useCDSClientCert require backend.protocol: https",
 		},
 		{
 			name: "route-verify-not-bool",
@@ -3508,7 +3620,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.protocol=https",
 				"--set-string", "routes[0].backend.tls.verify=false",
 			},
-			want: "tlsLb.routes[0].backend.tls.verify must be a boolean; do not set it via --set-string, got: false",
+			want: "router.routes[0].backend.tls.verify must be a boolean; do not set it via --set-string, got: false",
 		},
 		{
 			name: "route-address-with-hash",
@@ -3516,7 +3628,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080#x",
 			},
-			want: "tlsLb.routes[0].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: svc:8080#x",
+			want: "router.routes[0].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: svc:8080#x",
 		},
 		{
 			name: "route-serverName-with-slash",
@@ -3526,7 +3638,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.protocol=https",
 				"--set-string", "routes[0].backend.tls.serverName=a/b",
 			},
-			want: "tlsLb.routes[0].backend.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: a/b",
+			want: "router.routes[0].backend.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: a/b",
 		},
 		{
 			name: "upstream-serverName-injection",
@@ -3535,11 +3647,11 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set", "upstream.tls.verify=true",
 				"--set-string", "upstream.tls.serverName=evil; return 444",
 			},
-			want: "tlsLb.upstream.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: evil; return 444",
+			want: "router.upstream.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: evil; return 444",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := helmTemplateTLSLB(t, tt.args...)
+			out, err := helmTemplateRouter(t, tt.args...)
 			if err == nil {
 				t.Fatalf("helm template succeeded, want %q\n%s", tt.want, out)
 			}
@@ -3548,11 +3660,11 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 	}
 }
 
-// TestTLSLBVerifyDepthZeroPreserved guards against the sprig `default` footgun
+// TestRouterVerifyDepthZeroPreserved guards against the sprig `default` footgun
 // where an int 0 is treated as empty: an explicit verifyDepth: 0 (verify leaf
 // only) must reach nginx as 0, not be silently bumped to the default 2.
-func TestTLSLBVerifyDepthZeroPreserved(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterVerifyDepthZeroPreserved(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
 		"--set", "upstream.tls.verifyDepth=0",
@@ -3560,16 +3672,16 @@ func TestTLSLBVerifyDepthZeroPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	cfg.location(t, "prefix", "/").assertDirective(t, "proxy_ssl_verify_depth", "0")
 }
 
-// TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle pins that a verified HTTPS
+// TestRouterMultiRouteVerifiedRouteUsesMeshCABundle pins that a verified HTTPS
 // route using the default (mesh) CA resolves its trusted cert to the mesh CA
 // bundle the get-cert sidecar writes alongside the leaf, even when an earlier
 // route does not need it.
-func TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterMultiRouteVerifiedRouteUsesMeshCABundle(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/a",
 		"--set-string", "routes[0].backend.address=svc-a:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3583,17 +3695,17 @@ func TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	route := cfg.location(t, "prefix", "/b")
 	route.assertDirective(t, "proxy_ssl_verify", "on")
 	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/ca.pem")
 }
 
-// TestTLSLBRejectsUnsecuredRoute pins the per-route secured-backend guard,
+// TestRouterRejectsUnsecuredRoute pins the per-route secured-backend guard,
 // mirroring the catch-all upstream: a route backend must be https with
 // tls.verify=true (app-TLS). A plaintext http backend, or https without verify,
 // fails the render; there is no plaintext-to-unattested acknowledgment.
-func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
+func TestRouterRejectsUnsecuredRoute(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -3605,7 +3717,7 @@ func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080",
 			},
-			kind: "tlslb_unsecured_route",
+			kind: "router_unsecured_route",
 		},
 		{
 			name: "unverified-https-route",
@@ -3614,11 +3726,11 @@ func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set-string", "routes[0].backend.protocol=https",
 			},
-			kind: "tlslb_unsecured_route",
+			kind: "router_unsecured_route",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := helmTemplateTLSLB(t, tt.args...)
+			out, err := helmTemplateRouter(t, tt.args...)
 			if err == nil {
 				t.Fatalf("helm template succeeded, want %s failure\n%s", tt.kind, out)
 			}
@@ -3629,8 +3741,8 @@ func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
 	}
 }
 
-func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterRejectsInvalidRouteMatch(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=regex",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
@@ -3638,10 +3750,10 @@ func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want invalid route match failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.routes[0].match must be 'exact' or 'prefix', got: regex")
+	assertHelmFailMessage(t, out, "router.routes[0].match must be 'exact' or 'prefix', got: regex")
 }
 
-func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
+func TestRouterRejectsMissingRouteFields(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -3652,14 +3764,14 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 			args: []string{
 				"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 			},
-			want: "tlsLb.routes[0].path is required",
+			want: "router.routes[0].path is required",
 		},
 		{
 			name: "backend",
 			args: []string{
 				"--set-string", "routes[0].path=/allowlist",
 			},
-			want: "tlsLb.routes[0].backend is required",
+			want: "router.routes[0].backend is required",
 		},
 		{
 			name: "backend-address",
@@ -3667,11 +3779,11 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 				"--set-string", "routes[0].path=/allowlist",
 				"--set-string", "routes[0].backend.protocol=https",
 			},
-			want: "tlsLb.routes[0].backend.address is required",
+			want: "router.routes[0].backend.address is required",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := helmTemplateTLSLB(t, tt.args...)
+			out, err := helmTemplateRouter(t, tt.args...)
 			if err == nil {
 				t.Fatalf("helm template succeeded, want missing route field failure\n%s", out)
 			}
@@ -3680,19 +3792,19 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 	}
 }
 
-func TestTLSLBRejectsRouteUpstream(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterRejectsRouteUpstream(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].upstream=http://cds.c8s-system.svc:8080",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want unsupported route upstream failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.routes[0].upstream is not supported; set backend.address and backend.protocol instead")
+	assertHelmFailMessage(t, out, "router.routes[0].upstream is not supported; set backend.address and backend.protocol instead")
 }
 
-func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterRejectsInvalidTypedRouteProtocol(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 		"--set-string", "routes[0].backend.protocol=grpc",
@@ -3700,22 +3812,22 @@ func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want invalid typed route protocol failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.routes[0].backend.protocol must be 'http' or 'https', got: grpc")
+	assertHelmFailMessage(t, out, "router.routes[0].backend.protocol must be 'http' or 'https', got: grpc")
 }
 
-func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterRejectsUnsafeRoutePath(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set-string", "routes[0].path=/bad;return",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want unsafe route path failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.routes[0].path must start with '/' and contain only URI path characters safe for nginx locations, got: /bad;return")
+	assertHelmFailMessage(t, out, "router.routes[0].path must start with '/' and contain only URI path characters safe for nginx locations, got: /bad;return")
 }
 
-func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
 		"--set-string", "upstream.tls.trustedCAPath=/etc/ssl/certs/ca-certificates.crt",
@@ -3723,18 +3835,18 @@ func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/etc/ssl/certs/ca-certificates.crt")
-	assertNoTLSLBMeshCAVolume(t, out)
+	assertNoRouterMeshCAVolume(t, out)
 }
 
-// TestTLSLBExplicitTrustedCAPathRendersVerbatim pins that an operator-supplied
+// TestRouterExplicitTrustedCAPathRendersVerbatim pins that an operator-supplied
 // trustedCAPath is emitted verbatim in proxy_ssl_trusted_certificate. The chart
 // no longer mounts any volume for it: providing the file at that path is the
 // operator's responsibility.
-func TestTLSLBExplicitTrustedCAPathRendersVerbatim(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterExplicitTrustedCAPathRendersVerbatim(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
 		"--set-string", "upstream.tls.trustedCAPath=/mesh-ca/ca.pem",
@@ -3742,66 +3854,66 @@ func TestTLSLBExplicitTrustedCAPathRendersVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
 }
 
-func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "discovery.enabled=true",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg := renderedRouterNginxConfig(t, out)
 	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
 	meshCA.assertDirective(t, "alias", "/tls/ca.pem")
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
+	assertContainerArgs(t, routerGetCertContainer(t, out, "c8s-cert"),
 		"--ca-out=/tls/ca.pem",
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem")
 }
 
-// TestTLSLBGetCertWritesMeshCABundle pins the mechanism that replaced the
+// TestRouterGetCertWritesMeshCABundle pins the mechanism that replaced the
 // c8s-cds-mesh-ca ConfigMap mount: the c8s-cert sidecar writes the mesh CA
 // bundle to /tls/ca.pem (the tls-certs volume that already holds the leaf).
-func TestTLSLBGetCertWritesMeshCABundle(t *testing.T) {
-	out, err := helmTemplateTLSLB(t)
+func TestRouterGetCertWritesMeshCABundle(t *testing.T) {
+	out, err := helmTemplateRouter(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
+	assertContainerArgs(t, routerGetCertContainer(t, out, "c8s-cert"),
 		"--ca-out=/tls/ca.pem")
 }
 
-func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
+func TestRouterDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
+	out, err := helmTemplateRouter(t,
 		"--set", "discovery.enabled=true",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
+	assertContainerArgs(t, routerGetCertContainer(t, out, "c8s-cert"),
 		"--discovery-public-tls-mode=cds")
 }
 
-func TestTLSLBRollsOnNginxConfigChange(t *testing.T) {
-	defaultOut, err := helmTemplateTLSLB(t)
+func TestRouterRollsOnNginxConfigChange(t *testing.T) {
+	defaultOut, err := helmTemplateRouter(t)
 	if err != nil {
 		t.Fatalf("helm template default config: %v\n%s", err, defaultOut)
 	}
-	defaultChecksum := renderedDeployment(t, defaultOut, "c8s-tls-lb").Spec.Template.Annotations["checksum/nginx-config"]
+	defaultChecksum := renderedDeployment(t, defaultOut, "c8s-router").Spec.Template.Annotations["checksum/nginx-config"]
 	if defaultChecksum == "" {
 		t.Fatalf("default checksum/nginx-config is empty\n%s", defaultOut)
 	}
 
-	changedOut, err := helmTemplateTLSLB(t,
+	changedOut, err := helmTemplateRouter(t,
 		"--set-string", "upstream.address=other-upstream:8080",
 	)
 	if err != nil {
 		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
 	}
-	changedChecksum := renderedDeployment(t, changedOut, "c8s-tls-lb").Spec.Template.Annotations["checksum/nginx-config"]
+	changedChecksum := renderedDeployment(t, changedOut, "c8s-router").Spec.Template.Annotations["checksum/nginx-config"]
 	if changedChecksum == defaultChecksum {
 		t.Fatalf("checksum/nginx-config did not change after changing upstream: %s", defaultChecksum)
 	}
@@ -3969,384 +4081,6 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	}
 }
 
-// --- Kata runtime installation and enforcement -------------------------
-
-// TestChartKataDisabledByDefault: the default render must carry no kata
-// resources, so installs that don't ask for kata are unchanged.
-func TestChartKataDisabledByDefault(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy") {
-		t.Fatalf("kata-deploy DaemonSet rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu") {
-		t.Fatalf("kata RuntimeClass rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Fatalf("kata ValidatingAdmissionPolicy rendered without kata enforcement\n%s", out)
-	}
-}
-
-// TestChartKataEnabledRendersDeployStack: kata.enabled renders the
-// kata-deploy DaemonSet and the platform's RuntimeClasses — on the default
-// (SNP) platform the two non-confidential classes plus the SNP pair; the TDX
-// classes must NOT render (one CPU TEE per cluster).
-func TestChartKataEnabledRendersDeployStack(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, rc := range []string{"kata-qemu", "kata-clh", "kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		if !renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Fatalf("kata.enabled missing RuntimeClass %q\n%s", rc, out)
-		}
-	}
-	for _, rc := range []string{"kata-qemu-tdx", "kata-qemu-tdx-nvidia"} {
-		if renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Fatalf("TDX RuntimeClass %q rendered on an SNP install — only the declared platform's classes ship\n%s", rc, out)
-		}
-	}
-
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	if !ds.Spec.Template.Spec.HostPID {
-		t.Errorf("kata-deploy DaemonSet must set hostPID: true (kata-deploy nsenters PID 1)")
-	}
-	c, ok := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if !ok {
-		t.Fatalf("kata-deploy DaemonSet missing kube-kata container; have %v", containerNames(ds.Spec.Template.Spec.Containers))
-	}
-	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Errorf("kube-kata container must run privileged (it installs a runtime onto the host); got %+v", c.SecurityContext)
-	}
-
-	// kata is enforcing: there is no kata-without-enforcement shape, so the
-	// stack and the enforcement policy must arrive together.
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Errorf("kata.enabled must render the enforcement policy — kata is enforcing")
-	}
-	if !slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
-		t.Errorf("operator must get --kata-enforce under kata.enabled — kata is enforcing")
-	}
-	// The webhook injects the platform's confidential classes; the operator
-	// must be told which platform the chart rendered for.
-	if !slices.Contains(renderedOperatorArgs(t, out), "--hardware-platform=sev-snp") {
-		t.Errorf("operator must get --hardware-platform=sev-snp on a default kata install; args: %v", renderedOperatorArgs(t, out))
-	}
-	// The enforcement allowlist is platform-scoped too: a TDX class name must
-	// not be admissible on an SNP install.
-	expr := kataEnforcementExpressions(t, out)
-	if strings.Contains(expr, "'kata-qemu-tdx'") || strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept TDX classes on an SNP install\n%s", expr)
-	}
-}
-
-// rcScheduling captures the scheduling block of a rendered RuntimeClass.
-type rcScheduling struct {
-	Scheduling struct {
-		NodeSelector map[string]string `json:"nodeSelector"`
-	} `json:"scheduling"`
-}
-
-// TestChartKataSnpRuntimeClassesCarryNodeSelector: the confidential classes
-// must select SNP-labelled nodes (kata.snpNodeSelector). Without the selector
-// a confidential pod scheduled onto a non-SNP TEE host (e.g. Intel TDX) does
-// not fail cleanly — kata's confidential_guest auto-detects the host TEE and
-// QEMU aborts in an unbounded crash-loop; with it the pod stays Pending with a
-// clear scheduling message. kata-qemu / kata-clh work on any kata node and
-// must stay unrestricted.
-func TestChartKataSnpRuntimeClassesCarryNodeSelector(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, name := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if got := rc.Scheduling.NodeSelector["confidential.ai/sev-snp"]; got != "true" {
-			t.Errorf("%s scheduling.nodeSelector[confidential.ai/sev-snp] = %q, want \"true\"", name, got)
-		}
-	}
-	for _, name := range []string{"kata-qemu", "kata-clh"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if len(rc.Scheduling.NodeSelector) != 0 {
-			t.Errorf("%s must carry no scheduling.nodeSelector (it runs on any kata node), got %v", name, rc.Scheduling.NodeSelector)
-		}
-	}
-}
-
-// kata.snpNodeSelector={} is the documented opt-out: the confidential classes
-// render with no scheduling block (unrestricted scheduling, e.g. a uniformly
-// SNP cluster that wants no capability label).
-func TestChartKataSnpNodeSelectorClearable(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.snpNodeSelector=null")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, name := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		var rc rcScheduling
-		if !findDoc(t, out, "RuntimeClass", name, &rc) {
-			t.Fatalf("RuntimeClass %q not rendered\n%s", name, out)
-		}
-		if len(rc.Scheduling.NodeSelector) != 0 {
-			t.Errorf("%s scheduling.nodeSelector = %v, want none with kata.snpNodeSelector cleared", name, rc.Scheduling.NodeSelector)
-		}
-	}
-}
-
-// TestChartGpuAbsentWithoutKata: with kata disabled (the chart default) none of
-// the confidential-GPU stack renders — the whole GPU stack is part of the kata
-// stack, gated on kata.enabled.
-func TestChartGpuAbsentWithoutKata(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu-snp-nvidia") {
-		t.Errorf("GPU RuntimeClass rendered without kata.enabled\n%s", out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-image-puller-nvidia") {
-		t.Errorf("GPU image puller rendered without kata.enabled")
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-sandbox-device-plugin") {
-		t.Errorf("sandbox device plugin rendered without kata.enabled")
-	}
-}
-
-// TestChartKataRendersGpuStack: a plain --cvm-mode=pod install (no GPU flag) ships the
-// confidential-GPU stack — the GPU RuntimeClass (handler kata-qemu-nvidia-gpu-snp),
-// the GPU shim in SHIMS_X86_64, the enforcement allowlist entry, the GPU image
-// puller, and the privileged digest-pinned sandbox device plugin. GPU is part of
-// every kata install; there is no separate toggle.
-func TestChartKataRendersGpuStack(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-
-	// RuntimeClass name follows the c8s convention; handler is the kata shim.
-	var rc struct {
-		Handler string `yaml:"handler"`
-	}
-	if !findDoc(t, out, "RuntimeClass", "kata-qemu-snp-nvidia", &rc) {
-		t.Fatalf("a kata install must render RuntimeClass kata-qemu-snp-nvidia\n%s", out)
-	}
-	if rc.Handler != "kata-qemu-nvidia-gpu-snp" {
-		t.Errorf("kata-qemu-snp-nvidia handler = %q, want kata-qemu-nvidia-gpu-snp", rc.Handler)
-	}
-
-	// GPU shim registered with kata-deploy.
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	kube, _ := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if v := envValue(kube.Env, "SHIMS_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-snp") {
-		t.Errorf("SHIMS_X86_64 = %q must register qemu-nvidia-gpu-snp", v)
-	}
-
-	// Enforcement allowlist accepts the class.
-	if expr := kataEnforcementExpressions(t, out); !strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-snp-nvidia\n%s", expr)
-	}
-
-	// GPU image puller: pulls the -nvidia tag and patches the GPU config.
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "TAG"); got != "main-nvidia" {
-		t.Errorf("GPU puller TAG = %q, want main-nvidia", got)
-	}
-	if got := envValue(pc.Env, "SHIM_NAME"); got != "qemu-nvidia-gpu-snp" {
-		t.Errorf("GPU puller SHIM_NAME = %q, want qemu-nvidia-gpu-snp", got)
-	}
-	if got := envValue(pc.Env, "GPU_PCIE_ROOT_PORT"); got != "8" {
-		t.Errorf("GPU puller GPU_PCIE_ROOT_PORT = %q, want 8", got)
-	}
-
-	// Sandbox device plugin: privileged, digest-pinned, advertises GPUs.
-	plugin := renderedDaemonSet(t, out, "c8s-kata-deploy-sandbox-device-plugin")
-	dp, ok := findContainer(plugin.Spec.Template.Spec.Containers, "nvidia-sandbox-device-plugin")
-	if !ok {
-		t.Fatalf("sandbox device plugin missing its container")
-	}
-	if dp.SecurityContext == nil || dp.SecurityContext.Privileged == nil || !*dp.SecurityContext.Privileged {
-		t.Errorf("sandbox device plugin must run privileged (it mounts host /dev/vfio)")
-	}
-	if !strings.Contains(dp.Image, "@sha256:") {
-		t.Errorf("sandbox device plugin image %q must be digest-pinned", dp.Image)
-	}
-}
-
-// TestChartKataRendersGpuStackTdx: under attestationApi.teeDevices.tdxGuest
-// the TDX classes render (and the SNP ones do NOT — one CPU TEE per cluster),
-// the TDX shims register with kata-deploy, the enforcement allowlist accepts
-// the TDX pair only, the GPU puller targets the qemu-nvidia-gpu-tdx shim
-// (mirroring the non-GPU puller's qemu-tdx switch), and the operator is told
-// the platform so webhook injection matches.
-func TestChartKataRendersGpuStackTdx(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set", "attestationApi.teeDevices.tdxGuest=true",
-		"--set", "attestationApi.teeDevices.sevGuest=false",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-
-	var rc struct {
-		Handler    string `yaml:"handler"`
-		Scheduling struct {
-			NodeSelector map[string]string `yaml:"nodeSelector"`
-		} `yaml:"scheduling"`
-	}
-	if !findDoc(t, out, "RuntimeClass", "kata-qemu-tdx-nvidia", &rc) {
-		t.Fatalf("a kata install must render RuntimeClass kata-qemu-tdx-nvidia\n%s", out)
-	}
-	if rc.Handler != "kata-qemu-nvidia-gpu-tdx" {
-		t.Errorf("kata-qemu-tdx-nvidia handler = %q, want kata-qemu-nvidia-gpu-tdx", rc.Handler)
-	}
-	if got := rc.Scheduling.NodeSelector["confidential.ai/tdx"]; got != "true" {
-		t.Errorf("kata-qemu-tdx-nvidia nodeSelector[confidential.ai/tdx] = %q, want \"true\" (same guard as kata-qemu-tdx)", got)
-	}
-
-	ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-	kube, _ := findContainer(ds.Spec.Template.Spec.Containers, "kube-kata")
-	if v := envValue(kube.Env, "SHIMS_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-tdx") {
-		t.Errorf("SHIMS_X86_64 = %q must register qemu-nvidia-gpu-tdx", v)
-	}
-	if v := envValue(kube.Env, "SNAPSHOTTER_HANDLER_MAPPING_X86_64"); !strings.Contains(v, "qemu-nvidia-gpu-tdx:nydus") {
-		t.Errorf("SNAPSHOTTER_HANDLER_MAPPING_X86_64 = %q must route qemu-nvidia-gpu-tdx through nydus", v)
-	}
-
-	expr := kataEnforcementExpressions(t, out)
-	if !strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx-nvidia\n%s", expr)
-	}
-
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "SHIM_NAME"); got != "qemu-nvidia-gpu-tdx" {
-		t.Errorf("GPU puller SHIM_NAME = %q, want qemu-nvidia-gpu-tdx on a TDX cluster", got)
-	}
-
-	// One CPU TEE per cluster: the SNP classes must not render on TDX, the
-	// SNP shims must not register, and the allowlist must not accept them.
-	for _, rc := range []string{"kata-qemu-snp", "kata-qemu-snp-nvidia"} {
-		if renderedManifestHasNamedKind(t, out, "RuntimeClass", rc) {
-			t.Errorf("SNP RuntimeClass %q rendered on a TDX install — only the declared platform's classes ship", rc)
-		}
-	}
-	if v := envValue(kube.Env, "SHIMS_X86_64"); strings.Contains(v, "-snp") {
-		t.Errorf("SHIMS_X86_64 = %q must not register SNP shims on a TDX install", v)
-	}
-	if strings.Contains(expr, "'kata-qemu-snp'") || strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept SNP classes on a TDX install\n%s", expr)
-	}
-	if !strings.Contains(expr, "'kata-qemu-tdx'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx on a TDX install\n%s", expr)
-	}
-
-	// Webhook injection follows the platform.
-	if !slices.Contains(renderedOperatorArgs(t, out), "--hardware-platform=tdx") {
-		t.Errorf("operator must get --hardware-platform=tdx on a TDX kata install; args: %v", renderedOperatorArgs(t, out))
-	}
-}
-
-// TestChartKataSandboxDevicePluginOptOut: the privileged sandbox device plugin
-// (the only nvcr.io-pulled, host-/dev/vfio-mounting GPU component) can be opted
-// out via kata.gpu.sandboxDevicePlugin.enabled while the rest of the GPU stack
-// (runtime class, shim, puller) still ships.
-func TestChartKataSandboxDevicePluginOptOut(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.gpu.sandboxDevicePlugin.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-kata-deploy-sandbox-device-plugin") {
-		t.Errorf("sandbox device plugin rendered with sandboxDevicePlugin.enabled=false")
-	}
-	if !renderedManifestHasNamedKind(t, out, "RuntimeClass", "kata-qemu-snp-nvidia") {
-		t.Errorf("the rest of the GPU stack must still render with the device plugin opted out")
-	}
-}
-
-// TestChartKataDistroSelectsContainerdConfigDir: the kata.distro value must
-// pick the right host containerd config dir for kata-deploy to bind.
-func TestChartKataDistroSelectsContainerdConfigDir(t *testing.T) {
-	for _, tc := range []struct {
-		distro string
-		want   string
-	}{
-		{"k8s", "/etc/containerd"},
-		{"rke2", "/var/lib/rancher/rke2/agent/etc/containerd"},
-	} {
-		t.Run(tc.distro, func(t *testing.T) {
-			out, err := helmTemplateKata(t, "--set-string", "kata.distro="+tc.distro)
-			if err != nil {
-				t.Fatalf("helm template: %v\n%s", err, out)
-			}
-			ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-			if got := hostPathVolume(t, ds, "containerd-conf"); got != tc.want {
-				t.Fatalf("distro %q: containerd-conf hostPath = %q, want %q", tc.distro, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestChartKataRejectsUnknownDistro(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set-string", "kata.distro=openshift")
-	if err == nil {
-		t.Fatalf("helm template succeeded for an unknown kata.distro, want failure\n%s", out)
-	}
-}
-
-// TestChartKataContainerdPrepInitContainer: on rke2 the kata-deploy DaemonSet
-// must carry a containerd-prep initContainer that wires up the drop-in import
-// before kube-kata runs; on k8s kata-deploy edits containerd directly, so the
-// prep must be absent.
-func TestChartKataContainerdPrepInitContainer(t *testing.T) {
-	t.Run("rke2", func(t *testing.T) {
-		out, err := helmTemplateKata(t, "--set-string", "kata.distro=rke2")
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-		prep, ok := findContainer(ds.Spec.Template.Spec.InitContainers, "containerd-prep")
-		if !ok {
-			t.Fatalf("rke2: kata-deploy DaemonSet missing containerd-prep initContainer; have %v",
-				containerNames(ds.Spec.Template.Spec.InitContainers))
-		}
-		if prep.SecurityContext == nil || prep.SecurityContext.Privileged == nil || !*prep.SecurityContext.Privileged {
-			t.Errorf("containerd-prep must run privileged (it edits the host containerd config)")
-		}
-		env := initContainerEnv(t, ds, "containerd-prep")
-		if got := env["HOST_CONTAINERD_DIR"]; got != "/var/lib/rancher/rke2/agent/etc/containerd" {
-			t.Errorf("HOST_CONTAINERD_DIR = %q, want the rke2 containerd dir", got)
-		}
-		if got := env["BASE_DIRECTIVE"]; got != `{{ template "base" . }}` {
-			t.Errorf("BASE_DIRECTIVE = %q, want the literal RKE2 base include", got)
-		}
-	})
-
-	t.Run("k8s", func(t *testing.T) {
-		out, err := helmTemplateKata(t, "--set-string", "kata.distro=k8s")
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		ds := renderedDaemonSet(t, out, "c8s-kata-deploy")
-		if _, ok := findContainer(ds.Spec.Template.Spec.InitContainers, "containerd-prep"); ok {
-			t.Fatalf("k8s: kata-deploy must not carry a containerd-prep initContainer")
-		}
-	})
-}
-
 // TestChartCwLabelIntegrityPolicyRendersByDefault: the cw-label
 // ValidatingAdmissionPolicy guards Service-membership identity and must ship
 // on by default, with the immutability (oldObject) check present and the
@@ -4405,95 +4139,6 @@ func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
 	}
 }
 
-// helmTemplateKata renders the chart in the shape `c8s install --cvm-mode=pod`
-// produces. kata is enforcing, so the host-side components whose function
-// moves into the kata-guest-base image are switched off (the chart validates
-// they are off — see TestChartKataRejectsHostSideComponents).
-// testImageDigest is a syntactically valid digest for renders that only need
-// `image` to be pinned.
-const testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-
-func helmTemplateKata(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-	return helmTemplate(t, append([]string{
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-		// The guest admits only digest-pinned references, so kata.enabled
-		// requires one for the injected sidecars (kind=kata_image_digest).
-		"--set-string", "image.digest=" + testImageDigest,
-	}, args...)...)
-}
-
-// Contract with the `c8s uninstall` running-pod guard (cmd/c8s/uninstall.go,
-// filterKataPods): it skips the release's own kata pods by release namespace +
-// app.kubernetes.io/instance, so every kata-pinned pod template must carry that
-// label or a clean uninstall is refused again.
-func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	var pinned []string
-	iterateManifests(t, out, func(doc []byte) bool {
-		var obj struct {
-			docMeta
-			Spec struct {
-				Template corev1.PodTemplateSpec `json:"template"`
-			} `json:"spec"`
-		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
-			return false
-		}
-		rc := obj.Spec.Template.Spec.RuntimeClassName
-		if rc == nil || !strings.HasPrefix(*rc, "kata-") {
-			return false
-		}
-		pinned = append(pinned, obj.Metadata.Name)
-		if got := obj.Spec.Template.Labels["app.kubernetes.io/instance"]; got != "c8s" {
-			t.Errorf("%s pod template: app.kubernetes.io/instance = %q, want the release name", obj.Metadata.Name, got)
-		}
-		return false
-	})
-	slices.Sort(pinned)
-	if want := []string{"c8s-cds", "c8s-tls-lb"}; !reflect.DeepEqual(pinned, want) {
-		t.Errorf("kata-pinned workloads = %v, want %v", pinned, want)
-	}
-}
-
-func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
-	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
-	if hasHostIPEnv(proxy) {
-		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
-	}
-}
-
-// TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the
-// ValidatingAdmissionPolicy + binding and flips the operator's --kata-enforce
-// flag — the two halves of enforcement must move together, and kata is
-// enforcing by definition.
-func TestChartKataRendersPolicyAndOperatorFlag(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Fatalf("kata enforcement missing ValidatingAdmissionPolicy\n%s", out)
-	}
-	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicyBinding", "c8s-kata-enforcement") {
-		t.Fatalf("kata enforcement missing ValidatingAdmissionPolicyBinding\n%s", out)
-	}
-	if !slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
-		t.Fatalf("operator missing --kata-enforce=true with enforcement on\n%s", out)
-	}
-}
-
 // On node-CVM the operator gets the host-dir mount source, from which the
 // webhook derives the get-cert workload-claims injection.
 func TestChartWorkloadClaimsOperatorFlags(t *testing.T) {
@@ -4513,105 +4158,14 @@ func TestChartWorkloadClaimsOperatorFlags(t *testing.T) {
 	}
 }
 
-// pcie_root_port=0 disables VFIO cold-plug: a GPU pod would boot as a
-// confidential VM with no device and the only symptom is a missing
-// /dev/nvidia* in-guest. The chart must refuse the render instead of
-// shipping that silently (the puller script double-checks at run time).
-func TestChartKataRejectsZeroPcieRootPort(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.gpu.guestImage.pcieRootPort=0")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata.gpu.guestImage.pcieRootPort=0, want failure\n%s", out)
-	}
-	if msg := helmFailMessage(t, out); !strings.Contains(msg, "kind=gpu_pcie_root_port") {
-		t.Errorf("fail message %q missing the gpu_pcie_root_port marker", msg)
-	}
-}
-
-// kata is enforcing: every workload is a kata CVM, where ratls routing,
-// attestation, and image admission run inside the kata-guest-base image. The
-// chart must refuse to deploy the host-side versions alongside — they would be
-// dead weight at best and a second, unattested enforcement path at worst.
-// The webhook injects the c8s sidecars into every confidential pod off `image`,
-// and they run inside the guest, which admits only digest-pinned references. A
-// tag renders sidecars the guest refuses at CreateContainer, so catch it at
-// render rather than as a pod that never starts.
-func TestChartKataRequiresImageDigest(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-		"--set-string", "image.tag=dev",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata.enabled and a tag-only image, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=kata_image_digest") {
-		t.Errorf("fail message %q missing the kata_image_digest marker", msg)
-	}
-}
-
-func TestChartKataRejectsHostSideComponents(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata and host-side components enabled, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=enforce_host_components") {
-		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
-	}
-	for _, want := range []string{"ratlsMesh.enabled", "attestationApi.enabled", "nriImagePolicy.enabled"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("fail message %q should name %s", msg, want)
-		}
-	}
-}
-
-// The kata shape (what `c8s install --cvm-mode=pod` renders) must drop the host-side
-// DaemonSets entirely — their in-guest counterparts ship in kata-guest-base.
-func TestChartKataShapeDropsHostSideComponents(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
-		t.Errorf("kata shape still renders the host attestation-api DaemonSet")
-	}
-	for _, component := range []string{"ratls-mesh", "nri-image-policy"} {
-		if renderedManifestHasLabel(t, out, "app.kubernetes.io/name", component) {
-			t.Errorf("kata shape still renders %s manifests", component)
-		}
-	}
-}
-
-// tls-lb lives in the release namespace, which the kata-enforcement webhook
-// deliberately excludes — so the chart itself must pin the confidential
-// RuntimeClass on it under kata, exactly like cds.yaml. kata-qemu-snp
-// specifically: its get-cert containers dial the in-guest attestation-api on
-// loopback (c8s.attestationApiURL), which only exists inside an SNP guest.
-func TestChartKataPinsRuntimeClassOnTLSLB(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	dep := renderedDeployment(t, out, "c8s-tls-lb")
-	rc := dep.Spec.Template.Spec.RuntimeClassName
-	if rc == nil || *rc != "kata-qemu-snp" {
-		t.Errorf("c8s-tls-lb runtimeClassName = %v, want kata-qemu-snp", rc)
-	}
-}
-
-// Without kata the same Deployment must carry no RuntimeClass — runc is the
-// only runtime on a plain cluster.
-func TestChartNoRuntimeClassOnTLSLBWithoutKata(t *testing.T) {
+func TestChartNoRuntimeClassOnRouter(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	dep := renderedDeployment(t, out, "c8s-router")
 	if rc := dep.Spec.Template.Spec.RuntimeClassName; rc != nil {
-		t.Errorf("c8s-tls-lb runtimeClassName = %q, want unset without kata", *rc)
+		t.Errorf("c8s-router runtimeClassName = %q, want unset", *rc)
 	}
 }
 
@@ -4794,21 +4348,25 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		// enables it; set the tag here so those tests need not repeat it (its
 		// own image requires a tag or digest, like every component).
 		"--set", "volumed.image.tag=dev",
-		// tls-lb has no default upstream (a silently-plaintext VIP was
+		// router has no default upstream (a silently-plaintext VIP was
 		// removed); a c8s-<id> headless-Service address (what `c8s install
 		// --upstream` derives) is the representative mesh-wrapped baseline, and
 		// the chart recognizes that shape as mesh-wrapped. Tests for the
 		// manual-upstream paths clear it via noUpstreamArgs.
-		"--set-string", "tlsLb.upstream.address=c8s-infer.c8s-system.svc.cluster.local:8000",
+		"--set-string", "router.upstream.address=c8s-infer.c8s-system.svc.cluster.local:8000",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
 		// The fail-closed default (this PR) activates the
 		// uncovered_component_digest guard: every digest-pinned component must be
-		// covered in the allowlist floor or the plugin would deny it on its own
-		// node. The nri installer also self-allows by digest, so the image must
-		// stay digest-pinned. Cover the base nri digest in the floor so the
-		// default render is a valid fail-closed config. Tests that exercise the
-		// guard pin a different, deliberately-uncovered digest.
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		// admitted under any argv by a bootstrap entry or the plugin would deny
+		// it on its own node. The nri installer also self-allows by digest, so
+		// the image must stay digest-pinned. Cover the base nri digest with an
+		// entry so the default render is a valid fail-closed config. Tests that
+		// exercise the guard pin a different, deliberately-uncovered digest.
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".label=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].digest=" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].args.policy=any",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 	}
 	cmd := exec.Command("helm", append(base, args...)...)
@@ -4818,9 +4376,9 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 }
 
 // noUpstreamArgs clears the mesh-wrapped upstream that helmTemplate pins by
-// default, for tests exercising the manual tlsLb.upstream paths.
+// default, for tests exercising the manual router.upstream paths.
 func noUpstreamArgs(args ...string) []string {
-	return append([]string{"--set-string", "tlsLb.upstream.address="}, args...)
+	return append([]string{"--set-string", "router.upstream.address="}, args...)
 }
 
 // docMeta is the minimum we decode from each YAML doc to dispatch by kind+name.
@@ -5007,8 +4565,7 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 }
 
 // TestChartCDSWiresInProcessTrustRoot confirms the flag set: the in-memory CA
-// (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
-// --jwks-url, since signing happens in the same binary).
+// (no Secret/ca-cert flag) and the allowlist DB.
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
 	// gke: host-side attestation-api over the on-node Unix socket. node points
 	// CDS at the baked host attestation-api via HOST_IP (covered separately),
@@ -5053,7 +4610,7 @@ func TestChartCDSAllowlistPersistentTracksPVC(t *testing.T) {
 
 // TestChartCDSServesRATLS confirms the cds container renders with a non-empty
 // --ratls-platform by default, i.e. RA-TLS serving is ON. An empty platform
-// makes cds serve /attest, /sign-csr, and /attest-key over plaintext HTTP,
+// makes cds serve /attest over plaintext HTTP,
 // collapsing the H1 bootstrap-channel MITM defence — a regression this guards.
 func TestChartCDSServesRATLS(t *testing.T) {
 	out, err := helmTemplate(t)
@@ -5088,7 +4645,7 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 		return loc != nil && loc[0] == 0 && loc[1] == len(s)
 	}
 	for _, san := range []string{
-		"c8s-tls-lb.c8s-system.svc",
+		"c8s-router.c8s-system.svc",
 		"ratls-mesh.c8s-system.svc",
 		"acme-vllm-router-service.vllm.svc",
 		"acme-vllm-acme-opt-125m-engine-service.vllm.svc",
@@ -5101,7 +4658,7 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 		"evil.example.com",                    // not a .svc name
 		"svc.cluster.local",                   // wrong shape
 		"a.b.c.svc",                           // more than <name>.<ns>
-		"tls-lb.c8s-system.svc.cluster.local", // trailing labels
+		"router.c8s-system.svc.cluster.local", // trailing labels
 	} {
 		if fullMatch(san) {
 			t.Fatalf("default dns-san-pattern should reject non-Service SAN %q", san)
@@ -5127,62 +4684,62 @@ func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--dns-san-pattern="+public)
 }
 
-// TestChartCertDependentPodStrategies pins tls-lb's rollout strategy to its
+// TestChartCertDependentPodStrategies pins router's rollout strategy to its
 // constraint: with the default hostPort binding it must Recreate (two pods on
 // a node would collide on the host port, and a surge pod could never schedule
 // on a single-node cluster, deadlocking the roll); without hostPort it surges
 // so the new cert-holding pod is Ready before the old one retires. An
-// explicit tlsLb.strategy renders verbatim.
+// explicit router.strategy renders verbatim.
 func TestChartCertDependentPodStrategies(t *testing.T) {
 	t.Run("default hostPort binds, so Recreate", func(t *testing.T) {
 		out, err := helmTemplate(t)
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
-		if tlsLB.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-			t.Errorf("c8s-tls-lb strategy = %q, want Recreate (host-port binding forbids two concurrent pods on a node)", tlsLB.Spec.Strategy.Type)
+		router := renderedDeployment(t, out, "c8s-router")
+		if router.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("c8s-router strategy = %q, want Recreate (host-port binding forbids two concurrent pods on a node)", router.Spec.Strategy.Type)
 		}
 	})
 
 	t.Run("no hostPort surges with no gap", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.enabled=false")
+		out, err := helmTemplate(t, "--set", "router.hostPort.enabled=false")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
-		if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Errorf("c8s-tls-lb strategy = %q, want RollingUpdate", tlsLB.Spec.Strategy.Type)
+		router := renderedDeployment(t, out, "c8s-router")
+		if router.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("c8s-router strategy = %q, want RollingUpdate", router.Spec.Strategy.Type)
 		}
-		if ru := tlsLB.Spec.Strategy.RollingUpdate; ru == nil ||
+		if ru := router.Spec.Strategy.RollingUpdate; ru == nil ||
 			ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
 			ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
-			t.Errorf("c8s-tls-lb should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
+			t.Errorf("c8s-router should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
 		}
 	})
 
 	t.Run("explicit strategy renders verbatim", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set-string", "tlsLb.strategy.type=RollingUpdate")
+		out, err := helmTemplate(t, "--set-string", "router.strategy.type=RollingUpdate")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
-		if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Errorf("c8s-tls-lb strategy = %q, want the explicit RollingUpdate override", tlsLB.Spec.Strategy.Type)
+		router := renderedDeployment(t, out, "c8s-router")
+		if router.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("c8s-router strategy = %q, want the explicit RollingUpdate override", router.Spec.Strategy.Type)
 		}
 	})
 }
 
-// TestChartTLSLBHostPort covers the tlsLb.hostPort edge toggle. The default
+// TestChartRouterHostPort covers the router.hostPort edge toggle. The default
 // publishes nginx's TLS listener on the node's host port 443 (the in-pod
 // listener stays on the unprivileged nginx.httpsPort). hostPort.enabled=false
 // omits it so the pod schedules where another controller already owns 443
 // (e.g. RKE2's bundled ingress-nginx). A custom host port binds independently
 // of the listener port.
-func TestChartTLSLBHostPort(t *testing.T) {
+func TestChartRouterHostPort(t *testing.T) {
 	nginxHTTPSPort := func(t *testing.T, out string) (containerPort, hostPort int32) {
 		t.Helper()
-		nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+		nginx := renderedDeploymentContainer(t, out, "c8s-router", "nginx")
 		p, ok := namedContainerPort(nginx, "https")
 		if !ok {
 			t.Fatal("nginx container has no https port")
@@ -5202,7 +4759,7 @@ func TestChartTLSLBHostPort(t *testing.T) {
 	})
 
 	t.Run("disabled omits the host port", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.enabled=false")
+		out, err := helmTemplate(t, "--set", "router.hostPort.enabled=false")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -5216,7 +4773,7 @@ func TestChartTLSLBHostPort(t *testing.T) {
 	})
 
 	t.Run("custom host port decouples from the listener port", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.https=8443")
+		out, err := helmTemplate(t, "--set", "router.hostPort.https=8443")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -5229,23 +4786,22 @@ func TestChartTLSLBHostPort(t *testing.T) {
 	t.Run("string bool is rejected", func(t *testing.T) {
 		// A string "false" is truthy in templates and would silently keep the
 		// port bound (and the strategy on Recreate) despite the opt-out.
-		out, err := helmTemplate(t, "--set-string", "tlsLb.hostPort.enabled=false")
+		out, err := helmTemplate(t, "--set-string", "router.hostPort.enabled=false")
 		if err == nil {
 			t.Fatalf("helm template succeeded, want string-bool rejection\n%s", out)
 		}
-		assertHelmFailMessage(t, out, "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: false")
+		assertHelmFailMessage(t, out, "router.hostPort.enabled must be a boolean; do not set it via --set-string, got: false")
 	})
 }
 
-// TestChartNoTeeProxyRemnants sweeps the default and kata renders for any
-// leftover tee-proxy wiring after the component's removal.
+// TestChartNoTeeProxyRemnants sweeps the default render for any leftover
+// tee-proxy wiring after the component's removal.
 func TestChartNoTeeProxyRemnants(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		render func(t *testing.T, args ...string) (string, error)
 	}{
 		{"default", helmTemplate},
-		{"kata", helmTemplateKata},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := tc.render(t)
@@ -5267,13 +4823,13 @@ func TestChartRejectsMalformedUpstreamAddress(t *testing.T) {
 	// so the render reaches the address-format check rather than tripping the
 	// workload-conflict / unsecured-upstream guards first.
 	out, err := helmTemplate(t, noUpstreamArgs(
-		"--set-string", "tlsLb.upstream.address=bad addr;{}",
-		"--set-string", "tlsLb.upstream.protocol=https",
-		"--set", "tlsLb.upstream.tls.verify=true")...)
+		"--set-string", "router.upstream.address=bad addr;{}",
+		"--set-string", "router.upstream.protocol=https",
+		"--set", "router.upstream.tls.verify=true")...)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want upstream address rejection\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tlsLb.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: bad addr;{}")
+	assertHelmFailMessage(t, out, "router.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: bad addr;{}")
 }
 
 // TestChartRejectsLeftoverTeeProxyValues: helm silently ignores values keys
@@ -5299,7 +4855,7 @@ func TestChartGetCertRetriesInProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	inits := renderedDeploymentInitContainers(t, out, "c8s-tls-lb")
+	inits := renderedDeploymentInitContainers(t, out, "c8s-router")
 	var cert *corev1.Container
 	for i := range inits {
 		if inits[i].Name == "c8s-cert" {
@@ -5307,7 +4863,7 @@ func TestChartGetCertRetriesInProcess(t *testing.T) {
 		}
 	}
 	if cert == nil {
-		t.Fatalf("tls-lb has no c8s-cert init container\n%s", out)
+		t.Fatalf("router has no c8s-cert init container\n%s", out)
 	}
 	assertContainerHasArg(t, "c8s-cert", cert.Args, "--initial-retry-timeout=2m")
 }
@@ -5324,218 +4880,22 @@ func TestChartCDSMeasurementsPlumbFlatAllowlist(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--measurements="+measurement)
 }
 
-// TestChartCDSHandoffEnabledWiresMeasurements confirms handoff plumbs the flat
-// allowlist into --handoff-measurements (cds is its own EAR issuer, so there is
-// no external URL to wire).
-func TestChartCDSHandoffEnabledWiresMeasurements(t *testing.T) {
-	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.measurements[0]="+measurement,
-		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-	assertContainerHasArg(t, "cds", args, "--handoff-measurements="+measurement)
-}
-
-// TestChartCDSHandoffDisabledOmitsFlag is the negative: with handoff off
-// (default) the bootstrap flag MUST be absent, or cds would register /handoff
-// when it shouldn't.
-func TestChartCDSHandoffDisabledOmitsFlag(t *testing.T) {
+// TestChartCDSStrategyIsRecreateSingleton pins the rollout to its constraint:
+// two cds pods would mint divergent trust roots and cannot co-mount the RWO
+// data PVC, so the pod is replaced, never surged. Replicas stays 1: EAR
+// signing keys are per pod, so a second steady-state endpoint breaks EAR
+// verification (see the active/active decision memo).
+func TestChartCDSStrategyIsRecreateSingleton(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-	assertContainerNoArgPrefix(t, "cds", args, "--handoff-measurements=")
-}
-
-// TestChartCDSHandoffEnabledFailsWithoutMeasurements locks the chart-time
-// guard: handoff with an empty allowlist would register /handoff and 403 every
-// caller — caught at template time, not at scale-up.
-func TestChartCDSHandoffEnabledFailsWithoutMeasurements(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "cds.handoff.enabled=true")
-	if err == nil {
-		t.Fatalf("helm template succeeded with cds handoff enabled but no cds.measurements; output=%s", out)
+	dep := renderedDeployment(t, out, "c8s-cds")
+	if dep.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Errorf("cds strategy = %q, want Recreate", dep.Spec.Strategy.Type)
 	}
-	if got := parseValidationErrorKind(out); got != "cds_handoff_measurements" {
-		t.Fatalf("validation kind = %q, want cds_handoff_measurements; output=%s", got, out)
-	}
-}
-
-const cdsPeerMeasurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
-const cdsHandoffOperatorKeys = "-----BEGIN PUBLIC KEY-----fake"
-
-func TestChartCDSHandoffEnabledRequiresOperatorKeys(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with CDS handoff but no operator keys; output=%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "cds_handoff_operator_keys" {
-		t.Fatalf("validation kind = %q, want cds_handoff_operator_keys; output=%s", got, out)
-	}
-}
-
-// TestChartCDSHandoffPeerURLWiresFlag confirms cds.handoff.peerUrl renders the
-// requester-side --handoff-peer-url flag (pull-on-startup adoption) alongside
-// the serving-side --handoff-measurements, so the rendered pod both adopts and
-// offers /handoff for the roll after it.
-func TestChartCDSHandoffPeerURLWiresFlag(t *testing.T) {
-	const peer = "https://c8s-cds-peer.c8s-system.svc:8443"
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.handoff.peerUrl="+peer,
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-	assertContainerHasArg(t, "cds", args, "--handoff-peer-url="+peer)
-	assertContainerHasArg(t, "cds", args, "--handoff-measurements="+cdsPeerMeasurement)
-}
-
-// TestChartCDSHandoffPeerURLOmittedByDefault is the negative: without peerUrl
-// the flag MUST be absent so cds self-generates (cold start).
-func TestChartCDSHandoffPeerURLOmittedByDefault(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-	assertContainerNoArgPrefix(t, "cds", args, "--handoff-peer-url=")
-}
-
-// TestChartCDSHandoffPeerURLRequiresHandoffEnabled locks the guard: without
-// handoff.enabled no pod serves /handoff, so a peerUrl surge pod would have
-// nothing to adopt from and the roll wedges.
-func TestChartCDSHandoffPeerURLRequiresHandoffEnabled(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.peerUrl=https://peer:8443",
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with peerUrl but handoff.enabled=false; output=%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "cds_handoff_peer_requires_enabled" {
-		t.Fatalf("validation kind = %q, want cds_handoff_peer_requires_enabled; output=%s", got, out)
-	}
-}
-
-// TestChartCDSHandoffPeerURLFailsOnNonHTTPS locks the https guard: an http peer
-// URL would let cds adopt a CA over an unattested channel.
-func TestChartCDSHandoffPeerURLFailsOnNonHTTPS(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.handoff.peerUrl=http://peer:8443",
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with an http peerUrl; output=%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "cds_handoff_peer_scheme" {
-		t.Fatalf("validation kind = %q, want cds_handoff_peer_scheme; output=%s", got, out)
-	}
-}
-
-// TestChartCDSStrategyTracksAdoption pins the rollout to its constraint: with
-// no adoption peer cds must Recreate (two non-adopting pods would mint
-// divergent trust roots); with cds.handoff.peerUrl set it surges so the new
-// pod adopts from the still-serving old pod before it retires, and a
-// startupProbe holds liveness off while adoption blocks the listener. Either
-// way replicas stays 1: EAR signing keys are per pod, so a second steady-state
-// endpoint breaks EAR verification (see the active/active decision memo).
-func TestChartCDSStrategyTracksAdoption(t *testing.T) {
-	t.Run("no peer: Recreate singleton", func(t *testing.T) {
-		out, err := helmTemplate(t)
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		dep := renderedDeployment(t, out, "c8s-cds")
-		if dep.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-			t.Errorf("cds strategy = %q, want Recreate", dep.Spec.Strategy.Type)
-		}
-		if got := *dep.Spec.Replicas; got != 1 {
-			t.Errorf("cds replicas = %d, want the fixed singleton 1", got)
-		}
-		if renderedDeploymentContainer(t, out, "c8s-cds", "cds").StartupProbe != nil {
-			t.Error("cds has a startupProbe without adoption; nothing blocks startup")
-		}
-	})
-
-	t.Run("peerUrl set: surge with no gap", func(t *testing.T) {
-		out, err := helmTemplate(t,
-			"--set", "cds.handoff.enabled=true",
-			"--set", "cds.handoff.peerUrl=self",
-			"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-			"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-		)
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		dep := renderedDeployment(t, out, "c8s-cds")
-		if dep.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Errorf("cds strategy = %q, want RollingUpdate", dep.Spec.Strategy.Type)
-		}
-		if ru := dep.Spec.Strategy.RollingUpdate; ru == nil ||
-			ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
-			ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
-			t.Errorf("cds should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
-		}
-		if got := *dep.Spec.Replicas; got != 1 {
-			t.Errorf("cds replicas = %d, want the fixed singleton 1", got)
-		}
-		// The probe window must cover --handoff-peer-timeout (2m default) or
-		// liveness kills the pod mid-adoption.
-		sp := renderedDeploymentContainer(t, out, "c8s-cds", "cds").StartupProbe
-		if sp == nil {
-			t.Fatal("adoption rendered no startupProbe; liveness would kill a mid-adoption pod")
-		}
-		if window := sp.FailureThreshold * sp.PeriodSeconds; window < 150 {
-			t.Errorf("startupProbe window = %ds, want >= 150s to cover the 120s adoption deadline", window)
-		}
-	})
-}
-
-// TestChartCDSHandoffPeerSelfResolvesToServiceURL confirms the "self" sentinel
-// expands to the CDS Service URL so an operator flips one value, not a hostname.
-func TestChartCDSHandoffPeerSelfResolvesToServiceURL(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.handoff.peerUrl=self",
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-	assertContainerHasArg(t, "cds", args, "--handoff-peer-url=https://c8s-cds.c8s-system.svc:8443")
-}
-
-// TestChartCDSHandoffPeerRejectsPersistence locks the guard that adoption and
-// the RWO data PVC are mutually exclusive (a surge pod cannot co-mount it).
-func TestChartCDSHandoffPeerRejectsPersistence(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "cds.handoff.enabled=true",
-		"--set", "cds.handoff.peerUrl=self",
-		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
-		"--set", "cds.persistence.enabled=true",
-		"--set-string", "cds.operatorKeys="+cdsHandoffOperatorKeys,
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with peerUrl + persistence; output=%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "cds_handoff_peer_persistence" {
-		t.Fatalf("validation kind = %q, want cds_handoff_peer_persistence; output=%s", got, out)
+	if got := *dep.Spec.Replicas; got != 1 {
+		t.Errorf("cds replicas = %d, want the fixed singleton 1", got)
 	}
 }
 
@@ -5565,6 +4925,7 @@ type nriRuntimeConfig struct {
 			Timeout           string   `yaml:"timeout"`
 			AttestationApiURL string   `yaml:"attestation_api_url"`
 			CDSMeasurements   []string `yaml:"cds_measurements"`
+			CDSRTMRs          []string `yaml:"cds_rtmrs"`
 		} `yaml:"pull"`
 		Push struct {
 			PersistPath string `yaml:"persist_path"`
@@ -5644,16 +5005,16 @@ func renderedDeploymentContainer(t *testing.T, manifest, deploymentName, contain
 	return corev1.Container{}
 }
 
-// helmTemplateTLSLB renders the tls-lb component from the parent c8s chart in
+// helmTemplateRouter renders the router component from the parent c8s chart in
 // isolation: siblings are disabled and every caller-supplied --set/--set-string
-// path is prefixed with tlsLb. so the existing subchart-relative test values
+// path is prefixed with router. so the existing subchart-relative test values
 // (upstream.*, routes[*], nginx.*) keep working after the hoist. The release is
-// named "c8s" so tls-lb.fullname resolves to c8s-tls-lb, matching the resource
-// names the parent-chart tls-lb tests already assert. upstream.address is
+// named "c8s" so router.fullname resolves to c8s-router, matching the resource
+// names the parent-chart router tests already assert. upstream.address is
 // pinned to the standalone subchart's old default (vllm:8000) so the
 // default-backend assertions remain a meaningful fixture rather than the
 // parent's default upstream wiring.
-func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
+func helmTemplateRouter(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm CLI not found")
@@ -5666,56 +5027,60 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
-		// nri-image-policy is mandatory on a non-kata render
+		// nri-image-policy is enabled in this render
 		// (require_host_image_policy); pin its digest + floor so the render is
-		// valid. Output is scoped to the tls-lb templates below, so its
+		// valid. Output is scoped to the router templates below, so its
 		// manifests do not appear here.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + baseNRIDigest + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
-		"--set-string", "tlsLb.upstream.address=vllm:8000",
-		// Secured (https + verify) upstream baseline for the tls-lb subchart
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".label=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].digest=" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-" + baseNRIDigest[7:19] + ".containers[0].args.policy=any",
+		"--set-string", "router.upstream.address=vllm:8000",
+		// Secured (https + verify) upstream baseline for the router subchart
 		// tests, on a bare vllm address. A manual address must be app-TLS now
 		// that no default ships and there is no unmeshed acknowledgment; tests
 		// that exercise a specific upstream protocol override it.
-		"--set", "tlsLb.upstream.protocol=https",
-		"--set", "tlsLb.upstream.tls.verify=true",
-		"--set", "tlsLb.nginx.image.tag=dev",
-		"--show-only", "templates/tls-lb-configmap.yaml",
-		"--show-only", "templates/tls-lb-deployment.yaml",
+		"--set", "router.upstream.protocol=https",
+		"--set", "router.upstream.tls.verify=true",
+		"--set", "router.nginx.image.tag=dev",
+		"--show-only", "templates/router-configmap.yaml",
+		"--show-only", "templates/router-deployment.yaml",
 	}
-	cmd := exec.Command("helm", append(base, prefixTLSLBSetArgs(args)...)...)
+	cmd := exec.Command("helm", append(base, prefixRouterSetArgs(args)...)...)
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-// prefixTLSLBSetArgs rewrites the value path of each --set/--set-string pair to
-// live under the parent chart's tlsLb key, leaving the value (right of '=')
+// prefixRouterSetArgs rewrites the value path of each --set/--set-string pair to
+// live under the parent chart's router key, leaving the value (right of '=')
 // untouched.
-func prefixTLSLBSetArgs(args []string) []string {
+func prefixRouterSetArgs(args []string) []string {
 	out := make([]string, len(args))
 	copy(out, args)
 	for i := 0; i+1 < len(out); i++ {
 		if out[i] != "--set" && out[i] != "--set-string" {
 			continue
 		}
-		out[i+1] = "tlsLb." + out[i+1]
+		out[i+1] = "router." + out[i+1]
 		i++
 	}
 	return out
 }
 
-// Example_tlsLBConfig renders the tls-lb ConfigMap for a representative route
+// Example_routerConfig renders the router ConfigMap for a representative route
 // set — one plaintext HTTP backend (/allowlist) and one RA-TLS-verified HTTPS
 // backend (/tenant/) — and prints the generated nginx.conf. It doubles as a
 // golden test of templates/configmap.yaml: a template edit that changes the
 // rendered config must be reflected in the Output block, so the full config
 // diff surfaces in review. helm is required, as it is for every test in this
 // package; without it the render errors and the example fails.
-func Example_tlsLBConfig() {
-	fmt.Print(renderExampleTLSLBNginxConf())
+func Example_routerConfig() {
+	fmt.Print(renderExampleRouterNginxConf())
 	// Output:
 	// worker_processes auto;
 	// error_log /var/log/nginx/error.log warn;
@@ -5736,21 +5101,19 @@ func Example_tlsLBConfig() {
 	//
 	//     sendfile on;
 	//     keepalive_timeout 65;
-	//
-	//     # The catch-all upstream is dialed via a variable (see location /), so
-	//     # nginx re-resolves it here at request time per record TTL. A static
-	//     # upstream block would pin the pod IPs a headless-Service name (an
-	//     # adopted workload) resolved to at startup and 502 after pod churn.
-	//     resolver kube-dns.kube-system.svc.cluster.local;
 	//     upstream route_0 {
 	//         server c8s-cds.c8s-system.svc:8443;
 	//     }
 	//     upstream route_1 {
 	//         server tenant-router.c8s-system.svc:8080;
 	//     }
+	//     upstream catch_all {
+	//         server vllm:8000;
+	//     }
+	//
 	//     server {
 	//         listen 8443 ssl;
-	//         server_name c8s-tls-lb.c8s-system.svc;
+	//         server_name c8s-router.c8s-system.svc;
 	//
 	//         ssl_certificate     /tls/cert.pem;
 	//         ssl_certificate_key /tls/key.pem;
@@ -5801,8 +5164,7 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
 	//             proxy_ssl_trusted_certificate /tls/cert.pem;
-	//             set $backend_addr vllm:8000;
-	//             proxy_pass https://$backend_addr;
+	//             proxy_pass https://catch_all;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;
 	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -5840,16 +5202,46 @@ func podVolume(spec corev1.PodSpec, name string) (corev1.Volume, bool) {
 	return corev1.Volume{}, false
 }
 
-// TestChartSeedsCDSAllowlistFromFloor proves the single authoritative floor
-// (nriImagePolicy.bootstrapAllowlist.digests) plus the CDS image self-entry are
-// rendered into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
-// non-empty on the first worker pull. Decoded with the same typed Allowlist
-// shape CDS parses, not substring-matched.
-func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
-	const floorDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
-	out, err := helmTemplate(t,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+floorDigest+"=ghcr.io/x/coredns:v1",
-	)
+// seedEntry finds the seed entry whose single container carries digest.
+func seedEntry(seed *pkgallowlist.Allowlist, digest string) (pkgallowlist.Workload, bool) {
+	for _, w := range seed.Workloads {
+		for _, c := range w.Containers {
+			if c.Digest.String() == digest {
+				return w, true
+			}
+		}
+	}
+	return pkgallowlist.Workload{}, false
+}
+
+// seedLabel is the label of the entry admitting digest, or "" when none does.
+func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
+	w, _ := seedEntry(seed, digest)
+	return w.Label
+}
+
+// anyArgvEntryArgs renders one bootstrapAllowlist.workloads entry admitting
+// digest under any command and args, as `helm --set-string` arguments.
+func anyArgvEntryArgs(name, digest, image string) []string {
+	p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
+	return []string{
+		"--set-string", p + "label=" + image,
+		"--set-string", p + "containers[0].digest=" + digest,
+		"--set-string", p + "containers[0].image=" + image,
+		"--set-string", p + "containers[0].command.policy=any",
+		"--set-string", p + "containers[0].args.policy=any",
+	}
+}
+
+// TestChartSeedsCDSAllowlistFromBootstrapEntries proves a
+// bootstrapAllowlist.workloads entry and the CDS image self-entry are rendered
+// into CDS's --allowlist-seed ConfigMap, so CDS's served /allowlist is
+// non-empty on the first worker pull, and that an entry admitting its digest
+// under any argv also reaches every plugin's always_allow. Decoded with the
+// same typed Allowlist shape CDS parses, not substring-matched.
+func TestChartSeedsCDSAllowlistFromBootstrapEntries(t *testing.T) {
+	const bootDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t, anyArgvEntryArgs("coredns", bootDigest, "ghcr.io/x/coredns:v1")...)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -5865,16 +5257,144 @@ func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 		t.Fatalf("seed JSON does not parse as a Allowlist (CDS would fail closed): %v\n%s", err, raw)
 	}
 
-	// The floor digest the operator supplied.
-	if got := seed.Digests[floorDigest]; got != "ghcr.io/x/coredns:v1" {
-		t.Errorf("seed floor digest = %q, want ghcr.io/x/coredns:v1\nseed: %v", got, seed.Digests)
+	w, ok := seed.Workloads["coredns"]
+	if !ok {
+		t.Fatalf("seed entry coredns missing\nseed: %v", seed.Workloads)
+	}
+	if w.Label != "ghcr.io/x/coredns:v1" || len(w.InitContainers) != 0 || len(w.Containers) != 1 {
+		t.Errorf("seed entry = %#v, want label ghcr.io/x/coredns:v1 with one main container", w)
+	}
+	if c := w.Containers[0]; c.Digest.String() != bootDigest || c.Image != "ghcr.io/x/coredns:v1" || !c.AnyArgv() {
+		t.Errorf("seed container = %#v, want %s under any command and args", c, bootDigest)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if got := worker.Allowlist.AlwaysAllow[bootDigest]; got != "ghcr.io/x/coredns:v1" {
+		t.Errorf("always_allow[%s] = %q, want the entry's image\nalways_allow: %v", bootDigest, got, worker.Allowlist.AlwaysAllow)
 	}
 	// The CDS self-entry, derived from cds.image (set by the test harness to
 	// digest ...0001); the reference is repository@digest.
 	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
-	if got := seed.Digests[cdsDigest]; got != cdsRef {
-		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Digests)
+	if got := seedLabel(seed, cdsDigest); got != cdsRef {
+		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+}
+
+// An entry that pins a command line is seed-only: the host plugin admits by
+// digest alone, so always_allow carries only what the seed admits under any
+// command and args.
+func TestChartAlwaysAllowSkipsPinnedEntries(t *testing.T) {
+	const pinned = "sha256:abcdef0000000000000000000000000000000000000000000000000000000001"
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.infer.containers[0]."
+	out, err := helmTemplate(t,
+		"--set-string", p+"digest="+pinned,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/bin/vllm",
+		"--set-string", p+"args.policy=any",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if _, ok := seed.Workloads["infer"]; !ok {
+		t.Fatalf("pinned entry missing from the seed: %v", seed.Workloads)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if _, ok := worker.Allowlist.AlwaysAllow[pinned]; ok {
+		t.Errorf("a pinned entry's digest reached always_allow, where it would be admitted under any argv: %v", worker.Allowlist.AlwaysAllow)
+	}
+}
+
+// The derived name lowercases the digest whatever case the values key used, so
+// the chart and pkg/allowlist DigestEntryName agree on it.
+func TestChartSeedEntryNameIsCaseInsensitive(t *testing.T) {
+	const d = "sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t, "--set-string", "cds.image.digest="+d)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if _, ok := seed.Workloads["cds-abcdef000000"]; !ok {
+		t.Fatalf("seed entry cds-abcdef000000 missing\nseed: %v", seed.Workloads)
+	}
+}
+
+// The chart derives entry names with the rule pkg/allowlist DigestEntryName
+// pins (TestDigestEntryName): the same inputs must yield the same names, tag
+// and digest stripping, the "image" fallback and the 50-byte truncation
+// included. Driven through the router nginx image, whose repository the
+// operator sets freely.
+func TestChartSeedEntryNamesMatchMigration(t *testing.T) {
+	const d = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	for _, tc := range []struct{ repository, want string }{
+		{"ghcr.io/x/coredns:v1", "coredns"},
+		{"registry:5000/team/app", "app"},
+		{"busybox", "busybox"},
+		{"ghcr.io/x/not a name!", "image"},
+		{"ghcr.io/x/" + strings.Repeat("y", 60), strings.Repeat("y", 50)},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			out, err := helmTemplate(t,
+				"--set-string", "router.nginx.image.repository="+tc.repository,
+				"--set-string", "router.nginx.image.digest="+d,
+			)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+			}
+			if _, ok := seed.Workloads[tc.want+"-abcdef000000"]; !ok {
+				t.Errorf("repository %q: entry %q missing\nseed: %v", tc.repository, tc.want+"-abcdef000000", seed.Workloads)
+			}
+		})
+	}
+}
+
+// A bootstrapAllowlist.workloads entry sharing a derived entry's name replaces
+// it whole in the seed, so an operator can narrow a component's policy without
+// the chart re-widening it; the component stays in always_allow regardless.
+func TestChartSeedWorkloadsOverrideDerivedEntry(t *testing.T) {
+	// The harness pins cds.image.digest to ...0001; its derived entry is
+	// cds-000000000000.
+	const d = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.cds-000000000000.containers[0]."
+	out, err := helmTemplate(t,
+		"--set-string", p+"digest="+d,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/cds",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	w, ok := seed.Workloads["cds-000000000000"]
+	if !ok || len(w.Containers) != 1 {
+		t.Fatalf("seed entry = %#v, want one container", w)
+	}
+	if c := w.Containers[0]; c.Command.Policy != pkgallowlist.PolicyExact || c.Digest.String() != d {
+		t.Errorf("operator entry did not win over the derived one: %#v", c)
+	}
+	if w.Label != "" {
+		t.Errorf("derived label leaked into the operator's entry: %q", w.Label)
+	}
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	if _, ok := worker.Allowlist.AlwaysAllow[d]; !ok {
+		t.Errorf("narrowing the seed entry dropped CDS from always_allow: %v", worker.Allowlist.AlwaysAllow)
 	}
 }
 
@@ -5918,8 +5438,8 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
 	}
 	for digest, ref := range want {
-		if got := seed.Digests[digest]; got != ref {
-			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Digests)
+		if got := seedLabel(seed, digest); got != ref {
+			t.Errorf("derived entry %s = %q, want %q\nseed: %v", digest, got, ref, seed.Workloads)
 		}
 	}
 
@@ -5933,21 +5453,21 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 	}
 }
 
-// The tls-lb nginx image is a chart-deployed non-c8s system image: it is not in
+// The router nginx image is a chart-deployed non-c8s system image: it is not in
 // the tag-locked c8sComponents derive set, so a default install would otherwise
-// leave it out of the allowlist and the NRI plugin would reject the tls-lb
+// leave it out of the allowlist and the NRI plugin would reject the router
 // nginx container. It must be self-seeded from its pinned digest whenever
-// tls-lb is enabled — independent of deriveComponents (off here) — and dropped
-// when tls-lb is disabled.
-func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
+// router is enabled — independent of deriveComponents (off here) — and dropped
+// when router is disabled.
+func TestChartAllowlistsRouterNginxSelfEntry(t *testing.T) {
 	const (
 		nxDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000b1"
 		nxRepo   = "example.test/nginx-unprivileged"
 	)
 	t.Run("enabled: self-entry present without deriveComponents", func(t *testing.T) {
 		out, err := helmTemplate(t,
-			"--set-string", "tlsLb.nginx.image.repository="+nxRepo,
-			"--set-string", "tlsLb.nginx.image.digest="+nxDigest,
+			"--set-string", "router.nginx.image.repository="+nxRepo,
+			"--set-string", "router.nginx.image.digest="+nxDigest,
 		)
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
@@ -5957,16 +5477,16 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got, want := seed.Digests[nxDigest], nxRepo+"@"+nxDigest; got != want {
-			t.Errorf("tls-lb nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Digests)
+		if got, want := seedLabel(seed, nxDigest), nxRepo+"@"+nxDigest; got != want {
+			t.Errorf("router nginx self-entry = %q, want %q\nseed: %v", got, want, seed.Workloads)
 		}
 	})
 
 	t.Run("disabled: no self-entry", func(t *testing.T) {
 		out, err := helmTemplate(t,
-			"--set", "tlsLb.enabled=false",
-			"--set-string", "tlsLb.nginx.image.repository="+nxRepo,
-			"--set-string", "tlsLb.nginx.image.digest="+nxDigest,
+			"--set", "router.enabled=false",
+			"--set-string", "router.nginx.image.repository="+nxRepo,
+			"--set-string", "router.nginx.image.digest="+nxDigest,
 		)
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
@@ -5976,8 +5496,8 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[nxDigest]; ok {
-			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, nxDigest); ok {
+			t.Errorf("router nginx self-entry present with router disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6004,8 +5524,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; !ok {
-			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Workloads)
 		}
 	})
 
@@ -6022,8 +5542,8 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[volD]; ok {
-			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		if _, ok := seedEntry(seed, volD); ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Workloads)
 		}
 	})
 }
@@ -6065,20 +5585,83 @@ func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
 	}
 }
 
-// TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
-// --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
-// the plugin) and kata is off, yet the baked plugin still pulls the live
-// allowlist from CDS. If the seed is not served, CDS starts empty and every
-// un-baked component (operator, ratls-mesh, tls-lb's nginx) is denied until an
-// operator hand-runs `c8s allowlist add`. Regression for that deadlock: the seed
-// ConfigMap must render, be mounted, and carry the deployed digests.
-func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
+// TestChartPinsCDSInBareMetalMode guards the node-as-CVM pin path. The node image
+// bakes the plugin with empty cds_measurements, and the chart is the only thing
+// that knows this release's pins — so an install that does not carry them into
+// the baked config leaves the component deciding which images may run on the
+// node willing to take its allowlist from ANY RA-TLS-attested CDS, and its
+// sandbox-digests endpoint willing to answer any of them. Regression for a
+// bare-metal run that found exactly that (2026-08-26).
+func TestChartPinsCDSInBareMetalMode(t *testing.T) {
+	const (
+		pinM = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+		pinR = "1=bbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"
+	)
+	const pinsImageDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=bare-metal",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.baked=true",
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+		"--set-string", "nriImagePolicy.image.digest="+pinsImageDigest,
+		"--set-string", "cds.measurements[0]="+pinM,
+		"--set-string", "cds.rtmrs[0]="+pinR,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	ds := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	for _, want := range []string{
+		"set-cds-pins",
+		"--cds-measurements \"" + pinM + "\"",
+		"--cds-rtmrs \"" + pinR + "\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("bare-metal-mode installer script missing %q\n%s", want, script)
+		}
+	}
+
+	// The baked config carries the image floor whose RKE2 system digests only
+	// the image build resolves, so the installer must patch it, never rewrite
+	// it — and must leave the binary and the containerd registration alone.
+	for _, forbidden := range []string{"IMAGE_POLICY_EOF", "install_file", "render_nri_toml"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("bare-metal-mode installer script must not run %q — it would replace what the node image measured\n%s", forbidden, script)
+		}
+	}
+	for _, c := range ds.Spec.Template.Spec.InitContainers {
+		if c.Name == "containerd-prep" {
+			t.Errorf("bare-metal-mode installer renders containerd-prep; the node image owns the containerd NRI registration")
+		}
+	}
+
+	// The installer image is a chart image, not a baked one, so the node admits
+	// it only through the seed CDS serves.
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("bare-metal-mode seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	if got := seedLabel(seed, pinsImageDigest); got != "ghcr.io/confidential-dot-ai/nri-image-policy@"+pinsImageDigest {
+		t.Errorf("seed[%s] = %q, want the pins installer image; the baked plugin would deny it", pinsImageDigest, got)
+	}
+}
+
+// TestChartServesAllowlistSeedInBareMetalMode guards the node-as-CVM seed path: even
+// with chart nriImagePolicy disabled, the baked plugin pulls the live allowlist
+// from CDS. If the seed is not served, CDS starts empty and every un-baked
+// component (operator, ratls-mesh, router's nginx) is denied until an operator
+// hand-runs `c8s allowlist add`. The seed ConfigMap must render, be mounted,
+// and carry the deployed digests.
+func TestChartServesAllowlistSeedInBareMetalMode(t *testing.T) {
 	const (
 		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
 		rmD = "sha256:00000000000000000000000000000000000000000000000000000000000000c2"
 	)
 	out, err := helmTemplate(t,
-		"--set-string", "attestationApi.cvmMode=node",
+		"--set-string", "attestationApi.cvmMode=bare-metal",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
@@ -6092,24 +5675,24 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
 	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
 	if err != nil {
-		t.Fatalf("node-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
+		t.Fatalf("bare-metal-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
 	}
 	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
-	// and tls-lb's nginx (default digest from values.yaml).
-	if got := seed.Digests[opD]; got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
-		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Digests)
+	// and router's nginx (default digest from values.yaml).
+	if got := seedLabel(seed, opD); got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
+		t.Errorf("bare-metal-mode seed missing operator entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
-		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
+	if got := seedLabel(seed, rmD); got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
+		t.Errorf("bare-metal-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Workloads)
 	}
-	const nginxD = "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
-	if _, ok := seed.Digests[nginxD]; !ok {
-		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
+	const nginxD = "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+	if _, ok := seedEntry(seed, nginxD); !ok {
+		t.Errorf("bare-metal-mode seed missing router nginx self-entry\nseed: %v", seed.Workloads)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
-		t.Errorf("node-mode CDS missing --allowlist-seed flag; seed rendered but not loaded\nargs: %v", cds.Args)
+		t.Errorf("bare-metal-mode CDS missing --allowlist-seed flag; seed rendered but not loaded\nargs: %v", cds.Args)
 	}
 }
 
@@ -6140,8 +5723,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if got := seed.Digests[prepDigest]; got != wantRef {
-			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Digests)
+		if got := seedLabel(seed, prepDigest); got != wantRef {
+			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Workloads)
 		}
 
 		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
@@ -6164,8 +5747,8 @@ func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed JSON does not parse: %v", err)
 		}
-		if _, ok := seed.Digests[prepDigest]; ok {
-			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Digests)
+		if _, ok := seedEntry(seed, prepDigest); ok {
+			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Workloads)
 		}
 	})
 }
@@ -6285,30 +5868,6 @@ func TestChartBootConfigRendersExemptNamespaces(t *testing.T) {
 	}
 }
 
-// A fleet-supplied bootstrapAllowlist.digests entry must override a derived
-// entry for the same sha256 (fleet values win).
-func TestChartFleetAllowlistOverridesDerived(t *testing.T) {
-	const cdsD = "sha256:00000000000000000000000000000000000000000000000000000000000000a3"
-	out, err := helmTemplate(t,
-		// deriveComponents on so cds.image.digest produces a derived entry for
-		// the fleet `digests` value to override.
-		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
-		"--set-string", "cds.image.digest="+cdsD,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+cdsD+"=mirror.local/cds@"+cdsD,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-	if err != nil {
-		t.Fatalf("seed JSON does not parse: %v", err)
-	}
-	if got := seed.Digests[cdsD]; got != "mirror.local/cds@"+cdsD {
-		t.Errorf("fleet override lost: %s = %q, want mirror.local/cds@%s\nseed: %v", cdsD, got, cdsD, seed.Digests)
-	}
-}
-
 // deriveComponents is OFF by default (a demo convenience, like
 // --resolve-digests): the seed carries only the CDS floor self-entry and
 // operator-supplied digests, not the auto-derived component images. Covers both
@@ -6335,12 +5894,12 @@ func TestChartDeriveComponentsDefaultsOff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seed JSON does not parse: %v", err)
 			}
-			if _, ok := seed.Digests[opD]; ok {
-				t.Errorf("operator digest derived without deriveComponents: %v", seed.Digests)
+			if _, ok := seedEntry(seed, opD); ok {
+				t.Errorf("operator digest derived without deriveComponents: %v", seed.Workloads)
 			}
 			// The CDS floor self-entry is always present, independent of derivation.
-			if _, ok := seed.Digests[cdsDigest]; !ok {
-				t.Errorf("CDS floor self-entry missing: %v", seed.Digests)
+			if _, ok := seedEntry(seed, cdsDigest); !ok {
+				t.Errorf("CDS floor self-entry missing: %v", seed.Workloads)
 			}
 		})
 	}
@@ -6379,35 +5938,6 @@ func TestChartWiresCDSAllowlistSeedFlagAndVolume(t *testing.T) {
 	}
 }
 
-// Under kata the host NRI plugin is off, but admission is the in-guest
-// policy-monitor fed from CDS's served allowlist, so the seed must still render.
-// Otherwise adopted --workload-ref digests (in bootstrapAllowlist.digests) never
-// reach CDS and the in-guest monitor denies those images.
-func TestChartRendersCDSSeedUnderKata(t *testing.T) {
-	const (
-		wlDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
-		wlRepo   = "example.test/vllm-router"
-	)
-	out, err := helmTemplateKata(t,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+wlDigest+"="+wlRepo+"@"+wlDigest,
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
-	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
-	if err != nil {
-		t.Fatalf("seed JSON does not parse: %v\n%s", err, cm.Data["allowlist-seed.json"])
-	}
-	if got, want := seed.Digests[wlDigest], wlRepo+"@"+wlDigest; got != want {
-		t.Errorf("adopted workload digest not in kata seed = %q, want %q\nseed: %v", got, want, seed.Digests)
-	}
-	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
-	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
-		t.Errorf("cds missing --allowlist-seed flag under kata\nargs: %v", cds.Args)
-	}
-}
-
 // The CDS image must be admittable by digest in the floor/seed; without
 // cds.image.digest the image policy would deny CDS on its own node. The chart
 // fails the render with a structured marker rather than shipping that deadlock.
@@ -6421,15 +5951,16 @@ func TestChartRejectsImagePolicyWithoutCDSDigest(t *testing.T) {
 	}
 }
 
-// In fail-closed mode with deriveComponents off, a digest-pinned component
-// whose digest is absent from bootstrapAllowlist.digests would be denied on its
-// own node, so the chart fails the render. cds.image is exempt (always seeded).
+// In fail-closed mode with deriveComponents off, a digest-pinned component no
+// bootstrapAllowlist.workloads entry admits under any argv would be denied on
+// its own node, so the chart fails the render. cds.image is exempt (always
+// seeded).
 func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
-	// A digest distinct from the harness floor (baseNRIDigest), so it is
+	// A digest distinct from the harness entry (baseNRIDigest), so it is
 	// genuinely uncovered unless a case below covers it.
 	const nriD = "sha256:bbbb000000000000000000000000000000000000000000000000000000000000"
 
-	// Uncovered: nriImagePolicy.image is digest-pinned but not in digests,
+	// Uncovered: nriImagePolicy.image is digest-pinned but no entry admits it,
 	// deriveComponents off, fail-closed -> guard fires.
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.policy.mode=fail-closed",
@@ -6449,7 +5980,7 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 	}{
 		{"audit mode is non-blocking", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=audit"}},
 		{"deriveComponents covers it", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true"}},
-		{"digest listed in floor", []string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed", "--set-string", "nriImagePolicy.bootstrapAllowlist.digests." + nriD + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD}},
+		{"any-argv entry admits it", append([]string{"--set-string", "nriImagePolicy.image.digest=" + nriD, "--set", "nriImagePolicy.policy.mode=fail-closed"}, anyArgvEntryArgs("nri", nriD, "ghcr.io/confidential-dot-ai/nri-image-policy@"+nriD)...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if out, err := helmTemplate(t, tc.args...); err != nil {
@@ -6457,11 +5988,28 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 			}
 		})
 	}
+
+	// An entry that pins the plugin's command line is seed-only, so it does not
+	// cover the plugin on its own node and the guard still fires.
+	p := "nriImagePolicy.bootstrapAllowlist.workloads.nri.containers[0]."
+	out, err = helmTemplate(t,
+		"--set-string", "nriImagePolicy.image.digest="+nriD,
+		"--set", "nriImagePolicy.policy.mode=fail-closed",
+		"--set-string", p+"digest="+nriD,
+		"--set-string", p+"command.policy=exact",
+		"--set-string", p+"command.argv[0]=/c8s",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with the component covered only by a pinned entry\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "uncovered_component_digest" {
+		t.Fatalf("validation error kind = %q, want uncovered_component_digest\n%s", kind, out)
+	}
 }
 
 // golden stays gofmt-clean. Render errors are returned verbatim so the example
 // fails loudly rather than masking a broken template.
-func renderExampleTLSLBNginxConf() string {
+func renderExampleRouterNginxConf() string {
 	cmd := exec.Command("helm",
 		"template", "c8s", "c8s",
 		"--kube-version", "1.30.0",
@@ -6470,31 +6018,35 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
-		// nri-image-policy is mandatory on a non-kata render
+		// nri-image-policy is enabled in this render
 		// (require_host_image_policy); pin its digest + floor. The render is
-		// scoped to the tls-lb ConfigMap, so nri manifests do not appear.
+		// scoped to the router ConfigMap, so nri manifests do not appear.
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest="+baseNRIDigest,
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+baseNRIDigest+"=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".label=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].digest="+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].image=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].command.policy=any",
+		"--set-string", "nriImagePolicy.bootstrapAllowlist.workloads.nri-image-policy-"+baseNRIDigest[7:19]+".containers[0].args.policy=any",
 		// discovery defaults to enabled; scope this example to route rendering
 		// (discovery's own locations are covered by a dedicated test above).
-		"--set", "tlsLb.discovery.enabled=false",
-		"--set", "tlsLb.attest.enabled=false",
-		"--set-string", "tlsLb.upstream.address=vllm:8000",
-		"--set", "tlsLb.upstream.protocol=https",
-		"--set", "tlsLb.upstream.tls.verify=true",
-		"--set", "tlsLb.nginx.image.tag=dev",
-		"--set-string", "tlsLb.routes[0].path=/allowlist",
-		"--set-string", "tlsLb.routes[0].match=exact",
-		"--set-string", "tlsLb.routes[0].backend.address=c8s-cds.c8s-system.svc:8443",
-		"--set-string", "tlsLb.routes[0].backend.protocol=https",
-		"--set", "tlsLb.routes[0].backend.tls.verify=true",
-		"--set-string", "tlsLb.routes[1].path=/tenant/",
-		"--set-string", "tlsLb.routes[1].backend.address=tenant-router.c8s-system.svc:8080",
-		"--set-string", "tlsLb.routes[1].backend.protocol=https",
-		"--set", "tlsLb.routes[1].backend.tls.verify=true",
-		"--show-only", "templates/tls-lb-configmap.yaml",
+		"--set", "router.discovery.enabled=false",
+		"--set", "router.attest.enabled=false",
+		"--set-string", "router.upstream.address=vllm:8000",
+		"--set", "router.upstream.protocol=https",
+		"--set", "router.upstream.tls.verify=true",
+		"--set", "router.nginx.image.tag=dev",
+		"--set-string", "router.routes[0].path=/allowlist",
+		"--set-string", "router.routes[0].match=exact",
+		"--set-string", "router.routes[0].backend.address=c8s-cds.c8s-system.svc:8443",
+		"--set-string", "router.routes[0].backend.protocol=https",
+		"--set", "router.routes[0].backend.tls.verify=true",
+		"--set-string", "router.routes[1].path=/tenant/",
+		"--set-string", "router.routes[1].backend.address=tenant-router.c8s-system.svc:8080",
+		"--set-string", "router.routes[1].backend.protocol=https",
+		"--set", "router.routes[1].backend.tls.verify=true",
+		"--show-only", "templates/router-configmap.yaml",
 	)
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
@@ -6503,7 +6055,7 @@ func renderExampleTLSLBNginxConf() string {
 	}
 	var cm corev1.ConfigMap
 	if err := sigsyaml.Unmarshal(out, &cm); err != nil {
-		return fmt.Sprintf("decode tls-lb ConfigMap: %v\n%s", err, out)
+		return fmt.Sprintf("decode router ConfigMap: %v\n%s", err, out)
 	}
 	lines := strings.Split(cm.Data["nginx.conf"], "\n")
 	for i, line := range lines {
@@ -6573,7 +6125,7 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 		}
 		return false
 	})
-	// The default render ships at least operator, cds, and tls-lb Deployments
+	// The default render ships at least operator, cds, and router Deployments
 	// plus the attestation-api, ratls-mesh, and nri-image-policy DaemonSets;
 	// fewer means the decode regressed and the loop below passes vacuously.
 	if len(workloads) < 6 {
@@ -6598,7 +6150,7 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "imagePullSecret=ghcr-secret",
-		"--set", "tlsLb.imagePullSecrets[0].name=extra")
+		"--set", "router.imagePullSecrets[0].name=extra")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -6610,7 +6162,7 @@ func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 				Template corev1.PodTemplateSpec `json:"template"`
 			} `json:"spec"`
 		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil || obj.Kind != "Deployment" || obj.Metadata.Name != "c8s-tls-lb" {
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil || obj.Kind != "Deployment" || obj.Metadata.Name != "c8s-router" {
 			return false
 		}
 		names = pullSecretNames(obj.Spec.Template.Spec.ImagePullSecrets)
@@ -6618,7 +6170,7 @@ func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 	})
 	for _, want := range []string{"extra", "ghcr-secret"} {
 		if !slices.Contains(names, want) {
-			t.Errorf("tls-lb imagePullSecrets = %v, missing %q", names, want)
+			t.Errorf("router imagePullSecrets = %v, missing %q", names, want)
 		}
 	}
 }
@@ -6662,169 +6214,36 @@ func TestChartDefaultRendersNoPullSecretRefs(t *testing.T) {
 	})
 }
 
-// pullerDockercfgSecret returns the Secret name the kata-image-puller's
-// dockercfg projected volume references, or "" when the volume is absent
-// (anonymous oras pull). Fails the test if the puller DaemonSet is missing.
-func pullerDockercfgSecret(t *testing.T, helmOut string) string {
+// routerUpstreamAddress returns the catch-all upstream address from the
+// rendered router nginx config: the `upstream catch_all` block's server for a
+// static dial, or the `set $backend_addr <addr>;` directive for the
+// mesh-wrapped shape that is re-resolved per request.
+func routerUpstreamAddress(t *testing.T, manifest string) string {
 	t.Helper()
-	name := ""
-	found := false
-	iterateManifests(t, helmOut, func(doc []byte) bool {
-		var ds appsv1.DaemonSet
-		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
-			return false
+	cfg := renderedRouterNginxConfig(t, manifest)
+	if block, ok := cfg.upstreams["catch_all"]; ok {
+		servers := block.directives["server"]
+		if len(servers) != 1 || len(servers[0]) != 1 {
+			t.Fatalf("upstream catch_all must carry exactly one server; got %v", servers)
 		}
-		found = true
-		for _, v := range ds.Spec.Template.Spec.Volumes {
-			if v.Name != "dockercfg" || v.Projected == nil {
-				continue
-			}
-			for _, s := range v.Projected.Sources {
-				if s.Secret != nil {
-					name = s.Secret.Name
-				}
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
+		return servers[0][0]
 	}
-	return name
-}
-
-// The puller's in-pod `oras pull` ignores kubelet imagePullSecrets, so the
-// install-time pull secret must also feed its dockercfg mount — otherwise
-// `c8s install --image-pull-secret` would cover every kubelet pull but leave
-// the kata-guest-base fetch anonymous (401 against a private registry).
-func TestChartImagePullSecretFeedsKataImagePuller(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set-string", "imagePullSecret=ghcr-secret")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "ghcr-secret" {
-		t.Errorf("puller dockercfg secret = %q, want ghcr-secret", got)
-	}
-}
-
-// An explicit pullerAuthSecret wins over the imagePullSecret default — the
-// guest-base artifact may need a different credential than the c8s images.
-func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
-	out, err := helmTemplateKata(t,
-		"--set-string", "imagePullSecret=ghcr-secret",
-		"--set-string", "kata.guestImage.pullerAuthSecret=other-creds")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "other-creds" {
-		t.Errorf("puller dockercfg secret = %q, want other-creds", got)
-	}
-}
-
-// pullerEnv returns the value of the named env var on the kata-image-puller's
-// container. Fails the test if the puller DaemonSet is missing.
-func pullerEnv(t *testing.T, helmOut, name string) string {
-	t.Helper()
-	val := ""
-	found := false
-	iterateManifests(t, helmOut, func(doc []byte) bool {
-		var ds appsv1.DaemonSet
-		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
-			return false
-		}
-		found = true
-		for _, c := range ds.Spec.Template.Spec.Containers {
-			for _, e := range c.Env {
-				if e.Name == name {
-					val = e.Value
-				}
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
-	}
-	return val
-}
-
-// kata.guestImage.debug must repoint the puller at the `<tag>-debug` artifact
-// — the variant whose guest policy allows host log/exec streams (published in
-// lockstep by the kata-guest-base workflow; `c8s install --cvm-mode=pod --debug` sets
-// the value). Default off: a plain kata install pulls the locked image.
-func TestChartKataGuestImageDebugSelectsDebugTag(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerEnv(t, out, "TAG"); got != "main" {
-		t.Errorf("default puller TAG = %q, want main (locked image)", got)
-	}
-
-	out, err = helmTemplateKata(t, "--set", "kata.guestImage.debug=true")
-	if err != nil {
-		t.Fatalf("helm template (debug): %v\n%s", err, out)
-	}
-	if got := pullerEnv(t, out, "TAG"); got != "main-debug" {
-		t.Errorf("debug puller TAG = %q, want main-debug", got)
-	}
-}
-
-// kata.guestImage.debug must vary the GPU guest tag in lockstep with the
-// non-GPU one: CI publishes `<tag>-nvidia` and `<tag>-nvidia-debug` together
-// (kata-guest-base.yml build job, build.sh Step 6) — see
-// c8s.kataGuestImageNvidiaTag.
-func TestChartKataGuestImageDebugDerivesNvidiaDebugTag(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "kata.guestImage.debug=true")
-	if err != nil {
-		t.Fatalf("helm template (debug): %v\n%s", err, out)
-	}
-	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
-	pc, ok := findContainer(puller.Spec.Template.Spec.Containers, "reconcile")
-	if !ok {
-		t.Fatalf("GPU puller missing reconcile container")
-	}
-	if got := envValue(pc.Env, "TAG"); got != "main-nvidia-debug" {
-		t.Errorf("GPU puller TAG under debug = %q, want main-nvidia-debug (published in lockstep with main-nvidia)", got)
-	}
-	if got := envValue(pc.Env, "KATA_DEBUG"); got != "true" {
-		t.Errorf("GPU puller KATA_DEBUG under debug = %q, want true", got)
-	}
-}
-
-// With neither value set the pull stays anonymous: no dockercfg volume at all
-// (the default shape — the published artifacts are public).
-func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if got := pullerDockercfgSecret(t, out); got != "" {
-		t.Errorf("puller dockercfg secret = %q, want none (anonymous pull)", got)
-	}
-}
-
-// tlsLbUpstreamAddress returns the address from the catch-all location's
-// `set $backend_addr <addr>;` directive in the rendered tls-lb nginx config.
-func tlsLbUpstreamAddress(t *testing.T, manifest string) string {
-	t.Helper()
-	sets := renderedTLSLBNginxConfig(t, manifest).location(t, "prefix", "/").directives["set"]
+	sets := cfg.location(t, "prefix", "/").directives["set"]
 	for _, args := range sets {
 		if len(args) == 2 && args[0] == "$backend_addr" {
 			return args[1]
 		}
 	}
-	t.Fatalf("location / has no `set $backend_addr <addr>;` directive; got %v", sets)
+	t.Fatalf("catch-all has neither an `upstream catch_all` block nor a `set $backend_addr <addr>;` directive; got %v", sets)
 	return ""
 }
 
-// TestChartTLSLBUpstreamChoice: there is no default upstream. An unset upstream
-// is a legal install-then-attach state (tls-lb serves with no catch-all); when
+// TestChartRouterUpstreamChoice: there is no default upstream. An unset upstream
+// is a legal install-then-attach state (router serves with no catch-all); when
 // an upstream IS set that is not a c8s-<id> headless Service it must be https
 // with tls.verify=true (app-TLS) — a plaintext http address or unverified https
 // fails instead of shipping a silently-plaintext hop.
-func TestChartTLSLBUpstreamChoice(t *testing.T) {
+func TestChartRouterUpstreamChoice(t *testing.T) {
 	// No upstream renders a healthy front door with NO catch-all: the operator
 	// attaches a workload later via --upstream. The cert, discovery, and
 	// /healthz still render; only location / is withheld.
@@ -6833,7 +6252,7 @@ func TestChartTLSLBUpstreamChoice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		cfg := renderedTLSLBNginxConfig(t, out)
+		cfg := renderedRouterNginxConfig(t, out)
 		if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/"}]; ok {
 			t.Fatalf("no upstream should render no catch-all location /, but one is present\n%s", out)
 		}
@@ -6846,38 +6265,38 @@ func TestChartTLSLBUpstreamChoice(t *testing.T) {
 	// shape the guard admits, and the address passes through verbatim.
 	t.Run("verified-https-upstream-passes-verbatim", func(t *testing.T) {
 		out, err := helmTemplate(t, noUpstreamArgs(
-			"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
-			"--set", "tlsLb.upstream.protocol=https")...)
+			"--set-string", "router.upstream.address=my-backend.other-ns.svc:8443",
+			"--set", "router.upstream.protocol=https")...)
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
-		if got, want := tlsLbUpstreamAddress(t, out), "my-backend.other-ns.svc:8443"; got != want {
+		if got, want := routerUpstreamAddress(t, out), "my-backend.other-ns.svc:8443"; got != want {
 			t.Fatalf("upstream = %q, want %q", got, want)
 		}
 	})
 
-	// A disabled tls-lb needs no upstream, and a leftover upstream (e.g. a
-	// migration that flips tlsLb.enabled=false without clearing the value)
+	// A disabled router needs no upstream, and a leftover upstream (e.g. a
+	// migration that flips router.enabled=false without clearing the value)
 	// must not trip the secured-backend check: the unmeshed-hop risk cannot
-	// occur when tls-lb renders nothing.
+	// occur when router renders nothing.
 	for _, tc := range []struct {
 		name string
 		args []string
 	}{
-		{"tlslb-disabled-needs-no-upstream", noUpstreamArgs("--set", "tlsLb.enabled=false")},
-		{"tlslb-disabled-ignores-leftover-upstream", noUpstreamArgs(
-			"--set", "tlsLb.enabled=false",
-			"--set-string", "tlsLb.upstream.address=my-router.ns.svc:9000")},
+		{"router-disabled-needs-no-upstream", noUpstreamArgs("--set", "router.enabled=false")},
+		{"router-disabled-ignores-leftover-upstream", noUpstreamArgs(
+			"--set", "router.enabled=false",
+			"--set-string", "router.upstream.address=my-router.ns.svc:9000")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			// The render must not just succeed: a disabled tls-lb must emit no
+			// The render must not just succeed: a disabled router must emit no
 			// Deployment, so no upstream (leftover or otherwise) can ship.
-			if renderedManifestHasNamedKind(t, out, "Deployment", "c8s-tls-lb") {
-				t.Fatalf("tlsLb.enabled=false still rendered a c8s-tls-lb Deployment\n%s", out)
+			if renderedManifestHasNamedKind(t, out, "Deployment", "c8s-router") {
+				t.Fatalf("router.enabled=false still rendered a c8s-router Deployment\n%s", out)
 			}
 		})
 	}
@@ -6894,8 +6313,8 @@ func TestChartUpstreamValidation(t *testing.T) {
 			// (plaintext http, the mesh secures it), so https can only fail at runtime.
 			name: "mesh-wrapped-https",
 			args: []string{
-				"--set-string", "tlsLb.upstream.address=c8s-infer.c8s-system.svc.cluster.local:8000",
-				"--set", "tlsLb.upstream.protocol=https",
+				"--set-string", "router.upstream.address=c8s-infer.c8s-system.svc.cluster.local:8000",
+				"--set", "router.upstream.protocol=https",
 			},
 			kind: "workload_https_upstream",
 		},
@@ -6903,18 +6322,18 @@ func TestChartUpstreamValidation(t *testing.T) {
 			// A plaintext http manual upstream cannot render: there is no
 			// acknowledgment, only https + verify is admitted.
 			name: "http-upstream",
-			args: noUpstreamArgs("--set-string", "tlsLb.upstream.address=my-router.ns.svc:9000"),
-			kind: "tlslb_unsecured_upstream",
+			args: noUpstreamArgs("--set-string", "router.upstream.address=my-router.ns.svc:9000"),
+			kind: "router_unsecured_upstream",
 		},
 		{
 			// https alone does not secure the hop: verify=false is an
 			// encrypted-but-unauthenticated backend, rejected like http.
 			name: "unverified-https-upstream",
 			args: noUpstreamArgs(
-				"--set-string", "tlsLb.upstream.address=my-router.ns.svc:8443",
-				"--set", "tlsLb.upstream.protocol=https",
-				"--set", "tlsLb.upstream.tls.verify=false"),
-			kind: "tlslb_unsecured_upstream",
+				"--set-string", "router.upstream.address=my-router.ns.svc:8443",
+				"--set", "router.upstream.protocol=https",
+				"--set", "router.upstream.tls.verify=false"),
+			kind: "router_unsecured_upstream",
 		},
 		{
 			// A near-miss of the c8s-<id>.<ns>.svc.cluster.local shape (here the
@@ -6922,8 +6341,8 @@ func TestChartUpstreamValidation(t *testing.T) {
 			// http fails closed: only the exact headless-Service FQDN gets the
 			// plaintext pass. Guards the shape regex against being too loose.
 			name: "c8s-shape-short-svc-not-meshwrapped",
-			args: noUpstreamArgs("--set-string", "tlsLb.upstream.address=c8s-infer.vllm.svc:8000"),
-			kind: "tlslb_unsecured_upstream",
+			args: noUpstreamArgs("--set-string", "router.upstream.address=c8s-infer.vllm.svc:8000"),
+			kind: "router_unsecured_upstream",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -6938,27 +6357,27 @@ func TestChartUpstreamValidation(t *testing.T) {
 	}
 }
 
-// TestChartTLSLBUpstreamDefaultEmpty guards the no-default-upstream invariant:
+// TestChartRouterUpstreamDefaultEmpty guards the no-default-upstream invariant:
 // a shipped default would silently render a catch-all and could put the
 // inference hop back on an unmeshed Service VIP. Empty keeps the front door
 // catch-all-free until an upstream is deliberately wired.
-func TestChartTLSLBUpstreamDefaultEmpty(t *testing.T) {
+func TestChartRouterUpstreamDefaultEmpty(t *testing.T) {
 	data, err := os.ReadFile("c8s/values.yaml")
 	if err != nil {
 		t.Fatalf("read values.yaml: %v", err)
 	}
 	var values struct {
-		TLSLB struct {
+		Router struct {
 			Upstream struct {
 				Address string `yaml:"address"`
 			} `yaml:"upstream"`
-		} `yaml:"tlsLb"`
+		} `yaml:"router"`
 	}
 	if err := yaml.Unmarshal(data, &values); err != nil {
 		t.Fatalf("unmarshal values.yaml: %v", err)
 	}
-	if values.TLSLB.Upstream.Address != "" {
-		t.Fatalf("tlsLb.upstream.address default = %q, want empty: a shipped default silently renders a catch-all and can leave the hop unmeshed", values.TLSLB.Upstream.Address)
+	if values.Router.Upstream.Address != "" {
+		t.Fatalf("router.upstream.address default = %q, want empty: a shipped default silently renders a catch-all and can leave the hop unmeshed", values.Router.Upstream.Address)
 	}
 }
 
@@ -7155,11 +6574,13 @@ func TestChartVolumedDaemonSetShape(t *testing.T) {
 	}
 }
 
-// The daemon's socket has to land in the inventory's socket directory: the
-// deny-host-namespaces VAP carves out that exact path by string equality, and
-// it is the directory the webhook mounts into cw pods. A daemon serving
-// anywhere else is a daemon no confidential pod can reach.
-func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
+// The daemon's socket has to land in the inventory's socket directory — the
+// one nri-image-policy NRI-mounts into cw-pod sidecars, which the operator
+// names via --workload-claims-host-dir. A daemon serving anywhere else is a
+// daemon no confidential pod can reach. And a moved directory must not
+// resurface in the VAP: the pod spec carries no hostPath anymore, so a
+// carve-out would only reopen tenant access to the node filesystem.
+func TestChartVolumedSocketDirTracksTheInventoryDir(t *testing.T) {
 	const runtimeDir = "/var/run/c8s-inventory-elsewhere"
 	out, err := helmTemplate(t,
 		"--set", "volumed.enabled=true",
@@ -7176,19 +6597,100 @@ func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
 	if got := argAfter(c.Args, "--socket-dir"); got != runtimeDir {
 		t.Errorf("--socket-dir = %q, want the inventory socket dir %q", got, runtimeDir)
 	}
+	operator := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
+	if !slices.Contains(operator.Args, "--workload-claims-host-dir="+runtimeDir) {
+		t.Errorf("operator args %v missing --workload-claims-host-dir=%s", operator.Args, runtimeDir)
+	}
 
 	var vap admissionregv1.ValidatingAdmissionPolicy
 	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
 		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
 	}
-	var carved bool
 	for _, v := range vap.Spec.Validations {
 		if strings.Contains(v.Expression, strconv.Quote(runtimeDir)) {
-			carved = true
+			t.Errorf("the VAP names the socket dir %s; hostPath must be denied without carve-outs, expression=%q", runtimeDir, v.Expression)
 		}
 	}
-	if !carved {
-		t.Errorf("the VAP does not carve out %s, so the socket dir the daemon serves in is denied to cw pods", runtimeDir)
+}
+
+// volumed resolves pod volume directories beneath the kubelet root, so the
+// rendered arg, mount, and hostPath must agree, and an explicit value must win.
+func TestChartVolumedKubeletRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "/var/lib/kubelet"},
+		{"rke2 distro keeps the default", []string{"--set-string", "nriImagePolicy.distro=rke2"}, "/var/lib/kubelet"},
+		{"explicit wins", []string{
+			"--set-string", "volumed.hostPaths.kubeletRoot=/custom/kubelet",
+		}, "/custom/kubelet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--set", "volumed.enabled=true"}, tc.args...)
+			out, err := helmTemplate(t, args...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			spec := renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec
+			c, ok := findContainer(spec.Containers, "volumed")
+			if !ok {
+				t.Fatal("volumed container missing")
+			}
+			if got := argAfter(c.Args, "--kubelet-root"); got != tc.want {
+				t.Errorf("--kubelet-root = %q, want %q", got, tc.want)
+			}
+			mount, ok := containerVolumeMount(c, "kubelet-root")
+			if !ok {
+				t.Fatal("no kubelet-root mount")
+			}
+			if mount.MountPath != tc.want {
+				t.Errorf("kubelet-root mountPath = %q, want %q", mount.MountPath, tc.want)
+			}
+			v, ok := podVolume(spec, "kubelet-root")
+			if !ok || v.HostPath == nil {
+				t.Fatal("no kubelet-root hostPath volume")
+			}
+			if v.HostPath.Path != tc.want {
+				t.Errorf("kubelet-root hostPath = %q, want %q", v.HostPath.Path, tc.want)
+			}
+			// The teardown hook unmounts under the same root; a divergent
+			// path would sweep the wrong tree.
+			hook := renderedDaemonSet(t, out, "c8s-volumed-teardown").Spec.Template.Spec
+			hc, ok := findContainer(hook.InitContainers, "teardown")
+			if !ok {
+				t.Fatal("teardown init container missing")
+			}
+			hm, ok := containerVolumeMount(hc, "kubelet-root")
+			if !ok {
+				t.Fatal("no kubelet-root mount in the teardown hook")
+			}
+			if hm.MountPath != tc.want {
+				t.Errorf("hook kubelet-root mountPath = %q, want %q", hm.MountPath, tc.want)
+			}
+			hv, ok := podVolume(hook, "kubelet-root")
+			if !ok || hv.HostPath == nil {
+				t.Fatal("no kubelet-root hostPath volume in the teardown hook")
+			}
+			if hv.HostPath.Path != tc.want {
+				t.Errorf("hook kubelet-root hostPath = %q, want %q", hv.HostPath.Path, tc.want)
+			}
+		})
+	}
+}
+
+// An empty kubeletRoot would render an empty hostPath the apiserver rejects
+// long after helm reports success; the chart refuses to render it instead.
+func TestChartVolumedKubeletRootMustNotBeEmpty(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.hostPaths.kubeletRoot=")
+	if err == nil {
+		t.Fatal("rendered with an empty volumed.hostPaths.kubeletRoot")
+	}
+	if !strings.Contains(out, "volumed.hostPaths.kubeletRoot is required") {
+		t.Errorf("render error does not name the value: %s", out)
 	}
 }
 
@@ -7233,129 +6735,6 @@ func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
 	}
 }
 
-// The one install shape granting the operator node RBAC. Asserted exactly
-// here: TestChartOperatorRBACIsScoped's ban never renders this branch.
-func TestChartOperatorNodeRBACOnlyUnderKataGuestReadyGate(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	var role rbacv1.ClusterRole
-	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
-		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
-	}
-	got := operatorVerbsFor(role, "", "nodes")
-	want := []string{"get", "list", "watch", "patch"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("operator nodes verbs under kata = %v, want %v", got, want)
-	}
-
-	// No puller, no controller: the grant and the gate must both go with it.
-	out, err = helmTemplateKata(t, "--set", "kata.guestImage.enabled=false")
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
-		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
-	}
-	if got := operatorVerbsFor(role, "", "nodes"); got != nil {
-		t.Fatalf("operator keeps nodes verbs %v with the puller disabled", got)
-	}
-	if strings.Contains(out, "kata-guest-ready-gate=true") {
-		t.Fatal("operator still told to enforce the guest-ready gate with no puller to set the label")
-	}
-}
-
-// Pods pinning a kata RuntimeClass bypass the injecting webhook.
-func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
-	out, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	seen := map[string]bool{}
-	iterateManifests(t, out, func(doc []byte) bool {
-		var obj struct {
-			docMeta
-			Spec struct {
-				Template corev1.PodTemplateSpec `json:"template"`
-			} `json:"spec"`
-		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
-			return false
-		}
-		spec := obj.Spec.Template.Spec
-		if spec.RuntimeClassName == nil || !strings.HasPrefix(*spec.RuntimeClassName, "kata-") {
-			return false
-		}
-		if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil ||
-			spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-			t.Errorf("%s %s pins %s but has no required node affinity", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
-			return false
-		}
-		for _, term := range spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
-			for _, e := range term.MatchExpressions {
-				if e.Key == webhook.GuestReadyNodeLabel {
-					seen[obj.Metadata.Name] = true
-				}
-			}
-		}
-		if !seen[obj.Metadata.Name] {
-			t.Errorf("%s %s pins %s without the guest-ready gate", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
-		}
-		return false
-	})
-	for _, name := range []string{"c8s-cds", "c8s-tls-lb"} {
-		if !seen[name] {
-			t.Errorf("%s missing the guest-ready node affinity", name)
-		}
-	}
-}
-
-// The host volumed DaemonSet is replaced under kata by `volumed --guest` inside
-// the guest, which is where the fetcher posts. Leaving the host one enabled
-// deploys a privileged DaemonSet nothing calls, so the chart refuses it for the
-// same reason as the other host-side components.
-func TestChartKataRejectsHostVolumed(t *testing.T) {
-	out, err := helmTemplateKata(t, "--set", "volumed.enabled=true")
-	if err == nil {
-		t.Fatalf("helm template succeeded with kata and host volumed enabled, want failure\n%s", out)
-	}
-	msg := helmFailMessage(t, out)
-	if !strings.Contains(msg, "kind=enforce_host_components") {
-		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
-	}
-	if !strings.Contains(msg, "volumed.enabled") {
-		t.Errorf("fail message %q should name volumed.enabled", msg)
-	}
-}
-
-// The host qemu wrapper needs one source of truth: the puller ConfigMap ships a
-// copy, and kata-guest-base scripts/ holds the canonical file because it lives
-// alongside the guest tooling it is coupled to. A silent drift would be a
-// launch-behaviour drift the launch measurement can't catch (the wrapper runs
-// on the host outside every attested boundary).
-func TestKataQemuWrapperCopiesMatch(t *testing.T) {
-	// Both paths are repo-relative; the chart test package sits under
-	// internal/helmchart, so climb two levels to reach the repo root.
-	const (
-		chart  = "c8s/files/scripts/kata-qemu-scratch-wrapper.sh"
-		source = "../../kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh"
-	)
-	chartBytes, err := os.ReadFile(chart)
-	if err != nil {
-		t.Fatalf("read %s: %v", chart, err)
-	}
-	sourceBytes, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatalf("read %s: %v", source, err)
-	}
-	if !slices.Equal(chartBytes, sourceBytes) {
-		t.Fatalf("wrapper drift: %s and %s must be byte-identical\n"+
-			"the puller ConfigMap uses the chart copy; the guest-base tree is the source of truth\n"+
-			"fix: cp %s %s", chart, source, source, chart)
-	}
-}
-
 // The preStop hook must run `iptables-cleanup --keep-guard` so a terminating
 // mesh keeps the fail-closed guard while workloads are still running. A
 // regression dropping the flag would pass every rule-shape test but silently
@@ -7383,10 +6762,11 @@ func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
 	}
 }
 
-// The fail-closed egress guards scope their DNS carve-out to the cluster DNS
-// server; the daemonset must pass that ClusterIP to iptables-sync so the
-// carve-out is not silently scoped to a different address.
-func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
+// The fail-closed egress guards carve out UDP/53 to any destination, so the
+// daemonset names no resolver address. A reintroduced --cluster-dns-ip would
+// scope the carve-out to one address again and silently drop every cw DNS
+// query on a cluster whose resolver sits elsewhere.
+func TestChartIptablesSyncNamesNoClusterDNS(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -7402,23 +6782,16 @@ func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
 	if len(flags) == 0 {
 		t.Fatal("iptables-sync container command not found")
 	}
-	var saw bool
-	for i := 0; i+1 < len(flags); i++ {
-		if flags[i] == "--cluster-dns-ip" {
-			saw = true
-			if flags[i+1] != "10.53.0.10" {
-				t.Errorf("--cluster-dns-ip = %q, want c8s default 10.53.0.10", flags[i+1])
-			}
+	for _, f := range flags {
+		if f == "--cluster-dns-ip" {
+			t.Errorf("iptables-sync carries --cluster-dns-ip; the carve-out must name no address: %v", flags)
 		}
-	}
-	if !saw {
-		t.Error("iptables-sync command does not carry --cluster-dns-ip")
 	}
 }
 
 // schemaCoveredPaths are the values subtrees values.schema.json seals: the
 // component blocks the docs tell operators to write by hand.
-var schemaCoveredPaths = []string{"cds", "nriImagePolicy", "tlsLb", "volumed"}
+var schemaCoveredPaths = []string{"cds", "nriImagePolicy", "router", "volumed"}
 
 // readChartFile decodes a file from the chart directory. JSON is a subset of
 // YAML, so one decoder serves values.yaml and values.schema.json alike.
@@ -7445,7 +6818,7 @@ func TestChartValuesSchemaRejectsUnknownKeys(t *testing.T) {
 		// The singular of the key whose loss bricked a cluster.
 		{"nriImagePolicy.policy", "nriImagePolicy.policy.exemptNamespace=kube-system"},
 		{"nriImagePolicy top level", "nriImagePolicy.exemptNamespaces=kube-system"},
-		{"tlsLb.hostPort", "tlsLb.hostPort.enable=false"},
+		{"router.hostPort", "router.hostPort.enable=false"},
 		{"cds.persistence", "cds.persistence.enable=true"},
 		{"volumed", "volumed.enable=true"},
 	} {
@@ -7668,7 +7041,7 @@ func TestChartNRICDSURLRefusesAnUnderivableService(t *testing.T) {
 // The node image bakes its own copy of the pull URL into the NRI floor, and the
 // chart cannot reach it. Keeping the two literals equal in-tree is the half
 // that is enforceable here; a per-install -f override still cannot follow (the
-// node-mode baked-config problem).
+// bare-metal-mode baked-config problem).
 func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
 	baked, err := os.ReadFile(bakedPath)
@@ -7753,7 +7126,7 @@ func TestChartValuesSchemaConstrainsTheEnumsAndRanges(t *testing.T) {
 }
 
 // Every component that serves a port had no ingress policy at all, so anything
-// on the pod network could reach any port they happened to bind — the tls-lb
+// on the pod network could reach any port they happened to bind — the router
 // sidecars bind loopback by intention, not by enforcement. These policies are
 // default-deny with the declared ports carved back out.
 func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
@@ -7770,7 +7143,7 @@ func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
 		{"c8s-cds-ingress", "cds", []int32{8443}},
 		{"c8s-operator-ingress", "operator", []int32{9443, 8081, 8080}},
 		{"c8s-volumed-ingress", "volumed", nil},
-		{"c8s-tls-lb-ingress", "", []int32{8443}},
+		{"c8s-router-ingress", "", []int32{8443}},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			var np networkingv1.NetworkPolicy
@@ -7792,7 +7165,7 @@ func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
 			var got []int32
 			for _, rule := range np.Spec.Ingress {
 				if len(rule.From) != 0 {
-					t.Errorf("ingress rule restricts source (%v); these policies narrow which port answers, never who connects — tls-lb is a public front door, the API server dialling the webhook has no selectable address, and the CDS NodePort route arrives off-cluster", rule.From)
+					t.Errorf("ingress rule restricts source (%v); these policies narrow which port answers, never who connects — router is a public front door, the API server dialling the webhook has no selectable address, and the CDS NodePort route arrives off-cluster", rule.From)
 				}
 				for _, p := range rule.Ports {
 					if p.Port == nil {
@@ -7808,19 +7181,19 @@ func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
 	}
 }
 
-// tls-lb is the public front door, so its policy must leave the front-door port
+// router is the public front door, so its policy must leave the front-door port
 // open to every source. A `from` here would also be unsatisfiable in principle:
 // externalTrafficPolicy defaults to Local precisely to preserve arbitrary public
 // client IPs, and no selector can enumerate the internet.
-func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
+func TestChartRouterIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 
 	var np networkingv1.NetworkPolicy
-	if !findDoc(t, out, "NetworkPolicy", "c8s-tls-lb-ingress", &np) {
-		t.Fatal("render is missing the tls-lb ingress policy")
+	if !findDoc(t, out, "NetworkPolicy", "c8s-router-ingress", &np) {
+		t.Fatal("render is missing the router ingress policy")
 	}
 	if len(np.Spec.Ingress) != 1 {
 		t.Fatalf("ingress rules = %d, want 1", len(np.Spec.Ingress))
@@ -7832,17 +7205,17 @@ func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
 	// The allowed port must be the one the Service and hostPort both target,
 	// or external traffic lands on a port the policy does not name.
 	var svc corev1.Service
-	if !findDoc(t, out, "Service", "c8s-tls-lb", &svc) {
-		t.Fatal("render is missing the tls-lb Service")
+	if !findDoc(t, out, "Service", "c8s-router", &svc) {
+		t.Fatal("render is missing the router Service")
 	}
 	if len(svc.Spec.Ports) != 1 {
-		t.Fatalf("tls-lb Service exposes %d ports; the policy names one", len(svc.Spec.Ports))
+		t.Fatalf("router Service exposes %d ports; the policy names one", len(svc.Spec.Ports))
 	}
 	target := svc.Spec.Ports[0].TargetPort.StrVal
 
 	var deploy appsv1.Deployment
-	if !findDoc(t, out, "Deployment", "c8s-tls-lb", &deploy) {
-		t.Fatal("render is missing the tls-lb Deployment")
+	if !findDoc(t, out, "Deployment", "c8s-router", &deploy) {
+		t.Fatal("render is missing the router Deployment")
 	}
 	var wantPort int32
 	for _, c := range deploy.Spec.Template.Spec.Containers {
@@ -7853,9 +7226,122 @@ func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
 		}
 	}
 	if wantPort == 0 {
-		t.Fatalf("no containerPort named %q on the tls-lb pod", target)
+		t.Fatalf("no containerPort named %q on the router pod", target)
 	}
 	if got := int32(np.Spec.Ingress[0].Ports[0].Port.IntValue()); got != wantPort {
 		t.Errorf("policy admits :%d but the Service targets containerPort :%d — external traffic would be dropped", got, wantPort)
 	}
+}
+
+// TestChartRTMRPinsFlagThrough confirms cds.rtmrs and ratlsMesh.rtmrs reach
+// every consumer the way cds.measurements does: without the fan-out a TDX
+// install's RTMR pins would validate in values and enforce nowhere.
+func TestChartRTMRPinsFlagThrough(t *testing.T) {
+	const (
+		measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+		rtmr1       = "1=111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+		rtmr2       = "2=222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
+	)
+	out, err := helmTemplate(t,
+		"--set", "cds.measurements[0]="+measurement,
+		"--set", "cds.rtmrs[0]="+rtmr1,
+		"--set", "cds.rtmrs[1]="+rtmr2,
+		"--set", "ratlsMesh.rtmrs[0]="+rtmr1,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	joined := rtmr1 + "," + rtmr2
+
+	cdsArgs := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", cdsArgs, "--rtmrs="+joined)
+
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if i := slices.Index(meshArgs, "--cds-rtmrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != joined {
+		t.Fatalf("ratls-mesh missing --cds-rtmrs %q\nargs: %v", joined, meshArgs)
+	}
+	if i := slices.Index(meshArgs, "--rtmrs"); i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != rtmr1 {
+		t.Fatalf("ratls-mesh missing --rtmrs %q\nargs: %v", rtmr1, meshArgs)
+	}
+
+	operatorArgs := renderedOperatorArgs(t, out)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-rtmrs="+rtmr1)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-rtmrs="+rtmr2)
+
+	workerCfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if want := []string{rtmr1, rtmr2}; !slices.Equal(workerCfg.Allowlist.Pull.CDSRTMRs, want) {
+		t.Fatalf("worker CDS RTMR pins = %v, want %v", workerCfg.Allowlist.Pull.CDSRTMRs, want)
+	}
+
+	proxyArgs := renderedDeploymentContainer(t, out, "c8s-router", "allowlist-proxy").Args
+	assertContainerHasArg(t, "allowlist-proxy", proxyArgs, "--cds-rtmrs="+joined)
+}
+
+// With no rtmrs set nothing renders the flags — the empty default must not
+// emit empty pins.
+func TestChartNoRTMRPinsRendersNoFlags(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cdsArgs := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerNoArgPrefix(t, "cds", cdsArgs, "--rtmrs")
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if slices.Contains(meshArgs, "--rtmrs") || slices.Contains(meshArgs, "--cds-rtmrs") {
+		t.Fatalf("unpinned render emitted RTMR flags\nargs: %v", meshArgs)
+	}
+}
+
+func TestChartRejectsImagePolicyOffOnManagedNodes(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "nriImagePolicy.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with nriImagePolicy disabled on a managed-node cluster, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_host_image_policy" {
+		t.Fatalf("validation error kind = %q, want require_host_image_policy\n%s", kind, out)
+	}
+}
+
+func TestChartRejectsAttestationApiOffOnManagedNodes(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "attestationApi.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with attestationApi disabled on a managed-node cluster, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
+		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
+	}
+}
+
+func TestRouterProbesUseHTTPSHealthChecks(t *testing.T) {
+	type namedProbe struct {
+		name  string
+		probe *corev1.Probe
+	}
+
+	base, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, base)
+	}
+	nginx := renderedDeploymentContainer(t, base, "c8s-router", "nginx")
+	for _, p := range []namedProbe{
+		{"readiness", nginx.ReadinessProbe},
+		{"liveness", nginx.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.HTTPGet == nil {
+			t.Fatalf("base shape: router %s probe should be httpGet; got %+v", p.name, p.probe)
+		}
+		if got := p.probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+			t.Errorf("base shape: router %s probe scheme = %q, want HTTPS", p.name, got)
+		}
+		if got := p.probe.HTTPGet.Path; got != "/healthz" {
+			t.Errorf("base shape: router %s probe path = %q, want /healthz", p.name, got)
+		}
+	}
+
 }

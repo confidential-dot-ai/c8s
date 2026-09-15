@@ -22,8 +22,8 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 		{"client-ca-cert", defaultClientCACert},
 		{"client-ca-key", defaultClientCAKey},
 		{"server-ca-cert", defaultServerCACert},
-		{"cert-ttl", "24h0m0s"},
-		{"cert-org", "system:masters"},
+		{"cert-ttl", "1h0m0s"},
+		{"cert-org", "c8s:node-operators"},
 		{"cert-cn", "operator"},
 	}
 	flags := cmd.Flags()

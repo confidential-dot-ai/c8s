@@ -19,7 +19,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -35,17 +34,20 @@ type JoinConfig struct {
 	// AttestationAPIURL is the local attestation-api base URL, used both for
 	// this node's client-cert quote and for verifying the server's quote.
 	AttestationAPIURL string
-	// Platform is the TEE platform ("tdx").
+	// Platform is the TEE platform ("tdx" or "sev-snp").
 	Platform string
+	// MeasurementsConfig pins exactly one designated leader image and operator key.
+	MeasurementsConfig string
 	// TokenOut is where the received token is written. Must be on a RAM-backed
-	// filesystem — enforced, see prepareTokenDir.
+	// filesystem, held open from verification through the atomic token write.
 	TokenOut string
-	// FragmentOut is the rke2 config drop-in to write (server + token-file).
+	// FragmentOut is an optional rke2 config drop-in (server + token-file).
+	// Empty skips it when launch-config has already staged the role fragment.
 	FragmentOut string
 	// SupervisorPort is the rke2 supervisor port on the server node, used in
 	// the fragment's server URL.
 	SupervisorPort int
-	// Timeout bounds each network step separately (own attestation, cert
+	// Timeout bounds each network step separately (cert
 	// provisioning, handshake incl. peer verification, token fetch), so a slow
 	// verifier cannot eat a later step's budget. Must be positive. One attempt
 	// per invocation; retries belong to the systemd unit.
@@ -58,11 +60,9 @@ type rke2Fragment struct {
 	TokenFile string `yaml:"token-file"`
 }
 
-// RunJoin performs one attested join exchange: verify the server is a
-// same-image TDX guest (RA-TLS + register comparison), present this node's
-// own quote-bound client cert, fetch the token, and stage it for rke2-agent.
+// RunJoin verifies the designated leader, presents this node's quote-bound
+// client certificate, and stages the received agent token for rke2-agent.
 func RunJoin(ctx context.Context, cfg JoinConfig) error {
-	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
 	if cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join)")
 	}
@@ -74,19 +74,20 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if err != nil {
 		return fmt.Errorf("--server must be host:port: %w", err)
 	}
-	// Before any network work: discovering an on-disk --token-out after
-	// join-release has already handed over the token is too late.
-	if err := prepareTokenDir(cfg.TokenOut); err != nil {
-		return err
+	if cfg.FragmentOut != "" && (cfg.SupervisorPort < 1 || cfg.SupervisorPort > 65535) {
+		return fmt.Errorf("--supervisor-port must be between 1 and 65535")
 	}
-
-	api := attestationclient.NewClient(cfg.AttestationAPIURL)
-	refsCtx, cancelRefs := context.WithTimeout(ctx, cfg.Timeout)
-	own, err := ownRefs(refsCtx, api)
-	cancelRefs()
+	policy, err := loadPeerPolicy(cfg.MeasurementsConfig, cfg.Platform, cfg.AttestationAPIURL, cfg.Timeout, true)
 	if err != nil {
 		return err
 	}
+	// Keep the checked RAM directory open through enrollment and the rename.
+	// Replacing its pathname while the network call runs cannot redirect secrets.
+	tokenRoot, err := prepareTokenDir(cfg.TokenOut)
+	if err != nil {
+		return err
+	}
+	defer tokenRoot.Close()
 
 	// Client cert with an embedded quote bound to its own key: the server's
 	// side of the mutual attestation.
@@ -95,7 +96,7 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		Platform:   cfg.Platform,
 		AttestFunc: attestFunc,
 		// The cert only has to survive this one exchange; the validity window
-		// is the replay bound for a stolen leaf key (see certSkew), so keep it
+		// is the replay bound for a stolen leaf key, so keep it
 		// as tight as clock skew allows.
 		CertTTL: joinClientCertTTL,
 		Logger:  slog.Default(),
@@ -103,10 +104,8 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if err != nil {
 		return fmt.Errorf("build RA-TLS client config: %w", err)
 	}
-	// Replace ratls's delegated peer callback (which requires a VerifyPolicy
-	// and checks MRTD only) with the full same-image check. The handshake
-	// callback carries no context, so the verification round trip to the
-	// local attestation-api gets its own bounded one.
+	// Add the explicit hardware-family pin to the shared certificate verifier.
+	// The callback carries no context, so give online verification its own bound.
 	tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return fmt.Errorf("join: server presented no certificate")
@@ -117,7 +116,7 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		}
 		vctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
-		return verifyPeer(vctx, api, leaf, own)
+		return verifyPeer(vctx, leaf, policy)
 	}
 
 	warmCtx, cancelWarm := context.WithTimeout(ctx, cfg.Timeout)
@@ -132,7 +131,7 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		return err
 	}
 
-	if err := writeStaged(cfg, host, token); err != nil {
+	if err := writeStaged(cfg, tokenRoot, host, token); err != nil {
 		return err
 	}
 	slog.Info("joined: token staged", "server", cfg.ServerAddr, "token_file", cfg.TokenOut, "fragment", cfg.FragmentOut)
@@ -145,12 +144,11 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 // VerifyPeerCertificate callback), so a slow local verifier hits its own
 // deadline first and the error names the attestation-api, not the server.
 func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string, error) {
+	transport := &http.Transport{TLSClientConfig: tlsCfg, TLSHandshakeTimeout: 2 * cfg.Timeout}
+	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{
-		Timeout: 3 * cfg.Timeout, // handshake budget + request
-		Transport: &http.Transport{
-			TLSClientConfig:     tlsCfg,
-			TLSHandshakeTimeout: 2 * cfg.Timeout,
-		},
+		Timeout:   3 * cfg.Timeout, // handshake budget + request
+		Transport: transport,
 		// join-release never redirects.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return fmt.Errorf("join-release must not redirect")
@@ -167,7 +165,7 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenRespBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenRespBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read response: %w", err)
 	}
@@ -176,45 +174,72 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 		// still, don't echo more than the status line needs.
 		return "", fmt.Errorf("join-release returned %s", resp.Status)
 	}
+	if len(body) > maxTokenRespBytes {
+		return "", fmt.Errorf("join-release response exceeds size limit")
+	}
+	return decodeTokenResponse(body)
+}
+
+// Decode exactly one field in exactly one object; duplicate keys, unknown
+// fields, trailing documents and malformed or privileged tokens are refused.
+func decodeTokenResponse(body []byte) (string, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var tr tokenResponse
-	if err := dec.Decode(&tr); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return "", fmt.Errorf("join-release response must be a JSON object")
 	}
-	if tr.Token == "" {
-		return "", fmt.Errorf("join-release returned an empty token")
+	if key, err := dec.Token(); err != nil || key != "token" {
+		return "", fmt.Errorf("join-release response requires token")
 	}
-	return tr.Token, nil
+	var token string
+	if err := dec.Decode(&token); err != nil {
+		return "", fmt.Errorf("decode join token: %w", err)
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return "", fmt.Errorf("join-release response must contain only one token field")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return "", fmt.Errorf("trailing data after join-release response")
+	}
+	if !isSecureAgentToken(token) {
+		return "", fmt.Errorf("join-release returned an invalid agent token")
+	}
+	return token, nil
 }
 
 // prepareTokenDir creates TokenOut's directory and enforces that it is
 // RAM-backed: the join token is a bearer secret and must never reach
 // persistent storage, which the host reads at will.
-func prepareTokenDir(path string) error {
+func prepareTokenDir(path string) (*os.Root, error) {
+	if path == "" || path != filepath.Clean(path) || filepath.Base(path) == "." || filepath.Base(path) == ".." {
+		return nil, fmt.Errorf("--token-out must name a file")
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	if err := fileutil.RequireRAMBacked(dir); err != nil {
-		return fmt.Errorf("--token-out: %w", err)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if err := fileutil.RequireRAMBackedRoot(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("--token-out: %w", err)
+	}
+	return root, nil
 }
 
-// writeStaged writes the token and the rke2 config fragment. Order matters
-// only for partial-failure cleanliness: the fragment references the token
-// file, so the token lands first. A failed run is retried whole by the unit;
-// both writes are idempotent replaces.
-func writeStaged(cfg JoinConfig, host, token string) error {
-	// TokenOut's dir already exists: prepareTokenDir created and vetted it.
+// writeStaged replaces the token within the already verified RAM directory.
+// Repeated enrollment replaces files atomically; partition/fetch failures write
+// nothing. The optional fragment is public and is written after the token.
+func writeStaged(cfg JoinConfig, tokenRoot *os.Root, host, token string) error {
+	if err := fileutil.WriteAtomicRoot(tokenRoot, filepath.Base(cfg.TokenOut), []byte(token+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write token: %w", err)
+	}
+	if cfg.FragmentOut == "" {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.FragmentOut), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(cfg.FragmentOut), err)
-	}
-	// WriteAtomic renames a fresh 0600 file over the destination; os.WriteFile
-	// would leave a pre-existing world-readable file's mode untouched.
-	if err := fileutil.WriteAtomic(cfg.TokenOut, []byte(token+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write token: %w", err)
 	}
 
 	frag, err := yaml.Marshal(rke2Fragment{

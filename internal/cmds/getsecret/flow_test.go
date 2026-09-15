@@ -50,7 +50,7 @@ func startInventory(t *testing.T) string {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
+	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
 	t.Cleanup(func() { cancel(); l.Close() })
 
 	return "unix://" + sock
@@ -333,7 +333,8 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 	if string(values["DB"]) != existing || string(values["NEW"]) != minted {
 		t.Fatalf("values = %q, %q; want both sentinels", values["DB"], values["NEW"])
 	}
-	if err := writeAll(cfg, values); err != nil {
+	root := openOutRoot(t, cfg.OutDir)
+	if err := writeAll(root, cfg, values); err != nil {
 		t.Fatal(err)
 	}
 

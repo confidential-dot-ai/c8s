@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -25,17 +26,15 @@ import (
 // of it; each command adds its own fields for what it fetches and where it
 // puts the result.
 type Config struct {
-	CDSURL            string
-	AttestationApiURL string
-	Measurements      []string
+	CDSURL                 string
+	AttestationApiURL      string
+	Measurements           []string
+	RTMRs                  []string
+	MeasurementsConfig     string
+	MeasurementsConfigJSON string
 
 	CertPath string
 	KeyPath  string
-
-	// WorkloadClaimsGuest selects the kata shape: the inventory (and any
-	// node-local daemons) are inside the guest, reached on guest loopback
-	// rather than over sockets a kata guest cannot mount.
-	WorkloadClaimsGuest bool
 
 	Attempts         int
 	RetryInterval    time.Duration
@@ -48,9 +47,6 @@ type Config struct {
 // control-plane value cannot redirect the redemption to a rogue inventory
 // (docs/getcert-workload-binding.md, Corner 5).
 func (c Config) Endpoint() string {
-	if c.WorkloadClaimsGuest {
-		return workloadclaims.GuestInventoryEndpoint()
-	}
 	return workloadclaims.InventoryEndpoint()
 }
 
@@ -60,16 +56,18 @@ func (c Config) Endpoint() string {
 // shape also moves the volume daemon onto guest loopback) overrides the
 // affected flag's Usage via f.Lookup after this call.
 func BindFlags(f *pflag.FlagSet, cfg *Config) {
+	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "path to the complete CDS image and operator identity policy")
+	f.StringVar(&cfg.MeasurementsConfigJSON, "measurements-config-json", "", "inline complete CDS image and operator identity policy")
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
+	f.StringSliceVar(&cfg.RTMRs, "rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy (repeatable; ignored when CDS presents SNP evidence, empty pins no registers)")
 	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
 	f.DurationVar(&cfg.RetryInterval, "retry-interval", 5*time.Second, "wait between attempts")
 	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, "per-request timeout against CDS")
 	f.DurationVar(&cfg.InventoryTimeout, "inventory-timeout", 5*time.Second, "timeout for redeeming a sandbox token from the node's admission inventory")
-	f.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 }
 
 // Validate checks the shared half of a config and canonicalises the CDS URL.
@@ -97,18 +95,29 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParseMeasurements decodes --measurements, refusing an empty pin inside a kata
-// guest and warning outside one.
-func (c *Config) ParseMeasurements() ([][]byte, error) {
-	measurements, err := ratls.ParseHexMeasurementsList(c.Measurements)
+// ParsePins decodes --measurements and --rtmrs, warning when measurements are unpinned.
+func (c *Config) ParsePins() (ratls.Pins, error) {
+	if c.MeasurementsConfig != "" || c.MeasurementsConfigJSON != "" {
+		if len(c.Measurements) != 0 || len(c.RTMRs) != 0 {
+			return ratls.Pins{}, fmt.Errorf("a measurements config cannot be combined with --measurements or --rtmrs")
+		}
+		set, err := cmdsutil.LoadMeasurementsSource(c.MeasurementsConfig, c.MeasurementsConfigJSON)
+		if err != nil {
+			return ratls.Pins{}, err
+		}
+		return ratls.Pins{Entries: set.Entries}, nil
+	}
+	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
-		return nil, fmt.Errorf("--measurements: %w", err)
+		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)
 	}
-	if err := cmdsutil.CheckCDSPinned(len(measurements), c.WorkloadClaimsGuest,
-		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
-		return nil, err
+	cmdsutil.WarnIfCDSUnpinned(len(measurements),
+		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development.")
+	rtmrs, err := refvalues.ParseRTMRPins(c.RTMRs)
+	if err != nil {
+		return ratls.Pins{}, fmt.Errorf("--rtmrs: %w", err)
 	}
-	return measurements, nil
+	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
 }
 
 // Terminal marks a non-nil error no later attempt can clear, so Retry stops on

@@ -1,5 +1,5 @@
 # A plain workload with no c8s opt-in, adopted into the mesh by
-# `c8s install --workload-ref web=adopted/deployment/web:80 --upstream web`
+# `c8s install --workload-ref web=adopted/deployment/web:8080 --upstream web`
 # during the harness's upgrade step.
 apiVersion: v1
 kind: Namespace
@@ -21,6 +21,16 @@ spec:
       labels:
         app: web
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: app
-          image: nginx:1.27-alpine
+          image: nginxinc/nginx-unprivileged@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 # 1.27-alpine
+          ports:
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

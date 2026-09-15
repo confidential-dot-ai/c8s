@@ -17,8 +17,8 @@ func NewCmd() *cobra.Command {
 		Use:   "get-volume",
 		Short: "Fetch this pod's volume keys from CDS and have the node open them",
 		Long: `get-volume fetches the key for each encrypted volume a workload is granted
-and hands it to the node agent, which opens the device and mounts it read-only
-into this pod.
+and hands it to the node agent, which opens the device and mounts it into this
+pod — read-only for an immutable volume, read-write for a mutable one.
 
 It authenticates with the pod's CDS-issued certificate and a sandbox token
 redeemed from the node's admission inventory, and CDS releases only when the
@@ -43,10 +43,8 @@ Nothing here creates one.`,
 	}
 	f := cmd.Flags()
 	sidecar.BindFlags(f, &cfg.Config)
-	// This command's timeout also covers the node agent, and its guest shape
-	// also moves the volume daemon onto guest loopback.
+	// This command's timeout also covers the node agent.
 	f.Lookup("request-timeout").Usage = "per-request timeout against CDS and the node agent"
-	f.Lookup("workload-claims-guest").Usage = "Reach the inventory and the volume daemon on the kata guest's loopback addresses instead of node-CVM Unix sockets. Both shapes are compiled in; this only selects which applies, so a wrong setting fails closed rather than redirecting the request"
 	f.StringSliceVar(&specs, "volume", nil, "NAME=/store/path to open; NAME selects the device by serial (repeatable)")
 	f.StringVar(&cfg.SocketDir, "socket-dir", workloadclaims.SidecarSocketDir, "directory holding the node agent's socket, as this pod sees it")
 	return cmd

@@ -3,6 +3,7 @@ package secrets
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,8 @@ func newPutCmd(o *options) *cobra.Command {
 		fromFile  string
 		overwrite bool
 		dryRun    bool
+		meshCA    string
+		force     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "put <path>",
@@ -26,6 +29,9 @@ newline; the byte count is printed so you can confirm which bytes were sent.
 
 A path that already holds a value needs --overwrite, and the value it holds is
 named before it is replaced.
+
+The write names the CDS it trusts with --mesh-ca: the mesh CA CDS serves must be
+one you pinned, or the secret is refused. --force writes without that check.
 
 A workload reads its secret into a file once, at startup. Replacing a value
 reaches a running pod when that pod next restarts.`,
@@ -48,11 +54,15 @@ reaches a running pod when that pod next restarts.`,
 				return nil
 			}
 
-			signer, err := o.Signer()
+			c, err := o.client(cmd.Context())
 			if err != nil {
 				return err
 			}
-			c, err := o.client(cmd.Context())
+			if err := gateOnMeshCA(cmd, c, o.URL, meshCA, force); err != nil {
+				return err
+			}
+
+			signer, err := o.Signer()
 			if err != nil {
 				return err
 			}
@@ -90,7 +100,28 @@ reaches a running pod when that pod next restarts.`,
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "read the value from this file instead of stdin")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace a value already at the path")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the intended change without calling CDS")
+	cmd.Flags().StringVar(&meshCA, "mesh-ca", "", "PEM bundle of the mesh CA this CDS must serve; the same anchor 'c8s verify --mesh-ca' takes. Required unless --force")
+	cmd.Flags().BoolVar(&force, "force", false, "write the secret without checking the CDS mesh CA against --mesh-ca. Unrelated to --overwrite, which governs replacing an existing value")
 	return cmd
+}
+
+// gateOnMeshCA refuses a write whose CDS is not pinned to an operator-held mesh
+// CA. A plaintext endpoint is exempt for the same reason it is exempt from the
+// measurement pin: --insecure has already announced that nothing about the peer
+// is authenticated, and /ca fetched over it would be the host's answer anyway.
+func gateOnMeshCA(cmd *cobra.Command, c client, rawURL, meshCA string, force bool) error {
+	if u, err := url.Parse(rawURL); err == nil && u.Scheme == "http" {
+		return nil
+	}
+	if force {
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"warning: --force: writing this secret without checking the CDS mesh CA. An attested peer at this address that is not your CDS receives the value.")
+		return nil
+	}
+	if meshCA == "" {
+		return errMeshCARequired
+	}
+	return c.verifyMeshCA(cmd.Context(), meshCA)
 }
 
 // describe names a stored value by what put it there, for the line an operator

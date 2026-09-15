@@ -11,21 +11,24 @@ package workloadclaims
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"fmt"
-	"io"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // DigestsPort is the port every inventory serves its digests endpoint on, and
@@ -160,22 +163,19 @@ func outboundHost(ctx context.Context, target string) (string, error) {
 // DigestsServerTLSConfig builds the inventory's listener config for
 // ServeDigests: it presents an RA-TLS certificate proving the inventory runs in
 // a TEE, and requires the caller to present a hardware-attested one too. With
-// cdsMeasurements set the caller's launch measurement must be in it, so the
-// endpoint discloses what a node runs only to a CDS on an expected measurement;
-// empty pins no measurement, and any TEE on the network can then read it.
-// UNSAFE outside development; callers warn.
-func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte, certTTL time.Duration) (*tls.Config, *ratls.CertManager, error) {
+// cdsPins set the caller must satisfy them (launch measurement, and TDX RTMRs
+// when pinned), so the endpoint discloses what a node runs only to a CDS on an
+// expected measurement; zero pins accept any TEE on the network. UNSAFE
+// outside development; callers warn.
+func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins, certTTL time.Duration) (*tls.Config, *ratls.CertManager, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, nil, err
 	}
 	return ratls.NewServerTLSConfig(&ratls.ServerConfig{
-		Platform:   ratls.NormalizePlatform(platform),
-		AttestFunc: attestFunc,
-		CertTTL:    certTTL,
-		ClientPolicy: &ratls.VerifyPolicy{
-			Measurements:      cdsMeasurements,
-			AttestationApiURL: attestationApiURL,
-		},
+		Platform:     platform,
+		AttestFunc:   attestFunc,
+		CertTTL:      certTTL,
+		ClientPolicy: cdsPins.VerifyPolicy(attestationApiURL),
 	})
 }
 
@@ -191,16 +191,15 @@ func requireAttestationApi(url string) error {
 }
 
 // StartDigestsEndpoint binds DigestsPort and serves the identity and digests
-// routes on it. Shared by both inventories, which differ only in where their
-// configuration comes from.
+// routes for the node's NRI inventory.
 //
 // The listener is bound before the certificate warm-up so a token never names a
 // port nothing is listening on, and so a port conflict surfaces immediately
 // rather than after the warm-up window. Warm-up failure is logged, not fatal:
 // the endpoint provisions on the first handshake instead, and taking the
 // inventory down would cost far more than a slow first callback.
-func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte) error {
-	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsMeasurements, 0)
+func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsPins ratls.Pins) error {
+	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsPins, 0)
 	if err != nil {
 		return err
 	}
@@ -233,34 +232,31 @@ type DigestsClient struct {
 	timeout time.Duration
 }
 
-// NewDigestsClient builds the client. measurements are the launch digests an
-// inventory may present — the same allowlist CDS pins for the inventory's
-// /attest-key EAR, so a sandbox token and the callback that follows it are
-// held to one standard. Empty accepts any RA-TLS-attested inventory, matching
-// what an empty allowlist already means for the EAR: UNSAFE outside
-// development; callers warn.
+// NewDigestsClient builds the client. pins hold the launch digests (and any
+// TDX RTMR pins) an inventory may present — the same allowlist CDS pins for
+// the inventory's RA-TLS certificate, so a sandbox token and the callback that
+// follows it are held to one standard. Zero pins accept any RA-TLS-attested
+// inventory, matching what an empty allowlist already means for the certificate:
+// UNSAFE outside development; callers warn.
 //
 // It warms its own RA-TLS certificate before returning: provisioning costs an
 // attestation round-trip, and paying it lazily would put it inside the first
 // pod's issuance deadline.
-func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, measurements [][]byte, timeout time.Duration) (*DigestsClient, error) {
+func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, pins ratls.Pins, timeout time.Duration) (*DigestsClient, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy: &ratls.VerifyPolicy{
-			Measurements:      measurements,
-			AttestationApiURL: attestationApiURL,
-		},
-		Platform:   ratls.NormalizePlatform(platform),
+		Policy:     pins.VerifyPolicy(attestationApiURL),
+		Platform:   platform,
 		AttestFunc: attestFunc,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("workloadclaims: build sandbox-digests client: %w", err)
 	}
-	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	warmupCtx, cancel := context.WithTimeout(ctx, warmUpBudget)
 	defer cancel()
-	if err := certMgr.WarmUp(warmupCtx); err != nil {
+	if err := warmUpCert(warmupCtx, certMgr); err != nil {
 		return nil, fmt.Errorf("workloadclaims: warm up sandbox-digests client cert: %w", err)
 	}
 	if timeout <= 0 {
@@ -283,6 +279,57 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		},
 		timeout: timeout,
 	}, nil
+}
+
+const (
+	// Budget for provisioning the client certificate at startup.
+	warmUpBudget = 30 * time.Second
+	// Gap between attempts. The attestation API is reached over a DaemonSet's
+	// Unix socket, so the common failure is "not there yet" rather than "slow".
+	warmUpInterval = time.Second
+)
+
+// certWarmer is the slice of ratls.CertManager this needs, so the retry can be
+// tested without provisioning a real certificate.
+type certWarmer interface {
+	WarmUp(context.Context) error
+}
+
+// peerNotUpYet reports whether err means the attestation API is not listening
+// yet, as opposed to answering and refusing. Only the former is worth waiting
+// on: a live peer that rejects us is a real failure and must fail closed.
+func peerNotUpYet(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// warmUpCert retries only while the attestation API has not come up, returning
+// the last failure once ctx's budget is spent.
+//
+// A single attempt is not enough: the attestation API lives on a DaemonSet
+// socket that may not exist yet when CDS starts, and lstat on a missing socket
+// fails instantly. One attempt therefore leaves the whole budget unspent and
+// aborts startup for a peer that is usually seconds away. That is expensive
+// because the allowlist is not persistent, so CDS exiting here drops every
+// operator-added digest on restart.
+//
+// Anything else returns immediately, so a peer that answers and refuses still
+// fails closed at once rather than after the budget. WarmUp caches on success,
+// so the repeated calls cost nothing once provisioning lands.
+func warmUpCert(ctx context.Context, w certWarmer) error {
+	for {
+		err := w.WarmUp(ctx)
+		if err == nil {
+			return nil
+		}
+		if !peerNotUpYet(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(warmUpInterval):
+		}
+	}
 }
 
 // ErrSandboxUnknown reports that the inventory does not know the sandbox — it
@@ -383,33 +430,7 @@ func (c *DigestsClient) FetchSandbox(ctx context.Context, host, sandboxID string
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return out, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
 	}
-	// Carry the inventory's degraded posture into the caller's log — a kata
-	// guest's own journal is unreadable, so this is where it becomes visible.
-	// Diagnostic: it never changes the answer.
-	if r := out.AllowlistRefresh; r != nil && !r.Enabled {
-		slog.Warn("inventory reports a frozen image allowlist; operator allowlist additions are NOT reaching it",
-			"host", host, "sandbox", sandboxID, "reason", safeReason(r.Reason), "entries", r.Entries)
-	}
 	return out, nil
-}
-
-// maxReasonLen bounds a logged reason. The field crosses a trust boundary from
-// an inventory this client may not pin, so it is truncated and stripped of
-// control characters — an unbounded raw string could forge lines under a
-// non-JSON slog handler.
-const maxReasonLen = 200
-
-func safeReason(s string) string {
-	cleaned := []rune(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s))
-	if len(cleaned) > maxReasonLen {
-		return string(cleaned[:maxReasonLen]) + "…"
-	}
-	return string(cleaned)
 }
 
 // RequireContainers returns the per-container detail, refusing an answer that

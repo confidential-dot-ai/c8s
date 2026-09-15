@@ -1,7 +1,6 @@
 package secrets
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +10,7 @@ import (
 	"strings"
 
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // client writes secrets to CDS over an attested channel.
@@ -21,9 +21,7 @@ type client struct {
 
 // authorizer mints the operator Authorization header for one write, bound to
 // its method, path, and body. Implemented by operatorauth.Signer.
-type authorizer interface {
-	Authorization(method, path string, body []byte) (string, error)
-}
+type authorizer = operatorauth.Authorizer
 
 // result is what a write did. Created reports a path that held nothing;
 // Existing names what put the value the write displaced, or on a refusal what
@@ -48,16 +46,11 @@ func (c client) put(ctx context.Context, path string, value []byte, overwrite bo
 	}
 
 	url := c.baseURL + "/secrets" + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	req, err := operatorauth.NewRequest(ctx, http.MethodPut, url, body, auth)
 	if err != nil {
 		return result{}, err
 	}
-	authz, err := auth.Authorization(http.MethodPut, req.URL.Path, body)
-	if err != nil {
-		return result{}, fmt.Errorf("authorize request: %w", err)
-	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authz)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -96,15 +89,10 @@ func (c client) put(ctx context.Context, path string, value []byte, overwrite bo
 func (c client) explain(ctx context.Context, sandboxID string, auth authorizer) (intsecrets.ExplainResponse, error) {
 	var out intsecrets.ExplainResponse
 	url := c.baseURL + "/secrets-explain/" + sandboxID
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := operatorauth.NewRequest(ctx, http.MethodGet, url, nil, auth)
 	if err != nil {
 		return out, err
 	}
-	authz, err := auth.Authorization(http.MethodGet, req.URL.Path, nil)
-	if err != nil {
-		return out, fmt.Errorf("authorize request: %w", err)
-	}
-	req.Header.Set("Authorization", authz)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

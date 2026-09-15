@@ -18,6 +18,7 @@ func TestNormalizeDigest(t *testing.T) {
 		{name: "uppercase hex", in: "sha256:" + strings.ToUpper(hex), want: "sha256:" + hex},
 		{name: "bare hex", in: hex, want: "sha256:" + hex},
 		{name: "image ref with digest", in: "ghcr.io/acme/app@sha256:" + hex, want: "sha256:" + hex},
+		{name: "separator at position zero", in: "@sha256:" + hex, want: "sha256:" + hex},
 		{name: "surrounding whitespace", in: " sha256:" + hex + " ", want: "sha256:" + hex},
 		{name: "empty", in: "", wantErr: true},
 		{name: "tag only", in: "ghcr.io/acme/app:v1.0.0", wantErr: true},

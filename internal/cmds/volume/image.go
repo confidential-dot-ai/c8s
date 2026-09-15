@@ -18,6 +18,15 @@ import (
 // directory from sharing a hash tree.
 const saltBytes = 32
 
+// ImageBlockSize is the unit every built image is a whole number of: ext4's
+// block size for a mutable volume, dm-verity's for an immutable one. Same
+// value, two reasons — attach checks copies against it.
+const ImageBlockSize = 4096
+
+// minMutableBytes floors a mutable volume: below it ext4's own metadata leaves
+// no room to write anything.
+const minMutableBytes = 16 << 20
+
 // Runner executes one build tool. It exists so the orchestration is testable
 // without erofs-utils and cryptsetup on the machine running the tests.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -58,76 +67,214 @@ type BuildConfig struct {
 // a way to identify the contents; and the root hash then commits to the data
 // itself rather than to one encryption of it.
 func Build(ctx context.Context, cfg BuildConfig) (Verity, error) {
-	run := cfg.Run
-	if run == nil {
-		run = execRunner
-	}
 	if err := checkSource(cfg.Source); err != nil {
 		return Verity{}, err
 	}
 	if len(cfg.Key) != KeyBytes {
 		return Verity{}, fmt.Errorf("volume: key is %d bytes, want %d", len(cfg.Key), KeyBytes)
 	}
-	// O_EXCL on the output: a build that silently replaced an existing image
-	// would destroy a volume whose key is already in the store.
-	out, err := os.OpenFile(cfg.Out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return Verity{}, fmt.Errorf("volume: create %s: %w", cfg.Out, err)
-	}
-	defer out.Close()
-
-	work, cleanup, err := workDir(cfg.WorkDir)
-	if err != nil {
+	b := &immutableImage{source: cfg.Source}
+	if err := buildImage(ctx, cfg, b); err != nil {
 		return Verity{}, err
 	}
-	defer cleanup()
+	return b.verity, nil
+}
 
-	dataPath := filepath.Join(work, "data.erofs")
-	treePath := filepath.Join(work, "hash.tree")
-	// The erofs image is the plaintext this design exists to protect, so it goes
-	// whether the build succeeds or not, and whether or not WorkDir was the
-	// caller's (in which case removing the directory is not ours to do).
-	defer func() {
-		os.Remove(dataPath)
-		os.Remove(treePath)
-	}()
+type immutableImage struct {
+	source     string
+	data, tree imagePart
+	verity     Verity
+}
 
-	if _, err := run(ctx, "mkfs.erofs", erofsArgs(dataPath, cfg.Source)...); err != nil {
-		return Verity{}, err
+func (b *immutableImage) prepare(work string) []imagePart {
+	b.data = imagePart{filepath.Join(work, "data.erofs"), "erofs image"}
+	b.tree = imagePart{filepath.Join(work, "hash.tree"), "hash tree"}
+	return []imagePart{b.data, b.tree}
+}
+
+func (b *immutableImage) build(ctx context.Context, run Runner) error {
+	dataPath, treePath := b.data.path, b.tree.path
+	if _, err := run(ctx, "mkfs.erofs", erofsArgs(dataPath, b.source)...); err != nil {
+		return err
 	}
 	dataSize, err := fileSize(dataPath)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 	if dataSize == 0 || dataSize%VerityBlockSize != 0 {
-		return Verity{}, fmt.Errorf("volume: erofs image is %d bytes, not a multiple of %d", dataSize, VerityBlockSize)
+		return fmt.Errorf("volume: erofs image is %d bytes, not a multiple of %d", dataSize, VerityBlockSize)
 	}
 
 	salt := make([]byte, saltBytes)
 	if _, err := rand.Read(salt); err != nil {
-		return Verity{}, fmt.Errorf("volume: generate verity salt: %w", err)
+		return fmt.Errorf("volume: generate verity salt: %w", err)
 	}
 	saltHex := hex.EncodeToString(salt)
 
 	stdout, err := run(ctx, "veritysetup", verityArgs(dataPath, treePath, saltHex)...)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 	rootHash, err := parseRootHash(stdout)
 	if err != nil {
-		return Verity{}, err
+		return err
 	}
 
-	v := Verity{
+	b.verity = Verity{
 		RootHash:   rootHash,
 		Salt:       saltHex,
 		DataBlocks: dataSize / VerityBlockSize,
 		HashOffset: dataSize,
 	}
-	if err := encryptConcat(out, cfg.Key, dataPath, treePath); err != nil {
-		return Verity{}, err
+	return nil
+}
+
+// MutableBuildConfig describes one writable image build.
+type MutableBuildConfig struct {
+	// Source, when set, is the directory preloaded into the filesystem.
+	Source string
+	// Out is where the encrypted image is written. It must not already exist.
+	Out string
+	// Key is the XTS key; GenerateKey supplies it.
+	Key []byte
+	// Size is the filesystem size in bytes. Zero infers it from Source, which
+	// is then required.
+	Size uint64
+	// WorkDir holds the intermediate plaintext image, as in BuildConfig.
+	WorkDir string
+	// Run executes the build tools; nil uses execRunner.
+	Run Runner
+}
+
+// BuildMutable builds a writable ext4 image of Size bytes — preloaded from
+// Source when one is given — and encrypts it to Out, returning the size
+// actually built so an inferred Size is reported back to the operator.
+//
+// Every sector is encrypted, free space included: a sector left unwritten
+// would read back as the XTS decryption of zeros rather than the plaintext
+// zeros the filesystem expects, so the image must hold real ciphertext end to
+// end.
+func BuildMutable(ctx context.Context, cfg MutableBuildConfig) (uint64, error) {
+	if len(cfg.Key) != KeyBytes {
+		return 0, fmt.Errorf("volume: key is %d bytes, want %d", len(cfg.Key), KeyBytes)
 	}
-	return v, nil
+	size := cfg.Size
+	var inodes uint64
+	if cfg.Source != "" {
+		if err := checkSource(cfg.Source); err != nil {
+			return 0, err
+		}
+		dataBytes, entries, err := treeSize(cfg.Source)
+		if err != nil {
+			return 0, err
+		}
+		if size == 0 {
+			size = inferSize(dataBytes, entries)
+		}
+		inodes = inferInodes(size, entries)
+	}
+	if size == 0 {
+		return 0, fmt.Errorf("volume: a mutable volume without --source needs --size")
+	}
+	size = alignUp(size, ImageBlockSize)
+	if size < minMutableBytes {
+		return 0, fmt.Errorf("volume: mutable volume size %d is below the %d MiB minimum",
+			size, minMutableBytes>>20)
+	}
+
+	b := &mutableImage{source: cfg.Source, size: size, inodes: inodes}
+	if err := buildImage(ctx, BuildConfig{Out: cfg.Out, Key: cfg.Key, WorkDir: cfg.WorkDir, Run: cfg.Run}, b); err != nil {
+		return 0, err
+	}
+	return size, nil
+}
+
+type mutableImage struct {
+	source       string
+	data         imagePart
+	size, inodes uint64
+}
+
+func (b *mutableImage) prepare(work string) []imagePart {
+	b.data = imagePart{filepath.Join(work, "data.ext4"), "intermediate image"}
+	return []imagePart{b.data}
+}
+
+func (b *mutableImage) build(ctx context.Context, run Runner) error {
+	dataPath := b.data.path
+	data, err := os.OpenFile(dataPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("volume: create intermediate image: %w", err)
+	}
+	if err := data.Truncate(int64(b.size)); err != nil {
+		data.Close()
+		return fmt.Errorf("volume: size intermediate image: %w", err)
+	}
+	if err := data.Close(); err != nil {
+		return fmt.Errorf("volume: close intermediate image: %w", err)
+	}
+
+	_, err = run(ctx, "mkfs.ext4", ext4Args(dataPath, b.source, b.inodes)...)
+	return err
+}
+
+// ext4Args builds a 4K-block ext4 with no root-reserved blocks, preloading
+// source when given. Reserved blocks exist to keep a host's root user able to
+// write; a volume whose whole content is tenant data gets nothing from them.
+// -e remount-ro matches the platform rootfs: a filesystem error degrades the
+// mount to read-only rather than letting corruption spread — on a volume with
+// no integrity layer, the most likely cause is a host flipping bits.
+// Ownership and modes from the source are preserved, as on the immutable path.
+func ext4Args(dest, source string, inodes uint64) []string {
+	args := []string{"-q", "-F", "-b", fmt.Sprint(ImageBlockSize), "-m", "0", "-e", "remount-ro"}
+	if inodes > 0 {
+		args = append(args, "-N", fmt.Sprint(inodes))
+	}
+	if source != "" {
+		args = append(args, "-d", source)
+	}
+	return append(args, dest)
+}
+
+// inferSize estimates what a source tree needs: its bytes plus a block per
+// entry, grown by half so the volume is not born full, floored and rounded to
+// whole mebibytes.
+func inferSize(dataBytes, entries uint64) uint64 {
+	need := (dataBytes + entries*ImageBlockSize) * 3 / 2
+	return alignUp(max(need, minMutableBytes), 4<<20)
+}
+
+// inferInodes raises the inode count when the source tree's entries outnumber
+// what the default ratio gives the image, so a tree of small files does not
+// run mkfs out of inodes while blocks remain. Zero keeps the default.
+func inferInodes(size, entries uint64) uint64 {
+	const defaultInodeRatio = 16384
+	if inodes := entries * 2; inodes > size/defaultInodeRatio {
+		return inodes
+	}
+	return 0
+}
+
+// treeSize totals a source tree's bytes and entries, the inputs to inferSize.
+func treeSize(source string) (dataBytes, entries uint64, err error) {
+	err = filepath.Walk(source, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		entries++
+		if info.Mode().IsRegular() {
+			dataBytes += uint64(info.Size())
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("volume: measure --source: %w", err)
+	}
+	return dataBytes, entries, nil
+}
+
+func alignUp(n, unit uint64) uint64 {
+	return (n + unit - 1) / unit * unit
 }
 
 // erofsArgs pins the inputs that would otherwise vary per build, so the same
@@ -178,21 +325,48 @@ func parseRootHash(veritysetupOutput []byte) (string, error) {
 	return root, nil
 }
 
-// encryptConcat encrypts data followed by tree as one stream, so sector indices
-// — and therefore the XTS tweaks — run continuously across the join exactly as
-// they will when the device is read.
-func encryptConcat(out io.Writer, key []byte, dataPath, treePath string) error {
-	data, err := os.Open(dataPath)
-	if err != nil {
-		return fmt.Errorf("volume: open erofs image: %w", err)
+// imagePart order is the plaintext stream order, including the verity tree.
+type imagePart struct {
+	path, description string
+}
+
+type imageBuilder interface {
+	prepare(work string) []imagePart
+	build(context.Context, Runner) error
+}
+
+func buildImage(ctx context.Context, cfg BuildConfig, builder imageBuilder) error {
+	run := cfg.Run
+	if run == nil {
+		run = execRunner
 	}
-	defer data.Close()
-	tree, err := os.Open(treePath)
+	out, err := os.OpenFile(cfg.Out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("volume: open hash tree: %w", err)
+		return fmt.Errorf("volume: create %s: %w", cfg.Out, err)
 	}
-	defer tree.Close()
-	return Encrypt(out, io.MultiReader(data, tree), key)
+	defer out.Close()
+	work, cleanup, err := workDir(cfg.WorkDir)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	files := builder.prepare(work)
+	for _, part := range files {
+		defer os.Remove(part.path)
+	}
+	if err := builder.build(ctx, run); err != nil {
+		return err
+	}
+	readers := make([]io.Reader, 0, len(files))
+	for _, part := range files {
+		f, err := os.Open(part.path)
+		if err != nil {
+			return fmt.Errorf("volume: open %s: %w", part.description, err)
+		}
+		defer f.Close()
+		readers = append(readers, f)
+	}
+	return Encrypt(out, io.MultiReader(readers...), cfg.Key)
 }
 
 func checkSource(source string) error {

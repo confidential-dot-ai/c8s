@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -11,14 +13,16 @@ const digestB = "sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const digestC = "sha256:" + "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 func TestParseJSON_Minimal(t *testing.T) {
-	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"}}`)
-	if al.Digests[digestA] != "cds" {
-		t.Fatalf("floor digest not parsed: %#v", al.Digests)
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"cds":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+	c := al.Workloads["cds"].Containers[0]
+	if c.Digest.String() != digestA || !c.AnyArgv() {
+		t.Fatalf("entry not parsed: %#v", al.Workloads)
 	}
 }
 
 func TestParseJSON_RejectsUnknownSchema(t *testing.T) {
-	_, err := ParseJSON([]byte(`{"schema":"other","digests":{}}`))
+	_, err := ParseJSON([]byte(`{"schema":"other","workloads":{}}`))
 	if err == nil || !strings.Contains(err.Error(), "unknown schema") {
 		t.Fatalf("expected unknown schema error, got %v", err)
 	}
@@ -30,9 +34,100 @@ func TestParseJSON_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
-func TestParseJSON_RejectsBadFloorDigest(t *testing.T) {
-	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","digests":{"sha256:zz":"x"}}`)); err == nil {
+// A pre-unification digests map is an unknown field on the write path.
+func TestParseJSON_RejectsLegacyDigestsField(t *testing.T) {
+	doc := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"cds"},"workloads":{}}`
+	if _, err := ParseJSON([]byte(doc)); err == nil {
+		t.Fatal("expected the legacy digests field to be rejected")
+	}
+}
+
+// A grant is refused wherever a container's argv is left to the host, on both
+// write paths; a served document is not rejected over it.
+func TestParseJSON_SecretsRequirePinnedArgv(t *testing.T) {
+	grant := `"secrets":{"policy":"allow","read":["/s"]}`
+	for name, ctr := range map[string]string{
+		"args any":      `{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"any"}}`,
+		"command any":   `{"digest":"` + digestA + `","command":{"policy":"any"},"args":{"policy":"deny"}}`,
+		"init args any": `{"digest":"` + digestB + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}],"initContainers":[{"digest":"` + digestA + `","command":{"policy":"any"},"args":{"policy":"any"}}`,
+	} {
+		entry := `{"containers":[` + ctr + `],` + grant + `}`
+		if _, err := ParseWorkloadJSON([]byte(entry)); err == nil || !strings.Contains(err.Error(), "exact or deny") {
+			t.Errorf("%s: ParseWorkloadJSON = %v, want the grant refused", name, err)
+		}
+		doc := `{"schema":"c8s.allowlist/v1","workloads":{"w":` + entry + `}}`
+		if _, err := ParseJSON([]byte(doc)); err == nil || !strings.Contains(err.Error(), "exact or deny") {
+			t.Errorf("%s: ParseJSON = %v, want the grant refused", name, err)
+		}
+		if _, err := ParseServedJSON([]byte(doc)); err != nil {
+			t.Errorf("%s: ParseServedJSON refused a served document: %v", name, err)
+		}
+	}
+
+	pinned := `{"containers":[{"digest":"` + digestA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}],` + grant + `}`
+	if _, err := ParseWorkloadJSON([]byte(pinned)); err != nil {
+		t.Fatalf("a pinned entry with a grant was refused: %v", err)
+	}
+	if w, _ := ParseWorkloadJSON([]byte(`{"containers":[{"digest":"` + digestA + `","command":{"policy":"any"},"args":{"policy":"any"}}],"secrets":{"policy":"deny"}}`)); w == nil {
+		t.Fatal("a deny grant releases nothing and is accepted on an unconstrained entry")
+	}
+}
+
+// DigestEntryName must agree with the chart's c8s.digestWorkloadName for the
+// same inputs; the chart test renders the same table.
+func TestDigestEntryName(t *testing.T) {
+	// Hex is canonical lowercase whatever case the digest was written in.
+	d, err := types.ParseDigest("sha256:ABCDEF0000000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for image, want := range map[string]string{
+		"ghcr.io/x/coredns:v1":                          "coredns-abcdef000000",
+		"ghcr.io/confidential-dot-ai/cds@" + d.String(): "cds-abcdef000000",
+		"registry:5000/team/app":                        "app-abcdef000000",
+		"busybox":                                       "busybox-abcdef000000",
+		"":                                              "image-abcdef000000",
+		"ghcr.io/x/not a name!":                         "image-abcdef000000",
+		"ghcr.io/x/" + strings.Repeat("y", 60):          strings.Repeat("y", 50) + "-abcdef000000",
+	} {
+		if got := DigestEntryName(d, image); got != want {
+			t.Errorf("DigestEntryName(%q) = %q, want %q", image, got, want)
+		}
+		if !ValidWorkloadName(want) {
+			t.Errorf("%q is not a valid entry name", want)
+		}
+	}
+	if e := DigestEntry(d, "busybox"); len(e.Containers) != 1 || !e.Containers[0].AnyArgv() || e.Label != "busybox" || e.ArgvPinned() {
+		t.Fatalf("DigestEntry = %#v, want one any/any container labelled busybox", e)
+	}
+}
+
+func TestParseJSON_RejectsBadDigest(t *testing.T) {
+	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"sha256:zz"}]}}}`)); err == nil {
 		t.Fatal("expected invalid digest error")
+	}
+}
+
+func TestAdmitsAnyArgv(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
+		"open":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"}}]},
+		"pinned":{"containers":[
+			{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
+			{"digest":"`+digestB+`","command":{"policy":"any"},"args":{"policy":"exact","argv":["x"]}}]}}}`)
+	if !al.AdmitsAnyArgv(digestA) {
+		t.Fatal("a digest with an any/any entry must report AdmitsAnyArgv")
+	}
+	if al.AdmitsAnyArgv(digestB) {
+		t.Fatal("command any with args exact is not unconstrained")
+	}
+	if al.AdmitsAnyArgv(digestC) {
+		t.Fatal("an unlisted digest must not report AdmitsAnyArgv")
+	}
+	if !al.AdmitsAnyArgv(digestA[:7] + strings.ToUpper(digestA[7:])) {
+		t.Fatal("digests are compared canonically")
+	}
+	if al.AdmitsAnyArgv("not-a-digest") {
+		t.Fatal("a malformed digest must not report AdmitsAnyArgv")
 	}
 }
 
@@ -98,8 +193,8 @@ func TestCanonical_OrderIndependent(t *testing.T) {
 }
 
 func TestCanonical_FormattingIndependent(t *testing.T) {
-	compact := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"x"}}`)
-	spaced := mustParse(t, "{\n  \"schema\": \"c8s.allowlist/v1\",\n  \"digests\": {\""+digestA+"\": \"x\"}\n}")
+	compact := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"`+digestA+`"}]}}}`)
+	spaced := mustParse(t, "{\n  \"schema\": \"c8s.allowlist/v1\",\n  \"workloads\": {\"w\": {\"containers\": [{\"digest\": \""+digestA+"\"}]}}\n}")
 	dc, _ := compact.Canonical()
 	ds, _ := spaced.Canonical()
 	if !bytes.Equal(dc, ds) {
@@ -108,10 +203,10 @@ func TestCanonical_FormattingIndependent(t *testing.T) {
 }
 
 func TestRoundTripCanonical(t *testing.T) {
-	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"},
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1",
 		"workloads":{"w":{"label":"img","containers":[
 		{"digest":"`+digestB+`","command":{"policy":"exact","argv":["/app"]},
-		 "args":{"policy":"any"}}],"secrets":{"policy":"allow","read":["/s/**"]}}}}`)
+		 "args":{"policy":"deny"}}],"secrets":{"policy":"allow","read":["/s/**"]}}}}`)
 	canon, err := al.Canonical()
 	if err != nil {
 		t.Fatal(err)

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+readonly SCRIPT_DIR
+readonly PIN_MANIFEST="$SCRIPT_DIR/pin-manifest.sh"
+
+die() {
+  echo "repro-gate-changes: $*" >&2
+  exit 1
+}
+
+main() {
+  if [ "$#" -ne 3 ]; then
+    echo "usage: repro-gate-changes CURRENT_MANIFEST BASE_MANIFEST CHANGED_PATHS_ZERO" >&2
+    return 2
+  fi
+
+  local current_manifest=$1 base_manifest=$2 changed_paths=$3 path
+  local image=false
+
+  [ -f "$changed_paths" ] || die "changed-path list not found: $changed_paths"
+  bash "$PIN_MANIFEST" validate --manifest "$current_manifest" >/dev/null
+  jq -e '.builds["node-image"] | type == "object"' "$base_manifest" >/dev/null
+
+  if ! jq -e -s '.[0].builds["node-image"] == .[1].builds["node-image"]' \
+    "$base_manifest" "$current_manifest" >/dev/null; then
+    image=true
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      .github/scripts/pin-manifest.sh | \
+        .github/scripts/repro-gate-changes | \
+        .github/actions/setup-mkosi/action.yml | \
+        .github/workflows/image-repro-gate.yml)
+        image=true
+        ;;
+      node-guest-image/* | \
+        .github/workflows/c8s-image.yml | \
+        .github/workflows/c8s-image-publish.yml)
+        image=true
+        ;;
+      .github/build-pins.json)
+        # The manifest's domain objects were compared above.
+        ;;
+    esac
+  done <"$changed_paths"
+
+  printf 'image=%s\n' "$image"
+}
+
+main "$@"

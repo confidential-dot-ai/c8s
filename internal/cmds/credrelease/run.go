@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -31,8 +34,10 @@ type Config struct {
 	ServerCACert string
 	// CertTTL is the lifetime of issued operator certs.
 	CertTTL time.Duration
-	// CertOrg / CertCN are the Kubernetes group / user the issued cert
-	// carries. v1: O=system:masters, CN=operator (cluster-admin).
+	// CertOrg / CertCN are the Kubernetes group / user the issued cert carries.
+	// Authorization is ordinary RBAC on that group: the node image's baked
+	// cred-release-rbac AddOn binds defaultCertOrg to cluster-admin. Revocation
+	// semantics are in docs/operator.md.
 	CertOrg string
 	CertCN  string
 }
@@ -51,16 +56,17 @@ func Run(ctx context.Context, cfg Config) error {
 	// RA-TLS is mandatory here: this endpoint hands out cluster-admin creds,
 	// so serving without an attested cert (empty platform => plain HTTP in the
 	// ratls package) would let a host MITM impersonate the guest. Reject it.
-	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
-	if cfg.Platform == "" {
+	if strings.TrimSpace(cfg.Platform) == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for credential release)")
 	}
 	// Fail on a bad value here, before the RTMR and cluster-CA reads below.
-	if err := ratls.ValidatePlatform(cfg.Platform); err != nil {
+	family, err := teetypes.ParseFamily(cfg.Platform)
+	if err != nil {
 		return fmt.Errorf("--platform: %w", err)
 	}
+	cfg.Platform = family.String()
 
-	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.Platform, cfg.AttestationAPIURL)
+	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.AttestationAPIURL)
 	if err != nil {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}

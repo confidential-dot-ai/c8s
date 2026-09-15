@@ -12,7 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -43,9 +44,11 @@ type pluginConfig struct {
 // (docs/ratls.md).
 type workloadClaimsConfig struct {
 	// SocketDir is the host directory the inventory creates its socket in (as the
-	// compiled workloadclaims.SocketName); the webhook mounts it into c8s-cert
+	// compiled workloadclaims.SocketName); the plugin NRI-mounts it into c8s-cert
 	// sidecars so get-cert can fetch its pod's digests. The filename is fixed
 	// so get-cert can bake the dial path — see workloadclaims.InventoryEndpoint.
+	// The attestation-api and volumed sockets live in the same directory, so
+	// sidecar reachability of all three rides this setting.
 	SocketDir string `yaml:"socket_dir"`
 	// ProcRoot is the /proc mount used to resolve a caller PID to its
 	// container cgroup. Defaults to "/proc".
@@ -70,11 +73,13 @@ type allowlistConfig struct {
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
-	URL               string        `yaml:"url"`                 // empty disables pull
-	Interval          time.Duration `yaml:"interval"`            // ticker cadence; > 0 required when URL is set
-	Timeout           time.Duration `yaml:"timeout"`             // per-request timeout; > 0 required when URL is set
-	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
-	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
+	URL                   string        `yaml:"url"`                     // empty disables pull
+	Interval              time.Duration `yaml:"interval"`                // ticker cadence; > 0 required when URL is set
+	Timeout               time.Duration `yaml:"timeout"`                 // per-request timeout; > 0 required when URL is set
+	AttestationApiURL     string        `yaml:"attestation_api_url"`     // required for https pull
+	CDSMeasurements       []string      `yaml:"cds_measurements"`        // SHA-384 hex launch digests
+	CDSRTMRs              []string      `yaml:"cds_rtmrs"`               // TDX RTMR pins <index>=<sha384-hex>; ignored for SNP evidence
+	CDSMeasurementsConfig string        `yaml:"cds_measurements_config"` // complete CDS image and operator identity policy
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -140,13 +145,23 @@ const defaultPullTimeout = 30 * time.Second
 // node's address to. Read only when advertise_host is unset.
 const NodeIPFile = "node-ip"
 
+// defaultConfigPath is the plugin config containerd's plugin_config_path
+// resolves for this plugin, and the file set-cds-pins patches.
+const defaultConfigPath = "/etc/nri/conf.d/image-policy.yaml"
+
 // loadConfig loads configuration from a YAML file.
 func loadConfig(path string) (*config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
+	return parseConfig(data)
+}
 
+// parseConfig decodes and validates a config document. set-cds-pins reads the
+// file it is about to patch through here, so the patched bytes are accepted by
+// exactly the loader the plugin boots with.
+func parseConfig(data []byte) (*config, error) {
 	cfg := &config{
 		Allowlist: allowlistConfig{
 			Pull: pullConfig{
@@ -171,12 +186,28 @@ func loadConfig(path string) (*config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	// The pin parsers take one spelling of a digest, and this file is
+	// hand-editable: fold the case an operator typed rather than refusing a
+	// config the node has been booting with.
+	cfg.Allowlist.Pull.CDSMeasurements = foldHexPins(cfg.Allowlist.Pull.CDSMeasurements)
+	cfg.Allowlist.Pull.CDSRTMRs = foldHexPins(cfg.Allowlist.Pull.CDSRTMRs)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// foldHexPins lowercases each pin, leaving blanks and the "<index>=" prefix of
+// an RTMR pin untouched: both halves are hex or digits, which fold to
+// themselves.
+func foldHexPins(vals []string) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = strings.ToLower(v)
+	}
+	return out
 }
 
 // NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
@@ -186,9 +217,14 @@ func loadConfig(path string) (*config, error) {
 // literal and validate it directly.
 func (c *config) NormalizedPlatform() string {
 	if strings.TrimSpace(c.Platform) == "" {
-		return ratls.NormalizePlatform(string(types.PlatformSnp))
+		return teetypes.FamilySNP.String()
 	}
-	return ratls.NormalizePlatform(c.Platform)
+	family, err := teetypes.ParseFamily(c.Platform)
+	if err != nil {
+		// Validate reports it; return the input so its message can quote it.
+		return c.Platform
+	}
+	return family.String()
 }
 
 // PullEnabled reports whether the plugin should poll a remote CDS.
@@ -205,7 +241,7 @@ func (c *config) Validate() error {
 	// produces a peer-attestation failure on the CDS side that names the
 	// evidence platform, not this setting, so the cause is several hops from
 	// the symptom.
-	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
+	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
 	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
@@ -217,6 +253,9 @@ func (c *config) Validate() error {
 		}
 	}
 	if c.PullEnabled() {
+		if c.Allowlist.Pull.CDSMeasurementsConfig != "" && (len(c.Allowlist.Pull.CDSMeasurements) != 0 || len(c.Allowlist.Pull.CDSRTMRs) != 0) {
+			return fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
+		}
 		if c.Allowlist.Pull.Timeout <= 0 {
 			return fmt.Errorf("allowlist.pull.timeout must be > 0 when pull.url is set")
 		}
@@ -235,8 +274,11 @@ func (c *config) Validate() error {
 		if c.Allowlist.Pull.AttestationApiURL == "" {
 			return fmt.Errorf("allowlist.pull.attestation_api_url must be set")
 		}
-		if _, err := ratls.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
+		if _, err := refvalues.ParseHexMeasurementsList(c.Allowlist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("allowlist.pull.cds_measurements: %w", err)
+		}
+		if _, err := refvalues.ParseRTMRPins(c.Allowlist.Pull.CDSRTMRs); err != nil {
+			return fmt.Errorf("allowlist.pull.cds_rtmrs: %w", err)
 		}
 	}
 	if !c.AllowlistEnabled() && len(c.Policy.LabelRules) == 0 {

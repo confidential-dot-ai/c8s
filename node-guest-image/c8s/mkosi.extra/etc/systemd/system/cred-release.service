@@ -33,23 +33,32 @@ Type=simple
 # Waits bounded (10 min) rather than failing fast: on a slow first boot the
 # CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart
 # would exhaust StartLimitBurst in under a minute and give up until reboot.
-ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -r /var/lib/rancher/rke2/server/tls/client-ca.key ] && exit 0; sleep 5; done; exit 1'
+# Also waits for the c8s-node-operators ClusterRoleBinding and for the baked
+# PodSecurity AddOn, then proves the latter's allow and deny paths with
+# server-side dry-runs. RKE2 reconciles AddOns after kube-apiserver is ready;
+# cred-release is the external credential choke point, so keeping :8443 closed
+# until this gate passes prevents that reconciliation window reaching a tenant.
+ExecStartPre=/usr/local/bin/psa-ready.sh
 TimeoutStartSec=630
 # ${CRED_PLATFORM} comes from a drop-in the c8s sync hook renders from the
 # build's required C8S_PLATFORM. The `=` form matters: with the variable
 # unset systemd would elide a bare word, but --platform= expands to an empty
 # value, which platform validation rejects — fail closed, never a default.
+# The --cert-* flags equal the binary defaults; they are spelled out so the
+# measured unit states the issued identity, and the cred-release-rbac AddOn
+# must bind the same group (checked by credrelease's node_image_test.go).
 ExecStart=/usr/local/bin/c8s cred-release \
     --listen :8443 \
     --attestation-api-url http://127.0.0.1:8400 \
     --platform=${CRED_PLATFORM} \
-    --cert-ttl 24h \
-    --cert-org system:masters \
+    --cert-ttl 1h \
+    --cert-org c8s:node-operators \
     --cert-cn operator
 Restart=on-failure
 RestartSec=10
-# Reads two files: the initrd-staged operator pubkey (/etc/confai) and the
-# RKE2 client-CA key. No mount needed. Keep the rest of the FS read-only.
+# Reads the initrd-staged operator pubkey (/etc/confai), the RKE2 client-CA
+# key, and (ExecStartPre only) the RKE2 admin kubeconfig. Writes only the
+# kubectl cache under /run. Keep the rest of the FS read-only.
 ProtectSystem=strict
 ReadOnlyPaths=/etc/confai /var/lib/rancher/rke2/server/tls
 ReadWritePaths=/run

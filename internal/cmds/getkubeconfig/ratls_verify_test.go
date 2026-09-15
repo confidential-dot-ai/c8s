@@ -21,11 +21,10 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // The fixed guest-image tuple the test manifests pin.
@@ -69,6 +68,9 @@ func testPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if exp.platform() != teetypes.PlatformTDX {
+		t.Fatalf("policy platform = %q, want tdx", exp.platform())
+	}
 	return exp
 }
 
@@ -97,7 +99,7 @@ func mustKeyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
 
 // attestedCert builds a genuine RA-TLS TDX cert carrying the given evidence
 // envelope, bound to the cert's own key (as the real serving path does).
-func attestedCert(t *testing.T, envelope types.AttestationEvidence) *x509.Certificate {
+func attestedCert(t *testing.T, envelope teetypes.AttestationEvidence) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -107,7 +109,7 @@ func attestedCert(t *testing.T, envelope types.AttestationEvidence) *x509.Certif
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: report}
+	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: report}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -165,16 +167,19 @@ func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) *veri
 // verifiedResultFor builds a passing VerificationResult whose claims satisfy
 // exp exactly. Tests break individual claims from here.
 func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
+	mrtd := exp.identity.LaunchDigests()[0].Digest
+	rtmrs := exp.identity.RTMRs()
+	rtmr1, rtmr2 := rtmrs[1], rtmrs[2]
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformTDX,
 		ReportDataMatch: teetypes.Ptr(true),
 		Claims: teetypes.Claims{
-			LaunchDigest: hex.EncodeToString(exp.pins.MRTD[:]),
+			LaunchDigest: hex.EncodeToString(mrtd[:]),
 			PlatformData: map[string]any{
-				"rtmr_1": hex.EncodeToString(exp.pins.RTMR1[:]),
-				"rtmr_2": hex.EncodeToString(exp.pins.RTMR2[:]),
-				"rtmr_3": hex.EncodeToString(exp.rtmr3[:]),
+				"rtmr_1": hex.EncodeToString(rtmr1[:]),
+				"rtmr_2": hex.EncodeToString(rtmr2[:]),
+				"rtmr_3": hex.EncodeToString(expectedRTMR3(exp)),
 			},
 		},
 	}
@@ -220,7 +225,7 @@ func TestVerifyServerCertRejectsBadReportData(t *testing.T) {
 	res := verifiedResultFor(exp)
 	res.ReportDataMatch = teetypes.Ptr(false)
 	stubVerify(t, res, nil)
-	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 	err := verifyServerCert(cert, exp)
 	if err == nil || !strings.Contains(err.Error(), "report_data") {
@@ -242,13 +247,13 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 		}, "MRTD mismatch"},
 		{"wrong rtmr1", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_1"] = strings.Repeat("00", 48)
-		}, "RTMR[1] mismatch"},
+		}, "RTMR[1] does not match"},
 		{"wrong rtmr2", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_2"] = strings.Repeat("00", 48)
-		}, "RTMR[2] mismatch"},
+		}, "RTMR[2] does not match"},
 		{"wrong rtmr3", func(r *teetypes.VerificationResult) {
 			r.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
-		}, "RTMR[3] mismatch"},
+		}, "not bound to the expected anchor"},
 		{"absent MRTD", func(r *teetypes.VerificationResult) {
 			r.Claims.LaunchDigest = ""
 		}, "no launch digest"},
@@ -261,7 +266,7 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 			res := verifiedResultFor(exp)
 			tc.wreck(res)
 			stubVerify(t, res, nil)
-			cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+			cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 			err := verifyServerCert(cert, exp)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -275,7 +280,7 @@ func TestVerifyServerCertAccepts(t *testing.T) {
 	// Genuine quote, bound to the cert key, full measured identity: accept.
 	exp := testPolicy(t, operatorPub(t))
 	rec := stubVerify(t, verifiedResultFor(exp), nil)
-	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	cert := attestedCert(t, teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 	if err := verifyServerCert(cert, exp); err != nil {
 		t.Fatalf("want accept, got %v", err)
@@ -299,12 +304,12 @@ func TestVerifyServerCertAccepts(t *testing.T) {
 // validity, embedded key from holder, and signature from signer.
 func mintServingCert(t *testing.T, holder *ecdsa.PublicKey, signer *ecdsa.PrivateKey, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
-	report, err := json.Marshal(types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
+	report, err := json.Marshal(teetypes.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: report}
-	ext, err := att.MarshalExtension()
+	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: report}
+	ext, err := ratls.MarshalExtension(att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,21 +384,35 @@ func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exp.platform != teetypes.PlatformSNP {
-		t.Fatalf("policy platform = %q, want snp", exp.platform)
+	if exp.platform() != teetypes.PlatformSNP {
+		t.Fatalf("policy platform = %q, want snp", exp.platform())
 	}
 	return exp
 }
 
-func snpResultFor(exp measuredPolicy, smp int) *teetypes.VerificationResult {
-	digest := exp.snpPins.BySMP[smp]
+// smpDigest is the launch digest exp pins for an smp-vCPU guest.
+func smpDigest(t *testing.T, exp measuredPolicy, smp int) [runtimemeasure.Size]byte {
+	t.Helper()
+	label := fmt.Sprintf("smp%d", smp)
+	for _, v := range exp.identity.LaunchDigests() {
+		if v.Label == label {
+			return v.Digest
+		}
+	}
+	t.Fatalf("manifest pins no %s variant", label)
+	return [runtimemeasure.Size]byte{}
+}
+
+func snpResultFor(t *testing.T, exp measuredPolicy, smp int) *teetypes.VerificationResult {
+	t.Helper()
+	digest := smpDigest(t, exp, smp)
 	return &teetypes.VerificationResult{
 		SignatureValid:  true,
 		Platform:        teetypes.PlatformSNP,
 		ReportDataMatch: teetypes.Ptr(true),
 		Claims: teetypes.Claims{
 			LaunchDigest: hex.EncodeToString(digest[:]),
-			InitData:     teetypes.HexBytes(exp.hostData[:]),
+			InitData:     teetypes.HexBytes(expectedHostData(exp)),
 		},
 	}
 }
@@ -403,7 +422,7 @@ func snpResultFor(exp measuredPolicy, smp int) *teetypes.VerificationResult {
 func TestSNPGateAcceptsEveryPinnedVariant(t *testing.T) {
 	exp := snpTestPolicy(t, operatorPub(t))
 	for _, smp := range []int{2, 4} {
-		if err := checkMeasuredIdentity(snpResultFor(exp, smp), exp); err != nil {
+		if err := exp.checkIdentity(snpResultFor(t, exp, smp)); err != nil {
 			t.Errorf("smp%d: %v", smp, err)
 		}
 	}
@@ -428,7 +447,7 @@ func TestSNPGateFailsClosed(t *testing.T) {
 			r.Claims.InitData = teetypes.HexBytes(make([]byte, runtimemeasure.HostDataSize))
 		},
 		"HOSTDATA of a different operator key": func(r *teetypes.VerificationResult) {
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 		},
 		"no HOSTDATA": func(r *teetypes.VerificationResult) {
 			r.Claims.InitData = nil
@@ -439,9 +458,9 @@ func TestSNPGateFailsClosed(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			res := snpResultFor(exp, 2)
+			res := snpResultFor(t, exp, 2)
 			mutate(res)
-			if err := checkMeasuredIdentity(res, exp); err == nil {
+			if err := exp.checkIdentity(res); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})
@@ -489,7 +508,7 @@ func snpAttestedCert(t *testing.T) *x509.Certificate {
 	// reads; the rest stays zero (the stubbed verifier supplies the verdict).
 	report := make([]byte, 1184)
 	copy(report[0x50:], rd[:])
-	att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: report}
+	att := &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: report}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -506,17 +525,17 @@ func snpAttestedCert(t *testing.T) *x509.Certificate {
 // carry no embedded envelope.
 func TestVerifyServerCertSNPEnforcesBothPins(t *testing.T) {
 	exp := snpTestPolicy(t, operatorPub(t))
-	params := stubSNPRATLS(t, snpResultFor(exp, 2), nil)
+	params := stubSNPRATLS(t, snpResultFor(t, exp, 2), nil)
 
 	if err := verifyServerCert(snpAttestedCert(t), exp); err != nil {
 		t.Fatalf("verifyServerCert: %v", err)
 	}
 	// Both pins must have been handed to the verifier, not just checked after.
-	if len(params.Measurements) != len(exp.snpPins.BySMP) {
-		t.Errorf("passed %d measurements, want %d (every pinned SMP variant)", len(params.Measurements), len(exp.snpPins.BySMP))
+	if len(params.Measurements) != len(exp.identity.LaunchDigests()) {
+		t.Errorf("passed %d measurements, want %d (every pinned SMP variant)", len(params.Measurements), len(exp.identity.LaunchDigests()))
 	}
-	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
-		t.Errorf("ExpectedInitDataHash = %x, want the operator-key binding %x", params.ExpectedInitDataHash, exp.hostData)
+	if !bytes.Equal(params.ExpectedInitDataHash, expectedHostData(exp)) {
+		t.Errorf("ExpectedInitDataHash = %x, want the operator-key binding %x", params.ExpectedInitDataHash, expectedHostData(exp))
 	}
 	if len(params.ExpectedReportData) == 0 {
 		t.Error("ExpectedReportData empty: the quote would not be bound to this TLS channel")
@@ -531,17 +550,17 @@ func TestVerifyServerCertSNPRejectsContradictoryClaims(t *testing.T) {
 
 	for name, res := range map[string]*teetypes.VerificationResult{
 		"wrong HOSTDATA": func() *teetypes.VerificationResult {
-			r := snpResultFor(exp, 2)
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r := snpResultFor(t, exp, 2)
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 			return r
 		}(),
 		"unpinned launch digest": func() *teetypes.VerificationResult {
-			r := snpResultFor(exp, 2)
+			r := snpResultFor(t, exp, 2)
 			r.Claims.LaunchDigest = strings.Repeat("ab", runtimemeasure.Size)
 			return r
 		}(),
 		"signature not valid": func() *teetypes.VerificationResult {
-			r := snpResultFor(exp, 2)
+			r := snpResultFor(t, exp, 2)
 			r.SignatureValid = false
 			return r
 		}(),
@@ -572,7 +591,7 @@ func TestVerifyServerCertSNPPropagatesVerifierError(t *testing.T) {
 // localverify) would have accepted the same node.
 func TestAttestGateAcceptsSNPEvidenceWithoutInlineVCEK(t *testing.T) {
 	exp := snpTestPolicy(t, operatorPub(t))
-	params := stubSNPRATLS(t, snpResultFor(exp, 2), nil)
+	params := stubSNPRATLS(t, snpResultFor(t, exp, 2), nil)
 
 	// Exactly what the guest serves: a raw report and cert_chain: null.
 	envelope := []byte(`{"platform":"snp","evidence":{"attestation_report":"AAAA","cert_chain":null}}`)
@@ -583,11 +602,11 @@ func TestAttestGateAcceptsSNPEvidenceWithoutInlineVCEK(t *testing.T) {
 	}
 	// The gate must hand the collateral-fetching verifier the same two pins
 	// the dial arm passes, and the caller's nonce as the binding anchor.
-	if len(params.Measurements) != len(exp.snpPins.BySMP) {
-		t.Errorf("passed %d measurements, want %d", len(params.Measurements), len(exp.snpPins.BySMP))
+	if len(params.Measurements) != len(exp.identity.LaunchDigests()) {
+		t.Errorf("passed %d measurements, want %d", len(params.Measurements), len(exp.identity.LaunchDigests()))
 	}
-	if !bytes.Equal(params.ExpectedInitDataHash, exp.hostData[:]) {
-		t.Errorf("ExpectedInitDataHash = %x, want %x", params.ExpectedInitDataHash, exp.hostData)
+	if !bytes.Equal(params.ExpectedInitDataHash, expectedHostData(exp)) {
+		t.Errorf("ExpectedInitDataHash = %x, want %x", params.ExpectedInitDataHash, expectedHostData(exp))
 	}
 	if !bytes.Equal(params.ExpectedReportData, nonce) {
 		t.Errorf("ExpectedReportData = %q, want the caller's nonce %q", params.ExpectedReportData, nonce)
@@ -605,17 +624,17 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 			return nil, fmt.Errorf("collateral unavailable")
 		},
 		"report_data not bound": func() (*teetypes.VerificationResult, error) {
-			r := snpResultFor(exp, 2)
+			r := snpResultFor(t, exp, 2)
 			r.ReportDataMatch = teetypes.Ptr(false)
 			return r, nil
 		},
 		"another operator key's HOSTDATA": func() (*teetypes.VerificationResult, error) {
-			r := snpResultFor(exp, 2)
-			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+			r := snpResultFor(t, exp, 2)
+			r.Claims.InitData = teetypes.HexBytes(expectedHostData(other))
 			return r, nil
 		},
 		"unpinned launch digest": func() (*teetypes.VerificationResult, error) {
-			r := snpResultFor(exp, 2)
+			r := snpResultFor(t, exp, 2)
 			r.Claims.LaunchDigest = strings.Repeat("ab", runtimemeasure.Size)
 			return r, nil
 		},
@@ -629,4 +648,18 @@ func TestAttestGateSNPFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// expectedRTMR3 is the register a node satisfying exp must report: the
+// operator-key seed extended by exp's workload chain. VerifyBinding derives
+// the same value inside the gate; here it builds the claims to feed it.
+func expectedRTMR3(exp measuredPolicy) []byte {
+	reg := runtimemeasure.FromDigestsSeeded(runtimemeasure.Seed(exp.operatorPubPEM), exp.workloadDigests)
+	return reg[:]
+}
+
+// expectedHostData is the HOSTDATA a node satisfying exp must report.
+func expectedHostData(exp measuredPolicy) []byte {
+	hd := runtimemeasure.HostData(exp.operatorPubPEM)
+	return hd[:]
 }

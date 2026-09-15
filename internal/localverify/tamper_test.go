@@ -163,7 +163,7 @@ func TestEnforceResult(t *testing.T) {
 			Claims:          teetypes.Claims{LaunchDigest: digest},
 		}
 	}
-	anchor := Params{ExpectedReportData: []byte("nonce")}
+	anchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("nonce")}}
 
 	t.Run("passing verdict", func(t *testing.T) {
 		if err := enforceResult(good(), anchor); err != nil {
@@ -224,7 +224,7 @@ func TestEnforceResult(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := enforceResult(good(), Params{ExpectedReportData: []byte("nonce"), Measurements: [][]byte{m}}); err != nil {
+		if err := enforceResult(good(), Params{Measurements: [][]byte{m}, VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("nonce")}}); err != nil {
 			t.Fatalf("want nil, got %v", err)
 		}
 	})

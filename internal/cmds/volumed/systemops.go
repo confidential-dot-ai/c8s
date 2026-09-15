@@ -15,11 +15,14 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 )
 
-// fsType is the filesystem inside every volume. `c8s volume create` always
-// builds erofs, so this is an invariant rather than a choice the caller makes —
-// and a filesystem type read from the request would be a host-chosen argument
-// to mount(2).
-const fsType = "erofs"
+// The only two filesystems a volume can hold: erofs under dm-verity for an
+// immutable volume, writable ext4 for a mutable one. The opener picks from the
+// validated blob's mode — a filesystem type read from the request would be a
+// host-chosen argument to mount(2).
+const (
+	fsTypeErofs = "erofs"
+	fsTypeExt4  = "ext4"
+)
 
 // keyFD is where the key file lands in the child. exec.Cmd.ExtraFiles starts at
 // 3, and cryptsetup opens it by path.
@@ -40,19 +43,24 @@ type SystemOps struct {
 //
 // Plain, not LUKS: there is no header on the device, so every parameter comes
 // from the key blob and none from bytes the host can rewrite.
-func (s SystemOps) CryptOpen(ctx context.Context, device, mapper string, key []byte) error {
+//
+// An immutable volume's mapping must be read-only at the device layer, not
+// only at the mount: a writable mapping lets anything on the node write
+// plaintext through it, producing ciphertext under the real key on
+// host-visible storage. A mutable volume's is the writable one by design.
+func (s SystemOps) CryptOpen(ctx context.Context, device, mapper string, key []byte, readOnly bool) error {
 	keyFile, err := keyMemfd(key)
 	if err != nil {
 		return err
 	}
 	defer keyFile.Close()
 
-	if err := s.run(ctx, "cryptsetup", []*os.File{keyFile}, cryptOpenArgs(device, mapper)...); err != nil {
+	if err := s.run(ctx, "cryptsetup", []*os.File{keyFile}, cryptOpenArgs(device, mapper, readOnly)...); err != nil {
 		return err
 	}
-	// The mapping must be read-only at the device layer, not only at the mount:
-	// a writable mapping lets anything on the node write plaintext through it,
-	// producing ciphertext under the real key on host-visible storage.
+	if !readOnly {
+		return nil
+	}
 	if err := assertReadOnly(mapperDir, mapper); err != nil {
 		_ = s.CryptClose(ctx, mapper)
 		return err
@@ -76,13 +84,28 @@ func (s SystemOps) VerityClose(ctx context.Context, mapper string) error {
 	return s.run(ctx, "veritysetup", nil, "close", mapper)
 }
 
-// MountRO mounts the verified device at the target handle.
+// The hardening every volume mount gets, with and without the read-only flag
+// an immutable volume adds.
+const (
+	mountROFlags uintptr = unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+	mountRWFlags uintptr = unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+)
+
+// MountRO mounts the opened device read-only at the target handle; MountRW
+// mounts it writable.
 //
 // The syscall is made directly rather than through mount(8): the target is an
 // open handle, and passing /proc/self/fd to a subprocess would reopen it by
 // path in a process that does not hold it.
-func (SystemOps) MountRO(_ context.Context, source string, target *os.File) error {
-	const flags = unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+func (SystemOps) MountRO(_ context.Context, source string, target *os.File, fsType string) error {
+	return doMount(source, target, fsType, mountROFlags)
+}
+
+func (SystemOps) MountRW(_ context.Context, source string, target *os.File, fsType string) error {
+	return doMount(source, target, fsType, mountRWFlags)
+}
+
+func doMount(source string, target *os.File, fsType string, flags uintptr) error {
 	if err := unix.Mount(source, ProcPath(target), fsType, flags, ""); err != nil {
 		return fmt.Errorf("mount %s at %s: %w", source, target.Name(), err)
 	}
@@ -91,6 +114,20 @@ func (SystemOps) MountRO(_ context.Context, source string, target *os.File) erro
 
 // Unmount detaches the mount. MNT_DETACH so a mount still busy is removed from
 // the tree rather than left for kubelet to trip over while tearing the pod down.
+// ListMappings names what device-mapper has published, which is the only
+// record of a volume stack that outlives the process that opened it.
+func (SystemOps) ListMappings(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(mapperDir)
+	if err != nil {
+		return nil, fmt.Errorf("volumed: read %s: %w", mapperDir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
 func (SystemOps) Unmount(_ context.Context, target string) error {
 	if err := unix.Unmount(target, unix.MNT_DETACH); !unmounted(err) {
 		return fmt.Errorf("unmount %s: %w", target, err)
@@ -116,8 +153,8 @@ func unmounted(err error) bool {
 //   - --sector-size 512 matches what wrote the image. For aes-xts-plain64 the
 //     tweak is the sector index, and at a larger sector size the numbering
 //     depends on iv_large_sectors.
-func cryptOpenArgs(device, mapper string) []string {
-	return []string{
+func cryptOpenArgs(device, mapper string, readOnly bool) []string {
+	args := []string{
 		"open",
 		"--type", "plain",
 		"--hash", "plain",
@@ -126,10 +163,11 @@ func cryptOpenArgs(device, mapper string) []string {
 		"--cipher", "aes-xts-plain64",
 		"--key-size", strconv.Itoa(volume.KeyBytes * 8),
 		"--sector-size", strconv.Itoa(volume.SectorSize),
-		"--readonly",
-		"--batch-mode",
-		device, mapper,
 	}
+	if readOnly {
+		args = append(args, "--readonly")
+	}
+	return append(args, "--batch-mode", device, mapper)
 }
 
 // verityOpenArgs builds the verity open with no superblock.

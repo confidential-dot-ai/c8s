@@ -5,7 +5,8 @@
 # chart tests cannot: a dial to a cw pod IP is actually intercepted and
 # wrapped (the mesh inbound counter moves on the workload's node), the
 # FORWARD drop actually fires on this cluster's CNI for Service-VIP and
-# excluded-namespace traffic, and the drop counter records it. The inbound
+# excluded-namespace traffic, the drop counter records it, and the egress
+# guard's DNS carve-out is written so it can match in that chain at all. The inbound
 # connection counter is the wrap signal; no packet capture (tcpdump on CVM
 # node images is flaky and adds nothing the counters don't prove).
 #
@@ -15,10 +16,14 @@
 # Env:
 #   CW_NS / CW_ID   pick a specific workload (default: first Running cw pod)
 #   CW_PORT         port to probe (default: the pod's first containerPort)
-#   CLIENT_IMAGE    curl-capable client image (default curlimages/curl:8.8.0)
+#   CLIENT_IMAGE    curl-capable client image (default curl 8.8.0, digest-pinned)
+#   CLIENT_UID      numeric non-root UID declared by that image (default 100,
+#                   the verified curl_user UID in the pinned default)
 #   EXCLUDED_NS     mesh-excluded source namespace (default kube-system)
 #   MESH_HEALTH_PORT     ratls-mesh health/metrics port (chart
 #                        ratlsMesh.ports.health; default 15021)
+#   MESH_NS              namespace the chart is installed in (default
+#                        c8s-system), read for the ratls-mesh DaemonSet
 #   METRIC_WAIT_SECONDS  how long to wait for a counter to move; also the
 #                        abort budget for a baseline that never gets a
 #                        successful scrape (default 75; raise it above ~2x
@@ -27,10 +32,15 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-client_image="${CLIENT_IMAGE:-curlimages/curl:8.8.0}"
+client_image="${CLIENT_IMAGE:-curlimages/curl:8.8.0@sha256:73e4d532ea62d7505c5865b517d3704966ffe916609bedc22af6833dc9969bcd}"
+client_uid="${CLIENT_UID:-100}"
 excluded_ns="${EXCLUDED_NS:-kube-system}"
 health_port="${MESH_HEALTH_PORT:-15021}"
+mesh_ns="${MESH_NS:-c8s-system}"
 metric_wait="${METRIC_WAIT_SECONDS:-75}"
+
+[[ "$client_uid" =~ ^[1-9][0-9]*$ ]] \
+  || fail "CLIENT_UID must be a positive numeric UID (got '$client_uid')"
 
 ns="mesh-cw-check-$$"
 client=client
@@ -69,8 +79,11 @@ echo "workload: $cw_ns/$cw_pod (cw=$cw_id) at $cw_ip:$cw_port on $cw_node ($cw_n
 # --- client pod (fresh namespace: a normal, non-excluded mesh source) -------
 
 kubectl create namespace "$ns" >/dev/null
+# A plain client pod: restricted-compliant, since the fresh namespace inherits
+# the node image's restricted PodSecurity default.
 kubectl run "$client" -n "$ns" --image="$client_image" --restart=Never \
-  --command -- sleep 3600 >/dev/null
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":'"$client_uid"',"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$client"'","image":"'"$client_image"'","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  >/dev/null
 kubectl wait --for=condition=Ready pod/"$client" -n "$ns" --timeout=120s >/dev/null
 
 client_node=$(kubectl get pod "$client" -n "$ns" -o jsonpath='{.spec.nodeName}')
@@ -209,4 +222,47 @@ echo "ok: excluded-namespace source blocked (curl exit 28 = timeout from DROP)"
 await_metric_above "$excluded_node_ip" "$drops" "$base_excluded_drops" \
   "cw inbound drop counter on $excluded_node moved: the guard blocked the excluded source, not a coincidence"
 
-echo "PASS: workload path mesh-wrapped; VIP and excluded-source plaintext bypasses fail closed"
+# --- egress guard: the DNS carve-out is scoped where it can match -----------
+
+# A cw pod that loses DNS still reaches Running, so this is asserted against
+# the chain the node actually runs rather than against the pod's health. Read
+# on the workload's node, in the sidecar that programs it.
+mesh_pod=$(kubectl get pods -n "$mesh_ns" -l app=c8s-ratls-mesh \
+  --field-selector="spec.nodeName=$cw_node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+[ -n "$mesh_pod" ] || fail "no ratls-mesh pod on $cw_node in namespace $mesh_ns (set MESH_NS)"
+
+egress_chain=$(kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+  iptables -L RATLS-MESH-CW-EGRESS -n -v -x 2>/dev/null) \
+  || fail "RATLS-MESH-CW-EGRESS not readable on $cw_node; is the cw egress guard installed?"
+
+dns_rows=$(awk '/udp/ && /dpt:53/' <<<"$egress_chain")
+[ -n "$dns_rows" ] || fail "RATLS-MESH-CW-EGRESS carries no UDP/53 carve-out on $cw_node; cw pods cannot resolve:
+$egress_chain"
+
+# The carve-out names no destination, so it survives kube-proxy's Service DNAT
+# and holds whatever address this cluster's resolver has. A row naming one is
+# the regression this replaced: where the resolver sits elsewhere it puts the
+# carve-out out of reach and every cw DNS query hits the drop below.
+# In `iptables -L -n -v -x` the destination column is field 9; unscoped reads
+# 0.0.0.0/0. A conntrack scope shows as an extra match instead of a column.
+scoped=$(awk '$9 != "0.0.0.0/0" || /ctorigdst/' <<<"$dns_rows")
+[ -z "$scoped" ] || fail "the UDP/53 carve-out is destination-scoped; it must name no address:
+$scoped"
+
+# A RETURN below the drop is a RETURN that never runs.
+drop_line=$(awk '/DROP/ && /!tcp/ {print NR; exit}' <<<"$egress_chain")
+dns_line=$(awk '/udp/ && /dpt:53/ {print NR; exit}' <<<"$egress_chain")
+if [ -n "$drop_line" ] && [ -n "$dns_line" ] && [ "$dns_line" -gt "$drop_line" ]; then
+  fail "the UDP/53 carve-out is ordered below the non-TCP drop, so it is unreachable:
+$egress_chain"
+fi
+echo "ok: cw egress DNS carve-out is unscoped and ordered above the drop"
+
+# Membership is what the guard keys on. An empty set is enforcement that is not
+# running, and reads identically to a guard that is simply not being exercised.
+cw_members=$(kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+  ipset list RATLS-MESH-CW-PODS 2>/dev/null | awk '/^Number of entries:/ {print $NF}')
+[ "${cw_members:-0}" -gt 0 ] || fail "ipset RATLS-MESH-CW-PODS on $cw_node holds no members while $cw_ns/$cw_pod is Running; the guard is not enforcing on any cw pod"
+echo "ok: cw ipset on $cw_node holds $cw_members member(s)"
+
+echo "PASS: workload path mesh-wrapped; VIP and excluded-source plaintext bypasses fail closed; egress DNS carve-out matchable"

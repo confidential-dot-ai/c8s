@@ -22,9 +22,16 @@ spec:
         app.kubernetes.io/name: c8s-operator
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: operator
-      {{- with .Values.operator.podAnnotations }}
+      {{- if or .Values.operator.podAnnotations .Values.cds.measurementsConfig }}
       annotations:
+        {{- if .Values.cds.measurementsConfig }}
+        # A ConfigMap edit alone does not change the pod template, so without
+        # this a tightened pin would not roll the operator.
+        checksum/measurements-config: {{ .Values.cds.measurementsConfig | sha256sum }}
+        {{- end }}
+        {{- with .Values.operator.podAnnotations }}
 {{ toYaml . | indent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "c8s.operatorName" . }}
@@ -46,7 +53,11 @@ spec:
             - --leader-election-namespace={{ .Release.Namespace }}
             - --status-mirror-enabled={{ .Values.statusMirror.enabled }}
             - --get-cert-image={{ include "c8s.image" . }}
+            {{- if .Values.node.bakedServices }}
+            - --cds-url=$(C8S_CDS_URL)
+            {{- else }}
             - --cds-url={{ include "c8s.trustRootURL" . }}
+            {{- end }}
             - --webhook-config-name={{ include "c8s.fullname" . }}-pod-injector
             - --webhook-service-name={{ include "c8s.operatorName" . }}
             - --webhook-service-namespace={{ .Release.Namespace }}
@@ -54,41 +65,44 @@ spec:
             {{- /* The same measurements CDS is pinned to elsewhere: the
                    injected secret fetcher verifies CDS before handing it a
                    sandbox token and taking a value back. */}}
+            {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
+            - --measurements-config=/etc/c8s-measurements/cds.json
+            {{- else }}
             {{- range .Values.cds.measurements }}
             - --cds-measurements={{ . }}
+            {{- end }}
+            {{- range .Values.cds.rtmrs }}
+            - --cds-rtmrs={{ . }}
+            {{- end }}
             {{- end }}
             {{- range .Values.webhook.extraExcluded }}
             - --exclude-namespaces={{ . }}
             {{- end }}
             - --cert-fs-group={{ include "c8s.int" .Values.webhook.certVolume.fsGroup }}
-            - --cert-key-mode={{ .Values.webhook.certVolume.keyMode }}
             - --get-cert-renew-interval={{ .Values.webhook.getCert.renewInterval }}
             - --get-cert-run-as-user={{ include "c8s.int" .Values.webhook.getCert.runAsUser }}
             - --get-cert-run-as-group={{ include "c8s.int" .Values.webhook.getCert.runAsGroup }}
             - --get-cert-run-as-non-root={{ .Values.webhook.getCert.runAsNonRoot }}
-            {{- if .Values.kata.enabled }}
-            - --kata-enforce=true
-            - --hardware-platform={{ include "c8s.hardwarePlatform" . }}
-            {{- end }}
-            {{- if include "c8s.kataGuestReadyGate" . }}
-            - --kata-guest-ready-gate=true
-            {{- end }}
+
             {{- /* Workload-digest claims (docs/ratls.md): get-cert
                    redeems a sandbox token from the node's inventory over a
-                   compiled endpoint: the nri-image-policy socket mounted into
-                   c8s-cert on node-CVM, or guest loopback under kata, where
-                   policy-monitor is in the same guest and nothing is mounted. */}}
-            {{- if .Values.kata.enabled }}
-            - --workload-claims-guest
-            {{- else if or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node") }}
-            {{- /* cvmMode=node bakes the plugin into the node image instead of
-                   installing it from the chart, so nriImagePolicy.enabled is
-                   false there — but the socket still exists at the same path. */}}
+                   compiled endpoint: the nri-image-policy socket that plugin
+                   NRI-mounts into c8s-cert on node-CVM. */}}
+            {{- /* cvmMode=bare-metal bakes the plugin into the node image instead of
+                   installing it from the chart, so the socket exists even when
+                   nriImagePolicy.enabled is false. */}}
             - --workload-claims-host-dir={{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
-            {{- end }}
             {{- range .Values.operator.extraArgs }}
             - {{ . | quote }}
             {{- end }}
+          {{- if .Values.node.bakedServices }}
+          env:
+            - name: C8S_CDS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: c8s-node-runtime
+                  key: cds-url
+          {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
@@ -108,9 +122,26 @@ spec:
             # this emptyDir rather than the immutable image.
             - name: tmp
               mountPath: /tmp
+            {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
+            - name: measurements-config
+              mountPath: /etc/c8s-measurements
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
+        - name: measurements-config
+          configMap:
+            {{- if .Values.node.bakedServices }}
+            name: c8s-node-runtime
+            items:
+              - key: cds.json
+                path: cds.json
+            {{- else }}
+            name: {{ include "c8s.fullname" . }}-measurements
+            {{- end }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

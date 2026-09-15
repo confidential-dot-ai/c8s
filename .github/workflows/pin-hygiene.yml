@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/build-pins.json"
+      - ".github/scripts/pin-manifest.sh"
       - "node-guest-image/c8s/mkosi.sync"
       - "**/Dockerfile"
   workflow_dispatch:
@@ -21,17 +23,8 @@ jobs:
       - run: |
           set -euo pipefail
           fail=0
-          for wf in .github/workflows/c8s-image.yml .github/workflows/kata-guest-base.yml; do
-            value=$(yq -r '.env.CONFOS_REF // ""' "$wf")
-            if [[ "$value" =~ ^\$\{\{[[:space:]]*inputs\.confos_ref[[:space:]]*\|\|[[:space:]]*\'([0-9a-fA-F]{40})\'[[:space:]]*\}\}$ ]]; then
-              ref=${BASH_REMATCH[1]}
-            else
-              ref=$value
-            fi
-            if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
-              echo "::error file=$wf::CONFOS_REF effective default must be a full 40-hex commit, got '$ref'"; fail=1
-            fi
-          done
+          bash .github/scripts/pin-manifest.sh validate \
+            --manifest .github/build-pins.json
           ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
           release_re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$"
           if [[ ! "$ref" =~ $release_re ]]; then

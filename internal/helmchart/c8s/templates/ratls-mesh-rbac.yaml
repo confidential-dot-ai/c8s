@@ -21,7 +21,15 @@ roleRef:
   kind: ClusterRole
   name: {{ include "ratls-mesh.fullname" . }}
 subjects:
+  {{- if .Values.node.bakedServices }}
+  # Baked mesh processes use each node's rotating kubelet credential. Grant
+  # only the cluster-wide pod reads their resolver and ipsets need.
+  - kind: Group
+    name: system:nodes
+    apiGroup: rbac.authorization.k8s.io
+  {{- else }}
   - kind: ServiceAccount
     name: {{ include "ratls-mesh.fullname" . }}
     namespace: {{ .Release.Namespace }}
+  {{- end }}
 {{- end }}

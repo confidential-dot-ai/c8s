@@ -64,10 +64,12 @@ func TestVolumeFetcherIsANativeSidecarAfterTheCertContainers(t *testing.T) {
 	}
 }
 
-// The plaintext is read-only to the workload, and the node agent makes the
-// mount from outside the pod — without HostToContainer the container keeps
-// seeing the empty directory it started with.
-func TestVolumeMountIsReadOnlyAndPropagated(t *testing.T) {
+// The node agent makes the mount from outside the pod — without
+// HostToContainer the container keeps seeing the empty directory it started
+// with. The container's own mount is not read-only: writability is the
+// daemon's mount flags (ro for immutable, rw for mutable), and a container-side
+// flag would not narrow a propagated mount anyway.
+func TestVolumeMountIsPropagated(t *testing.T) {
 	pod := podWithApp()
 	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "")
 
@@ -76,8 +78,8 @@ func TestVolumeMountIsReadOnlyAndPropagated(t *testing.T) {
 	if m == nil {
 		t.Fatalf("app has no volume mount; mounts = %v", mountNames(app))
 	}
-	if !m.ReadOnly {
-		t.Error("the workload may write the decrypted volume")
+	if m.ReadOnly {
+		t.Error("a read-only container mount would hide a mutable volume's writability")
 	}
 	if m.MountPropagation == nil || *m.MountPropagation != corev1.MountPropagationHostToContainer {
 		t.Errorf("propagation = %v, want HostToContainer", m.MountPropagation)
@@ -145,8 +147,8 @@ func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 	if m.MountPath != "/run/c8s/volumes/weights" {
 		t.Errorf("mount path = %q, want the webhook's own", m.MountPath)
 	}
-	if !m.ReadOnly {
-		t.Error("a pre-declared writable mount survived")
+	if m.ReadOnly {
+		t.Error("a pre-declared read-only mount survived")
 	}
 	if m.MountPropagation == nil || *m.MountPropagation != corev1.MountPropagationHostToContainer {
 		t.Error("a pre-declared unpropagated mount survived")
@@ -180,18 +182,18 @@ func TestReservedVolumePrefixMustBeMemoryBacked(t *testing.T) {
 				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/exfil"},
 			},
 		}}
-		if err := rejectReservedVolumeVolume(pod, false); err == nil {
+		if err := rejectReservedVolumeVolume(pod); err == nil {
 			t.Errorf("%s: a hostPath under the reserved prefix was accepted", name)
 		}
 	}
 
 	// The shape the webhook itself injects is fine, as is omitting it.
 	pod := podWithApp()
-	pod.Spec.Volumes = []corev1.Volume{openedVolume("weights", false)}
-	if err := rejectReservedVolumeVolume(pod, false); err != nil {
+	pod.Spec.Volumes = []corev1.Volume{openedVolume("weights")}
+	if err := rejectReservedVolumeVolume(pod); err != nil {
 		t.Errorf("the injected shape was rejected: %v", err)
 	}
-	if err := rejectReservedVolumeVolume(podWithApp(), false); err != nil {
+	if err := rejectReservedVolumeVolume(podWithApp()); err != nil {
 		t.Errorf("an absent volume was rejected: %v", err)
 	}
 }
@@ -285,11 +287,11 @@ func TestVolumesAnnotationParsing(t *testing.T) {
 	}
 }
 
-// Neither shape configured means there is no daemon to hand the key to, so
+// Without a socket directory there is no daemon to hand the key to, so
 // admission refuses rather than leaving the workload waiting on a mount that
 // can never land.
 func TestHandleRejectsVolumesWithoutAnyDaemon(t *testing.T) {
-	cfg := secretsConfig() // neither WorkloadClaimsHostDir nor WorkloadClaimsGuest
+	cfg := secretsConfig() // WorkloadClaimsHostDir is unset
 
 	resp := handleVolumesPod(t, cfg)
 	if resp.Allowed {
@@ -300,46 +302,20 @@ func TestHandleRejectsVolumesWithoutAnyDaemon(t *testing.T) {
 	}
 }
 
-// Under kata volumed runs inside the guest on loopback, so a volumes pod is
-// serviceable with nothing mounted.
-func TestHandleAdmitsVolumesUnderKataGuest(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-
-	if resp := handleVolumesPod(t, cfg); !resp.Allowed {
-		t.Fatalf("Handle denied a volumes pod the in-guest daemon can serve: %v", resp.Result)
-	}
-}
-
-// The placeholder's medium is load-bearing and differs by shape: a default
-// emptyDir becomes a disk.img block device under shared_fs="none", and a
-// memory-backed one is unreachable to volumed's RESOLVE_NO_XDEV on node-CVM.
+// The placeholder's medium is load-bearing: a memory-backed emptyDir is
+// unreachable to volumed's RESOLVE_NO_XDEV on node-CVM.
 func TestOpenedVolumeMediumFollowsTheShape(t *testing.T) {
-	if got := openedVolume("weights", false).EmptyDir.Medium; got != corev1.StorageMediumDefault {
+	if got := openedVolume("weights").EmptyDir.Medium; got != corev1.StorageMediumDefault {
 		t.Errorf("node-CVM medium = %q, want default", got)
-	}
-	if got := openedVolume("weights", true).EmptyDir.Medium; got != corev1.StorageMediumMemory {
-		t.Errorf("kata medium = %q, want Memory", got)
 	}
 	// And the reserved-volume guard must expect the same shape it injects,
 	// or the webhook would reject its own output on re-admission.
-	for _, guest := range []bool{false, true} {
+	{
 		pod := podWithApp()
-		pod.Spec.Volumes = []corev1.Volume{openedVolume("weights", guest)}
-		if err := rejectReservedVolumeVolume(pod, guest); err != nil {
-			t.Errorf("guest=%v: the injected shape was rejected: %v", guest, err)
+		pod.Spec.Volumes = []corev1.Volume{openedVolume("weights")}
+		if err := rejectReservedVolumeVolume(pod); err != nil {
+			t.Errorf("the injected shape was rejected: %v", err)
 		}
-	}
-}
-
-// The fetcher must be told to use the guest endpoints, not merely admitted.
-func TestVolumeContainerSelectsGuestEndpointsUnderKata(t *testing.T) {
-	cfg := secretsConfig()
-	cfg.WorkloadClaimsGuest = true
-	inj := &injection{Volumes: volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}, Dir: "/models"}}
-
-	if args := volumeContainer(inj, cfg).Args; !slices.Contains(args, "--workload-claims-guest") {
-		t.Fatalf("get-volume args %v omit --workload-claims-guest under kata", args)
 	}
 }
 

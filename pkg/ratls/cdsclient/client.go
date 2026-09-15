@@ -23,8 +23,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -73,6 +75,16 @@ type Config struct {
 	// populate this from `cds.measurements` in values.yaml.
 	CDSMeasurements [][]byte
 
+	// CDSRTMRs, when non-empty, additionally pins CDS's TDX runtime
+	// measurement registers by index during the RA-TLS handshake. On TDX the
+	// launch digest covers TDVF firmware alone, so without these the
+	// handshake trusts a CDS whose kernel and rootfs the host chose. Ignored
+	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
+	CDSRTMRs map[int][]byte
+
+	// CDSEntries additionally binds the CDS image to its authorized leader key.
+	CDSEntries []measurements.Entry
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -98,7 +110,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Entries: cfg.CDSEntries, Policy: remote.Policy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc
@@ -130,7 +142,7 @@ func NewClient(cfg *Config) *Client {
 //  2. Call CDS (authenticate -> attest) over RA-TLS to get a signed certificate
 //     chain. Authenticity of the response is provided by the RA-TLS handshake
 //     (the underlying http.Client's TLSClientConfig verifies CDS's peer cert
-//     against the configured measurement allowlist).
+//     against the configured reference values).
 //  3. Return key + leaf cert + authenticated CA bundle from the signed response
 func (c *Client) RequestCert(ctx context.Context) (*ecdsa.PrivateKey, []byte, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -280,15 +292,15 @@ func (c *Client) attestationExtension(ctx context.Context, key *ecdsa.PrivateKey
 		return pkix.Extension{}, err
 	}
 	att := &ratls.Attestation{
-		TEEType: teeType,
-		Report:  []byte(report),
+		Family: teeType,
+		Report: []byte(report),
 	}
-	return att.MarshalExtension()
+	return ratls.MarshalExtension(att)
 }
 
 func (cfg *Config) teeType() (ratls.TEEType, error) {
-	if cfg == nil || cfg.TEEType == 0 {
-		return 0, fmt.Errorf("cdsclient: TEEType is required")
+	if cfg == nil || cfg.TEEType == "" {
+		return "", fmt.Errorf("cdsclient: TEEType is required")
 	}
 	// Both SEV-SNP and TDX are supported. attestclient.RATLSEvidence
 	// dispatches per-TEE (SNP → raw report bytes; TDX → envelope minus
@@ -298,7 +310,7 @@ func (cfg *Config) teeType() (ratls.TEEType, error) {
 	case ratls.TEETypeSEVSNP, ratls.TEETypeTDX:
 		return cfg.TEEType, nil
 	default:
-		return 0, fmt.Errorf("cdsclient: TEEType %s is not supported", cfg.TEEType)
+		return "", fmt.Errorf("cdsclient: TEEType %s is not supported", cfg.TEEType)
 	}
 }
 

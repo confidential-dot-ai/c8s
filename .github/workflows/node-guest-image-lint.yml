@@ -12,15 +12,35 @@ on:
   pull_request:
     paths:
       - "node-guest-image/**"
+      - "internal/cmds/launchconfig/**"
+      - "internal/cmds/join/**"
+      - "cmd/c8s/join*.go"
+      - "internal/cmds/nodeservices/**"
+      - "cmd/c8s/node_image*.go"
+      - "cmd/c8s/node_services*.go"
+      - "internal/helmchart/**"
+      - "test/e2e/**"
       - ".github/workflows/node-guest-image-lint.yml"
+      - ".github/build-pins.json"
+      - ".github/scripts/pin-manifest.sh"
       # The rke2-role job runs via make; a broken/renamed target must fail
       # here, not on the next node-guest-image change.
       - "Makefile"
       # The lint guards this vendored file's c8s-local bait/tripwire markers;
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
+      - ".github/workflows/snp-metal-e2e.yml"
+      - ".github/scripts/node-launch-data.sh"
+      - ".github/workflows/tdx-image-acceptance.yml"
+      - ".github/actions/tdx-metal-e2e/**"
       # The invariants gate body; a script-only change must run the gate.
       - ".github/scripts/node-guest-image-invariants.sh"
+      - ".github/scripts/tests/test-node-guest-image-invariants.sh"
+      - ".github/scripts/tdx-image-acceptance.sh"
+      - ".github/scripts/tests/test-tdx-image-acceptance.sh"
+      - ".github/workflows/c8s-image.yml"
+      - ".github/workflows/c8s-image-publish.yml"
+      - ".github/workflows/c8s-image-manual.yml"
   workflow_dispatch:
 
 permissions:
@@ -35,26 +55,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve pinned CONFOS_REF
-        id: ref
+      - name: Resolve node-image pins
+        id: pins
         run: |
-          # The pin line is either a bare quoted sha or an expression whose
-          # fallback carries the sha ("inputs.confos_ref || '<sha>'"); take
-          # the 40-hex value off the CONFOS_REF line either way.
-          ref=$(grep -m1 'CONFOS_REF:' .github/workflows/c8s-image.yml | grep -oE '[0-9a-f]{40}' | head -1)
-          [ -n "$ref" ] || { echo "::error::could not extract CONFOS_REF from c8s-image.yml"; exit 1; }
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          bash .github/scripts/pin-manifest.sh export \
+            --manifest .github/build-pins.json \
+            --domain node-image \
+            --format github-output >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/confidential-os-builder
-          ref: ${{ steps.ref.outputs.ref }}
+          ref: ${{ steps.pins.outputs.confos }}
           path: confos
 
       - name: node-guest-image invariants
         env:
-          CONFOS_REF: ${{ steps.ref.outputs.ref }}
-        run: .github/scripts/node-guest-image-invariants.sh
+          # The node-image pin must support the measured writable-state list.
+          EXPECT_IMMUTABLE_ROOT: "1"
+          CONFOS_REF: ${{ steps.pins.outputs.confos }}
+        run: |
+          .github/scripts/node-guest-image-invariants.sh
+          bash .github/scripts/tests/test-node-guest-image-invariants.sh
+
+      - name: Preserve the selected attester configuration with a loopback bind
+        run: ./node-guest-image/tests/attester-finalize-test.sh
 
       - name: Resolve the confos base release
         id: release
@@ -64,6 +89,38 @@ jobs:
           rel=$(sed -n 's/^Release=[[:space:]]*//p' "$conf" | head -1)
           [ -n "$rel" ] || { echo "::error::no Release= in $conf"; exit 1; }
           echo "release=$rel" >> "$GITHUB_OUTPUT"
+
+  immutable-root:
+    name: immutable root and c8s writable state
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve this checkout's node-image pin
+        id: pins
+        run: |
+          bash .github/scripts/pin-manifest.sh export \
+            --manifest .github/build-pins.json \
+            --domain node-image \
+            --format github-output >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: confidential-dot-ai/confidential-os-builder
+          ref: ${{ steps.pins.outputs.confos }}
+          path: confos
+          persist-credentials: false
+
+      - name: Exercise the pinned initrd with the c8s state declarations
+        # Real mounts in a private namespace and disposable chroot; the
+        # production init is unchanged, with hardware setup and handoff shimmed.
+        run: sudo make test-node-guest-image-immutable-root
+
+      - name: Check the immutable-root harness
+        run: shellcheck node-guest-image/tests/immutable-root-test.sh
 
   cloud-init-disabled:
     name: cloud-init cannot run in the node image
@@ -135,18 +192,80 @@ jobs:
             -manifest "$manifests/local-path-storage.yaml" \
             -manifest "$manifests/nvidia-device-plugin.yaml"
 
+  gpu-label:
+    name: gpu-node-label logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the gpu-node-label unit test
+        run: make test-node-guest-image-gpu-label
+
+  gpu-cc:
+    name: gpu-cc-enforce logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the gpu-cc-enforce unit test
+        run: make test-node-guest-image-gpu-cc
+
+  scratch:
+    name: scratch-enforce logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the scratch-enforce unit test
+        run: make test-node-guest-image-scratch
+
+  apparmor:
+    name: AppArmor config and boot gate
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run AppArmor regression tests
+        env:
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: make test-node-guest-image-apparmor
+
+      - name: Check exact-image acceptance evidence and lifecycle
+        run: bash .github/scripts/tests/test-tdx-image-acceptance.sh
+
+      - name: Check AppArmor scripts
+        run: |
+          shellcheck -x -P SCRIPTDIR node-guest-image/check-apparmor-config.sh \
+            node-guest-image/c8s/mkosi.extra/usr/local/bin/apparmor-enforce.sh \
+            node-guest-image/tests/apparmor-{config,enforce,kernel,runtime}-test.sh \
+            .github/scripts/tdx-image-acceptance.sh \
+            .github/scripts/tests/test-tdx-image-acceptance.sh
+          shellcheck -x -P SCRIPTDIR test/e2e/lib{,-test}.sh
+
+      - name: Exercise the real AppArmor kernel and parser
+        env:
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: bash node-guest-image/tests/apparmor-kernel-test.sh
+
+  psa-ready:
+    name: PodSecurity credential-release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the exact production-script harness
+        run: make test-node-guest-image-psa-ready
+
   rke2-role:
     name: rke2-role dispatch (script)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install genisoimage
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends genisoimage
-
       - name: Run the script-level harness
-        # Root: loop mounts + /run/confos writes; the runner VM is disposable.
-        run: sudo make test-node-guest-image-role
+        # The production script runs unchanged in an unprivileged container.
+        run: make test-node-guest-image-role
 
   rke2-role-systemd:
     name: rke2-role dispatch (systemd)

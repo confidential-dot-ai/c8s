@@ -5,13 +5,13 @@ peer is trusted not because its certificate chains to a CA, but because the
 certificate itself carries hardware attestation evidence proving that the TLS
 key was generated inside a genuine TEE running measured code. Every trust
 decision in c8s that crosses a machine boundary — mesh traffic between pods,
-certificate issuance, allowlist reads, CA handoff — rides on it.
+certificate issuance, allowlist reads — rides on it.
 
 This doc walks the process step by step: what is in an RA-TLS certificate, how
 a handshake verifies it, how the self-signed bootstrap regime upgrades to
 CDS-issued certificates, what the whole construction does and does not
-guarantee, how it operates under the two confidential shapes (node-as-CVM and
-pod-as-CVM), and which certificate is used where.
+guarantee, how it operates on confidential nodes, and which certificate is
+used where.
 
 Companion docs: [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh
 dataplane), [install-flows.md](install-flows.md) (which components deploy in
@@ -63,8 +63,9 @@ can sign a report, and only code inside the TEE ever holds the private key.
 
 ## Anatomy of an RA-TLS certificate
 
-`pkg/ratls` builds certificates like this (`cert.go`, `extension.go`,
-`provider.go`):
+`pkg/ratls` builds certificates like this (`cert.go`, `provider.go`), over the
+extension format in
+[attestation-go/ratls](https://github.com/confidential-dot-ai/attestation-go/tree/main/ratls):
 
 1. **Key generation.** An ECDSA P-256 key pair is generated in process memory.
    It is never written to disk and never leaves the TEE.
@@ -73,12 +74,7 @@ can sign a report, and only code inside the TEE ever holds the private key.
    TDX). The nonce is optional on mesh handshakes (TLS 1.3 already prevents
    replay of the *session*) and mandatory in the CDS issuance flow (it proves
    report freshness). Certificates always use this plain binding
-   (`ReportDataForKey`). One flow folds extra context in — the CDS handoff's
-   operator-key commitment (`ReportDataForKeyWithContext`) — as a
-   domain-separated, length-framed transcript,
-   `SHA-384("c8s-report-data-context-v1\0" ‖ framed(pubkey) ‖ framed(nonce) ‖ framed(context))`
-   with `framed(x) = uint64-BE(len(x)) ‖ x`, so no two distinct field triples
-   share a preimage.
+   (`ReportDataForKey`).
 3. **Evidence.** The component asks its **local attestation-api** (`POST
    /attest`, the Rust service from
    [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs))
@@ -100,26 +96,26 @@ The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 
 | OID | Extension | Stamped by |
 |---|---|---|
-| `…1.1` | RA-TLS attestation (`TEEAttestation`, above) — `extension.go` | the attesting component, on its own certificate and on its CSR |
+| `…1.1` | RA-TLS attestation (`TEEAttestation`) — format owned by attestation-go/ratls, OID assigned here in `pkg/ratls` | the attesting component, on its own certificate and on its CSR |
 | `…1.2` | SHA-256 audit digest of the issuance evidence — `pkg/certutil` | CDS, on every issued leaf |
 | `…1.4` | pod sandbox ID — `sandbox.go`, see [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key) | CDS, on a leaf whose requester presented a sandbox token |
 | `…1.5` | matched workload — `matchedworkload.go`, see [Matched workload](#matched-workload-which-allowlist-entry-is-behind-a-key) | CDS, on a leaf whose sandbox's high-water inventory uniquely matches one allowlist entry |
 
 `…1.3` was the config-claims extension; it is retired and not reusable.
 
-The `report` field carries one of two shapes, auto-detected on parse
-(`extension.go`):
+The `report` field carries one of two shapes, auto-detected on parse by
+attestation-go/ratls, which owns the wire format:
 
-- **Bare-metal SNP**: the raw 1184-byte `ATTESTATION_REPORT`. Kept raw so a
-  bare-metal report stays extractable by offline SNP verifiers.
-- **Everything else** (`az-snp`, `gcp-snp`, `tdx`, `az-tdx`): the attestation-api's
+- **Native SEV-SNP** (`snp`, `gcp-snp`): the raw 1184-byte `ATTESTATION_REPORT`,
+  kept raw so an offline SNP verifier can extract it.
+- **Everything else** (`az-snp`, `tdx`, `gcp-tdx`, `az-tdx`): the attestation-api's
   JSON evidence envelope, forwarded verbatim to `/verify` at handshake time. Both
   TDX shapes must use the envelope (c8s deliberately ships no in-process quote
-  parser — see `verify.go`): native `tdx` carries a bulky `cc_eventlog` that is
+  parser — see `verify.go`): the native ones carry a bulky `cc_eventlog` that is
   stripped before embedding, while Azure-vTPM `az-tdx` (the TD quote wrapped in the
   HCL report, alongside the vTPM quote) has no eventlog and is embedded as-is.
   Azure evidence wrapped in a Hyper-V HCL header is normalized back to the raw
-  report where needed (`snp_report.go`).
+  report where needed.
 
 Certificates live 24h by default and rotate in the background at 50% of TTL.
 While the current certificate is still inside its validity window it keeps
@@ -171,7 +167,7 @@ Step by step:
    handshakes reuse the cached certificate until rotation.
 2. **The client sends no PKI trust anchors.** `NewClientTLSConfig` sets
    `InsecureSkipVerify: true`; `VerifyPeerCertificate` does the work.
-3. **Extension extraction.** Missing extension → `ErrNotAttested`, connection
+3. **Extension extraction.** Missing extension → `ErrNoAttestation`, connection
    refused (unless the CA-chain path applies — see dual verification below).
 4. **Delegated verification.** The verifier computes the REPORTDATA it
    *expects* from the peer certificate's public key, then forwards evidence +
@@ -183,7 +179,7 @@ Step by step:
    attestation-api means no connection (fail closed).
 5. **Measurement policy.** The verified launch digest returned by the
    attestation-api is compared against the caller's allowlist
-   (`VerifyPolicy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
+   (`VerifyPolicy.Policy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
    **empty allowlist accepts any genuine TEE** — deliberate bootstrap
    ergonomics, loudly warned, and unsafe in production.
 6. **mTLS.** Servers configured with a `ClientPolicy` require a client
@@ -192,7 +188,8 @@ Step by step:
 Verification failures map to typed sentinels (`errors.go`):
 `ErrSignatureInvalid` (hardware chain), `ErrKeyBinding` (REPORTDATA mismatch —
 the key was not generated in that TEE), `ErrPolicyViolation` (measurement not
-allowlisted), `ErrNotAttested`, `ErrInvalidReport`, `ErrUnsupportedTEE`.
+allowlisted), `ErrNoAttestation`, `ErrInvalidReport`, `ErrUnsupportedTEE` — the
+last three re-exported from attestation-go/ratls.
 
 ## From self-signed to CA-issued: the CDS regime
 
@@ -235,12 +232,8 @@ Properties worth noting:
   measurements are pinned.
 - **The mesh CA private key exists only in CDS process memory** (P-384, CN
   `c8s Mesh CA`, 1-year validity, generated at startup). It is never a
-  Kubernetes Secret, never on disk. With `cds.handoff.enabled`, a replacement
-  replica adopts the CA from the surviving peer over the attested `/handoff`
-  flow — the key crosses the wire only as recipient-encrypted ciphertext
-  (X25519-ECDH → HKDF-SHA256 → AES-256-GCM, gated on both sides' EAR
-  measurements and operator-key-policy equality). Without handoff, a
-  (singleton) CDS restart mints a fresh CA and workloads re-bootstrap.
+  Kubernetes Secret, never on disk. A (singleton) CDS restart mints a fresh
+  CA and workloads re-bootstrap.
 - **Issued leaves are capped at 24h** and always carry a SHA-256 digest of
   the issuance evidence as an audit extension. When the CSR itself embeds an
   RA-TLS extension — the mesh client and get-cert both do, bound to the bare
@@ -254,17 +247,10 @@ Properties worth noting:
   response and afterwards accept only bundle updates signed by an
   already-trusted CA (`pkg/ratls/cdsclient`). A MITM'd `/ca` read cannot
   inject a new root.
-- **EAR tokens, not certs, for key-only attestation.** `POST /attest-key`
-  runs the same challenge/evidence flow but returns a signed EAR JWT (ES256,
-  JWKS at `/.well-known/jwks.json`) for a caller-held key instead of signing
-  a CSR. Callers already holding an EAR can have a CSR signed via
-  `POST /sign-csr`. Used by CDS's own handoff machinery.
 - **The serving certificate commits only CDS's key and measurement** — not its
   operator-key set, not its allowlist seed. A verifier cross-checks the key set
   CDS *serves* at `/operator-keys`, fetched over that attested serving cert
-  (`c8s cds verify --operator-keys`). The operator-key set is REPORTDATA-bound
-  only on the `/handoff` and `/attest-key` paths
-  (`ReportDataForKeyWithContext`).
+  (`c8s cds verify --operator-keys`).
 
 ### Dual verification and the upgrade path
 
@@ -325,14 +311,21 @@ What it does **not** guarantee:
   `AttestationApiURL` forges "valid". Every deployment therefore keeps the
   verifier in the same TCB as the verifying component: the node-local Unix
   socket the DaemonSet's attest-proxy serves (node-as-CVM — the client checks
-  the socket's owner and mode on every dial) or an in-guest loopback service
-  (pod-as-CVM). Do not point it across a trust boundary.
+  the socket's owner and mode on every dial). Do not point it across a trust boundary.
 - **Per-handshake measurement of CA-verified peers.** See "Dual verification"
   above: after the CDS upgrade, mesh peers are verified by CA chain only.
-- **Full TDX runtime measurement, in-cluster.** The mesh `VerifyPolicy` pins
-  MRTD only — the TDVF firmware, not the guest kernel/rootfs — RTMR[0..3] are
-  not pinned on that path, and `MinTCBVersion` is dropped on the TDX path
-  (GAPS). Operator-side, `c8s verify --image-manifest` pins the full
+- **Full TDX runtime measurement, unless RTMRs are pinned.** On TDX the
+  launch digest covers the TDVF firmware alone; the guest kernel measures
+  into RTMR[1] and the command line — carrying the dm-verity root hash — into
+  RTMR[2]. In-cluster those registers are pinned by `cds.rtmrs` /
+  `ratlsMesh.rtmrs` (`c8s install --rtmrs 1=<hex>,2=<hex>`): CDS requires
+  them of TDX callers on `/attest`, and every component
+  dialing CDS (and every mesh peer policy) enforces them on the handshake.
+  Left empty — the default, warned on a TDX install — the in-cluster pins
+  confer **no guest-code identity**: any TD booting the pinned firmware is
+  accepted. The RTMR pin is one register set for the whole fleet, not a
+  per-image tuple (GAP). A `Policy.MinTcb` floor names SEV-SNP components, so
+  TDX evidence is refused outright rather than verified under no floor. Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
   `--measurements` rather than combining with it — and `--rtmr 3=`
   (or `--operator-pkey`, which derives the same value from the operator public
@@ -344,8 +337,7 @@ What it does **not** guarantee:
   SNP-shaped floor against TDX evidence is a policy failure naming the
   platform, and on SNP the floor is re-checked against the verified claims.
 - **Workload-granular identity beyond the TEE boundary.** The unit of
-  hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
-  pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS
+  hardware attestation is the TEE: the whole node in node-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS
   issued it to, and CDS issues only after the sandbox's own inventory reports
   images that are all allowlisted (see Sandbox identity) — but that ID is
   vouched by the mesh CA signature, not by hardware evidence, and it is only as
@@ -353,8 +345,7 @@ What it does **not** guarantee:
   membership, not composition, so it does not say the pod runs one particular
   workload. Enforcing per-workload measurement at `/attest` is unimplemented.
 - **Post-boot integrity.** The launch digest covers boot state; runtime
-  compromise inside a measured guest is out of scope (that is the image
-  allowlist and guest lockdown's job — [kata-image-policy.md](kata-image-policy.md)).
+  compromise inside a measured node is out of scope for launch attestation.
 - **Availability.** A hostile host can always refuse service; RA-TLS turns
   host compromise into DoS, not data exposure.
 
@@ -371,13 +362,13 @@ SandboxID ::= IA5String     -- e.g. containerd's 64-hex sandbox ID
 ```
 
 The **inventory** is the component that admitted the pod's containers —
-nri-image-policy on node-CVM, policy-monitor inside the kata guest — so it is
+nri-image-policy on node-CVM — so it is
 the arbiter of both which sandbox a process belongs to and what runs in that
 sandbox. It serves two disjoint surfaces (`pkg/workloadclaims`):
 
 | Surface | Route | Listener | Caller bound by |
 |---|---|---|---|
-| tokens | `POST /sandbox` | node-CVM: a node-local Unix socket. kata: the guest's loopback `127.0.0.1:8401` (`workloadclaims.GuestTokenPort`) | node-CVM: kernel peer credentials (`SO_PEERCRED` + `SO_PEERPIDFD`). kata: the guest boundary — one pod per guest, so there is no caller to disambiguate |
+| tokens | `POST /sandbox` | a node-local Unix socket | kernel peer credentials (`SO_PEERCRED` + `SO_PEERPIDFD`) |
 | identity + digests | `GET /identity`, `GET /digests/{sandboxID}` | `:1019` (`workloadclaims.DigestsPort`), mutually-attested RA-TLS | the client leaf's launch measurement (CDS's) |
 
 The token surface cannot enumerate other sandboxes; the network surface cannot
@@ -401,8 +392,15 @@ the node bound" is not.
 
 Two things this rests on that attestation does not enforce:
 
-- the ValidatingAdmissionPolicy (or an equivalent PodSecurity floor) holds. It
-  is a values flag, and it exempts the release namespace and `kube-system`.
+- the default `deny-host-namespaces` ValidatingAdmissionPolicy (or an equivalent
+  control) holds. It enforces Restricted controls and denies host namespaces,
+  host ports, privilege, and every tenant `hostPath` volume, including on
+  ephemeral-container updates to existing Pods. Encrypted volumes
+  (docs/volumes.md) use `emptyDir`s that volumed fills; node-CVM credential
+  sidecars receive the read-only inventory socket directory through NRI below the Pod
+  spec. The policies exempt the release namespace, `kube-system`,
+  `local-path-storage`, and explicitly configured
+  `hostNamespacePolicy.exemptNamespaces`.
 - privileged node DaemonSets — CNI, CSI, the NVIDIA GPU operator — *can* bind
   the port. They are already root inside the node CVM and can read another
   pod's memory directly, so they are effectively part of the node's TCB;
@@ -495,7 +493,7 @@ The consequence: a leaf's sandbox ID says *this key belongs to pod X*, not *pod
 X runs exactly workload Y*. Whole-set enforcement belongs where the pod is
 complete and the stake is high — secrets release — and is not implemented yet.
 Per-container digest and argv policy is still enforced continuously at
-admission by nri-image-policy / policy-monitor
+admission by nri-image-policy
 ([allowlist-and-capabilities.md](allowlist-and-capabilities.md)).
 
 ### What vouches for the ID
@@ -517,8 +515,7 @@ satisfy a pin.
 inside the node bound, over RA-TLS on an allowed measurement". That narrows to a
 *node*, not to a process: anything able to bind that port on a node — the
 inventory, or a privileged node DaemonSet — can sign for any sandbox that
-node admitted. Under kata each guest holds one pod, and the token's host selects
-which guest CDS asks, so a cross-guest forgery fails. Fleet-wide the residual is
+node admitted. Fleet-wide the residual is
 a peer node: it shares the launch measurement, and the threat model already
 grants the host the ability to serve its own TEE attestation on the pod network,
 so a hostile node could in principle answer for a node whose traffic it can
@@ -547,35 +544,21 @@ the supplied mesh CA"), so an unqualified ID never reads as attested.
 
 ### Deployment
 
-Both shapes are wired.
+The node inventory is wired through NRI.
 
 - **node-CVM.** nri-image-policy — a host process containerd launches, not a pod
-  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which the
-  webhook mounts read-only into the `c8s-cert` sidecar, and `/identity` +
-  `/digests` on `:1019`. The node IP it signs into tokens comes from the
+  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which it
+  bind-mounts read-only into the `c8s-cert` sidecar at container creation (an
+  NRI mount, so the pod spec carries no hostPath and stays admissible under
+  PodSecurity `restricted`), and `/identity` + `/digests` on `:1019`. The node IP it signs into tokens comes from the
   installer DaemonSet's downward API `status.hostIP`, written to a `node-ip`
   file beside the socket; `nriImagePolicy.sandboxDigests.advertiseHost`
   overrides it. Route inference is the last resort and is wrong under the
   chart's own default, since the plugin dials the CDS NodePort over loopback.
-- **kata.** policy-monitor serves the token route on the guest's loopback
-  `127.0.0.1:8401` and the digests routes on `:1019` inside the guest. No
-  socket, no mount, and no configuration selects it: the port is compiled, so
-  the untrusted host cannot disable the binding by withholding a value. The
-  in-guest `volumed` follows the same pattern on `127.0.0.1:8402`
-  (docs/volumes.md), after the attestation-service on `:8400`.
-  `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` overrides the advertised guest IP.
-
-get-cert picks the shape with `--workload-claims-guest`, which the webhook
-injects under kata (and then injects no socket volume). Both endpoints are
-compiled in, so the flag selects a shape and never an address: a wrong setting
-fails closed against a port nothing serves.
-
-CDS must be able to reach every node and kata guest on `:1019`, and the
+CDS must be able to reach every node on `:1019`, and the
 bound must cover those addresses: `cds.sandboxInventoryCIDRs` (`c8s install
 --node-cidr`) when set, else one host route per node derived live from the node
-list — a node added later is covered without a CDS restart. Under
-`--cvm-mode=pod` the inventory answers from inside the guest on its pod IP, so
-`c8s install` pins the pod range(s) instead.
+list — a node added later is covered without a CDS restart.
 
 An empty measurement allowlist does not disable any of this — it tracks the same
 posture `/attest` takes (see "What RA-TLS guarantees"): both ends still require
@@ -587,13 +570,11 @@ CDS startup rather than silently unpinning the callback.
 
 What does disable the callback is a CDS with no `--ratls-platform`: it has no
 RA-TLS identity to present, so it makes no callback and **refuses** any request
-carrying a sandbox token. In the kata guest, CDS measurements that fail to
-*parse* (a typo, as opposed to being unset) disable tokens and get-cert issues
-without a sandbox ID; on node-CVM the same typo fails the plugin's config
-validation at startup.
+carrying a sandbox token. CDS measurements that fail to *parse* (a typo, as
+opposed to being unset) fail the node plugin's config validation at startup.
 
-A digests endpoint that fails to start is logged, not fatal, on both
-inventories: containerd sets `required_plugins`, so a plugin exit takes
+A digests endpoint that fails to start is logged, not fatal, by the NRI
+inventory: containerd sets `required_plugins`, so a plugin exit takes
 container creation down node-wide, whereas a missing digests endpoint only
 degrades issuance — CDS refuses the tokens it cannot check.
 
@@ -682,8 +663,15 @@ default 30s plus jitter) while the installed leaf is unnamed and settles to
 `--renew-interval` after a few polls, since being unnamed can be permanent.
 Poll timing never changes the match decision.
 
-Every delay is also capped at half the installed leaf's remaining lifetime, and
-a failed renewal retries on a short backoff rather than after a full interval.
+The ordinary renewal delay is the earlier of `--renew-interval` and half the
+installed leaf's remaining lifetime, randomly shortened on each cycle by up to
+`--renew-jitter-percent` to spread refreshes across pods.
+Unnamed fast polling retains its existing jitter; the minimum delay still applies.
+Certificate expiry is unchanged. A failed renewal retries on a short backoff
+rather than after a full interval.
+Once the installed leaf has **expired** and renewals still fail, get-cert exits
+instead of retrying forever: as a native sidecar it restarts with fresh client
+state and re-runs the full issuance.
 The named-leaf TTL is the shortest CDS issues and `certutil` does not backdate
 `NotBefore`, so a renewal interval alone — the chart's `renewInterval` — is not
 a safe schedule: it must stay strictly below `cds.namedCertTTL`, and the
@@ -733,11 +721,9 @@ The one canonical encoding of `{v1, "api", "7", 0x11×32}` is pinned as a
 golden vector in `pkg/ratls/matchedworkload_test.go` and shared with the other
 parsers so they cannot drift.
 
-## Operation under the two confidential shapes
+## Operation on confidential nodes
 
-The RA-TLS machinery is identical in both shapes; what changes is **where the
-TEE boundary sits**, and therefore where the components run, which device
-evidence comes from, and what one attested identity covers.
+The node is the TEE boundary: its components share its attested identity.
 
 ```text
 NODE-AS-CVM — one TEE, one identity, per node
@@ -750,25 +736,13 @@ NODE-AS-CVM — one TEE, one identity, per node
 ╚═══════════════════════════════════════════════════════════════════════╝
    host / hypervisor: untrusted, sees ciphertext
 
-POD-AS-CVM (kata) — one TEE, one identity, per pod
-   host: ADVERSARIAL — operator+webhook, containerd, kata-shim,
-         kata-deploy, image puller all run here, outside every TEE
-╔═ workload pod CVM (kata-qemu-snp/tdx; measured guest image) ══════════╗
-║  workload container(s) + get-cert sidecar                             ║
-║  ratls-mesh (in-guest systemd service)      ┐ baked into the          ║
-║  attestation-service @ 127.0.0.1:8400       ├ dm-verity rootfs —      ║
-║  policy-monitor                             ┘ inside the measurement  ║
-╚═══════════════════════════════════════════════════════════════════════╝
-╔═ CDS pod CVM ═════════════════╗  ╔═ tls-lb pod CVM ══════════════════╗
-║  same baked stack + CDS       ║  ║  same baked stack + nginx/attest  ║
-╚═══════════════════════════════╝  ╚═══════════════════════════════════╝
 ```
 
 ### Node-as-CVM (base layout on CVM nodes)
 
 The whole Kubernetes node is one confidential VM; pods are ordinary runc
 containers inside it. (This is the base component layout — `c8s install` with
-`--cvm-mode node|gke|aks` wiring the right TEE device — deployed onto nodes
+`--cvm-mode bare-metal|gke|aks` wiring the right TEE device — deployed onto nodes
 that are themselves CVMs. Base on non-CVM nodes has the same layout and no
 confidentiality.)
 
@@ -792,54 +766,27 @@ confidentiality.)
   the node's attestation flow; ratls-mesh runs self-signed or `--cert-mode
   cds`.
 
-### Pod-as-CVM (kata)
-
-Every in-scope pod is its own `kata-qemu-snp`/`kata-qemu-tdx` CVM with its own
-launch digest. The node is a launchpad and is fully adversarial; the chart
-refuses to render host-side security components at all (they would be
-theater), and CDS and tls-lb run in their own kata CVMs.
-
-- **Evidence source:** the attestation-service is baked into the measured
-  guest image and serves loopback `127.0.0.1:8400` inside each pod's VM. The
-  guest kernel exposes the TEE device natively. The verifier, the mesh, and
-  the image-policy enforcer are all *inside the launch measurement* — the host
-  cannot swap them without changing the digest every peer pins.
-- **RA-TLS endpoints:** `ratls-mesh in-guest` runs as a systemd service in
-  each guest (same ports, fixed). Configuration arrives via the baked
-  environment contract (`C8S_WORKLOAD_ID`, `C8S_CDS_URL`,
-  `C8S_MESH_MEASUREMENTS`, `C8S_CDS_MEASUREMENTS`, ...). It always runs in
-  CDS mode with a dynamically-fetched CA bundle. In-guest iptables REDIRECTs
-  all non-loopback TCP through the proxy — no ipsets, no Kubernetes API
-  dependency inside the guest.
-- **Identity granularity:** per pod. Tenants on one node are isolated from
-  each other by hardware memory encryption, and each workload proves its own
-  guest state independently.
-- **Sharp edges:** in-guest egress is exempted for the attestation-service's
-  systemd cgroup (its plain HTTPS to AMD KDS for VCEK fetch) and for the
-  mesh proxy's own cgroup (loop-prevention); every other process —
-  including a workload running as UID 0 via `runAsUser: 0` or an image
-  `USER 0` — is redirected (TCP) or dropped (non-TCP) rather than exempted.
-  Guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the CDS/tls-lb
-  front doors can accept certless external clients — inbound :8443 is
-  unmeshed in every guest.
-- **Cluster DNS carve-out is a shared invariant.** The egress guards scope
-  UDP/53 to the cluster DNS server. The host takes it from the chart
-  (`ratlsMesh.clusterDNSIP` → `--cluster-dns-ip`); the guest reads
-  `C8S_CLUSTER_DNS_IP` baked in kata-guest-base. Set both to the same value
-  or one side drops the other's DNS; the c8s default is 10.53.0.10 on both.
+- **DNS.** The egress guards carve out UDP/53 to any destination, on the
+  node. A resolver sits outside the guest's trust
+  boundary whatever its address, so its answers are untrusted input: they
+  select which endpoint a workload dials, and the RA-TLS handshake at that
+  endpoint is what authenticates the peer. A host that swaps, forges or
+  drops a DNS answer redirects or denies a connection it cannot read, which
+  it can do at the network layer regardless. The carve-out is scoped to the
+  cw pod ipset and to UDP/53; every other non-TCP from a cw pod still
+  drops.
 
 ## Which certificate is used where
 
 | Certificate | Private key lives | Signed by | Presented where | Verified by | Purpose |
 |---|---|---|---|---|---|
 | Self-signed RA-TLS cert (mesh bootstrap / `--cert-mode self-signed`) | ratls-mesh process memory (in the TEE) | itself — trust is the embedded attestation | mesh inbound :15006 and outbound dials (mTLS both ways) | peer's RA-TLS verification: local attestation-api `/verify` + measurement allowlist | pod-to-pod transport before (or without) CDS |
-| CDS RA-TLS serving cert | CDS process memory | itself — attestation bound to CDS's own measurement | CDS API (:8443) | clients pin `--cds-measurements` (get-cert, ratls-mesh, allowlist CLI, nri-image-policy, policy-monitor) | protect the issuance/allowlist API from pod-network impostors |
-| Mesh CA (P-384, CN `c8s Mesh CA`, 1y) | CDS process memory only — never a Secret, never disk | self-signed root, or adopted from a peer via attested `/handoff` (recipient-encrypted) | never served as a leaf; public bundle via `GET /ca` and issuance responses | continuity check: new bundle must be signed by an already-trusted CA | root of trust for the CA-chain fast path |
-| CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, key 0600) — inside the pod's TEE in both shapes | mesh CA, after challenge–attest–certify | workload's own listeners; tls-lb upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
+| CDS RA-TLS serving cert | CDS process memory | itself — attestation bound to CDS's own measurement | CDS API (:8443) | clients pin `--cds-measurements` (get-cert, ratls-mesh, allowlist CLI, nri-image-policy) | protect the issuance/allowlist API from pod-network impostors |
+| Mesh CA (P-384, CN `c8s Mesh CA`, 1y) | CDS process memory only — never a Secret, never disk | self-signed root | never served as a leaf; public bundle via `GET /ca` and issuance responses | continuity check: new bundle must be signed by an already-trusted CA | root of trust for the CA-chain fast path |
+| CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, keys 0640 with fsGroup) — inside the node TEE | mesh CA, after challenge–attest–certify | workload's own listeners; router upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
-| tls-lb public leaf | tls-lb pod volume (get-cert init container), or an operator-supplied `publicTLS` Secret | mesh CA (default) or external CA | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into SNP REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
-| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
-| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` and `/handoff` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (CA handoff, EAR-gated signing) |
+| router public leaf | router pod volume — get-cert init container (mode `cds`) or the `c8s acme` sidecar's Memory-medium emptyDir (mode `acme`) — or an operator-supplied `publicTLS` Secret (mode `webpki`, host-visible) | mesh CA (`cds`), ACME CA (`acme`), or external CA (`webpki`) | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
+| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy process memory; CDS process memory for the client side | itself — attestation bound to the node's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:
 
@@ -850,14 +797,14 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
   certificates mid-handshake). External clients get a challenge–response
   attestation and a post-quantum over-encrypted channel instead — see
   [c8s-verify-js](https://github.com/confidential-dot-ai/c8s-verify-js).
-- **Attested RKE2 credential release** (`c8s cred-release` /
-  `c8s cds request-handoff`) and the operator/allowlist CLIs are RA-TLS
-  *clients* of the surfaces above rather than new certificate types.
+- **Attested RKE2 credential release** (`c8s cred-release`) and the
+  operator/allowlist CLIs are RA-TLS *clients* of the surfaces above rather
+  than new certificate types.
 
 ## Reading order for the curious
 
-1. [`pkg/ratls/extension.go`](../pkg/ratls/extension.go) — the binding and the
-   extension format (start here).
+1. [attestation-go/ratls](https://github.com/confidential-dot-ai/attestation-go/tree/main/ratls)
+   — the key binding and the extension wire format (start here).
 2. [`pkg/ratls/tls.go`](../pkg/ratls/tls.go) + [`verify.go`](../pkg/ratls/verify.go)
    — handshake wiring, rotation, dual verification, delegated verification.
 3. [`pkg/attestclient/client.go`](../pkg/attestclient/client.go) — the CDS

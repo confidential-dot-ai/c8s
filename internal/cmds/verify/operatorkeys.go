@@ -3,14 +3,14 @@ package verify
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -25,43 +25,10 @@ const maxOperatorKeysBytes = 256 * 1024
 // it), plus the served set's KeySetDigest for comparison against the attested
 // --operator-keys bundle (applySandboxPolicy).
 //
-// The fetch is bound to the endpoint whose attestation was just verified: the
-// TLS handshake requires the presented leaf certificate's SHA-256 to equal
-// wantCertSHA256 (the attested serving cert), so a different endpoint — or a
-// MITM on this second connection — cannot inject its own key list into the
-// report.
-//
 // A 404 sets note and returns the empty-set digest: the endpoint reports
 // allowlist writes disabled, which --operator-keys can still be checked against.
 func fetchOperatorKeyFingerprints(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (fingerprints []string, digest []byte, note string, err error) {
-	if wantCertSHA256 == "" {
-		return nil, nil, "", fmt.Errorf("no attested serving certificate to bind the fetch to")
-	}
-
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // trust comes from the attested-cert pin below, not PKI
-		ServerName:         serverName,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no peer certificate")
-			}
-			sum := sha256.Sum256(rawCerts[0])
-			if got := hex.EncodeToString(sum[:]); got != wantCertSHA256 {
-				return fmt.Errorf("serving cert changed between attestation and key fetch (got sha256 %s, attested %s)", got, wantCertSHA256)
-			}
-			return nil
-		},
-	}
-	client := &http.Client{
-		Timeout:   timeout,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/operator-keys", nil)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	resp, err := client.Do(req)
+	resp, err := fetchAttested(ctx, base+"/operator-keys", serverName, wantCertSHA256, timeout)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("fetch /operator-keys: %w", err)
 	}
@@ -80,12 +47,12 @@ func fetchOperatorKeyFingerprints(ctx context.Context, base, serverName, wantCer
 		return nil, nil, "", fmt.Errorf("/operator-keys returned %d", resp.StatusCode)
 	}
 
-	pemBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxOperatorKeysBytes+1))
+	pemBytes, err := readutil.ReadAll(resp.Body, maxOperatorKeysBytes)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return nil, nil, "", fmt.Errorf("/operator-keys response exceeds %d bytes", maxOperatorKeysBytes)
+	}
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("read /operator-keys: %w", err)
-	}
-	if len(pemBytes) > maxOperatorKeysBytes {
-		return nil, nil, "", fmt.Errorf("/operator-keys response exceeds %d bytes", maxOperatorKeysBytes)
 	}
 
 	keys, err := operatorauth.ParsePublicKeysPEM(pemBytes)

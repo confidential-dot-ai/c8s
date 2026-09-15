@@ -18,9 +18,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // ramTempDir returns a tmpfs-backed temp dir; RunJoin refuses to stage the
@@ -41,13 +42,14 @@ func joinConfig(t *testing.T, apiURL, serverAddr string) JoinConfig {
 	t.Helper()
 	dir := ramTempDir(t)
 	return JoinConfig{
-		ServerAddr:        serverAddr,
-		AttestationAPIURL: apiURL,
-		Platform:          "tdx",
-		TokenOut:          filepath.Join(dir, "join-token"),
-		FragmentOut:       filepath.Join(dir, "50-join.yaml"),
-		SupervisorPort:    9345,
-		Timeout:           10 * time.Second,
+		ServerAddr:         serverAddr,
+		AttestationAPIURL:  apiURL,
+		Platform:           "tdx",
+		MeasurementsConfig: policyFile(t, teetypes.PlatformTDX, policyEntry(t, teetypes.PlatformTDX, testOperator)),
+		TokenOut:           filepath.Join(dir, "join-token"),
+		FragmentOut:        filepath.Join(dir, "50-join.yaml"),
+		SupervisorPort:     9345,
+		Timeout:            10 * time.Second,
 	}
 }
 
@@ -59,7 +61,7 @@ func joinServer(t *testing.T, handler http.Handler) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}, nil)
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,76 +78,122 @@ func serverHostPort(t *testing.T, srv *httptest.Server) string {
 	return strings.TrimPrefix(srv.URL, "https://")
 }
 
-// TestJoinExchangeE2E runs the real RunRelease and RunJoin against each other
-// over localhost with one shared fake attestation-api: mutual RA-TLS, client
-// cert demanded and verified, token staged for rke2.
+// TestJoinExchangeE2E uses distinct services and distinct operator keys on the
+// two nodes. Each side authorizes the other independently on TDX and SNP.
 func TestJoinExchangeE2E(t *testing.T) {
-	api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-
-	relCfg := releaseConfig(t)
-	relCfg.AttestationAPIURL = api.URL
-	if err := os.WriteFile(relCfg.TokenPath, []byte("K10cafe::node:secret\n"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
+		for _, scenario := range []string{"authorized", "no fragment", "wrong leader key", "wrong follower key", "wrong leader image", "wrong follower image", "wrong leader TEE", "wrong follower TEE"} {
+			t.Run(string(platform)+"/"+scenario, func(t *testing.T) {
+				dir := ramTempDir(t)
+				leaderKey, followerKey := operatorKey(t), operatorKey(t)
+				leaderVerdict := verifyResp(platform, leaderKey)
+				followerVerdict := verifyResp(platform, followerKey)
+				switch scenario {
+				case "wrong leader key":
+					leaderVerdict = verifyResp(platform, followerKey)
+				case "wrong follower key":
+					followerVerdict = verifyResp(platform, leaderKey)
+				case "wrong leader image":
+					leaderVerdict.Result.Claims.LaunchDigest = digestB
+				case "wrong follower image":
+					followerVerdict.Result.Claims.LaunchDigest = digestB
+				}
+				leaderAPI := newFakeAPI(t, staticVerify(followerVerdict))
+				followerAPI := newFakeAPI(t, staticVerify(leaderVerdict))
+				leaderAPI.platform, followerAPI.platform = platform, platform
+				other := teetypes.PlatformSNP
+				if platform == teetypes.PlatformSNP {
+					other = teetypes.PlatformTDX
+				}
+				if scenario == "wrong leader TEE" {
+					leaderAPI.platform = other
+				}
+				if scenario == "wrong follower TEE" {
+					followerAPI.platform = other
+				}
+				relCfg := releaseConfig(t)
+				relCfg.Platform = string(platform)
+				relCfg.AttestationAPIURL = leaderAPI.URL
+				relCfg.MeasurementsConfig = policyFile(t, platform, policyEntry(t, platform, followerKey))
+				if err := os.WriteFile(relCfg.TokenPath, []byte(testToken+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(filepath.Dir(relCfg.TokenPath), "token"), []byte(testCA+"::server:privileged-secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				relCfg.ListenAddr = ln.Addr().String()
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan error, 1)
+				go func() { done <- runRelease(ctx, relCfg, ln) }()
+				defer func() {
+					cancel()
+					ln.Close()
+					select {
+					case <-done:
+					case <-time.After(10 * time.Second):
+						t.Error("join release did not shut down")
+					}
+				}()
+				cfg := JoinConfig{ServerAddr: relCfg.ListenAddr, AttestationAPIURL: followerAPI.URL, Platform: string(platform),
+					MeasurementsConfig: policyFile(t, platform, policyEntry(t, platform, leaderKey)), TokenOut: filepath.Join(dir, "join-token"),
+					FragmentOut: filepath.Join(dir, "50-join.yaml"), SupervisorPort: 9345, Timeout: 2 * time.Second}
+				if scenario == "no fragment" {
+					cfg.FragmentOut = ""
+				}
+				err = RunJoin(context.Background(), cfg)
+				if scenario != "authorized" && scenario != "no fragment" {
+					if err == nil {
+						t.Fatal("unauthorized peer enrolled")
+					}
+					assertAbsent(t, cfg.TokenOut)
+					assertAbsent(t, cfg.FragmentOut)
+					return
+				}
+				if err != nil {
+					t.Fatalf("RunJoin: %v", err)
+				}
+				token, err := os.ReadFile(cfg.TokenOut)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(token) != testToken+"\n" {
+					t.Fatal("wrong staged token")
+				}
+				assertMode(t, cfg.TokenOut, 0600)
+				if leaderAPI.verifyCalls.Load() != 1 || followerAPI.verifyCalls.Load() != 1 {
+					t.Fatalf("mutual verification: leader %d, follower %d", leaderAPI.verifyCalls.Load(), followerAPI.verifyCalls.Load())
+				}
+				if scenario == "no fragment" {
+					assertAbsent(t, filepath.Join(dir, "50-join.yaml"))
+					return
+				}
+				var frag rke2Fragment
+				data, err := os.ReadFile(cfg.FragmentOut)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := yaml.Unmarshal(data, &frag); err != nil {
+					t.Fatal(err)
+				}
+				if frag.Server != "https://127.0.0.1:9345" || frag.TokenFile != cfg.TokenOut {
+					t.Fatalf("wrong fragment: %+v", frag)
+				}
+				assertMode(t, cfg.FragmentOut, 0600)
+			})
+		}
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	relCfg.ListenAddr = ln.Addr().String()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runRelease(ctx, relCfg, ln) }()
-	waitForListen(t, relCfg.ListenAddr, done)
-
-	cfg := joinConfig(t, api.URL, relCfg.ListenAddr)
-	if err := RunJoin(context.Background(), cfg); err != nil {
-		t.Fatalf("RunJoin: %v", err)
-	}
-
-	token, err := os.ReadFile(cfg.TokenOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(token) != "K10cafe::node:secret\n" {
-		t.Errorf("staged token = %q", token)
-	}
-	assertMode(t, cfg.TokenOut, 0o600)
-
-	var frag rke2Fragment
-	fragBytes, err := os.ReadFile(cfg.FragmentOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := yaml.Unmarshal(fragBytes, &frag); err != nil {
-		t.Fatal(err)
-	}
-	wantServer := "https://127.0.0.1:9345"
-	if frag.Server != wantServer {
-		t.Errorf("fragment server = %q, want %q", frag.Server, wantServer)
-	}
-	if frag.TokenFile != cfg.TokenOut {
-		t.Errorf("fragment token-file = %q, want %q", frag.TokenFile, cfg.TokenOut)
-	}
-	assertMode(t, cfg.FragmentOut, 0o600)
-
-	cancel()
-	<-done
 }
 
 // TestJoinRefusesMismatchedServer: the client's verifier reports the server's
-// registers differ from its own; the handshake must fail and nothing may be
+// operator key differs from the designated leader; the handshake must fail and nothing may be
 // staged.
 func TestJoinRefusesMismatchedServer(t *testing.T) {
-	// Call 1 is ownRefs, later calls are the server's cert during handshake
-	// (the client may retry the handshake internally).
-	api := newFakeAPI(t, func(call int, _ types.VerifyRequest) types.VerifyResponse {
-		if call == 1 {
-			return verifyResp(digestA, rtmr1A, rtmr2A, true, true)
-		}
-		return verifyResp(digestB, rtmr1A, rtmr2A, true, true)
+	api := newFakeAPI(t, func(call int, _ remote.VerifyRequest) remote.VerifyResponse {
+		return verifyResp(teetypes.PlatformTDX, operatorKey(t))
 	})
 	srv := joinServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("request reached the server despite a failed verification")
@@ -156,14 +204,14 @@ func TestJoinRefusesMismatchedServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected RunJoin to fail")
 	}
-	if !errors.Is(err, ErrPolicyMismatch) && !strings.Contains(err.Error(), ErrPolicyMismatch.Error()) {
+	if !errors.Is(err, ratls.ErrPolicyViolation) && !strings.Contains(err.Error(), ratls.ErrPolicyViolation.Error()) {
 		t.Fatalf("err = %v, want policy mismatch", err)
 	}
 	assertAbsent(t, cfg.TokenOut)
 	assertAbsent(t, cfg.FragmentOut)
 }
 
-// TestJoinServerErrors: an attested, same-image server that refuses or
+// TestJoinServerErrors: an attested, authorized server that refuses or
 // misbehaves must surface an error and stage nothing.
 func TestJoinServerErrors(t *testing.T) {
 	tests := []struct {
@@ -186,7 +234,7 @@ func TestJoinServerErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
+			api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
 			srv := joinServer(t, tc.handler)
 			cfg := joinConfig(t, api.URL, serverHostPort(t, srv))
 			if err := RunJoin(context.Background(), cfg); err == nil {
@@ -199,7 +247,7 @@ func TestJoinServerErrors(t *testing.T) {
 }
 
 func TestRunJoinConfigErrors(t *testing.T) {
-	api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
+	api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
 	tests := []struct {
 		name   string
 		mutate func(*JoinConfig)
@@ -240,7 +288,12 @@ func TestWriteStaged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := writeStaged(cfg, "2001:db8::1", "tok"); err != nil {
+	root, err := os.OpenRoot(filepath.Dir(cfg.TokenOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := writeStaged(cfg, root, "2001:db8::1", "tok"); err != nil {
 		t.Fatal(err)
 	}
 	assertMode(t, cfg.TokenOut, 0o600)
@@ -268,9 +321,11 @@ func TestWriteStaged(t *testing.T) {
 // documented.
 func TestPrepareTokenDir(t *testing.T) {
 	t.Run("tmpfs accepted", func(t *testing.T) {
-		if err := prepareTokenDir(filepath.Join(ramTempDir(t), "confos", "join-token")); err != nil {
+		root, err := prepareTokenDir(filepath.Join(ramTempDir(t), "confos", "join-token"))
+		if err != nil {
 			t.Fatal(err)
 		}
+		root.Close()
 	})
 
 	t.Run("persistent storage refused", func(t *testing.T) {
@@ -278,32 +333,11 @@ func TestPrepareTokenDir(t *testing.T) {
 		if fileutil.RequireRAMBacked(dir) == nil {
 			t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
 		}
-		if err := prepareTokenDir(filepath.Join(dir, "join-token")); err == nil {
+		if root, err := prepareTokenDir(filepath.Join(dir, "join-token")); err == nil {
+			root.Close()
 			t.Fatal("expected a token-out on persistent storage to be refused")
 		}
 	})
-}
-
-// waitForListen polls addr until it accepts a TCP connection or done yields.
-func waitForListen(t *testing.T, addr string, done <-chan error) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
-			_ = conn.Close()
-			return
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("server exited before serving: %v", err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("server never started accepting connections")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func assertMode(t *testing.T, path string, want os.FileMode) {
@@ -322,4 +356,76 @@ func assertAbsent(t *testing.T, path string) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("%s exists (err=%v), want absent", path, err)
 	}
+}
+
+func TestFetchTokenStrictResponse(t *testing.T) {
+	valid := `{"token":"` + testToken + `"}`
+	for _, tc := range []struct {
+		name, body string
+		accept     bool
+	}{
+		{"valid", valid, true}, {"whitespace", valid + " \n", true},
+		{"trailing document", valid + `{}`, false}, {"trailing junk", valid + `x`, false},
+		{"duplicate token", `{"token":"` + testToken + `","token":"` + testToken + `"}`, false},
+		{"unknown field", `{"token":"` + testToken + `","extra":true}`, false},
+		{"wrong field case", `{"Token":"` + testToken + `"}`, false},
+		{"null", `null`, false}, {"null token", `{"token":null}`, false},
+		{"privileged token", `{"token":"` + testCA + `::server:secret"}`, false},
+		{"invalid hash", `{"token":"K10cafe::node:secret"}`, false},
+		{"response too large", valid + strings.Repeat(" ", maxTokenRespBytes), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+			defer srv.Close()
+			token, err := fetchToken(context.Background(), JoinConfig{ServerAddr: serverHostPort(t, srv), Timeout: time.Second}, &tls.Config{InsecureSkipVerify: true})
+			if (err == nil) != tc.accept {
+				t.Fatalf("err=%v accept=%v", err, tc.accept)
+			}
+			if tc.accept && token != testToken {
+				t.Fatal("wrong returned token")
+			}
+		})
+	}
+}
+
+func TestTokenStagingSurvivesDirectoryReplacement(t *testing.T) {
+	ramDir := ramTempDir(t)
+	path := filepath.Join(ramDir, "checked")
+	cfg := JoinConfig{TokenOut: filepath.Join(path, "join-token")}
+	root, err := prepareTokenDir(cfg.TokenOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	moved := filepath.Join(ramDir, "original")
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	disk := t.TempDir()
+	if err := os.Symlink(disk, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStaged(cfg, root, "127.0.0.1", testToken); err != nil {
+		t.Fatal(err)
+	}
+	assertAbsent(t, filepath.Join(disk, "join-token"))
+	token, err := os.ReadFile(filepath.Join(moved, "join-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(token) != testToken+"\n" {
+		t.Fatal("token not written to checked root")
+	}
+}
+
+func TestJoinRejectsMissingPolicyBeforeNetwork(t *testing.T) {
+	api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, testOperator)))
+	cfg := JoinConfig{Platform: "tdx", ServerAddr: "127.0.0.1:1", AttestationAPIURL: api.URL, Timeout: time.Second, TokenOut: filepath.Join(t.TempDir(), "join-token")}
+	if err := RunJoin(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "measurements-config") {
+		t.Fatalf("err=%v", err)
+	}
+	if api.verifyCalls.Load() != 0 {
+		t.Fatal("missing policy reached network")
+	}
+	assertAbsent(t, cfg.TokenOut)
 }

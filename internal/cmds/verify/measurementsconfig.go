@@ -1,0 +1,109 @@
+package verify
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
+)
+
+// maxServedMeasurements bounds the served document. Reference values for a
+// realistic fleet are kilobytes; a larger body is a wrong endpoint, not a
+// bigger policy.
+const maxServedMeasurements = 1 << 20
+
+// measurementsReport is the cross-check section of the verdict: what the
+// attested target says it is enforcing, beside what the operator pinned.
+type measurementsReport struct {
+	served   measurementspkg.ReferenceValues
+	fetched  bool
+	fetchErr error
+	note     string
+}
+
+// fetchServedMeasurements parses /measurements from the attested endpoint.
+func fetchServedMeasurements(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (measurementspkg.ReferenceValues, error) {
+	resp, err := fetchAttested(ctx, base+"/measurements", serverName, wantCertSHA256, timeout)
+	if err != nil {
+		return measurementspkg.ReferenceValues{}, fmt.Errorf("fetch /measurements: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return measurementspkg.ReferenceValues{}, fmt.Errorf("/measurements not served: this target predates the endpoint, so its enforced set cannot be checked")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return measurementspkg.ReferenceValues{}, fmt.Errorf("/measurements returned %d", resp.StatusCode)
+	}
+	body, err := readutil.ReadAll(resp.Body, maxServedMeasurements)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return measurementspkg.ReferenceValues{}, fmt.Errorf("/measurements body exceeds %d bytes", maxServedMeasurements)
+	}
+	if err != nil {
+		return measurementspkg.ReferenceValues{}, fmt.Errorf("read /measurements: %w", err)
+	}
+	return measurementspkg.ParseServed(body)
+}
+
+// checkServedMeasurements compares the served set against the operator's file.
+// Equality is exact in both directions: an entry the target pins and the file
+// does not is the substitution this check exists to catch, and one the file
+// pins and the target does not means the cluster is enforcing less than the
+// operator believes.
+func checkServedMeasurements(want measurementspkg.ReferenceValues, report measurementsReport, fail func(string, ...any)) {
+	if report.fetchErr != nil {
+		fail("could not fetch /measurements to check it against --measurements-config: %v", report.fetchErr)
+		return
+	}
+	if !report.fetched {
+		fail("--measurements-config cannot be checked: %s", report.note)
+		return
+	}
+	if len(report.served.Entries) == 0 {
+		fail("the target serves an empty measurement set: it admits any TEE attestation, while --measurements-config pins %d image(s)", len(want.Entries))
+		return
+	}
+	if want.TEE != report.served.TEE {
+		fail("--measurements-config is for %q but the target enforces %q", want.TEE, report.served.TEE)
+		return
+	}
+	missing, extra := measurementspkg.Diff(want, report.served)
+	for _, e := range extra {
+		fail("the target admits an image --measurements-config does not pin: %s (%x)", e.Name, e.Digest)
+	}
+	for _, e := range missing {
+		fail("--measurements-config pins an image the target does not admit: %s (%x)", e.Name, e.Digest)
+	}
+}
+
+// gatherMeasurements fetches the set the target reports enforcing. Like the
+// operator-key fetch it never fails the run here; a fetch error is recorded so
+// checkServedMeasurements can fail the verdict when --measurements-config
+// asked for the check, rather than letting an erroring endpoint dodge it.
+func gatherMeasurements(ctx context.Context, cfg config, ev *evidence) measurementsReport {
+	if cfg.measurementsConfig == "" {
+		return measurementsReport{}
+	}
+	if cfg.kind != "cds" {
+		return measurementsReport{note: "target kind is not cds (use --kind cds to enable)"}
+	}
+	if cfg.url == "" {
+		return measurementsReport{note: "not fetched (no target URL)"}
+	}
+	if ev.certSHA256 == "" {
+		return measurementsReport{note: "not fetched (no serving cert to bind to)"}
+	}
+	_, baseURL, err := normalizeTarget(cfg.url, defaultPort(cfg))
+	if err != nil {
+		return measurementsReport{note: "not fetched: " + err.Error()}
+	}
+	served, err := fetchServedMeasurements(ctx, baseURL, cfg.server, ev.certSHA256, cfg.timeout)
+	if err != nil {
+		return measurementsReport{note: "not fetched: " + err.Error(), fetchErr: err}
+	}
+	return measurementsReport{served: served, fetched: true}
+}

@@ -1,31 +1,33 @@
-# Presets are processed by `systemctl preset-all` during the mkosi build.
-# Each `enable`/`disable` line creates the corresponding
-# /etc/systemd/system/... symlink at bake time so it's measured into the
-# verity root. The rke2 units live in /usr/local/lib/systemd/system (staged
-# there by this profile's mkosi.sync), which is on systemd's unit search
-# path.
-#
-# Both rke2-server AND rke2-agent are enabled: rke2-role.service decides
-# the role at runtime (joindata disk, strictly either/or) and each rke2
-# unit conditions on the matching /run/confos/role-* verdict; the other is
-# SKIPPED, not failed. No joindata disk => server (single-node default).
+# Presets are applied at image build time. Both RKE2 units are enabled;
+# the authenticated launch verdict selects exactly one at each boot.
+# The packaged nginx default must never open an unauthenticated listener.
+disable nginx.service
 enable containerd-data-disk.service
-# Read-only weights disk (serial=confai-models). Enabled always; a no-op boot
-# when the disk isn't attached (GPU-less / no-weights launches).
 enable models-disk.service
-# Publish the node address the nri-image-policy admission inventory advertises
-# to CDS. Ordered before rke2 so the file exists when containerd launches the
-# baked plugin.
 enable nri-node-ip.service
-# Role dispatch + the role-gated rke2 pair.
+enable gpu-node-label.service
+enable gpu-cc-enforce.service
+enable scratch-enforce.service
+enable c8s-modules-latch.service
 enable rke2-role.service
+enable c8s-join-release.service
+enable c8s-join.service
 enable rke2-server.service
 enable rke2-agent.service
-# NTP: sync the free-running TDX guest clock so it doesn't drift behind the
-# operator and trip cred-release's JWT clock-skew check. Egress is via the
-# CVM's masquerade NAT.
 enable systemd-timesyncd.service
-# Attested operator credential release. Enabled always, but its
-# ConditionPathExists on the opkeydata disk means it only starts on operator
-# boots — a no-op on nodes launched without --operator-key.
 enable cred-release.service
+enable cds.service
+enable ratls-mesh.service
+enable ratls-mesh-iptables.service
+enable c8s-get-cert.service
+enable cds-attest.service
+enable allowlist-proxy.service
+enable c8s-nginx.service
+enable attest-proxy.service
+# Check the running LSM and exercise a real policy before RKE2 can start.
+enable apparmor-enforce.service
+# The apparmor package supplies apparmor_parser and aa-exec for the boot
+# probe. Its unit would load the package's stock
+# host profiles from /etc/apparmor.d at boot; none of them are wanted on a
+# node, and one (nvidia_modprobe) sits on the GPU path.
+disable apparmor.service

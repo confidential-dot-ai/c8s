@@ -7,16 +7,16 @@ covers and why the kind harness is shaped the way it is.
 | Harness | Entrypoint | CI job | Subject |
 | --- | --- | --- | --- |
 | docker-compose | `make test-integration` | Integration | get-cert's RA-TLS flow against mock CDS + mock attestation-api, nginx serving the issued leaf |
-| kind cluster | `make test-integration-cluster` | Integration (cluster) | the full node-mode control plane and workload path (below) |
-| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, CA handoff on real TEEs |
+| kind cluster | `make test-integration-cluster` | Integration (cluster) | the full bare-metal-mode control plane and workload path (below) |
+| live-cluster scripts | `test/e2e/*.sh` | snp/tdx-metal-e2e | cw-label policy, mesh enforcement, allowlist enforcement, control-plane convergence on real TEEs |
 
 ## The kind harness
 
 `test/integration/cluster/run.sh` boots a single-node kind cluster, builds the
 component images from the checkout, and runs the real `c8s install
---cvm-mode=node`. The TEE is substituted at exactly one point: **evidence
+--cvm-mode=bare-metal`. The TEE is substituted at exactly one point: **evidence
 generation**. `test/mock-attestation` serves synthetic SNP reports (launch
-digest all-zero) on the node IP :8400 — the address node-mode consumers dial
+digest all-zero) on the node IP :8400 — the address bare-metal-mode consumers dial
 for the node-baked api — and an `attest-proxy` sidecar publishes it on the
 hostPath unix socket the host plugin uses. Every component that delegates
 verification to the attestation-api (get-cert, CDS, ratls-mesh, the NRI
@@ -24,11 +24,21 @@ plugin) works unchanged against it. The all-zero digest is pinned via
 `--measurements`, so every RA-TLS hop is verified exactly as in production.
 
 The NRI image-policy plugin runs for real: the harness renders the chart's
-installer DaemonSet and applies it out-of-band (node mode does not render it —
-production node images bake the plugin). The installer patches the node's
-containerd config and restarts it, which kind survives. The install-time
-allowlist floor is generated from the node containerd's image store, because
-`policy.enforceExisting` checks already-running containers against it.
+full installer DaemonSet and applies it out-of-band (bare-metal mode renders only
+the baked pins patcher, and the kind node bakes no plugin for it to pin). The
+installer patches the node's containerd config and restarts it, which kind
+survives. The install-time bootstrap entries are generated from the node
+containerd's image store, because `policy.enforceExisting` checks
+already-running containers against them.
+
+Tenant fixtures satisfy the Restricted controls: workload and adoption
+Deployments use digest-pinned `nginxinc/nginx-unprivileged` on port 8080;
+curl Pods run as UID 1000. All use non-root execution, RuntimeDefault seccomp,
+no privilege escalation, and dropped ALL capabilities. `pod-fixture.py` is the
+shared JSON renderer used by the shell harness and Go admission regression tests,
+so negative fixtures violate only their intended label or host-network rule.
+Workload pre-pulls, the allowlist floor, mesh probes, Service target ports, and
+adoption routing use the same image and backend-port settings.
 
 Two operator-facing commands verify evidence **in-process** with real hardware
 cryptography, which synthetic evidence cannot pass: `c8s verify` and the `c8s
@@ -43,7 +53,7 @@ a port-forward).
 - `c8s install` end-to-end: preflights, helm install, CRDs, RBAC,
   MutatingWebhookConfiguration, ValidatingAdmissionPolicies.
 - Control-plane readiness: operator, CDS (RA-TLS serving cert via the mock
-  api), tls-lb (mesh cert from CDS), ratls-mesh DaemonSet.
+  api), router (mesh cert from CDS), ratls-mesh DaemonSet.
 - NRI plugin: installer writes the binary + config, patches containerd,
   restarts it, registers, serves the admission inventory socket.
 - Allowlist authorization: unsigned writes and wrong-key writes are 401; a
@@ -65,20 +75,19 @@ a port-forward).
   plaintext — proven by the drop/wrap counters (rule ordering between
   kube-proxy and the mesh is not stable). Mirrors
   `test/e2e/mesh-cw-enforcement.sh`.
-- tls-lb front door: HTTPS verified against the CDS mesh CA.
+- router front door: HTTPS verified against the CDS mesh CA.
 - Workload adoption: `c8s install --workload-ref` patches a running
   deployment, its rollout goes through injection, the status mirror reports
-  `kubectl get cwl`, and tls-lb routes the front door to it over the mesh.
+  `kubectl get cwl`, and router routes the front door to it over the mesh.
 - `c8s uninstall`: release, webhook, and admission policies are removed.
 
 ## Deliberately out of scope
 
 No TEE properties are asserted: hardware verification, measurements that mean
-anything, kata guests, encrypted volumes (volumed needs device-mapper control
-of the node kernel), `get-kubeconfig` (SNP-gated), CDS handoff (two CDS
-replicas), and the `c8s allowlist`/`c8s verify` CLIs (in-process hardware
-verification, above). The metal lanes (snp-metal-e2e, tdx-metal-e2e,
-cvm-e2e) own those.
+anything, encrypted volumes (volumed needs device-mapper control
+of the node kernel), `get-kubeconfig` (SNP-gated), and the
+`c8s allowlist`/`c8s verify` CLIs (in-process hardware verification, above).
+The metal lanes (snp-metal-e2e, tdx-metal-e2e, cvm-e2e) own those.
 
 ## Running it
 
@@ -89,13 +98,16 @@ make test-integration-cluster
 Needs docker (or podman with `KIND_EXPERIMENTAL_PROVIDER=podman`), kind,
 kubectl, helm, go, openssl, curl, python3. The kind node image is pinned by
 digest in run.sh; bump it with the kind release. CI installs kind itself
-(`.github/workflows/ci.yml`, pinned binary sha256).
+(`.github/workflows/ci.yml`, pinned binary sha256). Custom node images must
+provide NRI `ValidateContainerAdjustment` support (the pinned image uses
+containerd 2.3.4 / NRI 0.12.0); older runtimes reject the env-enforcing plugin
+at registration.
 
 ### Failure notes
 
 - A pod stuck `CreateContainerError` with `image not in allowlist` is the NRI
-  plugin doing its job: the image's containerd store digest is missing from
-  the floor. The floor is written from the node's image store before install,
+  plugin doing its job: the image's containerd store digest has no bootstrap
+  entry. The entries are written from the node's image store before install,
   so an image first pulled *during* the run lands here — pre-pull it next to
   the other fixtures in run.sh.
 - The mock-attestation deployment is `Recreate` on purpose: two hostNetwork

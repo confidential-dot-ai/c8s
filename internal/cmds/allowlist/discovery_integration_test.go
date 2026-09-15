@@ -23,18 +23,18 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
-	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// tlsLBServer stands in for the tls-lb front door: a TLS server whose serving
+// routerServer stands in for the router front door: a TLS server whose serving
 // cert carries NO RA-TLS extension, serving its discovery document plus the
 // CDS allowlist read handler it proxies.
-func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
+func routerServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -43,7 +43,7 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "tls-lb"},
+		Subject:      pkix.Name{CommonName: "router"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 	}
@@ -59,7 +59,7 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 		},
 		Attestation: types.AttestationDiscovery{
 			Challenge: base64.StdEncoding.EncodeToString(measurementChallenge),
-			Platform:  string(types.PlatformAzSnp),
+			Platform:  string(teetypes.PlatformAzSNP),
 			Evidence:  json.RawMessage(`{"hcl_report":"fake"}`),
 		},
 	})
@@ -68,7 +68,7 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+lbdiscovery.DefaultPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+routerdiscovery.DefaultPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(doc)
 	})
@@ -81,14 +81,13 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 	return srv
 }
 
-// seededAllowlistHandler serves a canonical allowlist (floor seeded with digA)
-// as CDS's read endpoint would.
+// seededAllowlistHandler serves a canonical allowlist (one entry admitting
+// digA) as CDS's read endpoint would.
 func seededAllowlistHandler(t *testing.T) http.HandlerFunc {
 	t.Helper()
 	al := pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
-		Digests:   map[string]string{digA: "registry/c8s/cds@" + digA},
-		Workloads: map[string]pkgallowlist.Workload{},
+		Workloads: anyWorkloads(t, map[string]string{digA: "registry/c8s/cds@" + digA}),
 	}
 	body, err := al.Canonical()
 	if err != nil {
@@ -105,7 +104,7 @@ func seededAllowlistHandler(t *testing.T) http.HandlerFunc {
 // contract for measurement (the pin itself is unit-tested in localverify).
 func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
-		if len(p.Measurements) > 0 && !attestationclient.MeasurementAllowed(measurement, p.Measurements) {
+		if len(p.Measurements) > 0 && !remote.MeasurementAllowed(measurement, p.Measurements) {
 			return nil, localverify.ErrMeasurementNotAllowed
 		}
 		match := true
@@ -124,33 +123,33 @@ func runCmdWith(verify localverify.VerifyFunc, args ...string) (string, string, 
 	return out.String(), errb.String(), err
 }
 
-// TestListThroughTLSLB is the regression test for `c8s allowlist list` against
-// a tls-lb front door: the serving cert has no RA-TLS extension (OID
+// TestListThroughRouter is the regression test for `c8s allowlist list` against
+// a router front door: the serving cert has no RA-TLS extension (OID
 // 1.3.6.1.4.1.66378.1.1), so the CLI must verify the LB's discovery document
 // instead of failing the handshake, then read the allowlist over the pinned
 // cert.
-func TestListThroughTLSLB(t *testing.T) {
+func TestListThroughRouter(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
-	lb := tlsLBServer(t, []byte("issuance-challenge"))
+	lb := routerServer(t, []byte("issuance-challenge"))
 
 	out, errOut, err := runCmdWith(approvingVerify(measurement), "list",
 		"--url", lb.URL,
 		"--measurements", hex.EncodeToString(measurement),
 	)
 	if err != nil {
-		t.Fatalf("list through tls-lb failed: %v (stderr: %s)", err, errOut)
+		t.Fatalf("list through router failed: %v (stderr: %s)", err, errOut)
 	}
 	if !strings.Contains(out, digA) {
 		t.Fatalf("output missing seeded digest %s:\n%s", digA, out)
 	}
 }
 
-// TestListThroughTLSLBFailsClosed proves a front door whose discovery evidence
+// TestListThroughRouterFailsClosed proves a front door whose discovery evidence
 // does not verify is rejected outright — no fallback, no allowlist read.
-func TestListThroughTLSLBFailsClosed(t *testing.T) {
+func TestListThroughRouterFailsClosed(t *testing.T) {
 	pinned := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 	reported := bytes.Repeat([]byte{0x01}, ratls.SNPMeasurementSize)
-	lb := tlsLBServer(t, []byte("issuance-challenge"))
+	lb := routerServer(t, []byte("issuance-challenge"))
 
 	_, _, err := runCmdWith(approvingVerify(reported), "list",
 		"--url", lb.URL,
@@ -175,8 +174,8 @@ func ratlsCDSServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{
-		TEEType: ratls.TEETypeSEVSNP,
-		Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+		Family: ratls.TEETypeSEVSNP,
+		Report: []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
 	}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
@@ -204,7 +203,7 @@ func TestListDirectRATLS(t *testing.T) {
 	var sawVerify bool
 	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		sawVerify = true
-		if platform != string(types.PlatformAzSnp) {
+		if platform != string(teetypes.PlatformAzSNP) {
 			t.Fatalf("platform = %q, want az-snp", platform)
 		}
 		if len(p.ExpectedReportData) != sha512.Size384 {

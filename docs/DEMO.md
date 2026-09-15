@@ -7,18 +7,18 @@ production trust boundary.
 ## 1. Install c8s
 
 This demo shows confidential-workload injection, not the public front door, so
-it installs with tls-lb disabled. To also expose a workload through tls-lb, give
-it an upstream instead (see [tls-lb upstream](operator.md#tls-lb-upstream)).
+it installs with router disabled. To also expose a workload through router, give
+it an upstream instead (see [router upstream](operator.md#router-upstream)).
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem -f - <<'EOF'
-tlsLb:
+router:
   enabled: false
 EOF
 ```
 
-`--cvm-mode` is required (`pod`, `node`, `gke`, or `aks` — see
+`--cvm-mode` is required (`bare-metal`, `gke`, or `aks` — see
 [install-flows.md](install-flows.md)), as is `--hardware-platform` (`sev-snp`
 or `tdx`). `--operator-keys` points at a PEM bundle
 of EC public keys authorizing `c8s allowlist` writes (or pass `--force` to
@@ -34,8 +34,21 @@ kubectl apply -f samples/confidentialworkload.yaml
 
 ## 3. Deploy an annotated workload
 
+The node image enforces the Restricted PodSecurity standard in every tenant
+namespace, including namespaces hosting confidential workloads. In bare-metal mode,
+`nri-image-policy` mounts the inventory socket directory read-only into credential
+sidecars through NRI, below the Pod spec. The chart also enforces Restricted
+controls and denies every tenant `hostPath` volume. Keep enforcement, warning,
+and audit at Restricted:
+
 ```sh
-kubectl apply -f samples/nginx-confidential-pod.yaml
+kubectl create namespace demo
+kubectl label namespace demo \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=latest \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+kubectl -n demo apply -f samples/nginx-confidential-pod.yaml
 ```
 
 The pod template annotation `confidential.ai/cw: demo-nginx` is the security
@@ -44,8 +57,8 @@ opt-in. The `ConfidentialWorkload` object is not required for injection.
 ## 4. Inspect the result
 
 ```sh
-kubectl get pods
-kubectl describe pod -l app=demo-nginx
+kubectl -n demo get pods
+kubectl -n demo describe pod -l app=demo-nginx
 kubectl get cwl -A
 ```
 
@@ -59,11 +72,9 @@ Expected injected pieces:
 ## Reset
 
 ```sh
-kubectl delete -f samples/nginx-confidential-pod.yaml
+kubectl delete namespace demo
 kubectl delete -f samples/confidentialworkload.yaml
 c8s uninstall
 ```
 
-`c8s uninstall` wraps `helm uninstall c8s -n c8s-system`; on a `--cvm-mode=pod`
-install it also sweeps the kata runtime artifacts off the nodes (see
-[`kata.md`](kata.md#uninstalling)).
+`c8s uninstall` wraps `helm uninstall c8s -n c8s-system`.

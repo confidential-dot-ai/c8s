@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -24,14 +23,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+
+	"github.com/confidential-dot-ai/attestation-go/remote"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/initdata"
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -108,24 +109,25 @@ type config struct {
 	fromFile      string
 	discoveryPath string
 
-	measurements     []string
-	measurementsFile string
-	imageManifest    string
-	expectedRTMR3Hex string
-	operatorPubkey   string
-	rtmrs            []string
-	operatorKeys     string
-	sandboxID        string
-	workload         string
-	allowlistFile    string
-	meshCA           string
-	initDataHex      string
-	allowDebug       bool
-	minTCBBootloader uint
-	minTCBTEE        uint
-	minTCBSNP        uint
-	minTCBMicrocode  uint
-	expectedRDHex    string
+	measurements       []string
+	measurementsFile   string
+	imageManifest      string
+	expectedRTMR3Hex   string
+	operatorPubkey     string
+	rtmrs              []string
+	operatorKeys       string
+	measurementsConfig string
+	sandboxID          string
+	workload           string
+	allowlistFile      string
+	meshCA             string
+	initDataHex        string
+	allowDebug         bool
+	minTCBBootloader   uint
+	minTCBTEE          uint
+	minTCBSNP          uint
+	minTCBMicrocode    uint
+	expectedRDHex      string
 
 	output       string
 	showEvidence bool
@@ -204,8 +206,9 @@ responder chose).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
-	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
+	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -294,7 +297,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
+	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), gatherMeasurements(ctx, cfg, ev), out, errOut)
 }
 
 // targetDescription names the evidence source for a verdict produced before
@@ -352,7 +355,7 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // both work — then renders the verdict. The verification attempt (including the
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
-func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, out, errOut io.Writer) int {
+func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, servedMeasurements measurementsReport, out, errOut io.Writer) int {
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -366,7 +369,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc := newOutcome(cfg, ev, result, verr, plan)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applyVerdictPolicies(&oc, cfg, ev, held, opKeys)
+	applyVerdictPolicies(&oc, cfg, ev, held, opKeys, plan, servedMeasurements)
 	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
@@ -377,8 +380,8 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 // the verdict), then the honesty demotions, which only ever turn a passing
 // verdict partial. Ordering matters: applyChainAnchorPolicy reads the pinned
 // chain check's outcome from oc.Verified.
-func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport) {
-	applySandboxPolicy(oc, cfg, ev, opKeys)
+func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport) {
+	applySandboxPolicy(oc, cfg, ev, opKeys, plan, servedMeasurements)
 	applyWorkloadPolicy(oc, cfg, ev, held)
 	applyFrontDoorPolicy(oc, ev)
 	applyChainAnchorPolicy(oc, cfg, ev)
@@ -403,7 +406,7 @@ func demoteToPartial(oc *Outcome, notProven string) {
 const frontDoorAttestedNote = "; the live handshake presented the attested serving certificate"
 
 // frontDoorScopeWarning bounds an attested front door to the observation made.
-const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single tls-lb replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/lbdiscovery)"
+const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single router replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/routerdiscovery)"
 
 // applyFrontDoorPolicy settles what the verdict may claim about the front
 // door's serving key, keying on the live handshake the discovery gather
@@ -427,9 +430,9 @@ func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
 			oc.Error += "; " + digests + " — the TLS endpoint clients reach is not attestation-bound"
 			return
 		}
-		demoteToPartial(oc, digests+" — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
+		demoteToPartial(oc, digests+" — the router pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
 	case frontDoorUnobserved:
-		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
+		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the router pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 	}
 }
 
@@ -491,6 +494,9 @@ type verifyPlan struct {
 	meshCA *x509.CertPool
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
+	// refValues is the parsed --measurements-config, empty when unset. It
+	// both pins the target and is compared against what the target serves.
+	refValues measurementspkg.ReferenceValues
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -520,9 +526,22 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	// failure rather than the typo it is. Refuse the pair up front, before any
 	// file is read, so a contradictory invocation is a usage error here just as
 	// it already is in the client-side verifier.
+	if cfg.measurementsConfig != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "" || cfg.imageManifest != "") {
+		return nil, fmt.Errorf("--measurements-config cannot be combined with --measurements, --measurements-file or --image-manifest: it already pins whole images, and a second allowlist beside it can only narrow or contradict that")
+	}
 	if cfg.imageManifest != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "") {
 		used := allowlistFlagsUsed(cfg)
 		return nil, fmt.Errorf("%s cannot be combined with --image-manifest: the manifest pins MRTD exactly (together with RTMR[1] and RTMR[2] from the same build), so a launch-measurement allowlist beside it can only narrow that single digest or contradict it, and a contradiction is a policy no guest can ever satisfy. To pin this image, drop %s; to accept several firmware images instead, drop --image-manifest — which also gives up its RTMR[1]/RTMR[2] guest kernel and rootfs pins", used, used)
+	}
+
+	// Read once, here, like every other file-backed pin on this path.
+	var refValues measurementspkg.ReferenceValues
+	if cfg.measurementsConfig != "" {
+		loaded, err := measurementspkg.Load(cfg.measurementsConfig)
+		if err != nil {
+			return nil, err
+		}
+		refValues = loaded
 	}
 
 	hexes := append([]string{}, cfg.measurements...)
@@ -533,7 +552,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	measurements, err := ratls.ParseHexMeasurementsList(hexes)
+	measurements, err := refvalues.ParseHexMeasurementsList(hexes)
 	if err != nil {
 		return nil, err
 	}
@@ -607,14 +626,15 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
-		policy: &ratls.VerifyPolicy{
+		policy: &ratls.VerifyPolicy{Entries: refValues.Entries, Policy: remote.Policy{
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
-		},
+		}},
 		pins:         pins,
 		meshCA:       caPool,
 		initDataHash: initDataHash,
+		refValues:    refValues,
 	}, nil
 }
 
@@ -628,8 +648,8 @@ func parseInitDataPin(flag string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--init-data is not hex: %v", err)
 	}
-	if len(digest) != initdata.DigestSize {
-		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), initdata.DigestSize)
+	if len(digest) != sha256.Size {
+		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), sha256.Size)
 	}
 	return digest, nil
 }
@@ -647,11 +667,11 @@ func parseInitDataPin(flag string) ([]byte, error) {
 // two would otherwise pin RTMR[1]/[2] from different sources and a
 // disagreement is a policy no guest can satisfy.
 type rtmrPins struct {
-	image *runtimemeasure.ImagePins
+	image runtimemeasure.ImageIdentity
 	rtmr3 []byte
 	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
-	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
-	// read only by pkg/attestationclient, on the delegated attestation-api
+	// other two, rather than left to ratls.VerifyPolicy.Policy.RTMRs: that field is
+	// read only by attestation-go/remote, on the delegated attestation-api
 	// path, and `c8s verify` always verifies in process (verifyInProcess ->
 	// localverify.Verify, whose Params carries no registers). Setting the
 	// policy field alone made the flag a silent no-op.
@@ -692,9 +712,9 @@ func rtmr3FlagUsed(cfg config) string {
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	manual, err := parseRTMRPins(cfg.rtmrs)
+	manual, err := refvalues.ParseRTMRPins(cfg.rtmrs)
 	if err != nil {
-		return rtmrPins{}, err
+		return rtmrPins{}, fmt.Errorf("--rtmr: %w", err)
 	}
 	// RTMR[3] has three spellings — --rtmr 3=, --expected-rtmr3, and
 	// --operator-pkey (which derives the value) — and they write one slot, so
@@ -720,7 +740,14 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		if err != nil {
 			return rtmrPins{}, fmt.Errorf("--image-manifest: %w", err)
 		}
-		pins.image = &img
+		// The pins below (MRTD, RTMR[1], RTMR[2]) exist only on TDX, so an
+		// SNP manifest would load and then pin nothing. Refuse it here rather
+		// than report an enforcement that never ran.
+		if img.Family() != teetypes.FamilyTDX {
+			return rtmrPins{}, fmt.Errorf("--image-manifest: %s pins a %s image; c8s verify pins the TDX image tuple (MRTD + RTMR[1] + RTMR[2]) and has no gate for another family",
+				cfg.imageManifest, img.Family())
+		}
+		pins.image = img
 	}
 	if cfg.expectedRTMR3Hex != "" {
 		b, err := hex.DecodeString(strings.TrimSpace(cfg.expectedRTMR3Hex))
@@ -743,10 +770,10 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		}
 		// The seed is derived by the shared convention package, never
 		// recomputed here: the initrd, cred-release and get-kubeconfig all go
-		// through ForOperatorKey, and a second implementation of the same
+		// through runtimemeasure.Seed, and a second implementation of the same
 		// arithmetic is a second thing to drift. It hashes the file bytes
 		// verbatim — the check above only inspects them.
-		seed := runtimemeasure.ForOperatorKey(pubPEM)
+		seed := runtimemeasure.Seed(pubPEM)
 		pins.rtmr3 = seed[:]
 	}
 	if v, ok := manual[3]; ok {
@@ -791,7 +818,7 @@ func manualIndexList(manual map[int][]byte) string {
 }
 
 // checkOperatorPublicKeyPEM rejects a file that is not a PKIX public key before
-// its bytes become a register pin. ForOperatorKey hashes whatever it is given,
+// its bytes become a register pin. runtimemeasure.Seed hashes whatever it is given,
 // so any file yields some digest: without this check a mistyped path or a
 // private key handed over by mistake produces a pin no node can ever match, and
 // the resulting RTMR[3] mismatch would read like a compromised node rather than
@@ -811,55 +838,6 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 		return fmt.Errorf("PEM block is not a parseable PKIX public key: %w", err)
 	}
 	return nil
-}
-
-// parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
-//
-// Index 0 is refused rather than accepted-and-ignored: RTMR[0] carries the TD
-// HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin would
-// deny half the fleet.
-//
-// 1, 2 and 3 are all accepted here, but they are not interchangeable and
-// resolveRTMRPins applies opposite rules to them. RTMR[1] and [2] ARE the
-// image, so pinning them by hand conflicts with --image-manifest. RTMR[3]
-// records events extended inside whatever image the untrusted host chose, so
-// pinning it REQUIRES --image-manifest — alone it would read as proof of
-// identity while proving none, since the host can boot any image and
-// reproduce the chain.
-func parseRTMRPins(pins []string) (map[int][]byte, error) {
-	if len(pins) == 0 {
-		return nil, nil
-	}
-	out := make(map[int][]byte, len(pins))
-	for _, p := range pins {
-		idxStr, hexStr, ok := strings.Cut(strings.TrimSpace(p), "=")
-		if !ok {
-			return nil, fmt.Errorf("--rtmr %q: want <index>=<sha384-hex>", p)
-		}
-		idx, err := strconv.Atoi(idxStr)
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
-		}
-		switch idx {
-		case 1, 2, 3:
-		case 0:
-			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
-		default:
-			return nil, fmt.Errorf("--rtmr %q: index must be 1, 2 or 3", p)
-		}
-		if _, dup := out[idx]; dup {
-			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
-		}
-		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
-		if err != nil {
-			return nil, fmt.Errorf("--rtmr %d: value is not hex: %w", idx, err)
-		}
-		if len(v) != sha512.Size384 {
-			return nil, fmt.Errorf("--rtmr %d: value is %d bytes, want %d", idx, len(v), sha512.Size384)
-		}
-		out[idx] = v
-	}
-	return out, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
@@ -1109,7 +1087,7 @@ type Outcome struct {
 // applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
 // --operator-keys. It only ever demotes Verified — nothing here can rescue a
 // failed hardware verification (docs/ratls.md).
-func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKeysReport) {
+func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKeysReport, plan *verifyPlan, servedMeasurements measurementsReport) {
 	fail := func(format string, args ...any) {
 		oc.Verified = false
 		if oc.Error == "" {
@@ -1166,6 +1144,8 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		}
 	}
 
+	checkMeasurementsConfig(cfg, plan, servedMeasurements, fail)
+
 	// The served key list is authenticated by being fetched over the attested
 	// serving cert. A failed fetch fails closed when the operator asked for the
 	// check (a 404 is not an error — it maps to the empty-set digest in
@@ -1192,6 +1172,16 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	if !bytes.Equal(opKeys.digest, expected) {
 		fail("served /operator-keys digest %x does not match the --operator-keys set (%x)", opKeys.digest, expected)
 	}
+}
+
+// checkMeasurementsConfig compares the set the target reports enforcing against
+// the operator's own file. A swapped config leaves the launch measurement
+// untouched, so this is what makes the substitution visible.
+func checkMeasurementsConfig(cfg config, plan *verifyPlan, served measurementsReport, fail func(string, ...any)) {
+	if cfg.measurementsConfig == "" {
+		return
+	}
+	checkServedMeasurements(plan.refValues, served, fail)
 }
 
 // applyWorkloadPolicy surfaces the leaf's matched-workload stamp and enforces
@@ -1264,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil || !plan.refValues.Empty()
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1289,7 +1279,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	oc.Measurement = result.Claims.LaunchDigest
 	oc.CurrentTCB = formatTCB(result.Claims.TCB)
 	oc.ReportData = hex.EncodeToString(result.Claims.ReportData)
-	oc.Debug, oc.SMT = reportFlags(oc.Platform, result.Claims.PlatformData)
+	oc.Debug, oc.SMT = reportFlags(result.Claims)
 
 	// The TDX-only gate runs before any register is compared: on non-TDX
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
@@ -1300,6 +1290,29 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
 		return oc
+	}
+
+	fullImagePinned := plan.pins.image != nil
+	if !plan.refValues.Empty() {
+		if teetypes.NormalizePlatform(plan.refValues.TEE) != teetypes.NormalizePlatform(oc.Platform) {
+			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.TEE, oc.Platform)
+			return oc
+		}
+		response := remote.VerifyResponse{Result: *result}
+		if err := measurementspkg.EnforceEntries(response, plan.refValues.Entries, oc.Platform); err != nil {
+			oc.Error = fmt.Sprintf("--measurements-config: %v", err)
+			return oc
+		}
+		// A TDX tuple covers the guest only when the matching entry pins both
+		// kernel and rootfs registers. A weak alternative must not borrow the
+		// completeness of an unrelated entry in the same policy.
+		for _, entry := range plan.refValues.Entries {
+			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+				measurementspkg.EnforceEntries(response, []measurementspkg.Entry{entry}, oc.Platform) == nil {
+				fullImagePinned = true
+				break
+			}
+		}
 	}
 
 	if pinned {
@@ -1313,17 +1326,23 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		// allowlist: RTMR[1]/[2] are pinned against THIS manifest, so an MRTD
 		// that merely appears somewhere in --measurements would let a launch
 		// digest from a different build satisfy the tuple. Same rule as
-		// getkubeconfig.checkMeasuredIdentity — one manifest, one meaning.
+		// getkubeconfig's measuredPolicy.checkIdentity — one manifest, one
+		// meaning.
 		// buildPolicy now refuses a manifest and an allowlist in the same run,
 		// so the two compares below cannot both fire on a CLI-built plan; the
 		// exact compare stays exact anyway, because widening it is precisely
 		// the bypass this rule exists to close.
-		if plan.pins.image != nil && !bytes.Equal(mb, plan.pins.image.MRTD[:]) {
-			oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
-				launch, hex.EncodeToString(plan.pins.image.MRTD[:]))
-			return oc
+		if plan.pins.image != nil {
+			// A TDX identity has exactly one launch digest, its MRTD;
+			// buildPolicy refuses any other family.
+			mrtd := plan.pins.image.LaunchDigests()[0].Digest
+			if !bytes.Equal(mb, mrtd[:]) {
+				oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
+					launch, hex.EncodeToString(mrtd[:]))
+				return oc
+			}
 		}
-		if len(plan.policy.Measurements) > 0 && !attestationclient.MeasurementAllowed(mb, plan.policy.Measurements) {
+		if len(plan.policy.Policy.Measurements) > 0 && !remote.MeasurementAllowed(mb, plan.policy.Policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}
@@ -1341,7 +1360,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// anchor) does not downgrade this: chosen by the responder, it anchors
 	// nothing the operator asked about — the same rule the JS verifier applies
 	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
+	if isTDX(oc.Platform) && pinned && !fullImagePinned {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
 		if plan.meshCA == nil {
 			oc.Verified = false
@@ -1409,7 +1428,7 @@ func enforceMinTCB(oc *Outcome, cfg config, result *teetypes.VerificationResult)
 // pick "gcp-tdx" to slip past a TDX-only rule, or "tdx" to trip a TDX-only
 // rejection, so every platform decision here normalizes first.
 func isTDX(platform string) bool {
-	return ratls.NormalizePlatform(platform) == ratls.NormalizePlatform(string(teetypes.PlatformTDX))
+	return teetypes.NormalizePlatform(platform).IsTDX()
 }
 
 // applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and the RTMR[3] pin
@@ -1423,28 +1442,27 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	}
 
 	check := func(idx int, meaning string, want []byte) bool {
-		key := fmt.Sprintf("rtmr_%d", idx)
-		got, _ := result.Claims.PlatformData[key].(string)
-		got = strings.ToLower(strings.TrimSpace(got))
-		if got == "" {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: the verified claims carry no %s", idx, key)
+		got, err := result.Claims.RTMR(idx)
+		if err != nil {
+			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: register claim absent or malformed: %v", idx, err)
 			return false
 		}
-		gb, err := hex.DecodeString(got)
-		if err != nil || len(gb) != runtimemeasure.Size {
-			oc.Error = fmt.Sprintf("cannot enforce the RTMR[%d] pin: %s claim is malformed (%q)", idx, key, got)
-			return false
-		}
-		if !bytes.Equal(gb, want) {
-			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %s, expected %s", idx, meaning, got, hex.EncodeToString(want))
+		if !bytes.Equal(got, want) {
+			oc.Error = fmt.Sprintf("RTMR[%d] (%s) is %x, expected %x", idx, meaning, got, want)
 			return false
 		}
 		oc.RTMRsPinned = append(oc.RTMRsPinned, fmt.Sprintf("%d:%s", idx, hex.EncodeToString(want)))
 		return true
 	}
 	if pins.image != nil {
-		if !check(1, "guest kernel", pins.image.RTMR1[:]) || !check(2, "guest rootfs", pins.image.RTMR2[:]) {
-			return false
+		regs := pins.image.RTMRs()
+		// Ascending index, for the same reproducibility reason as the manual
+		// pins below.
+		for _, idx := range slices.Sorted(maps.Keys(regs)) {
+			want := regs[idx]
+			if !check(idx, imageRTMRMeaning(idx), want[:]) {
+				return false
+			}
 		}
 	}
 	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
@@ -1460,8 +1478,22 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	return true
 }
 
-// rtmrMeaning labels a register in operator-facing output. parseRTMRPins
-// admits only 1 and 2; the default keeps this total rather than printing an
+// imageRTMRMeaning labels the registers an image manifest pins. RTMR[2] reads
+// differently here than in [rtmrMeaning]: the manifest measures the rootfs the
+// command line names, so name the thing the pin identifies.
+func imageRTMRMeaning(idx int) string {
+	switch idx {
+	case 1:
+		return "guest kernel"
+	case 2:
+		return "guest rootfs"
+	default:
+		return rtmrMeaning(idx)
+	}
+}
+
+// rtmrMeaning labels a register in operator-facing output. refvalues.ParseRTMRPins
+// admits only 1, 2 and 3; the default keeps this total rather than printing an
 // empty meaning if that ever widens.
 func rtmrMeaning(idx int) string {
 	switch idx {
@@ -1512,21 +1544,12 @@ func minTCBFromCfg(cfg config) *teetypes.SnpTcb {
 }
 
 // reportFlags reads the debug and SMT state the verifier extracted into the
-// platform-specific claims: SNP carries them under policy/platform_info, TDX
-// attests debug under td_attributes_parsed and carries no SMT state (smt:false
-// means unattested, not off). attestation-go routes all six supported platforms
-// through one of these two claim layouts, so the non-TDX branch is SNP-shaped
-// by exhaustion.
-func reportFlags(platform string, pd map[string]any) (debug, smt bool) {
-	nested := func(section, key string) bool {
-		m, _ := pd[section].(map[string]any)
-		v, _ := m[key].(bool)
-		return v
-	}
-	if isTDX(platform) {
-		return nested("td_attributes_parsed", "debug"), false
-	}
-	return nested("policy", "debug_allowed"), nested("platform_info", "smt_enabled")
+// claims, for display. A flag the platform does not carry (SMT on TDX) renders
+// as false; the verdict never depends on either.
+func reportFlags(claims teetypes.Claims) (debug, smt bool) {
+	debug, _ = claims.DebugEnabled()
+	smt, _ = claims.SMTEnabled()
+	return debug, smt
 }
 
 // formatTCB renders the verified TCB for display: SNP shows its components, TDX

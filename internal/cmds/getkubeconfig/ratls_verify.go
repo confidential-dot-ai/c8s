@@ -28,7 +28,7 @@ import (
 // Go's own chain/hostname verification is disabled (InsecureSkipVerify): the
 // serving cert is self-signed and carries no SAN for the per-launch IP. RA-TLS
 // replaces it — the quote binding is strictly stronger than a CA chain here.
-func newRATLSClient(cfg Config, exp measuredPolicy) *http.Client {
+func newRATLSClient(cfg Config, exp platformVerifier) *http.Client {
 	return &http.Client{
 		Timeout: cfg.Timeout,
 		Transport: &http.Transport{
@@ -53,7 +53,7 @@ func newRATLSClient(cfg Config, exp measuredPolicy) *http.Client {
 // verifies it in-process with attestation-go (HW chain + report_data
 // binding), and enforces the full measured-identity policy — identical to the
 // attest gate. Fails closed on any missing piece.
-func verifyServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
+func verifyServerCert(leaf *x509.Certificate, exp platformVerifier) error {
 	// This leaf is self-signed by construction (newRATLSClient's doc comment:
 	// there is no CA on this path at all), so the classification must come
 	// back BodySelfSigned. Assert it rather than discard it: a CA-vouched
@@ -67,15 +67,24 @@ func verifyServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
 	if body != certutil.BodySelfSigned {
 		return fmt.Errorf("ratls: cred-release serving cert is not self-signed (issuer != subject), so its body is authenticated by nothing this flow checks; the RA-TLS leaf must carry its own signature under the attested key")
 	}
-	// Bare-metal SNP RA-TLS certs carry a RAW report, not a JSON envelope
-	// (pkg/ratls: EmbeddedEvidence is the TDX/az-snp shape), and the raw
-	// report has no inline VCEK — so the embedded-envelope path below cannot
-	// verify them. localverify handles exactly that shape, fetching the VCEK
-	// from AMD KDS, and takes the same two pins this gate enforces.
-	if exp.platform == teetypes.PlatformSNP {
-		return verifySNPServerCert(leaf, exp)
-	}
+	return exp.verifyCertificate(leaf)
+}
 
+// verifyCertificate routes to the arm the manifest's family names. An unknown
+// family cannot reach here — policyFor refuses one — but the default fails
+// closed rather than falling through to another family's rules.
+func (exp measuredPolicy) verifyCertificate(leaf *x509.Certificate) error {
+	switch exp.identity.Family() {
+	case teetypes.FamilySNP:
+		return exp.verifySNPCertificate(leaf)
+	case teetypes.FamilyTDX:
+		return exp.verifyTDXCertificate(leaf)
+	default:
+		return fmt.Errorf("ratls: --image-manifest pins TEE family %q, which this flow has no gate for", exp.identity.Family())
+	}
+}
+
+func (exp measuredPolicy) verifyTDXCertificate(leaf *x509.Certificate) error {
 	att, err := ratls.ExtractAttestation(leaf)
 	if err != nil {
 		return fmt.Errorf("ratls: %w", err)
@@ -116,7 +125,7 @@ var verifySNPRATLS localverify.VerifyFunc = localverify.Verify
 // (VCEK from AMD KDS) crosses the network. VerifyConnection has no context.
 const snpRATLSTimeout = 30 * time.Second
 
-// verifySNPServerCert is verifyServerCert's SNP arm: it enforces the SAME two
+// verifySNPCertificate verifies an SNP serving certificate: it enforces the SAME two
 // pins as the attest gate — the launch digest must be one of the manifest's
 // per-SMP variants, and HOSTDATA must equal the operator-key binding — over
 // evidence extracted from a bare-metal SNP RA-TLS cert (a raw report, no
@@ -124,7 +133,7 @@ const snpRATLSTimeout = 30 * time.Second
 //
 // The REPORTDATA anchor is the cert's own key hash, so a captured quote from
 // another guest cannot be replayed onto this channel.
-func verifySNPServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
+func (exp measuredPolicy) verifySNPCertificate(leaf *x509.Certificate) error {
 	platform, evidence, expectedReportData, err := localverify.CertEnvelope(leaf)
 	if err != nil {
 		return fmt.Errorf("ratls: %w", err)
@@ -135,18 +144,9 @@ func verifySNPServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
 		return fmt.Errorf("ratls: serving cert platform is %q: the SNP trust gate pins launch-time HOSTDATA, which only bare-metal snp launches carry as the operator-key binding", platform)
 	}
 
-	measurements := make([][]byte, 0, len(exp.snpPins.BySMP))
-	for _, d := range exp.snpPins.Digests() {
-		measurements = append(measurements, append([]byte(nil), d[:]...))
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), snpRATLSTimeout)
 	defer cancel()
-	res, err := verifySNPRATLS(ctx, platform, evidence, localverify.Params{
-		ExpectedReportData:   expectedReportData,
-		Measurements:         measurements,
-		ExpectedInitDataHash: exp.hostData[:],
-	})
+	res, err := verifySNPRATLS(ctx, platform, evidence, exp.verificationParams(expectedReportData))
 	if err != nil {
 		return fmt.Errorf("ratls: verify serving cert evidence: %w", err)
 	}
@@ -156,7 +156,7 @@ func verifySNPServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
 	if !res.SignatureValid {
 		return fmt.Errorf("ratls: quote signature invalid")
 	}
-	if err := checkSNPMeasuredIdentity(res, exp); err != nil {
+	if err := exp.checkIdentity(res); err != nil {
 		return fmt.Errorf("ratls: %w", err)
 	}
 	return nil

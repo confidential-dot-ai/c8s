@@ -5,13 +5,13 @@ package ratlsmesh
 import (
 	"context"
 	"crypto/sha512"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,10 +23,14 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
@@ -46,12 +50,22 @@ func Run(args []string) error {
 var inClusterConfig = rest.InClusterConfig
 
 // newKubeClientset builds the Kubernetes client used by the proxy and the
-// iptables-sync sidecar. Package var so tests can substitute a fake clientset;
-// production always uses the in-cluster config.
-var newKubeClientset = func() (kubernetes.Interface, error) {
-	restCfg, err := inClusterConfig()
-	if err != nil {
-		return nil, fmt.Errorf("k8s in-cluster config: %w", err)
+// iptables-sync sidecar: from kubeconfigPath when set, else from the
+// in-cluster service-account config. Package var so tests can substitute a
+// fake clientset.
+var newKubeClientset = func(kubeconfigPath string) (kubernetes.Interface, error) {
+	var restCfg *rest.Config
+	var err error
+	if kubeconfigPath != "" {
+		restCfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		if err != nil {
+			return nil, fmt.Errorf("k8s config from --kubeconfig %s: %w", kubeconfigPath, err)
+		}
+	} else {
+		restCfg, err = inClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("k8s in-cluster config: %w", err)
+		}
 	}
 	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
@@ -74,14 +88,21 @@ func newRatlsMeshCommand() *cobra.Command {
 	bindProxyFlags(cmd.Flags(), &cfg)
 	cmd.AddCommand(newIptablesSyncCommand())
 	cmd.AddCommand(newIptablesCleanupCommand())
-	cmd.AddCommand(newInGuestCommand())
-	cmd.AddCommand(newReadinessCheckCommand())
 	return cmd
+}
+
+// proxyListeners are served instead of binding the matching *Port fields;
+// tests pre-bind them.
+type proxyListeners struct {
+	outbound net.Listener
+	inbound  net.Listener
+	health   net.Listener
 }
 
 type proxyConfig struct {
 	platform                  string
 	attestationApiURL         string
+	kubeconfig                string
 	outboundPort              int
 	inboundPort               int
 	nodeIP                    string
@@ -96,7 +117,12 @@ type proxyConfig struct {
 	maxConns                  int
 	maxConnsPerSource         int
 	healthPort                int
+	listeners                 proxyListeners
 	measurements              string
+	rtmrs                     string
+	measurementsConfig        string
+	cdsMeasurementsConfig     string
+	cdsPins                   measurements.ReferenceValues
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -104,6 +130,7 @@ type proxyConfig struct {
 	caCertPath                string
 	caPollInterval            time.Duration
 	cdsMeasurements           string
+	cdsRTMRs                  string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
@@ -125,6 +152,7 @@ type proxyConfig struct {
 func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.platform, "platform", "auto", "TEE platform: sev-snp, tdx, or auto (probes /dev/{tdx_guest,sev-guest})")
 	fs.StringVar(&c.attestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
+	fs.StringVar(&c.kubeconfig, "kubeconfig", "", "path to a kubeconfig for the pod resolver's API access; empty uses the in-cluster service-account config")
 	fs.IntVar(&c.outboundPort, "outbound-port", 15001, "outbound listener port (intercepted app traffic)")
 	fs.IntVar(&c.inboundPort, "inbound-port", 15006, "inbound listener port (RA-TLS from peer nodes)")
 	fs.StringVar(&c.nodeIP, "node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
@@ -140,6 +168,9 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.maxConnsPerSource, "max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
+	fs.StringVar(&c.rtmrs, "rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> mesh peers must satisfy (RTMR[1] guest kernel, RTMR[2] cmdline with the dm-verity root hash). SNP peers are unaffected. Empty = no RTMR pinning: on TDX --measurements then pins TDVF firmware only, UNSAFE")
+	fs.StringVar(&c.measurementsConfig, "measurements-config", "", "path to atomic mesh peer image/operator identities; also used for CDS unless --cds-measurements-config is set")
+	fs.StringVar(&c.cdsMeasurementsConfig, "cds-measurements-config", "", "path to the CDS-only image/operator identities; independent of the mesh peer policy")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -147,6 +178,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.caCertPath, "ca-cert", "", "path to CA certificate file for peer verification")
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
+	fs.StringVar(&c.cdsRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> that CDS's RA-TLS peer cert must additionally satisfy. Ignored when CDS presents SNP evidence. Empty = launch-digest pinning only")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
@@ -188,7 +220,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	clientset, err := newKubeClientset()
+	clientset, err := newKubeClientset(c.kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -202,14 +234,27 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements)
+	// Resolve before the flat fields are read: every gate below reads them,
+	// so a config-mode start must fill them first.
+	pins, err := resolveMeasurementsConfig(c)
 	if err != nil {
 		return err
 	}
-	if len(meshPolicy.Measurements) > 0 {
-		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
+
+	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.rtmrs)
+	if err != nil {
+		return err
+	}
+	meshPolicy.Entries = pins.Entries
+	if len(meshPolicy.Policy.Measurements) > 0 {
+		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Policy.Measurements))
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
+	}
+	if len(meshPolicy.Policy.RTMRs) > 0 {
+		logger.Info("TDX RTMR pinning enabled for mesh peers", "count", len(meshPolicy.Policy.RTMRs))
+	} else if c.platform == "tdx" && len(meshPolicy.Policy.Measurements) > 0 {
+		logger.Warn("no --rtmrs set: TDX measurement pinning covers TDVF firmware only (MRTD); peer guest kernel and rootfs are not pinned")
 	}
 
 	var caCerts []*x509.Certificate
@@ -236,10 +281,20 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := checkTEEMatchesPlatform(pins, teeType); err != nil {
+		return err
+	}
+	if err := checkTEEMatchesPlatform(c.cdsPins, teeType); err != nil {
+		return err
+	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
-	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := refvalues.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
+	}
+	cdsRTMRs, err := refvalues.ParseRTMRPinsString(c.cdsRTMRs)
+	if err != nil {
+		return fmt.Errorf("--cds-rtmrs: %w", err)
 	}
 	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
 		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
@@ -249,7 +304,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	// hardware attestation, not by SAN/hostname (NewServerTLSConfig sets
 	// InsecureSkipVerify and verifies the RA-TLS extension). The CDS-issued
 	// upgrade cert does carry a DNS SAN (see cdsclient.Config.DNSSAN).
-	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+	runtime, err := newMeshRuntime(&ratls.ServerConfig{
 		Platform:        c.platform,
 		AttestFunc:      attestFunc,
 		CertTTL:         c.certTTL,
@@ -258,77 +313,54 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		DynamicCACert:   effectiveCAURL != "",
 		RotationTimeout: c.rotationTimeout,
 		Logger:          logger,
-	})
+	}, logger, c.sessionCacheSize)
 	if err != nil {
-		return fmt.Errorf("create server TLS config: %w", err)
+		return err
 	}
-
-	clientTLS, clientCertMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:          meshPolicy,
-		Platform:        c.platform,
-		AttestFunc:      attestFunc,
-		CACert:          caCerts,
-		DynamicCACert:   effectiveCAURL != "",
-		CertTTL:         c.certTTL,
-		RotationTimeout: c.rotationTimeout,
-		Logger:          logger,
-	})
-	if err != nil {
-		return fmt.Errorf("create client TLS config: %w", err)
+	cdsCfg := &cdsclient.Config{
+		CDSURL:            c.cdsURL,
+		AttestationApiURL: c.attestationApiURL,
+		CDSCAURL:          c.cdsURL,
+		CACertURL:         effectiveCAURL,
+		NodeIP:            c.nodeIP,
+		DNSSAN:            c.certDNSSAN,
+		TEEType:           teeType,
+		CDSMeasurements:   cdsMeasurements,
+		CDSRTMRs:          cdsRTMRs,
+		CDSEntries:        c.cdsPins.Entries,
 	}
-
-	if c.sessionCacheSize > 0 {
-		clientTLS.ClientSessionCache = tls.NewLRUClientSessionCache(c.sessionCacheSize)
+	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
+		return fmt.Errorf("proxy: %w", err)
 	}
+	return nil
+}
 
-	m := newMetrics()
+type hostMesh struct {
+	c        *proxyConfig
+	resolver *k8sResolver
+	cds      *cdsclient.Config
+}
+
+func (e hostMesh) configure(r *meshRuntime) *Proxy {
+	c, resolver := e.c, e.resolver
 	if c.certMode == "cds" {
-		m.certModeConfigured.Store(1)
+		r.metrics.certModeConfigured.Store(1)
 	}
-	if len(meshPolicy.Measurements) > 0 {
-		m.measurementPinning.Set(1)
-	}
-
-	// Wire attestation failure counter into TLS peer verification callbacks.
-	wrapVerify := func(orig func([][]byte, [][]*x509.Certificate) error) func([][]byte, [][]*x509.Certificate) error {
-		if orig == nil {
-			return nil
-		}
-		return func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
-			err := orig(rawCerts, chains)
-			if err != nil {
-				m.attestationFailures.Inc()
-			}
-			return err
-		}
-	}
-	serverTLS.VerifyPeerCertificate = wrapVerify(serverTLS.VerifyPeerCertificate)
-	clientTLS.VerifyPeerCertificate = wrapVerify(clientTLS.VerifyPeerCertificate)
-
-	// Wire rotation failure metrics.
-	serverCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	if clientCertMgr != nil {
-		clientCertMgr.SetOnRotationFail(func() { m.certRotationFailures.Inc() })
-	}
-
-	health := newHealthServer(m, serverCertMgr, clientCertMgr, c.acceptErrThreshold, c.healthReadTimeout, c.healthWriteTimeout)
-
+	r.health = newHealthServer(r.metrics, r.serverCertMgr, r.clientCertMgr, c.acceptErrThreshold, c.healthReadTimeout, c.healthWriteTimeout)
+	r.healthPort, r.healthListener = c.healthPort, c.listeners.health
 	var connSem chan struct{}
 	if c.maxConns > 0 {
 		connSem = make(chan struct{}, c.maxConns)
 	}
 
-	proxy := &Proxy{
+	return &Proxy{
 		outboundAddr:      fmt.Sprintf(":%d", c.outboundPort),
 		inboundAddr:       fmt.Sprintf(":%d", c.inboundPort),
-		serverTLS:         serverTLS,
-		clientTLS:         clientTLS,
+		outboundLn:        c.listeners.outbound,
+		inboundLn:         c.listeners.inbound,
 		nodeIP:            c.nodeIP,
 		inboundPort:       c.inboundPort,
 		resolver:          resolver,
-		origDstFunc:       defaultOrigDstFunc,
-		logger:            logger,
-		metrics:           m,
 		accessLog:         c.accessLog,
 		dialTimeout:       c.dialTimeout,
 		tlsDialTimeout:    c.tlsDialTimeout,
@@ -338,37 +370,15 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		idleTimeout:       c.idleTimeout,
 		maxDestHeaderSize: c.maxDestHeaderSize,
 		pipeBufferSize:    c.pipeBufferSize,
-		bufPool:           newBufPool(c.pipeBufferSize),
 		connSem:           connSem,
 		maxConnsPerSrc:    c.maxConnsPerSource,
-		onReady: func() {
-			// Eagerly provision certificates before marking ready.
-			// Bound the warm-up so a hanging attestation binary (missing
-			// /dev/sev, TPM not loaded) doesn't block readiness forever.
-			warmupTimeout := 2 * c.rotationTimeout
-			warmupCtx, warmupCancel := context.WithTimeout(ctx, warmupTimeout)
-			defer warmupCancel()
-
-			if err := serverCertMgr.WarmUp(warmupCtx); err != nil {
-				logger.Error("server certificate warm-up failed", "error", err)
-			}
-			if clientCertMgr != nil {
-				if err := clientCertMgr.WarmUp(warmupCtx); err != nil {
-					logger.Error("client certificate warm-up failed", "error", err)
-				}
-			}
-			health.ready.Store(true)
-		},
-		onShutdown: func() { health.ready.Store(false) },
 	}
+}
 
-	// Start health/metrics server.
-	go func() {
-		if err := health.serve(ctx, fmt.Sprintf(":%d", c.healthPort)); err != nil {
-			logger.Error("health server error", "error", err)
-		}
-	}()
-
+func (e hostMesh) start(ctx context.Context, r *meshRuntime) {
+	c, resolver := e.c, e.resolver
+	logger, m, proxy := r.logger, r.metrics, r.proxy
+	serverCertMgr, clientCertMgr := r.serverCertMgr, r.clientCertMgr
 	// Periodically update resolver cache and cert expiry metrics.
 	go func() {
 		t := time.NewTicker(c.metricsUpdateInterval)
@@ -407,49 +417,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		}
 	}()
 
-	// CDS certificate upgrade: after self-signed RA-TLS boot, a background
-	// goroutine contacts CDS, gets CA-signed certs, and hot-swaps them via
-	// CertManager.SwapProvider. cds serves both attestation and CA bundle on
-	// one URL, so CDSURL and CDSCAURL both take --cds-url.
-	if c.certMode == "cds" {
-		cdsCfg := &cdsclient.Config{
-			CDSURL:            c.cdsURL,
-			AttestationApiURL: c.attestationApiURL,
-			CDSCAURL:          c.cdsURL,
-			CACertURL:         effectiveCAURL,
-			NodeIP:            c.nodeIP,
-			DNSSAN:            c.certDNSSAN,
-			TEEType:           teeType,
-			CDSMeasurements:   cdsMeasurements,
-		}
-		// A provider-construction failure (config validation) is logged and
-		// the mesh keeps serving self-signed certs; it never blocks startup.
-		if provider, err := cdsclient.NewProvider(cdsCfg, logger); err != nil {
-			logger.Error("cds provider creation failed", "error", err)
-		} else {
-			go cdsUpgrade{
-				logger:          logger,
-				logPrefix:       "cds",
-				provider:        provider,
-				retryBackoff:    c.cdsRetryBackoff,
-				retryMaxBackoff: c.cdsRetryMaxBackoff,
-				opTimeout:       c.cdsOpTimeout,
-				serverCertMgr:   serverCertMgr,
-				clientCertMgr:   clientCertMgr,
-				metrics:         m,
-			}.run(ctx)
-
-			go caBundleRefresh{
-				logger:        logger,
-				logPrefix:     "cds",
-				provider:      provider,
-				interval:      c.caPollInterval,
-				opTimeout:     c.cdsOpTimeout,
-				serverCertMgr: serverCertMgr,
-				clientCertMgr: clientCertMgr,
-			}.run(ctx)
-			logger.Info("CA bundle refresh enabled", "url", effectiveCAURL, "interval", c.caPollInterval)
-		}
+	if c.certMode == "cds" && r.startCDS(ctx, e.cds, cdsUpgrade{
+		logPrefix: "cds", retryBackoff: c.cdsRetryBackoff,
+		retryMaxBackoff: c.cdsRetryMaxBackoff, opTimeout: c.cdsOpTimeout,
+	}, c.caPollInterval) {
+		logger.Info("CA bundle refresh enabled", "url", e.cds.CACertURL, "interval", c.caPollInterval)
 	}
 
 	// Cert pipeline health probe: periodically check CDS /readyz.
@@ -514,20 +486,15 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		"keepalive", c.keepAlive,
 		"session_cache_size", c.sessionCacheSize,
 	)
-
-	if err := proxy.Run(ctx); err != nil {
-		return fmt.Errorf("proxy: %w", err)
-	}
-	return nil
 }
 
 type iptablesSyncConfig struct {
 	outboundPort            int
+	kubeconfig              string
 	uid                     int
 	excludeUIDs             string
 	excludeSourceNamespaces string
 	nodeIPs                 []string
-	clusterDNSIPs           []string
 	resyncPeriod            time.Duration
 	watchdogPeriod          time.Duration
 	ipsetMaxElem            int
@@ -550,13 +517,13 @@ func newIptablesSyncCommand() *cobra.Command {
 	}
 	fs := cmd.Flags()
 	fs.IntVar(&cfg.outboundPort, "outbound-port", 15001, "outbound listener port")
+	fs.StringVar(&cfg.kubeconfig, "kubeconfig", "", "path to a kubeconfig for the pod watch; empty uses the in-cluster service-account config")
 	fs.IntVar(&cfg.uid, "uid", defaultProxyUID, "UID to exclude from redirect")
 	fs.StringVar(&cfg.excludeUIDs, "exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
 	fs.StringVar(&cfg.excludeSourceNamespaces, "exclude-source-namespaces", defaultMeshExcludedSourceNamespacesCSV(), "comma-separated local source namespaces excluded from transparent mesh interception")
 	fs.StringSliceVar(&cfg.nodeIPs, "node-ip", nil, "local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to NODE_IP env. Each address must be a non-loopback, non-unspecified IP bound to a local interface.")
-	fs.StringSliceVar(&cfg.clusterDNSIPs, "cluster-dns-ip", []string{clusterDNSClusterIP}, "cluster DNS (CoreDNS) server IP(s) the egress DNS carve-out is restricted to (c8s default 10.53.0.10). Set the same IP in the guest C8S_CLUSTER_DNS_IP and verify the carve-out on a live cluster (post-DNAT).")
 	fs.DurationVar(&cfg.resyncPeriod, "resync-period", 30*time.Second, "periodic full ipset reconciliation interval")
-	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at position 1 (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
+	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at the head of their chain (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")
 	fs.StringVar(&cfg.cwInboundPassthrough, "cw-inbound-passthrough", formatCWPassthrough(defaultCWPassthrough), "comma-separated proto:source-port replies exempted from the always-on cw inbound guard (which drops FORWARD-path traffic to confidential.ai/cw pods). Each entry matches only a destination port in 32768-60999 and, for TCP, a reply segment shape. Empty = strict drop-all; DNS is the default")
 	fs.StringVar(&cfg.readyFile, "ready-file", "", "path to write after initial ipset and iptables sync succeeds")
@@ -661,10 +628,16 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 
 // meshVerifyPolicy builds the mesh peer-verification policy: evidence checked
 // by the same-node attestation-api, launch measurements pinned to the
-// --measurements allowlist. Empty measurements leaves the policy unpinned
-// (accept any TEE — development only).
-func meshVerifyPolicy(attestationApiURL, measurements string) (*ratls.VerifyPolicy, error) {
+// --measurements allowlist, and TDX peers additionally pinned to the --rtmrs
+// registers. Empty measurements leaves the policy unpinned (accept any TEE —
+// development only).
+func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.VerifyPolicy, error) {
 	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
+	pins, err := refvalues.ParseRTMRPinsString(rtmrs)
+	if err != nil {
+		return nil, fmt.Errorf("--rtmrs: %w", err)
+	}
+	policy.Policy.RTMRs = pins
 	if measurements == "" {
 		return policy, nil
 	}
@@ -678,7 +651,7 @@ func meshVerifyPolicy(attestationApiURL, measurements string) (*ratls.VerifyPoli
 			return nil, fmt.Errorf("invalid measurement length: %q is %d bytes, want %d (SHA-384 measurement must be %d hex characters)",
 				h, len(b), ratls.SNPMeasurementSize, ratls.SNPMeasurementSize*2)
 		}
-		policy.Measurements = append(policy.Measurements, b)
+		policy.Policy.Measurements = append(policy.Policy.Measurements, b)
 	}
 	return policy, nil
 }
@@ -692,17 +665,11 @@ func effectiveCDSCAURL(certMode, cdsURL string) string {
 
 func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
-	case "sev-snp":
-		return ratls.TEETypeSEVSNP, nil
-	case "tdx":
-		return ratls.TEETypeTDX, nil
 	case "auto":
-		// Probe the guest device tree. Kata's confidential runtimes
-		// pass the TEE device through as /dev/{tdx_guest,sev-guest};
-		// attestation-rs's own is_available() does the same check.
-		// Prefer TDX over SNP for the (theoretical) mixed case — an
-		// operator setting --platform=auto wants a working guest,
-		// and choosing arbitrarily is the sanest tiebreaker for a
+		// Probe the guest device tree; attestation-rs's own is_available()
+		// does the same check. Prefer TDX over SNP for the (theoretical)
+		// mixed case — an operator setting --platform=auto wants a working
+		// guest, and choosing arbitrarily is the sanest tiebreaker for a
 		// shape we don't ship today.
 		if _, err := os.Stat("/dev/tdx_guest"); err == nil {
 			return ratls.TEETypeTDX, nil
@@ -710,10 +677,13 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 		if _, err := os.Stat("/dev/sev-guest"); err == nil {
 			return ratls.TEETypeSEVSNP, nil
 		}
-		return 0, fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
+		return "", fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the node does not expose a TEE device")
 	case "":
-		return 0, fmt.Errorf("--platform is required")
-	default:
-		return 0, fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
+		return "", fmt.Errorf("--platform is required")
 	}
+	family, err := teetypes.ParseFamily(platform)
+	if err != nil {
+		return "", fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
+	}
+	return family, nil
 }

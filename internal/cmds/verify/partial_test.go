@@ -18,7 +18,6 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
-	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -83,7 +82,7 @@ func snpVerifiedOutcome(t *testing.T, cfg config, ev *evidence) Outcome {
 		Claims:         teetypes.Claims{LaunchDigest: launch},
 	}
 	oc := newOutcome(cfg, ev, result, nil, plan)
-	applyVerdictPolicies(&oc, cfg, ev, nil, operatorKeysReport{})
+	applyVerdictPolicies(&oc, cfg, ev, nil, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
 	return oc
 }
 
@@ -144,7 +143,7 @@ func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 	// the door lie rides the failure instead of being buried by it.
 	verr := &securityError{err: errors.New("rejected")}
 	failed := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
-	applyVerdictPolicies(&failed, config{}, ev, nil, operatorKeysReport{})
+	applyVerdictPolicies(&failed, config{}, ev, nil, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
 	if failed.Partial || verdictExitCode(failed) != exitFailed {
 		t.Errorf("failed evidence + webpki: partial=%v exit=%d, want a plain failure", failed.Partial, verdictExitCode(failed))
 	}
@@ -171,7 +170,7 @@ func TestFrontDoorVerdictJSONHonesty(t *testing.T) {
 	failedOutcome := func(ev *evidence) Outcome {
 		verr := &securityError{err: errors.New("rejected")}
 		oc := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
-		applyVerdictPolicies(&oc, config{}, ev, nil, operatorKeysReport{})
+		applyVerdictPolicies(&oc, config{}, ev, nil, operatorKeysReport{}, &verifyPlan{}, measurementsReport{})
 		return oc
 	}
 	renderJSON := func(oc Outcome) map[string]any {
@@ -273,7 +272,7 @@ func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 		ev := genoaFileEvidence(t)
 		ev.frontDoor = frontDoorOther // as a discovery gather would record it
 		var out, errOut bytes.Buffer
-		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
 		if code != exitPartial {
 			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitPartial, out.String(), errOut.String())
 		}
@@ -286,7 +285,7 @@ func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 		ev := genoaFileEvidence(t)
 		ev.frontDoor = frontDoorUnobserved // discovery doc fetched over a non-TLS connection
 		var out, errOut bytes.Buffer
-		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
 		if code != exitPartial {
 			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitPartial, out.String(), errOut.String())
 		}
@@ -296,7 +295,7 @@ func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 		ev := genoaFileEvidence(t)
 		ev.frontDoor = frontDoorAttested
 		var out, errOut bytes.Buffer
-		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
 		if code != exitVerified {
 			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
 		}
@@ -311,7 +310,7 @@ func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 	t.Run("no front-door property still verifies", func(t *testing.T) {
 		ev := genoaFileEvidence(t) // frontDoorNone — not discovery-sourced
 		var out, errOut bytes.Buffer
-		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, measurementsReport{}, &out, &errOut)
 		if code != exitVerified {
 			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
 		}
@@ -419,16 +418,15 @@ func TestAttestPQChainAnchorHonesty(t *testing.T) {
 func TestEndpointEvidenceMarksChainDerived(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
-	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	sess := fakeSession(0x02)
 	id := mintEndpointIdentity(t)
-	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m)
+	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), sess)
 
 	for _, tc := range []struct {
 		name string
 		get  func() (*evidence, error)
 	}{
-		{"live fetch", func() (*evidence, error) { return evidenceFromEndpointJSON(data, nonce, "test") }},
+		{"live fetch", func() (*evidence, error) { return evidenceFromEndpointJSON(data, nonce, sess.ek, "test") }},
 		{"saved bundle", func() (*evidence, error) { return gatherFromFile(data, nil, "file", leafTrust{}) }},
 	} {
 		ev, err := tc.get()

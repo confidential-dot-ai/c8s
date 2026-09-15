@@ -1,15 +1,15 @@
 // Package allowlist defines the CDS-served image allowlist and its deterministic
 // canonical serialization.
 //
-// The allowlist has two layers. Digests is the floor: a digest -> image-label
-// map whose images are admitted by digest alone. The measured guest seed and
-// standalone/injected component images live here. Workloads carries policy:
-// each named entry pins an init/main container set, every container carries
-// entrypoint/cmd (argv) policy, and the entry as a whole carries a secret-store
-// grant. Policy is always looked up by container digest — the entry name and
-// image labels are informational, never a trust-bearing key, because the image
-// reference a pod presents is chosen by the untrusted host while the digest is
-// bound to the bytes that run.
+// The allowlist is a map of named workload entries. Each entry pins an
+// init/main container set; every container binds a digest to the process
+// (argv), bind-mount and environment policy permitted for those bytes, and the
+// entry as a whole carries a secret-store grant. An image that may run however
+// it is invoked — a standalone or injected c8s component, whose argv is
+// per-pod — is an entry whose container policy is any. Policy is always looked
+// up by container digest — the entry name and image labels are informational,
+// never a trust-bearing key, because the image reference a pod presents is
+// chosen by the untrusted host while the digest is bound to the bytes that run.
 //
 // Canonical is Go's json.Marshal of the normalized struct: fixed field order,
 // map keys sorted by encoding/json, container and path lists sorted by
@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -47,7 +48,6 @@ const (
 // Allowlist is the complete image allowlist.
 type Allowlist struct {
 	Schema    string              `json:"schema"`
-	Digests   map[string]string   `json:"digests"`
 	Workloads map[string]Workload `json:"workloads"`
 }
 
@@ -101,13 +101,10 @@ type MountPolicy struct {
 	Destinations []string `json:"destinations,omitempty"`
 }
 
-// EnvPolicy governs the environment variable NAMES a container may run with.
-// Values are not matched: they carry secrets, and an allowlist is served to
-// every enforcer. Exact requires every name to appear in Names; Any, the
-// default, leaves them unconstrained.
+// EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
-	Policy string   `json:"policy"`
-	Names  []string `json:"names,omitempty"`
+	Policy string            `json:"policy"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -139,6 +136,9 @@ func ParseServedJSON(data []byte) (*Allowlist, error) {
 }
 
 func parseJSON(data []byte, strict bool) (*Allowlist, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if strict {
 		dec.DisallowUnknownFields()
@@ -157,6 +157,9 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 // a PUT /allowlist/workloads/{name} — applying the same normalization as
 // ParseJSON so a stored entry is canonical.
 func ParseWorkloadJSON(data []byte) (*Workload, error) {
+	if err := validateJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var w Workload
@@ -172,10 +175,18 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	if err := normalizeSecrets(&w.Secrets); err != nil {
 		return nil, fmt.Errorf("entry secrets: %w", err)
 	}
+	if w.Secrets != nil && !w.ArgvPinned() {
+		return nil, fmt.Errorf("entry: %w", errGrantUnpinned)
+	}
 	sortContainers(w.InitContainers)
 	sortContainers(w.Containers)
 	return &w, nil
 }
+
+// errGrantUnpinned refuses a secrets grant on an entry that leaves any
+// container's argv to the host: the value would be released to whatever
+// command line the host chose.
+var errGrantUnpinned = fmt.Errorf("a secrets grant requires every container's command and args policy to be exact or deny")
 
 // Digests returns every container digest in the workload (init and main), for
 // building a digest index.
@@ -188,6 +199,82 @@ func (w Workload) Digests() []types.Digest {
 		out = append(out, c.Digest)
 	}
 	return out
+}
+
+// AnyArgv reports whether the container is admitted whatever it runs: command
+// and args both any.
+func (c Container) AnyArgv() bool {
+	return c.Command.Policy == PolicyAny && c.Args.Policy == PolicyAny
+}
+
+// ArgvPinned reports whether every container's command and args policy is
+// exact or deny, so nothing about the entry's argv is left to the host. A
+// secrets grant requires it (docs/secrets.md).
+func (w Workload) ArgvPinned() bool {
+	for _, c := range w.containers() {
+		if c.Command.Policy == PolicyAny || c.Args.Policy == PolicyAny {
+			return false
+		}
+	}
+	return true
+}
+
+// containers is the init containers followed by the main containers.
+func (w Workload) containers() []Container {
+	return slices.Concat(w.InitContainers, w.Containers)
+}
+
+// AdmitsAnyArgv reports whether some entry admits the digest under an
+// unconstrained argv policy. The injected-container drop set (internal/secrets)
+// keys on it: c8s's own images run with per-pod arguments, so they are only
+// ever admitted this way.
+func (a *Allowlist) AdmitsAnyArgv(digest string) bool {
+	d, err := types.ParseDigest(digest)
+	if err != nil {
+		return false
+	}
+	for _, w := range a.Workloads {
+		for _, c := range w.containers() {
+			if c.Digest == d && c.AnyArgv() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// DigestEntry is the entry that admits an image under any command line: one
+// container at digest, labelled with the image reference. The chart seeds one
+// per bootstrap digest and `c8s allowlist add` writes one.
+func DigestEntry(digest types.Digest, image string) Workload {
+	return Workload{
+		Label:          image,
+		InitContainers: []Container{},
+		Containers: []Container{{
+			Digest:  digest,
+			Image:   image,
+			Command: ArgvPolicy{Policy: PolicyAny},
+			Args:    ArgvPolicy{Policy: PolicyAny},
+			Env:     EnvPolicy{Policy: PolicyAny},
+		}},
+	}
+}
+
+// DigestEntryName names a DigestEntry: the image reference's last path segment
+// with any tag or digest stripped ("image" when that is not a legal name), then
+// the first 12 hex digits of the digest. Must match the chart's
+// c8s.digestWorkloadName.
+func DigestEntryName(digest types.Digest, image string) string {
+	base, _, _ := strings.Cut(image, "@")
+	base = base[strings.LastIndex(base, "/")+1:]
+	base, _, _ = strings.Cut(base, ":")
+	if len(base) > 50 {
+		base = base[:50]
+	}
+	if !ValidWorkloadName(base) {
+		base = "image"
+	}
+	return base + "-" + digest.Hex()[:12]
 }
 
 // Canonical returns the canonical byte serialization: json.Marshal of the
@@ -218,20 +305,6 @@ func (a *Allowlist) normalize(strict bool) error {
 	if a.Schema != Schema {
 		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
 	}
-	if a.Digests != nil {
-		canon := make(map[string]string, len(a.Digests))
-		for d, img := range a.Digests {
-			pd, err := types.ParseDigest(d)
-			if err != nil {
-				return fmt.Errorf("floor digest %q: %w", d, err)
-			}
-			if _, dup := canon[pd.String()]; dup {
-				return fmt.Errorf("duplicate floor digest %s", pd.String())
-			}
-			canon[pd.String()] = img
-		}
-		a.Digests = canon
-	}
 	for name, w := range a.Workloads {
 		// The grammar is not negotiable on either path: the name is used
 		// verbatim as a URL path segment.
@@ -259,6 +332,9 @@ func (a *Allowlist) normalize(strict bool) error {
 		}
 		if err := normalizeSecrets(&w.Secrets); err != nil {
 			return fmt.Errorf("workload %q secrets: %w", name, err)
+		}
+		if strict && w.Secrets != nil && !w.ArgvPinned() {
+			return fmt.Errorf("workload %q: %w", name, errGrantUnpinned)
 		}
 		sortContainers(w.InitContainers)
 		sortContainers(w.Containers)
@@ -317,28 +393,30 @@ func normalizeMounts(p *MountPolicy) error {
 	return nil
 }
 
-// normalizeEnv validates an env policy, canonicalizing an absent policy to Any
-// for the same reason as mounts: a container inherits names it did not declare.
 func normalizeEnv(p *EnvPolicy) error {
 	switch p.Policy {
-	case PolicyAny, "":
-		if len(p.Names) != 0 {
-			return fmt.Errorf("any policy takes no names")
+	case PolicyAny, "", PolicyDeny:
+		if p.Values != nil {
+			return fmt.Errorf("%s env policy takes no values", p.Policy)
 		}
-		p.Policy = PolicyAny
-		p.Names = nil
+		if p.Policy == "" {
+			p.Policy = PolicyAny
+		}
 	case PolicyExact:
-		if len(p.Names) == 0 {
-			return fmt.Errorf("exact policy requires at least one name")
+		if p.Values == nil {
+			return fmt.Errorf("exact env requires values")
 		}
-		for _, n := range p.Names {
-			if n == "" || strings.ContainsRune(n, '=') {
-				return fmt.Errorf("environment name %q is empty or contains '='", n)
+		for n, v := range p.Values {
+			if !validEnvPair(n, v) {
+				return fmt.Errorf("invalid environment name or value")
 			}
 		}
-		p.Names = sortedUnique(p.Names)
+		if len(p.Values) == 0 {
+			p.Policy = PolicyDeny
+			p.Values = nil
+		}
 	default:
-		return fmt.Errorf("unknown env policy %q (want any or exact)", p.Policy)
+		return fmt.Errorf("unknown env policy %q (want deny, any, or exact)", p.Policy)
 	}
 	return nil
 }
@@ -467,7 +545,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Mounts, c.Env})
 	return string(b)
 }
 

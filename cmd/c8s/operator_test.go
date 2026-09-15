@@ -3,30 +3,54 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
-func TestValidateOperatorPlatform(t *testing.T) {
-	for _, tc := range []struct {
-		platform    string
-		kataEnforce bool
-		wantErr     string
-	}{
-		{webhook.HardwarePlatformSNP, true, ""},
-		{webhook.HardwarePlatformTDX, true, ""},
-		{"", false, ""}, // no kata enforcement: platform unused, empty is fine
-		{"", true, "required with --kata-enforce"},
-		{"foo", false, "must be"},
+func TestOperatorMeasurementsPolicyPreservesCompleteIdentities(t *testing.T) {
+	path := filepath.Join("..", "..", "pkg", "measurements", "testdata", "node-identities.json")
+	want, err := measurements.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := operatorMeasurementsPolicy(path, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := measurements.Parse([]byte(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) || !got.PinsOperatorKeys() {
+		t.Fatalf("operator lost image/operator-key identities: %+v", got)
+	}
+	for _, flat := range []struct{ digests, rtmrs []string }{
+		{digests: []string{strings.Repeat("ab", 48)}},
+		{rtmrs: []string{"1=" + strings.Repeat("cd", 48)}},
 	} {
-		err := validateOperatorPlatform(tc.platform, tc.kataEnforce)
-		if tc.wantErr == "" && err != nil {
-			t.Errorf("validateOperatorPlatform(%q, %v) = %v, want nil", tc.platform, tc.kataEnforce, err)
+		if _, err := operatorMeasurementsPolicy(path, flat.digests, flat.rtmrs); err == nil {
+			t.Fatal("accepted policy with conflicting flat pins")
 		}
-		if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-			t.Errorf("validateOperatorPlatform(%q, %v) = %v, want substring %q", tc.platform, tc.kataEnforce, err, tc.wantErr)
-		}
+	}
+	if got, err := operatorMeasurementsPolicy("", []string{strings.Repeat("ab", 48)}, nil); err != nil || got != "" {
+		t.Fatalf("legacy flags require no JSON policy: %q, %v", got, err)
+	}
+}
+
+func TestOperatorMeasurementsPolicyFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if _, err := operatorMeasurementsPolicy(path, nil, nil); err == nil {
+		t.Fatal("accepted missing policy")
+	}
+	if err := os.WriteFile(path, []byte(`{"not_a_policy":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operatorMeasurementsPolicy(path, nil, nil); err == nil {
+		t.Fatal("accepted malformed policy")
 	}
 }

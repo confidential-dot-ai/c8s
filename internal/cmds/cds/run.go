@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,22 +18,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	nodepolicy "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"golang.org/x/time/rate"
 )
@@ -50,14 +50,19 @@ func run(cfg config) error {
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
+	// Resolve before validateConfig: the secrets predicate reads the flat
+	// lists, so a config-mode start must fill them first.
+	pinned, err := resolveMeasurementsConfig(&cfg)
+	if err != nil {
+		return err
+	}
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	cfg.ratlsPlatform = ratls.NormalizePlatform(cfg.ratlsPlatform)
-
-	// EAR JWT validation reads the clock-skew leeway from this package-level
-	// var; set it before any /sign-csr request can be served.
-	issuer.JWTClockSkew = time.Duration(cfg.jwtClockSkew) * time.Second
+	// Empty stays empty: it selects the plain-HTTP path below.
+	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil {
+		cfg.ratlsPlatform = family.String()
+	}
 
 	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
@@ -68,9 +73,6 @@ func run(cfg config) error {
 		return fmt.Errorf("init rate limiter: %w", err)
 	}
 
-	// Load the operator policy before either side of handoff is attested. Its
-	// canonical hash is committed to REPORTDATA by both replicas and compared
-	// before any CA or allowlist state is released.
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
 		return fmt.Errorf("operator writes are disabled: set --operator-keys")
 	}
@@ -101,42 +103,45 @@ func run(cfg config) error {
 	}
 	defer allowlistStore.Close()
 
-	// CDS obtains its mesh CA in process; the private key never touches a
-	// Kubernetes Secret. With no --handoff-peer-url it generates a fresh
-	// self-signed CA (cold start); with a peer set it adopts that peer's CA
-	// via attested /handoff, failing closed if the peer cannot be reached or
-	// denies the handoff so a partition never mints a divergent trust root.
-	mesh, adopted, err := issuer.ProvisionCA(ctx, issuer.CAProvisionConfig{
-		CommonName:        cfg.caCommonName,
-		Validity:          cfg.caCertValidity,
-		Curve:             elliptic.P384(),
-		PeerURL:           strings.TrimRight(cfg.handoffPeerURL, "/"),
-		AttestationApiURL: cfg.attestationApiURL,
-		Measurements:      cfg.handoffMeasurements,
-		ExpectedIssuer:    cfg.earIssuerName,
-		Timeout:           cfg.handoffPeerTimeout,
-		OperatorKeysHash:  operatorKeysHash,
-		RestoreAllowlist:  allowlistStore.RestoreSnapshot,
-	}, slog.Default())
+	// CDS generates its mesh CA in process at startup; the private key never
+	// touches a Kubernetes Secret.
+	mesh, err := issuer.NewCAWithCurve(cfg.caCommonName, cfg.caCertValidity, elliptic.P384())
 	if err != nil {
-		return fmt.Errorf("provision mesh CA: %w", err)
+		return fmt.Errorf("generate mesh CA: %w", err)
 	}
-	caSource := "self-generated"
-	if adopted {
-		caSource = "adopted-from-peer"
-	}
-	slog.Info("loaded in-memory mesh CA",
-		"source", caSource,
+	slog.Info("generated in-memory mesh CA",
 		"fingerprint", certutil.CertFingerprint(mesh.Cert.Raw),
 		"not_after", mesh.Cert.NotAfter.Format(time.RFC3339),
 	)
 	caChainPEM := certutil.EncodeCertPEM(mesh.Cert.Raw)
 
-	measurements := parseMeasurementAllowlist(cfg.measurements)
+	measurements := parseReferenceDigests(cfg.measurements)
 	if len(measurements) == 0 {
 		slog.Warn("--measurements empty: /attest accepts any TEE measurement. UNSAFE outside development.")
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
+	}
+	rtmrPins, err := refvalues.ParseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		return fmt.Errorf("--rtmrs: %w", err)
+	}
+	if len(rtmrPins) > 0 {
+		slog.Info("TDX RTMR pinning enabled for /attest", "count", len(rtmrPins))
+	} else if len(measurements) > 0 {
+		slog.Warn("--rtmrs empty: on TDX the measurement allowlist pins TDVF firmware only (MRTD); the guest kernel and rootfs are not pinned. SNP is unaffected.")
+	}
+
+	// Served at /measurements so a verifier holding the operator's own file can
+	// detect a swapped config. Built from the enforced values, never re-read
+	// from disk: re-reading would attest the file rather than the policy.
+	served := pinned
+	if served.Empty() {
+		served = nodepolicy.FromFlags(measurementBytes(measurements), rtmrPins)
+	}
+	served.TEE = string(servedFamily(cfg.ratlsPlatform))
+	measurementsDoc, err := nodepolicy.Format(served)
+	if err != nil {
+		return fmt.Errorf("render /measurements document: %w", err)
 	}
 
 	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
@@ -148,26 +153,7 @@ func run(cfg config) error {
 		return err
 	}
 
-	earKeyPEM, err := earsigner.Generate()
-	if err != nil {
-		return fmt.Errorf("generate token-signing key: %w", err)
-	}
-	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
-	if err != nil {
-		return fmt.Errorf("create EAR issuer: %w", err)
-	}
-
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: cfg.rotationInterval,
-		Overlap:  cfg.rotationOverlap,
-		Jitter:   cfg.rotationJitter,
-		Logger:   slog.Default(),
-	}, earKeyPEM, earIssuer.SwapKey)
-	if err != nil {
-		return fmt.Errorf("create EAR key rotator: %w", err)
-	}
-
-	asClient := attestationclient.NewClient(cfg.attestationApiURL)
+	asClient := remote.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
 	// A separate pool for /secrets: sharing one would make a nonce minted for
 	// issuance redeemable against a secret, and vice versa.
@@ -185,11 +171,7 @@ func run(cfg config) error {
 	}
 
 	if !cfg.allowlistPersistent {
-		if adopted {
-			slog.Warn("allowlist store is not durable (cds.persistence.enabled=false): this planned adoption restored the peer's dynamic entries, but a total CDS outage and deliberate re-bootstrap still resets them to the install seed")
-		} else {
-			slog.Warn("allowlist store is not persistent (cds.persistence.enabled=false): a restart without a surviving handoff peer resets the served allowlist to the install seed and regenerates the mesh CA. Operator-added digests do not survive")
-		}
+		slog.Warn("allowlist store is not persistent (cds.persistence.enabled=false): a restart resets the served allowlist to the install seed and regenerates the mesh CA. Operator-added digests do not survive")
 	}
 
 	policy := issuer.CSRPolicy{
@@ -197,24 +179,10 @@ func run(cfg config) error {
 		AllowedCNPattern: cnPattern,
 	}
 
-	// /attest-key issues a TEE-attested EAR for a caller-generated key (no CSR,
-	// no certificate). Shares the challenge store, attestation-api, and EAR
-	// issuer with /attest.
-	attestKeyOperatorPolicy := ""
-	if len(cfg.handoffMeasurements) > 0 {
-		attestKeyOperatorPolicy = operatorKeysHash
-	}
-	attestKeyHandler := attestation.Handler{
-		Challenges:        &challengeStore,
-		AttestationClient: asClient,
-		EarIssuer:         earIssuer,
-		OperatorKeysHash:  attestKeyOperatorPolicy,
-	}
-
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
 	// admitted a pod what the pod is running (docs/ratls.md, "Sandbox
 	// identity"). Pins the same measurement allowlist as /attest, so the
-	// inventory answering is held to the standard its EAR already met.
+	// inventory answering is held to the standard its RA-TLS certificate already met.
 	//
 	// Needs an RA-TLS identity of its own, since inventories require a client
 	// certificate; without --ratls-platform there is none, and a request
@@ -223,7 +191,7 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
-	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs)
+	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs, cfg.kubeconfig)
 	if err != nil {
 		return err
 	}
@@ -244,17 +212,12 @@ func run(cfg config) error {
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			measurementBytes,
+			ratls.Pins{Measurements: measurementBytes, RTMRs: rtmrPins, Entries: pinned.Entries},
 			cfg.requestTimeout,
 		)
 		if err != nil {
 			return err
 		}
-	}
-
-	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
-	if err != nil {
-		return err
 	}
 
 	// The ledger is written on every issuance, not only when secrets are on:
@@ -313,6 +276,8 @@ func run(cfg config) error {
 			NamedCertTTL:      cfg.namedCertTTL,
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
+			RTMRs:             rtmrPins,
+			NodeEntries:       pinned.Entries,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
@@ -321,29 +286,15 @@ func run(cfg config) error {
 			InventoryHosts:    inventoryHosts,
 			SandboxBindings:   sandboxBindings,
 		},
-		SignCSRHandler: SignCSRHandler{
-			CA:             mesh,
-			CAChainPEM:     caChainPEM,
-			MaxTTL:         cfg.maxTTL,
-			KeyProvider:    rotator,
-			ExpectedIssuer: cfg.expectedIssuer,
-			RequestTimeout: cfg.requestTimeout,
-			Measurements:   measurements,
-			Policy:         policy,
-			SANValidation:  cfg.sanValidation,
-		},
 		AllowlistHandler: allowlist.Handler{
 			Store:             &allowlistStore,
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
-		AttestKeyHandler:  attestKeyHandler,
-		HandoffHandler:    handoffHandler,
 		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:         earIssuer,
-		JWKSFunc:          rotator.JWKSetJSON,
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
+		MeasurementsDoc:   measurementsDoc,
 		RateLimiter:       rateLimiter,
 		ChallengeLimiter:  challengeLimiter,
 		MaxRequestSize:    cfg.maxRequestSize,
@@ -351,9 +302,6 @@ func run(cfg config) error {
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
-	}
-	if cfg.rotationInterval > 0 {
-		go rotator.Run(ctx)
 	}
 	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 	go challengeLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
@@ -412,74 +360,6 @@ func run(cfg config) error {
 	return nil
 }
 
-// buildHandoffHandler wires the /handoff endpoint that hands the in-memory mesh
-// CA to an attested peer replica. It is disabled (returns nil) unless
-// --handoff-measurements pins which peer launch digests may pull the CA.
-//
-// cds self-provisions its handoff signer EAR in process via
-// LocalHandoffBootstrap: cds is its own EAR issuer, so the requester EAR is
-// validated against cds's own rotator/issuer name, and the signer EAR is minted
-// by cds's earIssuer — no external service to dial for it.
-func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
-	handoffMeasurements := parseMeasurementAllowlist(cfg.handoffMeasurements)
-	if len(handoffMeasurements) == 0 {
-		slog.Info("/handoff disabled: set --handoff-measurements to enable mesh CA handoff to peer replicas")
-		return nil, nil
-	}
-
-	boot, err := issuer.NewLocalHandoffBootstrap(asClient, earIssuer, operatorKeysHash)
-	if err != nil {
-		return nil, fmt.Errorf("prepare handoff bootstrap: %w", err)
-	}
-
-	hh, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
-		Logger:              slog.Default(),
-		KeyProvider:         keyProvider,
-		ExpectedIssuer:      cfg.earIssuerName,
-		AllowedMeasurements: handoffMeasurements,
-		OperatorKeysHash:    operatorKeysHash,
-		Signer:              boot.Signer(),
-		EARSource:           boot.EARSource(),
-		Snapshot: func() (issuer.CASnapshot, bool) {
-			return snapshotAllowlist(allowlistStore.LoadAll, mesh)
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	go boot.RunRefresh(ctx, slog.Default())
-	go issuer.RunHandoffEARExpiryUpdater(ctx, hh.IssuerEARSource(), time.Minute, slog.Default())
-	slog.Info("attested CA handoff enabled (bootstrap runs in background)", "measurements", len(handoffMeasurements))
-	return hh, nil
-}
-
-// snapshotAllowlist builds the handoff CA snapshot from the live allowlist
-// store; any load or digest-parse failure withholds the snapshot.
-func snapshotAllowlist(load func() (*pkgallowlist.Allowlist, string, error), mesh *issuer.CA) (issuer.CASnapshot, bool) {
-	doc, version, err := load()
-	if err != nil {
-		slog.Error("snapshot allowlist for handoff", "error", err)
-		return issuer.CASnapshot{}, false
-	}
-	floor := make(map[types.Digest]string, len(doc.Digests))
-	for d, img := range doc.Digests {
-		pd, err := types.ParseDigest(d)
-		if err != nil {
-			slog.Error("snapshot allowlist digest parse", "digest", d, "error", err)
-			return issuer.CASnapshot{}, false
-		}
-		floor[pd] = img
-	}
-	return issuer.CASnapshot{
-		Cert:             mesh.Cert,
-		Key:              mesh.Key,
-		AllowlistVersion: version,
-		Allowlist:        floor,
-		Workloads:        doc.Workloads,
-	}, true
-}
-
 func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {
 	cfg = normalizeHTTPServerConfig(cfg)
 	return &http.Server{
@@ -490,7 +370,26 @@ func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {
 		WriteTimeout:      cfg.writeTimeout,
 		IdleTimeout:       cfg.idleTimeout,
 		MaxHeaderBytes:    cfg.maxHeaderBytes,
+		ErrorLog:          log.New(serverLogFilter{}, "", 0),
 	}
+}
+
+// serverLogFilter routes net/http server error lines to slog. The kubelet's
+// tcpSocket probes (the only probe shape a mutual RA-TLS port supports) open
+// the port and drop it every few seconds, which net/http reports as a TLS
+// handshake EOF or reset — demote exactly those to debug so real handshake
+// faults keep a visible log level.
+type serverLogFilter struct{}
+
+func (serverLogFilter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if strings.Contains(msg, "TLS handshake error") &&
+		(strings.HasSuffix(msg, ": EOF") || strings.HasSuffix(msg, ": connection reset by peer")) {
+		slog.Debug(msg)
+	} else {
+		slog.Info(msg)
+	}
+	return len(p), nil
 }
 
 func normalizeHTTPServerConfig(cfg config) config {
@@ -541,16 +440,8 @@ func validateSecretsConfig(cfg config) error {
 // one releases nothing and mounting the endpoint is inert until an operator
 // writes a grant. What this decides is narrower: whether CDS can answer at all,
 // which is what sandbox identity already needs.
-//
-// Handoff is the exception: a roll puts two CDS pods behind the Service at
-// once, and the surge replica serves an empty store — so a workload landing on
-// it mints a value diverging from the one its siblings already hold, with no
-// error anywhere. Refusing to serve is better than that divergence, and better
-// than failing startup, which would strand every existing handoff install.
 func secretsEnabled(cfg config, sandboxDigests *workloadclaims.DigestsClient, inventoryHosts workloadclaims.InventoryHosts) (bool, string) {
 	switch {
-	case cfg.handoffPeerURL != "" || len(cfg.handoffMeasurements) > 0:
-		return false, "handoff is configured: a surge replica would serve an empty secret store and mint values diverging from those already delivered"
 	case sandboxDigests == nil:
 		return false, "no --ratls-platform, so CDS has no attested channel to an inventory"
 	case inventoryHosts == nil || inventoryHosts.Empty():
@@ -578,9 +469,6 @@ func validateConfig(cfg config) error {
 	if cfg.maxHeaderBytes < 0 {
 		return fmt.Errorf("--max-header-bytes must be non-negative")
 	}
-	if cfg.maxTTL <= 0 {
-		return fmt.Errorf("--max-ttl must be positive")
-	}
 	// Not "0 disables": this is the stale-identity bound for a named leaf, and
 	// 0 is the disable idiom elsewhere in the chart, so a zero here would read
 	// as "no bound" while silently meaning issuer.MaxNamedLeafTTL.
@@ -596,22 +484,8 @@ func validateConfig(cfg config) error {
 	if cfg.readinessInterval <= 0 {
 		return fmt.Errorf("--readiness-interval must be positive")
 	}
-	if len(cfg.handoffMeasurements) > 0 && cfg.operatorKeys == "" {
-		return fmt.Errorf("--handoff-measurements requires --operator-keys so the operator policy is bound into handoff attestation")
-	}
 	if err := validateSecretsConfig(cfg); err != nil {
 		return err
-	}
-	if cfg.handoffPeerURL != "" {
-		if !strings.HasPrefix(cfg.handoffPeerURL, "https://") {
-			return fmt.Errorf("--handoff-peer-url must use https (RA-TLS)")
-		}
-		if len(cfg.handoffMeasurements) == 0 {
-			return fmt.Errorf("--handoff-peer-url requires --handoff-measurements to pin the peer")
-		}
-		if cfg.handoffPeerTimeout <= 0 {
-			return fmt.Errorf("--handoff-peer-timeout must be positive")
-		}
 	}
 	return nil
 }
@@ -678,7 +552,7 @@ func measurementDigests(allowed map[string]bool) ([][]byte, error) {
 	return out, nil
 }
 
-func parseMeasurementAllowlist(raw []string) map[string]bool {
+func parseReferenceDigests(raw []string) map[string]bool {
 	if len(raw) == 0 {
 		return nil
 	}

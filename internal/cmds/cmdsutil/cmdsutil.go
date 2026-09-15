@@ -13,6 +13,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 // RunMain is the body of the per-binary thin shim under cmd/<name>/main.go.
@@ -39,7 +41,7 @@ func ValidateHTTPURL(flagName, u string) error {
 
 // ValidateAttestationAPIURL returns an error if u is not an attestation-api
 // URL: http(s):// for a network endpoint, or unix:// plus an absolute socket
-// path for the node-local socket the chart wires in every non-kata mode.
+// path for the node-local socket the chart wires.
 func ValidateAttestationAPIURL(flagName, u string) error {
 	if socket, ok := strings.CutPrefix(u, "unix://"); ok {
 		if !path.IsAbs(socket) {
@@ -48,6 +50,34 @@ func ValidateAttestationAPIURL(flagName, u string) error {
 		return nil
 	}
 	return ValidateHTTPURL(flagName, u)
+}
+
+// RequireRAMBackedDir returns an error unless dir sits on tmpfs/ramfs
+// (fileutil.RequireRAMBacked). The flagName is interpolated into the error so
+// callers needn't wrap. Shared by get-secret (--out-dir) and get-cert
+// (--key-out): each secret-writing sidecar gets the same refusal shape.
+func RequireRAMBackedDir(flagName, dir string) error {
+	root, err := OpenRAMBackedDir(flagName, dir)
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}
+
+// OpenRAMBackedDir opens dir, verifies the filesystem behind that open handle
+// is RAM-backed, then returns the still-open root. Secret writers must use the
+// returned root for every write so replacing dir's pathname cannot redirect
+// bytes after verification.
+func OpenRAMBackedDir(flagName, dir string) (*os.Root, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open %s: %w", flagName, dir, err)
+	}
+	if err := fileutil.RequireRAMBackedRoot(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("%s: %w", flagName, err)
+	}
+	return root, nil
 }
 
 // ParseFlags is the standard fs.Parse(args) call used by every Run-style
@@ -70,22 +100,14 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	srv.Shutdown(shutdownCtx)
 }
 
-// CheckCDSPinned reports whether a sidecar may talk to CDS with the launch
-// measurements it was given.
+// WarnIfCDSUnpinned warns when a sidecar talks to CDS without launch measurements.
 //
-// An empty set accepts any RA-TLS-attested CDS, so dropping the flag is enough
-// to point a sidecar at a CDS the host runs — and under kata the host writes
-// the argv. Refuse there. Outside kata "no pinning" is a supported development
-// shape (`c8s install --measurements` documents empty as UNSAFE), so it stays a
-// warning. Shared by get-cert, get-secret and get-volume: three copies of this
-// decision would be three chances to drift.
-func CheckCDSPinned(measurementCount int, insideGuest bool, warn string) error {
-	if measurementCount > 0 {
-		return nil
+// An empty set accepts any RA-TLS-attested CDS. "No pinning" is a supported
+// development shape (`c8s install --measurements` documents empty as UNSAFE),
+// so it stays a warning. Shared by get-cert, get-secret and get-volume: three
+// copies of this decision would be three chances to drift.
+func WarnIfCDSUnpinned(measurementCount int, warn string) {
+	if measurementCount <= 0 {
+		slog.Warn(warn)
 	}
-	if insideGuest {
-		return errors.New("--measurements is empty: refusing to reach an unpinned CDS from inside a kata guest, where the host writes this argv")
-	}
-	slog.Warn(warn)
-	return nil
 }

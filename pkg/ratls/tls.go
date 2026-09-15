@@ -6,11 +6,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -676,8 +676,8 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 		if cfg.Platform == "" {
 			return nil, nil, fmt.Errorf("ratls: Platform is required")
 		}
-		if err := ValidatePlatform(cfg.Platform); err != nil {
-			return nil, nil, err
+		if _, err := teetypes.ParseFamily(cfg.Platform); err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedTEE, err)
 		}
 		if cfg.AttestFunc == nil {
 			return nil, nil, fmt.Errorf("ratls: AttestFunc is required")
@@ -772,8 +772,8 @@ func NewClientTLSConfig(cfg *ClientConfig) (*tls.Config, *CertManager, error) {
 			return nil, nil, fmt.Errorf("ratls: Platform and AttestFunc must both be set or both unset")
 		}
 		if cfg.Platform != "" {
-			if err := ValidatePlatform(cfg.Platform); err != nil {
-				return nil, nil, err
+			if _, err := teetypes.ParseFamily(cfg.Platform); err != nil {
+				return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedTEE, err)
 			}
 		}
 	}
@@ -946,43 +946,5 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			return fmt.Errorf("ratls: peer verification failed (CA chain: %v; RA-TLS: %w)", chainErr, err)
 		}
 		return nil
-	}
-}
-
-// NormalizePlatform maps the platform aliases used across the stack (cloud
-// prefixes like az-/gcp-, and "snp") to the two canonical values the RA-TLS
-// package understands: "sev-snp" and "tdx". Unknown values pass through
-// lowercased/trimmed so ValidatePlatform can reject them with a clear error.
-// Call it to canonicalize a value for display or comparison; the package
-// entry points normalize their own input.
-func NormalizePlatform(platform string) string {
-	switch p := strings.ToLower(strings.TrimSpace(platform)); p {
-	case "snp", "sev-snp", "az-snp", "gcp-snp":
-		return "sev-snp"
-	case "tdx", "az-tdx", "gcp-tdx":
-		return "tdx"
-	default:
-		return p
-	}
-}
-
-// ValidatePlatform checks that the platform string refers to an implemented
-// TEE type. Call at config creation time to fail fast instead of at first
-// handshake.
-func ValidatePlatform(platform string) error {
-	_, err := parseTEEType(platform)
-	return err
-}
-
-// parseTEEType resolves any alias NormalizePlatform accepts, so callers can
-// pass the platform string their own config carries.
-func parseTEEType(platform string) (TEEType, error) {
-	switch NormalizePlatform(platform) {
-	case "sev-snp":
-		return TEETypeSEVSNP, nil
-	case "tdx":
-		return TEETypeTDX, nil
-	default:
-		return 0, fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)
 	}
 }

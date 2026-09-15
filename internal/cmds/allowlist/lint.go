@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,11 +24,10 @@ func newLintCmd(o *options) *cobra.Command {
 		Short: "Validate an allowlist file and report semantic warnings",
 		Long: `Parse and validate an allowlist file (or stdin with '-') and report semantic
 findings: entries with no containers, a container that can never start, digests
-whose effective policy is unconstrained, a digest that is floor-listed while also
-carrying a workload policy (the floor short-circuits it), tag-form image labels
-(TOCTOU), root-subtree path grants, and mount/env policy on a deployment whose
-enforcer cannot observe those fields. --online additionally checks each digest
-exists in its registry via crane.
+whose effective policy is unconstrained, tag-form image labels (TOCTOU),
+root-subtree path grants, and mount/env policy on a deployment whose enforcer
+cannot observe those fields. --online additionally checks each digest exists in
+its registry via crane.
 
 Two entries declaring the same containers with the same argv policy are an
 error: release requires exactly one entry to match, so both are refused
@@ -151,14 +152,13 @@ func countErrors(findings []finding) int {
 // CDS access. The document is assumed already parsed/validated by ParseJSON.
 func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
-	anyCount := 0
 
 	// digest -> set of distinct entry names; and whether some occurrence is
 	// fully unconstrained (both argv segments any).
 	entriesByDigest := map[string]map[string]bool{}
 	fullyAny := map[string]bool{}
 
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		w := al.Workloads[name]
 		if len(w.InitContainers) == 0 && len(w.Containers) == 0 {
 			warnings = append(warnings, warnf("workload %q has no init or main containers", name))
@@ -172,23 +172,22 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 				entriesByDigest[d] = map[string]bool{}
 			}
 			entriesByDigest[d][name] = true
-			if c.Command.Policy == pkgallowlist.PolicyAny && c.Args.Policy == pkgallowlist.PolicyAny {
+			if hasUnconstrainedRuntimePolicy(c) {
 				fullyAny[d] = true
 			}
 			if argvPolicyName(c.Command) == pkgallowlist.PolicyDeny {
 				warnings = append(warnings, warnf("workload %q container %s command is deny; the effective argv must be empty, so the container can never start", name, d))
-			}
-			if c.Command.Policy == pkgallowlist.PolicyAny {
-				anyCount++
-			}
-			if c.Args.Policy == pkgallowlist.PolicyAny {
-				anyCount++
 			}
 			if c.Image != "" && isTagForm(c.Image) {
 				warnings = append(warnings, warnf("workload %q container %s image %q is a tag, not a digest (informational, but tags are mutable — TOCTOU)", name, d, c.Image))
 			}
 		}
 		if w.Secrets != nil {
+			for _, c := range allContainers(w) {
+				if c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "" {
+					warnings = append(warnings, warnf("workload %q grants secrets without pinning environment values for container %s", name, c.Digest))
+				}
+			}
 			for _, g := range append(append([]string{}, w.Secrets.Read...), w.Secrets.Write...) {
 				if g == "/**" {
 					warnings = append(warnings, warnf("workload %q grants the root secret subtree %q (every secret in the store)", name, g))
@@ -197,48 +196,92 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 		}
 	}
 
-	for _, d := range sortedKeysBool(fullyAny) {
+	for _, d := range slices.Sorted(maps.Keys(fullyAny)) {
 		if len(entriesByDigest[d]) > 1 {
 			warnings = append(warnings, warnf("digest %s appears in %d entries and one grants 'any'; the effective admission for that digest is 'any' (union across entries)", d, len(entriesByDigest[d])))
 		}
 	}
 
-	// A floor digest is admitted by digest alone, so it short-circuits any argv
-	// policy an operator also wrote for the same digest in a workload — and for
-	// a secrets-bearing entry it also makes the entry unmatchable, since the
-	// digest is dropped from the candidate set.
-	for _, d := range sortedKeys(al.Digests) {
-		if names := entriesByDigest[d]; len(names) > 0 {
-			warnings = append(warnings, warnf("digest %s is floor-listed and also in workload entr(ies) [%s]; the floor admits it by digest alone, so those argv policies are not enforced (remove it from the floor to enforce them)", d, strings.Join(sortedKeysBool(names), ", ")))
-		}
-	}
-
 	warnings = append(warnings, indistinguishableEntries(al)...)
-
-	if anyCount > 0 {
-		warnings = append(warnings, warnf("%d 'any' (unconstrained) policy value(s) across all entries", anyCount))
-	}
+	warnings = append(warnings, shadowedEntries(al)...)
 	return warnings
 }
 
-// unobservedFieldPolicies reports mount and env policy that the deployment's
-// enforcer cannot see. Only the in-guest policy-monitor reads the guest OCI
-// spec; the host NRI plugin sees the CRI container, reports neither field, and
-// an unobserved field is vacuously satisfied — so outside pod mode such a
-// policy admits every container with no signal at write, install or deny time.
+// shadowedEntries reports entries that can never be the unique match because
+// another entry describes every running set they describe. Like an
+// indistinguishable pair this is an error: release and the matched-workload
+// stamp are refused for every pod the narrower entry was written for.
+func shadowedEntries(al *pkgallowlist.Allowlist) []finding {
+	var out []finding
+	for _, pair := range shadowPairs(al) {
+		out = append(out, shadowFinding(pair[0], pair[1]))
+	}
+	return out
+}
+
+// shadowPairs returns every (wide, narrow) name pair where wide shadows narrow
+// and not the reverse — a mutual pair is the same shape, which
+// indistinguishableEntries already reports.
+func shadowPairs(al *pkgallowlist.Allowlist) [][2]string {
+	var out [][2]string
+	names := slices.Sorted(maps.Keys(al.Workloads))
+	for _, wide := range names {
+		for _, narrow := range names {
+			if wide == narrow {
+				continue
+			}
+			if shadows(al.Workloads[wide], al.Workloads[narrow]) && !shadows(al.Workloads[narrow], al.Workloads[wide]) {
+				out = append(out, [2]string{wide, narrow})
+			}
+		}
+	}
+	return out
+}
+
+func shadowFinding(wide, narrow string) finding {
+	return errorf(
+		"workload %q can never be the unique match: %q admits every container it declares under any argv and needs nothing more running, so every pod %q describes matches both (edit %q instead of adding a narrower entry beside it, or delete it)",
+		narrow, wide, narrow, wide)
+}
+
+// shadows reports whether wide describes every running set narrow describes:
+// each of wide's mains is one of narrow's mains, and each container narrow
+// declares has a wide container of the same digest that admits anything.
+func shadows(wide, narrow pkgallowlist.Workload) bool {
+	unconstrained := map[string]bool{}
+	for _, c := range allContainers(wide) {
+		if hasUnconstrainedRuntimePolicy(c) {
+			unconstrained[c.Digest.String()] = true
+		}
+	}
+	narrowMains := map[string]bool{}
+	for _, c := range narrow.Containers {
+		narrowMains[c.Digest.String()] = true
+	}
+	for _, c := range wide.Containers {
+		if !narrowMains[c.Digest.String()] {
+			return false
+		}
+	}
+	for _, c := range allContainers(narrow) {
+		if !unconstrained[c.Digest.String()] {
+			return false
+		}
+	}
+	return true
+}
+
+// unobservedFieldPolicies reports mount restrictions outside pod mode.
 func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
 	if cvmMode == "pod" {
 		return nil
 	}
 	var warnings []finding
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		for _, c := range allContainers(al.Workloads[name]) {
 			var fields []string
 			if c.Mounts.Policy == pkgallowlist.PolicyExact {
 				fields = append(fields, "mounts")
-			}
-			if c.Env.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "env")
 			}
 			if fields == nil {
 				continue
@@ -271,7 +314,7 @@ func indistinguishableEntries(al *pkgallowlist.Allowlist) []finding {
 // shape, in a stable order.
 func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 	byShape := map[string][]string{}
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		shape, err := entryShape(al.Workloads[name])
 		if err != nil {
 			// A shape that will not marshal cannot be compared; say so rather
@@ -281,7 +324,7 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 		byShape[shape] = append(byShape[shape], name)
 	}
 	var out [][]string
-	for _, shape := range sortedKeysStrings(byShape) {
+	for _, shape := range slices.Sorted(maps.Keys(byShape)) {
 		if names := byShape[shape]; len(names) > 1 {
 			out = append(out, names)
 		}
@@ -291,7 +334,7 @@ func indistinguishableGroups(al *pkgallowlist.Allowlist) ([][]string, error) {
 
 func ambiguousGroupFinding(names []string) finding {
 	return errorf(
-		"workloads [%s] declare the same containers with the same argv policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the argv policy so a running pod resolves to one)",
+		"workloads [%s] declare the same containers with the same command, args and env policy; release requires exactly one entry to match, so all of them are refused (merge them, or narrow the launch policy so a running pod resolves to one)",
 		strings.Join(names, ", "))
 }
 
@@ -304,11 +347,16 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 		Digest  string                  `json:"digest"`
 		Command pkgallowlist.ArgvPolicy `json:"command"`
 		Args    pkgallowlist.ArgvPolicy `json:"args"`
+		Env     pkgallowlist.EnvPolicy  `json:"env"`
 	}
 	shape := func(cs []pkgallowlist.Container) ([]string, error) {
 		out := make([]string, 0, len(cs))
 		for _, c := range cs {
-			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args})
+			env := c.Env
+			if env.Policy == "" {
+				env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyAny}
+			}
+			b, err := json.Marshal(containerShape{Digest: c.Digest.String(), Command: c.Command, Args: c.Args, Env: env})
 			if err != nil {
 				return nil, err
 			}
@@ -332,21 +380,12 @@ func entryShape(w pkgallowlist.Workload) (string, error) {
 	return string(b), err
 }
 
-func sortedKeysStrings(m map[string][]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 // lintOnline checks each workload container digest is resolvable in its
 // registry via crane. It needs the container image label to know the repo.
 func lintOnline(ctx context.Context, al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
 	checked := map[string]bool{}
-	for _, name := range sortedWorkloadNames(al.Workloads) {
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		w := al.Workloads[name]
 		for _, c := range allContainers(w) {
 			if c.Image == "" {
@@ -382,11 +421,7 @@ func isTagForm(image string) bool {
 	return !digested
 }
 
-func sortedKeysBool(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+func hasUnconstrainedRuntimePolicy(c pkgallowlist.Container) bool {
+	return c.AnyArgv() && c.Mounts.Policy != pkgallowlist.PolicyExact &&
+		(c.Env.Policy == pkgallowlist.PolicyAny || c.Env.Policy == "")
 }

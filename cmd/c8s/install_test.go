@@ -27,45 +27,6 @@ import (
 
 var errTestResolve = errors.New("simulated resolve failure")
 
-func TestPodModeMeasurementsPreflight(t *testing.T) {
-	// Not pod mode → no gate regardless of measurements.
-	if warn, err := podModeMeasurementsPreflight("node", nil, nil, false); err != nil || warn != "" {
-		t.Fatalf("node mode: want no error/warn, got warn=%q err=%v", warn, err)
-	}
-	// Pod mode with measurements → no gate, no warning.
-	if warn, err := podModeMeasurementsPreflight("pod", []string{"ab"}, nil, false); err != nil || warn != "" {
-		t.Fatalf("pod + measurements: want no error/warn, got warn=%q err=%v", warn, err)
-	}
-	// Pod mode, no measurements, no force → hard error (must acknowledge).
-	if _, err := podModeMeasurementsPreflight("pod", nil, nil, false); err == nil {
-		t.Fatal("pod + no measurements + no force: expected an error requiring --measurements or --force")
-	}
-	// Pod mode, no measurements, --force → allowed, but warns.
-	if warn, err := podModeMeasurementsPreflight("pod", nil, nil, true); err != nil || warn == "" {
-		t.Fatalf("pod + no measurements + force: want warn and no error, got warn=%q err=%v", warn, err)
-	}
-	// -f that pins cds.measurements → satisfied, no gate.
-	pinned := writeValuesFile(t, "cds:\n  measurements:\n    - \"ab\"\n")
-	if warn, err := podModeMeasurementsPreflight("pod", nil, []string{pinned}, false); err != nil || warn != "" {
-		t.Fatalf("-f with cds.measurements: want no error/warn, got warn=%q err=%v", warn, err)
-	}
-
-	// A -f that carries other values but no measurement is the hole this
-	// preflight had: helm renders it green and no cw workload ever gets a leaf.
-	for _, body := range []string{
-		"cds:\n  port: 8443\n",
-		"cds:\n  measurements: []\n",
-	} {
-		f := writeValuesFile(t, body)
-		if _, err := podModeMeasurementsPreflight("pod", nil, []string{f}, false); err == nil {
-			t.Fatalf("-f %q: expected the unpinned-CDS refusal", body)
-		}
-		if warn, err := podModeMeasurementsPreflight("pod", nil, []string{f}, true); err != nil || warn == "" {
-			t.Fatalf("-f %q with --force: want warn and no error, got warn=%q err=%v", body, warn, err)
-		}
-	}
-}
-
 func TestOperatorKeysPreflight(t *testing.T) {
 	// Keys provided → no gate, no warning.
 	if warn, err := operatorKeysPreflight("operator.pub", nil, false); err != nil || warn != "" {
@@ -80,8 +41,6 @@ func TestOperatorKeysPreflight(t *testing.T) {
 		t.Fatalf("no keys + force: want warn and no error, got warn=%q err=%v", warn, err)
 	}
 	// -f supplied → operator owns cds.operatorKeys in their values file; no gate.
-	// This is the same hole podModeMeasurementsPreflight just lost; closing it
-	// here is a separate change (five exec tests install through it today).
 	if warn, err := operatorKeysPreflight("", []string{"custom.yaml"}, false); err != nil || warn != "" {
 		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
 	}
@@ -127,33 +86,6 @@ func TestResolveImageTag(t *testing.T) {
 	installImageTag = ""
 	if got := resolveImageTag(); got != fallbackImageTag {
 		t.Errorf("unset: got %q, want the fallback tag %q", got, fallbackImageTag)
-	}
-}
-
-// labelSelector feeds the --cvm-mode=pod SNP-node preflight: it must produce a stable
-// kubectl -l selector from the chart's kata.snpNodeSelector map, and report
-// ok=false for the empty (opt-out) and malformed shapes so the preflight
-// skips rather than guesses.
-func TestLabelSelector(t *testing.T) {
-	tests := []struct {
-		name string
-		sel  map[string]any
-		want string
-		ok   bool
-	}{
-		{name: "chart default", sel: map[string]any{"confidential.ai/sev-snp": "true"}, want: "confidential.ai/sev-snp=true", ok: true},
-		{name: "multiple pairs sorted", sel: map[string]any{"b": "2", "a": "1"}, want: "a=1,b=2", ok: true},
-		{name: "empty map is the opt-out", sel: map[string]any{}, ok: false},
-		{name: "nil map is the opt-out", sel: nil, ok: false},
-		{name: "non-string value skips", sel: map[string]any{"a": true}, ok: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := labelSelector(tt.sel)
-			if ok != tt.ok || got != tt.want {
-				t.Fatalf("labelSelector(%v) = (%q, %t), want (%q, %t)", tt.sel, got, ok, tt.want, tt.ok)
-			}
-		})
 	}
 }
 
@@ -222,7 +154,7 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 	installRelease, installNamespace = "c8s", "c8s-system"
 
 	// CRDs installed, two operator -f files, wait on: computed file is LAST -f.
-	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", []string{"a.yaml", "b.yaml"}, true, true, false), []string{
+	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", []string{"a.yaml", "b.yaml"}, true, true), []string{
 		"upgrade", "--install", "c8s", "/chart", "--namespace", "c8s-system",
 		"-f", "a.yaml", "-f", "b.yaml", "-f", "/tmp/computed.yaml",
 		"--wait", "--timeout=5m",
@@ -230,63 +162,11 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 
 	// CRDs skipped, no operator -f, wait off: --skip-crds present, computed file
 	// still the last (only) -f, no --wait.
-	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", nil, false, false, false), []string{
+	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", nil, false, false), []string{
 		"upgrade", "--install", "c8s", "/chart", "--namespace", "c8s-system",
 		"--skip-crds", "-f", "/tmp/computed.yaml",
 	})
 
-	// --kata raises the wait ceiling: kata-deploy's first-install payload
-	// download routinely exceeds 5m.
-	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", nil, true, true, true), []string{
-		"upgrade", "--install", "c8s", "/chart", "--namespace", "c8s-system",
-		"-f", "/tmp/computed.yaml",
-		"--wait", "--timeout=10m",
-	})
-}
-
-func TestAppendKataInstallArgsNonPodModeIsNoOp(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks", ""} {
-		got := appendKataInstallArgs([]string{"upgrade"}, mode, false)
-		assertArgsEqual(t, got, []string{"upgrade"})
-	}
-}
-
-func TestAppendKataInstallArgsPodModeIsEnforcing(t *testing.T) {
-	// --cvm-mode=pod is enforcing: alongside the kata stack it must turn off the
-	// host-side components whose function runs inside the kata-guest-base
-	// image (the chart's enforce_host_components validation rejects them left
-	// on). Enforcement itself (webhook injection + ValidatingAdmissionPolicy)
-	// is keyed on kata.enabled in the chart — no separate value.
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", false)
-	assertArgsEqual(t, got, []string{
-		"upgrade",
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-	})
-}
-
-func TestAppendKataInstallArgsDebugSelectsDebugGuestImage(t *testing.T) {
-	// --cvm-mode=pod --debug keeps the enforcing shape and additionally points
-	// the puller at the -debug guest image (host log/exec streams allowed).
-	got := appendKataInstallArgs([]string{"upgrade"}, "pod", true)
-	assertArgsEqual(t, got, []string{
-		"upgrade",
-		"--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false",
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-		"--set", "kata.guestImage.debug=true",
-	})
-}
-
-func TestAppendKataInstallArgsDebugNonPodModeIsNoOp(t *testing.T) {
-	// RunE rejects --debug outside --cvm-mode=pod before args are built; the
-	// builder still keys everything on the pod mode so a call-order change
-	// cannot silently emit a debug guest image for a non-pod install.
-	got := appendKataInstallArgs([]string{"upgrade"}, "node", true)
-	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
 // --cvm-mode is required: empty or unknown must error.
@@ -300,28 +180,6 @@ func TestValidateCvmModeRequiresKnownValue(t *testing.T) {
 	for _, mode := range allowedCvmModes {
 		if err := validateCvmMode(mode); err != nil {
 			t.Errorf("mode %q: unexpected error: %v", mode, err)
-		}
-	}
-}
-
-// --debug outside --cvm-mode=pod is meaningless (the debug guest image only
-// exists under the kata stack) and must error rather than silently no-op.
-func TestValidateDebugFlagRejectsDebugOutsidePod(t *testing.T) {
-	err := validateDebugFlag("node", true)
-	if err == nil {
-		t.Fatal("--debug with --cvm-mode=node: want error, got nil")
-	}
-	for _, want := range []string{"--cvm-mode=pod", "--debug"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q missing %q", err.Error(), want)
-		}
-	}
-	for _, tc := range []struct {
-		mode  string
-		debug bool
-	}{{"node", false}, {"pod", false}, {"pod", true}} {
-		if err := validateDebugFlag(tc.mode, tc.debug); err != nil {
-			t.Errorf("mode=%s debug=%t: unexpected error: %v", tc.mode, tc.debug, err)
 		}
 	}
 }
@@ -344,23 +202,13 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 }
 
 func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
-	got := appendVolumedInstallArgs([]string{"upgrade"}, false, "node")
+	got := appendVolumedInstallArgs([]string{"upgrade"}, false)
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
 func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
-	for _, mode := range []string{"node", "gke", "aks"} {
-		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
-		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
-	}
-}
-
-func TestAppendVolumedInstallArgsPodModeServesVolumesInGuest(t *testing.T) {
-	// kata-guest-base bakes `volumed --guest`, and the chart's
-	// enforce_host_components validation fails the render if the host DaemonSet
-	// is enabled alongside kata — so --volumes must emit nothing here.
-	got := appendVolumedInstallArgs([]string{"upgrade"}, true, "pod")
-	assertArgsEqual(t, got, []string{"upgrade"})
+	got := appendVolumedInstallArgs([]string{"upgrade"}, true)
+	assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
 }
 
 func TestParseWorkloadRef(t *testing.T) {
@@ -392,7 +240,7 @@ func TestParseWorkloadRef(t *testing.T) {
 			want: workloadRef{kind: "nodeset.example.net", name: "worker", namespace: "workloads"},
 		},
 		{
-			// An optional :<port> suffix is the tls-lb upstream port.
+			// An optional :<port> suffix is the router upstream port.
 			ref:  "vllm/deployment/router:8000",
 			want: workloadRef{kind: "deployment", name: "router", namespace: "vllm", port: 8000},
 		},
@@ -511,7 +359,7 @@ func TestValidateWorkloadAdoptionFlags(t *testing.T) {
 }
 
 // TestUpstreamAddress drives the derivation buildValueArgs uses to set
-// tlsLb.upstream.address, so it guards the address the chart receives against
+// router.upstream.address, so it guards the address the chart receives against
 // divergence from the RunE's --upstream validation. The port comes from the
 // selected ref's :<port> suffix, not a separate flag.
 func TestUpstreamAddress(t *testing.T) {
@@ -720,12 +568,26 @@ func TestBuildWorkloadImageArgsAddsNRIAllowlistDigests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkloadImageArgs: %v", err)
 	}
-	assertArgsEqual(t, got, []string{
-		"upgrade",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=ghcr.io/acme/engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=ghcr.io/acme/router@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests.sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc=docker.io/library/busybox@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	})
+	entry := func(name, digest, ref string) []string {
+		p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
+		return []string{
+			"--set-string", p + "label=" + ref,
+			"--set-string", p + "containers[0].digest=" + digest,
+			"--set-string", p + "containers[0].image=" + ref,
+			"--set-string", p + "containers[0].command.policy=any",
+			"--set-string", p + "containers[0].args.policy=any",
+		}
+	}
+	const (
+		dA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		dB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		dC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	want := []string{"upgrade"}
+	want = append(want, entry("engine-aaaaaaaaaaaa", dA, "ghcr.io/acme/engine@"+dA)...)
+	want = append(want, entry("router-bbbbbbbbbbbb", dB, "ghcr.io/acme/router@"+dB)...)
+	want = append(want, entry("busybox-cccccccccccc", dC, "docker.io/library/busybox@"+dC)...)
+	assertArgsEqual(t, got, want)
 }
 
 func TestBuildWorkloadImageArgsFailsClosedOnResolveError(t *testing.T) {
@@ -812,16 +674,12 @@ func TestCheckImagePullSecret(t *testing.T) {
 	}
 }
 
-func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
-	// The detected distro feeds both the kata-deploy and nri-image-policy
-	// installers; nri-image-policy installs regardless of --cvm-mode=pod, so the two
-	// values always travel together.
+func TestAppendDistroInstallArgsSetsNRI(t *testing.T) {
 	for _, distro := range []string{"k8s", "rke2"} {
 		t.Run(distro, func(t *testing.T) {
 			got := appendDistroInstallArgs([]string{"upgrade"}, distro)
 			assertArgsEqual(t, got, []string{
 				"upgrade",
-				"--set-string", "kata.distro=" + distro,
 				"--set-string", "nriImagePolicy.distro=" + distro,
 			})
 		})
@@ -879,7 +737,7 @@ func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 	if err == nil {
 		t.Fatal("mixed cluster: want error, got nil")
 	}
-	for _, want := range []string{"kata.distro", "nriImagePolicy.distro", "rke2-node", "vanilla-node"} {
+	for _, want := range []string{"nriImagePolicy.distro", "rke2-node", "vanilla-node"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q (should name the fix and both node sets)", err.Error(), want)
 		}
@@ -904,8 +762,7 @@ func TestValuesFilesSetDistro(t *testing.T) {
 		want bool
 	}{
 		{"nri distro set", "nriImagePolicy:\n  distro: rke2\n", true},
-		{"kata distro set", "kata:\n  distro: rke2\n", true},
-		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"unrelated value only", "router:\n  enabled: false\n", false},
 		{"distro key absent under section", "nriImagePolicy:\n  enabled: true\n", false},
 		{"empty distro string is not a choice", "nriImagePolicy:\n  distro: \"\"\n", false},
 		{"empty file", "", false},
@@ -929,8 +786,8 @@ func TestValuesFilesSetDistro(t *testing.T) {
 	})
 
 	t.Run("one of several files sets it", func(t *testing.T) {
-		a := write(t, "tlsLb:\n  enabled: false\n")
-		b := write(t, "kata:\n  distro: rke2\n")
+		a := write(t, "router:\n  enabled: false\n")
+		b := write(t, "nriImagePolicy:\n  distro: rke2\n")
 		got, err := valuesFilesSetDistro([]string{a, b})
 		if err != nil || !got {
 			t.Errorf("valuesFilesSetDistro(two files) = (%v, %v), want (true, nil)", got, err)
@@ -938,9 +795,9 @@ func TestValuesFilesSetDistro(t *testing.T) {
 	})
 }
 
-func TestTLSLBHostPort(t *testing.T) {
+func TestRouterHostPort(t *testing.T) {
 	hp := func(https any) map[string]any {
-		return map[string]any{"tlsLb": map[string]any{"hostPort": map[string]any{"https": https}}}
+		return map[string]any{"router": map[string]any{"hostPort": map[string]any{"https": https}}}
 	}
 	for _, tc := range []struct {
 		name string
@@ -948,14 +805,14 @@ func TestTLSLBHostPort(t *testing.T) {
 		want int32
 	}{
 		{"empty string derives 443", hp(""), 443},
-		{"no hostPort map", map[string]any{"tlsLb": map[string]any{}}, 443},
+		{"no hostPort map", map[string]any{"router": map[string]any{}}, 443},
 		{"string override", hp("8443"), 8443},
 		{"int override", hp(9443), 9443},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tlsLBHostPort(tc.tree)
+			got, err := routerHostPort(tc.tree)
 			if err != nil || got != tc.want {
-				t.Fatalf("tlsLBHostPort = (%d, %v), want (%d, nil)", got, err, tc.want)
+				t.Fatalf("routerHostPort = (%d, %v), want (%d, nil)", got, err, tc.want)
 			}
 		})
 	}
@@ -970,7 +827,7 @@ func TestTLSLBHostPort(t *testing.T) {
 		{"zero is not a port", 0},
 	} {
 		t.Run(tc.name+" errors", func(t *testing.T) {
-			if _, err := tlsLBHostPort(hp(tc.https)); err == nil {
+			if _, err := routerHostPort(hp(tc.https)); err == nil {
 				t.Fatalf("want error for %v", tc.https)
 			}
 		})
@@ -1004,6 +861,13 @@ func TestHostPortConflict(t *testing.T) {
 			wantHolder:  "kube-system/rke2-ingress-nginx-abc",
 		},
 		{
+			name:        "single node, traefik holds 443 (rke2 v1.36+ default ingress)",
+			pods:        []corev1.Pod{pod("kube-system", "rke2-traefik-abc", "node-a", 443)},
+			nodes:       []string{"node-a"},
+			wantBlocked: true,
+			wantHolder:  "kube-system/rke2-traefik-abc",
+		},
+		{
 			name: "two nodes, ingress on both",
 			pods: []corev1.Pod{
 				pod("kube-system", "ing-a", "node-a", 443),
@@ -1020,7 +884,7 @@ func TestHostPortConflict(t *testing.T) {
 		},
 		{
 			name:        "holder only in ignored namespace",
-			pods:        []corev1.Pod{pod(ignoreNS, "c8s-tls-lb", "node-a", 443)},
+			pods:        []corev1.Pod{pod(ignoreNS, "c8s-router", "node-a", 443)},
 			nodes:       []string{"node-a"},
 			wantBlocked: false,
 		},
@@ -1064,9 +928,9 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	t.Cleanup(func() { installAttestEnabled = prevAttest })
 
 	// Two orthogonal axes:
-	//  --cvm-mode: pod (kata) / node (node-as-CVM) / gke (managed) / aks (vTPM)
+	//  --cvm-mode: bare-metal (node-as-CVM) / gke (managed) / aks (vTPM)
 	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
-	// pod+node+gke all take either hardware-platform; aks always emits the vTPM
+	// node+gke all take either hardware-platform; aks always emits the vTPM
 	// device and rides the Azure vTPM HCL report for both SNP (az-snp) and TDX
 	// (az-tdx).
 	build := func(mode, platform, sevGuest, tdxGuest, tpm string) []string {
@@ -1095,26 +959,28 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		switch {
 		case mode == "aks" && platform == "tdx":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-tdx",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=az-tdx",
+				"--set-string", "router.attest.generation=",
 			)
 		case mode == "aks":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=az-snp",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=az-snp",
+				"--set-string", "router.attest.generation=",
 			)
 		case platform == "tdx":
 			out = append(out,
-				"--set-string", "tlsLb.attest.platform=tdx",
-				"--set-string", "tlsLb.attest.generation=",
+				"--set-string", "router.attest.platform=tdx",
+				"--set-string", "router.attest.generation=",
 			)
 		}
 		// node: the node image bakes attestation-api + nri-image-policy, so the
-		// chart copies are skipped (ratlsMesh is not baked, stays on).
-		if mode == "node" {
+		// attestation-api copy is skipped and the NRI installer switches to its
+		// baked form — the only path that reaches the baked plugin's CDS pins.
+		// ratlsMesh is not baked, stays on.
+		if mode == "bare-metal" {
 			out = append(out,
 				"--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false",
+				"--set", "nriImagePolicy.baked=true",
 			)
 		}
 		return out
@@ -1124,13 +990,11 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 		hardwarePlatform string
 		want             []string
 	}{
-		"pod + sev-snp":  {"pod", "sev-snp", build("pod", "sev-snp", "true", "false", "false")},
-		"gke + sev-snp":  {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
-		"node + sev-snp": {"node", "sev-snp", build("node", "sev-snp", "true", "false", "false")},
-		"pod + tdx":      {"pod", "tdx", build("pod", "tdx", "false", "true", "false")},
-		"gke + tdx":      {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
-		"node + tdx":     {"node", "tdx", build("node", "tdx", "false", "true", "false")},
-		"aks + sev-snp":  {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
+		"gke + sev-snp":        {"gke", "sev-snp", build("gke", "sev-snp", "true", "false", "false")},
+		"bare-metal + sev-snp": {"bare-metal", "sev-snp", build("bare-metal", "sev-snp", "true", "false", "false")},
+		"gke + tdx":            {"gke", "tdx", build("gke", "tdx", "false", "true", "false")},
+		"bare-metal + tdx":     {"bare-metal", "tdx", build("bare-metal", "tdx", "false", "true", "false")},
+		"aks + sev-snp":        {"aks", "sev-snp", build("aks", "sev-snp", "false", "false", "true")},
 		// az-tdx: Azure vTPM (tpm=true, no guest device) + TDX RA-TLS platform.
 		"aks + tdx (az-tdx)": {"aks", "tdx", build("aks", "tdx", "false", "false", "true")},
 	}
@@ -1146,7 +1010,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
 		t.Fatalf("empty --hardware-platform: err = %v, want required error", err)
 	}
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure", "sev-snp"); err == nil {
@@ -1164,7 +1028,7 @@ func TestAppendCvmModeInstallArgsMeasurements(t *testing.T) {
 	m0, m1 := strings.Repeat("aa", 48), strings.Repeat("bb", 48)
 	installMeasurements = []string{m0, "", m1} // blank middle entry
 
-	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx")
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1188,35 +1052,13 @@ func TestAppendCvmModeInstallArgsRejectsBadMeasurement(t *testing.T) {
 	prev := installMeasurements
 	defer func() { installMeasurements = prev }()
 	installMeasurements = []string{"not-hex"}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted a malformed measurement, want error")
 	}
 }
 
-// Pod mode used to refuse --measurements because the per-pod kata guest digest
-// was not computable. `c8s kata measure` computes it, so the pin is now
-// accepted and emitted in every mode — same value, different provenance.
-func TestAppendCvmModeInstallArgsAcceptsMeasurementsInPodMode(t *testing.T) {
-	prev := installMeasurements
-	defer func() { installMeasurements = prev }()
-	m := strings.Repeat("aa", 48)
-	installMeasurements = []string{m}
-	for _, mode := range []string{"pod", "node"} {
-		args, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode, "tdx")
-		if err != nil {
-			t.Fatalf("%s mode should accept --measurements: %v", mode, err)
-		}
-		joined := strings.Join(args, " ")
-		for _, want := range []string{"cds.measurements[0]=" + m, "ratlsMesh.measurements[0]=" + m} {
-			if !strings.Contains(joined, want) {
-				t.Errorf("%s mode: missing %q in %v", mode, want, args)
-			}
-		}
-	}
-}
-
 func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sgx"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "sgx"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted an unknown --hardware-platform, want error")
 	}
 }
@@ -1321,7 +1163,7 @@ func TestBuildDigestArgsResolvesEachComponentOnce(t *testing.T) {
 
 // A component whose enabledPath resolves to false never renders, so its tag
 // must not be resolved (that image may be unpublished at the install tag — e.g.
-// attestationApi under --cvm-mode=node) and it must contribute no --set args.
+// attestationApi under --cvm-mode=bare-metal) and it must contribute no --set args.
 // Enabled components still resolve and pin.
 func TestBuildDigestArgsSkipsDisabledComponent(t *testing.T) {
 	resolved := map[string]bool{}
@@ -1329,8 +1171,6 @@ func TestBuildDigestArgsSkipsDisabledComponent(t *testing.T) {
 		resolved[ref] = true
 		return "sha256:3333333333333333333333333333333333333333333333333333333333333333", nil
 	}
-	// Node-mode shape: attestation-api and nri-image-policy are baked into the
-	// node image and disabled in the chart.
 	disabled := map[string]bool{"attestationApi.enabled": true, "nriImagePolicy.enabled": true}
 	enabled := func(path string) (bool, error) { return !disabled[path], nil }
 
@@ -1395,8 +1235,7 @@ func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
 }
 
 // A missing tag (registry MANIFEST_UNKNOWN) must abort with the tag-coupling
-// guidance — pointing at kata.guestImage.tag for guest-image-only tags like
-// gpu-test, and at the lockstep publish model — while preserving the cause.
+// guidance explaining the lockstep publish model while preserving the cause.
 func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 	notFound := errors.New(`crane digest "ghcr.io/confidential-dot-ai/c8s-operator:gpu-test": exit status 1: MANIFEST_UNKNOWN: manifest unknown`)
 	resolve := func(string) (string, error) { return "", notFound }
@@ -1408,14 +1247,66 @@ func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 		t.Errorf("wrapped error must preserve the cause, got: %v", err)
 	}
 	// The hint must be self-contained (end users don't have the repo, so no
-	// docs/ paths) and steer to the guest-image knob for guest-image tags.
-	for _, want := range []string{"kata.guestImage.tag", "lockstep"} {
+	// docs/ paths) and explain how to check the component tag.
+	for _, want := range []string{"lockstep"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error must mention %q, got: %v", want, err)
 		}
 	}
 	if strings.Contains(err.Error(), "docs/") {
 		t.Errorf("user-facing hint must not reference in-repo docs paths, got: %v", err)
+	}
+}
+
+// A component released on another repository's cadence has no image at a c8s
+// release tag, so its chart-declared pinnedDigest must be used verbatim and the
+// resolver must never be asked for it — asking is what aborted the whole
+// install, since a c8s tag can only 404 against that repository.
+func TestBuildDigestArgsUsesPinnedDigestWithoutResolving(t *testing.T) {
+	const pinned = "sha256:00000000000000000000000000000000000000000000000000000000000000ff"
+	comps := []c8sComponent{
+		{valuePrefix: "cds.image", repository: "ghcr.io/confidential-dot-ai/cds"},
+		{valuePrefix: "attestationApi.image", repository: "ghcr.io/confidential-dot-ai/attestation-api", pinnedDigest: pinned},
+	}
+	resolve := func(ref string) (string, error) {
+		if strings.Contains(ref, "attestation-api") {
+			return "", fmt.Errorf("resolver must not be called for a pinned component, got %q", ref)
+		}
+		return "sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+	got, err := buildDigestArgs(nil, "v0.1.15", comps, resolve, allEnabled)
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	for _, want := range []string{
+		"attestationApi.image.repository=ghcr.io/confidential-dot-ai/attestation-api",
+		"attestationApi.image.digest=" + pinned,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+}
+
+// A pinned component that the effective config disables must not be pinned
+// either: the enabled check has to run first, or the install would carry a
+// floor entry for a DaemonSet it never renders.
+func TestBuildDigestArgsSkipsDisabledPinnedComponent(t *testing.T) {
+	comps := []c8sComponent{{
+		valuePrefix:  "attestationApi.image",
+		repository:   "ghcr.io/confidential-dot-ai/attestation-api",
+		enabledPath:  "attestationApi.enabled",
+		pinnedDigest: "sha256:00000000000000000000000000000000000000000000000000000000000000ff",
+	}}
+	resolve := func(string) (string, error) { return "", errTestResolve }
+	got, err := buildDigestArgs(nil, "v0.1.15", comps, resolve, func(string) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, "attestationApi.image") {
+			t.Errorf("disabled pinned component was still pinned: %v", got)
+		}
 	}
 }
 
@@ -1428,7 +1319,7 @@ func TestBuildDigestArgsLeavesOtherResolveErrorsUnhinted(t *testing.T) {
 	if err == nil {
 		t.Fatal("buildDigestArgs ignored a resolver error, want fail-closed")
 	}
-	if strings.Contains(err.Error(), "kata.guestImage.tag") {
+	if strings.Contains(err.Error(), "lockstep") {
 		t.Errorf("non-not-found error must not carry the tag-coupling hint: %v", err)
 	}
 }
@@ -1465,6 +1356,23 @@ func TestChartComponentsFromValues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)
+	}
+
+	// Exactly the components released outside the c8s train may carry a
+	// pinnedDigest. Pinning one that does publish at the install tag would
+	// freeze it there silently, and unpinning attestation-api puts back the
+	// abort that made `--image-tag <release>` uninstallable.
+	pinned := map[string]string{}
+	for _, c := range comps {
+		if c.pinnedDigest != "" {
+			pinned[c.valuePrefix] = c.pinnedDigest
+		}
+	}
+	if len(pinned) != 1 || pinned["attestationApi.image"] == "" {
+		t.Errorf("pinnedDigest components = %v, want only attestationApi.image", pinned)
+	}
+	if !strings.HasPrefix(pinned["attestationApi.image"], "sha256:") || len(pinned["attestationApi.image"]) != len("sha256:")+64 {
+		t.Errorf("attestationApi pinnedDigest is not a sha256 digest: %q", pinned["attestationApi.image"])
 	}
 }
 
@@ -1510,22 +1418,23 @@ func TestComponentEnabledPredicateHonorsValuesFile(t *testing.T) {
 	}
 }
 
-// mergeValues must deep-merge a -f overlay the way helm coalesces it: a nested
-// map merges key-by-key (so enabling volumed via -f does not wipe its sibling
-// image/hostPaths defaults), while a scalar replaces. This is the fix for the
-// resolver treating a -f-enabled, default-disabled component as still off.
+// helmchart.MergeValues must deep-merge a -f overlay the way helm coalesces
+// it: a nested map merges key-by-key (so enabling volumed via -f does not
+// wipe its sibling image/hostPaths defaults), while a scalar replaces. This
+// is the fix for the resolver treating a -f-enabled, default-disabled
+// component as still off.
 func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	base := map[string]any{
 		"volumed": map[string]any{
 			"enabled": false,
 			"image":   map[string]any{"repository": "ghcr.io/confidential-dot-ai/volumed", "tag": ""},
 		},
-		"tlsLb": map[string]any{"enabled": true},
+		"router": map[string]any{"enabled": true},
 	}
 	overlay := map[string]any{
 		"volumed": map[string]any{"enabled": true},
 	}
-	mergeValues(base, overlay)
+	helmchart.MergeValues(base, overlay)
 
 	if !boolAtPath(base, "volumed.enabled") {
 		t.Error("volumed.enabled not flipped to true by the overlay")
@@ -1537,67 +1446,8 @@ func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	if !ok || img["repository"] != "ghcr.io/confidential-dot-ai/volumed" {
 		t.Errorf("overlay wiped volumed.image; got %v", vol["image"])
 	}
-	if !boolAtPath(base, "tlsLb.enabled") {
-		t.Error("unrelated tlsLb.enabled was disturbed by the overlay")
-	}
-}
-
-// The TEE-node preflight reads effectiveValues, so a -f file must move the
-// selector it actually sets and nothing else. The RKE2 case: the tls-lb
-// host-port workaround the install itself recommends must leave the chart's
-// snpNodeSelector standing, or the preflight would stop catching the
-// unlabelled cluster it exists to catch.
-func TestEffectiveValuesResolvesTEESelector(t *testing.T) {
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm not on PATH")
-	}
-	dir, err := extractChart()
-	if err != nil {
-		t.Fatalf("extractChart: %v", err)
-	}
-	defer os.RemoveAll(dir)
-	chartPath := filepath.Join(dir, helmchart.ChartRoot)
-
-	tmp := t.TempDir()
-	tlsLB := filepath.Join(tmp, "tlslb.yaml")
-	if err := os.WriteFile(tlsLB, []byte("tlsLb:\n  hostPort:\n    enabled: false\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nfd := filepath.Join(tmp, "nfd.yaml")
-	if err := os.WriteFile(nfd, []byte("kata:\n  snpNodeSelector:\n    nfd/snp: \"true\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	prev := installValues
-	defer func() { installValues = prev }()
-
-	selectorFor := func(t *testing.T, files []string) string {
-		t.Helper()
-		installValues = files
-		tree, err := effectiveValues(context.Background(), chartPath, nil)
-		if err != nil {
-			t.Fatalf("effectiveValues(%v): %v", files, err)
-		}
-		sel, _ := nestedMap(tree, "kata", "snpNodeSelector")
-		got, ok := labelSelector(sel)
-		if !ok {
-			return ""
-		}
-		return got
-	}
-
-	if got := selectorFor(t, nil); got != "confidential.ai/sev-snp=true" {
-		t.Errorf("chart default selector = %q, want confidential.ai/sev-snp=true", got)
-	}
-	if got := selectorFor(t, []string{tlsLB}); got != "confidential.ai/sev-snp=true" {
-		t.Errorf("with an unrelated -f, selector = %q, want the chart default confidential.ai/sev-snp=true", got)
-	}
-	// helm coalesces nested maps key-by-key, so repointing kata.snpNodeSelector
-	// at NFD without nulling the default leaves BOTH labels required — the
-	// preflight must demand what the chart will actually render, not what was
-	// written.
-	if got := selectorFor(t, []string{nfd}); got != "confidential.ai/sev-snp=true,nfd/snp=true" {
-		t.Errorf("with a -f repointing the selector, selector = %q, want the coalesced pair confidential.ai/sev-snp=true,nfd/snp=true", got)
+	if !boolAtPath(base, "router.enabled") {
+		t.Error("unrelated router.enabled was disturbed by the overlay")
 	}
 }
 
@@ -1639,7 +1489,7 @@ func TestMaterializeStdinValues(t *testing.T) {
 	})
 
 	t.Run("dash becomes a temp file holding the piped bytes, in order", func(t *testing.T) {
-		payload := "tlsLb:\n  enabled: false\n"
+		payload := "router:\n  enabled: false\n"
 		got, cleanup, err := materializeStdinValues([]string{"base.yaml", "-", "last.yaml"}, strings.NewReader(payload))
 		if err != nil {
 			t.Fatalf("materializeStdinValues: %v", err)
@@ -1675,19 +1525,43 @@ func TestMaterializeStdinValues(t *testing.T) {
 	})
 
 	t.Run("a temp-file write failure aborts", func(t *testing.T) {
-		// RLIMIT_FSIZE=0 fails the payload write (Go swallows the SIGXFSZ).
-		var orig syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &orig); err != nil {
-			t.Skipf("getrlimit: %v", err)
+		// RLIMIT_FSIZE=0 fails the payload write (Go swallows the SIGXFSZ),
+		// but the limit is process-wide: the harness's own testlog appends
+		// race the zeroed window and an unlucky buffer flush fails the whole
+		// package with "can't write testlog.txt: file too large" while every
+		// test is green. So the limit is zeroed in a re-exec'ed child (which
+		// runs without a testlog) and the parent reads its verdict from
+		// stdout — a pipe, which RLIMIT_FSIZE does not cover. The exit code
+		// is deliberately not consulted: under -coverprofile the child may
+		// fail writing its own coverage file inside the window.
+		if os.Getenv("C8S_TEST_FSIZE_CHILD") == "1" {
+			var lim syscall.Rlimit
+			if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+				fmt.Println("CHILD_SKIP getrlimit:", err)
+				return
+			}
+			lim.Cur = 0
+			if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+				fmt.Println("CHILD_SKIP setrlimit:", err)
+				return
+			}
+			if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err != nil {
+				fmt.Println("CHILD_GOT_WRITE_ERROR")
+			} else {
+				fmt.Println("CHILD_NO_ERROR")
+			}
+			return
 		}
-		zero := orig
-		zero.Cur = 0
-		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &zero); err != nil {
-			t.Skipf("setrlimit: %v", err)
-		}
-		t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &orig) })
-		if _, _, err := materializeStdinValues([]string{"-"}, strings.NewReader("a: 1\n")); err == nil {
-			t.Fatal("want the write error surfaced")
+
+		cmd := exec.Command(os.Args[0], "-test.run", "TestMaterializeStdinValues/a_temp-file_write_failure_aborts")
+		cmd.Env = append(os.Environ(), "C8S_TEST_FSIZE_CHILD=1")
+		out, _ := cmd.CombinedOutput()
+		switch {
+		case bytes.Contains(out, []byte("CHILD_GOT_WRITE_ERROR")):
+		case bytes.Contains(out, []byte("CHILD_SKIP")):
+			t.Skipf("child could not zero RLIMIT_FSIZE:\n%s", out)
+		default:
+			t.Fatalf("want the write error surfaced in the child; child output:\n%s", out)
 		}
 	})
 
@@ -1727,7 +1601,7 @@ func TestValuesFilesSetExemptNamespaces(t *testing.T) {
 		{"null is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces:\n", true},
 		{"sibling policy key only", "nriImagePolicy:\n  policy:\n    mode: audit\n", false},
 		{"wrong nesting level", "nriImagePolicy:\n  exemptNamespaces: [kube-system]\n", false},
-		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"unrelated value only", "router:\n  enabled: false\n", false},
 		{"empty file", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1749,7 +1623,7 @@ func TestValuesFilesSetExemptNamespaces(t *testing.T) {
 	})
 
 	t.Run("one of several files sets it", func(t *testing.T) {
-		a := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		a := writeValuesFile(t, "router:\n  enabled: false\n")
 		b := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [kube-system]\n")
 		got, err := valuesFilesSetExemptNamespaces([]string{a, b})
 		if err != nil || !got {
@@ -1770,9 +1644,9 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 
 	// node bakes the system digests into its own floor, so the chart's empty
 	// default stands.
-	got, err := appendExemptNamespacesInstallArgs(nil, "node", nil)
+	got, err := appendExemptNamespacesInstallArgs(nil, "bare-metal", nil)
 	if err != nil || got != nil {
-		t.Errorf("--cvm-mode=node = (%v, %v), want (nil, nil)", got, err)
+		t.Errorf("--cvm-mode=bare-metal = (%v, %v), want (nil, nil)", got, err)
 	}
 
 	t.Run("a -f file that sets it wins", func(t *testing.T) {
@@ -1784,7 +1658,7 @@ func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
 	})
 
 	t.Run("an unrelated -f file does not suppress the default", func(t *testing.T) {
-		f := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		f := writeValuesFile(t, "router:\n  enabled: false\n")
 		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
 		if err != nil {
 			t.Fatalf("appendExemptNamespacesInstallArgs: %v", err)
@@ -1825,22 +1699,24 @@ func TestImageDigest(t *testing.T) {
 func TestAdmissibleDigests(t *testing.T) {
 	const (
 		componentDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-		floorDigest     = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		bootDigest      = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 		workloadDigest  = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 		initDigest      = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 	)
 	values := map[string]any{
 		"cds": map[string]any{"image": map[string]any{"digest": componentDigest}},
 		"nriImagePolicy": map[string]any{"bootstrapAllowlist": map[string]any{
-			"digests": map[string]any{floorDigest: "example.test/etcd@" + floorDigest},
-			"workloads": map[string]any{"infer": map[string]any{
-				"initContainers": []any{map[string]any{"digest": initDigest}},
-				"containers":     []any{map[string]any{"digest": workloadDigest}},
-			}},
+			"workloads": map[string]any{
+				"etcd": map[string]any{"containers": []any{map[string]any{"digest": bootDigest}}},
+				"infer": map[string]any{
+					"initContainers": []any{map[string]any{"digest": initDigest}},
+					"containers":     []any{map[string]any{"digest": workloadDigest}},
+				},
+			},
 		}},
 	}
 	got := admissibleDigests(values, []c8sComponent{{valuePrefix: "cds.image"}, {valuePrefix: "volumed.image"}})
-	want := map[string]bool{componentDigest: true, floorDigest: true, workloadDigest: true, initDigest: true}
+	want := map[string]bool{componentDigest: true, bootDigest: true, workloadDigest: true, initDigest: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("admissibleDigests = %v, want %v", got, want)
 	}
@@ -2004,7 +1880,7 @@ func TestReportExemptedImages(t *testing.T) {
 			t.Errorf("report omits %q — a truncated audit list is not one:\n%s", image, out)
 		}
 	}
-	for _, want := range []string{"kube-system", "nriImagePolicy.bootstrapAllowlist.digests", exemptNamespacesPath} {
+	for _, want := range []string{"kube-system", "nriImagePolicy.bootstrapAllowlist.workloads", exemptNamespacesPath} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report does not mention %q:\n%s", want, out)
 		}
@@ -2014,5 +1890,69 @@ func TestReportExemptedImages(t *testing.T) {
 	reportExemptedImages(&buf, nil, nil)
 	if buf.Len() != 0 {
 		t.Errorf("nothing exempted must print nothing, got:\n%s", buf.String())
+	}
+}
+
+// --rtmrs completes the TDX pin: the entries fan into cds.rtmrs and
+// ratlsMesh.rtmrs, normalized and in index order.
+func TestAppendCvmModeInstallArgsRTMRs(t *testing.T) {
+	prev := installRTMRs
+	defer func() { installRTMRs = prev }()
+	r1, r2 := strings.Repeat("11", 48), strings.Repeat("22", 48)
+	installRTMRs = []string{"2=" + r2, "1=" + r1} // out of order on purpose
+
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"cds.rtmrs[0]=1=" + r1, "ratlsMesh.rtmrs[0]=1=" + r1,
+		"cds.rtmrs[1]=2=" + r2, "ratlsMesh.rtmrs[1]=2=" + r2,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("args missing %q; got %v", want, got)
+		}
+	}
+
+	installRTMRs = []string{"0=" + r1}
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "bare-metal", "tdx"); err == nil {
+		t.Fatal("RTMR[0] pin accepted; only RTMR[1] and RTMR[2] are supported")
+	}
+}
+
+// A TDX install without RTMR pins warns that the measurement pin covers TDVF
+// firmware only; SNP, pinned TDX, and values-file-pinned TDX stay quiet.
+func TestTDXRTMRPinWarning(t *testing.T) {
+	r1 := "1=" + strings.Repeat("11", 48)
+
+	if warn, err := tdxRTMRPinWarning("sev-snp", nil, nil); err != nil || warn != "" {
+		t.Fatalf("sev-snp: warn=%q err=%v, want quiet", warn, err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", []string{r1}, nil); err != nil || warn != "" {
+		t.Fatalf("pinned tdx: warn=%q err=%v, want quiet", warn, err)
+	}
+	warn, err := tdxRTMRPinWarning("tdx", nil, nil)
+	if err != nil || warn == "" {
+		t.Fatalf("unpinned tdx: warn=%q err=%v, want a warning", warn, err)
+	}
+
+	pinned := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(pinned, []byte("cds:\n  rtmrs:\n    - \""+r1+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", nil, []string{pinned}); err != nil || warn != "" {
+		t.Fatalf("values-file pinned tdx: warn=%q err=%v, want quiet", warn, err)
+	}
+
+	empty := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(empty, []byte("cds:\n  rtmrs: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warn, err := tdxRTMRPinWarning("tdx", nil, []string{empty}); err != nil || warn == "" {
+		t.Fatalf("empty-list values file: warn=%q err=%v, want a warning", warn, err)
+	}
+
+	if _, err := tdxRTMRPinWarning("tdx", nil, []string{filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
+		t.Fatal("an unreadable values file was silently treated as unpinned")
 	}
 }

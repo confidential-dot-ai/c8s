@@ -4,7 +4,7 @@
 //
 // It is shared by `c8s allowlist` and `c8s secrets`, which authorize against the
 // same pinned operator keys and reach CDS the same way. The attestation
-// decisions — that plaintext http needs --insecure, that a tls-lb front door is
+// decisions — that plaintext http needs --insecure, that a router front door is
 // trusted through its discovery document, that a direct URL is verified by
 // RA-TLS — belong in one place, since each is a way to talk to an unattested
 // endpoint by mistake.
@@ -12,8 +12,10 @@ package cdsconn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,10 +24,12 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // EnvOperatorKey supplies the operator private key when the flag is unset.
@@ -34,12 +38,13 @@ const EnvOperatorKey = "C8S_OPERATOR_KEY"
 // Options are the connection and credential flags an operator CLI carries.
 // Embed it in a command's option struct and bind Flags to its persistent flags.
 type Options struct {
-	URL              string
-	Measurements     []string
-	MeasurementsFile string
-	Timeout          time.Duration
-	OperatorKey      string
-	Insecure         bool
+	URL                string
+	Measurements       []string
+	MeasurementsFile   string
+	MeasurementsConfig string
+	Timeout            time.Duration
+	OperatorKey        string
+	Insecure           bool
 
 	// Verify is the evidence verifier; a stub in tests. Zero means
 	// localverify.Verify.
@@ -49,9 +54,10 @@ type Options struct {
 // BindFlags registers the connection and credential flags on a command's
 // persistent flag set, so every operator CLI spells them the same way.
 func BindFlags(pf *pflag.FlagSet, o *Options) {
-	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound")
-	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
+	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS router or direct CDS base URL (required); WebPKI router URLs are not attestation-bound")
+	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the router value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
 	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
+	pf.StringVar(&o.MeasurementsConfig, "measurements-config", "", "complete endpoint image, RTMR and launch-bound operator policy; excludes --measurements and --measurements-file")
 	pf.DurationVar(&o.Timeout, "timeout", 15*time.Second, "per-request timeout")
 	pf.StringVar(&o.OperatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+EnvOperatorKey+"); required for writes")
 	pf.BoolVar(&o.Insecure, "insecure", false, "dev/test only: allow a plaintext http:// CDS URL, skipping RA-TLS attestation of CDS")
@@ -77,20 +83,23 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 
 	switch u.Scheme {
 	case "http":
+		if o.MeasurementsConfig != "" {
+			return nil, fmt.Errorf("--measurements-config requires https; plaintext cannot enforce its endpoint identity")
+		}
 		if !o.Insecure {
 			return nil, fmt.Errorf("refusing plaintext http:// for CDS (no attestation): use https:// (RA-TLS), or pass --insecure for a dev/test endpoint")
 		}
 		fmt.Fprintln(os.Stderr, "warning: --url is http:// with --insecure; CDS attestation is NOT verified (dev/test only)")
 		return &http.Client{Timeout: o.Timeout}, nil
 	case "https":
-		measurements, err := o.loadMeasurements()
+		pins, err := o.loadPins()
 		if err != nil {
 			return nil, err
 		}
-		if len(measurements) == 0 {
+		if pins.Empty() {
 			fmt.Fprintln(os.Stderr, "warning: no --measurements set; accepting any attested endpoint build (UNSAFE)")
 		}
-		hc, err := o.httpsClient(ctx, measurements)
+		hc, err := o.httpsClient(ctx, pins)
 		if err != nil {
 			return nil, err
 		}
@@ -101,24 +110,58 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 	}
 }
 
-// httpsClient builds the attestation-verifying client. A tls-lb front door
+// httpsClient builds the attestation-verifying client. A router front door
 // serves a CDS-issued cert with no RA-TLS extension; its trust path is the
 // discovery document, so probe for that first and fall back to direct RA-TLS
 // serving-cert verification (a port-forwarded CDS) when the target serves none
 // — the same routing `c8s verify` uses in auto mode. A discovery document that
 // fails verification is a hard error, never a fallback.
-func (o *Options) httpsClient(ctx context.Context, measurements [][]byte) (*http.Client, error) {
+func (o *Options) httpsClient(ctx context.Context, pins measurements.ReferenceValues) (*http.Client, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
-	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, measurements, o.verifyFunc())
+	verify := o.pinnedVerifier(pins)
+	hc, err := routerdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, pins.Digests(), verify)
 	switch {
 	case err == nil:
-		fmt.Fprintln(os.Stderr, "note: target is a tls-lb front door; verified its discovery attestation and bound this session to the attested connection")
+		fmt.Fprintln(os.Stderr, "note: target is a router front door; verified its discovery attestation and bound this session to the attested connection")
 		return hc, nil
-	case errors.Is(err, lbdiscovery.ErrNoDiscovery):
-		return localverify.NewRATLSHTTPClient(measurements, o.verifyFunc(), o.Timeout), nil
+	case errors.Is(err, routerdiscovery.ErrNoDiscovery):
+		return localverify.NewRATLSHTTPClient(pins.Digests(), verify, o.Timeout), nil
 	default:
 		return nil, err
+	}
+}
+
+func (o *Options) loadPins() (measurements.ReferenceValues, error) {
+	if o.MeasurementsConfig != "" {
+		if len(o.Measurements) != 0 || o.MeasurementsFile != "" {
+			return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --measurements-file")
+		}
+		return measurements.Load(o.MeasurementsConfig)
+	}
+	digests, err := o.loadMeasurements()
+	return measurements.FromFlags(digests, nil), err
+}
+
+// pinnedVerifier keeps full tuple checks on both the discovery and direct
+// RA-TLS paths, which otherwise carry only legacy launch-digest slices.
+func (o *Options) pinnedVerifier(pins measurements.ReferenceValues) localverify.VerifyFunc {
+	verify := o.verifyFunc()
+	if o.MeasurementsConfig == "" {
+		return verify
+	}
+	return func(ctx context.Context, platform string, evidence json.RawMessage, params localverify.Params) (*teetypes.VerificationResult, error) {
+		result, err := verify(ctx, platform, evidence, params)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return nil, fmt.Errorf("endpoint verifier returned no result")
+		}
+		if err := measurements.EnforceEntries(remote.VerifyResponse{Result: *result}, pins.Entries, platform); err != nil {
+			return nil, fmt.Errorf("endpoint identity: %w", err)
+		}
+		return result, nil
 	}
 }
 
@@ -133,7 +176,7 @@ func (o *Options) loadMeasurements() ([][]byte, error) {
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
-	return ratls.ParseHexMeasurementsList(hexes)
+	return refvalues.ParseHexMeasurementsList(hexes)
 }
 
 // Signer builds the operator credential from the flag or the environment. The
@@ -176,12 +219,12 @@ func (o *Options) requirePinnedEndpoint() error {
 	if u, err := url.Parse(o.URL); err == nil && u.Scheme == "http" {
 		return nil
 	}
-	measurements, err := o.loadMeasurements()
+	pins, err := o.loadPins()
 	if err != nil {
 		return err
 	}
-	if len(measurements) == 0 {
-		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the tls-lb value for a CDS-issued public TLS front door, the CDS value for a direct URL")
+	if pins.Empty() {
+		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
 	}
 	return nil
 }

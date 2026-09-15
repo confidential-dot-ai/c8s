@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // startUpstream returns a running fake attestation-api and its URL.
@@ -31,26 +31,25 @@ func serveProxy(t *testing.T, cfg config) string {
 	if cfg.readHeaderTimeout == 0 {
 		cfg.readHeaderTimeout = time.Second
 	}
+	proxy, err := newProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bound here, so the socket carries its mode and group before any test
+	// looks at it; only the serve loop runs in the background.
+	listener, err := workloadclaims.ListenUnix(sock, cfg.socketGID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runContext(ctx, cfg) }()
+	go func() { done <- serve(ctx, cfg, proxy, listener) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Errorf("proxy serve: %v", err)
 		}
 	})
-	// Wait for the socket to appear rather than sleeping a fixed interval.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(sock); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("socket did not appear")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 	return sock
 }
 
@@ -64,7 +63,7 @@ func TestProxyForwardsOverSocket(t *testing.T) {
 	}))
 	sock := serveProxy(t, config{upstream: upstream, socketGID: 0})
 
-	if _, err := attestationclient.NewClient("unix://"+sock).Attest(context.Background(), types.AttestRequest{}); err != nil {
+	if _, err := remote.NewClient("unix://"+sock).Attest(context.Background(), remote.AttestRequest{}); err != nil {
 		t.Fatalf("Attest over proxy socket: %v", err)
 	}
 }
@@ -91,8 +90,8 @@ func TestProxySocketPermissions(t *testing.T) {
 func TestProxyReportsUpstreamDown(t *testing.T) {
 	// Nothing listens on the upstream; the proxy must answer 502, not hang.
 	sock := serveProxy(t, config{upstream: "http://127.0.0.1:1", socketGID: 0})
-	_, err := attestationclient.NewClient("unix://" + sock).Health(context.Background())
-	var unexpErr *attestationclient.UnexpectedError
+	_, err := remote.NewClient("unix://" + sock).Health(context.Background())
+	var unexpErr *remote.UnexpectedError
 	if err == nil {
 		t.Fatal("Health succeeded against a dead upstream")
 	}

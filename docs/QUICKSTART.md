@@ -24,13 +24,12 @@ This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
 webhook, attestation-api, and CDS.
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
 
-`--cvm-mode` is required — one of `pod` (per-pod kata CVMs, multi-tenant),
-`node` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
+`--cvm-mode` is required — one of `bare-metal` (node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here;
 single-tenant), `gke`, or `aks`. So is `--hardware-platform`, naming the nodes' CPU TEE: `sev-snp` or
 `tdx` (under `aks` it selects the Azure vTPM shape instead). `--operator-keys`
 takes a PEM bundle of EC public keys that authorize
@@ -42,11 +41,11 @@ openssl ecparam -genkey -name prime256v1 -noout -out operator.key
 openssl ec -in operator.key -pubout -out operator-pub.pem
 ```
 
-tls-lb ships no default upstream: `--upstream` (with the port on its
-`--workload-ref`) points tls-lb at an adopted workload's mesh-wrapped headless Service.
-Without an upstream choice, tls-lb renders no catch-all route until one is
+router ships no default upstream: `--upstream` (with the port on its
+`--workload-ref`) points router at an adopted workload's mesh-wrapped headless Service.
+Without an upstream choice, router renders no catch-all route until one is
 attached rather than shipping an unencrypted inference hop. Alternatives and details: the
-[Upstream](operator.md#tls-lb-upstream).
+[Upstream](operator.md#router-upstream).
 
 For existing workloads, use `--workload-ref <cw-id>=<namespace>/<kind>/<name>` so install
 adopts them as CWs and resolves their images into the NRI bootstrap allowlist.
@@ -83,7 +82,7 @@ carries no default image tag of its own, so the image tag above is supplied by
 To install without the advisory CRDs:
 
 ```sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem --install-crds=false \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
 ```
@@ -106,7 +105,7 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-username=<user-or-x-access-token> \
   --docker-password="$GITHUB_TOKEN"
 
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
@@ -117,7 +116,7 @@ idempotently (re-run it to rotate the credential in place):
 
 ```sh
 IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
-c8s install --namespace c8s-system --cvm-mode=node --hardware-platform=sev-snp \
+c8s install --namespace c8s-system --cvm-mode=bare-metal --hardware-platform=sev-snp \
   --operator-keys operator-pub.pem \
   --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=vllm/deployment/serving:8000 --upstream vllm
@@ -143,18 +142,6 @@ Note this is the cluster-side (kubelet) credential: `--resolve-digests` runs
 `crane` on your workstation and uses your local docker login, not this
 Secret.
 
-Under `--cvm-mode=pod`, the same Secret also feeds the kata-image-puller's in-pod
-`oras pull` of the kata-guest-base artifact, which reads
-`/root/.docker/config.json` rather than kubelet pull secrets (set
-`kata.guestImage.pullerAuthSecret` if that artifact needs a different
-credential).
-
-On kata clusters, also raise kubelet's `runtime-request-timeout` (default
-2 m): the effective ceiling on kata pod creation is `min(kubelet timeout,
-kata timeout)`, and a slow path — cold registry, a multi-GB model image
-guest-pulled inside the VM — hits the 2 m wall with the cause hidden. RKE2:
-`kubelet-arg: runtime-request-timeout=20m` in `/etc/rancher/rke2/config.yaml`.
-
 ## Certificate path
 
 The chart wires workload injection to chart-managed CDS. CDS generates its
@@ -162,7 +149,7 @@ mesh CA key in process memory and persists only the public CA bundle. The
 persisted bundle lets already-issued leaves keep verifying across CDS
 restarts; it does not preserve issuance — a restart generates a new CA key,
 and workloads must re-bootstrap to trust new leaves. See docs/operator.md
-for the singleton-vs-handoff trade-off. Run this chart inside the intended
+for the singleton operational guidance. Run this chart inside the intended
 CVM trust boundary; the supported chart path no longer has external CDS
 URL values.
 

@@ -2,20 +2,23 @@ package join
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"golang.org/x/net/netutil"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -37,8 +40,10 @@ type ReleaseConfig struct {
 	// AttestationAPIURL is the local attestation-api base URL, used both for
 	// the RA-TLS serving cert's quote and for verifying callers' quotes.
 	AttestationAPIURL string
-	// Platform is the TEE platform ("tdx").
+	// Platform is the TEE platform ("tdx" or "sev-snp").
 	Platform string
+	// MeasurementsConfig pins the authorized follower images and operator keys.
+	MeasurementsConfig string
 	// TokenPath is the agent-only rke2 join token file (the full-format
 	// K10<ca-hash>::node:... token rke2-server writes once initialised).
 	TokenPath string
@@ -50,11 +55,8 @@ type ReleaseConfig struct {
 // RunRelease serves the RA-TLS-protected /join-token endpoint. It blocks
 // until ctx is done.
 //
-// Startup order matters for the trust story:
-//  1. ownRefs: verify our own evidence and pin the same-image policy to it.
-//     Fails closed if the local attestation stack is broken.
-//  2. serve over an RA-TLS config that REQUIRES a client cert, so every
-//     request carries the evidence the handler verifies.
+// The authorization policy is loaded before binding the listener. Every request
+// verifies a client certificate before reading either RKE2 credential file.
 func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 	return runRelease(ctx, cfg, nil)
 }
@@ -65,7 +67,6 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	// RA-TLS is mandatory: joining agents verify this endpoint's serving
 	// quote before presenting their own evidence, so a plain-TLS listener
 	// (empty platform in the ratls package) must never come up.
-	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
 	if cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join release)")
 	}
@@ -75,17 +76,13 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		return fmt.Errorf("--verify-timeout must be positive (got %s)", cfg.VerifyTimeout)
 	}
 
-	api := attestationclient.NewClient(cfg.AttestationAPIURL)
-	refsCtx, cancelRefs := context.WithTimeout(ctx, 30*time.Second)
-	own, err := ownRefs(refsCtx, api)
-	cancelRefs()
+	policy, err := loadPeerPolicy(cfg.MeasurementsConfig, cfg.Platform, cfg.AttestationAPIURL, cfg.VerifyTimeout, false)
 	if err != nil {
 		return err
 	}
 
 	handler := &releaseHandler{
-		api:           api,
-		own:           own,
+		policy:        policy,
 		tokenPath:     cfg.TokenPath,
 		verifyTimeout: cfg.VerifyTimeout,
 		verifySlots:   make(chan struct{}, maxConcurrentVerifications),
@@ -97,7 +94,7 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		Platform:   cfg.Platform,
 		AttestFunc: attestFunc,
 		// Short-lived serving cert: the validity window is the replay bound
-		// for a stolen leaf key (see certSkew). Rotation is automatic.
+		// for a stolen leaf key. Rotation is automatic.
 		CertTTL: releaseServerCertTTL,
 		Logger:  slog.Default(),
 	})
@@ -129,8 +126,9 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
 		// A slow reader or parked keep-alive must not hold a goroutine open.
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  30 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		IdleTimeout:    30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 
 	errCh := make(chan error, 1)
@@ -154,8 +152,7 @@ type tokenResponse struct {
 }
 
 type releaseHandler struct {
-	api           attestationclient.Client
-	own           imageRefs
+	policy        peerPolicy
 	tokenPath     string
 	verifyTimeout time.Duration
 	verifySlots   chan struct{}
@@ -190,7 +187,7 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.verifyTimeout)
 	defer cancel()
-	if err := verifyPeer(ctx, h.api, r.TLS.PeerCertificates[0], h.own); err != nil {
+	if err := verifyPeer(ctx, r.TLS.PeerCertificates[0], h.policy); err != nil {
 		h.logger.Warn("join denied", "remote", r.RemoteAddr, "err", err)
 		http.Error(w, "join denied", http.StatusForbidden)
 		return
@@ -198,37 +195,84 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read per request, no caching: the file appears only once rke2-server
 	// has initialised, and agents retry on 503 until then.
-	token, err := os.ReadFile(h.tokenPath)
-	trimmed := strings.TrimSpace(string(token))
-	if err != nil || trimmed == "" {
-		h.logger.Warn("join token not ready", "remote", r.RemoteAddr, "path", h.tokenPath, "err", err)
-		http.Error(w, "join token not ready", http.StatusServiceUnavailable)
-		return
-	}
-	if !isSecureAgentToken(trimmed) {
-		// INVARIANT: the admission endpoint must never release a credential
-		// that can add an RKE2 server/control-plane node.
-		h.logger.Error("join token has unexpected role", "path", h.tokenPath)
+	token, err := readAgentToken(h.tokenPath)
+	if err != nil {
+		h.logger.Warn("join token not ready", "remote", r.RemoteAddr, "err", err)
 		http.Error(w, "join token not ready", http.StatusServiceUnavailable)
 		return
 	}
 
-	h.logger.Info("join token released",
-		"remote", r.RemoteAddr,
-		"launch_digest", hex.EncodeToString(h.own.launchDigest))
+	h.logger.Info("join token released", "remote", r.RemoteAddr)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(tokenResponse{Token: trimmed}); err != nil {
+	if err := json.NewEncoder(w).Encode(tokenResponse{Token: token}); err != nil {
 		h.logger.Warn("write response", "remote", r.RemoteAddr, "err", err)
 	}
 }
 
-func isSecureAgentToken(token string) bool {
-	// RKE2 names the agent-only basic-auth identity "node"; the privileged
-	// server token uses the distinct "server" identity.
-	caHash, credentials, ok := strings.Cut(token, "::")
-	if !ok || !strings.HasPrefix(caHash, "K10") || len(caHash) == len("K10") || strings.ContainsRune(caHash, ':') {
-		return false
+// readAgentToken also reads the conventional companion privileged token. RKE2
+// defaults agent-token to an alias of token unless a separate agent secret was
+// configured. Comparing secrets catches that alias even if its role is rewritten.
+func readAgentToken(path string) (string, error) {
+	token, err := readTokenFile(path)
+	if err != nil {
+		return "", err
 	}
-	username, secret, ok := strings.Cut(credentials, ":")
-	return ok && username == "node" && secret != ""
+	ca, user, secret, ok := secureTokenParts(token)
+	if !ok || user != "node" {
+		return "", fmt.Errorf("agent token has invalid format or role")
+	}
+	server, err := readTokenFile(filepath.Join(filepath.Dir(path), "token"))
+	if err != nil {
+		return "", fmt.Errorf("privileged token unavailable: %w", err)
+	}
+	serverCA, serverUser, serverSecret, ok := secureTokenParts(server)
+	if !ok || serverUser != "server" || serverCA != ca {
+		return "", fmt.Errorf("privileged token has invalid format or CA pin")
+	}
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(serverSecret)) == 1 {
+		return "", fmt.Errorf("agent token aliases privileged server credential")
+	}
+	return token, nil
+}
+
+func readTokenFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxTokenRespBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxTokenRespBytes {
+		return "", fmt.Errorf("token file exceeds size limit")
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func isSecureAgentToken(token string) bool {
+	_, user, _, ok := secureTokenParts(token)
+	return ok && user == "node"
+}
+
+func secureTokenParts(token string) (ca, user, secret string, ok bool) {
+	ca, credentials, found := strings.Cut(token, "::")
+	if !found || !strings.HasPrefix(ca, "K10") || len(ca) != 3+2*sha256.Size {
+		return "", "", "", false
+	}
+	if _, err := hex.DecodeString(ca[3:]); err != nil {
+		return "", "", "", false
+	}
+	user, secret, found = strings.Cut(credentials, ":")
+	if !found || secret == "" || strings.ContainsRune(secret, ':') {
+		return "", "", "", false
+	}
+	for _, c := range secret {
+		if c < '!' || c > '~' {
+			return "", "", "", false
+		}
+	}
+	return ca, user, secret, true
 }

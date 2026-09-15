@@ -23,11 +23,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // config is everything the sidecar needs. The webhook renders all of it.
@@ -35,9 +37,7 @@ type config struct {
 	sidecar.Config
 
 	Volumes []volumeRequest
-	// SocketDir holds volumed's socket, as this pod sees it. Unused under
-	// WorkloadClaimsGuest, where volumed is in the guest and there is no
-	// filesystem shared with it.
+	// SocketDir holds the node's volumed socket, as this pod sees it.
 	SocketDir string
 }
 
@@ -76,13 +76,21 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	measurements, err := cfg.ParseMeasurements()
+	pins, err := cfg.ParsePins()
 	if err != nil {
 		return err
 	}
 
+	// A done ctx is the pod terminating — mid-pass or after idling — and any
+	// volume opened by then must be released before kubelet's cleanup runs.
+	defer func() {
+		if ctx.Err() != nil {
+			closeVolumes(cfg)
+		}
+	}()
+
 	if err := sidecar.Retry(ctx, cfg.Config, "volume", func(ctx context.Context) error {
-		return openAll(ctx, cfg, measurements)
+		return openAll(ctx, cfg, pins)
 	}); err != nil {
 		return err
 	}
@@ -96,11 +104,47 @@ func run(cfg config) error {
 	return nil
 }
 
+// closeTimeout bounds the termination-time release, inside the pod's remaining
+// grace.
+const closeTimeout = 10 * time.Second
+
+// closeVolumes releases this pod's volumes at termination, before kubelet's
+// volume cleanup runs (see volumed.ClosePath). Failure is logged, not fatal:
+// the node's reaper collects whatever this misses.
+func closeVolumes(cfg config) {
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	daemon, base := daemonClient(cfg)
+	if err := closeWith(ctx, daemon, base); err != nil {
+		slog.Warn("volumes not released; the node reaper will collect them", "error", err)
+		return
+	}
+	slog.Info("volumes released")
+}
+
+// closeWith is closeVolumes once the client exists.
+func closeWith(ctx context.Context, daemon *http.Client, base string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+volumed.ClosePath, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := daemon.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("close volumes: %s: %s", resp.Status, strings.TrimSpace(string(detail)))
+	}
+	return nil
+}
+
 // openAll fetches and opens every requested volume in one pass. The daemon is
 // idempotent for a repeated identical request, so a pass that fails partway is
 // safe to run again.
-func openAll(ctx context.Context, cfg config, measurements [][]byte) error {
-	client, pub, err := sidecar.NewClient(cfg.Config, measurements)
+func openAll(ctx context.Context, cfg config, pins ratls.Pins) error {
+	client, pub, err := sidecar.NewClient(cfg.Config, pins)
 	if err != nil {
 		return err
 	}
@@ -164,17 +208,9 @@ func openOne(ctx context.Context, cfg config, daemon *http.Client, daemonBase, n
 	return nil
 }
 
-// daemonClient reaches volumed and returns the base URL to post to: the socket
-// the webhook mounts into this sidecar on node-CVM, or the guest's compiled
-// loopback address under kata, where volumed is in this VM and there is no
-// shared filesystem. Both are compiled; the flag selects a shape, not an
-// address.
+// daemonClient reaches volumed through the socket directory NRI-mounted into
+// this sidecar and returns the base URL to post to.
 func daemonClient(cfg config) (*http.Client, string) {
-	if cfg.WorkloadClaimsGuest {
-		// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose on
-		// the key blob's trip to the daemon.
-		return &http.Client{Transport: &http.Transport{}}, volumed.GuestEndpoint()
-	}
 	sock := filepath.Join(cfg.SocketDir, volumed.SocketName)
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -198,9 +234,7 @@ func validate(cfg *config) error {
 		}
 		seen[v.Name] = true
 	}
-	// Under kata volumed is in the guest on a compiled loopback address, so
-	// there is no socket directory to require.
-	if cfg.SocketDir == "" && !cfg.WorkloadClaimsGuest {
+	if cfg.SocketDir == "" {
 		return fmt.Errorf("--socket-dir is required")
 	}
 	return nil

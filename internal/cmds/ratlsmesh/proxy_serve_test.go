@@ -215,13 +215,12 @@ func TestInboundHeaderAtSizeLimitAccepted(t *testing.T) {
 // log must classify it as tls_error and the handshake histogram must not
 // record a bogus zero-duration sample.
 func TestOutboundDialFailureClassifiedAsTLSError(t *testing.T) {
-	deadPort := freePort(t)
 	m := testMetrics()
 	var logBuf syncBuffer
 	_, clientTLS := testTLSConfigs(t)
 	p := &Proxy{
 		nodeIP:      "1.1.1.1",
-		inboundPort: deadPort,
+		inboundPort: 1, // refused: nothing listens on port 1
 		clientTLS:   clientTLS,
 		resolver:    &fixedRemoteResolver{nodeIP: "127.0.0.1"},
 		origDstFunc: func(net.Conn) (string, error) { return "10.244.1.5:8080", nil },
@@ -283,14 +282,18 @@ func startProxyRun(t *testing.T, mutate func(*Proxy)) *proxyRunFixture {
 	t.Helper()
 	backend := startBackend(t, "run-e2e")
 	serverTLS, clientTLS := testTLSConfigs(t)
-	outPort := freePort(t)
-	inPort := freePort(t)
+	outLn := bindLoopback(t)
+	inLn := bindLoopback(t)
+	outPort := listenerPort(outLn)
+	inPort := listenerPort(inLn)
 	logBuf := &syncBuffer{}
 	ready := make(chan struct{})
 
 	p := &Proxy{
-		outboundAddr: fmt.Sprintf("127.0.0.1:%d", outPort),
-		inboundAddr:  fmt.Sprintf("127.0.0.1:%d", inPort),
+		outboundAddr: outLn.Addr().String(),
+		inboundAddr:  inLn.Addr().String(),
+		outboundLn:   outLn,
+		inboundLn:    inLn,
 		serverTLS:    serverTLS,
 		clientTLS:    clientTLS,
 		nodeIP:       "127.0.0.1",
@@ -548,20 +551,22 @@ func TestServeConnectionLimits(t *testing.T) {
 			releaseHold := func() { holdOnce.Do(func() { close(hold) }) }
 			defer releaseHold()
 
-			outPort := freePort(t)
-			inPort := freePort(t)
+			outLn := bindLoopback(t)
+			inLn := bindLoopback(t)
 			var sem chan struct{}
 			if tc.sem > 0 {
 				sem = make(chan struct{}, tc.sem)
 			}
 			ready := make(chan struct{})
 			p := &Proxy{
-				outboundAddr: fmt.Sprintf("127.0.0.1:%d", outPort),
-				inboundAddr:  fmt.Sprintf("127.0.0.1:%d", inPort),
+				outboundAddr: outLn.Addr().String(),
+				inboundAddr:  inLn.Addr().String(),
+				outboundLn:   outLn,
+				inboundLn:    inLn,
 				serverTLS:    serverTLS,
 				clientTLS:    clientTLS,
 				nodeIP:       "127.0.0.1",
-				inboundPort:  inPort,
+				inboundPort:  listenerPort(inLn),
 				resolver:     &staticResolver{nodeIP: "127.0.0.1"},
 				origDstFunc: func(net.Conn) (string, error) {
 					<-hold

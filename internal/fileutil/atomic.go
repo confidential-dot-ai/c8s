@@ -2,8 +2,12 @@
 package fileutil
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // WriteAtomic writes data to path via a same-directory temp file plus
@@ -15,17 +19,44 @@ import (
 // replace on POSIX filesystems; a /tmp tmp would silently degrade to a
 // copy+remove on cross-mount writes.
 func WriteAtomic(path string, data []byte, mode os.FileMode) error {
+	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
+		return fmt.Errorf("write atomically: path %q ends in a path separator", path)
+	}
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	tmp, err := os.CreateTemp(dir, "."+base+".*.tmp")
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
+	defer root.Close()
+	return WriteAtomicRoot(root, base, data, mode)
+}
+
+// WriteAtomicRoot writes data to a file directly beneath root via a
+// same-directory temp file plus root.Rename. Keeping the directory handle
+// through the rename prevents a later replacement of its pathname from
+// redirecting the write.
+func WriteAtomicRoot(root *os.Root, name string, data []byte, mode os.FileMode) error {
+	if root == nil {
+		return fmt.Errorf("write atomically: nil directory root")
+	}
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return fmt.Errorf("write atomically: %q is not a file name directly beneath the directory root", name)
+	}
+
+	tmpName, err := atomicTempName(name)
+	if err != nil {
+		return err
+	}
+	tmp, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			_ = tmp.Close()
+			_ = root.Remove(tmpName)
 		}
 	}()
 
@@ -40,9 +71,17 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		return err
 	}
 	cleanup = false
 	return nil
+}
+
+func atomicTempName(name string) (string, error) {
+	var suffix [12]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("generate atomic-write temp name: %w", err)
+	}
+	return "." + name + "." + hex.EncodeToString(suffix[:]) + ".tmp", nil
 }

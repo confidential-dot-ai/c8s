@@ -57,7 +57,7 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	}
 	ca.pem = certutil.EncodeCertPEM(serverCA.Cert.Raw)
 
-	h, err := NewHandler(pubPEM, ca, "system:masters", "operator", time.Hour)
+	h, err := NewHandler(pubPEM, ca, defaultCertOrg, defaultCertCN, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 // endpoint that issues cluster-admin credentials.
 func TestReleaseRefusesATokenBoundToAnotherCSR(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
-	h, err := NewHandler(pubPEM, testCA(t), "system:masters", "operator", time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func csrPEMFromKey(t *testing.T, key crypto.Signer) []byte {
 
 // TestNewHandlerRejectsBadPubkey: the measured key must be an ECDSA PKIX PEM.
 func TestNewHandlerRejectsBadPubkey(t *testing.T) {
-	if _, err := NewHandler([]byte("not a key"), testCA(t), "system:masters", "operator", time.Hour); err == nil {
+	if _, err := NewHandler([]byte("not a key"), testCA(t), defaultCertOrg, defaultCertCN, time.Hour); err == nil {
 		t.Error("expected error for non-PEM operator pubkey")
 	}
 }
@@ -217,7 +217,7 @@ func TestHandlerToleratesTokenClockSkew(t *testing.T) {
 	}
 	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
 
-	h, err := NewHandler(pubPEM, testCA(t), "system:masters", "operator", time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestHandlerSigningFailureIsServerError(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
 	ca := testCA(t)
 	ca.key = stubSigner{}
-	h, err := NewHandler(pubPEM, ca, "system:masters", "operator", time.Hour)
+	h, err := NewHandler(pubPEM, ca, defaultCertOrg, defaultCertCN, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
 // method, authorization, body decoding, CSR validation, and signing.
 func TestServeHTTPErrorPaths(t *testing.T) {
 	signer, pubPEM := newOperatorAuth(t)
-	h, err := NewHandler(pubPEM, testCA(t), "system:masters", "operator", time.Hour)
+	h, err := NewHandler(pubPEM, testCA(t), defaultCertOrg, defaultCertCN, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

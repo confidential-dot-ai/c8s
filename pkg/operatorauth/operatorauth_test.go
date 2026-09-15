@@ -335,9 +335,6 @@ func TestKeySetHashIsCanonical(t *testing.T) {
 	if withDuplicate != ab {
 		t.Fatalf("duplicate key changed set hash: %q != %q", withDuplicate, ab)
 	}
-	if err := ValidateKeySetHash(ab); err != nil {
-		t.Fatalf("ValidateKeySetHash: %v", err)
-	}
 
 	onlyA, err := KeySetHash([]*ecdsa.PublicKey{&keyA.PublicKey})
 	if err != nil {
@@ -354,11 +351,6 @@ func TestKeySetHashRejectsInvalidInputs(t *testing.T) {
 	}
 	if _, err := KeySetHash([]*ecdsa.PublicKey{nil}); err == nil {
 		t.Fatal("expected nil key to fail")
-	}
-	for _, value := range []string{"", "abcd", strings.Repeat("A", 64), strings.Repeat("z", 64)} {
-		if err := ValidateKeySetHash(value); err == nil {
-			t.Fatalf("ValidateKeySetHash(%q) succeeded", value)
-		}
 	}
 }
 

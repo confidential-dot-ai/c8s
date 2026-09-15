@@ -37,6 +37,12 @@ spec:
       labels:
         app.kubernetes.io/name: nvidia-device-plugin
     spec:
+      # Set by gpu-node-label.service only when an NVIDIA function is on the
+      # PCI bus: FAIL_ON_INIT_ERROR cannot rescue a GPU-less node — the
+      # cdi-annotations strategy still hard-fails CDI spec generation with no
+      # driver, and the pod crashloops.
+      nodeSelector:
+        confidential.ai/gpu: "true"
       priorityClassName: system-node-critical
       tolerations:
         - operator: Exists

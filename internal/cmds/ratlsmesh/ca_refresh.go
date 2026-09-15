@@ -12,9 +12,7 @@ import (
 )
 
 // caBundleRefresh polls CDS /ca and pushes each accepted bundle into the cert
-// managers, so mesh peers holding certs from a rotated CA still verify. Shared
-// by the host and in-guest runs, which differ only in logPrefix ("cds" vs
-// "in-guest cds").
+// managers, so mesh peers holding certs from a rotated CA still verify.
 //
 // It refreshes through the Provider the cdsUpgrade goroutine provisions with,
 // which owns the trust state the refresh continuity-checks against. Ticks

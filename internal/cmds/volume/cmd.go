@@ -1,7 +1,6 @@
 package volume
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // options holds the flags every subcommand shares.
@@ -31,11 +31,13 @@ func newCmd(verify localverify.VerifyFunc) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Build encrypted volumes and store their keys in CDS",
-		Long: `Build a volume that only an attested workload can read.
+		Long: `Build a volume that only an attested workload can open.
 
 'create' packages a directory into an encrypted, integrity-protected image and
-puts its key into the CDS secret store. The image is ciphertext: copy it to the
-node by any means, including through the untrusted host.
+puts its key into the CDS secret store — or, with --mutable, builds a writable
+volume the workload can both read and write, without integrity protection. The
+image is ciphertext either way: copy it to the node by any means, including
+through the untrusted host.
 
 'attach' then presents that image to the node as a disk carrying the serial the
 volume is found by, and 'detach' removes it. Both run on the node, as root, and
@@ -82,16 +84,11 @@ func putBlob(ctx context.Context, hc *http.Client, baseURL, path string, blob Bl
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, baseURL+"/secrets"+path, bytes.NewReader(body))
+	req, err := operatorauth.NewRequest(ctx, http.MethodPut, baseURL+"/secrets"+path, body, auth)
 	if err != nil {
 		return err
 	}
-	authz, err := auth.Authorization(http.MethodPut, req.URL.Path, body)
-	if err != nil {
-		return fmt.Errorf("authorize request: %w", err)
-	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authz)
 
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -113,6 +110,4 @@ func putBlob(ctx context.Context, hc *http.Client, baseURL, path string, blob Bl
 
 // authorizer mints the operator Authorization header for one write, bound to
 // its method, path, and body. Implemented by operatorauth.Signer.
-type authorizer interface {
-	Authorization(method, path string, body []byte) (string, error)
-}
+type authorizer = operatorauth.Authorizer

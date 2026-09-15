@@ -23,7 +23,7 @@ import (
 
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -130,6 +130,7 @@ func TestRunProxyMeasurementLengthMessage(t *testing.T) {
 	t.Setenv("NODE_IP", "")
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(), nil)
 	cfg := defaultTestProxyConfig(t)
+	bindProxyPorts(t, cfg)
 	cfg.logLevel = "error"
 	cfg.localCIDRBootTimeout = time.Millisecond
 	cfg.nodeIP = "127.0.0.1"
@@ -148,16 +149,14 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(testPod("web", "default", "10.244.0.7", nodeIP, nil)), nil)
 	t.Setenv("NODE_IP", "")
-	attest := testattest.New(t)
+	attest := mockapi.New(t)
 
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
-	cfg.attestationApiURL = attest.URL
-	cfg.outboundPort = freePort(t)
-	cfg.inboundPort = freePort(t)
-	cfg.healthPort = freePort(t)
+	cfg.attestationApiURL = attest.URL()
+	bindProxyPorts(t, cfg)
 	cfg.rotationTimeout = 5 * time.Second
 	cfg.metricsUpdateInterval = 10 * time.Millisecond
 	cfg.localCIDRBootTimeout = time.Millisecond
@@ -216,7 +215,7 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	// dialer verifies the mesh server normally; its own junk cert is what
 	// the server must reject.
 	junkClientTLS, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:       &ratls.VerifyPolicy{AttestationApiURL: attest.URL},
+		Policy:       &ratls.VerifyPolicy{AttestationApiURL: attest.URL()},
 		CertProvider: staticCertProvider{junkClientCert(t)},
 	})
 	if err != nil {
@@ -292,9 +291,7 @@ func TestRunProxyCDSModeDegraded(t *testing.T) {
 	cfg.platform = "sev-snp"
 	cfg.nodeIP = nodeIP
 	cfg.attestationApiURL = "http://127.0.0.1:1" // refused: warm-up failure is non-fatal
-	cfg.outboundPort = freePort(t)
-	cfg.inboundPort = freePort(t)
-	cfg.healthPort = freePort(t)
+	bindProxyPorts(t, cfg)
 	cfg.certMode = "cds"
 	cfg.cdsURL = cds.URL
 	cfg.cdsMeasurements = "" // deliberately unset: must warn

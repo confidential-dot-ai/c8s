@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -31,7 +31,7 @@ import (
 // cannot present a TEE-attested cert with an allowed measurement, so the TLS
 // handshake fails before any cert-issuance bytes flow.
 func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
-	as := testattest.New(t)
+	as := mockapi.New(t)
 
 	// Plain HTTPS server with a regular self-signed cert (no RA-TLS extension).
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +41,7 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            srv.URL,
-		AttestationApiURL: as.URL,
+		AttestationApiURL: as.URL(),
 		CDSCAURL:          "http://unused.invalid",
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -56,8 +56,8 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 	if err == nil {
 		t.Fatal("Provision succeeded against unattested CDS")
 	}
-	if !errors.Is(err, ratls.ErrNotAttested) {
-		t.Fatalf("Provision error = %v, want ErrNotAttested", err)
+	if !errors.Is(err, ratls.ErrNoAttestation) {
+		t.Fatalf("Provision error = %v, want ErrNoAttestation", err)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 // a well-known x509 path (not self-signed by httptest), and confirms the
 // cdsclient still rejects it because the cert lacks the RA-TLS extension.
 func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
-	as := testattest.New(t)
+	as := mockapi.New(t)
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
 
 	p, err := NewProvider(&Config{
 		CDSURL:            srv.URL,
-		AttestationApiURL: as.URL,
+		AttestationApiURL: as.URL(),
 		CDSCAURL:          "http://unused.invalid",
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,
@@ -122,13 +122,13 @@ func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
 // evidence verifies but whose launch digest is not in CDSMeasurements must
 // fail the handshake with ErrPolicyViolation before any CDS request flows.
 func TestProviderRATLSRejectsCDSWithUnpinnedMeasurement(t *testing.T) {
-	as := testattest.New(t)
+	as := mockapi.New(t)
 	served := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
-	as.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(served)))
+	as.SetVerdict(mockapi.PassingVerdict(hex.EncodeToString(served)))
 
 	serverTLS, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:   "sev-snp",
-		AttestFunc: attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), as.URL),
+		AttestFunc: attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), as.URL()),
 		CertTTL:    time.Hour,
 	})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestProviderRATLSRejectsCDSWithUnpinnedMeasurement(t *testing.T) {
 	pinned := bytes.Repeat([]byte{0x99}, ratls.SNPMeasurementSize)
 	p, err := NewProvider(&Config{
 		CDSURL:            "https://" + ln.Addr().String(),
-		AttestationApiURL: as.URL,
+		AttestationApiURL: as.URL(),
 		CDSCAURL:          "http://unused.invalid",
 		NodeIP:            "10.0.0.1",
 		TEEType:           ratls.TEETypeSEVSNP,

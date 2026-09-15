@@ -25,8 +25,6 @@ const keySetDomain = "c8s-operator-key-set-v1\x00"
 // pinned / writes disabled").
 //
 // KeySetHash is the lowercase-hex form of this digest — the same commitment.
-// CDS commits this in the /handoff and /attest-key REPORTDATA and verifiers
-// pin against it.
 func KeySetDigest(keys []*ecdsa.PublicKey) ([]byte, error) {
 	fps := make([][]byte, 0, len(keys))
 	for i, pub := range keys {

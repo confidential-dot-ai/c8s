@@ -29,15 +29,6 @@ const cwChainName = "RATLS-MESH-CW"
 // non-pod destinations is out of scope here.
 const cwEgressChainName = "RATLS-MESH-CW-EGRESS"
 
-// guestFilterOutputChain and guestFilterInputChain are the in-guest filter
-// chains that drop non-TCP which the NAT redirects do not carry (see
-// buildInGuestFailClosedRules). Guarded by the same fail-closed posture as
-// the host cw egress guard; the guest's own kernel is the trust boundary here.
-const (
-	guestFilterOutputChain = "RATLS-MESH-GUEST-OUT"
-	guestFilterInputChain  = "RATLS-MESH-GUEST-IN"
-)
-
 const (
 	podIPSetName4      = "RATLS-MESH-PODS"
 	podIPSetName6      = "RATLS-MESH-PODS6"
@@ -53,39 +44,25 @@ const ipSetTmpSuffix = "-TMP"
 // managedIPSetNames is the single source of truth for the ipsets this process
 // owns. reconcileLiveSetMaxElem and runIptablesCleanup derive their name lists
 // (and the -TMP swap variants) from it, so adding a set is one edit here.
+// These names (and the chain/jump names below) are a fixed contract with the
+// uninstall host sweep (cmd/c8s/host-sweep.sh), pinned there by
+// TestHostSweepScriptMeshNetfilterNames.
 var managedIPSetNames = []string{
 	podIPSetName4, podIPSetName6,
 	localPodIPSetName4, localPodIPSetName6,
 	cwPodIPSetName4, cwPodIPSetName6,
 }
 
-// clusterDNSClusterIP is the cluster DNS Service ClusterIP the DNS carve-out
-// is destination-scoped to. The c8s node guest image sets cluster-dns
-// 10.53.0.10 (rke2 config.yaml); operators override via --cluster-dns-ip.
-// The egress guard returns only UDP/53 traffic to this server so a cw pod
-// cannot ship arbitrary bytes to an un-scoped external resolver.
-const clusterDNSClusterIP = "10.53.0.10"
-
 // essentialICMPv6Types are the ICMPv6 types IPv6 needs to operate (RFC 4890):
 // 1-4 error/PMTU reporting, 128/129 echo, 130-132 Multicast Listener, 133-137
 // NDP (RS/RA/NS/NA) and redirect. The fail-closed egress guards RETURN these
-// and drop every other non-TCP from a cw pod / guest workload.
+// and drop every other non-TCP from a cw pod.
 var essentialICMPv6Types = []int{1, 2, 3, 4, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137}
 
 // defaultProxyUID is the UID under which the ratls-mesh sidecar proxy runs.
 // Traffic from this UID is excluded from iptables redirect to avoid loops.
 // This follows the Istio/Envoy convention of UID 1337.
 const defaultProxyUID = 1337
-
-// cgroup paths for the in-guest processes whose egress must not be
-// redirected into the mesh: the proxy itself (loop-prevention) and the
-// attestation-service (which must reach AMD KDS over plain TCP/HTTPS).
-// They are matched by systemd slice cgroup path, not by UID, so a workload
-// that happens to run as UID 1337 or 0 is not silently exempted.
-const (
-	meshProxyCgroupPath          = "/system.slice/ratls-mesh.service"
-	attestationServiceCgroupPath = "/system.slice/attestation-service.service"
-)
 
 const defaultIPSetMaxElem = 262144
 
@@ -433,14 +410,14 @@ func buildCWGuardRules(passthrough []cwPassthrough) []iptablesRule {
 // buildCWEgressGuardRules computes the filter-table rules that fail closed
 // on egress from confidential-workload pods: the mesh redirects TCP only, so
 // these rules drop every non-TCP from a cw pod, exempting established TCP
-// replies, UDP/53 queries to the cluster DNS server(s), and the ICMPv6 types
-// IPv6 needs. dnsIPs maps each family to the cluster DNS server IP(s) the DNS
-// carve-out is restricted to. TCP egress never reaches this chain: pod-
-// destination TCP is intercepted in PREROUTING and non-pod TCP is out of
-// scope here. NOTE: kube-proxy DNATs the ClusterIP to a pod IP in PREROUTING
-// before FORWARD, so the -d <ClusterIP> RETURN may miss; confirm on a live
-// cluster (post-DNAT vs pre-DNAT).
-func buildCWEgressGuardRules(dnsIPs map[iptablesFamily][]string) []iptablesRule {
+// replies, UDP/53 queries, and the ICMPv6 types IPv6 needs. TCP egress never
+// reaches this chain: pod-destination TCP is intercepted in PREROUTING and
+// non-pod TCP is out of scope here.
+//
+// The UDP/53 carve-out names no destination. A resolver is outside the guest's
+// trust boundary whatever its address, so an answer is untrusted input that
+// authenticated peers do not rely on; see docs/ratls.md, "DNS".
+func buildCWEgressGuardRules() []iptablesRule {
 	var rules []iptablesRule
 	for _, spec := range []struct {
 		family  iptablesFamily
@@ -461,20 +438,17 @@ func buildCWEgressGuardRules(dnsIPs map[iptablesFamily][]string) []iptablesRule 
 				"-j", "RETURN",
 			},
 		})
-		for _, ip := range dnsIPs[spec.family] {
-			rules = append(rules, iptablesRule{
-				table:  "filter",
-				chain:  cwEgressChainName,
-				label:  "cw-egress-dns-query",
-				family: spec.family,
-				args: []string{
-					"-m", "set", "--match-set", spec.setName, "src",
-					"-p", "udp", "--dport", "53",
-					"-d", ip,
-					"-j", "RETURN",
-				},
-			})
-		}
+		rules = append(rules, iptablesRule{
+			table:  "filter",
+			chain:  cwEgressChainName,
+			label:  "cw-egress-dns-query",
+			family: spec.family,
+			args: []string{
+				"-m", "set", "--match-set", spec.setName, "src",
+				"-p", "udp", "--dport", "53",
+				"-j", "RETURN",
+			},
+		})
 		if spec.family == iptablesFamilyIPv6 {
 			for _, t := range essentialICMPv6Types {
 				rules = append(rules, iptablesRule{
@@ -505,10 +479,11 @@ func buildCWEgressGuardRules(dnsIPs map[iptablesFamily][]string) []iptablesRule 
 	return rules
 }
 
-// cwJumpRule returns the filter FORWARD jump into the cw guard chain. It must
-// sit at position 1: KUBE-FORWARD's mark-based ACCEPT would otherwise admit
-// DNAT'd Service traffic before the drop runs. Args must stay exactly
-// {"-j", cwChainName} — see the isJumpAtHead literal-compare note.
+// cwJumpRule returns the filter FORWARD jump into the cw guard chain. It rides
+// at the head of FORWARD alongside cwEgressJumpRule: KUBE-FORWARD's mark-based
+// ACCEPT would otherwise admit DNAT'd Service traffic before the drop runs.
+// Args must stay exactly {"-j", cwChainName} — see the parseJumpBlockAtHead
+// literal-compare note.
 func cwJumpRule() iptablesRule {
 	return iptablesRule{
 		table: "filter",
@@ -520,7 +495,7 @@ func cwJumpRule() iptablesRule {
 
 // cwEgressJumpRule returns the filter FORWARD jump into the cw egress guard
 // chain. Args must stay exactly {"-j", cwEgressChainName} — see the
-// isJumpAtHead literal-compare note.
+// parseJumpBlockAtHead literal-compare note.
 func cwEgressJumpRule() iptablesRule {
 	return iptablesRule{
 		table: "filter",

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
@@ -19,7 +20,10 @@ type createConfig struct {
 	path      string
 	escrowOut string
 	node      string
+	size      string
+	sizeBytes uint64
 	workDir   string
+	mutable   bool
 	dryRun    bool
 
 	// run executes the build tools. Not a flag: tests set it so the whole
@@ -32,8 +36,16 @@ func newCreateCmd(o *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Build an encrypted volume and store its key",
-		Long: `Package --source into an encrypted image at --out and store its key at --path
-in the CDS secret store.
+		Long: `Build an encrypted image at --out and store its key at --path in the CDS
+secret store.
+
+By default the volume is immutable: --source is packaged into an erofs image
+with a dm-verity tree inside the encryption, and every read is checked against
+the root hash in the key blob.
+
+With --mutable the volume is a writable ext4 of --size bytes, preloaded from
+--source when one is given. A mutable volume has no integrity protection: the
+host can flip bits or roll it back, and c8s cannot detect that.
 
 The image is written as ciphertext and can travel by any means, including
 through the untrusted host. Attach it to the node as a raw block device whose
@@ -50,11 +62,13 @@ the volume is unopenable — keep it somewhere durable and access-controlled.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&cfg.name, "name", "", "volume name; forms the device serial c8s-vol-<name> (required, max 12 chars)")
-	f.StringVar(&cfg.source, "source", "", "directory whose contents become the volume (required)")
+	f.StringVar(&cfg.source, "source", "", "directory whose contents become the volume (required for immutable, optional preload for mutable)")
 	f.StringVar(&cfg.out, "out", "", "where to write the encrypted image; must not exist (required)")
 	f.StringVar(&cfg.path, "path", "", "secret-store path for the key, e.g. /tenant-a/volumes/weights (required)")
 	f.StringVar(&cfg.escrowOut, "escrow-out", "", "where to write the key blob you must keep (required)")
 	f.StringVar(&cfg.node, "node", "", "node holding the device; emitted as a nodeSelector on the printed annotations")
+	f.BoolVar(&cfg.mutable, "mutable", false, "build a writable ext4 volume instead of an immutable, verified one")
+	f.StringVar(&cfg.size, "size", "", "mutable filesystem size, e.g. 50Gi (default: inferred from --source; required without one)")
 	f.StringVar(&cfg.workDir, "work-dir", "", "directory for build intermediates (default: a temp dir); they are removed either way")
 	f.BoolVar(&cfg.dryRun, "dry-run", false, "build the image and write escrow, but do not call CDS")
 	return cmd
@@ -75,13 +89,26 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	verity, err := Build(cmd.Context(), BuildConfig{
-		Source: cfg.source, Out: cfg.out, Key: key, WorkDir: cfg.workDir, Run: cfg.run,
-	})
-	if err != nil {
-		return err
+	var blob Blob
+	var size uint64
+	var verity Verity
+	if cfg.mutable {
+		size, err = BuildMutable(cmd.Context(), MutableBuildConfig{
+			Source: cfg.source, Out: cfg.out, Key: key, Size: cfg.sizeBytes, WorkDir: cfg.workDir, Run: cfg.run,
+		})
+		if err != nil {
+			return err
+		}
+		blob, err = NewMutableBlob(key)
+	} else {
+		verity, err = Build(cmd.Context(), BuildConfig{
+			Source: cfg.source, Out: cfg.out, Key: key, WorkDir: cfg.workDir, Run: cfg.run,
+		})
+		if err != nil {
+			return err
+		}
+		blob, err = NewBlob(key, verity)
 	}
-	blob, err := NewBlob(key, verity)
 	if err != nil {
 		return err
 	}
@@ -95,8 +122,8 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 
 	out := cmd.OutOrStdout()
 	if cfg.dryRun {
-		fmt.Fprintf(out, "built %s (%d data blocks); key escrowed to %s; CDS not called\n",
-			cfg.out, verity.DataBlocks, cfg.escrowOut)
+		fmt.Fprintf(out, "built %s (%s); key escrowed to %s; CDS not called\n",
+			cfg.out, buildSummary(cfg.mutable, size, verity), cfg.escrowOut)
 		return nil
 	}
 
@@ -112,7 +139,7 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 		return err
 	}
 
-	printResult(out, cfg, path, verity)
+	printResult(out, cfg, path, size, verity)
 	return nil
 }
 
@@ -120,12 +147,28 @@ func validateCreate(cfg *createConfig) (string, error) {
 	switch {
 	case cfg.name == "":
 		return "", fmt.Errorf("--name is required")
-	case cfg.source == "":
-		return "", fmt.Errorf("--source is required")
 	case cfg.out == "":
 		return "", fmt.Errorf("--out is required")
 	case cfg.escrowOut == "":
 		return "", fmt.Errorf("--escrow-out is required: it is the only copy of the key outside CDS")
+	}
+	if !cfg.mutable {
+		if cfg.source == "" {
+			return "", fmt.Errorf("--source is required for an immutable volume")
+		}
+		if cfg.size != "" {
+			return "", fmt.Errorf("--size is only valid with --mutable: an immutable image sizes itself to its contents")
+		}
+	}
+	if cfg.size != "" {
+		sizeBytes, err := parseSize(cfg.size)
+		if err != nil {
+			return "", err
+		}
+		cfg.sizeBytes = sizeBytes
+	}
+	if cfg.mutable && cfg.source == "" && cfg.size == "" {
+		return "", fmt.Errorf("--size is required for a mutable volume without --source")
 	}
 	if err := ValidVolumeName(cfg.name); err != nil {
 		return "", fmt.Errorf("--name: %w", err)
@@ -135,6 +178,19 @@ func validateCreate(cfg *createConfig) (string, error) {
 		return "", fmt.Errorf("--path: %w", err)
 	}
 	return path, nil
+}
+
+// parseSize reads --size as a byte count or a quantity like 50Gi.
+func parseSize(s string) (uint64, error) {
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		return 0, fmt.Errorf("--size: %v (want a byte count or a quantity like 50Gi)", err)
+	}
+	v := q.Value()
+	if v <= 0 {
+		return 0, fmt.Errorf("--size must be positive")
+	}
+	return uint64(v), nil
 }
 
 // writeEscrow saves the blob, O_EXCL and 0600. It is the whole key: an operator
@@ -155,8 +211,20 @@ func writeEscrow(dest string, blob Blob) error {
 	return nil
 }
 
-func printResult(w io.Writer, cfg createConfig, path string, v Verity) {
-	fmt.Fprintf(w, "+ %s (%d data blocks)\n", cfg.out, v.DataBlocks)
+// buildSummary is the one-line description of what a build produced: a size
+// for mutable, a block count for immutable.
+func buildSummary(mutable bool, size uint64, v Verity) string {
+	if mutable {
+		return fmt.Sprintf("%s, mutable, read-write", resource.NewQuantity(int64(size), resource.BinarySI))
+	}
+	return fmt.Sprintf("%d data blocks", v.DataBlocks)
+}
+
+func printResult(w io.Writer, cfg createConfig, path string, size uint64, v Verity) {
+	fmt.Fprintf(w, "+ %s (%s)\n", cfg.out, buildSummary(cfg.mutable, size, v))
+	if cfg.mutable {
+		fmt.Fprintf(w, "  mutable volumes have no integrity protection: the host can flip bits or roll back undetected\n")
+	}
 	fmt.Fprintf(w, "+ key stored at %s\n", path)
 	fmt.Fprintf(w, "+ key escrowed to %s — keep it; a CDS restart needs it\n\n", cfg.escrowOut)
 

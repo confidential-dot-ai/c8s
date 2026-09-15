@@ -8,28 +8,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/controller"
-	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
-
-// validateOperatorPlatform fails at start, not at first injection: an unknown
-// platform would otherwise silently select the SNP classes. Only kata
-// enforcement consumes the platform, so it is required exactly then (the
-// chart passes both flags together under kata.enabled).
-func validateOperatorPlatform(platform string, kataEnforce bool) error {
-	if platform == "" && !kataEnforce {
-		return nil // nothing consumes the platform without kata enforcement
-	}
-	if platform == "" {
-		return fmt.Errorf("--hardware-platform is required with --kata-enforce: %s or %s",
-			webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX)
-	}
-	if platform != webhook.HardwarePlatformSNP && platform != webhook.HardwarePlatformTDX {
-		return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
-			webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, platform)
-	}
-	return nil
-}
 
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
@@ -42,35 +24,33 @@ in via annotation.
 Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet, not
 by this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := validateOperatorPlatform(operatorHardwarePlatform, kataEnforce); err != nil {
+		policyJSON, err := operatorMeasurementsPolicy(cdsMeasurementsConfig, cdsMeasurements, cdsRTMRs)
+		if err != nil {
 			return err
 		}
 		return controller.Run(cmd.Context(), controller.Options{
-			MetricsAddr:             metricsAddr,
-			HealthAddr:              healthAddr,
-			LeaderElection:          leaderElection,
-			LeaderElectionID:        "c8s-operator.confidential.ai",
-			LeaderElectionNS:        leaderElectionNS,
-			DisableStatusMirror:     !statusMirrorEnabled,
-			GetCertImage:            getCertImage,
-			CDSURL:                  cdsURL,
-			AttestationApiURL:       attestationApiURL,
-			CDSMeasurements:         cdsMeasurements,
-			ExcludeNamespaces:       excludeNamespaces,
-			WebhookConfigName:       webhookConfigName,
-			WebhookServiceName:      webhookServiceName,
-			WebhookServiceNamespace: webhookServiceNamespace,
-			CertFSGroup:             certFSGroup,
-			CertKeyMode:             certKeyMode,
-			CertRenewInterval:       certRenewInterval,
-			GetCertRunAsUser:        getCertRunAsUser,
-			GetCertRunAsGroup:       getCertRunAsGroup,
-			GetCertRunAsNonRoot:     getCertRunAsNonRoot,
-			KataEnforce:             kataEnforce,
-			KataGuestReadyGate:      kataGuestReadyGate,
-			HardwarePlatform:        operatorHardwarePlatform,
-			WorkloadClaimsHostDir:   workloadClaimsHostDir,
-			WorkloadClaimsGuest:     workloadClaimsGuest,
+			MetricsAddr:               metricsAddr,
+			HealthAddr:                healthAddr,
+			LeaderElection:            leaderElection,
+			LeaderElectionID:          "c8s-operator.confidential.ai",
+			LeaderElectionNS:          leaderElectionNS,
+			DisableStatusMirror:       !statusMirrorEnabled,
+			GetCertImage:              getCertImage,
+			CDSURL:                    cdsURL,
+			AttestationApiURL:         attestationApiURL,
+			CDSMeasurements:           cdsMeasurements,
+			CDSRTMRs:                  cdsRTMRs,
+			CDSMeasurementsConfigJSON: policyJSON,
+			ExcludeNamespaces:         excludeNamespaces,
+			WebhookConfigName:         webhookConfigName,
+			WebhookServiceName:        webhookServiceName,
+			WebhookServiceNamespace:   webhookServiceNamespace,
+			CertFSGroup:               certFSGroup,
+			CertRenewInterval:         certRenewInterval,
+			GetCertRunAsUser:          getCertRunAsUser,
+			GetCertRunAsGroup:         getCertRunAsGroup,
+			GetCertRunAsNonRoot:       getCertRunAsNonRoot,
+			WorkloadClaimsHostDir:     workloadClaimsHostDir,
 		})
 	},
 }
@@ -85,22 +65,19 @@ var (
 	cdsURL                  string
 	attestationApiURL       string
 	cdsMeasurements         []string
+	cdsMeasurementsConfig   string
+	cdsRTMRs                []string
 	webhookConfigName       string
 	webhookServiceName      string
 	webhookServiceNamespace string
 	excludeNamespaces       []string
 	certFSGroup             int64
-	certKeyMode             string
 	certRenewInterval       time.Duration
 	getCertRunAsUser        int64
 	getCertRunAsGroup       int64
 	getCertRunAsNonRoot     bool
 
-	kataEnforce              bool
-	kataGuestReadyGate       bool
-	operatorHardwarePlatform string
-	workloadClaimsHostDir    string
-	workloadClaimsGuest      bool
+	workloadClaimsHostDir string
 )
 
 func init() {
@@ -113,20 +90,37 @@ func init() {
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
+	operatorCmd.Flags().StringVar(&cdsMeasurementsConfig, "measurements-config", "", "path to the CDS identity policy propagated whole to injected sidecars, including image, RTMR and operator key pins. Cannot be combined with --cds-measurements or --cds-rtmrs")
+	operatorCmd.Flags().StringSliceVar(&cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> the injected sidecars additionally hold CDS to (repeatable; ignored for SNP evidence, empty pins no registers)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")
 	operatorCmd.Flags().StringVar(&webhookServiceName, "webhook-service-name", "", "webhook Service name (defaults to c8s)")
 	operatorCmd.Flags().StringVar(&webhookServiceNamespace, "webhook-service-namespace", "", "webhook Service namespace (defaults to --leader-election-namespace)")
 	operatorCmd.Flags().Int64Var(&certFSGroup, "cert-fs-group", 65532, "fsGroup applied to injected pods when unset (-1 disables mutation)")
-	operatorCmd.Flags().StringVar(&certKeyMode, "cert-key-mode", "0640", "octal mode for injected tls.key")
 	operatorCmd.Flags().DurationVar(&certRenewInterval, "get-cert-renew-interval", 2*time.Hour, "renewal interval for injected workload certificates")
 	operatorCmd.Flags().Int64Var(&getCertRunAsUser, "get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	operatorCmd.Flags().Int64Var(&getCertRunAsGroup, "get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	operatorCmd.Flags().BoolVar(&getCertRunAsNonRoot, "get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
-	operatorCmd.Flags().BoolVar(&kataGuestReadyGate, "kata-guest-ready-gate", false, "maintain the "+webhook.GuestReadyNodeLabel+" node label from kata-image-puller readiness and require it on confidential pods (set by the chart when the puller is deployed)")
-	operatorCmd.Flags().BoolVar(&kataEnforce, "kata-enforce", false, "inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses (set by the chart under kata.enabled)")
-	operatorCmd.Flags().StringVar(&operatorHardwarePlatform, "hardware-platform", "", "CPU TEE the injected confidential kata classes target: sev-snp or tdx (required with --kata-enforce; set by the chart to match the RuntimeClasses it renders)")
-	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy inventory socket (node-CVM); when set, the webhook mounts it into c8s-cert and injects --workload-claims so get-cert redeems a sandbox token (docs/ratls.md)")
-	operatorCmd.Flags().BoolVar(&workloadClaimsGuest, "workload-claims-guest", false, "kata shape: the inventory is policy-monitor inside the guest, reached on guest loopback, so the webhook injects --workload-claims with no socket mount (docs/ratls.md)")
+	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy inventory socket (node-CVM); when set, NRI mounts it into c8s-cert and the webhook injects --workload-claims so get-cert redeems a sandbox token (docs/ratls.md)")
 	rootCmd.AddCommand(operatorCmd)
+}
+
+// operatorMeasurementsPolicy preserves each image's runtime and operator-key
+// bindings instead of flattening independently authorized leader identities.
+func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if len(digests) != 0 || len(rtmrs) != 0 {
+		return "", fmt.Errorf("--measurements-config cannot be combined with --cds-measurements or --cds-rtmrs")
+	}
+	pins, err := cmdsutil.LoadMeasurementsSource(path, "")
+	if err != nil {
+		return "", err
+	}
+	encoded, err := measurements.Format(pins)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }

@@ -48,7 +48,7 @@ func startInventory(t *testing.T) string {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
+	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
 	t.Cleanup(func() { cancel(); l.Close() })
 
 	return "unix://" + sock
@@ -137,6 +137,23 @@ func testBlob(t *testing.T) volume.Blob {
 func testBlobJSON(t *testing.T) []byte {
 	t.Helper()
 	raw, err := json.Marshal(testBlob(t))
+	if err != nil {
+		t.Fatalf("marshal blob: %v", err)
+	}
+	return raw
+}
+
+func testMutableBlobJSON(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, volume.KeyBytes)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	blob, err := volume.NewMutableBlob(key)
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	raw, err := json.Marshal(blob)
 	if err != nil {
 		t.Fatalf("marshal blob: %v", err)
 	}

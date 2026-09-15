@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +21,21 @@ type fakeOps struct {
 
 	cryptOpen, verityOpen, mounted map[string]bool
 
+	// cryptRO records the read-only flag each crypt mapping was opened with,
+	// and mounts the (fsType, readOnly) of each Mount call.
+	cryptRO map[string]bool
+	mounts  []mountCall
+
 	// honorCtx makes every op fail once its context is done.
 	honorCtx bool
 	// afterCryptOpen fires once the first privileged step has landed.
 	afterCryptOpen func()
+}
+
+// mountCall records what one Mount was asked to do.
+type mountCall struct {
+	source, fsType string
+	readOnly       bool
 }
 
 func newOps() *fakeOps {
@@ -31,6 +43,7 @@ func newOps() *fakeOps {
 		cryptOpen:  map[string]bool{},
 		verityOpen: map[string]bool{},
 		mounted:    map[string]bool{},
+		cryptRO:    map[string]bool{},
 	}
 }
 
@@ -54,7 +67,7 @@ func (f *fakeOps) record(op string) error {
 	return nil
 }
 
-func (f *fakeOps) CryptOpen(ctx context.Context, _, mapper string, key []byte) error {
+func (f *fakeOps) CryptOpen(ctx context.Context, _, mapper string, key []byte, readOnly bool) error {
 	if len(key) != volume.KeyBytes {
 		return errors.New("wrong key length")
 	}
@@ -67,6 +80,7 @@ func (f *fakeOps) CryptOpen(ctx context.Context, _, mapper string, key []byte) e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cryptOpen[mapper] = true
+	f.cryptRO[mapper] = readOnly
 	if f.afterCryptOpen != nil {
 		f.afterCryptOpen()
 	}
@@ -112,11 +126,43 @@ func (f *fakeOps) VerityClose(ctx context.Context, mapper string) error {
 	return nil
 }
 
-func (f *fakeOps) MountRO(ctx context.Context, _ string, target *os.File) error {
+// ListMappings answers from what is open, the way /dev/mapper does: a mapping
+// is listed until something closes it.
+func (f *fakeOps) ListMappings(ctx context.Context) ([]string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if err := f.record("ListMappings"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for name := range f.cryptOpen {
+		out = append(out, name)
+	}
+	for name := range f.verityOpen {
+		out = append(out, name)
+	}
+	// /dev/mapper carries every consumer's targets, not only ours.
+	out = append(out, "control", "rootvg-swap")
+	sort.Strings(out)
+	return out, nil
+}
+
+func (f *fakeOps) MountRO(ctx context.Context, source string, target *os.File, fsType string) error {
+	return f.mount(ctx, "MountRO", source, target, fsType, true)
+}
+
+func (f *fakeOps) MountRW(ctx context.Context, source string, target *os.File, fsType string) error {
+	return f.mount(ctx, "MountRW", source, target, fsType, false)
+}
+
+func (f *fakeOps) mount(ctx context.Context, op, source string, target *os.File, fsType string, readOnly bool) error {
 	if err := f.ctxErr(ctx); err != nil {
 		return err
 	}
-	if err := f.record("MountRO"); err != nil {
+	if err := f.record(op); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -124,6 +170,7 @@ func (f *fakeOps) MountRO(ctx context.Context, _ string, target *os.File) error 
 	// The kernel resolves /proc/self/fd/N to the directory it names, so the
 	// mount lands at the real path — which is what teardown unmounts.
 	f.mounted[target.Name()] = true
+	f.mounts = append(f.mounts, mountCall{source: source, fsType: fsType, readOnly: readOnly})
 	return nil
 }
 
@@ -206,6 +253,16 @@ func TestOpenRunsTheStepsInOrder(t *testing.T) {
 	if o.Len() != 1 {
 		t.Fatalf("opener holds %d mounts, want 1", o.Len())
 	}
+	m := ops.mounts[0]
+	if m.fsType != fsTypeErofs || !m.readOnly {
+		t.Errorf("mount = %+v, want read-only erofs", m)
+	}
+	if !strings.HasSuffix(m.source, "c8s-verity-"+testPodUID+"-weights") {
+		t.Errorf("mount source = %q, want the verity device", m.source)
+	}
+	if !ops.cryptRO["c8s-crypt-"+testPodUID+"-weights"] {
+		t.Error("immutable volume's crypt mapping was not opened read-only")
+	}
 }
 
 // Every step that completed must be undone when a later one fails, or the
@@ -268,7 +325,7 @@ func TestOpenRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
 
 	other := testRequest(t)
 	wrong := make([]byte, volume.KeyBytes)
-	blob, err := volume.NewBlob(wrong, other.Blob.Verity)
+	blob, err := volume.NewBlob(wrong, *other.Blob.Verity)
 	if err != nil {
 		t.Fatalf("blob: %v", err)
 	}
@@ -279,6 +336,190 @@ func TestOpenRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
 	}
 	if got := ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("a refused caller reached the privileged steps: %q", got)
+	}
+}
+
+func testMutableRequest(t *testing.T) Request {
+	t.Helper()
+	blob, err := volume.NewMutableBlob(volumeKey())
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	return Request{Pod: testPod(testPodUID), Name: "weights", Device: "/dev/disk/by-id/virtio-c8s-vol-weights", Blob: blob}
+}
+
+// A mutable volume mounts the crypt device itself, writable ext4 — there is no
+// verity layer to open.
+func TestOpenMutableMountsTheCryptDeviceWritable(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	if err := o.Open(t.Context(), testMutableRequest(t)); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if got := ops.sequence(); got != "CryptOpen,MountRW" {
+		t.Fatalf("sequence = %q, want no verity step", got)
+	}
+	m := ops.mounts[0]
+	if m.fsType != fsTypeExt4 || m.readOnly {
+		t.Errorf("mount = %+v, want writable ext4", m)
+	}
+	if !strings.HasSuffix(m.source, "c8s-crypt-"+testPodUID+"-weights") {
+		t.Errorf("mount source = %q, want the crypt device", m.source)
+	}
+	if ops.cryptRO["c8s-crypt-"+testPodUID+"-weights"] {
+		t.Error("mutable volume's crypt mapping was opened read-only")
+	}
+}
+
+// Close on a mutable mount must not touch a verity layer that never existed.
+func TestCloseMutableSkipsVerity(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	req := testMutableRequest(t)
+	if err := o.Open(t.Context(), req); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	o.Close(t.Context(), req.Pod.UID, req.Name)
+	if got := ops.sequence(); !strings.HasSuffix(got, "Unmount,CryptClose") {
+		t.Fatalf("teardown order = %q", got)
+	}
+	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Fatalf("leaked crypt=%d verity=%d mounts=%d", c, v, m)
+	}
+}
+
+// The mode is part of the commitment: the same key presented in the other mode
+// is a different volume, not a repeat request.
+func TestOpenRefusesAModeFlipOnAnOpenVolume(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	if err := o.Open(t.Context(), testRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := o.Open(t.Context(), testMutableRequest(t)); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("immutable then mutable: got %v, want ErrNotAuthorized", err)
+	}
+
+	ops2 := newOps()
+	o2 := testOpener(t, ops2)
+	if err := o2.Open(t.Context(), testMutableRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := o2.Open(t.Context(), testRequest(t)); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("mutable then immutable: got %v, want ErrNotAuthorized", err)
+	}
+}
+
+// conflictTree builds the kubelet volume dirs for two pods, each able to hold
+// weights, and the first able to hold datasets too.
+func conflictTree(t *testing.T) (root, otherUID string) {
+	t.Helper()
+	root, base := kubeletTree(t)
+	for _, n := range []string{"weights", "datasets"} {
+		if err := os.Mkdir(filepath.Join(base, KubeVolumeName(n)), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", n, err)
+		}
+	}
+	otherUID = "99999999-8888-7777-6666-555555555555"
+	otherBase := filepath.Join(root, "pods", otherUID, emptyDirSubdir)
+	if err := os.MkdirAll(filepath.Join(otherBase, KubeVolumeName("weights")), 0o755); err != nil {
+		t.Fatalf("mkdir other pod: %v", err)
+	}
+	return root, otherUID
+}
+
+// Two writable mounts of one device corrupt the filesystem, and a writable
+// mount under read-only readers corrupts what they read: if either side is
+// mutable, one device backs one mount. This is the double-mount a rolling
+// update of a single-device workload would otherwise hit.
+func TestMutableOpenIsExclusivePerDevice(t *testing.T) {
+	root, otherUID := conflictTree(t)
+	ops := newOps()
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
+
+	if err := o.Open(t.Context(), testMutableRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+
+	// Same pod, different name, same device.
+	samePod := testMutableRequest(t)
+	samePod.Name = "datasets"
+	if err := o.Open(t.Context(), samePod); !errors.Is(err, ErrVolumeInUse) {
+		t.Errorf("second mutable open, same pod: got %v, want ErrVolumeInUse", err)
+	}
+
+	// Another pod, same device.
+	otherPod := testMutableRequest(t)
+	otherPod.Pod = testPod(otherUID)
+	if err := o.Open(t.Context(), otherPod); !errors.Is(err, ErrVolumeInUse) {
+		t.Errorf("second mutable open, other pod: got %v, want ErrVolumeInUse", err)
+	}
+
+	// A read-only open of the same device is refused too.
+	ro := testRequest(t)
+	ro.Pod = testPod(otherUID)
+	if err := o.Open(t.Context(), ro); !errors.Is(err, ErrVolumeInUse) {
+		t.Errorf("immutable open over a mutable one: got %v, want ErrVolumeInUse", err)
+	}
+	if o.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want only the first", o.Len())
+	}
+}
+
+// The mirror image: a device held mutable refuses every later open, whichever
+// mode the later one asks for.
+func TestImmutableOpenRefusesAMutableHolderOfTheSameDevice(t *testing.T) {
+	root, otherUID := conflictTree(t)
+	ops := newOps()
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
+
+	if err := o.Open(t.Context(), testRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	mutable := testMutableRequest(t)
+	mutable.Pod = testPod(otherUID)
+	if err := o.Open(t.Context(), mutable); !errors.Is(err, ErrVolumeInUse) {
+		t.Fatalf("got %v, want ErrVolumeInUse", err)
+	}
+}
+
+// Read-only mounts of one device share it as they always have.
+func TestImmutableOpensShareADevice(t *testing.T) {
+	root, otherUID := conflictTree(t)
+	ops := newOps()
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
+
+	if err := o.Open(t.Context(), testRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	other := testRequest(t)
+	other.Pod = testPod(otherUID)
+	if err := o.Open(t.Context(), other); err != nil {
+		t.Fatalf("second immutable open: %v", err)
+	}
+	if o.Len() != 2 {
+		t.Fatalf("opener holds %d mounts, want 2", o.Len())
+	}
+}
+
+// Exclusivity is per device, not per daemon: two mutable volumes on distinct
+// devices open side by side.
+func TestMutableOpensOnDistinctDevicesCoexist(t *testing.T) {
+	root, _ := conflictTree(t)
+	ops := newOps()
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
+
+	if err := o.Open(t.Context(), testMutableRequest(t)); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	second := testMutableRequest(t)
+	second.Name = "datasets"
+	second.Device = "/dev/disk/by-id/virtio-c8s-vol-datasets"
+	if err := o.Open(t.Context(), second); err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	if o.Len() != 2 {
+		t.Fatalf("opener holds %d mounts, want 2", o.Len())
 	}
 }
 
@@ -293,7 +534,7 @@ func TestOpenRefusesADifferentRootHashForAnOpenVolume(t *testing.T) {
 	}
 
 	other := testRequest(t)
-	v := other.Blob.Verity
+	v := *other.Blob.Verity
 	v.RootHash = strings.Repeat("cd", 32)
 	blob, err := volume.NewBlob(volumeKey(), v)
 	if err != nil {
@@ -446,15 +687,31 @@ func TestMapperNamesAreScopedPerPod(t *testing.T) {
 	}
 }
 
-func TestCommitmentCoversKeyAndRootHash(t *testing.T) {
+func TestCommitmentCoversKeyModeAndRootHash(t *testing.T) {
 	key := volumeKey()
-	base := commitmentFor(key, "aa")
-	if commitmentFor(key, "bb") == base {
+	withHash := func(h string) volume.Blob {
+		b, err := volume.NewBlob(key, volume.Verity{
+			RootHash: h, Salt: "cd", DataBlocks: 4, HashOffset: 4 * volume.VerityBlockSize,
+		})
+		if err != nil {
+			t.Fatalf("blob: %v", err)
+		}
+		return b
+	}
+	base := commitmentFor(key, withHash(strings.Repeat("aa", 32)))
+	if commitmentFor(key, withHash(strings.Repeat("bb", 32))) == base {
 		t.Error("commitment ignores the root hash")
 	}
 	other := make([]byte, volume.KeyBytes)
-	if commitmentFor(other, "aa") == base {
+	if commitmentFor(other, withHash(strings.Repeat("aa", 32))) == base {
 		t.Error("commitment ignores the key")
+	}
+	mutable, err := volume.NewMutableBlob(key)
+	if err != nil {
+		t.Fatalf("mutable blob: %v", err)
+	}
+	if commitmentFor(key, mutable) == base {
+		t.Error("commitment ignores the mode")
 	}
 }
 
@@ -489,5 +746,125 @@ func TestOpenUnwindsAfterTheCallerContextIsCancelled(t *testing.T) {
 	}
 	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
 		t.Errorf("leaked crypt=%d verity=%d mounts=%d after a cancelled open", c, v, m)
+	}
+}
+
+// A volume stack outlives the volumed that opened it: the mappings are kernel
+// state, and nothing else on a node reaps them. Until they go they hold the
+// backing disk open, so the next install cannot reopen the volume.
+func TestSweepStaleClosesMappingsLeftByAnEarlierVolumed(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["c8s-crypt-podA-weights"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+
+	o := testOpener(t, ops)
+	closed, stuck := o.SweepStale(context.Background())
+	if closed != 2 {
+		t.Errorf("closed %d mappings, want the crypt and verity pair", closed)
+	}
+	if len(stuck) != 0 {
+		t.Errorf("reported %v as still in use", stuck)
+	}
+	if len(ops.cryptOpen) != 0 || len(ops.verityOpen) != 0 {
+		t.Errorf("mappings survived the sweep: crypt=%v verity=%v", ops.cryptOpen, ops.verityOpen)
+	}
+	// verity is stacked on crypt and holds it open, so closing crypt first
+	// would fail against a real device-mapper.
+	var verityAt, cryptAt = -1, -1
+	for i, c := range ops.calls {
+		switch c {
+		case "VerityClose":
+			verityAt = i
+		case "CryptClose":
+			cryptAt = i
+		}
+	}
+	if verityAt < 0 || cryptAt < 0 || verityAt > cryptAt {
+		t.Errorf("verity must close before the crypt device under it; calls: %v", ops.calls)
+	}
+}
+
+// The sweep runs before this process has any state, so the kernel is what
+// decides: a mapping something still has mounted refuses to close, and a
+// workload's volume is not pulled out from under it.
+func TestSweepStaleLeavesAMappingStillInUse(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["c8s-crypt-podA-weights"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+	ops.failOn = "VerityClose"
+
+	o := testOpener(t, ops)
+	closed, stuck := o.SweepStale(context.Background())
+	if closed != 1 {
+		t.Errorf("closed %d, want only the crypt mapping", closed)
+	}
+	if len(stuck) != 1 || stuck[0] != "c8s-verity-podA-weights" {
+		t.Errorf("stuck = %v, want the verity mapping that refused", stuck)
+	}
+	if !ops.verityOpen["c8s-verity-podA-weights"] {
+		t.Error("a mapping that refused to close was reported as gone")
+	}
+}
+
+// Sweeping by name prefix keeps it to volumes this platform opened; the node's
+// other device-mapper targets are not ours to close.
+func TestSweepStaleTouchesOnlyC8sMappings(t *testing.T) {
+	ops := newOps()
+	ops.cryptOpen["luks-tenant-disk"] = true
+	ops.verityOpen["c8s-verity-podA-weights"] = true
+
+	o := testOpener(t, ops)
+	closed, _ := o.SweepStale(context.Background())
+	if closed != 1 {
+		t.Errorf("closed %d, want only the c8s mapping", closed)
+	}
+	if !ops.cryptOpen["luks-tenant-disk"] {
+		t.Error("closed a device-mapper target this platform did not open")
+	}
+}
+
+// A caller cancelled before its mapping lands has already posted its close, so
+// the mapping must not land — it would outlive the pod with only the reaper
+// behind it.
+func TestOpenDoesNotLandForACancelledCaller(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	ctx, cancel := context.WithCancel(context.Background())
+	ops.afterCryptOpen = cancel
+
+	if err := o.Open(ctx, testRequest(t)); err == nil {
+		t.Fatal("a cancelled open landed")
+	}
+	if o.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", o.Len())
+	}
+	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Fatalf("cancelled open leaked crypt=%d verity=%d mounts=%d", c, v, m)
+	}
+}
+
+// A mapping that refuses to close keeps its record, so the device stays marked
+// in use and the next close retries the teardown.
+func TestCloseKeepsTheRecordOfAStuckMapping(t *testing.T) {
+	ops := newOps()
+	o := testOpener(t, ops)
+	if err := o.Open(context.Background(), testRequest(t)); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	ops.failOn = "CryptClose"
+	if n := o.ClosePod(context.Background(), testPodUID); n != 0 {
+		t.Fatalf("a stuck close reported %d closed, want 0", n)
+	}
+	if o.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want the stuck 1", o.Len())
+	}
+
+	ops.failOn = ""
+	if n := o.ClosePod(context.Background(), testPodUID); n != 1 {
+		t.Fatalf("retry closed %d, want 1", n)
+	}
+	if o.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", o.Len())
 	}
 }

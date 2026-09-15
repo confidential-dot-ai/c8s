@@ -7,9 +7,9 @@
 package allowlistclient
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -18,8 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // requestTimeout bounds one CDS call; the peer decides whether it ever answers.
@@ -44,9 +45,7 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 // Authorizer produces the HTTP Authorization header value for a mutation,
 // binding it to the exact method, URL path, and body the client will send.
 // Implemented by operatorauth.Signer.
-type Authorizer interface {
-	Authorization(method, path string, body []byte) (string, error)
-}
+type Authorizer = operatorauth.Authorizer
 
 // List returns the current allowlist and its version (the ETag counter).
 func (c Client) List(ctx context.Context) (*allowlist.Allowlist, string, error) {
@@ -106,26 +105,8 @@ func (c Client) fetch(ctx context.Context, ifNoneMatch string) (*allowlist.Allow
 	return al, resp.Header.Get("ETag"), false, nil
 }
 
-// AddDigest adds a floor digest.
-func (c Client) AddDigest(ctx context.Context, digest types.Digest, image string, auth Authorizer) error {
-	data, err := json.Marshal(types.DigestAddRequest{Digest: digest, Image: image})
-	if err != nil {
-		return err
-	}
-	return c.mutate(ctx, http.MethodPost, "/allowlist/digests", data, auth)
-}
-
-// DeleteDigests removes floor digests. Returns a 404 StatusError if any is absent.
-func (c Client) DeleteDigests(ctx context.Context, digests []types.Digest, auth Authorizer) error {
-	data, err := json.Marshal(types.DigestDeleteRequest{Digests: digests})
-	if err != nil {
-		return err
-	}
-	return c.mutate(ctx, http.MethodDelete, "/allowlist/digests", data, auth)
-}
-
-// ReplaceAll atomically replaces the entire allowlist (floor and workloads).
-// CDS assigns the new version.
+// ReplaceAll atomically replaces the entire allowlist. CDS assigns the new
+// version.
 func (c Client) ReplaceAll(ctx context.Context, al *allowlist.Allowlist, auth Authorizer) error {
 	data, err := al.Canonical()
 	if err != nil {
@@ -155,22 +136,13 @@ func (c Client) mutate(ctx context.Context, method, path string, body []byte, au
 	if auth == nil {
 		return fmt.Errorf("allowlistclient: nil Authorizer")
 	}
-	var reader io.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := operatorauth.NewRequest(ctx, method, c.baseURL+path, body, auth)
 	if err != nil {
 		return err
-	}
-	authz, err := auth.Authorization(method, req.URL.Path, body)
-	if err != nil {
-		return fmt.Errorf("authorize request: %w", err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", authz)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -208,12 +180,12 @@ func isJSONContentType(ct string) bool {
 }
 
 func readCapped(r io.Reader, maxBytes int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	body, err := readutil.ReadAll(r, maxBytes)
+	if errors.Is(err, readutil.ErrTooLarge) {
+		return nil, errAllowlistResponseTooLarge
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	if int64(len(body)) > maxBytes {
-		return nil, errAllowlistResponseTooLarge
 	}
 	return body, nil
 }

@@ -20,7 +20,6 @@ import (
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // newOperatorKeypair writes an operator EC private key to dir and returns its
@@ -54,7 +53,6 @@ func newFakeCDS(pinned []*ecdsa.PublicKey) *fakeCDS {
 	return &fakeCDS{
 		al: pkgallowlist.Allowlist{
 			Schema:    pkgallowlist.Schema,
-			Digests:   map[string]string{},
 			Workloads: map[string]pkgallowlist.Workload{},
 		},
 		version:  1,
@@ -66,8 +64,6 @@ func (f *fakeCDS) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /allowlist", f.handleList)
 	mux.HandleFunc("PUT /allowlist", f.handleReplace)
-	mux.HandleFunc("POST /allowlist/digests", f.handleAddDigest)
-	mux.HandleFunc("DELETE /allowlist/digests", f.handleDeleteDigests)
 	mux.HandleFunc("PUT /allowlist/workloads/{name}", f.handlePutWorkload)
 	mux.HandleFunc("DELETE /allowlist/workloads/{name}", f.handleDeleteWorkload)
 	return mux
@@ -108,56 +104,11 @@ func (f *fakeCDS) handleReplace(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.al = *parsed
-	if f.al.Digests == nil {
-		f.al.Digests = map[string]string{}
-	}
 	if f.al.Workloads == nil {
 		f.al.Workloads = map[string]pkgallowlist.Workload{}
 	}
 	f.version++
 	f.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (f *fakeCDS) handleAddDigest(w http.ResponseWriter, r *http.Request) {
-	body, ok := f.authorize(w, r)
-	if !ok {
-		return
-	}
-	var req types.DigestAddRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	f.mu.Lock()
-	f.al.Digests[req.Digest.String()] = req.Image
-	f.version++
-	f.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (f *fakeCDS) handleDeleteDigests(w http.ResponseWriter, r *http.Request) {
-	body, ok := f.authorize(w, r)
-	if !ok {
-		return
-	}
-	var req types.DigestDeleteRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, d := range req.Digests {
-		if _, ok := f.al.Digests[d.String()]; !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-	}
-	for _, d := range req.Digests {
-		delete(f.al.Digests, d.String())
-	}
-	f.version++
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -194,14 +145,10 @@ func (f *fakeCDS) handleDeleteWorkload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (f *fakeCDS) floor() map[string]string {
+func (f *fakeCDS) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := map[string]string{}
-	for k, v := range f.al.Digests {
-		out[k] = v
-	}
-	return out
+	return len(f.al.Workloads)
 }
 
 func (f *fakeCDS) workload(name string) (pkgallowlist.Workload, bool) {
@@ -209,12 +156,6 @@ func (f *fakeCDS) workload(name string) (pkgallowlist.Workload, bool) {
 	defer f.mu.Unlock()
 	wl, ok := f.al.Workloads[name]
 	return wl, ok
-}
-
-func (f *fakeCDS) seedFloor(digest, image string) {
-	f.mu.Lock()
-	f.al.Digests[digest] = image
-	f.mu.Unlock()
 }
 
 func (f *fakeCDS) seedWorkload(name string, w pkgallowlist.Workload) {
@@ -246,8 +187,8 @@ func TestUploadEndToEndWithPinnedKey(t *testing.T) {
 	if _, _, err := runCmd("upload", file, "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
 		t.Fatalf("upload failed: %v", err)
 	}
-	if got := len(cds.floor()); got != len(images) {
-		t.Fatalf("store has %d floor entries after upload, want %d", got, len(images))
+	if got := cds.count(); got != len(images) {
+		t.Fatalf("store has %d entries after upload, want %d", got, len(images))
 	}
 }
 
@@ -263,7 +204,7 @@ func TestUploadRejectedWhenKeyNotPinned(t *testing.T) {
 	if _, _, err := runCmd("upload", file, "--url", srv.URL, "--insecure", "--operator-key", unpinnedKeyPath); err == nil {
 		t.Fatal("expected upload with an unpinned operator key to be rejected")
 	}
-	if got := len(cds.floor()); got != 0 {
+	if got := cds.count(); got != 0 {
 		t.Fatalf("store mutated despite rejected auth: %d entries", got)
 	}
 }
@@ -292,7 +233,7 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := runCmd("workload", "apply", file, "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
+	if _, _, err := runCmd("apply", file, "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
 		t.Fatalf("workload apply failed: %v", err)
 	}
 
@@ -307,7 +248,7 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 		t.Fatalf("command policy = %q, want exact", wl.Containers[0].Command.Policy)
 	}
 
-	out, _, err := runCmd("workload", "get", "api", "--url", srv.URL, "--insecure", "-o", "json")
+	out, _, err := runCmd("get", "api", "--url", srv.URL, "--insecure", "-o", "json")
 	if err != nil {
 		t.Fatalf("workload get failed: %v", err)
 	}
@@ -327,48 +268,13 @@ func TestWorkloadDeleteRoundTrip(t *testing.T) {
 		Containers: []pkgallowlist.Container{{Digest: mustDigest(t, digA)}},
 	})
 
-	if _, _, err := runCmd("workload", "delete", "api", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
+	if _, _, err := runCmd("delete", "api", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	if _, ok := cds.workload("api"); ok {
 		t.Fatal("workload 'api' still present after delete")
 	}
-	if _, _, err := runCmd("workload", "delete", "missing", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err == nil {
+	if _, _, err := runCmd("delete", "missing", "--url", srv.URL, "--insecure", "--operator-key", keyPath); err == nil {
 		t.Fatal("expected delete of an absent workload to fail (404)")
 	}
-}
-
-// TestRemoveWarnsOnComponentFloorImage drives the real CLI + fake CDS. Removing
-// a digest whose served ref names a c8s component must warn that enforcement is
-// unchanged (the floor keeps admitting it); removing a plain workload digest
-// must not.
-func TestRemoveWarnsOnComponentFloorImage(t *testing.T) {
-	dir := t.TempDir()
-	keyPath, pub := newOperatorKeypair(t, dir, "op.key")
-	srv, cds := cdsTestServer(t, []*ecdsa.PublicKey{pub})
-
-	cdsD := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	workloadD := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	cds.seedFloor(cdsD, "ghcr.io/confidential-dot-ai/cds@"+cdsD)
-	cds.seedFloor(workloadD, "registry.example.com/team/app@"+workloadD)
-
-	t.Run("component digest warns", func(t *testing.T) {
-		_, stderr, err := runCmd("remove", cdsD, "--url", srv.URL, "--insecure", "--operator-key", keyPath)
-		if err != nil {
-			t.Fatalf("remove: %v", err)
-		}
-		if !strings.Contains(stderr, "component floor image") {
-			t.Errorf("expected component floor-image warning, stderr=%q", stderr)
-		}
-	})
-
-	t.Run("workload digest does not warn", func(t *testing.T) {
-		_, stderr, err := runCmd("remove", workloadD, "--url", srv.URL, "--insecure", "--operator-key", keyPath)
-		if err != nil {
-			t.Fatalf("remove: %v", err)
-		}
-		if strings.Contains(stderr, "component floor image") {
-			t.Errorf("unexpected floor-image warning for workload digest, stderr=%q", stderr)
-		}
-	})
 }

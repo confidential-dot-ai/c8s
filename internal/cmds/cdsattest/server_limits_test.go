@@ -73,6 +73,7 @@ func newTestServerWith(t *testing.T, tune func(*Server)) (*Server, *httptest.Ser
 	evidence := &countingEvidence{inner: testFixture()}
 	srv := NewServer(Config{
 		Evidence:             evidence,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
 		MeshIdentityCAFile:   identity.caFile,
@@ -116,9 +117,38 @@ func get(t *testing.T, url, clientIP string, headers ...string) int {
 	return resp.StatusCode
 }
 
-func getAttestPQ(t *testing.T, base, clientIP string, nonce []byte) int {
+// postAttestPQAs POSTs a well-formed attest-pq request as the client X-Real-IP
+// names and returns the status.
+func postAttestPQAs(t *testing.T, base, clientIP string, nonce []byte) int {
 	t.Helper()
-	return get(t, base+"/.well-known/c8s/attest-pq?nonce="+b64url(nonce), clientIP)
+	resp := doAttestPQAs(t, base, clientIP, nonce)
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func doAttestPQAs(t *testing.T, base, clientIP string, nonce []byte) *http.Response {
+	t.Helper()
+	ck, err := overenc.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(types.AttestPQRequest{Nonce: b64url(nonce), XWingEK: b64url(ck.EncapsulationKey())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/.well-known/c8s/attest-pq", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientIP != "" {
+		req.Header.Set("X-Real-IP", clientIP)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 // TestAttestPQMetersEachClientSeparately spends one client's whole burst and
@@ -130,7 +160,7 @@ func TestAttestPQMetersEachClientSeparately(t *testing.T) {
 
 	var served, limited int
 	for i := 0; i < 3*burst; i++ {
-		switch code := getAttestPQ(t, ts.URL, "203.0.113.7", testNonce(t)); code {
+		switch code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code {
 		case http.StatusOK:
 			served++
 		case http.StatusTooManyRequests:
@@ -145,18 +175,18 @@ func TestAttestPQMetersEachClientSeparately(t *testing.T) {
 	if limited != 2*burst {
 		t.Fatalf("%d requests were limited, want %d", limited, 2*burst)
 	}
-	if code := getAttestPQ(t, ts.URL, "198.51.100.9", testNonce(t)); code != http.StatusOK {
+	if code := postAttestPQAs(t, ts.URL, "198.51.100.9", testNonce(t)); code != http.StatusOK {
 		t.Fatalf("attest-pq from a second client: got %d, want 200", code)
 	}
 }
 
-// TestAttestLBAndHandshakeAreMetered pins the other two unauthenticated
-// session-establishment routes onto the same budget.
-func TestAttestLBAndHandshakeAreMetered(t *testing.T) {
+// TestAttestLBIsMetered pins the other unauthenticated session-establishment
+// route onto the same budget.
+func TestAttestLBIsMetered(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             testFixture(),
-		FrontDoorMode:        FrontDoorModeCDS,
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ServingCertFile:      identity.certFile,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -172,33 +202,9 @@ func TestAttestLBAndHandshakeAreMetered(t *testing.T) {
 	if code := get(t, ts.URL+"/.well-known/c8s/attest-lb?nonce="+b64url(testNonce(t)), "203.0.113.7"); code != http.StatusTooManyRequests {
 		t.Fatalf("second attest-lb: got %d, want 429", code)
 	}
-
-	post := func(clientIP string) int {
-		t.Helper()
-		body, err := json.Marshal(types.HandshakeRequest{Nonce: b64url(testNonce(t))})
-		if err != nil {
-			t.Fatal(err)
-		}
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/.well-known/c8s/handshake", bytes.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("X-Real-IP", clientIP)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode
-	}
-	// A second client's burst is untouched by the first's; its own second
-	// handshake is refused.
-	if code := post("198.51.100.9"); code == http.StatusTooManyRequests {
-		t.Fatal("first handshake from a fresh client was rate limited")
-	}
-	if code := post("198.51.100.9"); code != http.StatusTooManyRequests {
-		t.Fatalf("second handshake from the same client: got %d, want 429", code)
+	// A second client's burst is untouched by the first's.
+	if code := get(t, ts.URL+"/.well-known/c8s/attest-lb?nonce="+b64url(testNonce(t)), "198.51.100.9"); code != http.StatusOK {
+		t.Fatalf("attest-lb from a fresh client: got %d, want 200", code)
 	}
 }
 
@@ -211,8 +217,8 @@ func TestShippedBurstCoversASessionFleet(t *testing.T) {
 
 	_, ts, _ := newMeteredTestServer(t)
 
-	// Each session costs one attest-pq and one handshake, and every request
-	// here lands in the one bucket the client is charged.
+	// Each session costs one attest-pq, and every request here lands in the
+	// one bucket the client is charged.
 	for i := 0; i < legitimateSessions; i++ {
 		if _, id := establishSession(t, ts.URL, testNonce(t)); id == "" {
 			t.Fatalf("session %d was not established", i)
@@ -303,7 +309,7 @@ func TestMaintenanceReclaimsQuietLimiterBuckets(t *testing.T) {
 	})
 
 	for i := 0; i < clients; i++ {
-		if code := getAttestPQ(t, ts.URL, fmt.Sprintf("203.0.113.%d", i), testNonce(t)); code != http.StatusOK {
+		if code := postAttestPQAs(t, ts.URL, fmt.Sprintf("203.0.113.%d", i), testNonce(t)); code != http.StatusOK {
 			t.Fatalf("client %d claiming a bucket: got %d, want 200", i, code)
 		}
 	}
@@ -334,8 +340,8 @@ func TestTimingsMeetTheirStatedRequirements(t *testing.T) {
 		min, max time.Duration
 		why      string
 	}{
-		{"nonce TTL", defaultNonceTTL, 10 * time.Second, time.Minute,
-			"a client verifies a hardware report in between, on a phone; and a parked ML-KEM key is held for exactly this long"},
+		{"session max age", defaultSessionMaxAge, time.Hour, 24 * time.Hour,
+			"the absolute lifetime of one key schedule; past it a busy session must re-attest"},
 		{"sweep interval", sweepInterval, time.Second, 30 * time.Second,
 			"expired entries hold their store's capacity until a sweep passes"},
 		{"readiness cache", readyzCacheTTL, 200 * time.Millisecond, time.Second,
@@ -355,50 +361,41 @@ func TestTimingsMeetTheirStatedRequirements(t *testing.T) {
 	}
 
 	// A client opening sessions steadily, not in a burst, must still get
-	// through: five a second is a browser reloading a page.
+	// through: five a second is a browser reloading a page, and a session
+	// costs one request.
 	const steadySessionsPerSecond = 5
 	if establishRateLimit < 2*steadySessionsPerSecond {
-		t.Fatalf("establishment is limited to %v/s, under the %d requests %d sessions a second cost",
+		t.Fatalf("establishment is limited to %v/s, under the %d requests headroom %d sessions a second need",
 			establishRateLimit, 2*steadySessionsPerSecond, steadySessionsPerSecond)
 	}
 }
 
-// The memory each store may cost, stated as a budget rather than as the
+// The memory the session pool may cost, stated as a budget rather than as the
 // constants themselves. A ceiling exists to bound memory, so raising it is the
 // dangerous direction and the one these bounds catch.
 const (
-	// A pending handshake holds an ML-KEM-768 decapsulation key and its public
-	// key, about 4 KiB.
-	pendingEntryBytes = 4 << 10
-	pendingBudget     = 48 << 20
-	// An established session holds a channel: two AEAD keys, a transcript and
-	// a bounded replay set, about 1 KiB.
+	// An established session holds a channel: two AEAD keys, IV prefixes, an
+	// exporter, a session id and a replay window, about 1 KiB.
 	sessionEntryBytes = 1 << 10
 	sessionBudget     = 16 << 20
 )
 
-// TestStoresStayInsideTheirMemoryBudget pins the ceilings from above. A store
+// TestStoresStayInsideTheirMemoryBudget pins the ceiling from above. A store
 // bound is what stops an attacker turning traffic into memory, so it has to be
 // small enough to matter, not only large enough to serve a fleet.
 func TestStoresStayInsideTheirMemoryBudget(t *testing.T) {
-	if cost := maxPendingSessions * pendingEntryBytes; cost > pendingBudget {
-		t.Fatalf("the pending store may cost %d bytes, over its budget of %d", cost, pendingBudget)
-	}
 	if cost := maxSessions * sessionEntryBytes; cost > sessionBudget {
 		t.Fatalf("the session pool may cost %d bytes, over its budget of %d", cost, sessionBudget)
 	}
-	// And no single client may hold more than an eighth of either store,
-	// however generous the per-client tier is to a crowd behind one address.
+	// And no single client may hold more than an eighth of the pool, however
+	// generous the per-client tier is to a crowd behind one address.
 	if maxSessionsPerClient > maxSessions/8 {
 		t.Fatalf("one client may hold %d of %d sessions, more than an eighth of the pool", maxSessionsPerClient, maxSessions)
-	}
-	if maxPendingPerClient > maxPendingSessions/8 {
-		t.Fatalf("one client may hold %d of %d handshakes, more than an eighth of the store", maxPendingPerClient, maxPendingSessions)
 	}
 }
 
 // TestLimiterMapsHoldTheirWholeKeySpace pins the relationship between the
-// stores and the maps that meter them. A limiter refuses a key it has no
+// store and the maps that meter it. A limiter refuses a key it has no
 // bucket for, and the session limiter is keyed by session as well as by
 // client, so a map smaller than the session store turns a full store into a
 // denial on live sessions.
@@ -453,7 +450,7 @@ func TestSessionlessFloodCannotDenyALiveSession(t *testing.T) {
 // name a bucket of its own.
 func TestTunnelKeyChargesOnlyLiveSessions(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
-	srv.sessions["live"] = establishedSession{lastUsed: time.Now()}
+	srv.sessions["live"] = establishedSession{createdAt: time.Now(), lastUsed: time.Now()}
 
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
@@ -514,16 +511,13 @@ func TestClientKeyOnlyTrustsTheFrontDoor(t *testing.T) {
 func TestIPv6ClientsShareTheirPrefixBucket(t *testing.T) {
 	_, ts, _ := newBurstTestServer(t, 1)
 
-	first := ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(testNonce(t))
-	if code := get(t, first, "2001:db8:1:2::1"); code != http.StatusOK {
+	if code := postAttestPQAs(t, ts.URL, "2001:db8:1:2::1", testNonce(t)); code != http.StatusOK {
 		t.Fatalf("first request from the /64: got %d, want 200", code)
 	}
-	second := ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(testNonce(t))
-	if code := get(t, second, "2001:db8:1:2:aaaa::9"); code != http.StatusTooManyRequests {
+	if code := postAttestPQAs(t, ts.URL, "2001:db8:1:2:aaaa::9", testNonce(t)); code != http.StatusTooManyRequests {
 		t.Fatalf("second address in the same /64: got %d, want 429", code)
 	}
-	third := ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(testNonce(t))
-	if code := get(t, third, "2001:db8:1:3::1"); code != http.StatusOK {
+	if code := postAttestPQAs(t, ts.URL, "2001:db8:1:3::1", testNonce(t)); code != http.StatusOK {
 		t.Fatalf("first request from a neighbouring /64: got %d, want 200", code)
 	}
 }
@@ -534,148 +528,89 @@ func TestIPv6ClientsShareTheirPrefixBucket(t *testing.T) {
 func TestForwardedForCannotSplitTheBucket(t *testing.T) {
 	_, ts, _ := newBurstTestServer(t, 1)
 
-	url := ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(testNonce(t))
-	if code := get(t, url, "203.0.113.7", "X-Forwarded-For", "10.0.0.1"); code != http.StatusOK {
+	ck, err := overenc.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(forwardedFor string) int {
+		body, _ := json.Marshal(types.AttestPQRequest{Nonce: b64url(testNonce(t)), XWingEK: b64url(ck.EncapsulationKey())})
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/.well-known/c8s/attest-pq", bytes.NewReader(body))
+		req.Header.Set("X-Real-IP", "203.0.113.7")
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+	if code := post("10.0.0.1"); code != http.StatusOK {
 		t.Fatalf("first request: got %d, want 200", code)
 	}
-	url = ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(testNonce(t))
-	if code := get(t, url, "203.0.113.7", "X-Forwarded-For", "10.0.0.2"); code != http.StatusTooManyRequests {
+	if code := post("10.0.0.2"); code != http.StatusTooManyRequests {
 		t.Fatalf("second request behind a different X-Forwarded-For: got %d, want 429", code)
 	}
 }
 
-// TestPendingEvictsTheClientsOwnOldest pins what a client past its bound
-// loses: its own oldest handshake, not the request it just made and not
-// another client's entry.
-func TestPendingEvictsTheClientsOwnOldest(t *testing.T) {
-	// The per-client bound, not the rate, is what this test drives.
-	srv, ts, _ := newBurstTestServer(t, 4*maxPendingPerClient)
-
-	firstNonce := testNonce(t)
-	if code := getAttestPQ(t, ts.URL, "203.0.113.7", firstNonce); code != http.StatusOK {
-		t.Fatalf("first attest-pq: got %d, want 200", code)
-	}
-	// The rest of the client's bound is filled directly: the requests this
-	// test is about are the first, which must survive, and the two at the
-	// boundary. Minting five hundred ML-KEM keys over HTTP adds nothing.
-	for i := 1; i < maxPendingPerClient-1; i++ {
-		if err := srv.addPending("client:203.0.113.7", fmt.Sprintf("filler-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("filling to one under the bound: %v", err)
-		}
-	}
-	if code := getAttestPQ(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusOK {
-		t.Fatalf("attest-pq at the bound: got %d, want 200", code)
-	}
-	// A neighbour's entry, parked before the bound is crossed.
-	neighbourNonce := testNonce(t)
-	if code := getAttestPQ(t, ts.URL, "198.51.100.9", neighbourNonce); code != http.StatusOK {
-		t.Fatalf("attest-pq from a second client: got %d, want 200", code)
-	}
-
-	if code := getAttestPQ(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusOK {
-		t.Fatalf("attest-pq past the bound: got %d, want 200", code)
-	}
-
-	srv.mu.Lock()
-	held := srv.pendingBy.count("client:203.0.113.7")
-	_, firstKept := srv.pending[b64url(firstNonce)]
-	_, neighbourKept := srv.pending[b64url(neighbourNonce)]
-	srv.mu.Unlock()
-	if held != maxPendingPerClient {
-		t.Fatalf("client holds %d pending handshakes, want %d", held, maxPendingPerClient)
-	}
-	if firstKept {
-		t.Fatal("the client's oldest handshake survived its own overflow")
-	}
-	if !neighbourKept {
-		t.Fatal("a second client's handshake was evicted by the first's overflow")
-	}
-}
-
-// TestRefusedAttestPQMintsNoEvidence pins that the one attest-pq refusal — a
-// nonce already pending — is decided before the hardware report is pulled.
+// TestRefusedAttestPQMintsNoEvidence pins that a client already at its session
+// bound is refused before the hardware report is pulled.
 func TestRefusedAttestPQMintsNoEvidence(t *testing.T) {
-	_, ts, evidence := newMeteredTestServer(t)
+	srv, ts, evidence := newMeteredTestServer(t)
 
-	nonce := testNonce(t)
-	if code := getAttestPQ(t, ts.URL, "203.0.113.7", nonce); code != http.StatusOK {
-		t.Fatalf("first attest-pq: got %d, want 200", code)
+	const client = "client:203.0.113.7"
+	for i := 0; i < maxSessionsPerClient; i++ {
+		if err := srv.addSession(client, fmt.Sprintf("held-%d", i), establishedSession{createdAt: time.Now(), lastUsed: time.Now()}); err != nil {
+			t.Fatalf("filling the client to its bound: %v", err)
+		}
 	}
 	minted := evidence.calls.Load()
 
 	for i := 0; i < 5; i++ {
-		if code := getAttestPQ(t, ts.URL, "198.51.100.9", nonce); code != http.StatusConflict {
-			t.Fatalf("attest-pq reusing a pending nonce: got %d, want 409", code)
+		if code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusTooManyRequests {
+			t.Fatalf("attest-pq at the client's session bound: got %d, want 429", code)
 		}
 	}
 	if got := evidence.calls.Load(); got != minted {
 		t.Fatalf("refused requests minted %d reports, want 0", got-minted)
 	}
-}
-
-// TestAddPendingRefusesADuplicateNonce asserts the collision check where it
-// has to live — inside the insert — rather than through the endpoint, whose
-// earlier check would answer for it.
-func TestAddPendingRefusesADuplicateNonce(t *testing.T) {
-	srv, _, _ := newMeteredTestServer(t)
-
-	first := pendingSession{createdAt: time.Now()}
-	if err := srv.addPending("client:first", "shared-nonce", first); err != nil {
-		t.Fatal(err)
-	}
-	if err := srv.addPending("client:second", "shared-nonce", pendingSession{createdAt: time.Now()}); err == nil {
-		t.Fatal("a second client parked a handshake under a nonce already pending")
-	}
 
 	srv.mu.Lock()
-	held := len(srv.pending)
-	kept := srv.pending["shared-nonce"]
-	second := srv.pendingBy.count("client:second")
+	held := srv.sessionsBy.count(client)
 	srv.mu.Unlock()
-	if held != 1 {
-		t.Fatalf("store holds %d entries, want 1", held)
-	}
-	if kept.client != "client:first" {
-		t.Fatalf("the entry is charged to %q, want the client that took the nonce", kept.client)
-	}
-	if second != 0 {
-		t.Fatalf("the refused client is charged %d entries, want 0", second)
+	if held != maxSessionsPerClient {
+		t.Fatalf("client holds %d sessions after the refusal, want %d", held, maxSessionsPerClient)
 	}
 }
 
-// TestPendingNonceIsNeverOverwritten pins that a second attest-pq under a
-// nonce already pending cannot replace the first client's handshake key.
-func TestPendingNonceIsNeverOverwritten(t *testing.T) {
-	srv, ts, _ := newMeteredTestServer(t)
+// TestAttestPQRefusesOnceEveryHolderIsAtTheFloor pins the endpoint's answer
+// when the pool has nothing to give up: a 503 the client can retry, and no
+// attestation minted for it.
+func TestAttestPQRefusesOnceEveryHolderIsAtTheFloor(t *testing.T) {
+	srv, ts, evidence := newMeteredTestServer(t)
 
-	nonce := testNonce(t)
-	if code := getAttestPQ(t, ts.URL, "203.0.113.7", nonce); code != http.StatusOK {
-		t.Fatalf("first attest-pq: got %d, want 200", code)
-	}
-	srv.mu.Lock()
-	first := srv.pending[b64url(nonce)].key
-	srv.mu.Unlock()
+	fillSessions(t, srv, maxSessions, func(i int) string {
+		return fmt.Sprintf("client:holder-%d", i/minShare)
+	})
+	minted := evidence.calls.Load()
 
-	if code := getAttestPQ(t, ts.URL, "198.51.100.9", nonce); code != http.StatusConflict {
-		t.Fatalf("attest-pq reusing a pending nonce: got %d, want 409", code)
+	for i := 0; i < 5; i++ {
+		if code := postAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusServiceUnavailable {
+			t.Fatalf("attest-pq against a pool with nothing to give up: got %d, want 503", code)
+		}
 	}
+	if got := evidence.calls.Load(); got != minted {
+		t.Fatalf("refused attest-pq minted %d reports, want 0", got-minted)
+	}
+
 	srv.mu.Lock()
-	after := srv.pending[b64url(nonce)].key
-	held := srv.pendingBy.count("client:198.51.100.9")
+	held := len(srv.sessions)
 	srv.mu.Unlock()
-	if after != first {
-		t.Fatal("a second client's attest-pq replaced the pending handshake key")
-	}
-	if held != 0 {
-		t.Fatalf("the refused client is accounted %d pending handshakes, want 0", held)
+	if held != maxSessions {
+		t.Fatalf("pool holds %d sessions, want %d", held, maxSessions)
 	}
 }
 
-// raceRounds: two goroutines can only be inside a check-then-act window at
-// once when they truly run at once, so these rounds buy little on a runner
-// with few processors. The invariants they cover are also asserted directly,
-// without a race, by TestAddPendingRefusesADuplicateNonce and
-// TestPendingEvictsTheClientsOwnOldest.
 // noteRaceCoverage says out loud when a barrier test cannot do its job: with
 // one processor two goroutines never sit inside the window it guards, so it
 // passes without covering anything.
@@ -691,66 +626,6 @@ func raceRounds() int {
 		return 200
 	}
 	return 500
-}
-
-// TestPendingHoldsTheBoundUnderConcurrency releases a crowd of inserts at a
-// client already at its bound, round after round: the bound check, the
-// eviction and the insert must be one critical section, or a round leaves the
-// client holding more than its bound. Every insert past the bound costs the
-// client one of its own, so the store stays at the bound across rounds.
-func TestPendingHoldsTheBoundUnderConcurrency(t *testing.T) {
-	const (
-		client = "client:203.0.113.7"
-		racers = 64
-	)
-	noteRaceCoverage(t)
-	srv, _, _ := newMeteredTestServer(t)
-
-	for i := 0; i < maxPendingPerClient; i++ {
-		if err := srv.addPending(client, fmt.Sprintf("held-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("filling to the bound: %v", err)
-		}
-	}
-
-	for round := 0; round < raceRounds(); round++ {
-		// One under the bound, so the racers contend for the last free slot
-		// rather than all reading a full store.
-		srv.mu.Lock()
-		for _, nonce := range sortedKeys(srv.pendingBy.keys(client))[:1] {
-			srv.dropPending(nonce)
-		}
-		srv.mu.Unlock()
-
-		var wg sync.WaitGroup
-		start := make(chan struct{})
-		for i := 0; i < racers; i++ {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				<-start
-				_ = srv.addPending(client, fmt.Sprintf("racer-%d-%d", round, i), pendingSession{createdAt: time.Now()})
-			}(i)
-		}
-		close(start)
-		wg.Wait()
-
-		srv.mu.Lock()
-		held, counted := len(srv.pending), srv.pendingBy.count(client)
-		srv.mu.Unlock()
-		if held != maxPendingPerClient || counted != maxPendingPerClient {
-			t.Fatalf("round %d: store holds %d entries and counts %d, want %d of each", round, held, counted, maxPendingPerClient)
-		}
-	}
-}
-
-// sortedKeys is a deterministic order over a holder's keys.
-func sortedKeys(held map[string]struct{}) []string {
-	keys := make([]string, 0, len(held))
-	for key := range held {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // TestSessionBoundHoldsUnderConcurrency races inserts at a client one under
@@ -804,146 +679,14 @@ func TestSessionBoundHoldsUnderConcurrency(t *testing.T) {
 	}
 }
 
-// TestPendingNonceCollidesUnderConcurrency races two clients onto one nonce:
-// the collision check must sit inside the lock that inserts, or both are
-// charged for an entry only one of them holds.
-func TestPendingNonceCollidesUnderConcurrency(t *testing.T) {
-	const racers = 256
-	srv, _, _ := newMeteredTestServer(t)
-
-	for round := 0; round < raceRounds(); round++ {
-		srv.mu.Lock()
-		srv.pending = make(map[string]pendingSession)
-		srv.pendingBy = newHolders()
-		srv.mu.Unlock()
-
-		nonce := fmt.Sprintf("contested-%d", round)
-		var wg sync.WaitGroup
-		var accepted atomic.Int64
-		start := make(chan struct{})
-		for i := 0; i < racers; i++ {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				<-start
-				if err := srv.addPending(fmt.Sprintf("client:%d", i), nonce, pendingSession{createdAt: time.Now()}); err == nil {
-					accepted.Add(1)
-				}
-			}(i)
-		}
-		close(start)
-		wg.Wait()
-
-		srv.mu.Lock()
-		held, clients := len(srv.pending), srv.pendingBy.clients()
-		srv.mu.Unlock()
-		if got := accepted.Load(); got != 1 {
-			t.Fatalf("round %d: %d clients were accepted onto one nonce, want 1", round, got)
-		}
-		if held != 1 || clients != 1 {
-			t.Fatalf("round %d: store holds %d entries charged to %d clients, want 1 and 1", round, held, clients)
-		}
+// sortedKeys is a deterministic order over a holder's keys.
+func sortedKeys(held map[string]struct{}) []string {
+	keys := make([]string, 0, len(held))
+	for key := range held {
+		keys = append(keys, key)
 	}
-}
-
-// TestPendingGlobalBoundDropsFromTheLargestHolder pins the memory ceiling on
-// pending handshakes: past it the entry dropped belongs to whoever holds the
-// most, so a client holding one keeps it.
-func TestPendingGlobalBoundDropsFromTheLargestHolder(t *testing.T) {
-	srv, _, _ := newMeteredTestServer(t)
-
-	// A victim that arrived first and holds a single, therefore oldest, entry.
-	if err := srv.addPending("client:victim", "victim-nonce", pendingSession{createdAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().Add(time.Second)
-	for i := 1; i < maxPendingSessions; i++ {
-		client := fmt.Sprintf("client:flooder-%d", i/maxPendingPerClient)
-		if err := srv.addPending(client, fmt.Sprintf("nonce-%d", i), pendingSession{createdAt: now.Add(time.Duration(i) * time.Millisecond)}); err != nil {
-			t.Fatalf("filling the store at %d: %v", i, err)
-		}
-	}
-
-	if err := srv.addPending("client:newcomer", "newcomer", pendingSession{createdAt: time.Now()}); err != nil {
-		t.Fatalf("insert into a full store: %v", err)
-	}
-
-	srv.mu.Lock()
-	held := len(srv.pending)
-	_, victimKept := srv.pending["victim-nonce"]
-	_, newcomerKept := srv.pending["newcomer"]
-	flooders := 0
-	for client := range srv.pendingBy.byClient {
-		if strings.HasPrefix(client, "client:flooder-") {
-			flooders += srv.pendingBy.count(client)
-		}
-	}
-	srv.mu.Unlock()
-
-	if held != maxPendingSessions {
-		t.Fatalf("store holds %d entries, want %d", held, maxPendingSessions)
-	}
-	if !victimKept {
-		t.Fatal("the oldest entry was dropped although its client held only one")
-	}
-	if !newcomerKept {
-		t.Fatal("the new pending handshake was not stored")
-	}
-	// The victim and the newcomer hold one each; every other entry, and the
-	// one dropped to make room, belongs to a flooder.
-	if want := maxPendingSessions - 2; flooders != want {
-		t.Fatalf("the flooders hold %d entries, want %d", flooders, want)
-	}
-}
-
-// TestPendingFullStoreAdmitsAClientHoldingNothing mirrors the session rule on
-// the handshake store.
-func TestPendingFullStoreAdmitsAClientHoldingNothing(t *testing.T) {
-	srv, _, _ := newMeteredTestServer(t)
-
-	for i := 0; i < maxPendingSessions; i++ {
-		client := fmt.Sprintf("client:holder-%d", i/maxPendingPerClient)
-		if err := srv.addPending(client, fmt.Sprintf("nonce-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("filling the store at %d: %v", i, err)
-		}
-	}
-	if err := srv.addPending("client:newcomer", "newcomer", pendingSession{createdAt: time.Now()}); err != nil {
-		t.Fatalf("a client holding nothing was refused by a full store: %v", err)
-	}
-}
-
-// TestPendingRefusesOnceEveryHolderIsAtTheFloor pins the endpoint's answer
-// when the store has nothing to give up: a 503 the client can retry, and no
-// attestation minted for it.
-func TestPendingRefusesOnceEveryHolderIsAtTheFloor(t *testing.T) {
-	srv, ts, evidence := newMeteredTestServer(t)
-
-	for i := 0; i < maxPendingSessions; i++ {
-		client := fmt.Sprintf("client:holder-%d", i/minShare)
-		if err := srv.addPending(client, fmt.Sprintf("nonce-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("filling the store at %d: %v", i, err)
-		}
-	}
-	if err := srv.addPending("client:newcomer", "newcomer", pendingSession{createdAt: time.Now()}); !errors.Is(err, errStoreFull) {
-		t.Fatalf("insert into a store level at the floor: %v, want it refused", err)
-	}
-
-	minted := evidence.calls.Load()
-	for i := 0; i < 5; i++ {
-		if code := getAttestPQ(t, ts.URL, "203.0.113.7", testNonce(t)); code != http.StatusServiceUnavailable {
-			t.Fatalf("attest-pq against a store with nothing to give up: got %d, want 503", code)
-		}
-	}
-	if got := evidence.calls.Load(); got != minted {
-		t.Fatalf("refused attest-pq minted %d reports, want 0", got-minted)
-	}
-
-	srv.mu.Lock()
-	held := len(srv.pending)
-	srv.mu.Unlock()
-	if held != maxPendingSessions {
-		t.Fatalf("store holds %d entries, want %d", held, maxPendingSessions)
-	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestRefuseSessionSeparatesACollisionFromALimit pins that a 128-bit id
@@ -970,7 +713,7 @@ func TestRefuseSessionSeparatesACollisionFromALimit(t *testing.T) {
 }
 
 // TestSessionsAreBoundedPerClient pins that established sessions are counted
-// per client too: pending is a flow, and only this bounds the stock.
+// per client: this is what bounds the stock one address may hold.
 func TestSessionsAreBoundedPerClient(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	const client = "client:203.0.113.7"
@@ -991,10 +734,9 @@ func TestSessionsAreBoundedPerClient(t *testing.T) {
 // The concurrency one address is entitled to, stated here rather than derived
 // from the bounds, so shrinking a bound fails this test. One public address
 // fronts a CGNAT or a corporate egress, so it stands for a crowd: 500
-// simultaneous sessions and 500 handshakes in flight behind one address.
+// simultaneous sessions behind one address.
 const (
 	entitledSessions = 500
-	entitledPending  = 500
 	// And the store as a whole holds a fleet of those crowds.
 	entitledStore = 8000
 )
@@ -1010,26 +752,8 @@ func TestOneAddressMayHoldACrowdsWorthOfSessions(t *testing.T) {
 	}
 }
 
-// TestOneAddressMayHoldACrowdsWorthOfHandshakes pins the same for handshakes
-// in flight: past the bound the oldest is dropped, so the assertion is that
-// the crowd's own entries are all still there.
-func TestOneAddressMayHoldACrowdsWorthOfHandshakes(t *testing.T) {
-	srv, _, _ := newMeteredTestServer(t)
-	for i := 0; i < entitledPending; i++ {
-		if err := srv.addPending("client:203.0.113.7", fmt.Sprintf("nonce-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("handshake %d of one address: %v", i, err)
-		}
-	}
-	srv.mu.Lock()
-	held := srv.pendingBy.count("client:203.0.113.7")
-	srv.mu.Unlock()
-	if held != entitledPending {
-		t.Fatalf("one address holds %d handshakes of %d it started, want all of them", held, entitledPending)
-	}
-}
-
-// TestTheStoresHoldAFleet pins the global bounds against a number of clients
-// rather than against themselves.
+// TestTheStoresHoldAFleet pins the global bound against a number of clients
+// rather than against itself.
 func TestTheStoresHoldAFleet(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	for i := 0; i < entitledStore; i++ {
@@ -1037,15 +761,12 @@ func TestTheStoresHoldAFleet(t *testing.T) {
 		if err := srv.addSession(client, fmt.Sprintf("session-%d", i), establishedSession{lastUsed: time.Now()}); err != nil {
 			t.Fatalf("session %d of a fleet: %v", i, err)
 		}
-		if err := srv.addPending(client, fmt.Sprintf("nonce-%d", i), pendingSession{createdAt: time.Now()}); err != nil {
-			t.Fatalf("handshake %d of a fleet: %v", i, err)
-		}
 	}
 	srv.mu.Lock()
-	sessions, pending := len(srv.sessions), len(srv.pending)
+	sessions := len(srv.sessions)
 	srv.mu.Unlock()
-	if sessions != entitledStore || pending != entitledStore {
-		t.Fatalf("the stores hold %d sessions and %d handshakes, want %d of each", sessions, pending, entitledStore)
+	if sessions != entitledStore {
+		t.Fatalf("the store holds %d sessions, want %d", sessions, entitledStore)
 	}
 }
 
@@ -1062,16 +783,6 @@ func TestEvictionPicksTheIdlestWithinAHolder(t *testing.T) {
 	held := map[string]struct{}{"busy": {}, "idle": {}, "middle": {}}
 	if got := idlestSessionOf(sessions, held); got != "idle" {
 		t.Fatalf("idlestSessionOf = %q, want idle", got)
-	}
-
-	pending := map[string]pendingSession{
-		"new":    {createdAt: now},
-		"oldest": {createdAt: now.Add(-time.Hour)},
-		"middle": {createdAt: now.Add(-time.Minute)},
-	}
-	heldNonces := map[string]struct{}{"new": {}, "oldest": {}, "middle": {}}
-	if got := oldestPendingOf(pending, heldNonces); got != "oldest" {
-		t.Fatalf("oldestPendingOf = %q, want oldest", got)
 	}
 }
 
@@ -1295,9 +1006,8 @@ func TestDrainStopsAtTheFloor(t *testing.T) {
 	}
 }
 
-// TestSessionIdIsNeverOverwritten pins the same invariant addPending carries:
-// an id already in the pool cannot be taken again, which would charge one
-// client for a session another holds.
+// TestSessionIdIsNeverOverwritten pins that an id already in the pool cannot
+// be taken again, which would charge one client for a session another holds.
 func TestSessionIdIsNeverOverwritten(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 
@@ -1327,6 +1037,7 @@ func TestReadyzIsCached(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             testFixture(),
+		FrontDoorMode:        types.FrontDoorModeCDS,
 		ExpectedWorkload:     "some-workload",
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -1401,10 +1112,10 @@ func TestTunnelIsCappedPerClientAcrossSessions(t *testing.T) {
 	}
 }
 
-// TestHandshakeRefusesWhenTheClientIsAtItsBound drives the session bound
-// through the endpoint: a handshake whose session cannot be stored must not
-// answer 200 with an id for a session the server does not hold.
-func TestHandshakeRefusesWhenTheClientIsAtItsBound(t *testing.T) {
+// TestAttestPQRefusesWhenTheClientIsAtItsBound drives the session bound
+// through the endpoint: an attest-pq whose session cannot be stored must not
+// answer 200 with evidence for a session the server does not hold.
+func TestAttestPQRefusesWhenTheClientIsAtItsBound(t *testing.T) {
 	srv, ts, _ := newMeteredTestServer(t)
 
 	// The bucket a request through the front door is charged to.
@@ -1415,30 +1126,10 @@ func TestHandshakeRefusesWhenTheClientIsAtItsBound(t *testing.T) {
 		}
 	}
 
-	nonce := testNonce(t)
-	bundle := fetchBundleAs(t, ts.URL, "203.0.113.7", nonce)
-	_, handshake := clientChannelFromBundle(t, bundle, nonce)
-	body, err := json.Marshal(types.HandshakeRequest{
-		Nonce:        b64url(nonce),
-		ClientX25519: b64url(handshake.ClientX25519),
-		MLKEMCt:      b64url(handshake.MLKEMCiphertext),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/.well-known/c8s/handshake", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Real-IP", "203.0.113.7")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := doAttestPQAs(t, ts.URL, "203.0.113.7", testNonce(t))
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("handshake at the client's session bound: got %d, want 429", resp.StatusCode)
+		t.Fatalf("attest-pq at the client's session bound: got %d, want 429", resp.StatusCode)
 	}
 	var refusal types.ErrorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&refusal); err != nil {
@@ -1454,29 +1145,6 @@ func TestHandshakeRefusesWhenTheClientIsAtItsBound(t *testing.T) {
 	if held != maxSessionsPerClient {
 		t.Fatalf("client holds %d sessions after the refusal, want %d", held, maxSessionsPerClient)
 	}
-}
-
-// fetchBundleAs fetches attest-pq as a named client.
-func fetchBundleAs(t *testing.T, base, clientIP string, nonce []byte) types.AttestationBundle {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, base+"/.well-known/c8s/attest-pq?nonce="+b64url(nonce), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Real-IP", clientIP)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("attest-pq status %d", resp.StatusCode)
-	}
-	var bundle types.AttestationBundle
-	if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
-		t.Fatal(err)
-	}
-	return bundle
 }
 
 // TestClientBucketFallsBackToTheAddress pins that per-client state is charged
@@ -1542,70 +1210,44 @@ func TestTunnelClientAggregateIsCheckedFirst(t *testing.T) {
 	}
 }
 
-// TestNonceTTLDefaultsShorterThanTheSession pins the wait a client is given
-// between attest-pq and its handshake, which is the window a parked ML-KEM key
-// is held for.
-func TestNonceTTLDefaultsShorterThanTheSession(t *testing.T) {
-	srv := NewServer(Config{Evidence: testFixture(), SessionTTL: time.Hour})
-	if srv.cfg.NonceTTL != defaultNonceTTL {
-		t.Fatalf("NonceTTL = %v, want %v", srv.cfg.NonceTTL, defaultNonceTTL)
-	}
-	if srv.cfg.NonceTTL >= srv.cfg.SessionTTL {
-		t.Fatalf("NonceTTL %v is not shorter than SessionTTL %v", srv.cfg.NonceTTL, srv.cfg.SessionTTL)
-	}
-	// A handshake later than that window is refused even though the session
-	// TTL has not passed.
-	if err := srv.addPending("client:x", "aged", pendingSession{createdAt: time.Now().Add(-defaultNonceTTL - time.Second)}); err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := srv.takePending("aged")
-	if !ok {
-		t.Fatal("the parked handshake vanished")
-	}
-	if time.Since(entry.createdAt) <= srv.cfg.NonceTTL {
-		t.Fatal("the parked handshake is still inside its TTL")
-	}
-}
-
-// TestSweepReleasesExpiredEntries pins that the background sweep, which is the
-// only sweep now, frees both the entry and the client's accounting.
+// TestSweepReleasesExpiredEntries pins that the background sweep frees both
+// the entry and the client's accounting, for the idle TTL and the absolute
+// max age alike.
 func TestSweepReleasesExpiredEntries(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	const client = "client:203.0.113.7"
 
-	stale := time.Now().Add(-2 * srv.cfg.SessionTTL)
-	if err := srv.addPending(client, "expired", pendingSession{createdAt: stale}); err != nil {
+	now := time.Now()
+	if err := srv.addSession(client, "idle", establishedSession{createdAt: now, lastUsed: now.Add(-2 * srv.cfg.SessionTTL)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.addSession(client, "idle", establishedSession{lastUsed: stale}); err != nil {
+	if err := srv.addSession(client, "over-age", establishedSession{createdAt: now.Add(-srv.cfg.SessionMaxAge - time.Second), lastUsed: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.addPending(client, "fresh", pendingSession{createdAt: time.Now()}); err != nil {
+	if err := srv.addSession(client, "fresh", establishedSession{createdAt: now, lastUsed: now}); err != nil {
 		t.Fatal(err)
 	}
 
 	srv.sweep()
 
 	srv.mu.Lock()
-	pending, sessions := len(srv.pending), len(srv.sessions)
-	pendingHeld, sessionsHeld := srv.pendingBy.count(client), srv.sessionsBy.count(client)
+	sessions := len(srv.sessions)
+	held := srv.sessionsBy.count(client)
+	_, freshKept := srv.sessions["fresh"]
 	srv.mu.Unlock()
-	if pending != 1 || pendingHeld != 1 {
-		t.Fatalf("sweep left %d pending entries counted %d, want 1 of each", pending, pendingHeld)
-	}
-	if sessions != 0 || sessionsHeld != 0 {
-		t.Fatalf("sweep left %d sessions counted %d, want none", sessions, sessionsHeld)
+	if sessions != 1 || held != 1 || !freshKept {
+		t.Fatalf("sweep left %d sessions counted %d (fresh kept: %v), want only the fresh one", sessions, held, freshKept)
 	}
 }
 
 // TestMaintainSweepsAndStopsWithItsContext pins the background loop: it is the
-// only thing that reclaims expired entries now that no request sweeps, and it
-// has to stop with its context.
+// only thing that reclaims expired entries besides use, and it has to stop
+// with its context.
 func TestMaintainSweepsAndStopsWithItsContext(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	srv.sweepEvery = 5 * time.Millisecond
 
-	if err := srv.addPending("client:x", "stale", pendingSession{createdAt: time.Now().Add(-time.Hour)}); err != nil {
+	if err := srv.addSession("client:x", "stale", establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1616,10 +1258,10 @@ func TestMaintainSweepsAndStopsWithItsContext(t *testing.T) {
 		close(done)
 	}()
 
-	waitFor(t, "the expired handshake to be swept", func() bool {
+	waitFor(t, "the expired session to be swept", func() bool {
 		srv.mu.Lock()
 		defer srv.mu.Unlock()
-		return len(srv.pending) == 0
+		return len(srv.sessions) == 0
 	})
 
 	cancel()
@@ -1637,7 +1279,7 @@ func TestServeRunsMaintenance(t *testing.T) {
 	srv, _, _ := newMeteredTestServer(t)
 	srv.sweepEvery = 5 * time.Millisecond
 
-	if err := srv.addPending("client:x", "stale", pendingSession{createdAt: time.Now().Add(-time.Hour)}); err != nil {
+	if err := srv.addSession("client:x", "stale", establishedSession{createdAt: time.Now(), lastUsed: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1646,10 +1288,10 @@ func TestServeRunsMaintenance(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ctx, &http.Server{Addr: "127.0.0.1:0", Handler: srv.Handler()}) }()
 
-	waitFor(t, "the expired handshake to be swept while serving", func() bool {
+	waitFor(t, "the expired session to be swept while serving", func() bool {
 		srv.mu.Lock()
 		defer srv.mu.Unlock()
-		return len(srv.pending) == 0
+		return len(srv.sessions) == 0
 	})
 
 	cancel()

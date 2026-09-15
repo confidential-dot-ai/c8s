@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -167,7 +168,7 @@ func (bm *BundleManager) persistLocked(certs []*x509.Certificate, retiredAt map[
 	if err := bm.persistRetirementsLocked(retiredAt); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(bundleFile, encodeCertBundlePEM(certs), 0644); err != nil {
+	if err := fileutil.WriteAtomic(bundleFile, encodeCertBundlePEM(certs), 0644); err != nil {
 		return fmt.Errorf("write bundle: %w", err)
 	}
 
@@ -289,33 +290,10 @@ func (bm *BundleManager) persistRetirementsLocked(retiredAt map[string]time.Time
 		return fmt.Errorf("marshal bundle retirements: %w", err)
 	}
 	data = append(data, '\n')
-	if err := writeFileAtomic(bm.retirementsFile(), data, 0644); err != nil {
+	if err := fileutil.WriteAtomic(bm.retirementsFile(), data, 0644); err != nil {
 		return fmt.Errorf("write bundle retirements: %w", err)
 	}
 	return nil
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 func (bm *BundleManager) retirementsFile() string {

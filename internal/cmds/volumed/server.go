@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -19,19 +18,10 @@ import (
 // VolumePath is the route the fetcher sidecar posts to.
 const VolumePath = "/volume"
 
-// GuestPort is the in-guest loopback port this daemon serves on under kata,
-// after the attestation-service on 8400 and the token route on 8401. A kata
-// guest holds one pod whose containers share its network namespace, so loopback
-// reaches the daemon without the shared filesystem a socket would need. Like
-// those two it is compiled, not configured: the untrusted host cannot redirect
-// the fetcher by withholding or rewriting a value.
-const GuestPort = 8402
-
-// GuestAddr is the address the in-guest daemon serves on.
-func GuestAddr() string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(GuestPort)) }
-
-// GuestEndpoint is the URL the in-guest fetcher posts to.
-func GuestEndpoint() string { return "http://" + GuestAddr() }
+// ClosePath is the route the sidecar posts to at termination, releasing its
+// pod's volumes before kubelet's emptyDir cleanup can delete through the live
+// mount. See docs/volumes.md — teardown.
+const ClosePath = "/volume/close"
 
 // maxRequestBytes bounds a request body. It carries one key blob.
 const maxRequestBytes = 64 << 10
@@ -96,6 +86,7 @@ func (s *Server) logger() *slog.Logger {
 func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle("POST "+VolumePath, http.HandlerFunc(s.handleOpen))
+	mux.Handle("POST "+ClosePath, http.HandlerFunc(s.handleClose))
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -165,6 +156,8 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authorized for this volume", http.StatusForbidden)
 	case errors.Is(err, ErrTooManyMounts):
 		http.Error(w, "too many open volumes on this node", http.StatusInsufficientStorage)
+	case errors.Is(err, ErrVolumeInUse):
+		http.Error(w, "volume device is already in use", http.StatusConflict)
 	default:
 		// Forward the underlying cause, not just a generic 500: the caller is
 		// the in-pod get-volume sidecar over a node-local socket, same tenant
@@ -175,6 +168,33 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		s.logger().Error("volume open failed", "pod", pod.UID, "name", req.Name, "error", err)
 		http.Error(w, fmt.Sprintf("could not open the volume: %v", err), http.StatusInternalServerError)
 	}
+}
+
+// handleClose releases every volume the calling pod holds. The caller is
+// resolved from kernel peer credentials, so a pod can only ever close its own
+// volumes; closing what is not open is a no-op, because teardown races pod
+// deletion by design.
+func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
+	conn, _ := r.Context().Value(connKey{}).(net.Conn)
+	peer := workloadclaims.PeerFromConn(conn)
+	defer peer.Close()
+
+	pod, err := s.Identity.Resolve(peer)
+	if err != nil {
+		s.logger().Warn("volume close rejected", "reason", err)
+		http.Error(w, "caller could not be resolved", http.StatusForbidden)
+		return
+	}
+	release, ok := s.acquire(pod.UID)
+	if !ok {
+		http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+	if n := s.Opener.ClosePod(r.Context(), pod.UID); n > 0 {
+		s.logger().Info("volumes closed", "pod", pod.UID, "volumes", n)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // acquire bounds concurrent opens per pod.

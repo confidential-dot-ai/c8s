@@ -21,7 +21,8 @@ The operator tree is built around these pieces:
   workload can fetch and renew a leaf certificate through CDS.
 
 The operator does not inject the RA-TLS mesh sidecar. Pod-to-pod mTLS remains
-the responsibility of the node-level `ratls-mesh` DaemonSet. The chart-managed
+the responsibility of node-level `ratls-mesh`, deployed as a DaemonSet by
+the chart or as systemd services by the measured node image. The chart-managed
 mesh excludes `kube-system` and its own release namespace as local traffic
 sources, so c8s control-plane agents (and, on kind/kubeadm-style clusters where
 the API server runs as a `kube-system` pod, in-cluster webhook callers) do not
@@ -83,12 +84,190 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
+`c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
+The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
+RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
+CRDs, webhook and admission policies are rendered from this same chart at
+**image build time**. RKE2 applies those manifests at boot; there is no c8s
+Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
+namespace carries `confidential.ai/baked=true`.
+
+### Authenticated launch configuration
+
+A measured node uses one image for both `leader` and `follower`. Each boot
+requires an ISO labelled `opkeydata` containing exactly the launch inputs
+`pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
+with the operator. `pubkey` is bound to the guest by the platform: the measured
+initrd extends TDX RTMR[3], while an SNP launcher must set HOST_DATA to
+`SHA-256(pubkey)` over the exact PEM file bytes.
+
+The strict `c8s-launch/v2` document selects the role, cluster identity, node
+addresses, trusted role keys, image pins and TLS SAN. It contains no RKE2
+credentials and rejects the entire `rke2` field, including empty values.
+It accepts an optional `workloads` string containing a complete
+`c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
+service arguments or component toggles; volume support remains disabled.
+
+Use **distinct launch keys for leader and follower roles, and new keys for
+each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
+launch keys establish cluster separation during peer verification. Keep one
+leader key and one or more follower keys. The leader generates its separate
+agent credential inside the guest; RKE2 generates the privileged server token.
+Neither credential is present on the host launch disk. Existing v1 bundles
+must remove the `rke2` field, set `schemaVersion: c8s-launch/v2`, and be signed
+again before use with this image.
+
+The following creates launch bundles for one leader and one follower. Select
+the trusted `manifest.json` published with the exact node image and VM shape;
+set `LEADER_ADDRESS` to the leader's guest IPv4 address reachable by every node.
+The example uses Python 3 and writes YAML with numeric RTMR indices.
+
+```sh
+umask 077
+mkdir -p demo/leader demo/follower
+c8s keys new --out demo/leader.key --pub-out demo/leader/pubkey
+c8s keys new --out demo/follower.key --pub-out demo/follower/pubkey
+
+export NODE_PLATFORM=tdx       # tdx or snp
+export NODE_VCPUS=8            # SNP: select this exact manifest variant
+export LEADER_ADDRESS=10.0.0.10  # replace with the actual leader guest address
+python3 - manifest.json <<'PYTHON'
+import copy, json, os, sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+platform = os.environ["NODE_PLATFORM"]
+if platform == "tdx":
+    measured = manifest["tdx"]
+    image = {"platform": "tdx", "measurement": measured["mrtd"],
+             "rtmrs": {1: measured["rtmr1"], 2: measured["rtmr2"]}}
+elif platform == "snp":
+    variants = [v for v in manifest["snp_variants"]
+                if v["smp"] == int(os.environ["NODE_VCPUS"])]
+    assert len(variants) == 1, "select exactly one matching SNP vCPU variant"
+    image = {"platform": "snp",
+             "measurement": variants[0]["measurement"]["snp_launch_digest"]}
+else:
+    raise ValueError("NODE_PLATFORM must be tdx or snp")
+
+leader = {
+    "schemaVersion": "c8s-launch/v2",
+    "clusterID": "demo",
+    "role": "leader",
+    "image": image,
+    "node": {"name": "demo-leader"},
+    "leader": {"address": os.environ["LEADER_ADDRESS"],
+               "operatorPublicKey": Path("demo/leader/pubkey").read_text()},
+    "followerOperatorPublicKeys": [Path("demo/follower/pubkey").read_text()],
+    "tlsSAN": "c8s.local",
+}
+follower = copy.deepcopy(leader)
+follower["role"] = "follower"
+follower["node"]["name"] = "demo-follower"
+for role, document in [("leader", leader), ("follower", follower)]:
+    lines = [f"{field}: {json.dumps(value)}" for field, value in document.items()
+             if field != "image"]
+    lines += ["image:", "  platform: " + image["platform"],
+              "  measurement: " + json.dumps(image["measurement"])]
+    if "rtmrs" in image:
+        # RTMR indices must be numeric YAML keys, not quoted JSON keys.
+        lines += ["  rtmrs:", *[f"    {i}: {json.dumps(digest)}"
+                                for i, digest in image["rtmrs"].items()]]
+    Path(f"demo/{role}/launch.yaml").write_text("\n".join(lines) + "\n")
+PYTHON
+
+c8s keys sign-launch --key demo/leader.key demo/leader/launch.yaml
+c8s keys sign-launch --key demo/follower.key demo/follower/launch.yaml
+xorriso -as mkisofs -V opkeydata -o demo/leader.iso demo/leader
+xorriso -as mkisofs -V opkeydata -o demo/follower.iso demo/follower
+```
+
+Attach the corresponding ISO to each VM along with its required scratch
+disk, booting the **same image and supported VM shape** for both roles.
+The image is built separately for TDX and SNP; their image digests and
+measurements are different. SNP's launch digest also depends on vCPU count.
+Every `image.measurement` is 96 lowercase hexadecimal characters. TDX
+requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
+pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
+RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
+
+For a leader, `leader.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. A follower must
+always carry its leader's reachable IPv4 address. `node.ip` is optional
+(`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
+IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
+to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
+serves a CDS-issued certificate; arbitrary routes, public WebPKI configuration
+and CORS overrides are not launch settings in this image.
+
+For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
+
+```sh
+kubectl -n YOUR_NAMESPACE create secret generic demo-leader-launch \
+  --from-file=pubkey=demo/leader/pubkey \
+  --from-file=launch.yaml=demo/leader/launch.yaml \
+  --from-file=launch.yaml.sig=demo/leader/launch.yaml.sig
+```
+
+Reference that Secret in the VM's volume with
+`secret: {secretName: demo-leader-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the follower's files and a separate
+Secret. On SNP, the launcher must additionally commit the corresponding
+public-key hash as HOST_DATA; attaching the disk alone is insufficient.
+
+`c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
+and writes an ASN.1 DER signature encoded as one base64 line to
+`<file>.sig`. It does not overwrite an existing signature unless `--force`
+is passed. Any later edit requires a new signature. At boot, `rke2-role.service` calls
+`c8s launch-config stage`, which authenticates those bytes before parsing,
+checks the complete software measurement and role-key relationship against
+verified self-attestation, then publishes the role marker last. Missing,
+unsigned or inconsistent input leaves RKE2 and role-dependent services down.
+Changing role or launch configuration requires a relaunch with a newly
+signed bundle and the corresponding role's hardware-bound public key.
+
+The verified files live in root-only `/run/confos/launch`. `peers.json`
+contains the software/key tuples for this cluster's leader and permitted
+followers; `cds.json` contains only its leader. On a leader with authorized
+followers, `followers.json` contains only those follower identities. Their
+shared measurement-file
+schema carries `operator_key` as the exact PEM string alongside each entry's
+image measurement and TDX RTMR tuple. This lets peers accept both roles while
+CDS clients require the authorized leader despite identical software images.
+The leader publishes only the CDS URL and leader policy to the public
+`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
+and private keys do not enter that ConfigMap. The operator forwards the full
+leader policy to injected workload helpers. NRI and host CDS clients use the
+same leader policy directly from the staged files.
+
+On leaders with an authorized follower policy, `c8s-join-release.service`
+listens on TCP `8444`. A follower's `c8s-join.service` authenticates that leader
+with the pinned image and designated leader key; the leader checks the
+follower's pinned image and an explicitly authorized follower key. Both
+endpoints prove possession of their attested TLS keys. This works with TDX
+and SNP, using the same image and platform tuple throughout each cluster.
+Only the agent credential with its RKE2 CA pin is released, and the follower
+stages it in root-only `/run/confos/rke2-agent-token` before RKE2 may start.
+A leader without authorized followers does not start the release listener.
+
+Enrollment waits indefinitely while the leader is unavailable, using bounded
+attempts with a five-second backoff. Until it succeeds,
+RKE2 agent startup remains blocked; enrollment does not depend on CDS, the
+mesh, Kubernetes or kubelet. Nodes in different datacenters need follower-to-
+leader TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
+for the mesh and CNI. There is no NAT traversal or control-plane failover.
+
+The leader's generated agent credential survives launch staging and service
+restarts within the same boot. All guest runtime state, including RKE2's
+server credential and CA, resets on a full VM reboot. Relaunch followers
+after a leader reboot so they enroll against the new ephemeral cluster.
+
+### Chart-managed defaults
+
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
-- CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one
-  process; EAR validation and signing share that process, so there is no
-  internal Service hop or JWKS fetch between them.
-- allowlist admin is EAR-authorized through CDS; the chart does not render a
+- CDS verifies evidence and signs workload CSRs in one process.
+- allowlist admin uses operator-signed JWTs through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
 - Sandbox identity needs the node addresses CDS may dial for a pod's admission
@@ -107,15 +286,6 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   `--node-cidr <range>` instead: CDS then uses the static range and the chart
   grants no node access. (docs/ratls.md, "Sandbox identity".)
 
-  **Under `--cvm-mode=pod` the inventory is inside each kata guest** and answers
-  on the guest's pod IP, so `c8s install` pins `cds.sandboxInventoryCIDRs` to the
-  cluster's **pod range(s)** (read from `spec.podCIDRs`) instead of leaving CDS
-  to derive node host routes. The address bound is not what separates a
-  workload from its guest's inventory there — both share the guest's IP; the
-  RA-TLS handshake CDS runs against the inventory endpoint is, since only the
-  guest's own attested mesh identity can present that leaf. A CNI that runs its
-  own IPAM leaves `spec.podCIDR` empty; the install then fails and asks for
-  `--node-cidr <pod-cidr>` explicitly.
 - `image.tag` or `image.digest`, `attestationApi.image.tag` or
   `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
@@ -130,8 +300,8 @@ application workloads until those workloads opt in with
 `confidential.ai/cw`.
 
 Install with the CLI. Adopt a running workload as a CW and front it behind
-tls-lb with `--upstream` (see [Existing workload adoption](#existing-workload-adoption)
-and [tls-lb upstream](#tls-lb-upstream)):
+router with `--upstream` (see [Existing workload adoption](#existing-workload-adoption)
+and [router upstream](#router-upstream)):
 
 ```bash
 c8s install \
@@ -155,76 +325,61 @@ c8s install \
 The ref syntax is `<cw-id>=<namespace>/<kind>/<name>[:<port>]`, where kind is any
 resource exposing a pod template at `spec.template` (`deployment`,
 `statefulset`, `daemonset`, or an operator CRD such as `<kind>.<group>`); the
-optional `:<port>` is the tls-lb upstream port, needed on the ref `--upstream`
+optional `:<port>` is the router upstream port, needed on the ref `--upstream`
 selects. After Helm reports the c8s release ready, the CLI patches each workload
 pod template with `confidential.ai/cw: <id>`. Those rollouts go through the
 webhook, and the workload-service reconciler creates the `c8s-<id>` headless
-Services. `--upstream vllm-router` points tls-lb at
+Services. `--upstream vllm-router` points router at
 `c8s-vllm-router.vllm.svc.cluster.local:8000` (its `<cw-id>` must be one of the
 adopted refs, carrying a `:<port>`). With `--resolve-digests=true`, install resolves adopted workload
-images into `nriImagePolicy.bootstrapAllowlist.digests` so image admission (the
-host NRI plugin, or the in-guest policy-monitor under `--cvm-mode=pod`) allows those
-rollouts.
+images into `nriImagePolicy.bootstrapAllowlist.workloads` entries admitting them
+under any command and args, so image admission (the node NRI plugin) allows
+those rollouts.
 
 `c8s install --install-crds=false` passes Helm's `--skip-crds`; CRDs are
 advisory and not required for pod injection. That path also disables the
 CRD-backed status mirror controller; if CRDs are absent at runtime, the
 operator skips that controller rather than failing startup.
 
-## Kata runtime installation and enforcement
-
-`c8s install --cvm-mode=pod` additionally installs the Kata Containers runtime onto
-the cluster: the embedded chart renders the upstream `kata-deploy` DaemonSet
-(which installs QEMU, the kata runtime, and the `containerd-shim-kata-v2`
-shim onto every node) and the `kata-qemu` / `kata-clh` / `kata-qemu-snp` /
-`kata-qemu-tdx` RuntimeClass objects. The host containerd config path (`k8s` vs `rke2`
-layout) is detected from the cluster's kubelet versions.
-
-`--cvm-mode=pod` is **enforcing** — there is no kata-without-enforcement shape:
-
-- the operator's pod webhook injects a `runtimeClassName` into workload pods
-  that don't request one — `kata-qemu`, or `kata-qemu-snp` for pods annotated
-  `confidential.ai/cw`;
-- a `ValidatingAdmissionPolicy` rejects workload pods that request a non-kata
-  `runtimeClassName`;
-- the host-side ratls-mesh, attestation-api, and nri-image-policy are
-  disabled — their function runs inside the kata-guest-base VM image.
-
-Host-namespace pods and system namespaces are exempt. The Kata stack is off
-by default — a plain `c8s install` is unchanged.
-
-See [`docs/kata.md`](kata.md) for the design (why it wraps upstream
-kata-deploy), the threat model, distro support, the one-shot bootstrap-window
-caveat, and the SEV-SNP-host / GPU constraints.
+The default `deny-host-namespaces` policy rejects host namespaces outside
+trusted platform namespaces.
 
 ## Uninstall
 
 `c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
-release (operator, CDS, attestation-api, ratls-mesh, tls-lb, the
-webhook configuration, RuntimeClasses, and the enforcement policy). The
+release (operator, CDS, attestation-api, ratls-mesh, router, the
+webhook configuration and admission policies). The
 `MutatingWebhookConfiguration` is release-tracked, so it is deleted with the
 release — a `failurePolicy: Fail` webhook cannot outlive the operator Service
 and block pod creation cluster-wide.
 
-For a `--cvm-mode=pod` install it then **sweeps the host-side kata artifacts** that the
-`kata-deploy` preStop cleanup cannot guarantee: a short-lived privileged
-DaemonSet removes `/opt/kata`, the containerd runtime drop-in (restarting the
-runtime only when the drop-in was still registered), the pulled
-`kata-guest-base` image, the RKE2 containerd-prep template, and the
-`katacontainers.io/kata-runtime` node labels. The sweep set and host paths are
-read from the release's computed values *before* deletion, so install-time `-f`
-overrides are honored; it is skipped automatically for a non-kata install.
+It then **sweeps the host-side artifacts** that chart hooks cannot guarantee
+were removed: chart-installed NRI policy, ratls-mesh netfilter state, and the
+managed RKE2 containerd-prep template. Baked node-image components are preserved.
+The host paths are read from the release's computed values *before* deletion,
+so install-time `-f` overrides are honored. `--host-sweep=false` skips this cleanup.
+
+The sweep removes:
+
+- the NRI image-policy containerd registration (drop-in or managed config
+  block), binary, config, and state directories. It skips these on the c8s
+  node image, detected via the baked-only `nri-node-ip.service`: that stack is
+  the image's to keep, not the release's to delete;
+- the `RATLS-MESH` chains and base-chain jumps in `iptables` and `ip6tables`,
+  and the `RATLS-MESH-*` ipsets. The mesh's own preStop deliberately keeps the
+  fail-closed guard, so this state survives healthy uninstall. A stale
+  `OUTPUT` redirect blackholes host-originated pod traffic for non-root users;
+- on RKE2, the sentinel-marked containerd template written by containerd-prep
+  and its lock file, skipped on the baked node image by the same rule.
+
+The swept paths are cluster-global, so running two c8s releases in one
+cluster is unsupported: uninstalling either strips the other's host state.
 
 Guardrails:
 
-- Uninstall **refuses to run while pods with a kata RuntimeClass are still
-  scheduled** — pulling the runtime out from under a confidential workload kills
-  it without cleanup. Delete those workloads first, or pass `--force` (the kata
-  VMs keep running unmanaged but cannot restart). The release's own
-  chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) are excluded by
-  release namespace + `app.kubernetes.io/instance`, and the refusal reports how
-  many it skipped; see [`docs/kata.md`](kata.md#uninstalling).
-- `--host-sweep-only` runs only the kata sweep, for a cluster whose release a
+- Uninstall refuses while pods hold encrypted volumes. Delete those workloads
+  first; `--force` bypasses the guard and may leave device mappings behind.
+- `--host-sweep-only` runs only the host sweep, for a cluster whose release a
   bare `helm uninstall` already removed but whose nodes still carry artifacts;
   it uses the chart defaults and the distro detected from the cluster.
 - `--delete-crds` and `--delete-namespace` are **off by default** and
@@ -234,8 +389,7 @@ Guardrails:
 
 Requires the `helm` and `kubectl` CLIs on `PATH`. See
 [`docs/install-flows.md`](install-flows.md#uninstall-flow) for the uninstall
-sequence and [`docs/kata.md`](kata.md#uninstalling) for the host sweep in
-full.
+sequence and host sweep.
 
 ## Chart-managed CDS
 
@@ -251,12 +405,15 @@ whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
 that token (see the README, "Managing the image allowlist"). Without
 `cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
 
-CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
-those flows comes from EAR validation, measurement allowlists, and CA
-continuity checks rather than WebPKI on the Service hop.
+Operator clients construct signed requests through `operatorauth.NewRequest`,
+which binds the token to the actual HTTP method, parsed URL path (including
+any base URL prefix), and an owned copy of the body.
 
-CDS verifies EAR JWTs against its own in-process signer; there is no JWKS
-fetch to a separate component. The chart does not render a CA private key into
+CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
+those flows comes from authenticated certificate issuance and CA continuity
+checks.
+
+The chart does not render a CA private key into
 a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
 public-bundle PVC.
@@ -279,16 +436,25 @@ The value is the PEM **content**, never a file path — a path from the machine
 that rendered the values is meaningless in-cluster, and the chart fails the
 render when the value doesn't look like PEM.
 
-### Operational warning: CDS is a singleton until handoff is enabled
+### Operational warning: CDS is a singleton
 
-By default, CDS runs as a single replica with the in-memory mesh CA
-key, and **any restart is a full re-bootstrap event**: the replacement pod
-generates a fresh CA whose public key is not signed by anything ratls-mesh
-already trusts. `pkg/ratls/cdsclient`'s continuity check then refuses the
-new CA on the next `/ca` poll, CDS keeps signing leaves with the
-new key, no workload trusts them, and the mesh degrades as old leaves
-expire. Recovery is to restart every workload so its get-cert init container
-re-runs the CDS provisioning flow.
+CDS runs as a single replica with the in-memory mesh CA key, and **any
+restart is a full re-bootstrap event**: the replacement pod generates a
+fresh CA whose public key is not signed by anything ratls-mesh already
+trusts. `pkg/ratls/cdsclient`'s continuity check then refuses the new CA on
+the next `/ca` poll, CDS keeps signing leaves with the new key, no workload
+trusts them, and the mesh degrades as old leaves expire. Recovery is to
+restart every workload so its get-cert init container re-runs the CDS
+provisioning flow.
+
+The router discovery endpoints (`/.well-known/mesh-ca.pem`,
+`/.well-known/cds-cert.pem`, `/v1/discovery`) track the new CA without a
+router restart: the c8s-cert sidecar polls CDS's `/ca` every
+`router.certProvisioning.caWatchInterval` (default 1m) over the same
+RA-TLS-verified channel it obtains certificates on, and re-issues its leaf —
+rewriting the served CA bundle and discovery document — as soon as CDS holds
+a CA the served bundle is missing. External clients that pinned the old CA
+must still re-fetch it from the discovery endpoint.
 
 There is **no scheduled in-process CA rotation today** — no cds flag or
 loop drives it, so every CA fingerprint change is a restart-shaped
@@ -298,18 +464,7 @@ continuity check would accept it and workloads would pick it up on their
 next `/ca` refresh, without re-bootstrap. Wiring it into `c8s cds` is
 future work.)
 
-To remove this restriction, enable in-process handoff by setting
-`cds.handoff.enabled=true` in values and pinning `cds.measurements` to CDS's
-launch digest. Handoff also requires `cds.operatorKeys`: both replicas bind a
-canonical hash of that public-key set into their handoff REPORTDATA and reject
-a peer whose hash differs. Enabling handoff without either measurements or
-operator keys fails chart render. With those values set, CDS generates an
-ECDSA handoff signer key in process at startup and self-provisions its handoff
-EAR via its own EAR issuer (no external service to dial). Only the existing
-public operator-key ConfigMap is mounted; no private operator key or
-CA-adjacent Kubernetes Secret is introduced.
-
-Until handoff is enabled:
+With CDS a singleton:
 
 - run CDS with `replicas: 1` and `strategy: Recreate` (default in
   this chart);
@@ -320,114 +475,33 @@ Until handoff is enabled:
 - watch CDS startup logs for the active CA fingerprint — any fingerprint
   change means a restart happened and workload re-provisioning is needed.
 
-After enabling handoff, verify the bootstrap succeeded by checking
-CDS logs for `attested CA handoff enabled` and
-`handoff EAR refreshed` lines. Failures will be logged at warn-level
-without crashing the binary; the handoff handler stays unregistered and the
-restart-fragility window above applies until the operator fixes the
-underlying issue. On a node-as-CVM (non-kata) cluster, `make
-test-e2e-ca-handoff` proves the full path end to end: it runs an attested
-in-cluster probe (`c8s cds request-handoff`) that pulls the CA over `/handoff`
-and verifies it against the served `/ca`. (The probe pod reuses CDS's own
-`--attestation-api-url`, mounting the socket directory from the host when it
-is a `unix://` one — the gke/aks-style install shape. Under kata the endpoint
-is in-guest loopback and under cvmMode=node the URL is an unexpanded
-$(HOST_IP) one, so the script supports neither.)
-
 ### Operator-added allowlist entries across restarts
+
+For the measured node image, CDS stores its database at
+`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
+restarts, but a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the next boot; reapply any later
+operator changes. The CA signing key is in process memory and changes on a
+CDS process restart, so plan for certificate re-bootstrap. This image does
+not expose a persistent-volume switch in launch configuration.
+
+For chart-managed CDS:
 
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator adds with `c8s allowlist add`. With
+whatever an operator writes with `c8s allowlist add` or `apply`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
+restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
 the install seed — workloads pulling those images are denied roughly one worker
 poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
-Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
-entries, are also enforced from the baked floor.
-
-There is one important exception: a **planned CA-adoption roll** transfers the
-peer's complete allowlist (version plus digests) inside the same encrypted
-handoff payload as the CA. The replacement restores that snapshot atomically,
-then applies the install seed additively, before it starts serving. Thus
-operator-added entries survive normal `peerUrl` rollovers even though each pod
-uses `emptyDir`. Freeze allowlist writes while the rollout is in progress: a
-mutation accepted by the old pod after it took the snapshot can miss the new
-pod and must be re-added. A total outage followed by deliberate re-bootstrap
-still has no peer snapshot and resets dynamic entries to the seed.
-
-### Adopting a peer's CA on startup (`cds.handoff.peerUrl`)
-
-Setting `cds.handoff.peerUrl` makes a starting CDS **adopt** the peer's mesh CA
-over `/handoff` instead of generating a fresh one — the same attested pull the
-probe performs, run in process at startup. It requires `cds.handoff.enabled=true`
-(the serving pod must offer `/handoff` for the next roll to adopt from), pins
-the peer with `cds.measurements` (same launch digest), and requires an exact
-`cds.operatorKeys` set match committed into both handoff attestations. It
-**fails closed**: if the peer is unreachable within
-`--handoff-peer-timeout`, denies the handoff, or presents a different operator
-policy, CDS refuses to start rather than mint a divergent trust root. The
-startup log reports `source=adopted-from-peer` or `source=self-generated`.
-
-On SEV-SNP, the measurement pin is LAUNCH_DIGEST. On TDX it is MRTD, which
-covers only the TDVF firmware — two different guest images built against the
-same firmware share an MRTD — and RTMRs (including workload RTMR[3]) are not
-covered by this adoption verdict. Operator-side `c8s verify` can pin the full
-TDX image tuple instead (`--image-manifest`, below); the adoption verdict
-itself remains MRTD-only.
-
-Setting `peerUrl` also flips the rollout to `RollingUpdate`
-(`maxUnavailable: 0`/`maxSurge: 1`): the replacement pod starts and adopts from
-the still-serving old pod before that pod is retired, so the CA survives a
-restart and no workload re-provisions. The sentinel `peerUrl: self` expands to
-the CDS Service URL — the new pod adopts from its own predecessor, which is the
-only Ready Service endpoint while it starts. `peerUrl` cannot be combined with
-`persistence.enabled` (the surge pod cannot share the RWO data PVC; the
-allowlist is instead restored from the encrypted handoff snapshot). Replicas
-stay fixed at 1 either way: EAR signing keys are per pod, so a second
-steady-state endpoint would break EAR verification even though adoption shares
-the CA.
-
-The operator-key hash is a **configuration-continuity check**, not proof of
-operator private-key possession. The public bundle is intentionally readable,
-so a malicious control plane able to boot the same measured CDS image can copy
-the same bundle. Preventing that clone from requesting the CA requires a future
-interactive operator approval or attestation-gated secret-release primitive.
-Exact-set matching also means changing `cds.operatorKeys` cannot ride the same
-adoption roll; until a signed policy-transition mechanism exists, rotate that
-set only as part of a deliberate trust-root re-bootstrap.
-
-**Two-phase install** (adoption is a deliberate day-2 opt-in):
-
-1. Install with `cds.handoff.enabled=true`, pinned `cds.measurements`, and
-   `cds.operatorKeys`, but leave `peerUrl` empty — the first CDS cold-starts
-   and self-generates (`Recreate`) while already serving `/handoff`.
-2. Once it is serving, enable adoption:
-   `helm upgrade <release> ... --reuse-values --set cds.handoff.peerUrl=self`.
-   The upgrade surges a new pod that adopts the running CA; every subsequent
-   roll then preserves it.
-
-Verify with `kubectl rollout restart deploy/<release>-cds`: the new pod logs
-`source=adopted-from-peer` with the **same** CA fingerprint as before the
-restart (a plain restart without adoption changes it).
-
-**If the sole pod dies involuntarily** (container crash, OOM kill, node
-failure), no peer survives to adopt from, so the replacement fails closed and
-crash-loops — by design, since silently minting a fresh CA is exactly what
-adoption exists to prevent. The mesh CA is gone regardless; recover with a
-deliberate re-bootstrap: `helm upgrade <release> ... --reuse-values --set
-cds.handoff.peerUrl=""` (cold start, new trust root, workloads re-provision),
-then re-enable adoption with `--set cds.handoff.peerUrl=self`.
-
-**Adoption does not renew the CA.** Every handoff preserves the original
-certificate and its `NotAfter`, so a chain of successful rollovers still
-approaches the same expiry wall. CDS reports `not_after` at startup and
-`/readyz` turns 503 inside `cds.ca.minValidity`; scheduled `CARotator` wiring is
-not shipped. Plan a deliberate re-bootstrap (and workload re-provisioning)
-before expiry, and choose `cds.ca.certValidity` with that maintenance horizon
-in mind on the initial cold start.
+(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
+chart-seeded component entries are unaffected — they are re-seeded and, unlike
+dynamic entries, are also admitted from the plugin's `always_allow`. The restart also resets the allowlist version counter, and
+every enforcer ignores a served version at or below the one it last applied
+(`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
+that had applied version N stays on that policy until the restarted
+CDS counts past N again, or the plugin itself restarts.
 
 ## Attestation-api
 
@@ -452,7 +526,7 @@ Two operational notes:
 `c8s verify` (and `c8s cds verify`, shorthand for `c8s verify --kind cds`) fetches
 a component's TEE attestation evidence — AMD SEV-SNP or Intel TDX — and verifies it
 against the hardware signature chain plus a pinned launch measurement. Use it to
-confirm CDS — or the load balancer — is a genuine TEE running the expected code
+confirm CDS — or the router — is a genuine TEE running the expected code
 after install.
 
 It verifies **in-process** with `attestation-go` — the Go port of the same
@@ -463,10 +537,7 @@ HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
 report; no container runtime is needed.
 
 ```bash
-# CDS's RA-TLS endpoint answers unattested clients. Under kata the baked guest
-# env exempts the front-door port from the in-guest mesh redirect
-# (C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 — see docs/kata.md), so a plain
-# port-forward reaches it:
+# CDS's RA-TLS endpoint answers unattested clients:
 kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
 
 c8s cds verify https://localhost:8443 --measurements <sha384-launch-digest>
@@ -479,18 +550,10 @@ PKI/SAN mismatch when dialing localhost or a pod IP is fine — `verify` trusts
 the attestation embedded in the serving cert, not the certificate chain.
 
 The launch digest(s) to pin are the same values discussed under measurement
-pinning (kata guest digest via `sev-snp-measure`, or the node CVM digest). They
+pinning (the node CVM digest). They
 are enforced client-side against the report's launch measurement; with no
 `--measurements` the command still runs but prints an UNSAFE warning — any
 genuine TEE is accepted.
-
-`--init-data <sha256-hex>` pins the guest's init-data document: the kata shim
-commits `sha256(document)` at launch, and a verdict pinned this way fails
-unless the evidence commits exactly that digest. The document renders
-deterministically from the pod's role and CDS measurement set (`pkg/initdata`),
-so the digest comes from the same pipeline that chose those measurements. With
-no `--init-data` the committed digest is still shown on SNP/TDX, labelled as
-compared against nothing.
 
 On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
 guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
@@ -521,7 +584,7 @@ images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
 rootfs pins with it.
 
 `--rtmr 3=<sha384-hex>` can additionally pin the runtime register — the ordered
-operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
+operator-key/workload extend chain ([`runtimemeasure`](https://github.com/confidential-dot-ai/attestation-go/tree/main/runtimemeasure)) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
 anything and reproduce that chain. (`--expected-rtmr3` is the former spelling of
@@ -535,8 +598,7 @@ and `verify` derives the bare operator-key seed,
 — one register, one expected value — and `--operator-pkey` carries the same
 `--image-manifest` requirement. Note its scope: it pins the **bare** seed,
 i.e. a node with no per-workload RTMR[3] extends on top. That is what every
-node reports today, because the workload measurer ships only inside the kata
-guest image; `c8s get-kubeconfig` is the command that also folds
+node reports today; `c8s get-kubeconfig` is the command that also folds
 `--workload-image` extends into the expected register. Supplying any of these
 flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
 has no runtime measurement registers.
@@ -567,7 +629,7 @@ front door's live TLS handshake presenting a serving certificate the discovery
 evidence does not attest (a WebPKI front door, whatever the document's
 `public_tls.mode` declares — the verdict keys on the handshake observed on the
 verifier's own connection at verify time, not the host-served declaration;
-what is proven is the tls-lb pod's TEE residency and measurement, not the TLS
+what is proven is the router pod's TEE residency and measurement, not the TLS
 endpoint clients reach), a discovery target fetched over a non-TLS connection
 (no live handshake observed — the declared `public_tls.mode` is then the only
 mode signal, a host-served claim nothing authenticates), and attest-pq or
@@ -582,13 +644,6 @@ Caveats the output surfaces:
 - **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
   certificate key, not a per-request nonce, so it proves "this key was born in a
   TEE with this measurement" but not "freshly now" (`fresh: false`).
-- **Reachability under kata.** Reach each component on its public/host address,
-  not the in-cluster ClusterIP — the ClusterIP path goes through the mesh and
-  demands an attested client cert (`tls: certificate required`). CDS's RA-TLS
-  endpoint and the tls-lb's nginx serving port both answer unattested clients on
-  their public address (the tls-lb serves `/v1/discovery` there with no client
-  cert), so `c8s cds verify` and `c8s verify <lb>` work without any mesh changes.
-
 ### Trust gate: `c8s get-kubeconfig`
 
 `c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
@@ -603,7 +658,7 @@ and again on the RA-TLS credential-release connection:
   build-artifact manifest carrying all three fields under its `tdx` object. A
   generic artifact-hash `manifest.json` is not an image pin and is rejected;
 - **RTMR[3] chain (TDX)** — the register must equal the operator-key seed
-  (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
+  (`runtimemeasure.Seed` over the exact pubkey PEM bytes)
   extended, in order, by each digest-pinned `--workload-image` ref (tags are
   rejected). With no `--workload-image` the register must equal the bare seed;
 - **guest image + operator key (SEV-SNP)** — the report's MEASUREMENT must be
@@ -615,6 +670,44 @@ and again on the RA-TLS credential-release connection:
   its validity window (NotBefore with a bounded 5-minute skew, NotAfter with
   none) and, being self-signed, verify its own signature with its attested
   key.
+
+The released kubeconfig's client certificate is
+`CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
+node-image) TTL. The node image's baked `cred-release-rbac` RKE2 AddOn binds
+that group to the built-in `cluster-admin` ClusterRole through ordinary RBAC.
+RKE2 reconciles AddOns asynchronously, so `cred-release.service` keeps its
+listener closed until `psa-ready.sh` sees that binding plus the baked
+`confos-psa-level` policy and binding. The gate then uses a temporary,
+namespace-create-only synthetic principal for two server-side dry-runs: a
+Restricted namespace must be admitted and a privileged namespace must be
+denied by that exact policy and validation. A released credential is therefore
+both authorized and behind a live Restricted namespace floor the moment it is
+issued.
+`system:masters` is deliberately avoided because it bypasses authorization
+and admission webhooks and cannot be revoked through RBAC. The default group
+is only meaningful where such a binding exists: on a cluster that is not the
+c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
+for a group that cluster already authorizes.
+
+Do not read the binding as a privilege boundary. In this node cluster
+`cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
+PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
+`kubectl` away. RBAC is used for revocability and policy, not containment; the
+credential's blast radius is bounded by who can obtain it (the attestation gate
+above), by the one-hour TTL, and by the verity root and per-boot ephemeral
+writable state of the guest.
+
+Revocation is a launch-time decision. Deleting or editing the live
+ClusterRoleBinding cuts access immediately, but only until the next boot: the
+manifest is baked into the read-only root and everything RKE2 writes, the
+cluster state included, lives on the scratch disk, which is re-encrypted with
+a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
+are lost with it, so there is no in-guest switch that survives a restart, by
+design. To revoke durably, relaunch with a rotated leader launch key and
+updated signed documents and peer key sets. Every boot requires valid
+`opkeydata`; omitting it prevents the node from starting. A certificate already
+issued remains usable against its original live cluster until expiry or an
+RBAC change.
 
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,
@@ -631,7 +724,7 @@ workload set to it.
 The webhook only reads pod metadata. A `ConfidentialWorkload` CR is not
 required for injection. The single webhook entry (`pods.c8s.confidential.ai`)
 excludes the release namespace via its namespaceSelector, so the chart's own
-pods never hit the webhook during bootstrap; tls-lb's get-cert containers are
+pods never hit the webhook during bootstrap; router's get-cert containers are
 rendered directly into its pod template by the chart instead of injected.
 
 Opt a pod template in with:
@@ -674,7 +767,7 @@ get-cert \
   --san=<derived from confidential.ai/cw, e.g. c8s-api.default.svc> \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
-  --key-mode=<webhook.certVolume.keyMode> \
+  --ca-out=/etc/c8s/certs/ca.crt \
   --renew-interval=<webhook.getCert.renewInterval> \
   --reload-nginx=<from annotation> \
   --continue-on-initial-error
@@ -682,91 +775,121 @@ get-cert \
 
 `--key-out` is idempotent: on a kubelet restart of the sidecar it reuses the
 key that's already on disk, so the previously-issued cert chain stays valid.
+`tls.crt` is the full chain (leaf first, mesh CA after); `ca.crt` is the mesh
+CA alone, world-readable, for applications that take the trust anchor as a
+separate file (`mysqld --ssl-ca`, clients doing `VERIFY_CA` against peers on
+the mesh). File names are overridable per pod with `confidential.ai/c8s-cert-file`,
+`confidential.ai/c8s-key-file`, and `confidential.ai/c8s-ca-file`.
+
+`tls.key` is written `0640` owned by the get-cert user (UID/GID 65532, the pod's
+`fsGroup`). An image whose entrypoint starts as root and then drops to a
+service user (`gosu`, `su`) loses supplementary groups and can no longer read
+it; either run the container as UID 65532, or have the entrypoint copy the
+key into a directory the service user owns before dropping privileges.
 The `c8s-cert-wait` init container (`/c8s probe-file --wait /etc/c8s/certs/tls.crt`)
 gates the application containers on the initial cert being written: it blocks
 until the cert exists, then exits, and normal init-completion ordering holds the
-workload until then — fail-closed. It is a plain init container rather than a
-`startupProbe` on the sidecar because the locked `kata-qemu-snp` guest denies
-`ExecProcessRequest` by design, so an exec probe could never pass there and the
-workload would hang in `Init`; a container blocking on its own is a
-`CreateContainerRequest` the guest allows. Renewals rewrite the file on disk;
+workload until then — fail-closed. Renewals rewrite the file on disk;
 application-level TLS reload remains the workload's responsibility unless the
 pod opts into one of the c8s reload annotations.
-
-The sidecar is long-lived rather than a run-once init container because under
-kata it doubles as the pidns anchor for `shareProcessNamespace` — see
-`docs/kata.md` for the underlying constraint.
 
 Platform-owned workloads can specialize the same webhook behavior with typed
 c8s annotations for the cert volume, cert/key filenames, renewal interval,
 nginx reload, Secret watch paths, discovery output, and get-cert UID/GID.
-(tls-lb, living in the webhook-excluded release namespace, renders equivalent
+(router, living in the webhook-excluded release namespace, renders equivalent
 get-cert containers directly from the chart's templates instead.) The
 webhook rejects incomplete reload-watch or discovery annotation sets during pod
 admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.
 
-## tls-lb upstream
+## router public TLS modes
+
+`router.publicTLS.mode` selects which credential terminates public TLS at the
+front door:
+
+- `cds` (default) — get-cert provisions a mesh-CA-issued serving leaf into a
+  pod-local volume; the key stays inside the pod's TEE.
+- `webpki` — nginx serves an operator-supplied `publicTLS` Secret; the key is
+  host-visible.
+- `acme` — the `c8s acme` sidecar keeps one multi-SAN WebPKI certificate for
+  the validated router SAN list via ACME HTTP-01: nginx's :80 server proxies
+  `/.well-known/acme-challenge/` to the sidecar's loopback challenge listener
+  and 301s everything else to https. The CA's validation fetch arrives on that
+  port, so the mode needs :80 reachable from the internet, not just from the
+  cluster. Key, chain, and ACME account state live
+  in a Memory-medium emptyDir — TEE-held under a confidential runtime (which
+  this mode requires), lost with the pod and re-issued on recreation (point
+  the sidecar at an ACME staging directory in tests to stay clear of the CA's
+  duplicate-certificate limits). Renewal fires at 2/3 lifetime; each install
+  SIGHUPs nginx. On start the sidecar writes a self-signed placeholder so
+  nginx, whose config names the cert files, can start before the first
+  issuance.
+
+The mode is a trust statement, not plumbing: the attestation sidecar commits
+it into the attest-pq and attest-lb report_data transcripts and echoes it as
+`front_door_mode`, and attest-lb — the transport binding to the exact serving
+leaf — is served only for the TEE-held-key modes, `cds` and `acme`; `webpki`
+is attest-pq-only.
+
+## router upstream
 
 ### Built-in allowlist route
 
-The chart publishes CDS's complete `/allowlist` API through tls-lb by default.
+The chart publishes CDS's complete `/allowlist` API through router by default.
 It renders exact `/allowlist` and `/allowlist/` prefix locations backed by the
 release's chart-managed CDS Service, so lookalike paths such as `/allowlisted`
-are not exposed. The tls-lb-to-CDS hop verifies CDS's RA-TLS attestation using
+are not exposed. The router-to-CDS hop verifies CDS's RA-TLS attestation using
 `cds.measurements`; `c8s install --measurements` populates that pin in node-CVM
 mode. An empty pin still verifies that the peer is a TEE but accepts any launch
 measurement, which is unsafe outside development.
 
 Before nginx collapses requests onto the loopback proxy connection, it
 rate-limits the route while it still has the public client address. Mutation
-methods are limited per client (`tlsLb.allowlist.rateLimit.requestsPerSecond`/
+methods are limited per client (`router.allowlist.rateLimit.requestsPerSecond`/
 `burst`, default 1 r/s, burst 5) and in aggregate across all clients
 (`totalRequestsPerSecond`/`totalBurst`, default 8 r/s, burst 15). The
 aggregate bound matters because CDS rate-limits per source IP and sees every
-front-door request as the one tls-lb pod IP: without it, many distinct public
+front-door request as the one router pod IP: without it, many distinct public
 clients each inside their per-client budget could drain the single CDS bucket
 that signed operator writes share. The chart requires the per-client values
 not to exceed the totals and the totals to stay below `cds.rateLimit`/
 `rateBurst`. Reads (GET/HEAD) are limited per client under
-`tlsLb.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
+`router.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
 read pressure on CDS — which also serves attestation issuance and node
 allowlist fetches — stays bounded; CORS preflights are exempt. If a flood
 saturates the front-door buckets, signed writes still work over a direct CDS
 URL or port-forward, which CDS accounts under the caller's own source IP.
 LoadBalancer and NodePort Services default to `externalTrafficPolicy: Local`
-while this route or the attestation sidecar (`tlsLb.attest.enabled`) renders,
+while this route or the attestation sidecar (`router.attest.enabled`) renders,
 so nginx receives the public source address their per-client keys need;
-`tlsLb.service.externalTrafficPolicy` overrides (Local delivers traffic only
-through nodes that run the tls-lb pod).
+`router.service.externalTrafficPolicy` overrides (Local delivers traffic only
+through nodes that run the router pod).
 
 The attestation sidecar bounds what one client may hold as well as how fast it
-may ask: 512 concurrent sessions and 512 handshakes in flight per client
-address (an IPv6 client is one /64), inside pools of 8192 each. A pool that is
-full gives up an entry only from a client above the share the pool divides
-between its holders and the caller, and never below 8 entries, so a client
-holding a handful is not drained by one holding thousands. Once every holder is
-down to that floor — which takes 1024 client addresses holding sessions — a new
-session is refused with 503 until one expires; established sessions are never
-taken to admit a new one.
+may ask: 512 concurrent sessions per client address (an IPv6 client is one
+/64), inside a pool of 8192. A pool that is full gives up the idlest session,
+and only from a client above the share the pool divides between its holders
+and the caller, never below 8 entries, so a client holding a handful is not
+drained by one holding thousands. Once every holder is down to that floor —
+which takes 1024 client addresses holding sessions — a new session is refused
+with 503 until one expires.
 
 The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still
 require the short-lived, body-bound operator token generated by
 `c8s allowlist --operator-key`; the operator private key is never mounted in
-tls-lb or CDS.
-Use the tls-lb URL with `c8s allowlist --url` and pin tls-lb's launch digest
-with `--measurements` only when `tlsLb.publicTLS.secretName` is empty
-(`public_tls.mode=cds`). With a configured WebPKI secret, the public certificate
-is not yet bound to the discovery attestation and the CLI refuses that front
-door. Use a direct CDS RA-TLS URL (or a CDS port-forward) and pin the CDS launch
-digest instead.
+router or CDS.
+Use the router URL with `c8s allowlist --url` and pin router's launch digest
+with `--measurements` only when `router.publicTLS.mode` is `cds`. In the other
+modes the public certificate is not yet bound to the discovery attestation and
+the CLI refuses that front door. Use a direct CDS RA-TLS URL (or a CDS
+port-forward) and pin the CDS launch digest instead.
 
-Set `tlsLb.allowlist.enabled=false` to remove this route. For compatibility,
-an explicit `tlsLb.routes` entry whose path is `/allowlist` or `/allowlist/`
+Set `router.allowlist.enabled=false` to remove this route. For compatibility,
+an explicit `router.routes` entry whose path is `/allowlist` or `/allowlist/`
 takes precedence and suppresses the built-in route.
 
-tls-lb proxies its catch-all route to one upstream, `tlsLb.upstream.address`,
+router proxies its catch-all route to one upstream, `router.upstream.address`,
 an opaque `host:port` the chart never interprets. For a workload run as the
 operator-managed headless Service (annotated `confidential.ai/cw`, see
 [Injection contract](#injection-contract)), that upstream must be the headless
@@ -779,7 +902,7 @@ is why the explicit container port is required.
 
 `c8s install --upstream <cw-id>` builds that string for you from an adopted
 workload: `<cw-id>` must be one of your `--workload-ref` ids and that ref must
-carry a `:<port>`, and install sets `tlsLb.upstream.address` to
+carry a `:<port>`, and install sets `router.upstream.address` to
 `c8s-<id>.<ns>.svc.cluster.local:<port>` (the ref's namespace and port). The
 chart recognizes that headless-Service address shape as mesh-wrapped and admits
 the plaintext http hop; any other address must be app-TLS (see below):
@@ -788,27 +911,27 @@ the plaintext http hop; any other address must be app-TLS (see below):
 c8s install --namespace c8s-system \
   --workload-ref infer=vllm/deployment/serving:8000 --wait \
   --upstream infer
-# tlsLb.upstream.address = c8s-infer.vllm.svc.cluster.local:8000
+# router.upstream.address = c8s-infer.vllm.svc.cluster.local:8000
 ```
 
-Without `--upstream`, `tlsLb.upstream.address` is used as-is: an upstream that
+Without `--upstream`, `router.upstream.address` is used as-is: an upstream that
 is not a c8s-managed workload (an existing Service, an external address). The
 chart cannot verify a manual address resolves to pod IPs the mesh intercepts,
 so it must be `protocol: https` with `tls.verify: true`: an upstream that
 terminates and authenticates TLS itself (app-TLS). There is no
 plaintext-to-unattested escape hatch and no default upstream.
 
-Leaving the upstream unset is legal: tls-lb installs and serves its cert,
+Leaving the upstream unset is legal: router installs and serves its cert,
 discovery, and any explicit routes with **no catch-all** `location /` until one
 is wired. This is the install-then-attach flow: `c8s install` stands up the
 front door, and the operator attaches the workload later (`--upstream`, or a
-verified-https `tlsLb.upstream.address` via `-f`). An unmatched request gets
+verified-https `router.upstream.address` via `-f`). An unmatched request gets
 nginx's default 404 until then.
 
 The chart rejects, at render time, with stable `kind=` markers (the same the
 chart tests assert on):
 
-- `tlslb_unsecured_upstream`: a `tlsLb.upstream.address` that is not a
+- `router_unsecured_upstream`: a `router.upstream.address` that is not a
   `c8s-<id>.<ns>.svc.cluster.local` headless-Service address is a plaintext http
   backend, or https without `tls.verify=true`. Only a verified-https (app-TLS)
   manual address is admitted; there is no acknowledgment to override this. To
@@ -817,29 +940,30 @@ chart tests assert on):
   unmeshed, and the always-on cw guard drops it, so the hop fails closed rather
   than running plaintext.
 - `workload_https_upstream`: the address is a `c8s-<id>` headless Service (a
-  mesh-wrapped upstream) with `tlsLb.upstream.protocol=https`. That hop is
+  mesh-wrapped upstream) with `router.upstream.protocol=https`. That hop is
   plaintext at the app layer (the mesh wraps it in attested mTLS), so an https
   protocol could only fail at runtime; use http for a mesh-wrapped upstream.
 
-The same secured-backend rule applies to every `tlsLb.routes[].backend`: it
+The same secured-backend rule applies to every `router.routes[].backend`: it
 must use `protocol: https` with `tls.verify: true` (app-TLS). A plaintext http
-or unverified-https route backend fails the render (`tlslb_unsecured_route`);
+or unverified-https route backend fails the render (`router_unsecured_route`);
 there is no acknowledgment to override it. Routes have no default backend, so
 this only affects routes you configure. A confidential workload is reached via
-`tlsLb.upstream` (the `--upstream` flow), not a route.
+`router.upstream` (the `--upstream` flow), not a route.
 
 The mesh guarantee holds only when `--upstream` names a real cw workload: the
 CLI checks the id is one of the adopted refs, but cannot confirm `c8s-<id>`
 fronts attested cw pods. A wrong id derives a headless Service that resolves to
-nothing (tls-lb has no backend) rather than a plaintext leak; the runtime
+nothing (router has no backend) rather than a plaintext leak; the runtime
 boundary that a peer is a genuine cw pod is the mesh's always-on cw inbound
 guard, not this render guard.
 
 ## Certificate file permissions
 
-`get-cert` writes the private key with the mode passed by `--key-mode`. The
-webhook default is `0640`, and it sets `fsGroup: 65532` on injected pods that
-do not already define an `fsGroup`. This lets application containers running
+`get-cert` writes private keys with mode `0640` (owner read/write, group read)
+in setgid directories and `0600` (owner read/write) elsewhere, on every write.
+The webhook sets `fsGroup: 65532` on injected pods that do not already
+define an `fsGroup`. This lets application containers running
 as a different non-root UID read `tls.key` through the shared group.
 
 Relevant values:
@@ -848,7 +972,6 @@ Relevant values:
 webhook:
   certVolume:
     fsGroup: 65532
-    keyMode: "0640"
   getCert:
     renewInterval: 2h
     runAsUser: 65532
@@ -859,7 +982,7 @@ webhook:
 Set `webhook.certVolume.fsGroup` to `-1` to disable pod `fsGroup` mutation.
 The webhook preserves an existing pod `fsGroup`.
 
-For Kata deployments that require UID 0 inside the guest, set
+For workloads that require UID 0, set
 `webhook.getCert.runAsUser=0`, `webhook.getCert.runAsGroup=0`, and
 `webhook.getCert.runAsNonRoot=false`. The install CLI exposes those as
 `--webhook-get-cert-run-as-user`, `--webhook-get-cert-run-as-group`, and
@@ -886,14 +1009,14 @@ it:
 | `c8s-cds-ingress` | cds | `cds.port` (RA-TLS; also the NodePort route) |
 | `c8s-operator-ingress` | operator | 9443 webhook, 8081 probes, 8080 metrics |
 | `c8s-volumed-ingress` | volumed | nothing (it serves a node-local Unix socket) |
-| `c8s-tls-lb-ingress` | tls-lb | `tlsLb.nginx.httpsPort` |
+| `c8s-router-ingress` | router | `router.nginx.httpsPort`, plus the :80 HTTP-01/redirect server in `publicTLS.mode=acme` |
 
 They are ingress-only. `ratls-mesh-tcp-only-egress` already selects every pod in
 the namespace and allows all TCP, and NetworkPolicies union, so an egress rule
 on one component would be allowed by that policy regardless.
 
 **None of them restricts the source of a connection** — no rule carries a
-`from`, so each one narrows which port answers, not who may connect. tls-lb is
+`from`, so each one narrows which port answers, not who may connect. router is
 the public front door and stays reachable from off-cluster; the API server that
 dials the admission webhook has no address a selector could name; get-cert runs
 beside every adopted workload in every namespace; and the CDS NodePort route
@@ -947,7 +1070,7 @@ The chart ships no default image tag, so a bare `helm template` must set one.
 `c8s install` injects this for you; `main` here is the same fallback tag it
 uses for a non-release build. The simplest validation disables the image-policy
 component, so only image tags are required (no digests). Disabling it renders
-only because the chart's default `attestationApi.cvmMode=node` bakes its own
+only because the chart's default `attestationApi.cvmMode=bare-metal` bakes its own
 policy plugin and so is exempt from the `require_host_image_policy` guard; other
 modes (gke/aks) must keep nri-image-policy enabled and digest-pinned, as in the
 full-shape render below.

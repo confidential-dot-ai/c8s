@@ -58,7 +58,7 @@ jobs:
           fi
 
       # Repository-monotonic run IDs serialize release calculation without
-      # dropping a middle merge from the Docker -> Kata/e2e workflow chain.
+      # dropping a middle merge from the Docker -> e2e workflow chain.
       - name: Wait for older Docker runs on main
         env:
           GH_TOKEN: ${{ github.token }}
@@ -172,7 +172,7 @@ jobs:
         run: make build-c8s VERSION="$RELEASE_TAG"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -220,8 +220,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ inputs.target-sha }}
             org.opencontainers.image.version=${{ needs.calculate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          # The apt layers come from the :main image CI built and scanned;
+          # see docker.yml.
+          cache-from: type=registry,ref=${{ matrix.image }}:main
 
       - name: Validate commit-scoped staging image
         env:
@@ -235,7 +236,7 @@ jobs:
 
       - name: Scan release image
         id: container-scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: ${{ matrix.image }}:release-${{ inputs.target-sha }}
           fail-build: false
@@ -538,8 +539,7 @@ jobs:
                 new_tags+=(latest)
               fi
             fi
-            # The downstream Kata build resolves component manifests by this
-            # commit tag. Point it at the canonical all-components release
+            # Point this commit tag at the canonical all-components release
             # rebuild before the parent Docker workflow completes.
             if ! grep -Fxq -- "$short_sha" <<< "$repo_tags" || \
                [ "$(oras resolve "$image:$short_sha")" != "$source_digest" ]; then

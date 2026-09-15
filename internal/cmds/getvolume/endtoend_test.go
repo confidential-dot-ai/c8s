@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -24,9 +24,16 @@ type recordingOps struct {
 	mounted []string
 	key     []byte
 	verity  volume.Verity
+	mounts  []recordedMount
 }
 
-func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key []byte) error {
+// recordedMount is what one Mount was asked to do.
+type recordedMount struct {
+	fsType   string
+	readOnly bool
+}
+
+func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key []byte, readOnly bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.calls = append(o.calls, "CryptOpen "+device+" "+mapper)
@@ -34,7 +41,12 @@ func (o *recordingOps) CryptOpen(_ context.Context, device, mapper string, key [
 	return nil
 }
 
-func (o *recordingOps) CryptClose(context.Context, string) error { return nil }
+func (o *recordingOps) CryptClose(context.Context, string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, "CryptClose")
+	return nil
+}
 
 func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.Verity) error {
 	o.mu.Lock()
@@ -44,17 +56,39 @@ func (o *recordingOps) VerityOpen(_ context.Context, _, mapper string, v volume.
 	return nil
 }
 
-func (o *recordingOps) VerityClose(context.Context, string) error { return nil }
-
-func (o *recordingOps) MountRO(_ context.Context, _ string, target *os.File) error {
+func (o *recordingOps) VerityClose(context.Context, string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.calls = append(o.calls, "MountRO")
-	o.mounted = append(o.mounted, target.Name())
+	o.calls = append(o.calls, "VerityClose")
 	return nil
 }
 
-func (o *recordingOps) Unmount(context.Context, string) error { return nil }
+func (o *recordingOps) MountRO(_ context.Context, _ string, target *os.File, fsType string) error {
+	return o.recordMount("MountRO", target, fsType, true)
+}
+
+func (o *recordingOps) MountRW(_ context.Context, _ string, target *os.File, fsType string) error {
+	return o.recordMount("MountRW", target, fsType, false)
+}
+
+func (o *recordingOps) recordMount(op string, target *os.File, fsType string, readOnly bool) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, op)
+	o.mounted = append(o.mounted, target.Name())
+	o.mounts = append(o.mounts, recordedMount{fsType: fsType, readOnly: readOnly})
+	return nil
+}
+
+func (o *recordingOps) Unmount(context.Context, string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, "Unmount")
+	return nil
+}
+
+// This path never sweeps: the daemon under test is already serving.
+func (o *recordingOps) ListMappings(context.Context) ([]string, error) { return nil, nil }
 
 // fixedIdentity stands in for the kernel peer-credential lookup, which needs a
 // real pod cgroup. Everything downstream of it is the production path.
@@ -142,6 +176,9 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 	if ops.verity.RootHash != testBlob(t).Verity.RootHash {
 		t.Error("the verity anchor did not come from the blob")
 	}
+	if len(ops.mounts) != 1 || ops.mounts[0].fsType != "erofs" || !ops.mounts[0].readOnly {
+		t.Errorf("mount = %+v, want read-only erofs", ops.mounts)
+	}
 
 	// It landed in this pod's own emptyDir for this volume, and nowhere else.
 	if len(ops.mounted) != 1 {
@@ -205,6 +242,43 @@ func TestSidecarReportsADaemonRefusal(t *testing.T) {
 	}
 }
 
+// A mutable blob travels the same delivery path and skips verity: the daemon
+// mounts the crypt device itself, writable ext4.
+func TestSidecarOpensAMutableVolumeEndToEnd(t *testing.T) {
+	endpoint := startInventory(t)
+	_, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testMutableBlobJSON(t)}},
+	})
+
+	socketDir := t.TempDir()
+	ops := startDaemon(t, socketDir)
+
+	cfg := flowConfig(t, url)
+	cfg.SocketDir = socketDir
+	daemon, daemonBase := daemonClient(cfg)
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+	want := []string{
+		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + e2ePodUID + "-weights",
+		"MountRW",
+	}
+	if len(ops.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", ops.calls, want)
+	}
+	for i, w := range want {
+		if ops.calls[i] != w {
+			t.Fatalf("calls = %v, want %v", ops.calls, want)
+		}
+	}
+	if len(ops.mounts) != 1 || ops.mounts[0].fsType != "ext4" || ops.mounts[0].readOnly {
+		t.Errorf("mount = %+v, want writable ext4", ops.mounts)
+	}
+}
+
 // containsDir reports whether want is one of path's components.
 func containsDir(path, want string) bool {
 	for path != "/" && path != "." {
@@ -216,87 +290,36 @@ func containsDir(path, want string) bool {
 	return false
 }
 
-// startGuestDaemon runs a real volumed in its in-guest shape on the compiled
-// loopback port, over a kata ephemeral directory with the volume's mount point
-// already materialised.
-func startGuestDaemon(t *testing.T) *recordingOps {
-	t.Helper()
-	ephemeral := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(ephemeral, volumed.KubeVolumeName("weights")), 0o755); err != nil {
-		t.Fatalf("mkdir ephemeral volume: %v", err)
-	}
-
-	ops := &recordingOps{}
-	srv := &volumed.Server{
-		Identity: volumed.GuestIdentity{},
-		Opener:   &volumed.Opener{Ops: ops, Targets: volumed.GuestTargets{Root: ephemeral}},
-		Devices:  fixedDevices{},
-	}
-	l, err := net.Listen("tcp", volumed.GuestAddr())
-	if err != nil {
-		t.Skipf("guest volume port %d unavailable here: %v", volumed.GuestPort, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); _ = srv.Serve(ctx, l) }()
-	t.Cleanup(func() { cancel(); <-done })
-	return ops
-}
-
-// startGuestInventory serves the token route on the compiled guest loopback
-// port, which is where the sidecar redeems under kata.
-func startGuestInventory(t *testing.T) {
-	t.Helper()
-	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
-	if err != nil {
-		t.Fatal(err)
-	}
-	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(workloadclaims.GuestTokenPort)))
-	if err != nil {
-		t.Skipf("guest token port %d unavailable here: %v", workloadclaims.GuestTokenPort, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
-	t.Cleanup(func() { cancel(); l.Close() })
-}
-
-// The kata path end to end, with nothing mounted: the sidecar redeems its token
-// on guest loopback, reads the blob from CDS, and hands it to an in-guest
-// volumed that mounts into kata's ephemeral directory — the same delivery the
-// node path runs over the host unix sockets.
-func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
-	startGuestInventory(t)
+// At termination the sidecar posts a close — with the run context already gone,
+// as SIGTERM leaves it — and the daemon unwinds the pod's whole stack.
+func TestSidecarClosesItsVolumesAtTermination(t *testing.T) {
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
 	})
-	ops := startGuestDaemon(t)
+
+	socketDir := t.TempDir()
+	ops := startDaemon(t, socketDir)
 
 	cfg := flowConfig(t, url)
-	cfg.WorkloadClaimsGuest = true
-	cfg.SocketDir = "" // nothing is mounted in a guest
-
+	cfg.SocketDir = socketDir
 	daemon, daemonBase := daemonClient(cfg)
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), cfg.Endpoint(), daemon, daemonBase); err != nil {
+	runCtx, cancel := context.WithCancel(context.Background())
+	if err := openAllWith(runCtx, cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
 		t.Fatalf("open: %v", err)
+	}
+	cancel()
+
+	closeCtx, done := context.WithTimeout(context.Background(), closeTimeout)
+	defer done()
+	if err := closeWith(closeCtx, daemon, daemonBase); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 
 	ops.mu.Lock()
 	defer ops.mu.Unlock()
-	want := []string{
-		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + volumed.GuestPodUID + "-weights",
-		"VerityOpen c8s-verity-" + volumed.GuestPodUID + "-weights",
-		"MountRO",
-	}
-	for i, w := range want {
-		if i >= len(ops.calls) || ops.calls[i] != w {
-			t.Fatalf("calls = %v, want %v", ops.calls, want)
-		}
-	}
-	stored, err := testBlob(t).DecodeKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(ops.key) != string(stored) {
-		t.Error("the key handed to dm-crypt is not the one CDS released")
+	got := strings.Join(ops.calls, ",")
+	if !strings.HasSuffix(got, "Unmount,VerityClose,CryptClose") {
+		t.Fatalf("calls = %q, want the close to unwind mount, verity, then crypt", got)
 	}
 }

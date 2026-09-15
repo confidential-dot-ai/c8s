@@ -1,10 +1,9 @@
 name: setup-mkosi
 description: >
-  Local replacement for the systemd/mkosi setup action: same load-bearing host
-  prep (userns sysctls, ca-certificates mountpoint, apparmor teardown) plus a
-  pinned shallow clone of mkosi, without the codeload tarball fetch, the
-  diagnostics, the apparmor package removal, or the dnf/pacman/zypper installs
-  confos's Ubuntu-only builds never use.
+  Install an exact mkosi commit from a fresh job-scoped checkout, without the
+  upstream action's codeload fetch or foreign-distro package installs. AppArmor
+  and user-namespace policy are runner-provisioning invariants; this action
+  never weakens persistent host security controls.
 
 inputs:
   ref:
@@ -14,15 +13,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Host prep
+    - name: Prepare CA certificate mountpoint
       shell: bash
       run: |
-        sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_unconfined=0
-        sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_userns=0
-        # unix-chkpwd/swtpm apparmor profiles are broken on runner images
-        # (apparmor/apparmor#402); unload and keep them off.
-        sudo aa-teardown || true
-        sudo systemctl mask --now apparmor || true
         sudo mkdir -p /var/lib/ca-certificates
 
     - name: Install mkosi (pinned)
@@ -30,8 +23,29 @@ runs:
       env:
         MKOSI_REF: ${{ inputs.ref }}
       run: |
-        git init -q /opt/mkosi
-        git -C /opt/mkosi fetch -q --depth 1 https://github.com/systemd/mkosi.git "$MKOSI_REF"
-        git -C /opt/mkosi checkout -q FETCH_HEAD
-        sudo ln -svf /opt/mkosi/bin/mkosi /usr/bin/mkosi
-        mkosi --version
+        set -euo pipefail
+        if [[ ! "$MKOSI_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::mkosi ref must be a full lowercase 40-hex SHA"
+          exit 1
+        fi
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        : "${GITHUB_PATH:?GITHUB_PATH is required}"
+
+        mkosi_dir=$(mktemp -d -- "$RUNNER_TEMP/mkosi.XXXXXX")
+        git -C "$mkosi_dir" init -q
+        git -C "$mkosi_dir" fetch -q --depth=1 \
+          https://github.com/systemd/mkosi.git "$MKOSI_REF"
+        git -C "$mkosi_dir" checkout -q --detach "$MKOSI_REF"
+
+        resolved_ref=$(git -C "$mkosi_dir" rev-parse HEAD)
+        if [[ "$resolved_ref" != "$MKOSI_REF" ]]; then
+          echo "::error::mkosi checkout resolved to $resolved_ref, expected $MKOSI_REF"
+          exit 1
+        fi
+        if [[ -n "$(git -C "$mkosi_dir" status --porcelain=v1 --untracked-files=all)" ]]; then
+          echo "::error::fresh mkosi checkout is not clean"
+          exit 1
+        fi
+
+        printf '%s\n' "$mkosi_dir/bin" >> "$GITHUB_PATH"
+        "$mkosi_dir/bin/mkosi" --version

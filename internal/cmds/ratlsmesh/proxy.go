@@ -38,15 +38,19 @@ type Resolver interface {
 type Proxy struct {
 	outboundAddr string
 	inboundAddr  string
-	serverTLS    *tls.Config
-	clientTLS    *tls.Config
-	nodeIP       string
-	inboundPort  int
-	resolver     Resolver
-	origDstFunc  func(net.Conn) (string, error)
-	logger       *slog.Logger
-	metrics      *metrics
-	accessLog    bool
+	// outboundLn/inboundLn, when non-nil, are served instead of binding the
+	// Addr strings; tests hand over pre-bound listeners.
+	outboundLn  net.Listener
+	inboundLn   net.Listener
+	serverTLS   *tls.Config
+	clientTLS   *tls.Config
+	nodeIP      string
+	inboundPort int
+	resolver    Resolver
+	origDstFunc func(net.Conn) (string, error)
+	logger      *slog.Logger
+	metrics     *metrics
+	accessLog   bool
 
 	dialTimeout       time.Duration
 	tlsDialTimeout    time.Duration
@@ -154,13 +158,13 @@ func (p *Proxy) Run(ctx context.Context) error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := p.serve(ctx, p.outboundAddr, nil, p.handleOutbound, outReady, &p.metrics.acceptConsecutiveOutbound); err != nil {
+		if err := p.serve(ctx, p.outboundAddr, p.outboundLn, nil, p.handleOutbound, outReady, &p.metrics.acceptConsecutiveOutbound); err != nil {
 			errCh <- fmt.Errorf("outbound: %w", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := p.serve(ctx, p.inboundAddr, p.serverTLS, p.handleInbound, inReady, &p.metrics.acceptConsecutiveInbound); err != nil {
+		if err := p.serve(ctx, p.inboundAddr, p.inboundLn, p.serverTLS, p.handleInbound, inReady, &p.metrics.acceptConsecutiveInbound); err != nil {
 			errCh <- fmt.Errorf("inbound: %w", err)
 		}
 	}()
@@ -203,15 +207,19 @@ func (p *Proxy) Run(ctx context.Context) error {
 	}
 }
 
-// serve is the generic listen/accept loop. If tlsCfg is non-nil the listener
-// is wrapped with TLS. The ready channel is closed once the listener is bound.
+// serve is the generic listen/accept loop. ln, when non-nil, is served
+// instead of binding addr. If tlsCfg is non-nil the listener is wrapped with
+// TLS. The ready channel is closed once the listener is acquired.
 // consecutiveErrors is an atomic counter exposed as a metric for readiness gating.
-func (p *Proxy) serve(ctx context.Context, addr string, tlsCfg *tls.Config, handler func(context.Context, net.Conn), ready chan<- struct{}, consecutiveErrors *atomic.Int64) error {
-	ln, err := (&net.ListenConfig{
-		KeepAlive: durOrDefault(p.keepAlive, 30*time.Second),
-	}).Listen(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+func (p *Proxy) serve(ctx context.Context, addr string, ln net.Listener, tlsCfg *tls.Config, handler func(context.Context, net.Conn), ready chan<- struct{}, consecutiveErrors *atomic.Int64) error {
+	if ln == nil {
+		var err error
+		ln, err = (&net.ListenConfig{
+			KeepAlive: durOrDefault(p.keepAlive, 30*time.Second),
+		}).Listen(ctx, "tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", addr, err)
+		}
 	}
 	if tlsCfg != nil {
 		ln = tls.NewListener(ln, tlsCfg)
@@ -230,7 +238,7 @@ func (p *Proxy) serve(ctx context.Context, addr string, tlsCfg *tls.Config, hand
 			}
 			n := consecutiveErrors.Add(1)
 			p.metrics.acceptErrors.Inc()
-			p.logger.Warn("accept error", "addr", addr, "error", err, "consecutive", n)
+			p.logger.Warn("accept error", "addr", ln.Addr(), "error", err, "consecutive", n)
 
 			// Exponential backoff: 5ms, 10ms, 20ms, … capped at 640ms.
 			backoff := 5 * time.Millisecond

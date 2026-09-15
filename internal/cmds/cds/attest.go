@@ -19,26 +19,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	nodepolicy "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // AttestHandler serves POST /attest by verifying TEE evidence and signing the
-// requester's CSR in-process — attestation and mesh-CA signing live in the same
-// binary, so there is no EAR JWT round-trip to a separate signer.
+// requester's CSR in-process.
 //
 // THREAT MODEL: the measurement check is the only thing standing between an
 // attacker who controls a TEE workload and a CA-signed leaf for any subject
 // they choose. Empty Measurements skips this check (UNSAFE outside dev).
 type AttestHandler struct {
 	Challenges        *attestation.ChallengeStore
-	AttestationClient attestationclient.Client
+	AttestationClient remote.Client
 	CA                *issuer.CA
 	CAChainPEM        []byte
 	CertTTL           time.Duration
@@ -47,9 +47,20 @@ type AttestHandler struct {
 	// verification + signing. Zero = no timeout.
 	RequestTimeout time.Duration
 
-	// Measurements is the flat allowlist of SHA-384 launch digests permitted
+	// Measurements is the flat set of SHA-384 launch digests permitted
 	// to obtain a signed leaf. Empty = no measurement pinning.
 	Measurements map[string]bool
+
+	// RTMRs pins TDX runtime measurement registers on issuance: on TDX the
+	// launch digest (MRTD) covers the TDVF firmware alone, so without these a
+	// host can boot the pinned firmware with a substituted kernel and rootfs
+	// and still be issued a leaf. Enforced only against TDX-shaped evidence;
+	// SNP evidence is unaffected (kernel-hashes folds the guest image into
+	// its launch digest). Empty = no RTMR pinning.
+	RTMRs map[int][]byte
+
+	// NodeEntries binds each node image to an authorized launch key.
+	NodeEntries []nodepolicy.Entry
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
@@ -179,8 +190,9 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	verifyReq := remote.NewVerifyRequest(req.Evidence, &remote.VerifyParams{
+		ExpectedReportData: expectedReportData[:sha512.Size384],
+	}, false)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
@@ -193,11 +205,26 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// measurement is admitted, so the digest a leaf was issued against is the
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-	if len(h.Measurements) > 0 {
-		if !h.Measurements[launchDigest] {
-			slog.Warn("measurement not in allowlist", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
-			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+	if len(h.NodeEntries) > 0 {
+		if err := nodepolicy.EnforceEntries(verifyResp, h.NodeEntries, string(req.Evidence.Platform)); err != nil {
+			slog.Warn("node identity does not match policy", "error", err, "remote_addr", r.RemoteAddr)
+			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "node identity not allowed")
 			return
+		}
+	} else {
+		if len(h.Measurements) > 0 {
+			if !h.Measurements[launchDigest] {
+				slog.Warn("measurement does not match any reference value", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
+				attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+				return
+			}
+		}
+		if req.Evidence.Platform.HasRegisters() {
+			if err := remote.EnforceRTMRs(verifyResp, h.RTMRs); err != nil {
+				slog.Warn("RTMR pin not satisfied", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
+				attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "TDX runtime measurement registers not allowed")
+				return
+			}
 		}
 	}
 
@@ -488,7 +515,7 @@ func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapsh
 		if err != nil {
 			return unnamed(slog.LevelError, "inventory reported a malformed container digest", "error", err)
 		}
-		canonical = append(canonical, workloadclaims.SandboxContainer{Digest: digest.String(), Argv: c.Argv})
+		canonical = append(canonical, workloadclaims.SandboxContainer{Digest: digest.String(), Argv: c.Argv, Env: c.Env})
 		containerSet[digest.String()] = struct{}{}
 	}
 	// The two views describe the same sandbox and must agree. The inventory is
@@ -555,19 +582,19 @@ func (h AttestHandler) caChainPEM() []byte {
 // conditions, not evidence rejections, so they classify as unreachable too.
 func classifyVerifyError(err error) (int, string, string) {
 	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+	case errors.Is(err, remote.ErrSignatureInvalid):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+	case errors.Is(err, remote.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
 	}
-	var apiErr *attestationclient.APIError
+	var apiErr *remote.APIError
 	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
 	}
 	// The api answers its own refusals in the JSON envelope, so a non-JSON body
 	// names the request rather than the evidence, and only where there is a
 	// body to have named it.
-	var unexpected *attestationclient.UnexpectedError
+	var unexpected *remote.UnexpectedError
 	if errors.As(err, &unexpected) && rejectsRequest(unexpected.Status) && unexpected.Text != "" {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation-api rejected the request"
 	}

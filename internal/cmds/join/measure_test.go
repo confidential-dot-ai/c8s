@@ -8,62 +8,77 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// Register values used across the tests. All 48-byte SHA-384 hex.
 var (
-	digestA = strings.Repeat("ad", 48)
-	digestB = strings.Repeat("bd", 48)
-	rtmr1A  = strings.Repeat("a1", 48)
-	rtmr2A  = strings.Repeat("a2", 48)
-	rtmr1B  = strings.Repeat("b1", 48)
+	digestA      = strings.Repeat("ad", 48)
+	digestB      = strings.Repeat("bd", 48)
+	rtmr1A       = strings.Repeat("a1", 48)
+	rtmr2A       = strings.Repeat("a2", 48)
+	rtmr1B       = strings.Repeat("b1", 48)
+	testOperator = []byte("-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaaBz1ISIaMWDuPRjgg152EBIYRab\nILbNz0VOO47mubLnNsK8igqlET/44vuAzyC+Zw4aha2ag3HgzfBWZxbuog==\n-----END PUBLIC KEY-----\n")
+	testCA       = "K10" + strings.Repeat("ca", 32)
+	testToken    = testCA + "::node:agent-secret"
 )
 
-// tdxEnvelope is a minimal self-describing evidence envelope for RA-TLS
-// certs; verdicts come from the fake attestation-api, nothing parses it.
-const tdxEnvelope = `{"platform":"tdx","evidence":{}}`
+const tdxEnvelope = `{"platform":"tdx","evidence":{"quote":"ZmFrZS1xdW90ZQ=="}}`
 
-// fakeAPI is a stand-in local attestation-api: POST /attest returns a TDX
-// envelope, POST /verify answers via verifyFn keyed by call number (1-based),
-// so tests can serve different claims to ownRefs and verifyPeer.
+// The service is the verification trust boundary. Fake evidence is deliberately
+// unsigned; these tests exercise the caller's enforcement of service verdicts,
+// expected key bindings, and image/operator tuples, not hardware verification.
 type fakeAPI struct {
-	URL            string
-	attestPlatform string
-	verifyFn       func(call int, req types.VerifyRequest) types.VerifyResponse
-	verifyCalls    atomic.Int32
+	URL         string
+	platform    teetypes.PlatformType
+	verifyCalls atomic.Int32
 }
 
-func newFakeAPI(t *testing.T, verifyFn func(call int, req types.VerifyRequest) types.VerifyResponse) *fakeAPI {
+func newFakeAPI(t *testing.T, verifyFn func(int, remote.VerifyRequest) remote.VerifyResponse) *fakeAPI {
 	t.Helper()
-	f := &fakeAPI{attestPlatform: string(types.PlatformTdx), verifyFn: verifyFn}
+	f := &fakeAPI{platform: teetypes.PlatformTDX}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/attest":
-			_ = json.NewEncoder(w).Encode(types.AttestResponse{
-				Platform: f.attestPlatform,
-				Evidence: json.RawMessage(`{"quote":"ZmFrZS1xdW90ZQ=="}`),
-			})
-		case "/verify":
-			var req types.VerifyRequest
+			var req remote.AttestRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("verify body: %v", err)
+				t.Error(err)
+				http.Error(w, "decode", 400)
+				return
 			}
-			_ = json.NewEncoder(w).Encode(f.verifyFn(int(f.verifyCalls.Add(1)), req))
+			evidence := mockapi.FakeSNPEvidence(req.ReportData)
+			if f.platform == teetypes.PlatformTDX {
+				evidence, _ = json.Marshal(map[string]string{"quote": base64.StdEncoding.EncodeToString(req.ReportData)})
+			}
+			_ = json.NewEncoder(w).Encode(remote.AttestResponse{Platform: f.platform, Evidence: evidence})
+		case "/verify":
+			var req remote.VerifyRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Error(err)
+				http.Error(w, "decode", 400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(verifyFn(int(f.verifyCalls.Add(1)), req))
 		default:
 			http.NotFound(w, r)
 		}
@@ -72,44 +87,75 @@ func newFakeAPI(t *testing.T, verifyFn func(call int, req types.VerifyRequest) t
 	f.URL = srv.URL
 	return f
 }
-
-// verifyResp builds a /verify response with the given claims and verdicts.
-func verifyResp(digest, r1, r2 string, sigValid, rdMatch bool) types.VerifyResponse {
-	pd, err := json.Marshal(map[string]string{"rtmr_1": r1, "rtmr_2": r2})
-	if err != nil {
-		panic(err)
+func verifyResp(platform teetypes.PlatformType, key []byte) remote.VerifyResponse {
+	v := mockapi.PassingVerdict(digestA)
+	v.Claims.PlatformData = map[string]any{"rtmr_1": rtmr1A, "rtmr_2": rtmr2A}
+	if platform == teetypes.PlatformTDX {
+		seed := runtimemeasure.Seed(key)
+		v.Claims.PlatformData["rtmr_3"] = hex.EncodeToString(seed[:])
+	} else {
+		hd := runtimemeasure.HostData(key)
+		v.Claims.InitData = hd[:]
 	}
-	return types.VerifyResponse{Result: types.VerificationResult{
-		Platform:        string(types.PlatformTdx),
-		SignatureValid:  sigValid,
-		Claims:          types.Claims{LaunchDigest: digest, PlatformData: pd},
-		ReportDataMatch: &rdMatch,
-	}}
+	return remote.VerifyResponse{Result: teetypes.VerificationResult{Platform: platform, SignatureValid: true, ReportDataMatch: teetypes.Ptr(true), Claims: v.Claims}}
 }
-
-// staticVerify answers every /verify call identically.
-func staticVerify(resp types.VerifyResponse) func(int, types.VerifyRequest) types.VerifyResponse {
-	return func(int, types.VerifyRequest) types.VerifyResponse { return resp }
+func staticVerify(resp remote.VerifyResponse) func(int, remote.VerifyRequest) remote.VerifyResponse {
+	return func(int, remote.VerifyRequest) remote.VerifyResponse { return resp }
 }
-
-// mustRefs builds an imageRefs from hex register values.
-func mustRefs(t *testing.T, digest, r1, r2 string) imageRefs {
+func operatorKey(t *testing.T) []byte {
 	t.Helper()
-	d, err := hex.DecodeString(digest)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return imageRefs{launchDigest: d, rtmr1: r1, rtmr2: r2}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
-
-// attestedLeaf builds a genuine RA-TLS leaf cert embedding envelope.
+func policyEntry(t *testing.T, platform teetypes.PlatformType, key []byte) measurements.Entry {
+	t.Helper()
+	decode := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	e := measurements.Entry{Name: "authorized", Digest: decode(digestA), OperatorKey: key}
+	if platform == teetypes.PlatformTDX {
+		e.RTMRs = map[int][]byte{1: decode(rtmr1A), 2: decode(rtmr2A)}
+	}
+	return e
+}
+func policyFile(t *testing.T, platform teetypes.PlatformType, entries ...measurements.Entry) string {
+	t.Helper()
+	data, err := measurements.Format(measurements.ReferenceValues{TEE: string(platform.Family()), Entries: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+func testPolicy(t *testing.T, platform teetypes.PlatformType, key []byte, url string) peerPolicy {
+	t.Helper()
+	p, err := loadPeerPolicy(policyFile(t, platform, policyEntry(t, platform, key)), string(platform), url, 5*time.Second, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 func attestedLeaf(t *testing.T, envelope string) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(envelope)}, nil)
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(envelope)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +165,25 @@ func attestedLeaf(t *testing.T, envelope string) *x509.Certificate {
 	}
 	return cert
 }
-
-// selfSigned signs tmpl with a fresh P-256 key and parses the result.
+func leafForPlatform(t *testing.T, p teetypes.PlatformType) *x509.Certificate {
+	t.Helper()
+	if p == teetypes.PlatformTDX {
+		return attestedLeaf(t, tdxEnvelope)
+	}
+	key, rd, err := ratls.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: mockapi.FakeSNPReport(rd[:])}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
+}
 func selfSigned(t *testing.T, tmpl *x509.Certificate) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -137,217 +200,178 @@ func selfSigned(t *testing.T, tmpl *x509.Certificate) *x509.Certificate {
 	}
 	return cert
 }
-
-// attestedLeafWindow builds an RA-TLS leaf with an explicit validity window
-// (CreateAttestedCert always starts at now, which the freshness check needs to
-// vary).
-func attestedLeafWindow(t *testing.T, notBefore, notAfter time.Time) *x509.Certificate {
-	t.Helper()
-	ext, err := (&ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}).MarshalExtension()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return selfSigned(t, &x509.Certificate{
-		SerialNumber:    big.NewInt(2),
-		Subject:         pkix.Name{CommonName: "ratls-window"},
-		NotBefore:       notBefore,
-		NotAfter:        notAfter,
-		ExtraExtensions: []pkix.Extension{ext},
-	})
-}
-
-// plainLeaf builds a self-signed cert with no RA-TLS extension.
 func plainLeaf(t *testing.T) *x509.Certificate {
-	t.Helper()
-	return selfSigned(t, &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "plain"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	})
+	return selfSigned(t, &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "plain"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)})
 }
-
-func TestOwnRefs(t *testing.T) {
-	t.Run("ok", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-		refs, err := ownRefs(context.Background(), attestationclient.NewClient(api.URL))
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := mustRefs(t, digestA, rtmr1A, rtmr2A)
-		if !bytes.Equal(refs.launchDigest, want.launchDigest) || refs.rtmr1 != want.rtmr1 || refs.rtmr2 != want.rtmr2 {
-			t.Errorf("refs = %+v, want %+v", refs, want)
-		}
-	})
-
-	t.Run("non-tdx platform rejected", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-		api.attestPlatform = string(types.PlatformSnp)
-		if _, err := ownRefs(context.Background(), attestationclient.NewClient(api.URL)); err == nil {
-			t.Fatal("expected error for non-tdx platform")
-		}
-	})
-
-	t.Run("invalid signature fails closed", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, false, true)))
-		_, err := ownRefs(context.Background(), attestationclient.NewClient(api.URL))
-		if !errors.Is(err, attestationclient.ErrSignatureInvalid) {
-			t.Fatalf("err = %v, want ErrSignatureInvalid", err)
-		}
-	})
-
-	t.Run("report_data mismatch fails closed", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, false)))
-		_, err := ownRefs(context.Background(), attestationclient.NewClient(api.URL))
-		if !errors.Is(err, attestationclient.ErrReportDataMismatch) {
-			t.Fatalf("err = %v, want ErrReportDataMismatch", err)
-		}
-	})
-
-	t.Run("api down", func(t *testing.T) {
-		if _, err := ownRefs(context.Background(), attestationclient.NewClient("http://127.0.0.1:1")); err == nil {
-			t.Fatal("expected error with no attestation-api")
-		}
-	})
-}
-
-func TestRefsFromClaims(t *testing.T) {
-	pd := func(r1, r2 string) json.RawMessage {
-		b, err := json.Marshal(map[string]string{"rtmr_1": r1, "rtmr_2": r2})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
+func TestLoadPeerPolicy(t *testing.T) {
+	key := operatorKey(t)
+	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
+		t.Run(string(platform), func(t *testing.T) {
+			valid := policyEntry(t, platform, key)
+			for _, tc := range []struct {
+				name          string
+				edit          func(*measurements.Entry)
+				otherPlatform string
+				leader        bool
+				second        bool
+			}{
+				{name: "image only", edit: func(e *measurements.Entry) { e.OperatorKey = nil }},
+				{name: "wrong family", otherPlatform: map[teetypes.PlatformType]string{teetypes.PlatformTDX: "snp", teetypes.PlatformSNP: "tdx"}[platform]},
+				{name: "multiple leaders", leader: true, second: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					e := valid
+					if tc.edit != nil {
+						tc.edit(&e)
+					}
+					entries := []measurements.Entry{e}
+					if tc.second {
+						e.Name = "second"
+						e.OperatorKey = operatorKey(t)
+						entries = append(entries, e)
+					}
+					p := string(platform)
+					if tc.otherPlatform != "" {
+						p = tc.otherPlatform
+					}
+					if _, err := loadPeerPolicy(policyFile(t, platform, entries...), p, "http://127.0.0.1:1", time.Second, tc.leader); err == nil {
+						t.Fatal("unsafe policy accepted")
+					}
+				})
+			}
+		})
 	}
-	tests := []struct {
-		name    string
-		claims  types.Claims
-		wantErr bool
+	for _, raw := range []string{`{"schema_version":"1","tee":"tdx","measurements":[]}`, `{}`} {
+		p := filepath.Join(t.TempDir(), "policy.json")
+		if err := os.WriteFile(p, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadPeerPolicy(p, "tdx", "", time.Second, false); err == nil {
+			t.Fatal("empty policy accepted")
+		}
+	}
+	if _, err := loadPeerPolicy("", "tdx", "", time.Second, false); err == nil {
+		t.Fatal("missing policy accepted")
+	}
+	for _, idx := range []int{1, 2} {
+		e := policyEntry(t, teetypes.PlatformTDX, key)
+		delete(e.RTMRs, idx)
+		if _, err := loadPeerPolicy(policyFile(t, teetypes.PlatformTDX, e), "tdx", "", time.Second, false); err == nil {
+			t.Fatalf("missing RTMR[%d] accepted", idx)
+		}
+	}
+}
+func TestVerifyPeerIdentity(t *testing.T) {
+	key, other := operatorKey(t), operatorKey(t)
+	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
+		t.Run(string(platform), func(t *testing.T) {
+			leaf := leafForPlatform(t, platform)
+			wantRD, err := ratls.ReportDataForKey(leaf.PublicKey, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				name   string
+				change func(*remote.VerifyResponse)
+				want   error
+			}{
+				{name: "authorized"},
+				{"wrong image", func(r *remote.VerifyResponse) { r.Result.Claims.LaunchDigest = digestB }, ratls.ErrPolicyViolation},
+				{"same image wrong operator", func(r *remote.VerifyResponse) { *r = verifyResp(platform, other) }, ratls.ErrPolicyViolation},
+				{"missing operator", func(r *remote.VerifyResponse) {
+					r.Result.Claims.InitData = nil
+					delete(r.Result.Claims.PlatformData, "rtmr_3")
+				}, ratls.ErrPolicyViolation},
+				{"replayed evidence wrong key", func(r *remote.VerifyResponse) { r.Result.ReportDataMatch = teetypes.Ptr(false) }, ratls.ErrKeyBinding},
+				{"signature invalid", func(r *remote.VerifyResponse) { r.Result.SignatureValid = false }, ratls.ErrSignatureInvalid},
+				{"verified family mismatch", func(r *remote.VerifyResponse) { r.Result.Platform = "unexpected" }, ratls.ErrPolicyViolation},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					resp := verifyResp(platform, key)
+					if tc.change != nil {
+						tc.change(&resp)
+					}
+					api := newFakeAPI(t, func(_ int, req remote.VerifyRequest) remote.VerifyResponse {
+						if req.Params == nil || !bytes.Equal(req.Params.ExpectedReportData, wantRD[:48]) {
+							t.Error("peer verification not anchored to leaf key")
+						}
+						return resp
+					})
+					err := verifyPeer(context.Background(), leaf, testPolicy(t, platform, key, api.URL))
+					if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
+						t.Fatalf("err=%v want=%v", err, tc.want)
+					}
+				})
+			}
+			wrongFamily := teetypes.PlatformSNP
+			if platform == teetypes.PlatformSNP {
+				wrongFamily = teetypes.PlatformTDX
+			}
+			if err := verifyPeer(context.Background(), leafForPlatform(t, wrongFamily), testPolicy(t, platform, key, "http://127.0.0.1:1")); !errors.Is(err, ratls.ErrPolicyViolation) {
+				t.Fatalf("wrong TEE accepted: %v", err)
+			}
+		})
+	}
+	for _, register := range []string{"rtmr_1", "rtmr_2"} {
+		t.Run(register, func(t *testing.T) {
+			resp := verifyResp(teetypes.PlatformTDX, key)
+			resp.Result.Claims.PlatformData[register] = rtmr1B
+			api := newFakeAPI(t, staticVerify(resp))
+			if err := verifyPeer(context.Background(), attestedLeaf(t, tdxEnvelope), testPolicy(t, teetypes.PlatformTDX, key, api.URL)); !errors.Is(err, ratls.ErrPolicyViolation) {
+				t.Fatalf("wrong RTMR accepted: %v", err)
+			}
+		})
+	}
+}
+func TestVerifyPeerCertificateValidity(t *testing.T) {
+	key := operatorKey(t)
+	for _, tc := range []struct {
+		name       string
+		start, end time.Time
+		accept     bool
 	}{
-		{"ok", types.Claims{LaunchDigest: digestA, PlatformData: pd(rtmr1A, rtmr2A)}, false},
-		{"uppercase normalised", types.Claims{LaunchDigest: digestA, PlatformData: pd(strings.ToUpper(rtmr1A), rtmr2A)}, false},
-		{"digest not hex", types.Claims{LaunchDigest: "zz", PlatformData: pd(rtmr1A, rtmr2A)}, true},
-		{"digest short", types.Claims{LaunchDigest: digestA[:10], PlatformData: pd(rtmr1A, rtmr2A)}, true},
-		{"digest empty", types.Claims{LaunchDigest: "", PlatformData: pd(rtmr1A, rtmr2A)}, true},
-		{"rtmr_1 missing", types.Claims{LaunchDigest: digestA, PlatformData: pd("", rtmr2A)}, true},
-		{"rtmr_2 short", types.Claims{LaunchDigest: digestA, PlatformData: pd(rtmr1A, "abcd")}, true},
-		{"platform_data absent", types.Claims{LaunchDigest: digestA}, true},
-	}
-	for _, tc := range tests {
+		{"current", time.Now().Add(-time.Hour), time.Now().Add(time.Hour), true},
+		{"expired within former skew", time.Now().Add(-time.Hour), time.Now().Add(-time.Minute), false},
+		{"future", time.Now().Add(time.Hour), time.Now().Add(2 * time.Hour), false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			refs, err := refsFromClaims(tc.claims)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			api := newFakeAPI(t, staticVerify(verifyResp(teetypes.PlatformTDX, key)))
+			ext, err := ratls.MarshalExtension(&ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if err == nil && (refs.rtmr1 != rtmr1A || refs.rtmr2 != rtmr2A) {
-				t.Errorf("refs = %+v not normalised to lowercase", refs)
+			leaf := selfSigned(t, &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "window"}, NotBefore: tc.start, NotAfter: tc.end, ExtraExtensions: []pkix.Extension{ext}})
+			err = verifyPeer(context.Background(), leaf, testPolicy(t, teetypes.PlatformTDX, key, api.URL))
+			if (err == nil) != tc.accept {
+				t.Fatalf("err=%v", err)
+			}
+			if !tc.accept && api.verifyCalls.Load() != 0 {
+				t.Fatal("expired certificate reached verifier")
 			}
 		})
 	}
 }
 
-func TestVerifyPeer(t *testing.T) {
-	own := mustRefs(t, digestA, rtmr1A, rtmr2A)
-
-	t.Run("same-image peer accepted, report_data bound to leaf key", func(t *testing.T) {
-		leaf := attestedLeaf(t, tdxEnvelope)
-		wantRD, err := ratls.ReportDataForKey(leaf.PublicKey, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		api := newFakeAPI(t, func(_ int, req types.VerifyRequest) types.VerifyResponse {
-			if req.Params == nil || req.Params.ExpectedReportData == nil {
-				t.Error("verify request carries no expected_report_data")
-			} else if !bytes.Equal(req.Params.ExpectedReportData.Bytes(), wantRD[:]) {
-				t.Error("expected_report_data is not ReportDataForKey(leaf pubkey)")
+func TestVerifyPeerDoesNotMixAuthorizedEntries(t *testing.T) {
+	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
+		t.Run(string(platform), func(t *testing.T) {
+			keyA, keyB := operatorKey(t), operatorKey(t)
+			a, b := policyEntry(t, platform, keyA), policyEntry(t, platform, keyB)
+			b.Name = "other image"
+			var err error
+			b.Digest, err = hex.DecodeString(digestB)
+			if err != nil {
+				t.Fatal(err)
 			}
-			return verifyResp(digestA, rtmr1A, rtmr2A, true, true)
+			// This peer matches a's image and b's operator, but neither complete tuple.
+			api := newFakeAPI(t, staticVerify(verifyResp(platform, keyB)))
+			policy, err := loadPeerPolicy(policyFile(t, platform, a, b), string(platform), api.URL, time.Second, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyPeer(context.Background(), leafForPlatform(t, platform), policy); !errors.Is(err, ratls.ErrPolicyViolation) {
+				t.Fatalf("crossed image/operator tuple accepted: %v", err)
+			}
 		})
-		if err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), leaf, own); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("case-insensitive register compare", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(strings.ToUpper(digestA), strings.ToUpper(rtmr1A), strings.ToUpper(rtmr2A), true, true)))
-		if err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("validity window", func(t *testing.T) {
-		now := time.Now()
-		tests := []struct {
-			name       string
-			notBefore  time.Time
-			notAfter   time.Time
-			wantAccept bool
-		}{
-			{"current", now.Add(-time.Hour), now.Add(time.Hour), true},
-			{"expired", now.Add(-25 * time.Hour), now.Add(-time.Hour), false},
-			{"not yet valid", now.Add(time.Hour), now.Add(25 * time.Hour), false},
-			{"just issued on a fast peer clock", now.Add(time.Minute), now.Add(24 * time.Hour), true},
-			{"just expired within skew", now.Add(-24 * time.Hour), now.Add(-time.Minute), true},
-		}
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-				leaf := attestedLeafWindow(t, tc.notBefore, tc.notAfter)
-				err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), leaf, own)
-				if tc.wantAccept != (err == nil) {
-					t.Fatalf("err = %v, wantAccept %v", err, tc.wantAccept)
-				}
-				if !tc.wantAccept && api.verifyCalls.Load() != 0 {
-					t.Error("evidence was sent for verification despite a stale cert")
-				}
-			})
-		}
-	})
-
-	t.Run("no RA-TLS extension", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-		if err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), plainLeaf(t), own); err == nil {
-			t.Fatal("expected error for cert without attestation")
-		}
-	})
-
-	t.Run("non-tdx envelope", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
-		leaf := attestedLeaf(t, `{"platform":"snp","evidence":{}}`)
-		if err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), leaf, own); err == nil {
-			t.Fatal("expected error for non-tdx peer")
-		}
-	})
-
-	t.Run("launch digest mismatch", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestB, rtmr1A, rtmr2A, true, true)))
-		err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own)
-		if !errors.Is(err, ErrPolicyMismatch) {
-			t.Fatalf("err = %v, want ErrPolicyMismatch", err)
-		}
-	})
-
-	t.Run("rtmr_1 mismatch", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1B, rtmr2A, true, true)))
-		err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own)
-		if !errors.Is(err, ErrPolicyMismatch) {
-			t.Fatalf("err = %v, want ErrPolicyMismatch", err)
-		}
-	})
-
-	t.Run("rtmr_2 mismatch", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr1B, true, true)))
-		err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own)
-		if !errors.Is(err, ErrPolicyMismatch) {
-			t.Fatalf("err = %v, want ErrPolicyMismatch", err)
-		}
-	})
-
-	t.Run("report_data mismatch is not a policy error", func(t *testing.T) {
-		api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, false)))
-		err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own)
-		if err == nil || errors.Is(err, ErrPolicyMismatch) {
-			t.Fatalf("err = %v, want binding failure", err)
-		}
-	})
+	}
 }

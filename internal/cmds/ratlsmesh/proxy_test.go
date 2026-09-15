@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -62,16 +63,16 @@ func (r *fixedRemoteResolver) ValidateOutboundDest(string) (bool, string) { retu
 func (r *fixedRemoteResolver) ValidateLocalDest(string) bool              { return true }
 
 // testTLSConfigs creates mutually-attested server+client TLS configs: both
-// sides mint RA-TLS certs from testattest evidence and verify the peer
+// sides mint RA-TLS certs from mockapi evidence and verify the peer
 // through the production VerifyPeerCertificate. These tests exercise L4 proxy
 // plumbing, not attestation policy, so the policy pins no measurements;
 // pinning is covered by the mesh handshake tests.
 func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
 	t.Helper()
 
-	stub := testattest.New(t)
-	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
-	policy := &ratls.VerifyPolicy{AttestationApiURL: stub.URL}
+	stub := mockapi.New(t)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL())
+	policy := &ratls.VerifyPolicy{AttestationApiURL: stub.URL()}
 
 	serverCfg, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:     "sev-snp",
@@ -1007,6 +1008,33 @@ func TestReadinessOnShutdown(t *testing.T) {
 
 	if health.ready.Load() {
 		t.Fatal("health.ready should be false after shutdown")
+	}
+}
+
+// A held port makes the outbound bind fail; Run must return the listen
+// error instead of dropping it.
+func TestRunReturnsListenError(t *testing.T) {
+	held := bindLoopback(t)
+	p := &Proxy{
+		outboundAddr: held.Addr().String(),
+		inboundAddr:  "127.0.0.1:0",
+		logger:       testLogger(),
+		metrics:      testMetrics(),
+		drainTimeout: time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "outbound: listen") {
+			t.Fatalf("Run() = %v, want the outbound listen error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after cancel")
 	}
 }
 

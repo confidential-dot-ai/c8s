@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration test for the TLS load balancer.
+# Integration test for the router.
 # Starts the mock attestation-api and mock CDS, runs get-cert as an init
 # container through the real RA-TLS attestation flow, and verifies nginx
 # serves HTTPS with the issued certificate, chained to the mock CDS CA.

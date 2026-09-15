@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 )
 
 // fakeIptablesScript emulates iptables/ip6tables closely enough for
@@ -309,6 +311,62 @@ func TestEnsureIptablesJumps(t *testing.T) {
 		}
 		if d := jumpPositionCheckErrors.Load() - chkBefore; d != 0 {
 			t.Errorf("check errors advanced by %d, want 0", d)
+		}
+	})
+
+	// Regression: the cw inbound and egress guards share filter FORWARD, so
+	// one of them is always rule 2. Checking head position per rule made that
+	// one look demoted forever, and every watchdog tick then deleted and
+	// reinserted both — each repair leaving FORWARD unguarded for the length
+	// of two iptables execs, which is how plaintext reached a cw pod.
+	t.Run("sibling FORWARD guards at head are a no-op", func(t *testing.T) {
+		nf := installFakeNetfilter(t)
+		silenceIptablesMetricsFile(t)
+		mustInitFakeIptables(t)
+		atHead := "-P FORWARD ACCEPT\n-A FORWARD -j " + cwChainName +
+			"\n-A FORWARD -j " + cwEgressChainName + "\n-A FORWARD -j KUBE-FORWARD\n"
+		nf.set("list_iptables_FORWARD", atHead)
+		nf.set("list_ip6tables_FORWARD", atHead)
+
+		violBefore := jumpPositionViolations.Load()
+		if err := ensureIptablesJumps(testLogger(), []iptablesRule{cwJumpRule(), cwEgressJumpRule()}); err != nil {
+			t.Fatalf("ensureIptablesJumps: %v", err)
+		}
+		calls := nf.calls()
+		for _, op := range []string{"-I FORWARD", "-D FORWARD"} {
+			if got := len(callsContaining(calls, "", op)); got != 0 {
+				t.Errorf("%s issued for an in-order guard block:\n%s", op, strings.Join(calls, "\n"))
+			}
+		}
+		if d := jumpPositionViolations.Load() - violBefore; d != 0 {
+			t.Errorf("violations advanced by %d for an in-order guard block", d)
+		}
+	})
+
+	t.Run("demoted FORWARD guards restored in block order", func(t *testing.T) {
+		nf := installFakeNetfilter(t)
+		silenceIptablesMetricsFile(t)
+		mustInitFakeIptables(t)
+		demoted := "-P FORWARD ACCEPT\n-A FORWARD -j KUBE-FORWARD\n-A FORWARD -j " + cwChainName +
+			"\n-A FORWARD -j " + cwEgressChainName + "\n"
+		nf.set("list_iptables_FORWARD", demoted)
+		nf.set("list_ip6tables_FORWARD", demoted)
+		nf.set("del_budget", "4")
+
+		violBefore := jumpPositionViolations.Load()
+		if err := ensureIptablesJumps(testLogger(), []iptablesRule{cwJumpRule(), cwEgressJumpRule()}); err != nil {
+			t.Fatalf("ensureIptablesJumps: %v", err)
+		}
+		calls := callsContaining(nf.calls(), "iptables ", "-I FORWARD 1 -j ")
+		if len(calls) != 2 {
+			t.Fatalf("v4 insert count = %d, want 2\n%s", len(calls), strings.Join(calls, "\n"))
+		}
+		// Inserts land at position 1, so the last one issued ends up first.
+		if !strings.Contains(calls[0], "-j "+cwEgressChainName) || !strings.Contains(calls[1], "-j "+cwChainName) {
+			t.Errorf("inserts issued in the wrong order, leaving the block reversed:\n%s", strings.Join(calls, "\n"))
+		}
+		if d := jumpPositionViolations.Load() - violBefore; d != 4 {
+			t.Errorf("violations advanced by %d, want 4 (two demoted jumps per binary)", d)
 		}
 	})
 
@@ -664,18 +722,6 @@ func TestCleanupPodIPSetsForNamesWarnsOnDestroyFailure(t *testing.T) {
 	}
 }
 
-// The in-guest setup installs the fail-closed rules including the DNS
-// carve-out for the cluster DNS server.
-func TestSetupInGuestIptablesInstallsFailClosed(t *testing.T) {
-	nf := installFakeNetfilter(t)
-	if err := setupInGuestIptables(slog.New(slog.DiscardHandler), "10.0.0.5", nil, clusterDNSClusterIP); err != nil {
-		t.Fatalf("setupInGuestIptables: %v", err)
-	}
-	if len(callsContaining(nf.calls(), "iptables ", clusterDNSClusterIP)) == 0 {
-		t.Errorf("no rule references the cluster DNS IP %s", clusterDNSClusterIP)
-	}
-}
-
 func TestReadIPSetMaxElemStates(t *testing.T) {
 	nf := installFakeNetfilter(t)
 	nf.set("ipset_list_"+podIPSetName4, `Name: `+podIPSetName4+`
@@ -945,5 +991,64 @@ func TestPublishIptablesMetricsWarnsOnlyOnWriteFailure(t *testing.T) {
 	publishIptablesMetrics(slog.New(slog.NewJSONHandler(&failBuf, nil)))
 	if !hasMsg(decodeLogRecords(failBuf.String()), "write iptables metrics file failed") {
 		t.Errorf("failed write did not warn: %s", failBuf.String())
+	}
+}
+
+// cwPodStore is a pod cache holding one confidential workload, which is what
+// the guard sets are computed from.
+func cwPodStore(t *testing.T) cache.Store {
+	t.Helper()
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := store.Add(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "serving",
+			Namespace: "demo",
+			Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
+		},
+		Status: corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
+	}); err != nil {
+		t.Fatalf("seed pod store: %v", err)
+	}
+	return store
+}
+
+// Membership is what the guard matches on, so a set left at a previous cycle's
+// contents is enforcement that has stopped covering pods created since — and
+// the cw sets, which the fail-closed guard keys on, used to be written last and
+// abandoned whenever an earlier set failed.
+func TestReconcilePodIPSetsWritesGuardSetsFirst(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	if _, err := reconcilePodIPSets(cwPodStore(t), []string{"10.0.0.1"}, nil, 100, testLogger()); err != nil {
+		t.Fatalf("reconcilePodIPSets: %v", err)
+	}
+	script := nf.read("restore_scripts")
+	cwAt := strings.Index(script, cwPodIPSetName4)
+	podAt := strings.Index(script, podIPSetName4)
+	if cwAt < 0 || podAt < 0 {
+		t.Fatalf("both sets must be written; script:\n%s", script)
+	}
+	if cwAt > podAt {
+		t.Errorf("the guard's own set is written after the interception sets, so an earlier failure costs it its write:\n%s", script)
+	}
+}
+
+func TestReconcilePodIPSetsAttemptsEverySetWhenOneFails(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	nf.set("ipset_restore_fail", "ipset v7.15: Kernel error received: Invalid argument")
+	before := iptablesIPSetSyncFailures()
+
+	_, err := reconcilePodIPSets(cwPodStore(t), []string{"10.0.0.1"}, nil, 100, testLogger())
+	if err == nil {
+		t.Fatal("a failing ipset write must surface")
+	}
+	// Abandoning the remaining sets is what froze membership behind a single
+	// warning; every set gets its own attempt and its own error.
+	for _, label := range []string{"IPv4 cw pod ipset", "IPv6 cw pod ipset", "IPv4 pod ipset", "local IPv4 pod ipset"} {
+		if !strings.Contains(err.Error(), label) {
+			t.Errorf("the %s was never attempted after an earlier set failed: %v", label, err)
+		}
+	}
+	if got := iptablesIPSetSyncFailures() - before; got != 6 {
+		t.Errorf("sync failures counted %d, want one per managed set (6)", got)
 	}
 }

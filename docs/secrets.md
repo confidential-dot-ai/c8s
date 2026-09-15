@@ -15,12 +15,6 @@ callback (`--sandbox-inventory-cidr`, or the live node list it derives when that
 is unset). Miss any and CDS logs a warning naming the one it is missing, and
 does not serve `/secrets`.
 
-It also does not serve `/secrets` when **handoff** is configured
-(`--handoff-peer-url` / `--handoff-measurements`). A handoff roll puts two CDS
-pods behind the Service at once, and the surge replica serves an empty store: a
-workload landing on it mints a value diverging from the one its siblings already
-hold, with no error anywhere. Refusing to serve is better than that divergence.
-
 Sizing: `--secrets-max-paths-per-workload` (default 64, chart
 `cds.secretsMaxPathsPerWorkload`) bounds the paths one allowlist entry may hold,
 and is checked before the ceiling. A workload, for this bound, is one allowlist
@@ -46,24 +40,10 @@ The quota bounds one entry, not the store: enough entries one path apiece still
 reach the ceiling. What it buys is that the refusal lands on the entry that
 caused it rather than on the next one to ask.
 
-**kata is supported, with two caveats.** The fetcher redeems its sandbox token
-from whichever inventory its shape has: the mounted nri-image-policy socket on
-node-CVM, or `policy-monitor` on the guest's loopback `127.0.0.1:8401` under
-kata, where nothing is mounted. The webhook selects the shape with
-`--workload-claims-guest` and rejects `confidential.ai/c8s-secrets` only when
-the operator has neither — a pod whose fetcher would CrashLoop while the
-workload blocked forever on a file that never lands.
-
-The two caveats are weaker guarantees, not broken ones, and both are properties
-of the guest rather than of secret release:
-
-- the kata sandbox ID comes from a host-written CRI annotation, so the sandbox a
-  token names is asserted by the host rather than read from the kernel as it is
-  on node-CVM;
-- argv enforcement in the guest is watch-and-kill rather than synchronous, so a
-  container running a non-admitted argv is killed rather than refused.
-
-A deployment whose threat model cannot accept either should stay on node-CVM.
+The fetcher redeems its sandbox token from the mounted nri-image-policy
+socket. The webhook rejects `confidential.ai/c8s-secrets` when the operator
+has no inventory socket configured, rather than admitting a pod whose fetcher
+would CrashLoop while the workload waits for a file that never lands.
 
 ## Asking for a secret
 
@@ -136,7 +116,7 @@ A request carries:
 | `Authorization: SandboxToken <base64>` | the inventory-signed token, in a header so it is bounded and never logged |
 
 The token is obtained from the admission inventory at `POST /sandbox` — the
-node's on node-CVM, the guest's own under kata — bound to the leaf's key and
+node's inventory — bound to the leaf's key and
 that challenge, the same route and the same envelope `get-cert` uses at
 issuance.
 
@@ -171,12 +151,29 @@ an operator:
 
 ```sh
 c8s secrets put /tenant-a/hf-token --url "$CDS" --measurements "$M" \
-  --operator-key operator.key < token.txt
+  --mesh-ca mesh-ca.pem --operator-key operator.key < token.txt
 ```
 
 The value is read from stdin or `--from-file`, and the bytes are stored exactly
 as read — a trailing newline is part of the value. The byte count is printed to
 confirm which one was sent.
+
+### Naming the CDS you are writing to
+
+`--mesh-ca` takes the CA bundle you hold out of band, the same anchor
+`c8s verify --mesh-ca` takes. Before the write, the CLI reads the mesh CA CDS
+serves at `GET /ca` over the attested connection and refuses unless it is one
+you pinned.
+
+`--measurements` alone does not cover this. It proves the peer is an attested
+build at a pinned launch measurement — but nodes can boot the same image,
+so that measurement does not identify a particular CDS instance. The mesh CA key is generated per CDS, so it is what tells your CDS from
+another one at the same measurement, and it is the anchor your workloads
+already trust.
+
+The write is refused with no `--mesh-ca`. `--force` writes without the check
+and says so on stderr; it governs the CA check only, and is unrelated to
+`--overwrite`, which governs replacing a value already at the path.
 
 ```
 PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
@@ -296,19 +293,23 @@ c8s injects its own containers into every confidential pod. They are not part of
 a workload's declared set, so they are removed before matching — an entry never
 has to enumerate c8s's own sidecars.
 
-A container is dropped when its digest is an allowlist **floor** entry *and* its
+A container is dropped when its digest is admitted by some entry under an
+**unconstrained argv policy** (`command` and `args` both `any`) *and* its
 entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
-Both halves are load-bearing. Floor membership alone would let a pod add busybox running a
-shell — also a floor entry — and have it ignored.
+Both halves are load-bearing. Admission alone would let a pod add busybox
+running a shell — admitted the same way — and have it ignored.
 
-The floor is the source. It already carries the injected image, since it could
-not run otherwise, and it is **additive**: a digest once served is never
-dropped. So an image bump leaves the previous digest in place alongside the new
-one, and pods still running the old image keep matching while they recycle.
+The seeded component entries are the source: the injected image is among them,
+since it could not run otherwise, and an image bump seeds the new digest's entry
+beside the old one ([`allowlist-and-capabilities.md`](allowlist-and-capabilities.md#bootstrap)).
 
-What this rests on: no floor image other than c8s's has an executable at one of
-those entrypoints. Floor contents are operator-controlled and auditable, but
-that is a property of the deployment rather than something enforced here.
+What this rests on, in both directions: no image admitted under an unconstrained
+argv other than c8s's has an executable at one of those entrypoints, and the
+injected image's own entry stays unconstrained — an operator who narrows it
+(`bootstrapAllowlist.workloads` or `c8s allowlist edit`) turns every injected sidecar
+into a foreign container and every release in the cluster is refused. Allowlist
+contents are operator-controlled and auditable, but that is a property of the
+deployment rather than something enforced here.
 
 ## The grant
 
@@ -327,6 +328,11 @@ actually released.
 
 - `policy` is `allow` or `deny`. There is deliberately **no `any`**: an unbounded
   secret grant is never what an operator means.
+- A grant requires every container in the entry — init and main — to pin its
+  argv: `command` and `args` both `exact` or `deny`. A container under `any`
+  runs whatever command line the host chose, and the value would be released
+  to it. The write path refuses the entry, and release refuses an entry stored
+  before it did.
 - Paths are absolute, clean, and the only wildcard is a trailing `/**`, which
   matches strictly beneath its base — `/a/**` does not grant `/a`.
 - `write` requires `read`. The only client creates with `POST`, then re-reads;

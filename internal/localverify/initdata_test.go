@@ -20,7 +20,7 @@ var genoaHostData = make([]byte, 32)
 func TestVerify_InitDataPinMatchesEvidence(t *testing.T) {
 	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
 
-	res, err := Verify(context.Background(), platform, evidence, Params{ExpectedInitDataHash: genoaHostData})
+	res, err := Verify(context.Background(), platform, evidence, Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: genoaHostData}})
 	if err != nil {
 		t.Fatalf("the evidence's own HOST_DATA must satisfy the pin: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestVerify_InitDataPinMismatchIsRefused(t *testing.T) {
 
 	t.Run("snp HOST_DATA", func(t *testing.T) {
 		platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
-		if _, err := Verify(context.Background(), platform, evidence, Params{ExpectedInitDataHash: mismatched}); err == nil {
+		if _, err := Verify(context.Background(), platform, evidence, Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: mismatched}}); err == nil {
 			t.Fatal("a HOST_DATA that differs from the pin must be refused")
 		} else if !strings.Contains(err.Error(), "HOST_DATA") {
 			t.Fatalf("the refusal must name the failing field, got: %v", err)
@@ -52,7 +52,7 @@ func TestVerify_InitDataPinMismatchIsRefused(t *testing.T) {
 	// vTPM — so any pin refuses at the PCR[8] binding.
 	t.Run("az-snp PCR[8]", func(t *testing.T) {
 		platform, evidence := envelopeFixture(t, "azsnp-evidence-v1.json")
-		if _, err := Verify(context.Background(), platform, evidence, Params{ExpectedInitDataHash: mismatched}); err == nil {
+		if _, err := Verify(context.Background(), platform, evidence, Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: mismatched}}); err == nil {
 			t.Fatal("a PCR[8] binding that differs from the pin must be refused")
 		} else if !strings.Contains(err.Error(), "PCR[8]") {
 			t.Fatalf("the refusal must name the failing field, got: %v", err)
@@ -74,9 +74,9 @@ func TestEnforceResult_InitDataPin(t *testing.T) {
 		res     *teetypes.VerificationResult
 		wantErr bool
 	}{
-		{"pin confirmed", Params{ExpectedInitDataHash: pin}, passing(teetypes.Ptr(true)), false},
-		{"pin unconfirmed", Params{ExpectedInitDataHash: pin}, passing(nil), true},
-		{"pin contradicted", Params{ExpectedInitDataHash: pin}, passing(teetypes.Ptr(false)), true},
+		{"pin confirmed", Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: pin}}, passing(teetypes.Ptr(true)), false},
+		{"pin unconfirmed", Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: pin}}, passing(nil), true},
+		{"pin contradicted", Params{VerifyParams: teetypes.VerifyParams{ExpectedInitDataHash: pin}}, passing(teetypes.Ptr(false)), true},
 		{"no pin, no claim", Params{}, passing(nil), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

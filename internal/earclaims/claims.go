@@ -16,7 +16,6 @@ const (
 	EARRawEvidence           = "ear_raw_evidence"
 	LaunchDigest             = "launch_digest"
 	TEEPublicKey             = "tee_public_key"
-	OperatorKeysHash         = "operator_keys_hash"
 	Developer                = "developer"
 	Build                    = "build"
 	SubmodAttester           = "attester"

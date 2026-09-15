@@ -11,7 +11,7 @@ policy denies out-of-band writes in the API server itself: at CREATE the
 label must match the opt-in annotation, a pod carrying the label must also
 carry the injected c8s-cert sidecar (so the identity cannot be kept while the
 sidecar is shed), and on UPDATE both keys are immutable. Scope (namespace
-exclusions) lives on the binding, like kata enforcement.
+exclusions) lives on the binding.
 
 ValidatingAdmissionPolicy is v1/GA from Kubernetes 1.30, the chart's
 kubeVersion floor.

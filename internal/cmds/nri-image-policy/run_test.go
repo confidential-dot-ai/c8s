@@ -12,14 +12,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -81,7 +82,7 @@ func TestPluginRun_StopsOnContextCancel(t *testing.T) {
 func TestRemoveContainer_EvictsFromInventory(t *testing.T) {
 	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
 	p.inventory = newAdmissionInventory(t.TempDir())
-	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil)
+	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil, nil)
 
 	ctr := &api.Container{Id: cidApp1, PodSandboxId: "sandbox-1", Name: "app"}
 	if err := p.RemoveContainer(context.Background(), &api.PodSandbox{Id: "sandbox-1"}, ctr); err != nil {
@@ -102,6 +103,8 @@ func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 	}
 	var want api.EventMask
 	want.Set(api.Event_CREATE_CONTAINER)
+	want.Set(api.Event_START_CONTAINER)
+	want.Set(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
 	want.Set(api.Event_REMOVE_CONTAINER)
 	// The inventory also needs the pod-sandbox lifecycle for its sandbox set.
 	want.Set(api.Event_RUN_POD_SANDBOX)
@@ -115,7 +118,7 @@ func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 
 func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
-		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 
 	// The containerd RPC blocks until the dial deadline; bound it so the
@@ -133,7 +136,7 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 
 func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
-		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+		anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 	p.inventory = newAdmissionInventory(t.TempDir())
 
@@ -314,6 +317,97 @@ logging:
 	}
 }
 
+// A CDS that is merely slow must not be read as a shutdown request. Every
+// initial-pull attempt carries its own deadline, so exhausting the retries
+// against an unresponsive endpoint returns an error wrapping
+// context.DeadlineExceeded while the process context is still live. Treating
+// that as SIGTERM parked the process on the plugin error channel: never ready,
+// never pulling again, and only a containerd restart cleared it. Run must take
+// the fail-soft path instead and surface the plugin's own failure.
+func TestRun_SlowCDSDuringInitialPullIsNotShutdown(t *testing.T) {
+	t.Setenv("NRI_PLUGIN_NAME", "")
+	origDelay, origRetries := allowlistApiInitialDelay, allowlistApiMaxRetries
+	allowlistApiInitialDelay = 5 * time.Millisecond
+	allowlistApiMaxRetries = 1
+	defer func() {
+		allowlistApiInitialDelay, allowlistApiMaxRetries = origDelay, origRetries
+	}()
+
+	// Both endpoints accept and then hang, so an attempt expires on its own
+	// deadline instead of being refused: connection-refused is a plain error
+	// and would never have reached the branch under test.
+	blocked := make(chan struct{})
+	defer close(blocked)
+	stalledAttestation := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-blocked:
+		case <-r.Context().Done():
+		}
+	}))
+	defer stalledAttestation.Close()
+	stalledCDS := stalledListener(t, blocked)
+
+	dir := t.TempDir()
+	cfgYAML := fmt.Sprintf(`
+plugin:
+  health_addr: unix://%s/health.sock
+containerd:
+  socket: %s/ctr.sock
+allowlist:
+  always_allow:
+    "%s": image-a
+  pull:
+    url: https://%s/
+    attestation_api_url: %s
+    cds_measurements: ["%s"]
+    interval: 30s
+    timeout: 300ms
+policy:
+  mode: fail-closed
+  enforce_existing: false
+logging:
+  level: error
+`, dir, dir, pushDigestA, stalledCDS, stalledAttestation.URL, strings.Repeat("ab", 48))
+
+	// Hand the stub a connected socket so the plugin cannot die while the pull
+	// is running: without it the NRI dial fails instantly, pullInitial's first
+	// select sees the error, and the run ends as errPluginDied having never
+	// reached the branch under test. Registration then stalls for its own 5s
+	// timeout — far longer than the 300ms pull — so the pull deterministically
+	// exhausts its retries first and the plugin failure is what Run reports.
+	holdNRISocket(t)
+
+	err := runWithDeadline(t, 20*time.Second, []string{"-config", writeConfigYAML(t, cfgYAML)})
+	if err == nil {
+		t.Fatal("Run returned nil: a stalled initial pull was misread as shutdown")
+	}
+	if errors.Is(err, errPluginDied) {
+		t.Fatalf("plugin died during the pull, so the stalled-pull branch never ran: %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "plugin: ") {
+		t.Fatalf("err = %v, want the NRI plugin run failure", err)
+	}
+}
+
+// holdNRISocket points the NRI stub at one end of a socketpair via
+// NRI_PLUGIN_SOCKET, which stub.connect adopts instead of dialing. Nothing
+// serves the peer end, so registration blocks until its timeout rather than
+// failing on connect. The socket stays up for the whole test: the stub holds a
+// dup of the adopted end, and closing the peer end would make registration fail
+// immediately and restore the race.
+func holdNRISocket(t *testing.T) {
+	t.Helper()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	// nri's NewFdConn dups the adopted descriptor and closes the original, so
+	// fds[0] belongs to the stub from here on and its number is recycled: the
+	// test owns only the peer end.
+	t.Cleanup(func() { _ = syscall.Close(fds[1]) })
+	t.Setenv(api.PluginSocketEnvVar, strconv.Itoa(fds[0]))
+}
+
 // --- allowlistPullHTTPClient ------------------------------------------------
 
 func TestAllowlistPullHTTPClient_ValidMeasurements(t *testing.T) {
@@ -378,7 +472,7 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 	defer srv.Close()
 
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: time.Second})
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 
 	start := time.Now()
 	_, err := pullInitial(context.Background(), pullArgs{
@@ -401,7 +495,7 @@ func TestPullInitial_BacksOffBetweenAttempts(t *testing.T) {
 
 func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 	t.Setenv("NRI_PLUGIN_NAME", "")
-	store := newPolicyStore(floorAllowlist(map[string]string{}))
+	store := newPolicyStore(map[string]string{})
 	for _, tc := range []struct {
 		name         string
 		socketDir    string
@@ -440,7 +534,7 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
-	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	}, anyAllowlist(map[string]string{pushDigestA: "image-a"}))
 	bindDeadResolver(t, p)
 	var buf bytes.Buffer
 	p.logger = slog.New(slog.NewJSONHandler(&buf, nil))
@@ -605,4 +699,29 @@ func TestAllowlistPullHTTPClient_InvalidMeasurements(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid CDS measurements")
 	}
+}
+
+// stalledListener accepts TCP connections and holds them open without ever
+// speaking, so a client dialing it hangs until its own deadline fires. It
+// returns the host:port to dial.
+func stalledListener(t *testing.T, done <-chan struct{}) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-done
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }

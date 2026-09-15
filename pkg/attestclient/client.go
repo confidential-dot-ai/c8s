@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -50,7 +51,7 @@ type Client struct {
 type CertificateResult struct {
 	Certificate string
 	Challenge   string
-	Platform    string
+	Platform    teetypes.PlatformType
 	Evidence    json.RawMessage
 }
 
@@ -74,17 +75,17 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 // for the given report data. This is the same attestation-api call used
 // internally by ObtainCertificate, exposed for callers that need evidence
 // without the full CDS challenge-attest-certify flow.
-func (c Client) GenerateEvidence(attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
+func (c Client) GenerateEvidence(attestationApiURL string, reportData []byte) (remote.AttestResponse, error) {
 	return c.GenerateEvidenceContext(context.Background(), attestationApiURL, reportData)
 }
 
 // GenerateEvidenceContext is GenerateEvidence with caller-controlled
 // cancellation.
-func (c Client) GenerateEvidenceContext(ctx context.Context, attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
-	asClient := attestationclient.NewClientWithHTTP(attestationApiURL, c.httpClient)
-	return asClient.Attest(contextOrBackground(ctx), types.AttestRequest{
-		ReportData: types.NewBase64Bytes(reportData),
-		Platform:   types.PlatformAuto,
+func (c Client) GenerateEvidenceContext(ctx context.Context, attestationApiURL string, reportData []byte) (remote.AttestResponse, error) {
+	asClient := remote.NewClientWithHTTP(attestationApiURL, c.httpClient)
+	return asClient.Attest(contextOrBackground(ctx), remote.AttestRequest{
+		ReportData: reportData,
+		Platform:   remote.PlatformAuto,
 	})
 }
 
@@ -166,11 +167,8 @@ func (c Client) ObtainCertificateWithSandboxContext(ctx context.Context, attesta
 	// /attest; CDS's /attest expects it wrapped in an AttestationEvidence
 	// envelope keyed by Platform.
 	attestReq := attestRequest{
-		Challenge: challenge,
-		Evidence: attestEvidence{
-			Platform: asResp.Platform,
-			Evidence: asResp.Evidence,
-		},
+		Challenge:    challenge,
+		Evidence:     asResp.Envelope(),
 		CSR:          csrPEM,
 		SandboxToken: sandboxToken,
 	}
@@ -185,72 +183,6 @@ func (c Client) ObtainCertificateWithSandboxContext(ctx context.Context, attesta
 		Platform:    asResp.Platform,
 		Evidence:    asResp.Evidence,
 	}, nil
-}
-
-// AttestKey performs the attestation flow for an in-process ECDSA key:
-//  1. Requests a challenge nonce from CDS (POST /authenticate)
-//  2. Calls the local attestation-api for evidence binding
-//     SHA-384(pubkey || challenge) into REPORTDATA
-//  3. Submits evidence + the PKIX-DER pubkey to CDS (POST /attest-key) and
-//     returns the signed EAR JWT
-//
-// Used by in-cluster c8s components (CDS for its handoff signer key
-// bootstrap) that need a CDS-issued EAR bound to a key they hold in
-// memory, without going through the cert-issuance flow.
-func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyDER []byte) (string, error) {
-	return c.AttestKeyWithOperatorKeysHash(ctx, attestationApiURL, pubKeyDER, "")
-}
-
-// AttestKeyWithOperatorKeysHash is AttestKey with an additional CDS
-// operator-key policy commitment bound into REPORTDATA and the resulting EAR.
-func (c Client) AttestKeyWithOperatorKeysHash(ctx context.Context, attestationApiURL string, pubKeyDER []byte, operatorKeysHash string) (string, error) {
-	ctx = contextOrBackground(ctx)
-
-	challengeResp, err := c.AuthenticateContext(ctx)
-	if err != nil {
-		return "", fmt.Errorf("authenticate: %w", err)
-	}
-	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
-	if err != nil {
-		return "", fmt.Errorf("invalid base64 in challenge: %w", err)
-	}
-
-	pubAny, err := x509.ParsePKIXPublicKey(pubKeyDER)
-	if err != nil {
-		return "", fmt.Errorf("parse public key: %w", err)
-	}
-	reportData, err := ratls.ReportDataForKeyWithContext(pubAny, challengeBytes, []byte(operatorKeysHash))
-	if err != nil {
-		return "", err
-	}
-
-	asResp, err := c.GenerateEvidenceContext(ctx, attestationApiURL, reportData[:sha512.Size384])
-	if err != nil {
-		return "", fmt.Errorf("attestation-api: %w", err)
-	}
-
-	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge:        challengeResp.Challenge,
-		Evidence:         types.AttestationEvidence(asResp),
-		PublicKey:        base64.StdEncoding.EncodeToString(pubKeyDER),
-		OperatorKeysHash: operatorKeysHash,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	respBody, err := c.do(ctx, http.MethodPost, "/attest-key", body)
-	if err != nil {
-		return "", err
-	}
-	var out types.AttestKeyResponseBody
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	if out.EAR == "" {
-		return "", fmt.Errorf("response missing ear")
-	}
-	return out.EAR, nil
 }
 
 // Authenticate requests an attestation challenge nonce.
@@ -273,15 +205,10 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge    string          `json:"challenge"`
-	Evidence     attestEvidence  `json:"evidence"`
-	CSR          string          `json:"csr"`
-	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
-}
-
-type attestEvidence struct {
-	Platform string          `json:"platform"`
-	Evidence json.RawMessage `json:"evidence"`
+	Challenge    string                       `json:"challenge"`
+	Evidence     teetypes.AttestationEvidence `json:"evidence"`
+	CSR          string                       `json:"csr"`
+	SandboxToken json.RawMessage              `json:"sandbox_token,omitempty"`
 }
 
 // Attest submits attestation evidence and receives a signed certificate chain
@@ -302,6 +229,13 @@ func (c Client) AttestContext(ctx context.Context, req attestRequest) (string, e
 		return "", err
 	}
 	return string(body), nil
+}
+
+// MeshCA fetches the mesh CA bundle CDS currently serves at /ca.
+// Authenticity comes from the RA-TLS transport the client was constructed
+// over, the same channel that authenticates the CA trailing an issued chain.
+func (c Client) MeshCA(ctx context.Context) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/ca", nil)
 }
 
 // Healthz checks liveness of the CDS service.

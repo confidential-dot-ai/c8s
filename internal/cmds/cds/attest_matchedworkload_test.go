@@ -51,7 +51,7 @@ func issueWithInventory(t *testing.T, store policyStore, digests []string, conta
 func leafFromInventory(t *testing.T, store policyStore, digests []string, containers []workloadclaims.SandboxContainer, tune func(*AttestHandler)) *x509.Certificate {
 	t.Helper()
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL)
+	h, signer := newSandboxTestEnv(t, stub.URL())
 	h.AllowlistStore = store
 	h.SandboxDigests = fakeDigests{
 		digests:    map[string][]string{testSandboxID: digests},
@@ -74,7 +74,7 @@ func leafFromInventory(t *testing.T, store policyStore, digests []string, contai
 // digest — a complete pod reporting it matches uniquely.
 func completeAPIStore(t *testing.T) fakeStore {
 	return fakeStore{
-		floor:     map[string]bool{wlDigestC: true},
+		anyArgv:   map[string]bool{wlDigestC: true},
 		workloads: map[string]pkgallowlist.Workload{"api": namedEntry(t, wlDigestA)},
 	}
 }
@@ -104,7 +104,7 @@ func TestAttest_MatchedWorkload_StampsUniqueMatch(t *testing.T) {
 	}
 }
 
-// The platform's injected sidecar (floor digest + injected entrypoint) is
+// The platform's injected sidecar (any-argv entry + injected entrypoint) is
 // dropped before matching — the same drop set secrets release uses — so a pod
 // running its workload plus the cert sidecar still matches its entry.
 func TestAttest_MatchedWorkload_DropsInjectedContainers(t *testing.T) {
@@ -143,7 +143,7 @@ func TestAttest_MatchedWorkload_UnnamedCases(t *testing.T) {
 		},
 		"incomplete pod (missing main)": {
 			store: fakeStore{
-				floor:     map[string]bool{wlDigestC: true},
+				anyArgv:   map[string]bool{wlDigestC: true},
 				workloads: map[string]pkgallowlist.Workload{"api": namedEntry(t, wlDigestA, wlDigestB)},
 			},
 			digests:    []string{wlDigestA},
@@ -260,6 +260,28 @@ func TestAttest_MatchedWorkload_NamedLeafTTLCeiling(t *testing.T) {
 			})
 			if got := leaf.NotAfter.Sub(leaf.NotBefore); got > issuer.MaxNamedLeafTTL {
 				t.Fatalf("named leaf validity = %v, want capped at MaxNamedLeafTTL %v", got, issuer.MaxNamedLeafTTL)
+			}
+		})
+	}
+}
+
+func TestAttest_WorkloadStampRequiresEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		known, want bool
+	}{
+		{"exact", "production", true, true}, {"wrong", "unsafe", true, false}, {"unknown", "", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := completeAPIStore(t)
+			store.workloads["api"].Containers[0].Env = pkgallowlist.EnvPolicy{Policy: pkgallowlist.PolicyExact, Values: map[string]string{"MODE": "production"}}
+			containers := containersView(wlDigestA)
+			if tc.known {
+				containers[0].Env, _ = pkgallowlist.ObserveEnv([]string{"MODE=" + tc.value})
+			}
+			matched := issueWithInventory(t, store, []string{wlDigestA}, containers, nil)
+			if (matched != nil) != tc.want {
+				t.Fatalf("stamp=%v", matched)
 			}
 		})
 	}

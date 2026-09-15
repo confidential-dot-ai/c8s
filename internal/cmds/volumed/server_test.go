@@ -27,12 +27,18 @@ func (f fakeIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
 }
 
 type fakeDevices struct {
-	err error
+	// device, when set, is answered for every name — two names resolving to
+	// one disk, which is what a device-conflict test needs.
+	device string
+	err    error
 }
 
 func (f fakeDevices) Device(name string) (string, error) {
 	if f.err != nil {
 		return "", f.err
+	}
+	if f.device != "" {
+		return f.device, nil
 	}
 	return "/dev/disk/by-id/virtio-c8s-vol-" + name, nil
 }
@@ -133,7 +139,7 @@ func TestServerRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
 	}
 
 	body := openBody(t)
-	blob, err := volume.NewBlob(make([]byte, volume.KeyBytes), body.Blob.Verity)
+	blob, err := volume.NewBlob(make([]byte, volume.KeyBytes), *body.Blob.Verity)
 	if err != nil {
 		t.Fatalf("blob: %v", err)
 	}
@@ -204,6 +210,45 @@ func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
 	if got := f.ops.sequence(); got != "CryptOpen,VerityOpen,MountRO" {
 		t.Fatalf("repeats re-ran privileged steps: %q", got)
 	}
+}
+
+// A second open of a device already held answers 409: the workload backing
+// off and being rescheduled is the recovery, not a retry.
+func TestServerReportsAConflictingOpen(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	f.srv.Devices = fakeDevices{device: "/dev/vdb"}
+	body := openBody(t)
+	blob, err := volume.NewMutableBlob(mustKey(t, body))
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	body.Blob = blob
+	if got := f.post(t, body).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("first open: status %d", got)
+	}
+
+	// Same device, another name, same mutable key: one device, one mount.
+	other := openBody(t)
+	otherBlob, err := volume.NewMutableBlob(mustKey(t, other))
+	if err != nil {
+		t.Fatalf("blob: %v", err)
+	}
+	other.Name = "datasets"
+	other.Blob = otherBlob
+	if got := f.post(t, other).StatusCode; got != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", got, http.StatusConflict)
+	}
+}
+
+// mustKey decodes the key out of a test body so a re-moded blob opens the same
+// volume.
+func mustKey(t *testing.T, body OpenRequest) []byte {
+	t.Helper()
+	key, err := body.Blob.DecodeKey()
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	return key
 }
 
 // The node cap answers differently from a refusal: a caller turned away here
@@ -286,5 +331,99 @@ func TestAcquireIsRaceFree(t *testing.T) {
 	defer s.mu.Unlock()
 	if len(s.inFlight) != 0 {
 		t.Fatalf("in-flight table leaked %d entries", len(s.inFlight))
+	}
+}
+
+// postClose posts the bodiless termination close.
+func (f *serverFixture) postClose(t *testing.T) *http.Response {
+	t.Helper()
+	resp, err := f.client.Post("http://volumed"+ClosePath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("post close: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestServerClosesTheCallingPodsVolumes(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d, want %d", got, http.StatusNoContent)
+	}
+	if f.opener.Len() != 0 {
+		t.Fatalf("opener holds %d mounts, want 0", f.opener.Len())
+	}
+	if c, v, m := f.ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Fatalf("close left crypt=%d verity=%d mounts=%d behind", c, v, m)
+	}
+}
+
+// Closing with nothing open is success: teardown races pod deletion by design.
+func TestServerCloseWithNothingOpenIsANoOp(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
+	}
+}
+
+func TestServerRefusesUnresolvableCloseCaller(t *testing.T) {
+	f := newServerFixture(t, fakeIdentity{err: errors.New("no pod cgroup")})
+	if got := f.postClose(t).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+// switchIdentity is an Identity whose answer the test changes between requests.
+type switchIdentity struct {
+	mu  sync.Mutex
+	pod PodCgroup
+}
+
+func (s *switchIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pod, nil
+}
+
+func (s *switchIdentity) set(pod PodCgroup) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pod = pod
+}
+
+// A close releases the caller's own volumes and nobody else's: the pod comes
+// from peer credentials, and the request has no say.
+func TestServerCloseIsScopedToTheCallingPod(t *testing.T) {
+	ident := &switchIdentity{pod: testPod(testPodUID)}
+	f := newServerFixture(t, ident)
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	ident.set(testPod("00000000-0000-4000-8000-000000000000"))
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d", got)
+	}
+	if f.opener.Len() != 1 {
+		t.Fatalf("another pod's close took the mount: %d mounts, want 1", f.opener.Len())
+	}
+}
+
+// A restarted sidecar whose close already ran re-opens and mounts afresh.
+func TestServerReopensAfterClose(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("open: status %d", got)
+	}
+	if got := f.postClose(t).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("close: status %d", got)
+	}
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("re-open: status %d", got)
+	}
+	if f.opener.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want 1", f.opener.Len())
 	}
 }

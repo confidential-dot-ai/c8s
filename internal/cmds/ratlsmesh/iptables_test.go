@@ -198,17 +198,16 @@ func TestJumpRules(t *testing.T) {
 	assertContains(t, "prerouting jump", jumps[1].args, "-j", preroutingChainName)
 }
 
-// TestJumpRulesArgsShape guards the assumption isJumpAtHead relies on: each
-// jump's args is exactly {"-j", chain}. Any matcher (e.g. -m comment, conntrack)
-// would let iptables -S renormalize tokens, defeat the literal string compare
-// in isJumpAtHead, and turn the watchdog into a reinsert-every-tick loop. Catch
+// TestJumpRulesArgsShape guards the assumption parseJumpBlockAtHead relies on:
+// each jump's args is exactly {"-j", chain}. Any matcher (e.g. -m comment,
+// conntrack) would let iptables -S renormalize tokens, defeat the literal
+// string compare, and turn the watchdog into a reinsert-every-tick loop. Catch
 // the regression here instead of in a noisy production race.
 func TestJumpRulesArgsShape(t *testing.T) {
 	jumps := append(append(jumpRules(), cwJumpRule()), cwEgressJumpRule())
-	jumps = append(jumps, guestFilterJumps()...)
 	for i, jump := range jumps {
 		if len(jump.args) != 2 || jump.args[0] != "-j" {
-			t.Fatalf("jump %d args = %v; isJumpAtHead requires {\"-j\", <chain>}", i, jump.args)
+			t.Fatalf("jump %d args = %v; parseJumpBlockAtHead requires {\"-j\", <chain>}", i, jump.args)
 		}
 	}
 }
@@ -322,25 +321,20 @@ func TestBuildCWGuardRulesEmptyPassthroughIsStrict(t *testing.T) {
 }
 
 // The egress guard drops non-TCP from cw pod source IPs (the mesh carries
-// TCP only), exempting established TCP replies, DNS queries restricted to the
-// cluster DNS server(s), and the ICMPv6 types IPv6 needs. Golden test
-// asserting the exact rules for both families.
+// TCP only), exempting established TCP replies, UDP/53 queries to any
+// destination, and the ICMPv6 types IPv6 needs. Golden test asserting the
+// exact rules for both families.
 func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
-	dns := map[iptablesFamily][]string{
-		iptablesFamilyIPv4: {"10.53.0.10"},
-		iptablesFamilyIPv6: {"fd00::10"},
-	}
-	rules := buildCWEgressGuardRules(dns)
+	rules := buildCWEgressGuardRules()
 	specs := []struct {
 		family  iptablesFamily
 		setName string
-		dnsIP   string
 	}{
-		{iptablesFamilyIPv4, cwPodIPSetName4, "10.53.0.10"},
-		{iptablesFamilyIPv6, cwPodIPSetName6, "fd00::10"},
+		{iptablesFamilyIPv4, cwPodIPSetName4},
+		{iptablesFamilyIPv6, cwPodIPSetName6},
 	}
-	// Per family: established RETURN, 1 DNS RETURN, [14 ICMPv6 RETURN for v6],
-	// nontcp DROP. v4 = 4 rules, v6 = 4 + 14.
+	// Per family: established RETURN, DNS RETURN, [14 ICMPv6 RETURN for v6],
+	// nontcp DROP. v4 = 3, v6 = 3 + 14.
 	var offset int
 	for _, spec := range specs {
 		icmpCount := 0
@@ -350,8 +344,8 @@ func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
 		perFamily := 3 + icmpCount // est, dns, icmpv6 x N, drop
 		group := rules[offset : offset+perFamily]
 		offset += perFamily
-		est, dnsRule, drop := group[0], group[1], group[perFamily-1]
-		for _, r := range []iptablesRule{est, dnsRule, drop} {
+		est, dns, drop := group[0], group[1], group[perFamily-1]
+		for _, r := range []iptablesRule{est, dns, drop} {
 			if r.table != "filter" || r.chain != cwEgressChainName {
 				t.Errorf("%s: table=%q chain=%q, want filter/%s", spec.family, r.table, r.chain, cwEgressChainName)
 			}
@@ -374,16 +368,15 @@ func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
 		if !reflect.DeepEqual(est.args, wantEst) {
 			t.Errorf("%s established return = %v, want %v", spec.family, est.args, wantEst)
 		}
-		// DNS carve-out is destination-scoped to the cluster DNS IP so a cw
-		// pod cannot reach an un-scoped external resolver in plaintext.
+		// The carve-out names no destination, so it survives kube-proxy's
+		// Service DNAT and holds whatever address the cluster resolver has.
 		wantDNS := []string{
 			"-m", "set", "--match-set", spec.setName, "src",
 			"-p", "udp", "--dport", "53",
-			"-d", spec.dnsIP,
 			"-j", "RETURN",
 		}
-		if !reflect.DeepEqual(dnsRule.args, wantDNS) {
-			t.Errorf("%s dns query = %v, want %v", spec.family, dnsRule.args, wantDNS)
+		if !reflect.DeepEqual(dns.args, wantDNS) {
+			t.Errorf("%s dns query = %v, want %v", spec.family, dns.args, wantDNS)
 		}
 		// ICMPv6 allow rules (v6 only) must cover every essential type.
 		if spec.family == iptablesFamilyIPv6 {
@@ -418,7 +411,7 @@ func TestBuildCWEgressGuardRulesGolden(t *testing.T) {
 // PREROUTING before FORWARD), so a TCP packet's protocol column never equals
 // "tcp" at the point the drop is evaluated. The rule uses `! -p tcp`.
 func TestBuildCWEgressGuardRulesDoesNotDropTCP(t *testing.T) {
-	rules := buildCWEgressGuardRules(map[iptablesFamily][]string{iptablesFamilyIPv4: {clusterDNSClusterIP}})
+	rules := buildCWEgressGuardRules()
 	for _, r := range rules {
 		if !strings.Contains(r.label, "drop") {
 			continue
@@ -440,7 +433,7 @@ func TestBuildCWEgressGuardRulesDoesNotDropTCP(t *testing.T) {
 // non-TCP flows are still dropped (SEC-4). A guard built without this would
 // let arbitrary established UDP pass the host FORWARD guard.
 func TestBuildCWEgressGuardEstablishedReturnIsTCPOnly(t *testing.T) {
-	rules := buildCWEgressGuardRules(map[iptablesFamily][]string{iptablesFamilyIPv4: {clusterDNSClusterIP}})
+	rules := buildCWEgressGuardRules()
 	for _, r := range rules {
 		if !strings.Contains(r.label, "established") {
 			continue
@@ -826,7 +819,6 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 		iptablesFamilyIPv4: "10.0.0.1",
 		iptablesFamilyIPv6: "fd00::10",
 	}
-	dnsIPs := map[iptablesFamily][]string{iptablesFamilyIPv4: {clusterDNSClusterIP}}
 	exclude, err := parseExcludeUIDs("0")
 	if err != nil {
 		t.Fatalf("parseExcludeUIDs: %v", err)
@@ -835,10 +827,10 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseCWPassthrough: %v", err)
 	}
-	rules, jumps := composeIptablesSyncRules(15001, defaultProxyUID, exclude, cwPassthrough, nodeIPs, dnsIPs)
+	rules, jumps := composeIptablesSyncRules(15001, defaultProxyUID, exclude, cwPassthrough, nodeIPs)
 
-	// The egress guard rules (both families, incl. ICMPv6 and dest-scoped
-	// DNS) must be present.
+	// The egress guard rules (both families, incl. ICMPv6 and the DNS
+	// carve-out) must be present.
 	var egressCount, icmpv6Count, dnsCount int
 	for _, r := range rules {
 		if r.chain != cwEgressChainName {
@@ -850,9 +842,13 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 			icmpv6Count++
 		case strings.Contains(r.label, "dns"):
 			dnsCount++
-			// The DNS carve-out must be destination-scoped to the cluster DNS.
-			if !slices.Contains(r.args, "-d") {
-				t.Errorf("egress dns rule lacks a destination match: %v", r.args)
+			// A destination scope here is the regression this removed: it
+			// silently drops every cw DNS query on a cluster whose resolver
+			// sits at another address.
+			for _, scope := range []string{"--ctorigdst", "-d"} {
+				if slices.Contains(r.args, scope) {
+					t.Errorf("egress dns rule is scoped by %s: %v", scope, r.args)
+				}
 			}
 		}
 	}
@@ -862,8 +858,8 @@ func TestComposeIptablesSyncRulesAssemblesFullGuard(t *testing.T) {
 	if icmpv6Count != len(essentialICMPv6Types) {
 		t.Errorf("compose icmpv6 allow rules = %d, want %d", icmpv6Count, len(essentialICMPv6Types))
 	}
-	if dnsCount != 1 { // one IPv4 cluster-DNS destination
-		t.Errorf("compose dns rules = %d, want 1", dnsCount)
+	if dnsCount != 2 { // one carve-out per family
+		t.Errorf("compose dns rules = %d, want one per family", dnsCount)
 	}
 
 	// The egress FORWARD jump must sit in the jump set alongside the inbound

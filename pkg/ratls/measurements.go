@@ -1,40 +1,23 @@
 package ratls
 
 import (
-	"encoding/hex"
-	"fmt"
-	"strings"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
-// ParseHexMeasurements parses a comma-separated list of hex-encoded SEV-SNP
-// launch digests into the byte form VerifyPolicy.Measurements expects. Empty
-// input returns nil; the caller decides whether to warn.
-func ParseHexMeasurements(raw string) ([][]byte, error) {
-	return ParseHexMeasurementsList(strings.Split(raw, ","))
+// Pins carries shared image pins and optional c8s launch-bound node identities.
+// Entries replace the image pins; the complete tuple is enforced on one response.
+type Pins struct {
+	Measurements [][]byte
+	RTMRs        map[int][]byte
+	Entries      []measurements.Entry
 }
 
-// ParseHexMeasurementsList parses a slice of hex-encoded SEV-SNP launch
-// digests into the byte form VerifyPolicy.Measurements expects. Blank entries
-// are skipped; an all-blank or empty slice returns nil. The caller decides
-// whether to warn on an empty result.
-func ParseHexMeasurementsList(raw []string) ([][]byte, error) {
-	out := make([][]byte, 0, len(raw))
-	for _, p := range raw {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		decoded, err := hex.DecodeString(p)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hex measurement %q: %w", p, err)
-		}
-		if len(decoded) != SNPMeasurementSize {
-			return nil, fmt.Errorf("measurement %q is %d bytes, want %d", p, len(decoded), SNPMeasurementSize)
-		}
-		out = append(out, decoded)
+// VerifyPolicy is the single conversion used by c8s peer verifiers.
+func (p Pins) VerifyPolicy(url string) *VerifyPolicy {
+	return &VerifyPolicy{
+		Policy:            remote.Policy{Measurements: p.Measurements, RTMRs: p.RTMRs},
+		Entries:           p.Entries,
+		AttestationApiURL: url,
 	}
-	if len(out) == 0 {
-		return nil, nil
-	}
-	return out, nil
 }
