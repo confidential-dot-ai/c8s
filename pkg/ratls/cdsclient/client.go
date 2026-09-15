@@ -26,7 +26,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -82,8 +81,8 @@ type Config struct {
 	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
 	CDSRTMRs map[int][]byte
 
-	// CDSEntries additionally binds the CDS image to its authorized server key.
-	CDSEntries []measurements.Entry
+	// CDSImages additionally binds the CDS image to its authorized server key.
+	CDSImages []remote.ImagePin
 
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
@@ -110,7 +109,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Entries: cfg.CDSEntries, Policy: remote.Policy{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{Policy: remote.Policy{Images: cfg.CDSImages, Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs}, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

@@ -204,6 +204,12 @@ agents; `cds.json` contains only its server. Their shared measurement-file
 schema carries `operator_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
 CDS clients require the authorized server despite identical software images.
+The schema belongs to attestation-go's `refvalues` package: `operator_key`
+maps to `remote.ImagePin.Anchor`. `remote.EnforceImages` checks the image and
+calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
+borrow another entry's authorized key. c8s passes these complete pins through
+`remote.Policy.Images`; legacy flags that cannot carry anchors are refused
+where they would weaken enforcement.
 The server publishes only the CDS URL and server policy to the public
 `c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
 and private keys do not enter that ConfigMap. The operator forwards the full
@@ -596,8 +602,7 @@ Caveats the output surfaces:
 
 `c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
-and it enforces the identical policy twice — on the initial attestation gate
-and again on the RA-TLS credential-release connection:
+both on the RA-TLS connection and on a fresh nonce-bound attestation report:
 
 - **platform** — the `--image-manifest` shape selects it (a TDX tuple or SNP
   `snp_variants`); a node of any other platform is refused up front;
@@ -618,6 +623,30 @@ and again on the RA-TLS credential-release connection:
   its validity window (NotBefore with a bounded 5-minute skew, NotAfter with
   none) and, being self-signed, verify its own signature with its attested
   key.
+
+By default the client sends a signed, 32-byte nonce to `POST /attest` on the
+credential-release service at port **8443**. That service authenticates the
+operator token before asking its configured local attester for evidence.
+The client verifies the returned report in-process before generating the
+credential CSR. The fresh report is still required: the TLS certificate's
+key-bound quote may have been created before later workload measurements.
+The raw attester remains on guest loopback; external bootstrap only needs
+the credential service and the Kubernetes API on port **6443**.
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key demo/server.key --image-manifest manifest.json \
+  --out demo/kubeconfig --release-wait 5m
+```
+
+For SSH tunnels or non-default ports, supply `--release-url` and
+`--apiserver-url` instead of `--node`. Release URLs must use HTTPS, and
+signed requests never follow redirects. `--release-wait` retries refused
+connections while the service starts; attestation and authorization failures
+stop the flow. An explicit `--attest-url` retains the separate nonce check
+for older images with a reachable attestation API. There is no automatic
+fallback: images without the authenticated `/attest` endpoint need a rebuild
+to use the default flow.
 
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked

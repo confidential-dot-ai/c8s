@@ -6,7 +6,7 @@ import (
 
 func TestPullAndInventoryUseCompleteCDSPolicy(t *testing.T) {
 	cfg := validConfig()
-	cfg.Allowlist.Pull.CDSMeasurementsConfig = "../../../pkg/measurements/testdata/node-identities.json"
+	cfg.Allowlist.Pull.CDSMeasurementsConfig = "../../../internal/testdata/node-identities.json"
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -15,7 +15,7 @@ func TestPullAndInventoryUseCompleteCDSPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pins.Entries) != 2 || len(pins.Entries[0].OperatorKey) == 0 || len(pins.Entries[0].RTMRs) != 2 {
+	if len(pins.Images) != 2 || len(pins.Images[0].Anchor) == 0 || len(pins.Images[0].RTMRs) != 2 {
 		t.Fatal("CDS policy lost part of its image/operator tuple")
 	}
 	if _, err := allowlistPullHTTPClient(cfg.Allowlist.Pull); err != nil {

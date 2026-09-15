@@ -12,7 +12,7 @@ import (
 )
 
 func TestEveryInjectedFetcherRetainsCompleteCDSPolicy(t *testing.T) {
-	doc, err := os.ReadFile("../../pkg/measurements/testdata/node-identities.json")
+	doc, err := os.ReadFile("../../internal/testdata/node-identities.json")
 	if err != nil {
 		t.Fatal(err)
 	}

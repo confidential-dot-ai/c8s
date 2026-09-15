@@ -2,12 +2,13 @@ package cds
 
 import (
 	"encoding/hex"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"net/http"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
@@ -16,7 +17,7 @@ func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
 	server, agent := []byte("server key"), []byte("agent key")
 	stub := newStubAttestationApi(t, hex.EncodeToString(digest))
 	h := newTestAttestHandler(t, stub.URL(), nil)
-	h.NodeEntries = []measurements.Entry{{Name: "server", Digest: digest, OperatorKey: server}}
+	h.Images = []remote.ImagePin{{Name: "server", Digest: digest, Anchor: server}}
 	csr, _ := generateCSR(t)
 	for _, tc := range []struct {
 		name   string
@@ -39,23 +40,23 @@ func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
 }
 
 func TestCDSConfigPreservesNodeKeys(t *testing.T) {
-	cfg := config{measurementsConfig: "../../../pkg/measurements/testdata/node-identities.json", ratlsPlatform: "tdx"}
+	cfg := config{measurementsConfig: "../../../internal/testdata/node-identities.json", ratlsPlatform: "tdx"}
 	got, err := resolveMeasurementsConfig(&cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Entries) != 2 || !got.PinsOperatorKeys() {
+	if len(got.Images) != 2 || !got.HasAnchors() {
 		t.Fatal("CDS startup dropped node identities")
 	}
-	encoded, err := measurements.Format(got)
+	encoded, err := refvalues.Format(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	served, err := measurements.Parse(encoded)
+	served, err := refvalues.Parse(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing, extra := measurements.Diff(got, served)
+	missing, extra := refvalues.Diff(got, served)
 	if len(missing)+len(extra) != 0 {
 		t.Fatal("served policy dropped identities")
 	}

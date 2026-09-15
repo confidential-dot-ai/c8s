@@ -3,11 +3,11 @@ package ratls
 import (
 	"encoding/hex"
 	"errors"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 // The policy must survive Pins conversion and the complete certificate
@@ -17,7 +17,7 @@ func TestVerifyCertRequiresServerLaunchKey(t *testing.T) {
 	digest := att.Report[0x90:0xc0]
 	server, agent := []byte("server key"), []byte("agent key")
 	stub := mockapi.New(t)
-	policy := Pins{Entries: []measurements.Entry{{Name: "server", Digest: digest, OperatorKey: server}}}.VerifyPolicy(stub.URL())
+	policy := Pins{Images: []remote.ImagePin{{Name: "server", Digest: digest, Anchor: server}}}.VerifyPolicy(stub.URL())
 	for _, tc := range []struct {
 		name   string
 		key    []byte

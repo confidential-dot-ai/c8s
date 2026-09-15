@@ -5,13 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 const (
@@ -19,9 +20,9 @@ const (
 	mcDigestB = "bb22000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 )
 
-func mcSet(t *testing.T, entries string) measurementspkg.ReferenceValues {
+func mcSet(t *testing.T, entries string) refvalues.ReferenceValues {
 	t.Helper()
-	s, err := measurementspkg.ParseServed([]byte(`{"schema_version":"1","tee":"sev-snp","measurements":[` + entries + `]}`))
+	s, err := refvalues.ParseRendered([]byte(`{"schema_version":"1","tee":"sev-snp","measurements":[` + entries + `]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestCheckServedMeasurementsReportsAnEmptySet(t *testing.T) {
 	want := mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`)
 	fail, msgs := collectFailures()
 
-	checkServedMeasurements(want, measurementsReport{served: measurementspkg.ReferenceValues{TEE: measurementspkg.TEESNP}, fetched: true}, fail)
+	checkServedMeasurements(want, measurementsReport{served: refvalues.ReferenceValues{Family: teetypes.FamilySNP}, fetched: true}, fail)
 	if len(*msgs) != 1 || !strings.Contains((*msgs)[0], "empty measurement set") {
 		t.Fatalf("an unpinned target was not reported: %v", *msgs)
 	}
@@ -116,7 +117,7 @@ func TestCheckServedMeasurementsNeverPassesUnchecked(t *testing.T) {
 // A target on the other platform is a policy error, not a per-image diff.
 func TestCheckServedMeasurementsReportsPlatformMismatch(t *testing.T) {
 	want := mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`)
-	served, err := measurementspkg.ParseServed([]byte(
+	served, err := refvalues.ParseRendered([]byte(
 		`{"schema_version":"1","tee":"tdx","measurements":[{"name":"a","mrtd":"00` + mcDigestA + `"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +134,7 @@ func TestCheckServedMeasurementsReportsPlatformMismatch(t *testing.T) {
 // refuse a server whose certificate is not the one that was attested — that
 // binding is what stops a substituted endpoint answering for CDS.
 func TestFetchServedMeasurementsBindsToTheAttestedCert(t *testing.T) {
-	doc, err := measurementspkg.Format(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
+	doc, err := refvalues.Format(mcSet(t, `{"name":"a","measurement":"00`+mcDigestA+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestFetchServedMeasurementsBindsToTheAttestedCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch over the attested cert failed: %v", err)
 	}
-	if len(got.Entries) != 1 || got.TEE != measurementspkg.TEESNP {
+	if len(got.Images) != 1 || got.Family != teetypes.FamilySNP {
 		t.Fatalf("served set = %+v, want the one pinned image", got)
 	}
 

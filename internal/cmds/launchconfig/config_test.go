@@ -17,8 +17,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -122,18 +122,18 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				if staged.Role != role || staged.TLSSAN != "c8s.local" || staged.Node.IP != "" {
 					t.Fatalf("incorrect staged role/default/address")
 				}
-				peers, err := measurements.Load(cfg.path(Dir + "/peers.json"))
+				peers, err := refvalues.Load(cfg.path(Dir + "/peers.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				cds, err := measurements.Load(cfg.path(Dir + "/cds.json"))
+				cds, err := refvalues.Load(cfg.path(Dir + "/cds.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(peers.Entries) != 2 || len(cds.Entries) != 1 || !bytes.Equal(cds.Entries[0].OperatorKey, []byte(doc.Server.OperatorPublicKey)) {
+				if len(peers.Images) != 2 || len(cds.Images) != 1 || !bytes.Equal(cds.Images[0].Anchor, []byte(doc.Server.OperatorPublicKey)) {
 					t.Fatal("node and server policy sets are not separated")
 				}
-				for _, entry := range peers.Entries {
+				for _, entry := range peers.Images {
 					if !bytes.Equal(entry.Digest, mustDecodeHex(doc.Image.Measurement)) {
 						t.Fatal("peer policy changed the shared image")
 					}

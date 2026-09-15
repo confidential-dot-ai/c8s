@@ -12,8 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 const (
@@ -87,11 +87,11 @@ func stageVerified(cfg Config, v *Verified) error {
 		doc.Server.Address = address
 		doc.Node.IP = address
 	}
-	peers, err := measurements.Format(v.pins)
+	peers, err := refvalues.Format(v.pins)
 	if err != nil {
 		return fmt.Errorf("format node peer policy: %w", err)
 	}
-	cds, err := measurements.Format(v.cdsPins)
+	cds, err := refvalues.Format(v.cdsPins)
 	if err != nil {
 		return fmt.Errorf("format server policy: %w", err)
 	}

@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 func TestOperatorMeasurementsPolicyPreservesCompleteIdentities(t *testing.T) {
-	path := filepath.Join("..", "..", "pkg", "measurements", "testdata", "node-identities.json")
-	want, err := measurements.Load(path)
+	path := filepath.Join("..", "..", "internal", "testdata", "node-identities.json")
+	want, err := refvalues.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,11 +22,11 @@ func TestOperatorMeasurementsPolicyPreservesCompleteIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := measurements.Parse([]byte(policy))
+	got, err := refvalues.Parse([]byte(policy))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) || !got.PinsOperatorKeys() {
+	if !reflect.DeepEqual(got, want) || !got.HasAnchors() {
 		t.Fatalf("operator lost image/operator-key identities: %+v", got)
 	}
 	for _, flat := range []struct{ digests, rtmrs []string }{

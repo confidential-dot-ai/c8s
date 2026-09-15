@@ -69,7 +69,7 @@ func TestInstallPinsEmitsFileAndFlatValues(t *testing.T) {
 }
 
 func TestInstallPinsRefusesToDropOperatorIdentity(t *testing.T) {
-	withInstallFlags(t, "../../pkg/measurements/testdata/node-identities.json", nil, nil)
+	withInstallFlags(t, "../../internal/testdata/node-identities.json", nil, nil)
 	if _, _, _, err := installPins(); err == nil || !strings.Contains(err.Error(), "baked node launch flow") {
 		t.Fatalf("operator-key policy was flattened for Helm: %v", err)
 	}

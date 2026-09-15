@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -61,7 +60,7 @@ func readOperatorPubkey() ([]byte, error) {
 // attestation-api; on expiry the service fails start and systemd retries.
 const selfReportTimeout = 15 * time.Second
 
-// attestationReadyTimeout bounds waitForAttestationAPI. attestation-api is a
+// attestationReadyTimeout bounds remote.Client.WaitHealthy. attestation-api is a
 // Type=simple unit that fetches its certificate collateral over the network
 // before it binds its port, so an After= ordering alone lets a caller start
 // while the socket is still refusing connections. Package vars so tests can
@@ -70,33 +69,6 @@ var (
 	attestationReadyTimeout  = 90 * time.Second
 	attestationReadyInterval = 2 * time.Second
 )
-
-// waitForAttestationAPI polls GET /health until the local attestation-api
-// answers or attestationReadyTimeout expires. A bounded wait in the binary
-// rather than a unit-level Restart=: rke2-role.service is a oneshot
-// rke2-server Requires, and a failed first attempt fails rke2-server's start
-// job for good regardless of how many times systemd restarts the oneshot.
-func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error {
-	client := remote.NewClient(attestationAPIURL)
-	deadline := time.Now().Add(attestationReadyTimeout)
-	var lastErr error
-	for {
-		hctx, cancel := context.WithTimeout(ctx, attestationReadyInterval)
-		_, lastErr = client.Health(hctx)
-		cancel()
-		if lastErr == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("attestation-api at %s not ready after %s: %w", attestationAPIURL, attestationReadyTimeout, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(attestationReadyInterval):
-		}
-	}
-}
 
 // verifiedSelfReport returns this guest's own attestation as the local
 // attestation-api verified it.
@@ -108,11 +80,15 @@ func waitForAttestationAPI(ctx context.Context, attestationAPIURL string) error 
 //
 // One report answers every question this package asks about the guest: the
 // operator-key binding (LoadMeasuredOperatorKey) and its own launch
-// measurement (OwnLaunchMeasurement). A caller needing both on the same boot
-// uses LoadMeasuredOperatorKeyAndOwnMeasurement so the guest attests once.
+// image identity. LoadMeasuredOperatorKeyAndOwnMeasurement answers both
+// from one report so the guest attests once.
 func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetypes.VerificationResult, error) {
-	if err := waitForAttestationAPI(ctx, attestationAPIURL); err != nil {
-		return nil, err
+	client := remote.NewClient(attestationAPIURL)
+	readyCtx, cancelReady := context.WithTimeout(ctx, attestationReadyTimeout)
+	err := client.WaitHealthy(readyCtx, attestationReadyInterval)
+	cancelReady()
+	if err != nil {
+		return nil, fmt.Errorf("attestation-api at %s not ready after %s: %w", attestationAPIURL, attestationReadyTimeout, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
 	defer cancel()
@@ -127,7 +103,7 @@ func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetype
 	if err != nil {
 		return nil, fmt.Errorf("attest self: %w", err)
 	}
-	verified, err := remote.NewClient(attestationAPIURL).VerifyEvidence(ctx,
+	verified, err := client.VerifyEvidence(ctx,
 		resp.Envelope(), remote.Policy{ExpectedReportData: reportData[:sha512.Size384]})
 	if err != nil {
 		return nil, fmt.Errorf("verify self-report: %w", err)
@@ -170,59 +146,8 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 	return pub, nil
 }
 
-// OwnLaunchMeasurement returns this guest's own launch measurement (TDX MRTD
-// or SNP LAUNCH_DIGEST, 48 bytes) and, on TDX, its RTMR[1] and RTMR[2] — the
-// values authenticated launch staging compares against the requested image
-// policy. rtmrs is nil on SNP, which has no runtime measurement registers.
-//
-// platform is the ratls-normalized platform this image was built for ("tdx"
-// or "sev-snp"). The values are read off one verified self-report; platform
-// does not select how they are read, it is checked against what the hardware
-// proved, so a chart baked for one TEE is never pinned to the other's report.
-func OwnLaunchMeasurement(ctx context.Context, platform, attestationAPIURL string) (measurement []byte, rtmrs map[int][]byte, err error) {
-	report, err := verifiedSelfReport(ctx, attestationAPIURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	return ownLaunchMeasurement(report, platform)
-}
-
-// ownLaunchMeasurement reads the launch measurement and (TDX) RTMR pins off a
-// verified report, failing closed on a family other than platform, a launch
-// digest of any width but 48 bytes, or a TDX report missing a register.
-func ownLaunchMeasurement(r *teetypes.VerificationResult, platform string) ([]byte, map[int][]byte, error) {
-	if !r.SignatureValid {
-		return nil, nil, fmt.Errorf("verification result does not carry a valid signature, so its claims are unverified")
-	}
-	family := r.Platform.Family()
-	if family == teetypes.FamilyUnknown {
-		return nil, nil, fmt.Errorf("%w %q", runtimemeasure.ErrUnknownPlatform, r.Platform)
-	}
-	if string(family) != platform {
-		return nil, nil, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, r.Platform)
-	}
-	digest, err := hex.DecodeString(r.Claims.LaunchDigest)
-	if err != nil {
-		return nil, nil, fmt.Errorf("launch_digest claim is not hex: %w", err)
-	}
-	if len(digest) != sha512.Size384 {
-		return nil, nil, fmt.Errorf("launch_digest claim is %d bytes, want %d", len(digest), sha512.Size384)
-	}
-	if family != teetypes.FamilyTDX {
-		return digest, nil, nil
-	}
-	rtmrs := make(map[int][]byte, 2)
-	for _, i := range []int{1, 2} {
-		if rtmrs[i], err = r.Claims.RTMR(i); err != nil {
-			return nil, nil, err
-		}
-	}
-	return digest, rtmrs, nil
-}
-
-// LoadMeasuredOperatorKeyAndOwnMeasurement does what LoadMeasuredOperatorKey
-// and OwnLaunchMeasurement do together, off one verified self-report instead
-// of attesting once per question.
+// LoadMeasuredOperatorKeyAndOwnMeasurement checks the operator key and reads
+// the guest image identity from one verified self-report.
 //
 // The own measurement is always resolved, operator key present or not — a
 // non-operator boot (pubErr wrapping ErrNoOperatorKey) still needs it for
@@ -242,9 +167,21 @@ func LoadMeasuredOperatorKeyAndOwnMeasurement(ctx context.Context, platform, att
 			pub, pubErr = nil, verr
 		}
 	}
-	measurement, rtmrs, err = ownLaunchMeasurement(report, platform)
+	identity, err := runtimemeasure.IdentityFromResult(report)
 	if err != nil {
 		return nil, nil, nil, nil, err
+	}
+	if string(identity.Family()) != platform {
+		return nil, nil, nil, nil, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, report.Platform)
+	}
+	// Adapt the shared identity to the signed launch document's fields.
+	observed := identity.LaunchDigests()[0].Digest
+	measurement = observed[:]
+	for index, value := range identity.RTMRs() {
+		if rtmrs == nil {
+			rtmrs = make(map[int][]byte)
+		}
+		rtmrs[index] = value[:]
 	}
 	return pub, pubErr, measurement, rtmrs, nil
 }

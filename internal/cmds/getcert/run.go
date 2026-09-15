@@ -210,7 +210,7 @@ func cdsPins(cfg config) (ratls.Pins, error) {
 		if err != nil {
 			return ratls.Pins{}, err
 		}
-		return ratls.Pins{Entries: set.Entries}, nil
+		return ratls.Pins(set.Policy()), nil
 	}
 	measurements, err := refvalues.ParseHexMeasurements(cfg.CDSMeasurements)
 	if err != nil {

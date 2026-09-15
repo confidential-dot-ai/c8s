@@ -28,12 +28,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -1378,7 +1378,7 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
 // ORTHOGONAL axes. pod/node/gke pair with either SEV-SNP
 // (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
-// tdx). aks uses the Azure vTPM path regardless of the CPU TEE: the node's
+// tdx). aks uses the Azure vTPM path regardless of the CPU Family: the node's
 // vTPM HCL report wraps an SNP report on an SEV-SNP CVM (az-snp) or a TD quote
 // on an Intel TDX CVM (az-tdx). Both are supported; --hardware-platform tdx on
 // aks selects the az-tdx shape (no /dev/tdx-guest needed — the TD quote comes
@@ -1515,7 +1515,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	for i, pin := range measurements.FormatRTMRPins(rtmrs) {
+	for i, pin := range refvalues.FormatRTMRPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),

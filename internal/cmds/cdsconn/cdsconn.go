@@ -28,7 +28,6 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -116,7 +115,7 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 // serving-cert verification (a port-forwarded CDS) when the target serves none
 // — the same routing `c8s verify` uses in auto mode. A discovery document that
 // fails verification is a hard error, never a fallback.
-func (o *Options) httpsClient(ctx context.Context, pins measurements.ReferenceValues) (*http.Client, error) {
+func (o *Options) httpsClient(ctx context.Context, pins refvalues.ReferenceValues) (*http.Client, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
 	verify := o.pinnedVerifier(pins)
@@ -132,20 +131,20 @@ func (o *Options) httpsClient(ctx context.Context, pins measurements.ReferenceVa
 	}
 }
 
-func (o *Options) loadPins() (measurements.ReferenceValues, error) {
+func (o *Options) loadPins() (refvalues.ReferenceValues, error) {
 	if o.MeasurementsConfig != "" {
 		if len(o.Measurements) != 0 || o.MeasurementsFile != "" {
-			return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --measurements-file")
+			return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --measurements-file")
 		}
-		return measurements.Load(o.MeasurementsConfig)
+		return refvalues.Load(o.MeasurementsConfig)
 	}
 	digests, err := o.loadMeasurements()
-	return measurements.FromFlags(digests, nil), err
+	return refvalues.FromFlags(digests, nil), err
 }
 
 // pinnedVerifier keeps full tuple checks on both the discovery and direct
 // RA-TLS paths, which otherwise carry only legacy launch-digest slices.
-func (o *Options) pinnedVerifier(pins measurements.ReferenceValues) localverify.VerifyFunc {
+func (o *Options) pinnedVerifier(pins refvalues.ReferenceValues) localverify.VerifyFunc {
 	verify := o.verifyFunc()
 	if o.MeasurementsConfig == "" {
 		return verify
@@ -158,7 +157,7 @@ func (o *Options) pinnedVerifier(pins measurements.ReferenceValues) localverify.
 		if result == nil {
 			return nil, fmt.Errorf("endpoint verifier returned no result")
 		}
-		if err := measurements.EnforceEntries(remote.VerifyResponse{Result: *result}, pins.Entries, platform); err != nil {
+		if err := remote.EnforceImages(remote.VerifyResponse{Result: *result}, pins.Images, teetypes.NormalizePlatform(platform)); err != nil {
 			return nil, fmt.Errorf("endpoint identity: %w", err)
 		}
 		return result, nil

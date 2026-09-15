@@ -4,42 +4,43 @@ package ratlsmesh
 
 import (
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"log/slog"
 	"strings"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // resolveMeasurementsConfig loads whole peer identities. Without a separate
 // CDS config the legacy behavior accepts the same set for both purposes.
-func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, error) {
+func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error) {
 	if c.measurementsConfig == "" && c.cdsMeasurementsConfig == "" {
-		return measurements.ReferenceValues{}, nil
+		return refvalues.ReferenceValues{}, nil
 	}
 	if c.measurementsConfig != "" && (c.measurements != "" || c.rtmrs != "") {
-		return measurements.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
+		return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
 	}
 	if c.cdsMeasurements != "" || c.cdsRTMRs != "" {
-		return measurements.ReferenceValues{}, fmt.Errorf("measurements configs cannot be combined with --cds-measurements or --cds-rtmrs")
+		return refvalues.ReferenceValues{}, fmt.Errorf("measurements configs cannot be combined with --cds-measurements or --cds-rtmrs")
 	}
-	var peers measurements.ReferenceValues
+	var peers refvalues.ReferenceValues
 	if c.measurementsConfig != "" {
 		var err error
-		peers, err = measurements.Load(c.measurementsConfig)
+		peers, err = refvalues.Load(c.measurementsConfig)
 		if err != nil {
-			return measurements.ReferenceValues{}, err
+			return refvalues.ReferenceValues{}, err
 		}
 	}
 	cds := peers
 	if c.cdsMeasurementsConfig != "" {
 		var err error
-		cds, err = measurements.Load(c.cdsMeasurementsConfig)
+		cds, err = refvalues.Load(c.cdsMeasurementsConfig)
 		if err != nil {
-			return measurements.ReferenceValues{}, fmt.Errorf("--cds-measurements-config: %w", err)
+			return refvalues.ReferenceValues{}, fmt.Errorf("--cds-measurements-config: %w", err)
 		}
-		if !peers.Empty() && peers.TEE != cds.TEE {
-			return measurements.ReferenceValues{}, fmt.Errorf("peer and CDS measurements configs declare different TEEs")
+		if !peers.Empty() && peers.Family != cds.Family {
+			return refvalues.ReferenceValues{}, fmt.Errorf("peer and CDS measurements configs declare different TEEs")
 		}
 	}
 	if !peers.Empty() {
@@ -47,34 +48,34 @@ func resolveMeasurementsConfig(c *proxyConfig) (measurements.ReferenceValues, er
 	}
 	c.cdsMeasurements, c.cdsRTMRs = flatPins(cds)
 	c.cdsPins = cds
-	slog.Info("measurements configs loaded", "peer_identities", len(peers.Entries), "cds_identities", len(cds.Entries))
+	slog.Info("measurements configs loaded", "peer_identities", len(peers.Images), "cds_identities", len(cds.Images))
 	return peers, nil
 }
 
 // flatPins fills legacy diagnostics; verification always keeps the entries.
-func flatPins(set measurements.ReferenceValues) (string, string) {
-	common, _ := set.CommonRTMRs()
-	return strings.Join(set.HexDigests(), ","), strings.Join(measurements.FormatRTMRPins(common), ",")
+func flatPins(set refvalues.ReferenceValues) (string, string) {
+	digests, common, _ := set.Flatten()
+	return strings.Join(digests, ","), strings.Join(refvalues.FormatRTMRPins(common), ",")
 }
 
 // checkTEEMatchesPlatform reports a config written for the other platform. It
 // runs after --platform=auto has probed the guest devices, so the comparison
 // is against the platform this proxy actually attests on.
-func checkTEEMatchesPlatform(set measurements.ReferenceValues, teeType ratls.TEEType) error {
+func checkTEEMatchesPlatform(set refvalues.ReferenceValues, teeType ratls.TEEType) error {
 	if set.Empty() {
 		return nil
 	}
-	platform := ""
+	var platform teetypes.Family
 	switch teeType {
 	case ratls.TEETypeSEVSNP:
-		platform = measurements.TEESNP
+		platform = teetypes.FamilySNP
 	case ratls.TEETypeTDX:
-		platform = measurements.TEETDX
+		platform = teetypes.FamilyTDX
 	default:
 		return nil
 	}
-	if set.TEE != platform {
-		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.TEE, platform)
+	if set.Family != platform {
+		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.Family, platform)
 	}
 	return nil
 }

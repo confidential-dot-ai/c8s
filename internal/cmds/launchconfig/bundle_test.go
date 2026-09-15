@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 // writeManifest writes a build manifest of the given platform, with the
@@ -152,14 +152,14 @@ func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 				t.Fatal("server.key does not match the server's launch public key")
 			}
 			// The client policy pins exactly the server entry Stage derives.
-			policy, err := measurements.Load(filepath.Join(dir, serverPolicy))
+			policy, err := refvalues.Load(filepath.Join(dir, serverPolicy))
 			if err != nil {
 				t.Fatal(err)
 			}
 			want, _ := server.referenceValues()
-			if len(policy.Entries) != 1 || policy.TEE != want.TEE || !bytes.Equal(policy.Entries[0].OperatorKey, want.Entries[0].OperatorKey) ||
-				!bytes.Equal(policy.Entries[0].Digest, want.Entries[0].Digest) {
-				t.Fatalf("server.json pins %+v, want the server entry %+v", policy, want.Entries[0])
+			if len(policy.Images) != 1 || policy.Family != want.Family || !bytes.Equal(policy.Images[0].Anchor, want.Images[0].Anchor) ||
+				!bytes.Equal(policy.Images[0].Digest, want.Images[0].Digest) {
+				t.Fatalf("server.json pins %+v, want the server entry %+v", policy, want.Images[0])
 			}
 			for _, f := range []string{serverKeyFile, agentKeyFile, filepath.Join(serverDir, documentFile), filepath.Join("demo-f1", signatureFile)} {
 				info, err := os.Stat(filepath.Join(dir, f))

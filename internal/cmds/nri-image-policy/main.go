@@ -28,7 +28,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -249,7 +248,7 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Images) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
 	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
@@ -266,11 +265,11 @@ func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
 		if len(cfg.CDSMeasurements) != 0 || len(cfg.CDSRTMRs) != 0 {
 			return ratls.Pins{}, fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
 		}
-		set, err := measurements.Load(cfg.CDSMeasurementsConfig)
+		set, err := refvalues.Load(cfg.CDSMeasurementsConfig)
 		if err != nil {
 			return ratls.Pins{}, err
 		}
-		return ratls.Pins{Entries: set.Entries}, nil
+		return ratls.Pins(set.Policy()), nil
 	}
 	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
 	if err != nil {
@@ -512,7 +511,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	if err != nil {
 		return err
 	}
-	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Images) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL

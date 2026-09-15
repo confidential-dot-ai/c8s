@@ -7,17 +7,17 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
-const nodePolicyPath = "../../../pkg/measurements/testdata/node-identities.json"
+const nodePolicyPath = "../../../internal/testdata/node-identities.json"
 
 func TestOperatorCLIConfigRejectsDowngrades(t *testing.T) {
 	o := Options{URL: "https://cds.example", MeasurementsConfig: nodePolicyPath, OperatorKey: writeTestKey(t)}
 	pins, err := o.loadPins()
-	if err != nil || len(pins.Entries) != 2 || len(pins.Entries[0].OperatorKey) == 0 {
+	if err != nil || len(pins.Images) != 2 || len(pins.Images[0].Anchor) == 0 {
 		t.Fatalf("full policy lost: %v", err)
 	}
 	if _, err := o.Signer(); err != nil {
@@ -39,12 +39,12 @@ func TestOperatorCLIConfigRejectsDowngrades(t *testing.T) {
 }
 
 func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
-	all, err := measurements.Load(nodePolicyPath)
+	all, err := refvalues.Load(nodePolicyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pins := measurements.ReferenceValues{TEE: all.TEE, Entries: all.Entries[:1]}
-	server := pins.Entries[0]
+	pins := refvalues.ReferenceValues{Family: all.Family, Images: all.Images[:1]}
+	server := pins.Images[0]
 	var report *teetypes.VerificationResult
 	o := Options{MeasurementsConfig: nodePolicyPath, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return report, nil
@@ -56,9 +56,9 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 		register []byte
 		accept   bool
 	}{
-		{"server", server.OperatorKey, server.RTMRs[1], true},
-		{"agent same image", all.Entries[1].OperatorKey, server.RTMRs[1], false},
-		{"server wrong image registers", server.OperatorKey, server.RTMRs[2], false},
+		{"server", server.Anchor, server.RTMRs[1], true},
+		{"agent same image", all.Images[1].Anchor, server.RTMRs[1], false},
+		{"server wrong image registers", server.Anchor, server.RTMRs[2], false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			seed := runtimemeasure.Seed(test.key)

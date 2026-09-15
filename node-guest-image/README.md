@@ -96,6 +96,30 @@ Additional optional disks:
   `/var/lib/models`. It is unencrypted and host-writable; attach public
   weights whose digests the workload verifies (`models-disk.service`).
 
+## Operator kubeconfig bootstrap
+
+After launching the server with its signed `opkeydata`, use the matching
+image manifest and server private key to obtain a kubeconfig:
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key demo/server.key --image-manifest manifest.json \
+  --out demo/kubeconfig --release-wait 5m
+```
+
+Bootstrap uses the RA-TLS credential service on port 8443 for both the
+operator-authenticated nonce attestation and credential release. The raw
+attester stays on loopback. The client verifies the full image and launch-key
+binding in both the serving certificate and the fresh report before requesting
+credentials. Port 6443 is the Kubernetes API; `--release-url` and
+`--apiserver-url` support forwarded ports. The credential listener starts only
+after the RKE2, operator-RBAC and PodSecurity readiness gates pass.
+
+Use a rebuilt image containing the authenticated credential-service `/attest`
+endpoint. Updating only the operator CLI does not add this guest endpoint.
+See [the operator trust gate](../docs/operator.md#trust-gate-c8s-get-kubeconfig)
+for the explicit legacy attestation URL option and verification rules.
+
 ## Measured services and Kubernetes integration
 
 One image contains all service binaries and role conditions:

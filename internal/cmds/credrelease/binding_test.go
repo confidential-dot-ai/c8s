@@ -242,9 +242,13 @@ func TestSelfReportWaitsForAttestationAPI(t *testing.T) {
 	}))
 	defer delayed.Close()
 
-	measurement, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", delayed.URL)
+	report, err := verifiedSelfReport(context.Background(), delayed.URL)
 	if err != nil {
-		t.Fatalf("OwnLaunchMeasurement: %v", err)
+		t.Fatalf("verifiedSelfReport: %v", err)
+	}
+	measurement, err := report.Claims.LaunchMeasurement()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !bytes.Equal(measurement, launchDigest) {
 		t.Errorf("measurement = %x, want %x", measurement, launchDigest)
@@ -258,102 +262,13 @@ func TestSelfReportWaitsForAttestationAPI(t *testing.T) {
 }
 
 func TestSelfReportFailsWhenAttestationAPINeverReady(t *testing.T) {
-	_, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", "http://127.0.0.1:1")
+	_, err := verifiedSelfReport(context.Background(), "http://127.0.0.1:1")
 	if err == nil {
 		t.Fatal("want an error when the attestation-api never answers /health")
 	}
 	if !strings.Contains(err.Error(), "not ready after") {
 		t.Errorf("error = %v, want the readiness wait to report the timeout", err)
 	}
-}
-
-// The own measurement comes off the verified report: MRTD plus RTMR[1]/[2]
-// on TDX, LAUNCH_DIGEST alone on SNP.
-func TestOwnLaunchMeasurement(t *testing.T) {
-	t.Run("tdx", func(t *testing.T) {
-		mrtd, rtmr1, rtmr2 := fill(0xaa), fill(0xbb), fill(0xcc)
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformTDX, launchDigest: mrtd, rtmr1: rtmr1, rtmr2: rtmr2}).URL()
-
-		measurement, rtmrs, err := OwnLaunchMeasurement(context.Background(), "tdx", url)
-		if err != nil {
-			t.Fatalf("OwnLaunchMeasurement: %v", err)
-		}
-		if !bytes.Equal(measurement, mrtd) {
-			t.Errorf("measurement = %x, want mrtd %x", measurement, mrtd)
-		}
-		if !bytes.Equal(rtmrs[1], rtmr1) {
-			t.Errorf("rtmrs[1] = %x, want %x", rtmrs[1], rtmr1)
-		}
-		if !bytes.Equal(rtmrs[2], rtmr2) {
-			t.Errorf("rtmrs[2] = %x, want %x", rtmrs[2], rtmr2)
-		}
-		if len(rtmrs) != 2 {
-			t.Errorf("rtmrs has %d entries, want exactly RTMR[1] and RTMR[2]", len(rtmrs))
-		}
-	})
-
-	t.Run("snp", func(t *testing.T) {
-		want := fill(0xab)
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: want}).URL()
-
-		measurement, rtmrs, err := OwnLaunchMeasurement(context.Background(), "sev-snp", url)
-		if err != nil {
-			t.Fatalf("OwnLaunchMeasurement: %v", err)
-		}
-		if !bytes.Equal(measurement, want) {
-			t.Errorf("measurement = %x, want %x", measurement, want)
-		}
-		if rtmrs != nil {
-			t.Errorf("rtmrs = %v, want nil (RTMRs are TDX-only)", rtmrs)
-		}
-	})
-}
-
-// A measurement that cannot be read exactly must not be pinned at all.
-func TestOwnLaunchMeasurementFailsClosed(t *testing.T) {
-	tdx := func(r selfReport) selfReport { r.platform = teetypes.PlatformTDX; return r }
-	full := selfReport{launchDigest: fill(0xaa), rtmr1: fill(0xbb), rtmr2: fill(0xcc)}
-	for _, tc := range []struct {
-		name     string
-		platform string
-		report   selfReport
-	}{
-		{"snp: launch_digest wrong width", "sev-snp", selfReport{platform: teetypes.PlatformSNP, launchDigest: []byte{0xab}}},
-		{"snp: launch_digest missing", "sev-snp", selfReport{platform: teetypes.PlatformSNP}},
-		{"tdx: rtmr1 missing", "tdx", tdx(selfReport{launchDigest: full.launchDigest, rtmr2: full.rtmr2})},
-		{"tdx: rtmr2 missing", "tdx", tdx(selfReport{launchDigest: full.launchDigest, rtmr1: full.rtmr1})},
-		{"tdx: rtmr2 wrong width", "tdx", tdx(selfReport{launchDigest: full.launchDigest, rtmr1: full.rtmr1, rtmr2: []byte{1}})},
-		// A chart baked for one TEE must never be pinned to the other's report.
-		{"image built for tdx, report from snp", "tdx", selfReport{platform: teetypes.PlatformSNP, launchDigest: fill(0xab)}},
-		{"image built for snp, report from tdx", "sev-snp", tdx(full)},
-		{"unknown platform in the report", "tdx", selfReport{platform: "nonsense", launchDigest: fill(0xab)}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			url := stubAttester(t, tc.report).URL()
-			if _, _, err := OwnLaunchMeasurement(context.Background(), tc.platform, url); err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
-	}
-
-	t.Run("launch_digest not hex", func(t *testing.T) {
-		stub := mockapi.New(t)
-		v := mockapi.PassingVerdict("")
-		v.Claims.LaunchDigest = "not-hex-zz"
-		stub.SetVerdict(v)
-		if _, _, err := OwnLaunchMeasurement(context.Background(), "sev-snp", stub.URL()); err == nil {
-			t.Fatal("expected error, got nil")
-		}
-	})
-
-	t.Run("unknown platform in config", func(t *testing.T) {
-		url := stubAttester(t, selfReport{platform: teetypes.PlatformSNP, launchDigest: fill(0xab)}).URL()
-		if _, _, err := OwnLaunchMeasurement(context.Background(), "no-such-platform", url); err == nil {
-			t.Fatal("want an error for an unknown platform")
-		} else if !strings.Contains(err.Error(), "no-such-platform") {
-			t.Errorf("error = %v, want it to name the platform", err)
-		}
-	})
 }
 
 // operatorReport is a self-report from a guest launched with operatorPub,
@@ -470,6 +385,15 @@ func TestLoadMeasuredOperatorKeyAndOwnMeasurementSubstitutedKey(t *testing.T) {
 // The hard-fail path: this guest's own measurement cannot be resolved, which
 // must fail the whole call even though a valid operator key was staged.
 func TestLoadMeasuredOperatorKeyAndOwnMeasurementFailsClosedOnUnresolvableMeasurement(t *testing.T) {
+	for _, platform := range []string{"sev-snp", "no-such-platform"} {
+		t.Run("configured family "+platform, func(t *testing.T) {
+			stageOperatorPubkey(t, operatorPub)
+			url := stubAttester(t, operatorReport(teetypes.PlatformTDX, fill(0xaa))).URL()
+			if _, _, _, _, err := LoadMeasuredOperatorKeyAndOwnMeasurement(context.Background(), platform, url); err == nil || !strings.Contains(err.Error(), platform) {
+				t.Fatalf("want configured-family refusal naming %q, got %v", platform, err)
+			}
+		})
+	}
 	t.Run("tdx report missing a register", func(t *testing.T) {
 		stageOperatorPubkey(t, operatorPub)
 		r := operatorReport(teetypes.PlatformTDX, fill(0xaa))

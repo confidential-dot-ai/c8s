@@ -30,7 +30,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
@@ -122,7 +121,7 @@ type proxyConfig struct {
 	rtmrs                     string
 	measurementsConfig        string
 	cdsMeasurementsConfig     string
-	cdsPins                   measurements.ReferenceValues
+	cdsPins                   refvalues.ReferenceValues
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -245,7 +244,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	meshPolicy.Entries = pins.Entries
+	meshPolicy.Policy.Images = pins.Images
 	if len(meshPolicy.Policy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Policy.Measurements))
 	} else {
@@ -327,7 +326,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 		CDSRTMRs:          cdsRTMRs,
-		CDSEntries:        c.cdsPins.Entries,
+		CDSImages:         c.cdsPins.Images,
 	}
 	if err := runtime.run(ctx, hostMesh{c: c, resolver: resolver, cds: cdsCfg}); err != nil {
 		return fmt.Errorf("proxy: %w", err)

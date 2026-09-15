@@ -30,7 +30,6 @@ import (
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -496,7 +495,7 @@ type verifyPlan struct {
 	initDataHash []byte
 	// refValues is the parsed --measurements-config, empty when unset. It
 	// both pins the target and is compared against what the target serves.
-	refValues measurementspkg.ReferenceValues
+	refValues refvalues.ReferenceValues
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -535,9 +534,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}
 
 	// Read once, here, like every other file-backed pin on this path.
-	var refValues measurementspkg.ReferenceValues
+	var refValues refvalues.ReferenceValues
 	if cfg.measurementsConfig != "" {
-		loaded, err := measurementspkg.Load(cfg.measurementsConfig)
+		loaded, err := refvalues.Load(cfg.measurementsConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -626,7 +625,8 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
-		policy: &ratls.VerifyPolicy{Entries: refValues.Entries, Policy: remote.Policy{
+		policy: &ratls.VerifyPolicy{Policy: remote.Policy{
+			Images:       refValues.Images,
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
@@ -1294,21 +1294,21 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 
 	fullImagePinned := plan.pins.image != nil
 	if !plan.refValues.Empty() {
-		if teetypes.NormalizePlatform(plan.refValues.TEE) != teetypes.NormalizePlatform(oc.Platform) {
-			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.TEE, oc.Platform)
+		if plan.refValues.Family != teetypes.NormalizePlatform(oc.Platform).Family() {
+			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.Family, oc.Platform)
 			return oc
 		}
 		response := remote.VerifyResponse{Result: *result}
-		if err := measurementspkg.EnforceEntries(response, plan.refValues.Entries, oc.Platform); err != nil {
+		if err := remote.EnforceImages(response, plan.refValues.Images, teetypes.NormalizePlatform(oc.Platform)); err != nil {
 			oc.Error = fmt.Sprintf("--measurements-config: %v", err)
 			return oc
 		}
 		// A TDX tuple covers the guest only when the matching entry pins both
 		// kernel and rootfs registers. A weak alternative must not borrow the
 		// completeness of an unrelated entry in the same policy.
-		for _, entry := range plan.refValues.Entries {
+		for _, entry := range plan.refValues.Images {
 			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
-				measurementspkg.EnforceEntries(response, []measurementspkg.Entry{entry}, oc.Platform) == nil {
+				remote.EnforceImages(response, []remote.ImagePin{entry}, teetypes.NormalizePlatform(oc.Platform)) == nil {
 				fullImagePinned = true
 				break
 			}

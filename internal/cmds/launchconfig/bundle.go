@@ -15,9 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -126,7 +126,7 @@ func NewBundle(opts BundleOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	policy, err := measurements.Format(measurements.ReferenceValues{TEE: pins.TEE, Entries: pins.Entries[:1]})
+	policy, err := refvalues.Format(refvalues.ReferenceValues{Family: pins.Family, Images: pins.Images[:1]})
 	if err != nil {
 		return err
 	}

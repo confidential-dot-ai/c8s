@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"io"
 	"net/netip"
 	"os"
@@ -22,10 +24,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -112,8 +114,8 @@ var loadMeasuredOperatorKeyAndOwnMeasurement = credrelease.LoadMeasuredOperatorK
 type Verified struct {
 	document    Document
 	operatorPub []byte
-	pins        measurements.ReferenceValues
-	cdsPins     measurements.ReferenceValues
+	pins        refvalues.ReferenceValues
+	cdsPins     refvalues.ReferenceValues
 }
 
 // Verify checks the signature before parsing host input and compares all image
@@ -178,7 +180,7 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	}
 	return &Verified{
 		document: *doc, operatorPub: pub, pins: pins,
-		cdsPins: measurements.ReferenceValues{TEE: pins.TEE, Entries: pins.Entries[:1]},
+		cdsPins: refvalues.ReferenceValues{Family: pins.Family, Images: pins.Images[:1]},
 	}, nil
 }
 
@@ -398,7 +400,7 @@ func parseLaunchKey(raw string) (*ecdsa.PublicKey, error) {
 	if len(raw) > 8192 {
 		return nil, fmt.Errorf("launch public key is too large")
 	}
-	return measurements.ParsePublicKeyPEM([]byte(raw))
+	return runtimemeasure.ParsePublicKeyPEM([]byte(raw))
 }
 
 func dnsLabel(s string) bool { return len(validation.IsDNS1123Label(s)) == 0 }
@@ -449,33 +451,33 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func (d *Document) referenceValues() (measurements.ReferenceValues, error) {
-	tee := measurements.TEESNP
+func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
+	tee := teetypes.FamilySNP
 	if d.Image.Platform == "tdx" {
-		tee = measurements.TEETDX
+		tee = teetypes.FamilyTDX
 	}
-	pins := measurements.ReferenceValues{TEE: tee}
+	pins := refvalues.ReferenceValues{Family: tee}
 	keys := append([]string{d.Server.OperatorPublicKey}, d.AgentOperatorPublicKeys...)
 	for i, pub := range keys {
 		name := "server"
 		if i > 0 {
 			name = fmt.Sprintf("agent-%d", i)
 		}
-		entry := measurements.Entry{Name: name, Digest: mustDecodeHex(d.Image.Measurement), OperatorKey: []byte(pub)}
+		entry := remote.ImagePin{Name: name, Digest: mustDecodeHex(d.Image.Measurement), Anchor: []byte(pub)}
 		if len(d.Image.RTMRs) > 0 {
 			entry.RTMRs = make(map[int][]byte, len(d.Image.RTMRs))
 			for idx, digest := range d.Image.RTMRs {
 				entry.RTMRs[idx] = mustDecodeHex(digest)
 			}
 		}
-		pins.Entries = append(pins.Entries, entry)
+		pins.Images = append(pins.Images, entry)
 	}
 	// Use the shared parser as a final schema check on the emitted policy.
-	data, err := measurements.Format(pins)
+	data, err := refvalues.Format(pins)
 	if err != nil {
-		return measurements.ReferenceValues{}, err
+		return refvalues.ReferenceValues{}, err
 	}
-	return measurements.Parse(data)
+	return refvalues.Parse(data)
 }
 
 // CDSURL is derived from the signed server address and the image's fixed port.
