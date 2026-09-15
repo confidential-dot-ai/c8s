@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	crreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
+	"github.com/confidential-dot-ai/c8s/api/v1alpha2"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 

@@ -141,11 +141,37 @@ func TestNodeImageRender(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(allowlist.Workloads) != 1 {
-				t.Errorf("seed has %d workloads, want only operator/get-cert", len(allowlist.Workloads))
+			if len(allowlist.Workloads) != 2 {
+				t.Errorf("seed has %d workloads, want operator/get-cert and the local-path helper", len(allowlist.Workloads))
 			}
 			if !bytes.Contains(seed, []byte("registry.example.com/c8s-operator@"+testDigest)) {
 				t.Error("operator missing from seed")
+			}
+			var helperDigest string
+			for _, workload := range allowlist.Workloads {
+				for _, c := range workload.Containers {
+					if strings.HasPrefix(c.Image, "busybox@") {
+						helperDigest = c.Digest.String()
+					}
+				}
+			}
+			if helperDigest == "" {
+				t.Fatal("local-path helper missing from the baked CDS seed")
+			}
+			index := allowlist.BuildIndex()
+			for _, script := range []string{"/script/setup", "/script/teardown"} {
+				if !index.AdmitsContainer(pkgallowlist.RunningContainer{
+					Digest: helperDigest,
+					Argv:   []string{"/bin/sh", script, "-p", "/opt/local-path-provisioner/pvc-123"},
+				}) {
+					t.Errorf("seed denies local-path helper %s", script)
+				}
+			}
+			if index.AdmitsContainer(pkgallowlist.RunningContainer{
+				Digest: helperDigest,
+				Argv:   []string{"/bin/sh", "-c", "echo arbitrary command"},
+			}) {
+				t.Error("seed admits arbitrary busybox commands")
 			}
 		})
 	}

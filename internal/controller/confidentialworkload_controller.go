@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
+	"github.com/confidential-dot-ai/c8s/api/v1alpha2"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 

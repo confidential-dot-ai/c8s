@@ -23,11 +23,11 @@ The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
 An image that may run **however it is invoked** — the standalone and injected
-c8s components (cds, get-cert, the operator, ratls-mesh, nri-image-policy, the
-router, the containerd-prep helper), whose argv is per-pod — is an entry whose
-container `command` and `args` are both `any`. Nothing distinguishes such an
-entry from any other: it is matched, stamped and diffed like the rest, and the
-same digest may also appear elsewhere under a narrower policy — see [union
+c8s components (cds, get-cert, the operator, ratls-mesh, the router), whose
+argv is per-pod — is an entry whose container `command` and `args` are both
+`any`. Nothing distinguishes such an entry from any other: it is matched,
+stamped and diffed like the rest, and the same digest may also appear
+elsewhere under a narrower policy — see [union
 semantics](#a-digest-may-run-many-ways).
 
 ### Document shape
@@ -301,9 +301,10 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
-Each enforcer also carries a **local seed** that admits by digest alone ahead of
-the served document and is never touched by a pull: the host NRI plugin's
-`always_allow` (chart-rendered from the chart's own component digests plus every
+Each enforcer also carries a **base enforcement allowlist** that admits by
+digest alone ahead of the served document and is never touched by a pull: the
+host NRI plugin's `allowlist.base` (an allowlist document baked into its boot
+config, chart-rendered from the chart's own component digests plus every
 `bootstrapAllowlist.workloads` container admitted under any command and args).
 That is what lets a node enforce at t=0 offline and bring the platform's own images
 up before CDS is reachable.
@@ -311,12 +312,12 @@ up before CDS is reachable.
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
-digests (`c8s.imageAllowlist`) plus any `bootstrapAllowlist.workloads`. Each
-component digest becomes one entry named `<image basename>-<first 12 hex of
+digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
+unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
 digest>` with a single container under `command: any, args: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
 rendered seed. Operator entries admitting a digest under any command and args
-also feed the host plugin's `always_allow`; an entry that pins a command line
+also feed the host plugin's base allowlist; an entry that pins a command line
 is seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
@@ -326,6 +327,11 @@ apply` survives a restart, while a deleted entry returns on the next CDS start
 for as long as the chart still renders it — to remove an image, roll the chart
 with it gone. During an upgrade an enforcer that pulls the old document shape
 before CDS restarts admits only workload containers until its next pull.
+
+Busybox and the NRI installer provide general-purpose shells, so the chart
+admits their configured invocations through argv-pinned entries and excludes
+those digests from the local floors. Their first startup may wait for the
+plugin's first successful policy pull and kubelet retry.
 
 ## CLI
 
@@ -356,7 +362,7 @@ same name (`<image basename>-<first 12 hex of digest>`), so a later chart bump
 that derives the digest adds nothing.
 
 Deleting a chart-seeded component entry does not lock its image out: the NRI
-plugin's `always_allow` still admits it. To block a
+plugin's base allowlist still admits it. To block a
 compromised component image, roll the chart with the bad digest replaced.
 
 ### Editing and applying

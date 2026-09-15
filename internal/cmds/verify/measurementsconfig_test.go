@@ -5,13 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 const (

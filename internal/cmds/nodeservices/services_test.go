@@ -61,7 +61,7 @@ func TestEveryCDSClientUsesLeaderPolicy(t *testing.T) {
 	}
 }
 
-const floor = "platform: tdx\nallowlist:\n  always_allow:\n    immutable: system\n  pull:\n    url: https://127.0.0.1:30808\n    timeout: 30s\n    cds_measurements: []\npolicy:\n  mode: fail-closed\n  enforce_existing: true\n"
+const floor = "platform: tdx\nallowlist:\n  base:\n    schema: c8s.allowlist/v1\n    workloads:\n      system:\n        containers:\n          - digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n            command: {policy: any}\n            args: {policy: any}\n  pull:\n    url: https://127.0.0.1:30808\n    timeout: 30s\n    cds_measurements: []\npolicy:\n  mode: fail-closed\n  enforce_existing: true\n"
 const seed = `{"schema":"c8s.allowlist/v1","workloads":{"operator":{"containers":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`
 
 func prepareRoot(t *testing.T) string {
@@ -99,7 +99,7 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 				t.Fatal(err)
 			}
 			ga := got["allowlist"].(map[string]any)
-			if !reflect.DeepEqual(got["policy"], before["policy"]) || !reflect.DeepEqual(ga["always_allow"], before["allowlist"].(map[string]any)["always_allow"]) {
+			if !reflect.DeepEqual(got["policy"], before["policy"]) || !reflect.DeepEqual(ga["base"], before["allowlist"].(map[string]any)["base"]) {
 				t.Fatal("changed baked floor")
 			}
 			pull := ga["pull"].(map[string]any)

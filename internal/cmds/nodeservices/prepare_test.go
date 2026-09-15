@@ -85,7 +85,7 @@ func TestPrepareFailsClosedOnBrokenBakedInputs(t *testing.T) {
 		{"missing policy", launchconfig.Follower, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/image-policy.yaml")) }, "image-policy.yaml"},
 		{"invalid policy yaml", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "allowlist: [") }, "baked NRI policy"},
 		{"policy without allowlist", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "platform: tdx\n") }, "missing allowlist"},
-		{"policy without pull", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "allowlist:\n  always_allow: {}\n") }, "missing pull"},
+		{"policy without pull", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "allowlist:\n  base: {}\n") }, "missing pull"},
 		{"missing nginx template", launchconfig.Leader, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/nginx.conf.in")) }, "nginx.conf.in"},
 		{"nginx template without hostname", launchconfig.Leader, func(root string) { overwrite(root, "nginx.conf.in", "server_name other;\n") }, "missing hostname"},
 		{"missing seed", launchconfig.Leader, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/allowlist-seed.json")) }, "allowlist-seed.json"},

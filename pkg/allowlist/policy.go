@@ -1,15 +1,10 @@
 package allowlist
 
-import (
-	"fmt"
+import "github.com/confidential-dot-ai/c8s/pkg/types"
 
-	"github.com/confidential-dot-ai/c8s/pkg/types"
-)
-
-// Index answers admission queries for enforcers in O(1). Build it once, from a
-// normalized Allowlist (BuildIndex) or from a bare digest set (DigestIndex). A
-// nil *Index admits nothing, so an enforcer with no policy yet can query it
-// without a guard.
+// Index answers admission queries for enforcers in O(1). Build it once from a
+// normalized Allowlist (BuildIndex). A nil *Index admits nothing, so an
+// enforcer with no policy yet can query it without a guard.
 type Index struct {
 	byDigest map[string][]Container
 }
@@ -26,33 +21,6 @@ func (a *Allowlist) BuildIndex() *Index {
 		}
 	}
 	return idx
-}
-
-// DigestIndex builds an index that admits each digest whatever it runs — the
-// shape of a DigestEntry, without a document to carry one. The bootstrap layers
-// are its callers: the NRI plugin's always_allow set and the guest monitor's
-// baked seed both sit beside a pulled snapshot rather than inside it, so a
-// withheld or failed pull cannot drop them.
-//
-// Digests arrive in the forms enforcers see (types.NormalizeDigest). One that
-// does not normalize is skipped and named in warnings, which leaves the caller
-// to decide whether a single bad entry is fatal.
-func DigestIndex(digests []string) (*Index, []error) {
-	idx := &Index{byDigest: map[string][]Container{}}
-	var warnings []error
-	for _, raw := range digests {
-		d, err := types.NormalizeDigest(raw)
-		if err != nil {
-			warnings = append(warnings, fmt.Errorf("skip digest %q: %w", raw, err))
-			continue
-		}
-		idx.byDigest[d.String()] = []Container{{
-			Digest:  d,
-			Command: ArgvPolicy{Policy: PolicyAny},
-			Args:    ArgvPolicy{Policy: PolicyAny},
-		}}
-	}
-	return idx, warnings
 }
 
 // Size reports how many distinct digests the index lists. Enforcers log it to

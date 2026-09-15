@@ -1,9 +1,10 @@
 package admissionhistory
 
 import (
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"reflect"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )

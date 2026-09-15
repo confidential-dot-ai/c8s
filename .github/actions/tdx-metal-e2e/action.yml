@@ -23,26 +23,28 @@ runs:
       set -euo pipefail
       # Every fetch here crosses the public internet from an ephemeral ARC
       # pod, and one hiccup fails the lane before it reaches a CVM.
-      sudo apt-get update -qq
-      sudo apt-get install -y -qq --no-install-recommends jq openssl python3
+      if ! command -v openssl >/dev/null || ! command -v python3 >/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends openssl python3
+      fi
       mkdir -p "$PWD/bin"
-      # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
-      # A file, not a function, because each `run:` block is a fresh shell.
-      printf '%s\n' \
-        'retry() {' \
-        '  local i delay=2' \
-        '  for i in 1 2 3 4; do' \
-        '    if eval "$1"; then return 0; fi' \
-        '    [ "$i" -eq 4 ] && break' \
-        '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
-        '    sleep "$delay"' \
-        '    delay=$((delay * 2))' \
-        '  done' \
-        '  echo "::error::gave up after 4 attempts: $1" >&2' \
-        '  return 1' \
-        '}' > bin/retry.sh
+      # Keep retry arguments literal; the helper is shared across run blocks.
+      cat > bin/retry.sh <<'RETRY'
+      retry() {
+        local attempt delay=2
+        for attempt in 1 2 3 4; do
+          if "$@"; then return 0; fi
+          [ "$attempt" -eq 4 ] && break
+          echo "attempt $attempt failed; retrying in ${delay}s" >&2
+          sleep "$delay"
+          delay=$((delay * 2))
+        done
+        return 1
+      }
+      RETRY
       . bin/retry.sh
-      retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
+      kube_version=$(retry curl -fsSL https://dl.k8s.io/release/stable.txt)
+      retry curl -fsSL "https://dl.k8s.io/release/$kube_version/bin/linux/amd64/kubectl" -o bin/kubectl
       chmod +x bin/kubectl
       echo "$PWD/bin" >> "$GITHUB_PATH"
       if ! command -v go >/dev/null; then
@@ -50,7 +52,8 @@ runs:
         # pinned fallback on the next line can be reached.
         GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
         [ -n "$GOVER" ] || GOVER=1.26.3
-        retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
+        retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+        sudo tar -C /usr/local -xzf /tmp/go.tar.gz
       fi
       # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
       # inside THIS one. `go install crane` below needs it here and now.
@@ -59,7 +62,12 @@ runs:
       echo "$HOME/go/bin" >> "$GITHUB_PATH"
       # crane resolves the published image and manifest digests. Helm is only
       # used while building the measured image; no runtime installer runs here.
-      command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
+      command -v crane >/dev/null || retry go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+      # Avoid apt's intermittent IPv6 mirror failures on the launcher.
+      if ! command -v jq >/dev/null; then
+        retry curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o bin/jq
+        chmod +x bin/jq
+      fi
 
   # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
   # Fail SAFE: only reap on a positive "completed", or on age. An unknown
@@ -277,15 +285,19 @@ runs:
           || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
         C8S_SOURCE_DIR=$GITHUB_WORKSPACE
       else
-        retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
-          || { clone_diag; exit 1; }
+        clone_c8s_source() {
+          rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
+        }
+        retry clone_c8s_source || { clone_diag; exit 1; }
         git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
         C8S_SOURCE_DIR=/tmp/c8s-src
       fi
       export C8S_SOURCE_DIR
       echo "C8S_SOURCE_DIR=$C8S_SOURCE_DIR" >> "$GITHUB_ENV"
       echo "c8s ref sha: $(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)"
-      retry '( cd "$C8S_SOURCE_DIR" && go install ./cmd/c8s )'
+      pushd "$C8S_SOURCE_DIR" >/dev/null
+      retry go install ./cmd/c8s
+      popd >/dev/null
       # The CLI comes from the paired source; baked services stay in the image.
       c8s --version || true
 
@@ -528,7 +540,21 @@ runs:
       export C8S_NODE_IMAGE=1
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
       export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-      bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
+      if ! bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"; then
+        # components-ready prints the listing and a describe tail; the reason a
+        # pod is stuck is in its containers' logs, init containers included.
+        for p in $(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") print $1}'); do
+          echo "::group::$p"
+          kubectl -n c8s-system describe pod "$p" 2>&1 | sed -n '/^Events:/,$p' | tail -15
+          # The node image's kubelet serves no debugging handlers, so pods/log
+          # is refused; exit codes and termination messages are still in status.
+          kubectl -n c8s-system get pod "$p" -o json 2>/dev/null | jq -r '
+            (.status.initContainerStatuses // []) + (.status.containerStatuses // []) | .[]
+            | "\(.name): restarts=\(.restartCount) state=\(.state | keys[0]) last=\(.lastState.terminated // {} | "exit=\(.exitCode // "-") reason=\(.reason // "-") message=\(.message // "-" | tostring | .[0:600])")"'
+          echo "::endgroup::"
+        done
+        exit 1
+      fi
 
   - name: assert the image floor denies, then opens to a signed write
     # Baked nginx fronts /allowlist; clients pin the complete image tuple
