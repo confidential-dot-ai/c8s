@@ -818,7 +818,7 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 
 	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args or env policy") {
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args, env or mounts policy") {
 		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
 	}
 

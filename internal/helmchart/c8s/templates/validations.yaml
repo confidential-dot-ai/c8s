@@ -66,7 +66,7 @@
 {{- range $c := (include "c8s.components" . | fromJsonArray) -}}
 {{- $img := get $c "image" -}}
 {{- if and (get $c "enabled") (not (get $c "cdsExempt")) (not (get $c "argvPinned")) (get $img "digest") (not (hasKey $covered (get $img "digest"))) -}}
-{{- fail (printf "VALIDATION_ERROR kind=uncovered_component_digest: nriImagePolicy.policy.mode=fail-closed with deriveComponents=false, but %s is digest-pinned (%s) and no nriImagePolicy.bootstrapAllowlist.workloads entry admits that digest under any command and args. The plugin would deny it on its own node. Add such an entry (c8s allowlist add writes the same shape), set deriveComponents=true, or use c8s install --resolve-digests." (get $c "name") (get $img "digest")) -}}
+{{- fail (printf "VALIDATION_ERROR kind=uncovered_component_digest: nriImagePolicy.policy.mode=fail-closed with deriveComponents=false, but %s is digest-pinned (%s) and no nriImagePolicy.bootstrapAllowlist.workloads entry leaves command, args, env and mounts unconstrained for that digest. The plugin would deny it on its own node. Add such an entry (c8s allowlist add writes the same shape), set deriveComponents=true, or use c8s install --resolve-digests." (get $c "name") (get $img "digest")) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -458,7 +458,7 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
 		if listed := snap.index.AdmitsDigest(digest); listed {
 			reason = "launch_not_admitted"
-			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args or env policy", imageRef)
+			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args, env or mounts policy", imageRef)
 		}
 		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
 		p.audit.Log(audit.Event{
