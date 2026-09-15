@@ -71,6 +71,98 @@ func TestAbsentMountAndEnvPolicyAreUnconstrained(t *testing.T) {
 	}
 }
 
+func TestContainerIsUnconstrained(t *testing.T) {
+	base := Container{
+		Command: ArgvPolicy{Policy: PolicyAny},
+		Args:    ArgvPolicy{Policy: PolicyAny},
+	}
+	tests := []struct {
+		name string
+		edit func(*Container)
+		want bool
+	}{
+		{name: "absent mount and env policies", want: true},
+		{name: "explicit any", edit: func(c *Container) {
+			c.Mounts.Policy = PolicyAny
+			c.Env.Policy = PolicyAny
+		}, want: true},
+		{name: "pinned command", edit: func(c *Container) {
+			c.Command = ArgvPolicy{Policy: PolicyExact, Argv: []string{"/app"}}
+		}},
+		{name: "pinned args", edit: func(c *Container) {
+			c.Args = ArgvPolicy{Policy: PolicyDeny}
+		}},
+		{name: "pinned mounts", edit: func(c *Container) {
+			c.Mounts = MountPolicy{Policy: PolicyExact, Destinations: []string{"/data"}}
+		}},
+		{name: "pinned env", edit: func(c *Container) {
+			c.Env = EnvPolicy{Policy: PolicyDeny}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base
+			if tt.edit != nil {
+				tt.edit(&c)
+			}
+			if got := c.IsUnconstrained(); got != tt.want {
+				t.Fatalf("IsUnconstrained() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainerConstraintsNormalizeEveryPolicy(t *testing.T) {
+	c := Container{Digest: mustDigest(t, "sha256:"+strings.Repeat("a", 64))}
+	cs := []Container{c}
+	if err := normalizeContainers("w", "containers", cs); err != nil {
+		t.Fatal(err)
+	}
+	c = cs[0]
+	if c.Command.Policy != PolicyDeny || c.Args.Policy != PolicyDeny ||
+		c.Mounts.Policy != PolicyAny || c.Env.Policy != PolicyAny {
+		t.Fatalf("normalized policies = command %q, args %q, mounts %q, env %q",
+			c.Command.Policy, c.Args.Policy, c.Mounts.Policy, c.Env.Policy)
+	}
+}
+
+func TestContainerConstraintsAllParticipateInAdmission(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	c := containerWith(t,
+		MountPolicy{Policy: PolicyExact, Destinations: []string{"/data"}},
+		EnvPolicy{Policy: PolicyExact, Values: map[string]string{"MODE": "prod"}})
+	c.Command = ArgvPolicy{Policy: PolicyExact, Argv: []string{"/app"}}
+	c.Args = ArgvPolicy{Policy: PolicyExact, Argv: []string{"serve"}}
+
+	valid := running(digest, []string{"/data"}, []string{"MODE=prod"})
+	valid.Argv = []string{"/app", "serve"}
+	if !c.admits(valid) {
+		t.Fatal("all matching constraints were refused")
+	}
+
+	tests := []struct {
+		name string
+		edit func(*RunningContainer)
+	}{
+		{name: "command", edit: func(r *RunningContainer) { r.Argv[0] = "/bin/sh" }},
+		{name: "args", edit: func(r *RunningContainer) { r.Argv[1] = "debug" }},
+		{name: "mounts", edit: func(r *RunningContainer) { r.BindMounts = []string{"/host"} }},
+		{name: "env", edit: func(r *RunningContainer) {
+			r.Env, _ = ObserveEnv([]string{"MODE=dev"})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := valid
+			r.Argv = append([]string(nil), valid.Argv...)
+			tt.edit(&r)
+			if c.admits(r) {
+				t.Errorf("container admitted with mismatched %s constraint", tt.name)
+			}
+		})
+	}
+}
+
 // LD_PRELOAD is the sharp case: an injected name is code execution inside an
 // otherwise-allowlisted image.
 func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {

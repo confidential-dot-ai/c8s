@@ -213,7 +213,19 @@ func (w Workload) Digests() []types.Digest {
 // AnyArgv reports whether the container is admitted whatever it runs: command
 // and args both any.
 func (c Container) AnyArgv() bool {
-	return c.Command.Policy == PolicyAny && c.Args.Policy == PolicyAny
+	return (processConstraint{command: &c.Command, args: &c.Args}).isUnconstrained()
+}
+
+// IsUnconstrained reports whether process, mounts and environment are all left
+// to the host. It accepts absent mount and environment policies because those
+// fields normalize to Any.
+func (c Container) IsUnconstrained() bool {
+	for _, constraint := range c.constraints() {
+		if !constraint.isUnconstrained() {
+			return false
+		}
+	}
+	return true
 }
 
 // ArgvPinned reports whether every container's command and args policy is
@@ -221,7 +233,7 @@ func (c Container) AnyArgv() bool {
 // secrets grant requires it (docs/secrets.md).
 func (w Workload) ArgvPinned() bool {
 	for _, c := range w.containers() {
-		if c.Command.Policy == PolicyAny || c.Args.Policy == PolicyAny {
+		if !(processConstraint{command: &c.Command, args: &c.Args}).hostIndependent() {
 			return false
 		}
 	}
@@ -358,17 +370,10 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if c.Digest.String() == "" {
 			return fmt.Errorf("workload %q %s[%d]: digest is required", workload, field, i)
 		}
-		if err := normalizeArgv(&c.Command); err != nil {
-			return fmt.Errorf("workload %q %s %s command: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeArgv(&c.Args); err != nil {
-			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeMounts(&c.Mounts); err != nil {
-			return fmt.Errorf("workload %q %s %s mounts: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizeEnv(&c.Env); err != nil {
-			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
+		for _, constraint := range c.constraints() {
+			if policyField, err := constraint.normalize(); err != nil {
+				return fmt.Errorf("workload %q %s %s %s: %w", workload, field, c.Digest, policyField, err)
+			}
 		}
 	}
 	return nil
