@@ -106,11 +106,39 @@ func TestInspectImageJSON(t *testing.T) {
 
 // --- shadowed entries ---
 
-// An any-argv entry for a digest shadows a narrower entry declaring only that
+func TestLintUnconstrainedChecksAllLaunchFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		wantAny      bool
+	}{
+		{"all any", `"mounts":{"policy":"any"},"env":{"policy":"any"}`, true},
+		{"default mounts", `"env":{"policy":"any"}`, false},
+		{"deny mounts", `"mounts":{"policy":"deny"},"env":{"policy":"any"}`, false},
+		{"deny env", `"mounts":{"policy":"any"},"env":{"policy":"deny"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wide := `[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},` + tc.fields + `}]`
+			narrow := `[` + ctrJSON(digA, "/app") + `]`
+			al := entryPair(t, wide, narrow)
+			var gotAny bool
+			for _, f := range lintOffline(al) {
+				gotAny = gotAny || strings.Contains(f.msg, "effective admission for that digest is 'any'")
+			}
+			if gotAny != tc.wantAny {
+				t.Fatalf("unconstrained warning = %v, want %v", gotAny, tc.wantAny)
+			}
+			if got := shadows(al.Workloads["alpha"], al.Workloads["beta"]); got != tc.wantAny {
+				t.Fatalf("unconstrained shadow = %v, want %v", got, tc.wantAny)
+			}
+		})
+	}
+}
+
+// An unconstrained entry for a digest shadows a narrower entry declaring only that
 // digest: every pod the narrow entry describes matches both, so the narrow
 // entry can never be released to.
 func TestLintShadowedEntry(t *testing.T) {
-	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}]}`
+	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}`
 	narrow := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
 
 	errs := func(doc string) []string {

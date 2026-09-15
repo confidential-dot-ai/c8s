@@ -818,7 +818,7 @@ func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
 
 	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
 		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
-	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args or env policy") {
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's command, args, env or mounts policy") {
 		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
 	}
 
@@ -1557,28 +1557,27 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 }
 
-// The NRI path leaves bind mounts unobserved.
-func TestCheckImage_MountPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+func TestCheckImage_ExactMountPolicyRequiresFinalObservation(t *testing.T) {
 	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
 	c := al.Workloads["w"].Containers[0]
-	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
+	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact, Rules: []allowlist.MountRule{{Destination: "/expected", Kind: allowlist.MountEmptyDir}}}
 	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
 	al.Workloads["w"].Containers[0] = c
 
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}}, al)
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
-		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
-	if verdict != verdictAllow {
-		t.Fatalf("host path must leave mounts unobserved, got verdict %d (reason=%q)", verdict, reason)
+	verdict, reason := p.checkImagePhase(context.Background(), p.cfg, "default", "pod", "ctr",
+		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"}, nil, nil, launchFinal)
+	if verdict != verdictDeny {
+		t.Fatalf("unobserved exact mounts: verdict %d, want deny (reason=%q)", verdict, reason)
 	}
 
 	// Non-vacuity: the same entry refuses a container that does report one, so
 	// the admit above is this plugin's silence rather than a dead policy.
 	if p.policy.current().index.AdmitsContainer(allowlist.RunningContainer{
-		Digest:     pushDigestB,
-		Argv:       []string{"/bin/app", "--serve"},
-		BindMounts: []string{"/injected"},
+		Digest: pushDigestB,
+		Argv:   []string{"/bin/app", "--serve"},
+		Mounts: []allowlist.ObservedMount{{Destination: "/injected", Class: allowlist.MountHost, Storage: allowlist.MountUnknown}},
 	}) {
 		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
 	}

@@ -17,8 +17,8 @@ into attestation).
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
 policy (`command`, `args`) permitted for those bytes, optionally to the
-environment values it may launch with (`env`), and the entry as a whole may
-carry a secret-store grant (`secrets`).
+environment values it may launch with (`env`) and the bind mounts it may receive
+(`mounts`), and the entry as a whole may carry a secret-store grant (`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -180,6 +180,86 @@ any environment. Missing env evidence fails `exact` and `deny`. An empty
 The NRI plugin enforces env after cumulative NRI adjustments, and the admission
 inventory carries an environment fingerprint for CDS workload matching and
 secret release.
+
+## Mount policy (`mounts`)
+
+`mounts` constrains bind mounts in the final OCI specification. The node
+classifies each source rather than trusting the destination alone: a hostPath,
+an `emptyDir`, and a ConfigMap can all be placed at the same destination while
+carrying very different authority over the container.
+
+An absent policy is `deny`, which permits only mounts the node verified as its
+fixed platform baseline. `any` explicitly leaves mounts unconstrained. `exact`
+requires the observed non-platform set to equal its concrete rules:
+
+```json
+"mounts": {
+  "policy": "exact",
+  "rules": [
+    {"destination": "/var/cache/app", "kind": "emptyDir"},
+    {"destination": "/mnt/c8s-data/config", "kind": "data"}
+  ]
+}
+```
+
+To supply mount policies when deriving an entry, use `--mounts-file`. The file
+maps container names to explicit policies and must include every init and main
+container in the input object; missing or unknown names are rejected. For a pod
+with an init container named `seed` and main containers named `frontend` and
+`worker`, save this as `mounts.json`:
+
+```json
+{
+  "seed": {"policy": "deny"},
+  "frontend": {
+    "policy": "exact",
+    "rules": [
+      {"destination": "/var/cache/app", "kind": "emptyDir"},
+      {"destination": "/mnt/c8s-data/config", "kind": "data"}
+    ]
+  },
+  "worker": {"policy": "deny"}
+}
+```
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts-file mounts.json > entry.json
+```
+
+Here `pod.json` contains the Kubernetes object with digest-pinned images and
+explicit command/args. Choose the policies to match the workload's actual
+mounts; the pod spec alone cannot establish source class or storage protection.
+Omitting `--mounts-file` leaves each container's mount policy at `deny`.
+
+The pod UID embedded in a kubelet source must equal the pod being admitted, and
+containerd sandbox sources must name its exact sandbox. These runtime IDs prove
+local ownership only and are not serialized into the stable allowlist.
+
+| Observed source | Class | Storage | `exact` behavior |
+|---|---|---|---|
+| Node-created platform mount at its fixed destination | `platform` | not relevant | admitted without a rule |
+| Current pod's `emptyDir` on tmpfs | `emptyDir` | `memory` | requires a matching `emptyDir` rule |
+| Current pod's `emptyDir` whose backing chain reaches encrypted boot scratch | `emptyDir` | `encrypted` | requires a matching `emptyDir` rule |
+| Another pod's `emptyDir` | `host` | `unknown` | denied |
+| Mapping merely named `scratch` | `emptyDir` | `unknown` | denied |
+| Missing or inconsistent scratch evidence | `emptyDir` | `unknown` | denied |
+| Plain disk-backed `emptyDir` | `emptyDir` | `unknown` | denied |
+| ConfigMap, Secret, projected, PVC, CSI, local data, or a subpath | `data` | observed | requires a matching `data` rule under `/mnt/c8s-data/` and memory or encrypted storage |
+| Reserved `c8s-volume-*` placeholder or propagated volume | `data` | observed | requires the same `data` rule, including before volume propagation |
+| Host path or unrecognized source | `host` | `unknown` | denied |
+
+The Linux observer resolves tmpfs directly. For disk storage it resolves the
+containing mount, follows an overlay upper directory when necessary, and walks
+the device-mapper slave graph. The current scratch contract requires the exact
+`scratch` mapper, a crypt device UUID, and ancestry reaching the virtio device
+with serial `confai-scratch`. The serial or mapper name alone is never proof.
+
+The initrd that creates scratch and generates its random in-memory key is part
+of the measured node image. Before RKE2 starts, `scratch-enforce` verifies the
+crypt mapping and backing device and writes a record tied to the current boot ID
+and device number under `/run/c8s`. NRI requires that record as well as the live
+backing chain. Fresh key creation remains an attested-initrd property; failure
+to establish any runtime evidence remains `unknown` and is denied.
 
 
 ## Secret grants (`secrets`)

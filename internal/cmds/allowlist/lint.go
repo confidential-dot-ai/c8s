@@ -153,8 +153,8 @@ func countErrors(findings []finding) int {
 func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
 
-	// digest -> set of distinct entry names; and whether some occurrence is
-	// fully unconstrained (both argv segments any).
+	// digest -> set of distinct entry names; and whether some occurrence admits
+	// an unconstrained launch.
 	entriesByDigest := map[string]map[string]bool{}
 	fullyAny := map[string]bool{}
 

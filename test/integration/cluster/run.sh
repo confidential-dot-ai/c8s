@@ -182,7 +182,8 @@ log "Writing the allowlist floor"
 # Every image in the node's store (kind system images, the loaded c8s images,
 # the pre-pulled fixtures) goes into the install-time floor: with
 # enforceExisting the plugin checks already-running containers against CDS's
-# served allowlist at startup, so anything missing is killed.
+# served allowlist at startup, so anything missing is killed. These fixture
+# entries explicitly allow mounts too: kind system pods require host mounts.
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -Fq "docker.io/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
@@ -205,7 +206,7 @@ def entry_name(digest, ref):
 workloads = {
     entry_name(d, r): {
         "label": r,
-        "containers": [{"digest": d, "image": r, "command": {"policy": "any"}, "args": {"policy": "any"}}],
+        "containers": [{"digest": d, "image": r, "command": {"policy": "any"}, "args": {"policy": "any"}, "mounts": {"policy": "any"}}],
     }
     for d, r in floor.items()
 }
@@ -260,9 +261,9 @@ cds_pf_start() {
 
 # cds_write <method> <path> <body-file> -> http code; signed with the operator key.
 # any_workload <digest> <image>: print a workload entry that admits the digest
-# under any command line, the body of PUT /allowlist/workloads/<name>.
+# under any command line and mounts, the body of PUT /allowlist/workloads/<name>.
 any_workload() {
-    printf '{"label":"%s","initContainers":[],"containers":[{"digest":"%s","image":"%s","command":{"policy":"any"},"args":{"policy":"any"}}]}' \
+    printf '{"label":"%s","initContainers":[],"containers":[{"digest":"%s","image":"%s","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}' \
         "$2" "$1" "$2"
 }
 

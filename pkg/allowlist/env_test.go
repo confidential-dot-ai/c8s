@@ -103,11 +103,11 @@ func TestEnvDistinguishesWorkloadsAndHistory(t *testing.T) {
  "b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"any"},"args":{"policy":"any"},"env":{"policy":"exact","values":{"MODE":"b"}}}]}}}`)
 	a, _ := ObserveEnv([]string{"MODE=a"})
 	b, _ := ObserveEnv([]string{"MODE=b"})
-	running := []RunningContainer{{Digest: digestA, Env: a}}
+	running := []RunningContainer{{Digest: digestA, Env: a, Mounts: []ObservedMount{}}}
 	if name, _, err := al.MatchWorkload(running); err != nil || name != "a" {
 		t.Fatalf("match %q %v", name, err)
 	}
-	running = append(running, RunningContainer{Digest: digestA, Env: b})
+	running = append(running, RunningContainer{Digest: digestA, Env: b, Mounts: []ObservedMount{}})
 	if _, _, err := al.MatchWorkload(running); err == nil {
 		t.Fatal("foreign historical env ignored")
 	}
