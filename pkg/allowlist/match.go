@@ -8,10 +8,21 @@ import (
 // RunningContainer holds the launch characteristics observed by an enforcer.
 // Missing Env is unavailable evidence and fails exact/deny policies.
 type RunningContainer struct {
-	Digest     string
-	Argv       []string
-	BindMounts []string
-	Env        *EnvObservation
+	Digest string
+	Argv   []string
+	// Mounts is nil when evidence is unavailable. A non-nil empty slice proves
+	// that the final OCI spec contained no bind mounts.
+	Mounts []ObservedMount
+	Env    *EnvObservation
+}
+
+// ObservedMount is a bind mount classified by the node. Source is diagnostic
+// node-local detail and is excluded from workload identity serialization.
+type ObservedMount struct {
+	Destination string       `json:"destination"`
+	Source      string       `json:"-"`
+	Class       MountClass   `json:"class"`
+	Storage     MountStorage `json:"storage"`
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -152,29 +163,47 @@ func (c Container) admitsProcess(r RunningContainer) bool {
 	return (processConstraint{command: &c.Command, args: &c.Args}).admits(r)
 }
 
-// admits reports whether every bind destination is one this policy names.
-func (p MountPolicy) admits(destinations []string) bool {
+// admits checks classified final mount evidence. Platform mounts are the
+// baseline. Exact means equality with the non-platform rules.
+func (p MountPolicy) admits(mounts []ObservedMount) bool {
+	if p.Policy == PolicyAny {
+		return true
+	}
+	if mounts == nil {
+		return false
+	}
+	if p.Policy == PolicyDeny || p.Policy == "" {
+		return !slices.ContainsFunc(mounts, func(m ObservedMount) bool {
+			return m.Class != MountPlatform
+		})
+	}
 	if p.Policy != PolicyExact {
-		return true
+		return false
 	}
-	return everyIn(destinations, p.Destinations)
-}
-
-// everyIn reports whether every observed value appears in allowed. An empty
-// observation is vacuously true — see RunningContainer on enforcers that cannot
-// see a field.
-func everyIn(observed, allowed []string) bool {
-	if len(observed) == 0 {
-		return true
-	}
-	set := make(map[string]struct{}, len(allowed))
-	for _, a := range allowed {
-		set[a] = struct{}{}
-	}
-	for _, o := range observed {
-		if _, ok := set[o]; !ok {
+	seen := make(map[string]bool, len(p.Rules))
+	for _, mount := range mounts {
+		if mount.Class == MountPlatform {
+			continue
+		}
+		if seen[mount.Destination] || !p.admitsMount(mount) {
 			return false
 		}
+		seen[mount.Destination] = true
 	}
-	return true
+	return len(seen) == len(p.Rules)
+}
+
+func (p MountPolicy) admitsMount(mount ObservedMount) bool {
+	i := slices.IndexFunc(p.Rules, func(rule MountRule) bool {
+		return rule.Destination == mount.Destination && rule.Kind == mount.Class
+	})
+	if i < 0 {
+		return false
+	}
+	switch mount.Class {
+	case MountEmptyDir, MountData:
+		return mount.Storage == MountMemory || mount.Storage == MountEncrypted
+	default:
+		return false
+	}
 }

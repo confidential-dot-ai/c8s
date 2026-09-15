@@ -45,7 +45,7 @@ func effectiveArgv(c corev1.Container) []string {
 // admitArgvs fails unless the seed admits (digest, argv) via some entry.
 func admitArgvs(t *testing.T, seed *pkgallowlist.Allowlist, digest string, argv []string) {
 	t.Helper()
-	if !seed.BuildIndex().AdmitsContainer(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	if !seed.BuildIndex().AdmitsProcess(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		t.Errorf("seed does not admit %s argv %q", digest[:19], argv[:2])
 	}
 }
@@ -53,7 +53,7 @@ func admitArgvs(t *testing.T, seed *pkgallowlist.Allowlist, digest string, argv 
 // denyArgvs fails if the seed admits (digest, argv) via any entry.
 func denyArgvs(t *testing.T, seed *pkgallowlist.Allowlist, digest string, argv []string) {
 	t.Helper()
-	if seed.BuildIndex().AdmitsContainer(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	if seed.BuildIndex().AdmitsProcess(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		t.Errorf("seed admits %s argv %q — the argv pin is not enforcing", digest[:19], argv[:2])
 	}
 }

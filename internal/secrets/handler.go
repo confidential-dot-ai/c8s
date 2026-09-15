@@ -458,7 +458,8 @@ func WorkloadContainers(al *pkgallowlist.Allowlist, reported []workloadclaims.Sa
 		if isInjected(al, c) {
 			continue
 		}
-		out = append(out, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env})
+		r := pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv, Env: c.Env, Mounts: c.Mounts}
+		out = append(out, r)
 	}
 	return out
 }

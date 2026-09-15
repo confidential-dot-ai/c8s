@@ -21,7 +21,7 @@ func (p *plugin) ValidateContainerAdjustment(ctx context.Context, req *api.Valid
 		return fmt.Errorf("missing container or sandbox in NRI validation")
 	}
 	ctr, env := adjustedLaunchContainer(req)
-	verdict, reason := p.checkContainerObserved(ctx, p.cfg, req.GetPod(), ctr, ctr.GetAnnotations()[annotationImageName], true, env)
+	verdict, reason := p.checkContainerObserved(ctx, p.cfg, req.GetPod(), ctr, ctr.GetAnnotations()[annotationImageName], launchFinal, env)
 	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
 		return fmt.Errorf("%s", reason)
 	}
