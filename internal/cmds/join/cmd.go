@@ -53,10 +53,8 @@ func NewJoinCmd() *cobra.Command {
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (client-cert quote source and server-quote verifier)")
 	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (tdx or sev-snp)")
 	f.StringVar(&cfg.TokenOut, "token-out", "/run/confos/join-token", "where to write the token (rejected unless RAM-backed; never persistent storage)")
-	f.StringVar(&cfg.FragmentOut, "fragment-out", "/etc/rancher/rke2/config.yaml.d/50-join.yaml", "rke2 config drop-in to write (empty skips it)")
 	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "designated leader image/operator policy (required)")
 	_ = cmd.MarkFlagRequired("measurements-config")
-	f.IntVar(&cfg.SupervisorPort, "supervisor-port", 9345, "rke2 supervisor port on the server node (fragment server URL)")
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
 	_ = cmd.MarkFlagRequired("server")
 	return cmd

@@ -16,8 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
@@ -47,8 +45,6 @@ func joinConfig(t *testing.T, apiURL, serverAddr string) JoinConfig {
 		Platform:           "tdx",
 		MeasurementsConfig: policyFile(t, teetypes.PlatformTDX, policyEntry(t, teetypes.PlatformTDX, testOperator)),
 		TokenOut:           filepath.Join(dir, "join-token"),
-		FragmentOut:        filepath.Join(dir, "50-join.yaml"),
-		SupervisorPort:     9345,
 		Timeout:            10 * time.Second,
 	}
 }
@@ -82,7 +78,7 @@ func serverHostPort(t *testing.T, srv *httptest.Server) string {
 // two nodes. Each side authorizes the other independently on TDX and SNP.
 func TestJoinExchangeE2E(t *testing.T) {
 	for _, platform := range []teetypes.PlatformType{teetypes.PlatformTDX, teetypes.PlatformSNP} {
-		for _, scenario := range []string{"authorized", "no fragment", "wrong leader key", "wrong follower key", "wrong leader image", "wrong follower image", "wrong leader TEE", "wrong follower TEE"} {
+		for _, scenario := range []string{"authorized", "wrong leader key", "wrong follower key", "wrong leader image", "wrong follower image", "wrong leader TEE", "wrong follower TEE"} {
 			t.Run(string(platform)+"/"+scenario, func(t *testing.T) {
 				dir := ramTempDir(t)
 				leaderKey, followerKey := operatorKey(t), operatorKey(t)
@@ -140,17 +136,13 @@ func TestJoinExchangeE2E(t *testing.T) {
 				}()
 				cfg := JoinConfig{ServerAddr: relCfg.ListenAddr, AttestationAPIURL: followerAPI.URL, Platform: string(platform),
 					MeasurementsConfig: policyFile(t, platform, policyEntry(t, platform, leaderKey)), TokenOut: filepath.Join(dir, "join-token"),
-					FragmentOut: filepath.Join(dir, "50-join.yaml"), SupervisorPort: 9345, Timeout: 2 * time.Second}
-				if scenario == "no fragment" {
-					cfg.FragmentOut = ""
-				}
+					Timeout: 2 * time.Second}
 				err = RunJoin(context.Background(), cfg)
-				if scenario != "authorized" && scenario != "no fragment" {
+				if scenario != "authorized" {
 					if err == nil {
 						t.Fatal("unauthorized peer enrolled")
 					}
 					assertAbsent(t, cfg.TokenOut)
-					assertAbsent(t, cfg.FragmentOut)
 					return
 				}
 				if err != nil {
@@ -167,22 +159,9 @@ func TestJoinExchangeE2E(t *testing.T) {
 				if leaderAPI.verifyCalls.Load() != 1 || followerAPI.verifyCalls.Load() != 1 {
 					t.Fatalf("mutual verification: leader %d, follower %d", leaderAPI.verifyCalls.Load(), followerAPI.verifyCalls.Load())
 				}
-				if scenario == "no fragment" {
-					assertAbsent(t, filepath.Join(dir, "50-join.yaml"))
-					return
-				}
-				var frag rke2Fragment
-				data, err := os.ReadFile(cfg.FragmentOut)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := yaml.Unmarshal(data, &frag); err != nil {
-					t.Fatal(err)
-				}
-				if frag.Server != "https://127.0.0.1:9345" || frag.TokenFile != cfg.TokenOut {
-					t.Fatalf("wrong fragment: %+v", frag)
-				}
-				assertMode(t, cfg.FragmentOut, 0600)
+				// join must never write an rke2 drop-in: launch-config
+				// staging is that file's only owner.
+				assertAbsent(t, filepath.Join(dir, "50-join.yaml"))
 			})
 		}
 	}
@@ -208,7 +187,6 @@ func TestJoinRefusesMismatchedServer(t *testing.T) {
 		t.Fatalf("err = %v, want policy mismatch", err)
 	}
 	assertAbsent(t, cfg.TokenOut)
-	assertAbsent(t, cfg.FragmentOut)
 }
 
 // TestJoinServerErrors: an attested, authorized server that refuses or
@@ -241,7 +219,6 @@ func TestJoinServerErrors(t *testing.T) {
 				t.Fatal("expected RunJoin to fail")
 			}
 			assertAbsent(t, cfg.TokenOut)
-			assertAbsent(t, cfg.FragmentOut)
 		})
 	}
 }
@@ -273,47 +250,28 @@ func TestRunJoinConfigErrors(t *testing.T) {
 
 func TestWriteStaged(t *testing.T) {
 	dir := t.TempDir()
-	cfg := JoinConfig{
-		TokenOut:       filepath.Join(dir, "run", "join-token"),
-		FragmentOut:    filepath.Join(dir, "config.yaml.d", "50-join.yaml"),
-		SupervisorPort: 9345,
-	}
-	// Pre-create both outputs world-readable: os.WriteFile's perm applies only
+	cfg := JoinConfig{TokenOut: filepath.Join(dir, "run", "join-token")}
+	// Pre-create the output world-readable: os.WriteFile's perm applies only
 	// on create, so a stale file would keep leaking the token.
-	for _, p := range []string{cfg.TokenOut, cfg.FragmentOut} {
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte("stale"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(filepath.Dir(cfg.TokenOut), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.TokenOut, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	root, err := os.OpenRoot(filepath.Dir(cfg.TokenOut))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := writeStaged(cfg, root, "2001:db8::1", "tok"); err != nil {
+	if err := writeStaged(cfg, root, "tok"); err != nil {
 		t.Fatal(err)
 	}
 	assertMode(t, cfg.TokenOut, 0o600)
-	assertMode(t, cfg.FragmentOut, 0o600)
 	if token, err := os.ReadFile(cfg.TokenOut); err != nil {
 		t.Fatal(err)
 	} else if string(token) != "tok\n" {
 		t.Errorf("token = %q, want the fresh value", token)
-	}
-
-	var frag rke2Fragment
-	b, err := os.ReadFile(cfg.FragmentOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := yaml.Unmarshal(b, &frag); err != nil {
-		t.Fatal(err)
-	}
-	if frag.Server != "https://[2001:db8::1]:9345" {
-		t.Errorf("server = %q, want bracketed IPv6 URL", frag.Server)
 	}
 }
 
@@ -405,7 +363,7 @@ func TestTokenStagingSurvivesDirectoryReplacement(t *testing.T) {
 	if err := os.Symlink(disk, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeStaged(cfg, root, "127.0.0.1", testToken); err != nil {
+	if err := writeStaged(cfg, root, testToken); err != nil {
 		t.Fatal(err)
 	}
 	assertAbsent(t, filepath.Join(disk, "join-token"))

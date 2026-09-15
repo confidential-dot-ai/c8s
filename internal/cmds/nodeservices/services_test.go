@@ -184,7 +184,7 @@ func TestJoinServicesRequireTheirSeparateRolePolicies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"--measurements-config=" + launchDir + "cds.json", "--server=192.0.2.10:8444", "--token-out=/run/confos/rke2-agent-token", "--fragment-out="} {
+	for _, required := range []string{"--measurements-config=" + launchDir + "cds.json", "--server=192.0.2.10:8444", "--token-out=/run/confos/rke2-agent-token"} {
 		if !slices.Contains(args, required) {
 			t.Fatalf("missing enrollment argument %s", required)
 		}

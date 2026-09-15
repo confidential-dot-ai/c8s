@@ -13,10 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -41,23 +38,11 @@ type JoinConfig struct {
 	// TokenOut is where the received token is written. Must be on a RAM-backed
 	// filesystem, held open from verification through the atomic token write.
 	TokenOut string
-	// FragmentOut is an optional rke2 config drop-in (server + token-file).
-	// Empty skips it when launch-config has already staged the role fragment.
-	FragmentOut string
-	// SupervisorPort is the rke2 supervisor port on the server node, used in
-	// the fragment's server URL.
-	SupervisorPort int
 	// Timeout bounds each network step separately (cert
 	// provisioning, handshake incl. peer verification, token fetch), so a slow
 	// verifier cannot eat a later step's budget. Must be positive. One attempt
 	// per invocation; retries belong to the systemd unit.
 	Timeout time.Duration
-}
-
-// rke2Fragment is the config.yaml.d drop-in rke2-agent merges on start.
-type rke2Fragment struct {
-	Server    string `yaml:"server"`
-	TokenFile string `yaml:"token-file"`
 }
 
 // RunJoin verifies the designated leader, presents this node's quote-bound
@@ -70,12 +55,8 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if cfg.Timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive (got %s)", cfg.Timeout)
 	}
-	host, _, err := net.SplitHostPort(cfg.ServerAddr)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(cfg.ServerAddr); err != nil {
 		return fmt.Errorf("--server must be host:port: %w", err)
-	}
-	if cfg.FragmentOut != "" && (cfg.SupervisorPort < 1 || cfg.SupervisorPort > 65535) {
-		return fmt.Errorf("--supervisor-port must be between 1 and 65535")
 	}
 	policy, err := loadPeerPolicy(cfg.MeasurementsConfig, cfg.Platform, cfg.AttestationAPIURL, cfg.Timeout, true)
 	if err != nil {
@@ -131,10 +112,10 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		return err
 	}
 
-	if err := writeStaged(cfg, tokenRoot, host, token); err != nil {
+	if err := writeStaged(cfg, tokenRoot, token); err != nil {
 		return err
 	}
-	slog.Info("joined: token staged", "server", cfg.ServerAddr, "token_file", cfg.TokenOut, "fragment", cfg.FragmentOut)
+	slog.Info("joined: token staged", "server", cfg.ServerAddr, "token_file", cfg.TokenOut)
 	return nil
 }
 
@@ -230,27 +211,11 @@ func prepareTokenDir(path string) (*os.Root, error) {
 
 // writeStaged replaces the token within the already verified RAM directory.
 // Repeated enrollment replaces files atomically; partition/fetch failures write
-// nothing. The optional fragment is public and is written after the token.
-func writeStaged(cfg JoinConfig, tokenRoot *os.Root, host, token string) error {
+// nothing. The rke2 config drop-in has a single owner in launch-config
+// staging, so join writes only the credential.
+func writeStaged(cfg JoinConfig, tokenRoot *os.Root, token string) error {
 	if err := fileutil.WriteAtomicRoot(tokenRoot, filepath.Base(cfg.TokenOut), []byte(token+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write token: %w", err)
-	}
-	if cfg.FragmentOut == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(cfg.FragmentOut), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(cfg.FragmentOut), err)
-	}
-
-	frag, err := yaml.Marshal(rke2Fragment{
-		Server:    "https://" + net.JoinHostPort(host, strconv.Itoa(cfg.SupervisorPort)),
-		TokenFile: cfg.TokenOut,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal rke2 fragment: %w", err)
-	}
-	if err := fileutil.WriteAtomic(cfg.FragmentOut, frag, 0o600); err != nil {
-		return fmt.Errorf("write rke2 fragment: %w", err)
 	}
 	return nil
 }

@@ -35,9 +35,6 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 			return nil, fmt.Errorf("mesh requires the routable node IPv4 address")
 		}
 	case service == "join":
-		if d.Role != launchconfig.Follower {
-			return nil, fmt.Errorf("join is a follower-only service")
-		}
 	case service == "attest-proxy":
 	case d.Role != launchconfig.Leader:
 		return nil, fmt.Errorf("%s is a leader-only service", service)
@@ -54,8 +51,11 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 			"--measurements-config=" + launchDir + "followers.json",
 			"--token-path=/var/lib/rancher/rke2/server/agent-token"}, nil
 	case "join":
+		if d.Role != launchconfig.Follower {
+			return nil, fmt.Errorf("join is a follower-only service")
+		}
 		return []string{"join", "--server=" + d.Leader.Address + ":8444", "--platform=" + d.Image.Platform, api,
-			pins, "--token-out=/run/confos/rke2-agent-token", "--fragment-out="}, nil
+			pins, "--token-out=/run/confos/rke2-agent-token"}, nil
 	case "attest-proxy":
 		return []string{"attest-proxy", "--socket=/var/run/nri-image-policy/attestation-api.sock", "--socket-gid=65532", "--upstream=" + apiURL}, nil
 	case "cds":
