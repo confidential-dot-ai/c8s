@@ -334,8 +334,12 @@ jobs:
           set -euo pipefail
           kubectl -n "$NS" exec "$POD" -c compute -- \
             sh -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline' > /tmp/qemu.cmdline
-          grep -q 'sev-snp-guest' /tmp/qemu.cmdline || { echo "::error::qemu has no sev-snp-guest object: not a genuine SNP guest"; exit 1; }
-          grep -q "host-data=$HOST_DATA" /tmp/qemu.cmdline || { echo "::error::qemu was not launched with this run's HOSTDATA; the operator-key binding is missing"; exit 1; }
+          # libvirt renders the object either as key=value or as JSON
+          # ("host-data":"..."), so match the object and the value, not a syntax.
+          OBJ=$(grep -A1 -x -- '-object' /tmp/qemu.cmdline | grep 'sev-snp-guest' | head -1 || true)
+          echo "sev-snp-guest object: ${OBJ:-<none>}"
+          [ -n "$OBJ" ] || { echo "::error::qemu has no sev-snp-guest object: not a genuine SNP guest"; exit 1; }
+          case "$OBJ" in *"$HOST_DATA"*) ;; *) echo "::error::the sev-snp-guest object carries no host-data equal to this run's operator-key hash; the binding is missing"; exit 1 ;; esac
           echo "OK: qemu launched with -object sev-snp-guest and host-data bound to this run's operator key"
 
       - name: wait for guest services (attestation-api, apiserver, cred-release)
