@@ -24,18 +24,21 @@
 # (.github/actions/tdx-metal-e2e), with SNP launch, IGVM and HOSTDATA in place
 # of TDX and RTMR[3].
 #
-# The image, its root PVC, IGVM file and manifest tag are pinned in the
-# snp-node-image-refs ConfigMap on the host; confidential-ci
-# c8s-e2e/cluster-prep/snp-node-image-stage.sh stages a new one.
+# NOTHING IS PINNED. The node image follows the c8s commit under test: c8s-image
+# publishes node-guest-base:rke2-snp-cdi-<short sha> for every main commit, so
+# the lane walks the ref's ancestry to the newest published image, imports its
+# CDI disk into a shared root PVC named by digest (a no-op when a previous run
+# already did), stages its vCPU-matched IGVM beside the other IGVM files, and
+# reads launch digests from the build's own manifest.json. A stale pin cannot
+# exist because there is no pin.
 #
-# WHAT IT TESTS. By default the c8s under test is the merge head (or the given
-# c8s_ref), installed with nri-image-policy in AUDIT mode: the image's measured
-# floor pins one CDS digest (the image's), so a newer CDS is denied under
-# enforce before it can serve the allowlist. Audit logs the would-be denial and
-# admits, which is what lets newer code run on a published image. The image
-# floor probe (allowlist-enforcement.sh) therefore runs only when c8s_ref is
-# the image's own build ref, where enforce mode is coherent; the TDX lane is the
-# one that always runs in enforce on its paired pair.
+# WHAT IT TESTS. When the image was built from the very commit under test the
+# pair is exact and nri-image-policy runs in ENFORCE mode with the image floor
+# probe. A merge-triggered run usually lands before that commit's image has
+# built, so it boots the nearest ancestor's image and installs in AUDIT mode:
+# the image's measured floor pins its own CDS digest, and a newer CDS would be
+# denied under enforce before it could serve the allowlist. The summary says
+# which pair a run got.
 name: snp-metal-e2e
 
 on:
@@ -75,8 +78,9 @@ concurrency:
 
 env:
   NS: confai-images
-  REFS_CM: snp-node-image-refs
   VM: c8s-snp-${{ github.run_id }}-${{ github.run_attempt }}
+  IMAGE_REPO: ghcr.io/confidential-dot-ai/node-guest-base
+  SMP: "4"
   # The snp-hostdata build (confidential-metal#137): the dev build the other
   # cells pin predates the host-data annotation and silently ignores it.
   SIDECAR: ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:9bb4a027bb1b800b2af01625bf5525f45d6953cd088fb9f7526fb58521e5bf98
@@ -163,30 +167,201 @@ jobs:
               echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
             fi
           done
+          # Shared root disks outlive their runs by design; drop the ones no VMI
+          # references once they are a week old, so images do not pile up.
+          inuse=$(kubectl -n "$NS" get vmi -o jsonpath='{range .items[*]}{range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{"\n"}{end}{end}' 2>/dev/null)
+          for pvc in $(kubectl -n "$NS" get pvc -l ci.confidential.ai/resource=snp-node-root -o name 2>/dev/null); do
+            name=${pvc#persistentvolumeclaim/}
+            grep -qx "$name" <<<"$inuse" && continue
+            ct=$(kubectl -n "$NS" get "$pvc" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+            age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+            [ "$age" -gt 604800 ] && { echo "reaping root disk $name (unused, ${age}s old)"; kubectl -n "$NS" delete "$pvc" --ignore-not-found --wait=false; }
+          done
           exit 0
 
-      - name: resolve the pinned image, its IGVM and its manifest
+      - name: build the c8s CLI under test
         run: |
           set -euo pipefail
-          for k in image imageTag rootPvc igvmFile smp launchDigest c8sRef; do
-            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
-            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. Stage an image with confidential-ci c8s-e2e/cluster-prep/snp-node-image-stage.sh"; exit 1; }
-            echo "$k=$v" >> "$GITHUB_ENV"
+          . "$GITHUB_WORKSPACE/bin/retry.sh"
+          REF="${{ inputs.c8s_ref }}"; REF="${REF:-main}"
+          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
+          git -C /tmp/c8s-src checkout -q "$REF" || { echo "::error::bad c8s ref '$REF'"; exit 1; }
+          echo "C8S_SOURCE_DIR=/tmp/c8s-src" >> "$GITHUB_ENV"
+          FULL=$(git -C /tmp/c8s-src rev-parse HEAD)
+          echo "C8S_SHA=$FULL" >> "$GITHUB_ENV"
+          echo "c8s ref sha: $FULL"
+          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
+          c8s --version || true
+          # IMAGE TAGS: docker.yml is path-gated, so a commit that touches no
+          # source has no :<short-sha> images. The image a commit X deploys is
+          # the newest built tag at or before X: walk X's ancestry until a tag
+          # exists. Only a 404 walks; a 429/5xx/timeout is retried, then fatal,
+          # so a registry hiccup never silently tests an older image.
+          tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/c8s-operator:pull" | jq -r .token)
+          TAG=""
+          for sha in $(git -C /tmp/c8s-src log --format=%h --abbrev=7 -50); do
+            for attempt in 1 2 3 4; do
+              code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+                "https://ghcr.io/v2/confidential-dot-ai/c8s-operator/manifests/${sha}")
+              case "$code" in
+                200) TAG=$sha; break 2 ;;
+                404) break ;;
+                *)   sleep $((attempt * 3)) ;;
+              esac
+            done
+            if [ "$code" != "404" ]; then
+              echo "::error::ghcr answered ${code} for c8s-operator:${sha} on 4 attempts; refusing to fall back to an older image"; exit 1
+            fi
           done
-          . "$GITHUB_ENV"
-          # The manifest the image build published, not a hand-written one:
-          # manifest.json is a layer of the oras artifact beside the CDI disk.
-          # The gate below pins every snp_variants launch digest from it, and
-          # the install pins the one for the vCPU count this VM boots with.
-          repo="${image%%@*}"; repo="${repo%%:*}"
-          d=$(crane manifest "$repo:$imageTag" | jq -er '.layers[] | select(.annotations["org.opencontainers.image.title"]=="manifest.json") | .digest')
-          crane blob "$repo@$d" > /tmp/image-manifest.json
+          [ -n "$TAG" ] || { echo "::error::no c8s component image tag in the last 50 commits of $REF"; exit 1; }
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "component images at :$TAG"
+
+      - name: resolve the node image for the ref under test
+        run: |
+          set -euo pipefail
+          # Newest rke2-snp-cdi-<sha> at or before the ref under test: c8s-image
+          # builds per main commit, so a merge run usually lands before its own
+          # image exists and takes the parent's. Only a 404 walks; anything
+          # else is retried, then fatal, so a registry hiccup never silently
+          # picks an older image.
+          tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
+          accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'
+          IMG_SHA=""; IMG_DIGEST=""
+          for sha in $(git -C "$C8S_SOURCE_DIR" log --format=%h --abbrev=7 -50); do
+            for attempt in 1 2 3 4; do
+              hdr=$(curl -sI --max-time 20 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
+                "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-cdi-${sha}" | tr -d '\r')
+              code=$(awk 'NR==1{print $2}' <<<"$hdr")
+              case "$code" in
+                200) IMG_SHA=$sha; IMG_DIGEST=$(awk 'tolower($1)=="docker-content-digest:"{print $2}' <<<"$hdr"); break 2 ;;
+                404) break ;;
+                *)   sleep $((attempt * 3)) ;;
+              esac
+            done
+            [ "$code" = 404 ] || { echo "::error::ghcr answered ${code:-none} for rke2-snp-cdi-${sha} on 4 attempts; refusing to fall back to an older image"; exit 1; }
+          done
+          [ -n "$IMG_SHA" ] || { echo "::error::no rke2-snp-cdi image in the last 50 commits of the ref under test"; exit 1; }
+          [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for rke2-snp-cdi-$IMG_SHA"; exit 1; }
+          # The manifest the image build published: manifest.json is a layer of
+          # the oras artifact beside the CDI disk, as are the per-vCPU IGVMs.
+          oras=$(curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "$accept" -H "Accept: $accept" \
+            "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-${IMG_SHA}")
+          mlayer=$(jq -er '.layers[] | select(.annotations["org.opencontainers.image.title"]=="manifest.json") | .digest' <<<"$oras")
+          curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$mlayer" > /tmp/image-manifest.json
           jq -e '.build.platform == "snp" and (.snp_variants | length > 0)' /tmp/image-manifest.json >/dev/null \
-            || { echo "::error::$repo:$imageTag manifest.json is not an SNP node image manifest"; exit 1; }
-          want=$(jq -er --argjson smp "$smp" '.snp_variants[] | select(.smp==$smp) | .measurement.snp_launch_digest' /tmp/image-manifest.json)
-          [ "$want" = "$launchDigest" ] || { echo "::error::$REFS_CM launchDigest does not match the smp$smp digest in $repo:$imageTag manifest.json; re-stage the image"; exit 1; }
-          echo "image $image"
-          echo "manifest $repo:$imageTag, smp$smp launch digest ${launchDigest:0:24}..."
+            || { echo "::error::rke2-snp-${IMG_SHA} manifest.json is not an SNP node image manifest"; exit 1; }
+          LAUNCH_DIGEST=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .measurement.snp_launch_digest' /tmp/image-manifest.json)
+          IGVM_LAYER=$(jq -er --argjson smp "$SMP" '.igvm_layer // empty' /tmp/image-manifest.json 2>/dev/null || true)
+          IGVM_NAME=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .igvm.path' /tmp/image-manifest.json)
+          IGVM_SHA256=$(jq -er --argjson smp "$SMP" '.snp_variants[] | select(.smp==$smp) | .igvm.sha256' /tmp/image-manifest.json)
+          IGVM_LAYER=$(jq -er --arg t "$IGVM_NAME" '.layers[] | select(.annotations["org.opencontainers.image.title"]==$t) | .digest' <<<"$oras")
+          short12=${IMG_DIGEST#sha256:}; short12=${short12:0:12}
+          {
+            echo "IMG_SHA=$IMG_SHA"
+            echo "image=${IMAGE_REPO}@${IMG_DIGEST}"
+            echo "imageTag=rke2-snp-${IMG_SHA}"
+            echo "rootPvc=c8s-snp-root-${short12}"
+            echo "igvmFile=rke2-snp-${IMG_SHA}-smp${SMP}.igvm"
+            echo "IGVM_LAYER=$IGVM_LAYER"
+            echo "IGVM_SHA256=$IGVM_SHA256"
+            echo "launchDigest=$LAUNCH_DIGEST"
+          } >> "$GITHUB_ENV"
+          # Enforce is coherent only for the exact pair (see the header).
+          if [ "${C8S_SHA:0:7}" = "$IMG_SHA" ]; then echo "POLICY_MODE=enforce" >> "$GITHUB_ENV"; else echo "POLICY_MODE=audit" >> "$GITHUB_ENV"; fi
+          echo "c8s under test ${C8S_SHA:0:7}; node image rke2-snp-cdi-${IMG_SHA} (${IMG_DIGEST:0:19}...), smp${SMP} launch digest ${LAUNCH_DIGEST:0:24}..."
+
+      - name: stage the node image on the host (no-op when already staged)
+        run: |
+          set -euo pipefail
+          # Root disk: a CDI registry import into a PVC named by image digest,
+          # shared read-only by every run of this image. bm-e2e may create PVCs
+          # and pods, not DataVolumes, so the import is requested through the
+          # PVC annotations CDI honours (the TDX exact-image flow does the same).
+          if ! kubectl -n "$NS" get pvc "$rootPvc" >/dev/null 2>&1; then
+            kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: $rootPvc
+            namespace: $NS
+            labels:
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/resource: snp-node-root
+              confai.confidential.ai/source-digest-sha256: "${rootPvc#c8s-snp-root-}"
+            annotations:
+              cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+              cdi.kubevirt.io/storage.import.source: registry
+              cdi.kubevirt.io/storage.import.endpoint: "docker://$image"
+              cdi.kubevirt.io/storage.import.secretName: ghcr-pull
+              cdi.kubevirt.io/storage.contentType: kubevirt
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            volumeMode: Filesystem
+            resources: {requests: {storage: 4Gi}}
+          EOF
+          fi
+          for i in $(seq 1 120); do
+            phase=$(kubectl -n "$NS" get pvc "$rootPvc" -o jsonpath='{.metadata.annotations.cdi\.kubevirt\.io/storage\.pod\.phase}' 2>/dev/null || true)
+            case "$phase" in
+              Succeeded) echo "root disk $rootPvc ready"; break ;;
+              Failed) kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image failed"; exit 1 ;;
+            esac
+            [ "$i" -lt 120 ] || { kubectl -n "$NS" describe pvc "$rootPvc" | tail -15; echo "::error::CDI import of $image did not finish in 20 min (phase ${phase:-none})"; exit 1; }
+            sleep 10
+          done
+          # IGVM: a pod writes the vCPU-matched IGVM from the oras artifact into
+          # the igvm-files PVC the hook sidecar reads, after checking its sha256
+          # against the manifest. Atomic rename, so a concurrent run sees all or
+          # nothing.
+          STAGER="$VM-igvm-stage"
+          kubectl -n "$NS" delete pod "$STAGER" --ignore-not-found --wait=true >/dev/null
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: $STAGER
+            namespace: $NS
+            labels: {ci.confidential.ai/managed: "true", ci.confidential.ai/run-id: "${{ github.run_id }}"}
+          spec:
+            restartPolicy: Never
+            activeDeadlineSeconds: 900
+            automountServiceAccountToken: false
+            nodeSelector: {confidential.ai/sev-snp: "true"}
+            securityContext: {runAsNonRoot: false, seccompProfile: {type: RuntimeDefault}}
+            containers:
+              - name: stage
+                image: alpine:3.20
+                command: ["/bin/sh", "-ec"]
+                args:
+                  - |
+                    if [ -f "/igvm/$igvmFile" ] && [ "\$(sha256sum "/igvm/$igvmFile" | cut -d' ' -f1)" = "$IGVM_SHA256" ]; then echo "already staged: $igvmFile"; exit 0; fi
+                    apk add --no-cache --quiet curl ca-certificates jq
+                    tok=\$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
+                    curl -fsSL -H "Authorization: Bearer \$tok" -o /work/igvm "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$IGVM_LAYER"
+                    got=\$(sha256sum /work/igvm | cut -d' ' -f1)
+                    [ "\$got" = "$IGVM_SHA256" ] || { echo "igvm sha256 \$got != manifest $IGVM_SHA256"; exit 1; }
+                    cp /work/igvm "/igvm/$igvmFile.$$" && chmod 0444 "/igvm/$igvmFile.$$" && mv "/igvm/$igvmFile.$$" "/igvm/$igvmFile"
+                    echo "staged $igvmFile (\$got)"
+                securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+                resources: {requests: {memory: 256Mi, cpu: 250m, ephemeral-storage: 512Mi}, limits: {memory: 1Gi}}
+                volumeMounts:
+                  - {name: work, mountPath: /work}
+                  - {name: igvm, mountPath: /igvm}
+            volumes:
+              - {name: work, emptyDir: {sizeLimit: 1Gi}}
+              - {name: igvm, persistentVolumeClaim: {claimName: igvm-files}}
+          EOF
+          for i in $(seq 1 90); do
+            ph=$(kubectl -n "$NS" get pod "$STAGER" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            case "$ph" in Succeeded|Failed) break ;; esac
+            sleep 10
+          done
+          kubectl -n "$NS" logs "$STAGER" 2>&1 | tail -3
+          [ "${ph:-}" = Succeeded ] || { kubectl -n "$NS" describe pod "$STAGER" | tail -12; echo "::error::IGVM staging pod ended in phase ${ph:-none}"; exit 1; }
+          kubectl -n "$NS" delete pod "$STAGER" --ignore-not-found --wait=false >/dev/null
 
       - name: preflight, SEV-SNP device capacity
         run: |
@@ -274,7 +449,7 @@ jobs:
                 domain:
                   cpu:
                     model: EPYC-Genoa
-                    cores: $smp          # MUST match the IGVM's measured vCPU count
+                    cores: $SMP          # MUST match the IGVM's measured vCPU count
                   memory: {guest: 16Gi}
                   resources: {requests: {memory: 16Gi}}
                   firmware: {bootloader: {efi: {secureBoot: false}}}
@@ -363,48 +538,6 @@ jobs:
             sleep 5
           done
 
-      - name: build the c8s CLI under test
-        run: |
-          set -euo pipefail
-          . "$GITHUB_WORKSPACE/bin/retry.sh"
-          REF="${{ inputs.c8s_ref }}"; REF="${REF:-main}"
-          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
-          git -C /tmp/c8s-src checkout -q "$REF" || { echo "::error::bad c8s ref '$REF'"; exit 1; }
-          echo "C8S_SOURCE_DIR=/tmp/c8s-src" >> "$GITHUB_ENV"
-          FULL=$(git -C /tmp/c8s-src rev-parse HEAD)
-          echo "C8S_SHA=$FULL" >> "$GITHUB_ENV"
-          echo "c8s ref sha: $FULL"
-          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
-          c8s --version || true
-          # IMAGE TAGS: docker.yml is path-gated, so a commit that touches no
-          # source has no :<short-sha> images. The image a commit X deploys is
-          # the newest built tag at or before X: walk X's ancestry until a tag
-          # exists. Only a 404 walks; a 429/5xx/timeout is retried, then fatal,
-          # so a registry hiccup never silently tests an older image.
-          tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:confidential-dot-ai/c8s-operator:pull" | jq -r .token)
-          TAG=""
-          for sha in $(git -C /tmp/c8s-src log --format=%h --abbrev=7 -50); do
-            for attempt in 1 2 3 4; do
-              code=$(curl -s -o /dev/null --max-time 20 -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-                "https://ghcr.io/v2/confidential-dot-ai/c8s-operator/manifests/${sha}")
-              case "$code" in
-                200) TAG=$sha; break 2 ;;
-                404) break ;;
-                *)   sleep $((attempt * 3)) ;;
-              esac
-            done
-            if [ "$code" != "404" ]; then
-              echo "::error::ghcr answered ${code} for c8s-operator:${sha} on 4 attempts; refusing to fall back to an older image"; exit 1
-            fi
-          done
-          [ -n "$TAG" ] || { echo "::error::no c8s component image tag in the last 50 commits of $REF"; exit 1; }
-          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
-          echo "component images at :$TAG"
-          # Enforce is coherent only when the c8s under test is the image's own
-          # build (the measured floor pins that CDS digest); see the header.
-          if [ "${FULL:0:${#c8sRef}}" = "$c8sRef" ]; then echo "POLICY_MODE=enforce" >> "$GITHUB_ENV"; else echo "POLICY_MODE=audit" >> "$GITHUB_ENV"; fi
-
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
           set -euo pipefail
@@ -427,7 +560,7 @@ jobs:
             policy:
               mode: $POLICY_MODE
           EOF
-          echo "nri-image-policy mode: $POLICY_MODE (c8s ${C8S_SHA:0:7} on an image built from $c8sRef)"
+          echo "nri-image-policy mode: $POLICY_MODE (c8s ${C8S_SHA:0:7} on an image built from $IMG_SHA)"
           c8s install --cvm-mode bare-metal --single-node --hardware-platform sev-snp \
             --image-tag "$IMAGE_TAG" \
             --operator-keys /tmp/op.pub \
@@ -512,10 +645,10 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| image | \`${image:-?}\` |"
-            echo "| manifest | \`${imageTag:-?}\` (smp${smp:-?}) |"
+            echo "| node image | \`${image:-?}\` (\`rke2-snp-cdi-${IMG_SHA:-?}\`) |"
+            echo "| manifest | \`${imageTag:-?}\` (smp${SMP}) |"
             echo "| launch digest | \`${launchDigest:0:32}...\` |"
-            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy \`${POLICY_MODE:-?}\` |"
+            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy \`${POLICY_MODE:-?}\` (${POLICY_MODE:+$([ "$POLICY_MODE" = enforce ] && echo exact pair || echo 'image from an ancestor')}) |"
             echo "| guest | \`${GUEST_IP:-?}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -527,5 +660,6 @@ jobs:
           kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s || cleanup_failed=1
           kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found || cleanup_failed=1
           kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false || cleanup_failed=1
+          kubectl -n "$NS" delete pod "$VM-igvm-stage" --ignore-not-found --wait=false || true
           [ "$cleanup_failed" = 0 ] || echo "::error::SNP cleanup incomplete; owned resources may need orphan reaping"
           exit "$cleanup_failed"
