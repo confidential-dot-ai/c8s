@@ -8,10 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 
 	"gopkg.in/yaml.v3"
 )

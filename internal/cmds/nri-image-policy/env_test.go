@@ -2,11 +2,12 @@ package nriimagepolicy
 
 import (
 	"context"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/containerd/nri/pkg/api"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/containerd/nri/pkg/api"
 )
 
 // Exercise containerd's create/start lifecycle for older admission tests.
