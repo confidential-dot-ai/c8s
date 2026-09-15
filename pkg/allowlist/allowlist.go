@@ -99,10 +99,35 @@ type ArgvPolicy struct {
 // Any leaves them unconstrained, and is what an absent policy means — unlike
 // argv, a Deny default would refuse every real pod, since the base set is never
 // empty.
+//
+// Sandboxed narrows Exact to the node-as-CVM rule, for an enforcer that can also
+// see who staged each source (RunningContainer.Mounts): the platform's own
+// mounts need no entry, an emptyDir needs a listed destination and nothing else,
+// operator-supplied content is admitted only at a listed destination under
+// DataMountPrefix that carries a Reviews string, and a host path is refused
+// outright. An enforcer that reports destinations without saying who staged
+// them falls back to plain containment, so a served document carrying the
+// marker stays enforceable on a node image that predates it.
 type MountPolicy struct {
 	Policy       string   `json:"policy" yaml:"policy"`
 	Destinations []string `json:"destinations,omitempty" yaml:"destinations,omitempty"`
+	// Sandboxed opts an exact policy into the classification above. It is a
+	// separate field rather than a fourth policy value so a consumer that
+	// predates it keeps parsing the document instead of failing every pull.
+	Sandboxed bool `json:"sandboxed,omitempty" yaml:"sandboxed,omitempty"`
+	// Reviews maps a destination to why bytes arriving there cannot name code —
+	// no configuration that loads modules, plugins or scripts, no dotfile a
+	// loader or interpreter reads. The reviewer decides that; the string makes
+	// the decision auditable, and under Sandboxed its absence is what refuses
+	// operator-supplied content at a destination.
+	Reviews map[string]string `json:"reviews,omitempty" yaml:"reviews,omitempty"`
 }
+
+// DataMountPrefix is the one destination subtree operator-supplied content may
+// land in under a sandboxed policy. A single prefix is cheaper to reason about
+// than a denylist of loader paths: no executable, library, loader configuration
+// or interpreter module path lives beneath it.
+const DataMountPrefix = "/mnt/c8s-data/"
 
 // EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
@@ -384,8 +409,12 @@ func normalizeMounts(p *MountPolicy) error {
 		if len(p.Destinations) != 0 {
 			return fmt.Errorf("any policy takes no destinations")
 		}
+		if p.Sandboxed || len(p.Reviews) != 0 {
+			return fmt.Errorf("any policy takes no sandboxed marker or reviews")
+		}
 		p.Policy = PolicyAny
 		p.Destinations = nil
+		p.Reviews = nil
 	case PolicyExact:
 		if len(p.Destinations) == 0 {
 			return fmt.Errorf("exact policy requires at least one destination")
@@ -396,8 +425,35 @@ func normalizeMounts(p *MountPolicy) error {
 			}
 		}
 		p.Destinations = sortedUnique(p.Destinations)
+		if err := normalizeReviews(p); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+	}
+	return nil
+}
+
+// normalizeReviews validates the per-destination review strings of an exact
+// policy. A review for a destination the policy does not list is a typo that
+// would otherwise sit in the document doing nothing, so it is refused rather
+// than dropped.
+//
+// A review outside DataMountPrefix is NOT refused here: the prefix is where the
+// enforcer refuses, and rejecting the whole document over one destination would
+// cost every other entry in it. `c8s allowlist lint` reports it as an error.
+func normalizeReviews(p *MountPolicy) error {
+	if len(p.Reviews) == 0 {
+		p.Reviews = nil
+		return nil
+	}
+	for d, review := range p.Reviews {
+		if !slices.Contains(p.Destinations, d) {
+			return fmt.Errorf("review for destination %q, which the policy does not list", d)
+		}
+		if strings.TrimSpace(review) == "" {
+			return fmt.Errorf("review for destination %q is empty", d)
+		}
 	}
 	return nil
 }

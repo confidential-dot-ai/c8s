@@ -310,3 +310,84 @@ func TestWorkloadApplyDoesNotDoubleReportInFileCollision(t *testing.T) {
 		t.Fatal("the file lint should have reported it")
 	}
 }
+
+// A sandboxed policy admits operator-supplied content only under the data
+// prefix, so a review outside it describes a mount the enforcer will refuse.
+// lint says so at write time rather than at the first pod.
+func TestLintRefusesSandboxedMountDestinations(t *testing.T) {
+	const head = `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":`
+	for _, tc := range []struct {
+		name   string
+		mounts string
+		want   string
+	}{
+		{
+			"reviewed destination outside the prefix",
+			`{"policy":"exact","sandboxed":true,"destinations":["/etc/attestation-api"],"reviews":{"/etc/attestation-api":"yaml only"}}`,
+			"admits that only under /mnt/c8s-data/",
+		},
+		{
+			"unreviewed destination under the prefix",
+			`{"policy":"exact","sandboxed":true,"destinations":["/mnt/c8s-data/config"]}`,
+			"with no review",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+head+tc.mounts+`}]}}}`)
+			out, _, err := runCmd("lint", f)
+			if err == nil {
+				t.Fatalf("lint accepted an inadmissible mount policy: %q", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("lint output %q missing %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// Reviews without the marker are documentation nothing reads, which is a
+// warning rather than an error: the entry still enforces containment.
+func TestLintWarnsOnReviewsWithoutSandboxed(t *testing.T) {
+	const ctr = `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},` +
+		`"mounts":{"policy":"exact","destinations":["/mnt/c8s-data/config"],"reviews":{"/mnt/c8s-data/config":"yaml only"}}}`
+	f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+ctr+`]}}}`)
+
+	out, _, err := runCmd("lint", f)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	if !strings.Contains(out, "not sandboxed") {
+		t.Errorf("lint output %q missing the unread-reviews warning", out)
+	}
+}
+
+// The data prefix only holds if no loader resolves through it. A sealed PATH
+// naming a directory under it hands the operator the executable the reviewed
+// exact command resolves to.
+func TestLintRefusesSealedSearchPathIntoDataPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     string
+		refused bool
+	}{
+		{"PATH reaching the data prefix", `{"PATH":"/usr/bin:/mnt/c8s-data/bin"}`, true},
+		{"PYTHONPATH at the prefix itself", `{"PYTHONPATH":"/mnt/c8s-data"}`, true},
+		{"LD_LIBRARY_PATH via a traversal", `{"LD_LIBRARY_PATH":"/mnt/c8s-data/lib/../lib"}`, true},
+		{"NODE_PATH elsewhere", `{"NODE_PATH":"/usr/lib/node_modules"}`, false},
+		{"a prefix that only looks alike", `{"PATH":"/mnt/c8s-database/bin"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctr := `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},` +
+				`"env":{"policy":"exact","values":` + tc.env + `}}`
+			f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+ctr+`]}}}`)
+
+			out, _, err := runCmd("lint", f)
+			if tc.refused && err == nil {
+				t.Fatalf("lint accepted a search path reaching the data prefix: %q", out)
+			}
+			if !tc.refused && err != nil {
+				t.Fatalf("lint refused an unrelated search path: %q (%v)", out, err)
+			}
+		})
+	}
+}

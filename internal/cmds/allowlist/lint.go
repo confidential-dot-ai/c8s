@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -25,9 +26,9 @@ func newLintCmd(o *options) *cobra.Command {
 		Long: `Parse and validate an allowlist file (or stdin with '-') and report semantic
 findings: entries with no containers, a container that can never start, digests
 whose effective policy is unconstrained, tag-form image labels (TOCTOU),
-root-subtree path grants, and mount/env policy on a deployment whose enforcer
-cannot observe those fields. --online additionally checks each digest exists in
-its registry via crane.
+root-subtree path grants, a sandboxed mount policy no enforcer can admit, and a
+sealed search path that reaches the sandboxed data prefix. --online additionally
+checks each digest exists in its registry via crane.
 
 Two entries declaring the same containers with the same argv policy are an
 error: release requires exactly one entry to match, so both are refused
@@ -44,7 +45,6 @@ same.`,
 				return err
 			}
 			findings := lintOffline(al)
-			findings = append(findings, unobservedFieldPolicies(al, cvmMode)...)
 			if online {
 				if err := crane.Require(); err != nil {
 					return err
@@ -70,7 +70,11 @@ same.`,
 	}
 	cmd.Flags().BoolVar(&online, "online", false, "also check each digest exists in its registry via crane")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero if there are any warnings")
-	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deployment mode the allowlist targets (pod, node, gke, aks); pod silences the mount/env scope warning")
+	// Inert since the NRI plugin began observing the mount table and the
+	// environment: nothing is left that only a guest enforcer could see. Kept
+	// accepted so an existing CI invocation does not fail on an unknown flag.
+	cmd.Flags().StringVar(&cvmMode, "cvm-mode", "", "deprecated and ignored")
+	_ = cmd.Flags().MarkDeprecated("cvm-mode", "every policy field is now observed by the enforcer, so this silences nothing")
 	return cmd
 }
 
@@ -204,6 +208,8 @@ func lintOffline(al *pkgallowlist.Allowlist) []finding {
 
 	warnings = append(warnings, indistinguishableEntries(al)...)
 	warnings = append(warnings, shadowedEntries(al)...)
+	warnings = append(warnings, mountPolicyFindings(al)...)
+	warnings = append(warnings, searchPathFindings(al)...)
 	return warnings
 }
 
@@ -271,25 +277,79 @@ func shadows(wide, narrow pkgallowlist.Workload) bool {
 	return true
 }
 
-// unobservedFieldPolicies reports mount restrictions outside pod mode.
-func unobservedFieldPolicies(al *pkgallowlist.Allowlist, cvmMode string) []finding {
-	if cvmMode == "pod" {
-		return nil
-	}
-	var warnings []finding
+// mountPolicyFindings reports sandboxed mount policy an enforcer will refuse at
+// admission, so an operator sees it at write time instead of at the first pod.
+//
+// A review says why bytes at a destination cannot name code, so a destination
+// carrying one is where operator-supplied content lands — and a sandboxed
+// policy admits that only beneath DataMountPrefix. The reverse is just as
+// wrong: a destination under the prefix with no review can never admit the
+// content it was carved out for.
+func mountPolicyFindings(al *pkgallowlist.Allowlist) []finding {
+	var out []finding
 	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
 		for _, c := range allContainers(al.Workloads[name]) {
-			var fields []string
-			if c.Mounts.Policy == pkgallowlist.PolicyExact {
-				fields = append(fields, "mounts")
-			}
-			if fields == nil {
+			m := c.Mounts
+			if !m.Sandboxed {
+				if len(m.Reviews) > 0 {
+					out = append(out, warnf("workload %q container %s carries mount reviews but is not sandboxed; the reviews are documentation only and no enforcer reads them", name, c.Digest.String()))
+				}
 				continue
 			}
-			warnings = append(warnings, warnf("workload %q container %s constrains %s; only the in-guest policy-monitor observes those fields, so on a deployment enforced by the host NRI plugin this policy admits every container (pass --cvm-mode=pod if this allowlist targets kata)", name, c.Digest.String(), strings.Join(fields, " and ")))
+			for _, d := range m.Destinations {
+				_, reviewed := m.Reviews[d]
+				underPrefix := strings.HasPrefix(d, pkgallowlist.DataMountPrefix)
+				switch {
+				case reviewed && !underPrefix:
+					out = append(out, errorf("workload %q container %s reviews mount destination %q as operator-supplied content, but a sandboxed policy admits that only under %s; move the volume there", name, c.Digest.String(), d, pkgallowlist.DataMountPrefix))
+				case !reviewed && underPrefix:
+					out = append(out, errorf("workload %q container %s lists mount destination %q under %s with no review; a sandboxed policy refuses operator-supplied content at an unreviewed destination", name, c.Digest.String(), d, pkgallowlist.DataMountPrefix))
+				}
+			}
 		}
 	}
-	return warnings
+	return out
+}
+
+// searchPathVars are the environment variables a loader or interpreter reads a
+// list of directories from before the reviewed code runs.
+var searchPathVars = []string{"PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "NODE_PATH"}
+
+// searchPathFindings refuses a sealed search path that reaches the sandboxed
+// data prefix. The prefix keeps operator-supplied content off every path a
+// loader resolves through; a PATH entry under it puts it back, and the exact
+// command that was reviewed then resolves to a file the operator wrote.
+func searchPathFindings(al *pkgallowlist.Allowlist) []finding {
+	var out []finding
+	for _, name := range slices.Sorted(maps.Keys(al.Workloads)) {
+		for _, c := range allContainers(al.Workloads[name]) {
+			if c.Env.Policy != pkgallowlist.PolicyExact {
+				continue
+			}
+			for _, v := range searchPathVars {
+				value, set := c.Env.Values[v]
+				if !set || !searchPathReachesData(value) {
+					continue
+				}
+				out = append(out, errorf("workload %q container %s pins %s to a value containing %s; operator-supplied content is admitted there precisely because no loader resolves through it", name, c.Digest.String(), v, pkgallowlist.DataMountPrefix))
+			}
+		}
+	}
+	return out
+}
+
+// searchPathReachesData reports whether a colon-separated search path has an
+// element at or beneath DataMountPrefix. The prefix's own trailing slash is
+// stripped first so a bare "/mnt/c8s-data" element is caught too.
+func searchPathReachesData(value string) bool {
+	prefix := strings.TrimSuffix(pkgallowlist.DataMountPrefix, "/")
+	for _, element := range strings.Split(value, ":") {
+		element = path.Clean(element)
+		if element == prefix || strings.HasPrefix(element, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // indistinguishableEntries reports entries that no running set can tell apart.
