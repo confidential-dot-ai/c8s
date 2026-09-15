@@ -56,14 +56,14 @@ func validateExistingAgentToken(root *os.Root, name string) error {
 		return fmt.Errorf("open existing agent token: %w", err)
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 65))
+	data, err := io.ReadAll(io.LimitReader(f, 64))
 	if err != nil {
 		return fmt.Errorf("read existing agent token: %w", err)
 	}
 	defer clear(data)
 	secret, err := hex.DecodeString(string(data))
 	defer clear(secret)
-	if err != nil || len(data) != 64 || len(secret) != 32 {
+	if err != nil {
 		return fmt.Errorf("existing agent token is malformed")
 	}
 	return nil
