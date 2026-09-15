@@ -172,9 +172,10 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	}
 }
 
-// TestRunReturnsListenError: with the port already taken, the serve goroutine
-// fails and Run surfaces the bind error (the errCh select arm). Everything else
-// in the config is startable, so the only possible failure is the bind.
+// TestRunReturnsListenError: with the port already taken, Run surfaces the
+// bind error. The listener is opened before the serve goroutine starts (so the
+// accept cap can wrap it), so this returns on the synchronous path. Everything
+// else in the config is startable, so the only possible failure is the bind.
 func TestRunReturnsListenError(t *testing.T) {
 	cfg := runnableConfig(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -186,5 +187,33 @@ func TestRunReturnsListenError(t *testing.T) {
 
 	if err := Run(context.Background(), cfg); err == nil {
 		t.Error("Run with an already-bound listen address returned nil, want bind error")
+	}
+}
+
+// TestServerBoundsConnectionResources: cred-release binds every interface and
+// is reachable off-host, so each of these bounds costs an unauthenticated peer
+// something it would otherwise get free. Asserted here because a regression is
+// silent — the service still serves correctly without them.
+func TestServerBoundsConnectionResources(t *testing.T) {
+	if maxConcurrentConns <= 0 {
+		t.Errorf("maxConcurrentConns = %d, want a positive accept cap", maxConcurrentConns)
+	}
+	// Run builds the server inline, so reflect the same settings here: these
+	// are the values a refactor must carry over.
+	srv := newServer(":0", nil, nil)
+	if srv.MaxHeaderBytes <= 0 || srv.MaxHeaderBytes > 64<<10 {
+		t.Errorf("MaxHeaderBytes = %d, want a bound well under Go's 1MiB default", srv.MaxHeaderBytes)
+	}
+	for _, tc := range []struct {
+		name string
+		got  time.Duration
+	}{
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout},
+		{"WriteTimeout", srv.WriteTimeout},
+		{"IdleTimeout", srv.IdleTimeout},
+	} {
+		if tc.got <= 0 {
+			t.Errorf("%s is unset; a parked connection holds a goroutine open", tc.name)
+		}
 	}
 }
