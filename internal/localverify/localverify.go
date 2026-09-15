@@ -79,7 +79,7 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 	// the Getter lets the snp and gcp-snp arms fetch it from AMD KDS, bounded
 	// by ctx. Nothing else here reaches the network.
 	res, err := teeverify.VerifyEnvelope(ctx, envelope, p.VerifyParams, teeverify.Options{
-		SNP: snp.Options{Getter: snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)},
+		SNP: snp.Options{Getter: newCachingGetter(defaultKDSCacheDir(), snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay))},
 	})
 	if err != nil {
 		var re *trust.AttestationRecreationErr
