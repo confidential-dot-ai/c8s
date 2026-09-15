@@ -717,16 +717,19 @@ enforce that:
   subresources reach the kubelet's exec endpoint without a `pods/exec`
   admission check), no exec, attach, port-forward or ephemeral containers,
   no `serviceaccounts/token`, no `podsecurityexemptions` grant, no
-  PersistentVolume, StorageClass, HelmChart, Node, APIService or CSR-approval
-  writes. Namespaced Roles and RoleBindings are allowed, and the apiserver's
+  PersistentVolume, StorageClass, HelmChart, CustomResourceDefinition, Node,
+  APIService or CSR-approval writes. Namespaced Roles and RoleBindings are
+  allowed, and the apiserver's
   escalation check keeps them within the operator's own permissions.
 - **Admission.** `confos-operator-scope` re-checks the same exclusions for
   every principal in a `c8s:` group, whatever RBAC says: no write at all in
-  the PodSecurity-exempt namespaces (`kube-system`, `local-path-storage`),
-  where a pod, an edited DaemonSet, a HelmChart or a service-account token
-  secret is root on the node; and none of the cluster-scoped resources
-  listed above. It short-circuits for every other principal, so system
-  components and the in-guest `rke2.yaml` are unaffected.
+  the privileged namespaces (`kube-system` and `local-path-storage`, which
+  are PodSecurity-exempt, and `c8s-system`, labelled privileged for the
+  baked operator), where a pod, an edited DaemonSet, a HelmChart or a
+  service-account token secret is root on the node; and none of the
+  cluster-scoped resources listed above. Its match condition selects the
+  `c8s:` groups before any validation runs, so system components and the
+  in-guest `rke2.yaml` are unaffected.
 
 The role therefore cannot lower a namespace below restricted, cannot exec,
 cannot write where PodSecurity does not apply, cannot mount the host through

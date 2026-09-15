@@ -44,7 +44,7 @@ func TestNewCmdValidation(t *testing.T) {
 
 	t.Run("unknown role", func(t *testing.T) {
 		err := execCmd(t, "--node", "127.0.0.1", "--operator-key", "k.pem", "--image-manifest", "m.json", "--out", "kc", "--role", "cluster-admin")
-		if err == nil || !strings.Contains(err.Error(), "--role must be operator or log-reader") {
+		if err == nil || !strings.Contains(err.Error(), "--role: unknown role \"cluster-admin\" (want operator or log-reader)") {
 			t.Fatalf("want role error, got %v", err)
 		}
 	})
@@ -116,56 +116,51 @@ func TestNewCmdValidation(t *testing.T) {
 }
 
 // TestNewCmdEndToEnd runs the whole command against the fake node: flags,
-// attest gate, RA-TLS release, kubeconfig on disk.
+// attest gate, RA-TLS release, kubeconfig on disk. The role reaches the
+// release body, so the server (not the client) picks the Subject.
 func TestNewCmdEndToEnd(t *testing.T) {
-	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
-
-	err := execCmd(t,
-		"--attest-url", env.attestURL,
-		"--release-url", env.releaseURL,
-		"--apiserver-url", "https://node:6443",
-		"--operator-key", env.keyPath,
-		"--image-manifest", env.manifestPath,
-		"--out", env.outPath,
-		"--context", "testctx",
-		"--tls-server-name", "c8s-cvm",
-		"--timeout", "10s")
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-
-	kc, err := os.ReadFile(env.outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"current-context: testctx",
-		"server: https://node:6443",
-		"client-certificate-data: " + base64.StdEncoding.EncodeToString([]byte("CERTPEM")),
+	for _, tt := range []struct {
+		name     string
+		roleArgs []string
+		wantRole string
+	}{
+		{"default role", nil, credrelease.RoleOperator},
+		{"log-reader", []string{"--role", "log-reader"}, credrelease.RoleLogReader},
 	} {
-		if !strings.Contains(string(kc), want) {
-			t.Errorf("kubeconfig missing %q", want)
-		}
-	}
-}
+		t.Run(tt.name, func(t *testing.T) {
+			env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
 
-// TestNewCmdLogReaderRole: --role log-reader reaches the release body, so the
-// server (not the client) picks the log-reader Subject.
-func TestNewCmdLogReaderRole(t *testing.T) {
-	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
-	wantReleaseRole.Store(credrelease.RoleLogReader)
-	t.Cleanup(func() { wantReleaseRole.Store("") })
+			err := execCmd(t, append([]string{
+				"--attest-url", env.attestURL,
+				"--release-url", env.releaseURL,
+				"--apiserver-url", "https://node:6443",
+				"--operator-key", env.keyPath,
+				"--image-manifest", env.manifestPath,
+				"--out", env.outPath,
+				"--context", "testctx",
+				"--tls-server-name", "c8s-cvm",
+				"--timeout", "10s",
+			}, tt.roleArgs...)...)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got := env.releaseRole.Load(); got != tt.wantRole {
+				t.Errorf("release role = %q, want %q", got, tt.wantRole)
+			}
 
-	err := execCmd(t,
-		"--attest-url", env.attestURL,
-		"--release-url", env.releaseURL,
-		"--apiserver-url", "https://node:6443",
-		"--operator-key", env.keyPath,
-		"--image-manifest", env.manifestPath,
-		"--out", env.outPath,
-		"--role", "log-reader",
-		"--timeout", "10s")
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
+			kc, err := os.ReadFile(env.outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"current-context: testctx",
+				"server: https://node:6443",
+				"client-certificate-data: " + base64.StdEncoding.EncodeToString([]byte("CERTPEM")),
+			} {
+				if !strings.Contains(string(kc), want) {
+					t.Errorf("kubeconfig missing %q", want)
+				}
+			}
+		})
 	}
 }

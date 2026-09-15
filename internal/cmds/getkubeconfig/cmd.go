@@ -35,9 +35,9 @@ func NewCmd() *cobra.Command {
 				return fmt.Errorf("--operator-key, --image-manifest and --out are required")
 			}
 			// Validate locally so a typo fails before the attest round-trip;
-			// the server rejects unknown roles too.
-			if cfg.Role != credrelease.RoleOperator && cfg.Role != credrelease.RoleLogReader {
-				return fmt.Errorf("--role must be %s or %s", credrelease.RoleOperator, credrelease.RoleLogReader)
+			// the server rejects unknown roles the same way.
+			if _, err := credrelease.ParseRole(cfg.Role); err != nil {
+				return fmt.Errorf("--role: %w", err)
 			}
 			// --vmi resolves a KubeVirt guest to the address --node would have
 			// been given; --node <host> is a convenience that fills the three

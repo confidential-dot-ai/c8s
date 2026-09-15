@@ -36,35 +36,21 @@ set -- "${positional[@]}"
 printf '%s\n' "$*" >>"$FAKE_LOG"
 
 # Guard comparison: replace --dry-run renders the reference copy, get -f the
-# live objects. They agree unless a drift mode says otherwise.
+# live objects. They agree unless a drift mode says otherwise. These are the
+# only gets the gate makes: the guards directory is what must be live.
 if [[ ${1:-} == replace ]]; then
     [[ $FAKE_MODE == guard-rejected ]] && { echo "error: reference copy rejected" >&2; exit 1; }
+    # The write path can carry apiserver warnings; they must not enter the comparison.
+    echo "Warning: dry-run warning from admission" >&2
     echo "fields-of-$(basename "$4")"
     exit 0
 fi
 if [[ ${1:-} == get && ${2:-} == -f ]]; then
     case "$FAKE_MODE:$(basename "$3")" in
-        guard-missing:*) echo "Error from server (NotFound): not found" >&2; exit 1 ;;
+        guard-missing:psa-level-policy.yaml) echo "Error from server (NotFound): validatingadmissionpolicies.admissionregistration.k8s.io \"confos-psa-level\" not found" >&2; exit 1 ;;
         guard-drift:operator-scope-policy.yaml) echo "fields-of-tampered"; exit 0 ;;
-        guard-drift-skipped:pod-exec-policy.yaml) echo "fields-of-tampered"; exit 0 ;;
     esac
     echo "fields-of-$(basename "$3")"
-    exit 0
-fi
-
-if [[ ${1:-} == get ]]; then
-    if [[ $FAKE_MODE == missing-policy && ${2:-} == validatingadmissionpolicy && ${3:-} == confos-psa-level ]]; then
-        exit 1
-    fi
-    if [[ $FAKE_MODE == missing-exec-policy* && ${2:-} == validatingadmissionpolicy && ${3:-} == confos-pod-exec ]]; then
-        exit 1
-    fi
-    if [[ $FAKE_MODE == missing-scope-policy && ${2:-} == validatingadmissionpolicybinding && ${3:-} == confos-operator-scope ]]; then
-        exit 1
-    fi
-    if [[ $FAKE_MODE == missing-log-reader-binding && ${2:-} == clusterrolebinding && ${3:-} == c8s-log-readers ]]; then
-        exit 1
-    fi
     exit 0
 fi
 
@@ -77,7 +63,7 @@ fi
 if [[ ${1:-} == create ]]; then
     body=$(cat)
     if grep -q 'kind: ConfigMap' <<<"$body"; then
-        scope_denial="Error from server (Invalid): ValidatingAdmissionPolicy 'confos-operator-scope' denied the request: c8s credentials may not write in the PodSecurity-exempt namespaces (kube-system, local-path-storage)"
+        scope_denial="Error from server (Invalid): ValidatingAdmissionPolicy 'confos-operator-scope' denied the request: c8s credentials may not write in the privileged namespaces (kube-system, local-path-storage, c8s-system)"
         case "$FAKE_MODE:$ns" in
             scope-fail-open:*) exit 0 ;;
             scope-over-denied:default) echo "$scope_denial" >&2; exit 1 ;;
@@ -88,15 +74,15 @@ if [[ ${1:-} == create ]]; then
     fi
     if grep -q 'enforce: privileged' <<<"$body"; then
         case "$FAKE_MODE" in
-            enforced|restricted-denied|missing-exec-policy-dev|scope-fail-open|scope-over-denied|scope-wrong-denial|guard-*)
-                echo "Error from server (Invalid): ValidatingAdmissionPolicy 'confos-psa-level' denied the request: pod-security.kubernetes.io/enforce may not be set below restricted" >&2
-                exit 1
-                ;;
             wrong-denial)
                 echo "Error from server (Forbidden): denied by some-other-policy" >&2
                 exit 1
                 ;;
             fail-open) exit 0 ;;
+            *)
+                echo "Error from server (Invalid): ValidatingAdmissionPolicy 'confos-psa-level' denied the request: pod-security.kubernetes.io/enforce may not be set below restricted" >&2
+                exit 1
+                ;;
         esac
     fi
     if [[ $FAKE_MODE == restricted-denied ]]; then
@@ -114,19 +100,22 @@ exit 2
 EOF
 chmod +x "$FAKE_KUBECTL"
 
-MANIFESTS="$WORK/manifests"
-DEV_MANIFESTS="$WORK/manifests-dev"
+# The reference copies psa-ready.sh waits for and compares: the locked
+# build's five guards, the dev build's four (mkosi.sync leaves the skipped
+# pod-exec AddOn out), and an empty directory.
 GUARDS="$WORK/guards"
+DEV_GUARDS="$WORK/guards-dev"
 EMPTY_GUARDS="$WORK/guards-empty"
-mkdir -p "$MANIFESTS" "$DEV_MANIFESTS" "$GUARDS" "$EMPTY_GUARDS"
-touch "$DEV_MANIFESTS/pod-exec-policy.yaml.skip"
+mkdir -p "$GUARDS" "$DEV_GUARDS" "$EMPTY_GUARDS"
 for g in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do
     echo "kind: reference" >"$GUARDS/$g.yaml"
+    [[ $g == pod-exec-policy ]] || echo "kind: reference" >"$DEV_GUARDS/$g.yaml"
 done
+guard_count=$(ls "$GUARDS"/*.yaml | wc -l | tr -d ' ')
 
 run_gate() {
-    local mode=$1 manifests=$MANIFESTS guards=$GUARDS
-    [[ $mode == *-dev ]] && manifests=$DEV_MANIFESTS
+    local mode=$1 guards=$GUARDS
+    [[ $mode == *-dev ]] && guards=$DEV_GUARDS
     [[ $mode == guard-none ]] && guards=$EMPTY_GUARDS
     : >"$WORK/log"
     : >"$WORK/stdout"
@@ -134,7 +123,7 @@ run_gate() {
     FAKE_MODE="$mode" FAKE_LOG="$WORK/log" \
         KUBECTL="$FAKE_KUBECTL" KUBECONFIG="$KUBECONFIG_FILE" \
         KUBECTL_CACHE_DIR="$WORK/cache" CLIENT_CA_KEY="$CA_KEY" \
-        MANIFESTS_DIR="$manifests" GUARDS_DIR="$guards" \
+        GUARDS_DIR="$guards" \
         PSA_WAIT_ATTEMPTS=2 PSA_WAIT_SECONDS=0 \
         "$SCRIPT" >"$WORK/stdout" 2>"$WORK/stderr"
 }
@@ -144,16 +133,21 @@ ok "passes both live probes" run_gate enforced
 ok "reports enforcement" grep -q 'is enforcing the restricted namespace floor' "$WORK/stdout"
 ok "reports operator scope" grep -q 'confos-operator-scope is enforcing the operator scope' "$WORK/stdout"
 ok "reports guard match" grep -q 'live guards match' "$WORK/stdout"
-ok "renders every reference copy server-side" [ "$(grep -c '^replace --dry-run=server -f ' "$WORK/log")" = 5 ]
-ok "fetches the live objects of every guard" [ "$(grep -c '^get -f ' "$WORK/log")" = 5 ]
+ok "renders every reference copy server-side" [ "$(grep -c '^replace --dry-run=server -f ' "$WORK/log")" = "$guard_count" ]
+ok "fetches the live objects of every guard" [ "$(grep -c '^get -f ' "$WORK/log")" = "$guard_count" ]
+ok "waits on nothing but the guards" not grep -Eq '^get [^-]' "$WORK/log"
+ok "cleans the probe binding" grep -q '^delete clusterrolebinding confos-psa-readiness-probe ' "$WORK/log"
+ok "cleans the probe role" grep -q '^delete clusterrole confos-psa-readiness-probe ' "$WORK/log"
 
 CASE="a live guard differs from its read-only copy"
 ok "fails closed" not run_gate guard-drift
-ok "names the drifted guard" stderr_has 'guard operator-scope-policy: live objects differ from the read-only reference copy'
+ok "names the drifted guard and both renderings" stderr_has 'guard operator-scope-policy: live objects differ from the read-only reference copy (live: fields-of-tampered; reference: fields-of-operator-scope-policy.yaml)'
 
-CASE="a live guard object is missing"
+CASE="AddOn absent"
 ok "fails closed" not run_gate guard-missing
-ok "names the missing objects" stderr_has 'live objects are not all present'
+ok "names the guard and the missing object" stderr_has 'guard psa-level-policy: live objects are not all present: .*confos-psa-level.*not found'
+ok "checks presence before rendering the reference copy" not grep -q '^replace --dry-run=server -f .*psa-level-policy.yaml' "$WORK/log"
+ok "never probes admission" not grep -q '^create ' "$WORK/log"
 
 CASE="the reference copy is not admitted"
 ok "fails closed" not run_gate guard-rejected
@@ -163,31 +157,9 @@ CASE="no reference copies at all"
 ok "fails closed" not run_gate guard-none
 ok "names the empty directory" stderr_has 'no guard reference copies in'
 
-CASE="a skipped guard is not compared (dev build)"
-ok "passes with the skipped guard drifted" run_gate guard-drift-skipped-dev
-ok "never renders the skipped guard" not grep -q '^replace --dry-run=server -f .*pod-exec-policy.yaml' "$WORK/log"
-ok "cleans the probe binding" grep -q '^delete clusterrolebinding confos-psa-readiness-probe ' "$WORK/log"
-ok "cleans the probe role" grep -q '^delete clusterrole confos-psa-readiness-probe ' "$WORK/log"
-
-CASE="AddOn absent"
-ok "fails closed" not run_gate missing-policy
-ok "names the missing policy" stderr_has 'ValidatingAdmissionPolicy confos-psa-level is not available'
-
-CASE="log-reader binding absent"
-ok "fails closed" not run_gate missing-log-reader-binding
-ok "names the missing binding" stderr_has 'ClusterRoleBinding c8s-log-readers is not available'
-
-CASE="pod-exec policy absent"
-ok "fails closed" not run_gate missing-exec-policy
-ok "names the missing policy" stderr_has 'ValidatingAdmissionPolicy confos-pod-exec is not available'
-
-CASE="pod-exec policy skipped by the dev build"
-ok "passes without the policy" run_gate missing-exec-policy-dev
-ok "never waits for the skipped policy" not grep -q '^get validatingadmissionpolicy confos-pod-exec' "$WORK/log"
-
-CASE="operator-scope binding absent"
-ok "fails closed" not run_gate missing-scope-policy
-ok "names the missing binding" stderr_has 'ValidatingAdmissionPolicyBinding confos-operator-scope is not available'
+CASE="pod-exec guard left out by the dev build"
+ok "passes without it" run_gate enforced-dev
+ok "never renders it" not grep -q 'pod-exec-policy.yaml' "$WORK/log"
 
 CASE="operator-scope policy fail-open"
 ok "fails closed" not run_gate scope-fail-open

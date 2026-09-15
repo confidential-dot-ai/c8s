@@ -77,12 +77,9 @@ func failingAttest(t *testing.T, status int) *httptest.Server {
 }
 
 // releaseHandler serves POST /release-credential with the given status; on 200
-// it checks the operator JWT + CSR shape and returns cert/ca PEMs.
-// wantReleaseRole, when set, is the role the fake cred-release expects in the
-// request body (the CLI's --role must reach the wire).
-var wantReleaseRole atomic.Value
-
-func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
+// it checks the operator JWT + CSR shape and returns cert/ca PEMs. gotRole,
+// when non-nil, records the role the request body carried.
+func releaseHandler(t *testing.T, status int, respBody string, gotRole *atomic.Value) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != credrelease.ReleasePath {
@@ -99,8 +96,8 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 		if !strings.Contains(req.CSRPEM, "CERTIFICATE REQUEST") {
 			t.Errorf("release csr = %q, want a CSR PEM", req.CSRPEM)
 		}
-		if want := wantReleaseRole.Load(); want != nil && req.Role != want.(string) {
-			t.Errorf("release role = %q, want %q", req.Role, want.(string))
+		if gotRole != nil {
+			gotRole.Store(req.Role)
 		}
 		if status != http.StatusOK {
 			http.Error(w, "release boom", status)
@@ -121,6 +118,8 @@ type testEnv struct {
 	releaseURL   string
 	outPath      string
 	exp          measuredPolicy
+	// releaseRole holds the role the fake cred-release last received.
+	releaseRole *atomic.Value
 }
 
 func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody string) testEnv {
@@ -147,7 +146,8 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 	exp := policy
 	stubVerify(t, verifiedResultFor(exp), nil)
 
-	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
+	releaseRole := new(atomic.Value)
+	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody, releaseRole))
 
 	return testEnv{
 		keyPath:      keyPath,
@@ -156,6 +156,7 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 		releaseURL:   release.URL,
 		outPath:      filepath.Join(dir, "kubeconfig"),
 		exp:          exp,
+		releaseRole:  releaseRole,
 	}
 }
 
@@ -270,7 +271,7 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	var releaseHits atomic.Int32
 	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		releaseHits.Add(1)
-		releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
+		releaseHandler(t, http.StatusOK, goodRelease, nil).ServeHTTP(w, r)
 	}))
 	t.Cleanup(release.Close)
 	cfg := env.config()
@@ -289,7 +290,7 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 // against a server whose cert carries no attestation envelope (a host MITM).
 func TestRATLSClientRejectsPlainCert(t *testing.T) {
 	env := newTestEnv(t, newAttestStub(t).URL()+"/attest", http.StatusOK, goodRelease)
-	plain := httptest.NewTLSServer(releaseHandler(t, http.StatusOK, goodRelease))
+	plain := httptest.NewTLSServer(releaseHandler(t, http.StatusOK, goodRelease, nil))
 	t.Cleanup(plain.Close)
 
 	cfg := env.config()
@@ -325,7 +326,7 @@ func TestRequestCredentialErrors(t *testing.T) {
 	})
 
 	serve := func(status int, body string) *httptest.Server {
-		srv := httptest.NewServer(releaseHandler(t, status, body))
+		srv := httptest.NewServer(releaseHandler(t, status, body, nil))
 		t.Cleanup(srv.Close)
 		return srv
 	}

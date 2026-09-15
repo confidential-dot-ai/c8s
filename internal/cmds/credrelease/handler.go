@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -33,6 +35,23 @@ const (
 	RoleLogReader = "log-reader"
 )
 
+// roleNames is the closed set of requestable roles, in help-text order.
+var roleNames = []string{RoleOperator, RoleLogReader}
+
+// ParseRole resolves a wire role name to its canonical form: "" is
+// RoleOperator (the pre-role wire format); anything outside the closed set is
+// an error, never a fallback to the operator identity. The CLI and the
+// handler share it so a typo fails the same way on both ends.
+func ParseRole(name string) (string, error) {
+	if name == "" {
+		return RoleOperator, nil
+	}
+	if !slices.Contains(roleNames, name) {
+		return "", fmt.Errorf("unknown role %q (want %s)", name, strings.Join(roleNames, " or "))
+	}
+	return name, nil
+}
+
 // ReleaseRequest is the POST ReleasePath body: a PEM CERTIFICATE REQUEST the
 // operator generated locally plus the role the cert should carry (empty means
 // RoleOperator, the pre-role wire format). The operator authorizes the request
@@ -51,22 +70,9 @@ type Identity struct {
 	TTL time.Duration
 }
 
-// Roles maps each requestable role to its Identity.
-type Roles struct {
-	Operator  Identity
-	LogReader Identity
-}
-
-// lookup resolves a wire role name; "" is RoleOperator for compatibility.
-func (r Roles) lookup(name string) (Identity, bool) {
-	switch name {
-	case "", RoleOperator:
-		return r.Operator, true
-	case RoleLogReader:
-		return r.LogReader, true
-	}
-	return Identity{}, false
-}
+// Roles maps each requestable role (RoleOperator, RoleLogReader) to its
+// Identity. NewHandler requires every role to be present and complete.
+type Roles map[string]Identity
 
 // ReleaseResponse returns the signed client cert and the cluster CA so the
 // operator can assemble a kubeconfig. The apiserver address is known to the
@@ -91,8 +97,8 @@ type Handler struct {
 // have been verified against the launch binding by LoadMeasuredOperatorKey —
 // NewHandler trusts it as authorized.
 func NewHandler(operatorPubPEM []byte, ca *clusterCA, roles Roles) (*Handler, error) {
-	for name, id := range map[string]Identity{RoleOperator: roles.Operator, RoleLogReader: roles.LogReader} {
-		if id.Org == "" || id.CN == "" || id.TTL <= 0 {
+	for _, name := range roleNames {
+		if id := roles[name]; id.Org == "" || id.CN == "" || id.TTL <= 0 {
 			return nil, fmt.Errorf("role %s: org, cn and a positive ttl are required", name)
 		}
 	}
@@ -143,13 +149,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// The role is a closed set: anything else is a client fault, never a
-	// fallback to the operator identity.
-	id, ok := h.roles.lookup(req.Role)
-	if !ok {
-		http.Error(w, fmt.Sprintf("bad request: unknown role %q (want %s or %s)", req.Role, RoleOperator, RoleLogReader), http.StatusBadRequest)
+	role, err := ParseRole(req.Role)
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	id := h.roles[role]
 	csr, err := parseCSR([]byte(req.CSRPEM))
 	if err != nil {
 		http.Error(w, "bad CSR: "+err.Error(), http.StatusBadRequest)

@@ -49,6 +49,14 @@ type Config struct {
 	LogCertCN  string
 }
 
+// roles is the per-role identity set the handler issues from this Config.
+func (cfg Config) roles() Roles {
+	return Roles{
+		RoleOperator:  {Org: cfg.CertOrg, CN: cfg.CertCN, TTL: cfg.CertTTL},
+		RoleLogReader: {Org: cfg.LogCertOrg, CN: cfg.LogCertCN, TTL: cfg.LogCertTTL},
+	}
+}
+
 // Run loads the measured operator key and cluster CA, then serves the
 // RA-TLS-protected /release-credential endpoint. It blocks until ctx is done.
 //
@@ -83,10 +91,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}
 
-	handler, err := NewHandler(operatorPub, ca, Roles{
-		Operator:  Identity{Org: cfg.CertOrg, CN: cfg.CertCN, TTL: cfg.CertTTL},
-		LogReader: Identity{Org: cfg.LogCertOrg, CN: cfg.LogCertCN, TTL: cfg.LogCertTTL},
-	})
+	handler, err := NewHandler(operatorPub, ca, cfg.roles())
 	if err != nil {
 		return fmt.Errorf("build handler: %w", err)
 	}

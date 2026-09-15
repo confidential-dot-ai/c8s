@@ -1,8 +1,7 @@
 package helmchart
 
 import (
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/cel-go/cel"
@@ -15,30 +14,26 @@ import (
 // the chart, so it is read from the image tree here like psa-level-policy.
 const operatorScopePolicyPath = "../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/operator-scope-policy.yaml"
 
-func loadOperatorScopePolicy(t *testing.T) (admissionregv1.ValidatingAdmissionPolicy, admissionregv1.ValidatingAdmissionPolicyBinding) {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Clean(operatorScopePolicyPath))
-	if err != nil {
-		t.Fatalf("read %s: %v", operatorScopePolicyPath, err)
-	}
-	var vap admissionregv1.ValidatingAdmissionPolicy
-	if !findDoc(t, string(raw), "ValidatingAdmissionPolicy", "confos-operator-scope", &vap) {
-		t.Fatal("ValidatingAdmissionPolicy confos-operator-scope not in manifest")
-	}
-	var binding admissionregv1.ValidatingAdmissionPolicyBinding
-	if !findDoc(t, string(raw), "ValidatingAdmissionPolicyBinding", "confos-operator-scope", &binding) {
-		t.Fatal("ValidatingAdmissionPolicyBinding confos-operator-scope not in manifest")
-	}
-	return vap, binding
-}
-
 func TestOperatorScopePolicyShape(t *testing.T) {
-	vap, binding := loadOperatorScopePolicy(t)
-	if vap.Spec.FailurePolicy == nil || *vap.Spec.FailurePolicy != admissionregv1.Fail {
-		t.Error("failurePolicy must be Fail so an evaluation error denies the write")
+	vap, binding := loadImagePolicy(t, operatorScopePolicyPath, "confos-operator-scope")
+	checkDenyPolicyShape(t, vap, binding)
+	// The principal test is a match condition, so other callers leave before
+	// any validation runs and a validation cannot forget it.
+	var selectsCredRelease bool
+	for _, mc := range vap.Spec.MatchConditions {
+		selectsCredRelease = selectsCredRelease || strings.Contains(mc.Expression, "startsWith('c8s:')")
+	}
+	if !selectsCredRelease {
+		t.Error("matchConditions must select the c8s:* principals")
+	}
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, "userInfo") {
+			t.Errorf("validation %q tests the principal itself; that is the match condition's job", v.Expression)
+		}
 	}
 	// Every group, resource and subresource, on every mutating operation:
-	// the expression, not the match, decides what a c8s:* principal may do.
+	// the validations, not the resource match, decide what a c8s:* principal
+	// may do.
 	var all, sub bool
 	ops := map[admissionregv1.OperationType]bool{}
 	for _, r := range vap.Spec.MatchConstraints.ResourceRules {
@@ -58,20 +53,6 @@ func TestOperatorScopePolicyShape(t *testing.T) {
 			t.Errorf("matchConstraints does not match %s", op)
 		}
 	}
-	if binding.Spec.PolicyName != vap.Name {
-		t.Errorf("binding names policy %q, want %q", binding.Spec.PolicyName, vap.Name)
-	}
-	if len(binding.Spec.ValidationActions) != 1 || binding.Spec.ValidationActions[0] != admissionregv1.Deny {
-		t.Errorf("binding must Deny, got %v", binding.Spec.ValidationActions)
-	}
-	if binding.Spec.MatchResources != nil {
-		t.Error("binding must not narrow the policy")
-	}
-	for _, v := range vap.Spec.Validations {
-		if v.Message == "" {
-			t.Errorf("validation %q has no message", v.Expression)
-		}
-	}
 }
 
 // scopeRequest models the AdmissionRequest fields the policy reads.
@@ -83,9 +64,11 @@ type scopeRequest struct {
 	sub       string
 }
 
-// evalOperatorScope compiles every variable and validation and returns
-// whether the request is admitted. Absent fields are left out of the map so
-// has() sees exactly what the apiserver would present.
+// evalOperatorScope compiles every match condition, variable and validation
+// and returns whether the request is admitted: a false match condition
+// admits without evaluating anything else, as the apiserver does. Absent
+// fields are left out of the map so has() sees exactly what the apiserver
+// would present.
 func evalOperatorScope(t *testing.T, vap admissionregv1.ValidatingAdmissionPolicy, r scopeRequest) bool {
 	t.Helper()
 	env, err := cel.NewEnv(cel.Variable("request", cel.DynType), cel.Variable("variables", cel.DynType))
@@ -106,27 +89,17 @@ func evalOperatorScope(t *testing.T, vap admissionregv1.ValidatingAdmissionPolic
 	if r.sub != "" {
 		req["subResource"] = r.sub
 	}
-	run := func(expr string, vars map[string]any) any {
-		ast, iss := env.Compile(expr)
-		if iss != nil && iss.Err() != nil {
-			t.Fatalf("cel compile %q: %v", expr, iss.Err())
+	for _, mc := range vap.Spec.MatchConditions {
+		if evalCEL(t, env, mc.Expression, map[string]any{"request": req}) != true {
+			return true
 		}
-		prg, err := env.Program(ast)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, _, err := prg.Eval(map[string]any{"request": req, "variables": vars})
-		if err != nil {
-			t.Fatalf("cel eval %q: %v", expr, err)
-		}
-		return out.Value()
 	}
 	vars := map[string]any{}
 	for _, v := range vap.Spec.Variables {
-		vars[v.Name] = run(v.Expression, vars)
+		vars[v.Name] = evalCEL(t, env, v.Expression, map[string]any{"request": req, "variables": vars})
 	}
 	for _, v := range vap.Spec.Validations {
-		if run(v.Expression, vars) != true {
+		if evalCEL(t, env, v.Expression, map[string]any{"request": req, "variables": vars}) != true {
 			return false
 		}
 	}
@@ -134,7 +107,7 @@ func evalOperatorScope(t *testing.T, vap admissionregv1.ValidatingAdmissionPolic
 }
 
 func TestOperatorScopePolicyExpression(t *testing.T) {
-	vap, _ := loadOperatorScopePolicy(t)
+	vap, _ := loadImagePolicy(t, operatorScopePolicyPath, "confos-operator-scope")
 	op := []string{"system:authenticated", "c8s:node-operators"}
 	logs := []string{"system:authenticated", "c8s:log-readers"}
 	sys := []string{"system:authenticated", "system:masters"}
@@ -154,11 +127,14 @@ func TestOperatorScopePolicyExpression(t *testing.T) {
 		{"operator namespace create", scopeRequest{op, "tenant", "", "namespaces", ""}, true},
 		{"operator rolebinding in tenant ns", scopeRequest{op, "tenant", "rbac.authorization.k8s.io", "rolebindings", ""}, true},
 		{"operator confidentialworkload", scopeRequest{op, "tenant", "confidential.ai", "confidentialworkloads", ""}, true},
-		{"operator crd", scopeRequest{op, "", "apiextensions.k8s.io", "customresourcedefinitions", ""}, true},
 		{"operator pod log (not proxy)", scopeRequest{op, "tenant", "", "pods", "log"}, true},
 		// The guards and the host are out of reach.
 		{"operator pod in kube-system", scopeRequest{op, "kube-system", "", "pods", ""}, false},
 		{"operator configmap in local-path-storage", scopeRequest{op, "local-path-storage", "", "configmaps", ""}, false},
+		{"operator pod in c8s-system", scopeRequest{op, "c8s-system", "", "pods", ""}, false},
+		{"operator token secret in c8s-system", scopeRequest{op, "c8s-system", "", "secrets", ""}, false},
+		{"operator delete c8s-system namespace", scopeRequest{op, "c8s-system", "", "namespaces", ""}, false},
+		{"operator crd", scopeRequest{op, "", "apiextensions.k8s.io", "customresourcedefinitions", ""}, false},
 		{"operator secret in kube-system", scopeRequest{op, "kube-system", "", "secrets", ""}, false},
 		{"operator token in kube-system", scopeRequest{op, "kube-system", "", "serviceaccounts", "token"}, false},
 		{"operator delete kube-system namespace", scopeRequest{op, "kube-system", "", "namespaces", ""}, false},

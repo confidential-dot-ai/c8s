@@ -493,9 +493,9 @@ func TestHandlerIssuesPerRoleIdentity(t *testing.T) {
 func TestNewHandlerRejectsIncompleteRoles(t *testing.T) {
 	_, pubPEM := newOperatorAuth(t)
 	for name, roles := range map[string]Roles{
-		"empty log-reader": {Operator: defaultRoles().Operator},
-		"zero ttl":         {Operator: defaultRoles().Operator, LogReader: Identity{Org: "g", CN: "u"}},
-		"no operator org":  {Operator: Identity{CN: "u", TTL: time.Hour}, LogReader: defaultRoles().LogReader},
+		"missing log-reader": {RoleOperator: defaultRoles()[RoleOperator]},
+		"zero ttl":           {RoleOperator: defaultRoles()[RoleOperator], RoleLogReader: {Org: "g", CN: "u"}},
+		"no operator org":    {RoleOperator: {CN: "u", TTL: time.Hour}, RoleLogReader: defaultRoles()[RoleLogReader]},
 	} {
 		if _, err := NewHandler(pubPEM, testCA(t), roles); err == nil {
 			t.Errorf("%s: NewHandler accepted incomplete roles", name)

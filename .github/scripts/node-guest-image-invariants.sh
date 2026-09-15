@@ -89,53 +89,48 @@ fi
 
 # The kubelet debugging handlers stay on (they back kubectl logs, which the
 # log-reader credential exists for); exec/attach/port-forward/ephemeral
-# containers are closed at the apiserver by the baked pod-exec-policy AddOn.
-# Only the C8S_DEV=1 build may skip that AddOn, and only through the
-# sync-rendered .skip marker.
+# containers are closed at the apiserver by the baked pod-exec-policy AddOn
+# (its shape and expression are tested in internal/helmchart). Only the
+# C8S_DEV=1 build may skip that AddOn, and only through the sync-rendered
+# .skip marker.
 manifests="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests"
+sync="$ngi/c8s/mkosi.sync"
 if ! grep -qxF '  - enable-debugging-handlers=true' "$rke2_config"; then
   echo "::error::$rke2_config must pin kubelet-arg enable-debugging-handlers=true (kubectl logs)"
   exit 1
 fi
-if [ ! -f "$manifests/pod-exec-policy.yaml" ]; then
-  echo "::error::$manifests/pod-exec-policy.yaml must close exec/attach/port-forward at the apiserver"
-  exit 1
-fi
-for sub in pods/exec pods/attach pods/portforward pods/ephemeralcontainers; do
-  if ! grep -q "\"$sub\"" "$manifests/pod-exec-policy.yaml"; then
-    echo "::error::$manifests/pod-exec-policy.yaml does not match $sub"
-    exit 1
-  fi
-done
 # cred-release identities are bounded: the operator binding must not name
-# cluster-admin, and the operator-scope policy that keeps every c8s:* group
-# away from the guards must be baked next to it.
+# cluster-admin (the baked guards must hold against the credential holder).
 if grep -q 'name: cluster-admin' "$manifests/cred-release-rbac.yaml"; then
   echo "::error::$manifests/cred-release-rbac.yaml binds the operator to cluster-admin; the baked guards must hold against the credential holder"
   exit 1
 fi
-if [ ! -f "$manifests/operator-scope-policy.yaml" ] || ! grep -q "g.startsWith('c8s:')" "$manifests/operator-scope-policy.yaml"; then
-  echo "::error::$manifests/operator-scope-policy.yaml must deny guard-reaching writes for every c8s:* group"
+# Every guard AddOn — each baked admission policy and each binding of a
+# cred-release group — must be staged by mkosi.sync as a reference copy on
+# the read-only root, where psa-ready.sh waits for it and compares the live
+# objects against it. mkosi.sync's GUARDS list is the single statement of
+# what is a guard; check it against the manifests rather than repeating it.
+guards=$(sed -n 's/^GUARDS="\(.*\)"$/\1/p' "$sync")
+if [ -z "$guards" ] || ! grep -q 'usr/lib/confai/guards' "$sync"; then
+  echo "::error::$sync must list the guard AddOns in GUARDS= and stage them under /usr/lib/confai/guards"
   exit 1
 fi
-# Every guard AddOn must have a reference copy staged onto the read-only root
-# by mkosi.sync, and the gate must compare against it.
-for guard in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do
+for guard in $guards; do
   if [ ! -f "$manifests/$guard.yaml" ]; then
-    echo "::error::$manifests/$guard.yaml is missing"
+    echo "::error::$sync stages $guard.yaml as a guard but $manifests/$guard.yaml is missing"
     exit 1
   fi
 done
-if ! grep -q 'for guard in psa-level-policy pod-exec-policy operator-scope-policy cred-release-rbac log-reader-rbac; do' "$ngi/c8s/mkosi.sync" \
-   || ! grep -q 'usr/lib/confai/guards' "$ngi/c8s/mkosi.sync"; then
-  echo "::error::$ngi/c8s/mkosi.sync must stage every guard AddOn under /usr/lib/confai/guards"
-  exit 1
-fi
-if ! grep -q 'GUARDS_DIR=\${GUARDS_DIR:-/usr/lib/confai/guards}' "$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh" \
-   || ! grep -q 'replace --dry-run=server -f "\$file"' "$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"; then
-  echo "::error::psa-ready.sh must compare the live guards against /usr/lib/confai/guards"
-  exit 1
-fi
+for file in $(grep -lE 'kind: ValidatingAdmissionPolicy$|name: c8s:' "$manifests"/*.yaml); do
+  guard=$(basename "$file" .yaml)
+  case " $guards " in
+    *" $guard "*) ;;
+    *)
+      echo "::error::$file is a guard (an admission policy or a cred-release group binding) but $sync GUARDS= does not stage it"
+      exit 1
+      ;;
+  esac
+done
 if find "$ngi/c8s/mkosi.extra" -name '*.skip' | grep -q .; then
   echo "::error::a baked .skip marker disables an RKE2 AddOn; only mkosi.sync may render one, for dev=1"
   exit 1
@@ -274,7 +269,7 @@ fi
 # pods, and the baked policy that stops tenants relabelling their namespaces
 # keeps naming `restricted`, denying, and failing closed.
 psa="$ngi/c8s/mkosi.extra/etc/rancher/rke2/psa-config.yaml"
-vap="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/psa-level-policy.yaml"
+vap="$manifests/psa-level-policy.yaml"
 psa_gate="$ngi/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 cred_release="$ngi/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 exempt=$(sed -n '/^[[:space:]]*namespaces:/,/^[[:space:]]*[^[:space:]-]/s/^[[:space:]]*-[[:space:]]*//p' "$psa")
@@ -312,11 +307,14 @@ if ! grep -qxF 'ExecStartPre=/usr/local/bin/psa-ready.sh' "$cred_release"; then
   exit 1
 fi
 for required in \
-  'get validatingadmissionpolicy "$policy"' \
-  'get validatingadmissionpolicybinding "$policy"' \
+  'GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}' \
+  'replace --dry-run=server -f "$file"' \
+  'get -f "$file"' \
   '--as="$probe_user" create --dry-run=server' \
   'probe_namespace restricted' \
-  'probe_namespace privileged'; do
+  'probe_namespace privileged' \
+  'probe_scope default' \
+  'probe_scope kube-system'; do
   if ! grep -qF -- "$required" "$psa_gate"; then
     echo "::error::$psa_gate is missing required live admission probe: $required"
     exit 1
@@ -336,7 +334,6 @@ grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/syste
 
 # The image renders Kubernetes integration from its staged binary at BUILD
 # time. It must not revive a c8s HelmChart or boot-time values merge.
-sync="$ngi/c8s/mkosi.sync"
 for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
              '--kube-version "${RKE2_VERSION%%+*}"' \
              'c8s-integration.yaml' '/usr/lib/c8s/nginx.conf.in' '/usr/lib/c8s/allowlist-seed.json'; do

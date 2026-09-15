@@ -58,6 +58,10 @@ type Config struct {
 // Run executes the client flow: attest + RTMR[3] gate, then CSR -> cred-release
 // -> kubeconfig.
 func Run(ctx context.Context, cfg Config) error {
+	role, err := credrelease.ParseRole(cfg.Role)
+	if err != nil {
+		return err
+	}
 	keyPEM, err := os.ReadFile(cfg.OperatorKeyPath)
 	if err != nil {
 		return fmt.Errorf("read operator key: %w", err)
@@ -106,7 +110,7 @@ func Run(ctx context.Context, cfg Config) error {
 	releaseDeadline := time.Now().Add(cfg.ReleaseWait)
 	for {
 		relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
-		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM, cfg.Role)
+		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM, role)
 		cancel2()
 		if !shouldRetryCredentialRelease(err, releaseDeadline) {
 			break
@@ -126,10 +130,6 @@ func Run(ctx context.Context, cfg Config) error {
 	kc := buildKubeconfig(cfg.APIServerURL, cfg.ContextName, cfg.TLSServerName, []byte(resp.CertPEM), id.keyPEM, []byte(resp.CAPEM))
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
-	}
-	role := cfg.Role
-	if role == "" {
-		role = credrelease.RoleOperator
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (context %q, role %s) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName, role)
 	return nil

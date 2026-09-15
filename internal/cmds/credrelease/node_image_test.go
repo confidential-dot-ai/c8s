@@ -21,16 +21,14 @@ import (
 // with each other and with the binary's defaults (which cmd_test.go pins to
 // literals). The operator role is bounded on purpose: the baked guards exist
 // to hold against the credential holder, so the role must not reach RBAC,
-// admission, the PodSecurity-exempt namespaces, or the kubelet.
+// admission, the privileged namespaces, or the kubelet.
 const (
 	nodeImageCredReleaseService = "../../../node-guest-image/c8s/mkosi.extra/etc/systemd/system/cred-release.service"
 	nodeImageCredReleaseDropIns = nodeImageCredReleaseService + ".d/*.conf"
 	nodeImageCredReleaseRBAC    = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/cred-release-rbac.yaml"
 	nodeImagePSAReadyScript     = "../../../node-guest-image/c8s/mkosi.extra/usr/local/bin/psa-ready.sh"
 	nodeImageLogReaderRBAC      = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/log-reader-rbac.yaml"
-	nodeImagePodExecPolicy      = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/pod-exec-policy.yaml"
-	nodeImageOperatorScope      = "../../../node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/operator-scope-policy.yaml"
-	nodeImageRKE2Config         = "../../../node-guest-image/c8s/mkosi.extra/etc/rancher/rke2/config.yaml"
+	nodeImageSync               = "../../../node-guest-image/c8s/mkosi.sync"
 )
 
 func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
@@ -139,28 +137,44 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 	if gateInfo.Mode().Perm()&0o111 == 0 {
 		t.Error("psa-ready.sh is not executable")
 	}
-	// The production gate must wait for both AddOns that authorize and
-	// constrain the released credential, then exercise the real admission
-	// chain as a non-granter. node-guest-image/tests/psa-ready-test.sh executes
-	// this exact script and proves these are behavior, not inert strings.
+	// The production gate waits for every guard mkosi.sync stages as a
+	// reference copy (GUARDS=), including the two RBAC AddOns, then exercises
+	// the real admission chain: PodSecurity as a non-granter, the operator
+	// scope as the baked --cert-org group. node-guest-image/tests/psa-ready-test.sh
+	// executes this exact script and proves these are behavior, not inert
+	// strings; the policies' shapes and expressions are tested in
+	// internal/helmchart.
 	gateText := string(gate)
 	for _, want := range []string{
-		"get clusterrolebinding \"$operator_binding\"",
-		"get validatingadmissionpolicy \"$policy\"",
-		"get validatingadmissionpolicybinding \"$policy\"",
+		"GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}",
+		"replace --dry-run=server -f \"$file\"",
+		"get -f \"$file\"",
 		"--as=\"$probe_user\" create --dry-run=server",
 		"probe_namespace restricted",
 		"probe_namespace privileged",
 		"pod-security.kubernetes.io/enforce may not be set below restricted",
+		"operator_group=" + org,
+		"--as-group=\"$operator_group\"",
+		"probe_scope default",
+		"probe_scope kube-system",
+		"may not write in the privileged namespaces",
 	} {
 		if !strings.Contains(gateText, want) {
 			t.Errorf("psa-ready.sh does not contain required gate %q", want)
 		}
 	}
-	// The gate waits for this binding by name so a released credential is
-	// never ahead of its authorization.
-	if binding.Name == "" || !strings.Contains(gateText, "operator_binding="+binding.Name) {
-		t.Errorf("psa-ready.sh does not wait for ClusterRoleBinding %q before serving", binding.Name)
+	sync, err := os.ReadFile(filepath.Clean(nodeImageSync))
+	if err != nil {
+		t.Fatalf("read node-image mkosi.sync: %v", err)
+	}
+	guards := regexp.MustCompile(`(?m)^GUARDS="(.*)"$`).FindStringSubmatch(string(sync))
+	if guards == nil {
+		t.Fatal("mkosi.sync does not define GUARDS=, the guard AddOns psa-ready.sh waits for")
+	}
+	for _, rbac := range []string{nodeImageCredReleaseRBAC, nodeImageLogReaderRBAC} {
+		if name := strings.TrimSuffix(filepath.Base(rbac), ".yaml"); !slices.Contains(strings.Fields(guards[1]), name) {
+			t.Errorf("mkosi.sync GUARDS= does not stage %s, so psa-ready.sh would not wait for its binding before serving", name)
+		}
 	}
 	// The operator is bound to the baked bounded role, never to cluster-admin
 	// (which could delete every guard) and never to a role that reaches them.
@@ -189,12 +203,6 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 	if len(logBinding.Subjects) != 1 || logBinding.Subjects[0] != wantLogSubjects[0] {
 		t.Errorf("log-reader subjects = %+v, want %+v (the baked --log-cert-org group)", logBinding.Subjects, wantLogSubjects)
 	}
-	if !strings.Contains(gateText, "log_reader_binding="+logBinding.Name) {
-		t.Errorf("psa-ready.sh does not wait for ClusterRoleBinding %q before serving", logBinding.Name)
-	}
-	if !strings.Contains(gateText, "get clusterrolebinding \"$log_reader_binding\"") {
-		t.Error("psa-ready.sh does not get the log-reader binding")
-	}
 	checkGuardedRules(t, "log-reader", logRole.Rules, logReaderGuard)
 	var grantsLogs bool
 	for _, rule := range logRole.Rules {
@@ -206,76 +214,6 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 		t.Error("log-reader ClusterRole does not grant get on pods/log")
 	}
 
-	// The operator-scope AddOn re-checks the same exclusions in admission for
-	// every c8s:* group; the gate waits for it and proves its deny path. Its
-	// shape and expressions are tested in internal/helmchart.
-	scopeText, err := os.ReadFile(filepath.Clean(nodeImageOperatorScope))
-	if err != nil {
-		t.Fatalf("read node-image operator-scope policy: %v", err)
-	}
-	for _, want := range []string{
-		"kind: ValidatingAdmissionPolicy\n", "kind: ValidatingAdmissionPolicyBinding\n",
-		"name: confos-operator-scope\n", "policyName: confos-operator-scope\n", "failurePolicy: Fail\n", "- Deny\n",
-		"g.startsWith('c8s:')",
-	} {
-		if !strings.Contains(string(scopeText), want) {
-			t.Errorf("operator-scope-policy.yaml does not contain %q", want)
-		}
-	}
-	for _, want := range []string{
-		"scope_policy=confos-operator-scope",
-		"operator_group=" + org,
-		"get validatingadmissionpolicy \"$scope_policy\"",
-		"get validatingadmissionpolicybinding \"$scope_policy\"",
-		"--as-group=\"$operator_group\"",
-		"probe_scope default",
-		"probe_scope kube-system",
-		"may not write in the PodSecurity-exempt namespaces",
-		// Live guards must equal their reference copies on the read-only root.
-		"GUARDS_DIR=${GUARDS_DIR:-/usr/lib/confai/guards}",
-		"elif ! guards_match; then",
-		"replace --dry-run=server -f \"$file\"",
-		"get -f \"$file\"",
-		"live objects differ from the read-only reference copy",
-	} {
-		if !strings.Contains(gateText, want) {
-			t.Errorf("psa-ready.sh does not contain required gate %q", want)
-		}
-	}
-
-	// The pod-exec AddOn keeps exec/attach/port-forward/ephemeral containers
-	// closed at the apiserver now that the kubelet serves logs; the gate waits
-	// for both of its objects unless the dev build's .skip marker is present.
-	execText, err := os.ReadFile(filepath.Clean(nodeImagePodExecPolicy))
-	if err != nil {
-		t.Fatalf("read node-image pod-exec policy: %v", err)
-	}
-	for _, want := range []string{
-		"kind: ValidatingAdmissionPolicy\n", "kind: ValidatingAdmissionPolicyBinding\n",
-		"name: confos-pod-exec\n", "policyName: confos-pod-exec\n", "failurePolicy: Fail\n", "- Deny\n",
-		`"pods/exec"`, `"pods/attach"`, `"pods/portforward"`, `"pods/ephemeralcontainers"`, `"CONNECT"`,
-	} {
-		if !strings.Contains(string(execText), want) {
-			t.Errorf("pod-exec-policy.yaml does not contain %q", want)
-		}
-	}
-	for _, want := range []string{
-		"exec_policy=confos-pod-exec",
-		"get validatingadmissionpolicy \"$exec_policy\"",
-		"get validatingadmissionpolicybinding \"$exec_policy\"",
-		"pod-exec-policy.yaml.skip",
-	} {
-		if !strings.Contains(gateText, want) {
-			t.Errorf("psa-ready.sh does not contain required gate %q", want)
-		}
-	}
-	rke2Config, err := os.ReadFile(filepath.Clean(nodeImageRKE2Config))
-	if err != nil {
-		t.Fatalf("read node-image rke2 config: %v", err)
-	}
-	if !strings.Contains(string(rke2Config), "\n  - enable-debugging-handlers=true\n") {
-		t.Error("rke2 config.yaml does not keep the kubelet debugging handlers on (kubectl logs needs them)")
-	}
 }
 
 // guard is what a cred-release ClusterRole must never grant. Wildcards are
@@ -302,6 +240,7 @@ var (
 			"":                             {"nodes", "nodes/status", "persistentvolumes"},
 			"rbac.authorization.k8s.io":    {"clusterroles", "clusterrolebindings"},
 			"admissionregistration.k8s.io": {"validatingadmissionpolicies", "validatingadmissionpolicybindings", "validatingwebhookconfigurations", "mutatingwebhookconfigurations", "mutatingadmissionpolicies", "mutatingadmissionpolicybindings"},
+			"apiextensions.k8s.io":         {"customresourcedefinitions"},
 			"storage.k8s.io":               {"storageclasses", "csidrivers", "csinodes", "volumeattachments"},
 			"helm.cattle.io":               {"helmcharts", "helmchartconfigs"},
 			"k3s.cattle.io":                {"addons"},
@@ -359,47 +298,44 @@ func checkGuardedRules(t *testing.T, role string, rules []rbacv1.PolicyRule, g g
 	}
 }
 
-// readRoleAndBinding decodes a two-document ClusterRole + ClusterRoleBinding
-// AddOn strictly.
+// readRoleAndBinding decodes an AddOn that holds exactly a ClusterRole then a
+// ClusterRoleBinding, strictly.
 func readRoleAndBinding(t *testing.T, path string) (rbacv1.ClusterRole, rbacv1.ClusterRoleBinding) {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		t.Fatalf("read node-image RBAC manifest %s: %v", path, err)
 	}
+	docs := yaml.NewDecoder(bytes.NewReader(body))
 	var role rbacv1.ClusterRole
 	var binding rbacv1.ClusterRoleBinding
-	docs := yaml.NewDecoder(bytes.NewReader(body))
-	for i := 0; ; i++ {
-		var node yaml.Node
-		if err := docs.Decode(&node); err == io.EOF {
-			if i != 2 {
-				t.Fatalf("%s holds %d documents, want a ClusterRole then a ClusterRoleBinding", path, i)
-			}
-			break
-		} else if err != nil {
-			t.Fatalf("decode %s document %d: %v", path, i, err)
-		}
-		raw, err := yaml.Marshal(&node)
-		if err != nil {
-			t.Fatal(err)
-		}
-		switch i {
-		case 0:
-			if err := sigsyaml.UnmarshalStrict(raw, &role); err != nil {
-				t.Fatalf("decode %s document 0 as ClusterRole: %v", path, err)
-			}
-			if role.APIVersion != "rbac.authorization.k8s.io/v1" || role.Kind != "ClusterRole" {
-				t.Errorf("document 0 typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRole", role.APIVersion, role.Kind)
-			}
-		case 1:
-			if err := sigsyaml.UnmarshalStrict(raw, &binding); err != nil {
-				t.Fatalf("decode %s document 1 as ClusterRoleBinding: %v", path, err)
-			}
-			if binding.APIVersion != "rbac.authorization.k8s.io/v1" || binding.Kind != "ClusterRoleBinding" {
-				t.Errorf("document 1 typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRoleBinding", binding.APIVersion, binding.Kind)
-			}
-		}
+	decodeStrictDoc(t, docs, path, 0, &role)
+	decodeStrictDoc(t, docs, path, 1, &binding)
+	if err := docs.Decode(new(yaml.Node)); err != io.EOF {
+		t.Fatalf("%s holds more than two documents, want a ClusterRole then a ClusterRoleBinding (third decode: %v)", path, err)
+	}
+	if role.APIVersion != "rbac.authorization.k8s.io/v1" || role.Kind != "ClusterRole" {
+		t.Errorf("%s document 0 typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRole", path, role.APIVersion, role.Kind)
+	}
+	if binding.APIVersion != "rbac.authorization.k8s.io/v1" || binding.Kind != "ClusterRoleBinding" {
+		t.Errorf("%s document 1 typeMeta = %s %s, want rbac.authorization.k8s.io/v1 ClusterRoleBinding", path, binding.APIVersion, binding.Kind)
 	}
 	return role, binding
+}
+
+// decodeStrictDoc reads the next YAML document from docs into out, refusing
+// unknown fields.
+func decodeStrictDoc(t *testing.T, docs *yaml.Decoder, path string, i int, out any) {
+	t.Helper()
+	var node yaml.Node
+	if err := docs.Decode(&node); err != nil {
+		t.Fatalf("decode %s document %d: %v", path, i, err)
+	}
+	raw, err := yaml.Marshal(&node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sigsyaml.UnmarshalStrict(raw, out); err != nil {
+		t.Fatalf("decode %s document %d as %T: %v", path, i, out, err)
+	}
 }

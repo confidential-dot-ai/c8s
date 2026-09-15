@@ -239,7 +239,8 @@ operator's `c8s-node-operator` ClusterRole (`cred-release-rbac.yaml`) has
 no admission or cluster-scoped RBAC writes, and the `confos-operator-scope`
 policy (`operator-scope-policy.yaml`) denies them in admission for every
 `c8s:` group regardless of RBAC, together with every write in the
-PodSecurity-exempt namespaces and the kubelet-proxy subresources. The
+privileged namespaces (`kube-system`, `local-path-storage` and the baked
+operator's `c8s-system`) and the kubelet-proxy subresources. The
 `psa-ready.sh` gate proves that deny path before cred-release serves.
 
 `kubectl exec`, `attach`, `port-forward` and ephemeral containers are closed
