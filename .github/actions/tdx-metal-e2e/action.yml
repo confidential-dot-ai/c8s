@@ -557,7 +557,6 @@ runs:
           kubectl -n c8s-system get pod "$p" -o json 2>/dev/null | jq -r '
             (.status.initContainerStatuses // []) + (.status.containerStatuses // []) | .[]
             | "\(.name): restarts=\(.restartCount) state=\(.state | keys[0]) last=\(.lastState.terminated // {} | "exit=\(.exitCode // "-") reason=\(.reason // "-") message=\(.message // "-" | tostring | .[0:600])")"'
-          kubectl -n c8s-system logs "$p" --all-containers --tail=60 2>&1 | head -80 || true
           echo "::endgroup::"
         done
         exit 1
