@@ -33,11 +33,11 @@
 # exist because there is no pin.
 #
 # WHAT IT TESTS. When the image was built from the very commit under test the
-# pair is exact and nri-image-policy runs in ENFORCE mode with the image floor
+# pair is exact and nri-image-policy runs FAIL-CLOSED with the image floor
 # probe. A merge-triggered run usually lands before that commit's image has
 # built, so it boots the nearest ancestor's image and installs in AUDIT mode:
 # the image's measured floor pins its own CDS digest, and a newer CDS would be
-# denied under enforce before it could serve the allowlist. The summary says
+# denied fail-closed before it could serve the allowlist. The summary says
 # which pair a run got.
 name: snp-metal-e2e
 
@@ -269,7 +269,7 @@ jobs:
             echo "launchDigest=$LAUNCH_DIGEST"
           } >> "$GITHUB_ENV"
           # Enforce is coherent only for the exact pair (see the header).
-          if [ "${C8S_SHA:0:7}" = "$IMG_SHA" ]; then echo "POLICY_MODE=enforce" >> "$GITHUB_ENV"; else echo "POLICY_MODE=audit" >> "$GITHUB_ENV"; fi
+          if [ "${C8S_SHA:0:7}" = "$IMG_SHA" ]; then echo "POLICY_MODE=fail-closed" >> "$GITHUB_ENV"; else echo "POLICY_MODE=audit" >> "$GITHUB_ENV"; fi
           echo "c8s under test ${C8S_SHA:0:7}; node image rke2-snp-cdi-${IMG_SHA} (${IMG_DIGEST:0:19}...), smp${SMP} launch digest ${LAUNCH_DIGEST:0:24}..."
 
       - name: stage the node image on the host (no-op when already staged)
@@ -555,18 +555,19 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          cat > /tmp/lane-values.yaml <<EOF
-          nriImagePolicy:
-            policy:
-              mode: $POLICY_MODE
-          EOF
+          # fail-closed is the chart default; only audit needs a values file.
+          EXTRA=()
+          if [ "$POLICY_MODE" = audit ]; then
+            printf 'nriImagePolicy:\n  policy:\n    mode: audit\n' > /tmp/lane-values.yaml
+            EXTRA=(-f /tmp/lane-values.yaml)
+          fi
           echo "nri-image-policy mode: $POLICY_MODE (c8s ${C8S_SHA:0:7} on an image built from $IMG_SHA)"
           c8s install --cvm-mode bare-metal --single-node --hardware-platform sev-snp \
             --image-tag "$IMAGE_TAG" \
             --operator-keys /tmp/op.pub \
             --measurements "$launchDigest" \
             --resolve-digests=true \
-            -f /tmp/lane-values.yaml
+            "${EXTRA[@]}"
           kubectl -n c8s-system get pods -o wide
 
       - name: assert components converged
@@ -576,9 +577,9 @@ jobs:
           bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
 
       - name: assert the image floor denies, then opens to a signed write
-        # Only coherent in enforce mode (see the header): the router fronts
+        # Only coherent fail-closed (see the header): the router fronts
         # /allowlist on hostPort 443 and the endpoint pins to the launch digest.
-        if: env.POLICY_MODE == 'enforce'
+        if: env.POLICY_MODE == 'fail-closed'
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
@@ -648,7 +649,7 @@ jobs:
             echo "| node image | \`${image:-?}\` (\`rke2-snp-cdi-${IMG_SHA:-?}\`) |"
             echo "| manifest | \`${imageTag:-?}\` (smp${SMP}) |"
             echo "| launch digest | \`${launchDigest:0:32}...\` |"
-            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy \`${POLICY_MODE:-?}\` (${POLICY_MODE:+$([ "$POLICY_MODE" = enforce ] && echo exact pair || echo 'image from an ancestor')}) |"
+            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy \`${POLICY_MODE:-?}\` (${POLICY_MODE:+$([ "$POLICY_MODE" = fail-closed ] && echo exact pair || echo 'image from an ancestor')}) |"
             echo "| guest | \`${GUEST_IP:-?}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
