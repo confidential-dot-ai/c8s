@@ -109,6 +109,7 @@ func TestNewProxyRejectsBadConfig(t *testing.T) {
 		{"relative socket", config{socket: "rel.sock", upstream: upstream, readHeaderTimeout: time.Second}},
 		{"bad upstream scheme", config{socket: "/tmp/x.sock", upstream: "ftp://x", readHeaderTimeout: time.Second}},
 		{"nonpositive header timeout", config{socket: "/tmp/x.sock", upstream: upstream}},
+		{"health address without a port", config{socket: "/tmp/x.sock", upstream: upstream, readHeaderTimeout: time.Second, healthAddr: "8401"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := newProxy(tc.cfg); err == nil {
@@ -138,5 +139,51 @@ func TestHealthcheckCmd(t *testing.T) {
 	missing.SetArgs([]string{"--socket", filepath.Join(t.TempDir(), "gone.sock")})
 	if err := missing.Execute(); err == nil {
 		t.Fatal("healthcheck succeeded against a missing socket")
+	}
+}
+
+// The node-CVM DaemonSet probes over HTTP because a locked node image denies
+// exec: /healthz must answer for a live upstream and fail for a dead one,
+// matching the healthcheck subcommand it replaces.
+func TestHealthEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream http.Handler
+		want     int
+	}{
+		{
+			name: "live upstream",
+			upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}),
+			want: http.StatusOK,
+		},
+		{
+			name:     "upstream refusing health",
+			upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }),
+			want:     http.StatusServiceUnavailable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sock := serveProxy(t, config{upstream: startUpstream(t, tt.upstream), socketGID: 0})
+
+			rec := httptest.NewRecorder()
+			healthHandler(sock).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+			if rec.Code != tt.want {
+				t.Errorf("GET /healthz = %d, want %d", rec.Code, tt.want)
+			}
+		})
+	}
+}
+
+// A probe against a proxy whose socket is gone must fail, not hang.
+func TestHealthEndpointWithoutSocket(t *testing.T) {
+	rec := httptest.NewRecorder()
+	healthHandler(filepath.Join(t.TempDir(), "gone.sock")).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /healthz with no socket = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }

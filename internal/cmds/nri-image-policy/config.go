@@ -101,6 +101,17 @@ type policyConfig struct {
 	// ExemptSnapshotPath persists the captured per-namespace digest set. Required
 	// when ExemptNamespaces is set; must sit on a filesystem that survives reboot.
 	ExemptSnapshotPath string `yaml:"exempt_snapshot_path"`
+
+	// FatalExisting powers the node off when a container is already running at
+	// the plugin's first registration after boot, or when the startup check
+	// denies one on a plugin restart. For the measured node image, where the
+	// plugin is pre-registered and containerd's required_plugins gate means no
+	// container can legitimately predate it. See bootgate.go.
+	FatalExisting bool `yaml:"fatal_existing"`
+	// BootMarkerPath separates the first registration since boot from a plugin
+	// restart. Must be on tmpfs: a marker that survived a reboot would read
+	// every boot as a restart. Required when FatalExisting is set.
+	BootMarkerPath string `yaml:"boot_marker_path"`
 }
 
 // labelRule defines a constraint on pod labels. Pods that do not satisfy
@@ -253,6 +264,20 @@ func (c *config) Validate() error {
 	// the symptom.
 	if _, err := teetypes.ParseFamily(c.NormalizedPlatform()); err != nil {
 		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
+	}
+	if c.Policy.FatalExisting {
+		// Both couplings are what makes the setting mean anything: audit mode
+		// reaches no deny branch, and without enforce_existing the startup
+		// check never evaluates a running container.
+		if c.Policy.Mode != ModeFailClosed {
+			return fmt.Errorf("policy.fatal_existing requires policy.mode %q, got %q", ModeFailClosed, c.Policy.Mode)
+		}
+		if !c.Policy.EnforceExisting {
+			return fmt.Errorf("policy.fatal_existing requires policy.enforce_existing")
+		}
+		if !strings.HasPrefix(c.Policy.BootMarkerPath, "/") {
+			return fmt.Errorf("policy.boot_marker_path must be an absolute path on tmpfs when policy.fatal_existing is set, got %q", c.Policy.BootMarkerPath)
+		}
 	}
 	if c.PullEnabled() && !c.baseEnabled() {
 		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")

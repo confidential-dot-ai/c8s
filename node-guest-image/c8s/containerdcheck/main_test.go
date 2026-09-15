@@ -1,0 +1,183 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const wrapper = "/usr/local/bin/c8s-runc"
+
+// bakedConfigDir is the profile's containerd directory, the one the CI gate
+// checks.
+const bakedConfigDir = "../mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd"
+
+// The image as committed must pass: RKE2's own base template, the baked
+// user template, and the baked drop-ins.
+func TestBakedConfigWrapsEveryHandler(t *testing.T) {
+	cfg, err := effectiveConfig(bakedConfigDir, nil)
+	if err != nil {
+		t.Fatalf("effectiveConfig(baked) = %v", err)
+	}
+	handlers, err := checkHandlers(cfg, wrapper)
+	if err != nil {
+		t.Fatalf("checkHandlers(baked) = %v", err)
+	}
+	if len(handlers) == 0 || handlers[0] != "runc" {
+		t.Fatalf("wrapped handlers = %v, want the runc handler", handlers)
+	}
+}
+
+// RKE2 adds a handler for every runtime binary it finds on PATH. None of them
+// is wrapped, so the gate must fail rather than publish the image.
+func TestAutoDetectedRuntimeFails(t *testing.T) {
+	for name, binary := range map[string]string{
+		"crun":   "/usr/bin/crun",
+		"nvidia": "/usr/local/nvidia/toolkit/nvidia-container-runtime",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := effectiveConfig(bakedConfigDir, extraRuntimes{name: binary})
+			if err != nil {
+				t.Fatalf("effectiveConfig = %v", err)
+			}
+			if _, err := checkHandlers(cfg, wrapper); err == nil {
+				t.Fatalf("checkHandlers accepted an auto-detected %s handler", name)
+			}
+		})
+	}
+}
+
+// buildConfigDir writes a template, its drop-ins, and returns the directory.
+func buildConfigDir(t *testing.T, template string, dropIns map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, userTemplateName), []byte(template), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dropInDir := filepath.Join(dir, dropInDirName)
+	if err := os.MkdirAll(dropInDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range dropIns {
+		if err := os.WriteFile(filepath.Join(dropInDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// bakedTemplate is the profile's own template, read once so the fixtures
+// differ from the shipped image in exactly the drop-ins.
+func bakedTemplate(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(bakedConfigDir, userTemplateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestCheckRejectsUnwrappedHandlers(t *testing.T) {
+	const runcOptions = "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc.options]\n"
+	tests := []struct {
+		name    string
+		dropIns map[string]string
+		wantErr string
+	}{
+		{
+			name:    "no drop-in leaves BinaryName empty, which is PATH runc",
+			dropIns: map[string]string{},
+			wantErr: "resolves runc through PATH",
+		},
+		{
+			name:    "an empty BinaryName is rejected",
+			dropIns: map[string]string{"10-c8s-runc.toml": runcOptions + `BinaryName = ""` + "\n"},
+			wantErr: "resolves runc through PATH",
+		},
+		{
+			name:    "an alternate runc is rejected",
+			dropIns: map[string]string{"10-c8s-runc.toml": runcOptions + `BinaryName = "/usr/bin/runc"` + "\n"},
+			wantErr: "want the measured wrapper",
+		},
+		{
+			name: "a later drop-in unwrapping the handler is rejected",
+			dropIns: map[string]string{
+				"10-c8s-runc.toml": runcOptions + `BinaryName = "` + wrapper + `"` + "\n",
+				"zz-operator.toml": runcOptions + `BinaryName = "/var/lib/rancher/rke2/bin/runc"` + "\n",
+			},
+			wantErr: "want the measured wrapper",
+		},
+		{
+			name: "an unaudited shim is rejected",
+			dropIns: map[string]string{
+				"10-c8s-runc.toml": runcOptions + `BinaryName = "` + wrapper + `"` + "\n",
+				"20-wasm.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.spin]\n" +
+					`runtime_type = "io.containerd.spin.v2"` + "\n",
+			},
+			wantErr: "unaudited shim",
+		},
+		{
+			name: "default_runtime_name must name a wrapped handler",
+			dropIns: map[string]string{
+				"10-c8s-runc.toml": runcOptions + `BinaryName = "` + wrapper + `"` + "\n",
+				"20-default.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd]\n" +
+					`default_runtime_name = "kata-qemu-tdx"` + "\n" +
+					"[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.kata-qemu-tdx]\n" +
+					`runtime_type = "io.containerd.kata-qemu-tdx.v2"` + "\n",
+			},
+			wantErr: "default_runtime_name",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := buildConfigDir(t, bakedTemplate(t), tt.dropIns)
+			cfg, err := effectiveConfig(dir, nil)
+			if err != nil {
+				t.Fatalf("effectiveConfig = %v", err)
+			}
+			_, err = checkHandlers(cfg, wrapper)
+			if err == nil {
+				t.Fatalf("checkHandlers accepted %s", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("checkHandlers = %q, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A kata handler is out of scope — its exec denial lives in the guest — but
+// only as long as the runc handler beside it stays wrapped.
+func TestKataHandlerIsAllowedBesideAWrappedRunc(t *testing.T) {
+	dir := buildConfigDir(t, bakedTemplate(t), map[string]string{
+		"10-c8s-runc.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc.options]\n" +
+			`BinaryName = "` + wrapper + `"` + "\n",
+		"20-kata.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.kata-qemu-tdx]\n" +
+			`runtime_type = "io.containerd.kata-qemu-tdx.v2"` + "\n",
+	})
+	cfg, err := effectiveConfig(dir, nil)
+	if err != nil {
+		t.Fatalf("effectiveConfig = %v", err)
+	}
+	if _, err := checkHandlers(cfg, wrapper); err != nil {
+		t.Fatalf("checkHandlers rejected a kata handler beside a wrapped runc: %v", err)
+	}
+}
+
+// Without the drop-in import the wrapper's BinaryName never reaches
+// containerd, however correct the drop-in itself is. The import comes from
+// RKE2's base template, so a re-vendor that lost it must fail here.
+func TestConfigWithoutDropInImportFails(t *testing.T) {
+	for name, cfg := range map[string]map[string]any{
+		"no imports":      {"version": int64(3)},
+		"other imports":   {"imports": []any{"/etc/containerd/other.d/*.toml"}},
+		"import not toml": {"imports": []any{"/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/*.json"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkImports(cfg); err == nil || !strings.Contains(err.Error(), "no import matching") {
+				t.Fatalf("checkImports(%v) = %v, want an error about the missing import", cfg, err)
+			}
+		})
+	}
+}

@@ -52,6 +52,15 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 		t.Fatalf("the rendered node-image boot config does not load: %v", err)
 	}
 
+	// The baked config is the only place the boot gate is armed, and
+	// its marker has to be boot-scoped or every restart reads as a first boot.
+	if !cfg.Policy.FatalExisting {
+		t.Error("the baked config must set policy.fatal_existing: a container predating the plugin means admission was not in place")
+	}
+	if !strings.HasPrefix(cfg.Policy.BootMarkerPath, "/run/") {
+		t.Errorf("policy.boot_marker_path = %q, want a path under /run (tmpfs, cleared by a reboot)", cfg.Policy.BootMarkerPath)
+	}
+
 	// The full RKE2 system set: every digest systemfloor derives from the
 	// pinned airgap bundles and baked manifests. A regen for an RKE2 pin bump
 	// rewrites these — update the pins with it. Pinning the whole set, not a

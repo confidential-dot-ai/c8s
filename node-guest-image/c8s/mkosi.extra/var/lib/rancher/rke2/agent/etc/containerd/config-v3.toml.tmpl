@@ -1,4 +1,3 @@
 {{/* c8s-containerd-prep:managed-template */}}
-imports = ["/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/*.toml"]
-
+{{/* RKE2's base template imports config-v3.toml.d/*.toml itself (k3s b51167a9); an imports line here would duplicate the key. */}}
 {{ template "base" . }}

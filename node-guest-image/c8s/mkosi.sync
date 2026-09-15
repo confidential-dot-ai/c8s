@@ -49,6 +49,11 @@ CACHE_DIR="$SRCDIR/mkosi.pkgcache/c8s"
 mkdir -p "$STAGE_DIR" "$CACHE_DIR" "${TMPDIR:=/tmp}"
 
 RKE2_VERSION="v1.36.4+rke2r1"
+# Where rke2 extracts the runtime image's bin dir to (a symlink to
+# data/<digest>/bin, created on first start). The measured wrapper execs runc
+# there by absolute path, and the dev drop-in below points containerd straight
+# at it.
+REAL_RUNC="/var/lib/rancher/rke2/bin/runc"
 RKE2_TARBALL_SHA256="7bcbd3167d6947e1d79cdf722acdc740b28021fefb50dd5b974a1980776d4079"
 RKE2_IMAGES_CORE_SHA256="8988a2eff587dd88b8eab86fe719703e9541a1f08d22771a94cbec446a13db86"
 RKE2_IMAGES_CILIUM_SHA256="6c76903f258b12bc0f322bcb029247ee49544b925170d320409401beeecd41bd"
@@ -109,6 +114,17 @@ printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nn
 if [ "$(cat "$SYNC_INPUTS/dev" 2>/dev/null || true)" = 1 ]; then
     printf '# DEV build: kubectl exec/attach/logs allowed. Never ship.\nkubelet-arg+:\n  - enable-debugging-handlers=true\n' \
         > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/60-dev-debugging-handlers.yaml"
+    # Same variant switch, the runtime half: the locked image's baked
+    # 10-c8s-runc.toml points the runc handler at the measured wrapper, which
+    # denies `runc exec` and with it every CRI exec path. A dev build that kept
+    # it would leave kubectl exec broken even with the handlers back on, so the
+    # dev image runs the unwrapped runtime. Lexically later, so it wins the
+    # containerd drop-in merge. The two variants therefore have different
+    # measurements — which is the point: exec posture is an image property.
+    mkdir -p "$STAGE_DIR/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d"
+    printf '# DEV build: unwrapped runtime, `runc exec` allowed. Never ship.\n[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]\n  BinaryName = "%s"\n' \
+        "$REAL_RUNC" \
+        > "$STAGE_DIR/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/60-dev-runc.toml"
 fi
 
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
@@ -227,6 +243,11 @@ PLUGIN_TARGET="$STAGE_DIR/opt/nri/plugins/10-nri-image-policy"
 # falls through to normal cobra dispatch — only get-cert/nri-image-policy/
 # ratls-mesh are argv-aliased).
 C8S_TARGET="$STAGE_DIR/usr/local/bin/c8s"
+# The measured OCI runtime wrapper (c8s internal/cmds/c8srunc), the same
+# binary under the name its argv dispatch keys on. The baked containerd
+# drop-in 10-c8s-runc.toml names this exact path as the runc handler's
+# BinaryName, so the two move together.
+RUNC_WRAPPER_TARGET="$STAGE_DIR/usr/local/bin/c8s-runc"
 # Content-addressed by the image digest: a cached copy skips the GHCR pull
 # entirely (oras digest-verifies the blobs on the pull that populates it).
 PLUGIN_CACHE="$CACHE_DIR/nri-image-policy-${NRI_IMAGE##*@sha256:}"
@@ -234,8 +255,9 @@ if [ -f "$PLUGIN_CACHE" ]; then
     echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
+    install -D -m 0755 "$PLUGIN_CACHE" "$RUNC_WRAPPER_TARGET"
     render_nri_base
-    echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
+    echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s + c8s-runc"
     exit 0
 fi
 
@@ -300,7 +322,8 @@ fi
 install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
 install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
 install -D -m 0755 "$BIN" "$C8S_TARGET"
+install -D -m 0755 "$BIN" "$RUNC_WRAPPER_TARGET"
 
 render_nri_base
 
-echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
+echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s + c8s-runc"
