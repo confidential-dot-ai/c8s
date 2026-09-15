@@ -70,11 +70,13 @@ at its root:
 - `launch.yaml`: the strict `c8s-launch/v1` document selecting `leader` or
   `follower`, the image measurements, cluster/node identity, join tokens,
   trusted role keys and TLS SAN.
-- `launch.yaml.sig`: the detached signature produced by
-  `c8s keys sign-launch --key <role-private-key> launch.yaml`.
+- `launch.yaml.sig`: the detached signature over those exact bytes.
 
-Use distinct leader and follower keys and generate fresh keys for each
-cluster. The private keys stay with the operator. Followers receive only the
+`c8s launch-config new` writes all three for a leader and its followers,
+with distinct leader and follower keys and fresh tokens per cluster
+(`c8s launch-config add-follower` extends a bundle later; `c8s keys
+sign-launch` re-signs a hand-edited document). The private keys stay with
+the operator. Followers receive only the
 RKE2 agent token; their documents must omit the server token entirely.
 There is no diskless/default-leader boot. Missing or invalid signed input
 fails the role gate before RKE2 or core services can start.

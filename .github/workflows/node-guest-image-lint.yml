@@ -28,7 +28,6 @@ on:
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
       - ".github/workflows/snp-metal-e2e.yml"
-      - ".github/scripts/node-launch-data.sh"
       - ".github/workflows/tdx-image-acceptance.yml"
       - ".github/actions/tdx-metal-e2e/**"
       # The invariants gate body; a script-only change must run the gate.

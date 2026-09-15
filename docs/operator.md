@@ -115,73 +115,44 @@ leader key and one or more follower keys. A follower document must omit
 agent token. Leader and agent tokens must differ and contain 64 lowercase
 hexadecimal characters each.
 
-The following creates launch bundles for one leader and one follower. Select
-the trusted `manifest.json` published with the exact node image and VM shape;
-set `LEADER_ADDRESS` to the leader's guest IPv4 address reachable by every node.
-The example uses Python 3 and writes YAML with numeric RTMR indices.
+`c8s launch-config new` creates everything one cluster needs: a leader
+launch key, a follower launch key, fresh join tokens, a signed `launch.yaml`
+per node and the client policy that pins the leader. Give it the trusted
+`manifest.json` published with the exact node image, the leader's guest IPv4
+address that every node can reach, and the follower names. On SNP, also pass
+the VM's vCPU count, which selects the launch digest.
 
 ```sh
-umask 077
-mkdir -p demo/leader demo/follower
-c8s keys new --out demo/leader.key --pub-out demo/leader/pubkey
-c8s keys new --out demo/follower.key --pub-out demo/follower/pubkey
+c8s launch-config new --out demo --cluster-id demo \
+  --image-manifest manifest.json \
+  --leader-address 10.0.0.10 \
+  --follower demo-follower-1 --follower demo-follower-2
+# SNP: add --vcpus 8 (the VM shape's launch digest); TDX has one per image.
 
-export NODE_PLATFORM=tdx       # tdx or snp
-export NODE_VCPUS=8            # SNP: select this exact manifest variant
-export LEADER_ADDRESS=10.0.0.10  # replace with the actual leader guest address
-python3 - manifest.json <<'PYTHON'
-import copy, json, os, secrets, sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text())
-platform = os.environ["NODE_PLATFORM"]
-if platform == "tdx":
-    measured = manifest["tdx"]
-    image = {"platform": "tdx", "measurement": measured["mrtd"],
-             "rtmrs": {1: measured["rtmr1"], 2: measured["rtmr2"]}}
-elif platform == "snp":
-    variants = [v for v in manifest["snp_variants"]
-                if v["smp"] == int(os.environ["NODE_VCPUS"])]
-    assert len(variants) == 1, "select exactly one matching SNP vCPU variant"
-    image = {"platform": "snp",
-             "measurement": variants[0]["measurement"]["snp_launch_digest"]}
-else:
-    raise ValueError("NODE_PLATFORM must be tdx or snp")
-
-leader = {
-    "schemaVersion": "c8s-launch/v1",
-    "clusterID": "demo",
-    "role": "leader",
-    "image": image,
-    "node": {"name": "demo-leader"},
-    "rke2": {"serverToken": secrets.token_hex(32),
-             "agentToken": secrets.token_hex(32)},
-    "leader": {"address": os.environ["LEADER_ADDRESS"],
-               "operatorPublicKey": Path("demo/leader/pubkey").read_text()},
-    "followerOperatorPublicKeys": [Path("demo/follower/pubkey").read_text()],
-    "tlsSAN": "c8s.local",
-}
-follower = copy.deepcopy(leader)
-follower["role"] = "follower"
-follower["node"]["name"] = "demo-follower"
-del follower["rke2"]["serverToken"]
-for role, document in [("leader", leader), ("follower", follower)]:
-    lines = [f"{field}: {json.dumps(value)}" for field, value in document.items()
-             if field != "image"]
-    lines += ["image:", "  platform: " + image["platform"],
-              "  measurement: " + json.dumps(image["measurement"])]
-    if "rtmrs" in image:
-        # RTMR indices must be numeric YAML keys, not quoted JSON keys.
-        lines += ["  rtmrs:", *[f"    {i}: {json.dumps(digest)}"
-                                for i, digest in image["rtmrs"].items()]]
-    Path(f"demo/{role}/launch.yaml").write_text("\n".join(lines) + "\n")
-PYTHON
-
-c8s keys sign-launch --key demo/leader.key demo/leader/launch.yaml
-c8s keys sign-launch --key demo/follower.key demo/follower/launch.yaml
 xorriso -as mkisofs -V opkeydata -o demo/leader.iso demo/leader
-xorriso -as mkisofs -V opkeydata -o demo/follower.iso demo/follower
+xorriso -as mkisofs -V opkeydata -o demo/demo-follower-1.iso demo/demo-follower-1
 ```
+
+The bundle directory is created new and never reused:
+
+| Path | Purpose |
+|---|---|
+| `demo/leader.key` | leader launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
+| `demo/follower.key` | the follower launch key every follower boots with |
+| `demo/leader.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
+| `demo/leader/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the leader's opkeydata |
+| `demo/<follower>/` | the same three files for each follower |
+
+A follower can be added to a running cluster without touching the leader:
+`c8s launch-config add-follower --bundle demo --name demo-follower-3` derives
+its document from the leader's (same cluster, image, agent token and keys,
+never the server token) and signs it with the follower key. A leader created
+without `--leader-address` autodetects its own; `add-follower` then needs
+`--leader-address`.
+
+The generated document is the strict schema below; edit it only when a field
+the command does not expose is needed, then re-sign with
+`c8s keys sign-launch --key demo/leader.key --force demo/leader/launch.yaml`.
 
 Attach the corresponding ISO to each VM along with its required scratch
 disk, booting the **same image and supported VM shape** for both roles.

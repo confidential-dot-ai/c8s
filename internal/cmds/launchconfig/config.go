@@ -38,6 +38,7 @@ const (
 	MaxDocumentSize   = 1024 * 1024
 	maxSignatureSize  = 4096
 	maxFollowerKeys   = 128
+	defaultTLSSAN     = "c8s.local"
 )
 
 // Role selects the services started for this boot, without changing its image.
@@ -353,7 +354,7 @@ func (d *Document) validate() error {
 		seen = append(seen, key)
 	}
 	if d.TLSSAN == "" {
-		d.TLSSAN = "c8s.local"
+		d.TLSSAN = defaultTLSSAN
 	}
 	if len(d.TLSSAN) > 253 {
 		return fmt.Errorf("tlsSAN exceeds DNS name length")

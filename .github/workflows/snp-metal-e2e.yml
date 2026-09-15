@@ -59,14 +59,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: tools (kubectl, go, crane, launch generator)
+      - name: tools (kubectl, go, crane)
         run: |
           set -euo pipefail
           # Every fetch here crosses the public internet from an ephemeral ARC
           # pod, and one hiccup fails the lane before it reaches a CVM.
-          if ! command -v openssl >/dev/null || ! command -v python3 >/dev/null; then
+          if ! command -v openssl >/dev/null; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq --no-install-recommends openssl python3
+            sudo apt-get install -y -qq --no-install-recommends openssl
           fi
           mkdir -p "$PWD/bin"
           # A file because each run block starts a fresh shell. Arguments are
@@ -252,12 +252,15 @@ jobs:
         # measured initrd against HOSTDATA, and pinned by external clients.
         run: |
           set -euo pipefail
-          bash .github/scripts/node-launch-data.sh /tmp/launch-data snp "$VM" "$snpLaunchDigest"
-          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/pubkey | base64 -w0)" >> "$GITHUB_ENV"
+          # The published manifest pins this SMP count's launch digest (checked
+          # above); the bundle's leader.key doubles as the run's operator key.
+          c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --leader-name c8s-node \
+            --image-manifest /tmp/image-manifest.json --vcpus "$smp"
+          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/leader/pubkey | base64 -w0)" >> "$GITHUB_ENV"
           kubectl -n "$NS" create secret generic "$VM-opkey" \
-            --from-file=pubkey=/tmp/launch-data/pubkey \
-            --from-file=launch.yaml=/tmp/launch-data/launch.yaml \
-            --from-file=launch.yaml.sig=/tmp/launch-data/launch.yaml.sig \
+            --from-file=pubkey=/tmp/launch-data/leader/pubkey \
+            --from-file=launch.yaml=/tmp/launch-data/leader/launch.yaml \
+            --from-file=launch.yaml.sig=/tmp/launch-data/leader/launch.yaml.sig \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: boot the SNP CVM
@@ -415,7 +418,7 @@ jobs:
           # with EOF. Retry a bounded number of times and print each failure.
           ok=""
           for attempt in 1 2 3 4 5 6; do
-            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/operator.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
+            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/leader.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
             echo "get-kubeconfig attempt $attempt failed; retrying in 20s"
             sleep 20
           done
@@ -447,7 +450,7 @@ jobs:
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
           export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
+          export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
           bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
 
       - name: assert a confidential workload runs with an injected cert
@@ -456,7 +459,7 @@ jobs:
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
           export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
+          export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
           bash /tmp/c8s-src/test/e2e/cw-workload.sh
 
       - name: assert confidential workload label integrity
