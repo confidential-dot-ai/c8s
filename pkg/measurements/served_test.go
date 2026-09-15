@@ -27,7 +27,7 @@ func TestServeAndParseServedRoundTrip(t *testing.T) {
 
 	key := operatorPEM(t, elliptic.P256())
 	pinned, err := Format(ReferenceValues{TEE: TEETDX, Entries: []Entry{{
-		Name: "leader", Digest: mustHex(t, d1), RTMRs: map[int][]byte{1: mustHex(t, r1)}, OperatorKey: key,
+		Name: "server", Digest: mustHex(t, d1), RTMRs: map[int][]byte{1: mustHex(t, r1)}, OperatorKey: key,
 	}}})
 	if err != nil {
 		t.Fatal(err)

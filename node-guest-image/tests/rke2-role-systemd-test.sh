@@ -149,7 +149,7 @@ for role in server agent; do
         test -L "/etc/systemd/system/rke2-$role.service.requires/apparmor-enforce.service"
 done
 
-for role in leader follower; do
+for role in server agent; do
     CASE="boot-$role"
     scenario_reset
     launch_media "$role"
@@ -158,14 +158,14 @@ for role in leader follower; do
     ok "launch verification is active" active rke2-role.service
     ok "AppArmor gate is active" active apparmor-enforce.service
     selected=rke2-server.service; skipped=rke2-agent.service
-    if [[ $role == follower ]]; then selected=rke2-agent.service; skipped=rke2-server.service; fi
+    if [[ $role == agent ]]; then selected=rke2-agent.service; skipped=rke2-server.service; fi
     ok "$selected active" active "$selected"
     ok "$skipped inactive" not_active "$skipped"
     ok "$skipped condition skipped" cond_skipped "$skipped"
     for unit in "${core_units[@]}"; do
-        if [[ $role == follower ]] && grep -qF 'ConditionPathExists=/run/confos/role-server' "$SOURCE_UNITS/$unit"; then
-            ok "$unit inactive on follower" not_active "$unit"
-            ok "$unit condition skipped on follower" cond_skipped "$unit"
+        if [[ $role == agent ]] && grep -qF 'ConditionPathExists=/run/confos/role-server' "$SOURCE_UNITS/$unit"; then
+            ok "$unit inactive on agent" not_active "$unit"
+            ok "$unit condition skipped on agent" cond_skipped "$unit"
         else
             ok "$unit active on $role" active "$unit"
         fi
@@ -176,7 +176,7 @@ for scenario in missing-launch invalid-signature prepare-failure; do
     CASE="boot-$scenario"
     scenario_reset
     if [[ $scenario != missing-launch ]]; then
-        launch_media leader
+        launch_media server
         : > /dev/disk/by-label/opkeydata
     fi
     case "$scenario" in
@@ -189,7 +189,7 @@ for scenario in missing-launch invalid-signature prepare-failure; do
     for unit in "${payload_units[@]}"; do ok "$unit stayed down" not_active "$unit"; done
 done
 
-for role in leader follower; do
+for role in server agent; do
     CASE="boot-$role-AppArmor-failure"
     scenario_reset
     launch_media "$role"

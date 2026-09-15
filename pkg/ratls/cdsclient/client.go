@@ -82,7 +82,7 @@ type Config struct {
 	// when CDS presents SNP evidence. Populate from `cds.rtmrs`.
 	CDSRTMRs map[int][]byte
 
-	// CDSEntries additionally binds the CDS image to its authorized leader key.
+	// CDSEntries additionally binds the CDS image to its authorized server key.
 	CDSEntries []measurements.Entry
 
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS

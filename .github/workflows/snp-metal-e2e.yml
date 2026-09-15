@@ -247,20 +247,20 @@ jobs:
             echo "no node read permission; skipping the SEV device capacity preflight"
           fi
 
-      - name: sign the leader launch and attach opkeydata
+      - name: sign the server launch and attach opkeydata
         # The same exact public PEM is signed into launch.yaml, bound by the
         # measured initrd against HOSTDATA, and pinned by external clients.
         run: |
           set -euo pipefail
           # The published manifest pins this SMP count's launch digest (checked
-          # above); the bundle's leader.key doubles as the run's operator key.
-          c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --leader-name c8s-node \
+          # above); the bundle's server.key doubles as the run's operator key.
+          c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
             --image-manifest /tmp/image-manifest.json --vcpus "$smp"
-          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/leader/pubkey | base64 -w0)" >> "$GITHUB_ENV"
+          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/server/pubkey | base64 -w0)" >> "$GITHUB_ENV"
           kubectl -n "$NS" create secret generic "$VM-opkey" \
-            --from-file=pubkey=/tmp/launch-data/leader/pubkey \
-            --from-file=launch.yaml=/tmp/launch-data/leader/launch.yaml \
-            --from-file=launch.yaml.sig=/tmp/launch-data/leader/launch.yaml.sig \
+            --from-file=pubkey=/tmp/launch-data/server/pubkey \
+            --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
+            --from-file=launch.yaml.sig=/tmp/launch-data/server/launch.yaml.sig \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: boot the SNP CVM
@@ -418,7 +418,7 @@ jobs:
           # with EOF. Retry a bounded number of times and print each failure.
           ok=""
           for attempt in 1 2 3 4 5 6; do
-            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/leader.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
+            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/server.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
             echo "get-kubeconfig attempt $attempt failed; retrying in 20s"
             sleep 20
           done
@@ -432,25 +432,25 @@ jobs:
         run: .github/scripts/cidata-tripwire.sh
 
       - name: assert measured services and Kubernetes integration converged
-        # components-ready verifies c8s-node-runtime and the full leader policy,
+        # components-ready verifies c8s-node-runtime and the full server policy,
         # then reaches the baked CDS service over authenticated discovery.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_NODE_IMAGE=1
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
           bash /tmp/c8s-src/test/e2e/components-ready.sh
 
       - name: assert the image floor denies, then opens to a signed write
         # Baked nginx fronts /allowlist on 443; discovery pins the whole
-        # measured image tuple and the leader operator key.
+        # measured image tuple and the server operator key.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
           bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
 
       - name: assert a confidential workload runs with an injected cert
@@ -458,8 +458,8 @@ jobs:
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
           bash /tmp/c8s-src/test/e2e/cw-workload.sh
 
       - name: assert confidential workload label integrity

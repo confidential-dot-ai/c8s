@@ -159,15 +159,15 @@ func TestCheckTEEMatchesPlatform(t *testing.T) {
 	}
 }
 
-func TestSeparateCDSConfigDoesNotWidenLeaderTrustOrNarrowMesh(t *testing.T) {
+func TestSeparateCDSConfigDoesNotWidenServerTrustOrNarrowMesh(t *testing.T) {
 	const peersPath = "../../../pkg/measurements/testdata/node-identities.json"
 	peers, err := measurements.Load(peersPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leader := peers
-	leader.Entries = peers.Entries[:1]
-	doc, err := measurements.Format(leader)
+	server := peers
+	server.Entries = peers.Entries[:1]
+	doc, err := measurements.Format(server)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestSeparateCDSConfigDoesNotWidenLeaderTrustOrNarrowMesh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Entries) != 2 || len(c.cdsPins.Entries) != 1 || c.cdsPins.Entries[0].Name != "leader" {
+	if len(got.Entries) != 2 || len(c.cdsPins.Entries) != 1 || c.cdsPins.Entries[0].Name != "server" {
 		t.Fatal("CDS and peer policies were conflated")
 	}
 	if len(c.cdsPins.Entries[0].OperatorKey) == 0 || len(got.Entries[1].OperatorKey) == 0 {
@@ -184,7 +184,7 @@ func TestSeparateCDSConfigDoesNotWidenLeaderTrustOrNarrowMesh(t *testing.T) {
 	}
 	missing := &proxyConfig{measurementsConfig: peersPath, cdsMeasurementsConfig: "missing-file"}
 	if _, err := resolveMeasurementsConfig(missing); err == nil {
-		t.Fatal("missing leader policy fell back to broad peer policy")
+		t.Fatal("missing server policy fell back to broad peer policy")
 	}
 	if !missing.cdsPins.Empty() || missing.measurements != "" {
 		t.Fatal("a partial policy was applied after a failed load")

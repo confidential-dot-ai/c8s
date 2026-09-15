@@ -3,7 +3,7 @@
   "tee": "tdx",
   "measurements": [
     {
-      "name": "leader",
+      "name": "server",
       "mrtd": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
       "rtmr": [
         null,
@@ -13,7 +13,7 @@
       "operator_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaaBz1ISIaMWDuPRjgg152EBIYRab\nILbNz0VOO47mubLnNsK8igqlET/44vuAzyC+Zw4aha2ag3HgzfBWZxbuog==\n-----END PUBLIC KEY-----\n"
     },
     {
-      "name": "follower",
+      "name": "agent",
       "mrtd": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
       "rtmr": [
         null,

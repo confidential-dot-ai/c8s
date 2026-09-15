@@ -66,14 +66,14 @@ func operatorPEM(t *testing.T, curve elliptic.Curve) []byte {
 }
 
 func TestOperatorIdentityRoundTripAndDuplicateTuples(t *testing.T) {
-	leader := operatorPEM(t, elliptic.P256())
-	follower := operatorPEM(t, elliptic.P256())
+	server := operatorPEM(t, elliptic.P256())
+	agent := operatorPEM(t, elliptic.P256())
 	// Preserve exact PEM whitespace: launch binding hashes the bytes.
-	leader = append(leader, '\n')
+	server = append(server, '\n')
 	digest, _ := hex.DecodeString(d1)
 	set := ReferenceValues{TEE: TEESNP, Entries: []Entry{
-		{Name: "leader", Digest: digest, OperatorKey: leader},
-		{Name: "follower", Digest: digest, OperatorKey: follower},
+		{Name: "server", Digest: digest, OperatorKey: server},
+		{Name: "agent", Digest: digest, OperatorKey: agent},
 	}}
 	encoded, err := Format(set)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestOperatorIdentityRoundTripAndDuplicateTuples(t *testing.T) {
 	if len(missing) != 1 || len(extra) != 1 {
 		t.Fatal("policy diff ignored operator identity")
 	}
-	set.Entries[1].OperatorKey = leader
+	set.Entries[1].OperatorKey = server
 	encoded, err = Format(set)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestOperatorIdentityRoundTripAndDuplicateTuples(t *testing.T) {
 }
 
 func TestOperatorIdentityRejectsMalformedKey(t *testing.T) {
-	if _, err := Parse([]byte(snpFile(`{"name":"leader","measurement":"` + d1 + `","operator_key":null}`))); err == nil {
+	if _, err := Parse([]byte(snpFile(`{"name":"server","measurement":"` + d1 + `","operator_key":null}`))); err == nil {
 		t.Fatal("explicit null operator key silently removed its pin")
 	}
 	valid := operatorPEM(t, elliptic.P256())
@@ -120,7 +120,7 @@ func TestOperatorIdentityRejectsMalformedKey(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			doc := snpFile(`{"name":"leader","measurement":"` + d1 + `","operator_key":` + string(encodedKey) + `}`)
+			doc := snpFile(`{"name":"server","measurement":"` + d1 + `","operator_key":` + string(encodedKey) + `}`)
 			if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "operator_key") {
 				t.Fatalf("malformed operator key accepted: %v", err)
 			}

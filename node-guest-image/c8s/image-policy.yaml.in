@@ -1,6 +1,6 @@
 # Measured NRI bootstrap base allowlist. mkosi.sync pins the operator image and RKE2
 # system images at build time. Authenticated launch staging selects the CDS
-# endpoint and complete leader image/key policy before containerd starts.
+# endpoint and complete server image/key policy before containerd starts.
 # The immutable source remains /usr/lib/c8s/image-policy.yaml; the staged copy
 # under /etc/nri is writable only through the node's ephemeral state overlay.
 platform: "@PLATFORM@"
@@ -236,7 +236,7 @@ allowlist:
             args: {policy: any}
       # END rke2 system images
   pull:
-    # Authenticated launch staging replaces this endpoint with the leader's
+    # Authenticated launch staging replaces this endpoint with the server's
     # CDS URL. The pull loop retries while the baked CDS service starts;
     # the plugin stays Ready on the base allowlist above.
     url: "https://127.0.0.1:30808"

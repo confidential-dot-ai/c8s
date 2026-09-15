@@ -52,10 +52,10 @@ func entryTDX(t *testing.T, name, digest string, r1, r2 string) measurements.Ent
 	return e
 }
 
-// A follower on the same image must never satisfy the leader-only CDS policy.
+// An agent on the same image must never satisfy the server-only CDS policy.
 func TestEnforceEntriesPinsOperatorWithImage(t *testing.T) {
-	leader := []byte("leader launch key")
-	follower := []byte("follower launch key")
+	server := []byte("server launch key")
+	agent := []byte("agent launch key")
 	for _, platform := range []teetypes.PlatformType{teetypes.PlatformSNP, teetypes.PlatformTDX} {
 		t.Run(string(platform), func(t *testing.T) {
 			bound := func(digest string, key []byte) remote.VerifyResponse {
@@ -71,43 +71,43 @@ func TestEnforceEntriesPinsOperatorWithImage(t *testing.T) {
 				}
 				return r
 			}
-			entry := entryTDX(t, "leader", digestA, regA1, "")
-			entry.OperatorKey = leader
+			entry := entryTDX(t, "server", digestA, regA1, "")
+			entry.OperatorKey = server
 			if platform == teetypes.PlatformSNP {
 				entry.RTMRs = nil
 			}
 			policy := []measurements.Entry{entry}
-			if err := measurements.EnforceEntries(bound(digestA, leader), policy, string(platform)); err != nil {
-				t.Fatalf("leader refused: %v", err)
+			if err := measurements.EnforceEntries(bound(digestA, server), policy, string(platform)); err != nil {
+				t.Fatalf("server refused: %v", err)
 			}
-			if err := measurements.EnforceEntries(bound(digestA, follower), policy, string(platform)); !errors.Is(err, measurements.ErrOperatorKeyNotAllowed) {
-				t.Fatalf("follower with same image: %v", err)
+			if err := measurements.EnforceEntries(bound(digestA, agent), policy, string(platform)); !errors.Is(err, measurements.ErrOperatorKeyNotAllowed) {
+				t.Fatalf("agent with same image: %v", err)
 			}
-			missing := bound(digestA, leader)
+			missing := bound(digestA, server)
 			missing.Result.Claims.InitData = nil
 			delete(missing.Result.Claims.PlatformData, "rtmr_3")
 			if err := measurements.EnforceEntries(missing, policy, string(platform)); !errors.Is(err, measurements.ErrOperatorKeyNotAllowed) {
 				t.Fatalf("missing operator binding: %v", err)
 			}
-			unverified := bound(digestA, leader)
+			unverified := bound(digestA, server)
 			unverified.Result.SignatureValid = false
 			if err := measurements.EnforceEntries(unverified, policy, string(platform)); !errors.Is(err, measurements.ErrOperatorKeyNotAllowed) {
 				t.Fatalf("unverified claims accepted: %v", err)
 			}
-			if err := measurements.EnforceEntries(bound(digestA, leader), policy, "different-platform"); err == nil {
+			if err := measurements.EnforceEntries(bound(digestA, server), policy, "different-platform"); err == nil {
 				t.Fatalf("inconsistent verified platform accepted: %v", err)
 			}
 			// Neither key matching a different image nor the shared image
 			// matching a different role may satisfy half of a tuple.
 			other := entry
-			other.Name, other.Digest, other.OperatorKey = "other", mustHex(t, digestB), follower
-			if err := measurements.EnforceEntries(bound(digestA, follower), append(policy, other), string(platform)); err == nil {
+			other.Name, other.Digest, other.OperatorKey = "other", mustHex(t, digestB), agent
+			if err := measurements.EnforceEntries(bound(digestA, agent), append(policy, other), string(platform)); err == nil {
 				t.Fatal("crossed image/operator tuple accepted")
 			}
 			// Mesh may explicitly allow both roles on the same image.
 			other.Digest = entry.Digest
-			if err := measurements.EnforceEntries(bound(digestA, follower), append(policy, other), string(platform)); err != nil {
-				t.Fatalf("authorized follower refused: %v", err)
+			if err := measurements.EnforceEntries(bound(digestA, agent), append(policy, other), string(platform)); err != nil {
+				t.Fatalf("authorized agent refused: %v", err)
 			}
 		})
 	}

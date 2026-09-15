@@ -25,20 +25,20 @@ import (
 // opkeydata disk is one directory and the operator's private material sits
 // beside it, never inside it:
 //
-//	<dir>/leader.key      leader launch key; also the operator key that
+//	<dir>/server.key      server launch key; also the operator key that
 //	                      get-kubeconfig and signed CDS writes use
-//	<dir>/follower.key    the one follower launch key this cluster trusts
-//	<dir>/leader.json     client policy pinning the leader (C8S_MEASUREMENTS_CONFIG)
-//	<dir>/leader/         pubkey, launch.yaml, launch.yaml.sig
-//	<dir>/<follower>/     pubkey, launch.yaml, launch.yaml.sig, one per follower
+//	<dir>/agent.key    the one agent launch key this cluster trusts
+//	<dir>/server.json     client policy pinning the server (C8S_MEASUREMENTS_CONFIG)
+//	<dir>/server/         pubkey, launch.yaml, launch.yaml.sig
+//	<dir>/<agent>/     pubkey, launch.yaml, launch.yaml.sig, one per agent
 const (
-	leaderKeyFile   = "leader.key"
-	followerKeyFile = "follower.key"
-	leaderPolicy    = "leader.json"
-	leaderDir       = "leader"
-	pubkeyFile      = "pubkey"
-	documentFile    = "launch.yaml"
-	signatureFile   = documentFile + ".sig"
+	serverKeyFile = "server.key"
+	agentKeyFile  = "agent.key"
+	serverPolicy  = "server.json"
+	serverDir     = "server"
+	pubkeyFile    = "pubkey"
+	documentFile  = "launch.yaml"
+	signatureFile = documentFile + ".sig"
 )
 
 // BundleOptions describes a new cluster's launch bundle.
@@ -47,29 +47,29 @@ type BundleOptions struct {
 	ClusterID     string
 	ManifestPath  string
 	VCPUs         int
-	LeaderName    string
-	LeaderAddress string
-	Followers     []string
+	ServerName    string
+	ServerAddress string
+	Agents        []string
 	TLSSAN        string
 	WorkloadsPath string
 }
 
 // NewBundle generates the cluster's two launch keys and join tokens, writes
-// and signs the leader document plus one follower document per name, and
+// and signs the server document plus one agent document per name, and
 // emits the client policy. Dir must not exist; a failed run removes it so a
 // half-written bundle can never be attached.
 func NewBundle(opts BundleOptions) (err error) {
 	if opts.Dir == "" || opts.ClusterID == "" || opts.ManifestPath == "" {
 		return errors.New("--out, --cluster-id and --image-manifest are required")
 	}
-	if opts.LeaderName == "" {
-		opts.LeaderName = opts.ClusterID + "-leader"
+	if opts.ServerName == "" {
+		opts.ServerName = opts.ClusterID + "-server"
 	}
 	if opts.TLSSAN == "" {
 		opts.TLSSAN = defaultTLSSAN
 	}
-	if len(opts.Followers) > 0 && opts.LeaderAddress == "" {
-		return errors.New("--leader-address is required when the bundle has followers: a follower must be told where its leader is")
+	if len(opts.Agents) > 0 && opts.ServerAddress == "" {
+		return errors.New("--server-address is required when the bundle has agents: an agent must be told where its server is")
 	}
 	image, err := imageFromManifest(opts.ManifestPath, opts.VCPUs)
 	if err != nil {
@@ -91,11 +91,11 @@ func NewBundle(opts BundleOptions) (err error) {
 			os.RemoveAll(opts.Dir)
 		}
 	}()
-	leaderKey, leaderPub, err := newLaunchKey(filepath.Join(opts.Dir, leaderKeyFile))
+	serverKey, serverPub, err := newLaunchKey(filepath.Join(opts.Dir, serverKeyFile))
 	if err != nil {
 		return err
 	}
-	_, followerPub, err := newLaunchKey(filepath.Join(opts.Dir, followerKeyFile))
+	_, agentPub, err := newLaunchKey(filepath.Join(opts.Dir, agentKeyFile))
 	if err != nil {
 		return err
 	}
@@ -107,22 +107,22 @@ func NewBundle(opts BundleOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	leader := Document{
-		SchemaVersion:              SchemaVersion,
-		ClusterID:                  opts.ClusterID,
-		Role:                       Leader,
-		Image:                      image,
-		Node:                       Node{Name: opts.LeaderName},
-		RKE2:                       RKE2{ServerToken: serverToken, AgentToken: agentToken},
-		Leader:                     LeaderConfig{Address: opts.LeaderAddress, OperatorPublicKey: leaderPub},
-		FollowerOperatorPublicKeys: []string{followerPub},
-		TLSSAN:                     opts.TLSSAN,
-		Workloads:                  workloads,
+	server := Document{
+		SchemaVersion:           SchemaVersion,
+		ClusterID:               opts.ClusterID,
+		Role:                    Server,
+		Image:                   image,
+		Node:                    Node{Name: opts.ServerName},
+		RKE2:                    RKE2{ServerToken: serverToken, AgentToken: agentToken},
+		Server:                  ServerConfig{Address: opts.ServerAddress, OperatorPublicKey: serverPub},
+		AgentOperatorPublicKeys: []string{agentPub},
+		TLSSAN:                  opts.TLSSAN,
+		Workloads:               workloads,
 	}
-	if err := writeSignedDocument(filepath.Join(opts.Dir, leaderDir), leader, leaderKey, leaderPub); err != nil {
+	if err := writeSignedDocument(filepath.Join(opts.Dir, serverDir), server, serverKey, serverPub); err != nil {
 		return err
 	}
-	pins, err := leader.referenceValues()
+	pins, err := server.referenceValues()
 	if err != nil {
 		return err
 	}
@@ -130,63 +130,63 @@ func NewBundle(opts BundleOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := writeNew(filepath.Join(opts.Dir, leaderPolicy), policy, 0o644); err != nil {
+	if err := writeNew(filepath.Join(opts.Dir, serverPolicy), policy, 0o644); err != nil {
 		return err
 	}
-	for _, name := range opts.Followers {
-		if err := AddFollower(opts.Dir, name, opts.LeaderAddress); err != nil {
+	for _, name := range opts.Agents {
+		if err := AddAgent(opts.Dir, name, opts.ServerAddress); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// AddFollower derives a follower document from the bundle's leader document
+// AddAgent derives an agent document from the bundle's server document
 // (same cluster, image, agent token, keys and SAN; never the server token),
-// signs it with the bundle's follower key and writes <dir>/<name>. It works
+// signs it with the bundle's agent key and writes <dir>/<name>. It works
 // on a bundle created earlier, so a cluster can grow without regenerating or
-// re-signing anything the leader already booted with.
-func AddFollower(dir, name, leaderAddress string) (err error) {
+// re-signing anything the server already booted with.
+func AddAgent(dir, name, serverAddress string) (err error) {
 	if !dnsLabel(name) {
-		return fmt.Errorf("follower name %q must be an RFC1123 label", name)
+		return fmt.Errorf("agent name %q must be an RFC1123 label", name)
 	}
-	if name == leaderDir {
-		return fmt.Errorf("follower name %q is reserved for the leader", name)
+	if name == serverDir {
+		return fmt.Errorf("agent name %q is reserved for the server", name)
 	}
-	leaderData, err := readBounded(filepath.Join(dir, leaderDir, documentFile), MaxDocumentSize)
+	serverData, err := readBounded(filepath.Join(dir, serverDir, documentFile), MaxDocumentSize)
 	if err != nil {
-		return fmt.Errorf("bundle has no leader document: %w", err)
+		return fmt.Errorf("bundle has no server document: %w", err)
 	}
-	leader, err := Parse(leaderData)
+	server, err := Parse(serverData)
 	if err != nil {
-		return fmt.Errorf("bundle leader document: %w", err)
+		return fmt.Errorf("bundle server document: %w", err)
 	}
-	if leader.Role != Leader {
-		return errors.New("bundle leader document does not carry the leader role")
+	if server.Role != Server {
+		return errors.New("bundle server document does not carry the server role")
 	}
-	if name == leader.Node.Name {
-		return fmt.Errorf("follower name %q is the leader's node name", name)
+	if name == server.Node.Name {
+		return fmt.Errorf("agent name %q is the server's node name", name)
 	}
-	key, err := certutil.LoadECPrivateKeyFile(filepath.Join(dir, followerKeyFile))
+	key, err := certutil.LoadECPrivateKeyFile(filepath.Join(dir, agentKeyFile))
 	if err != nil {
-		return fmt.Errorf("bundle follower key: %w", err)
+		return fmt.Errorf("bundle agent key: %w", err)
 	}
 	pub, err := publicKeyPEM(key)
 	if err != nil {
 		return err
 	}
-	if leaderAddress == "" {
-		leaderAddress = leader.Leader.Address
+	if serverAddress == "" {
+		serverAddress = server.Server.Address
 	}
-	if leaderAddress == "" {
-		return errors.New("--leader-address is required: the leader document leaves its address to autodetection, and a follower must be told where its leader is")
+	if serverAddress == "" {
+		return errors.New("--server-address is required: the server document leaves its address to autodetection, and an agent must be told where its server is")
 	}
-	follower := *leader
-	follower.Role = Follower
-	follower.Node = Node{Name: name}
-	follower.RKE2 = RKE2{AgentToken: leader.RKE2.AgentToken}
-	follower.Leader.Address = leaderAddress
-	return writeSignedDocument(filepath.Join(dir, name), follower, key, pub)
+	agent := *server
+	agent.Role = Agent
+	agent.Node = Node{Name: name}
+	agent.RKE2 = RKE2{AgentToken: server.RKE2.AgentToken}
+	agent.Server.Address = serverAddress
+	return writeSignedDocument(filepath.Join(dir, name), agent, key, pub)
 }
 
 // imageFromManifest turns the build's provenanced manifest into the launch

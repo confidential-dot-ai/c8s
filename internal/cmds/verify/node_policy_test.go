@@ -18,8 +18,8 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture contains leader and follower identities. Constrain this
-	// verdict to the leader, as a client connecting to CDS does.
+	// The fixture contains server and agent identities. Constrain this
+	// verdict to the server, as a client connecting to CDS does.
 	entry := plan.refValues.Entries[0]
 	plan.refValues.Entries = []measurementspkg.Entry{entry}
 	bound := func(key []byte) *teetypes.VerificationResult {
@@ -38,11 +38,11 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 		change func(*teetypes.VerificationResult)
 		want   bool
 	}{
-		{"matching leader", func(*teetypes.VerificationResult) {}, true},
+		{"matching server", func(*teetypes.VerificationResult) {}, true},
 		{"wrong image", func(r *teetypes.VerificationResult) { r.Claims.LaunchDigest = strings.Repeat("ff", 48) }, false},
 		{"wrong kernel", func(r *teetypes.VerificationResult) { r.Claims.PlatformData["rtmr_1"] = strings.Repeat("ff", 48) }, false},
 		{"wrong rootfs", func(r *teetypes.VerificationResult) { r.Claims.PlatformData["rtmr_2"] = strings.Repeat("ff", 48) }, false},
-		{"follower on same image", func(r *teetypes.VerificationResult) { *r = *bound([]byte("another role key")) }, false},
+		{"agent on same image", func(r *teetypes.VerificationResult) { *r = *bound([]byte("another role key")) }, false},
 		{"wrong platform", func(r *teetypes.VerificationResult) { r.Platform = teetypes.PlatformSNP }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

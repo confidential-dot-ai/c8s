@@ -72,19 +72,19 @@ type outputFile struct {
 
 func stageVerified(cfg Config, v *Verified) error {
 	doc := &v.document
-	if doc.Role == Leader && doc.Leader.Address == "" {
+	if doc.Role == Server && doc.Server.Address == "" {
 		address := doc.Node.IP
 		if address == "" {
 			var err error
 			address, err = PrimaryIPv4()
 			if err != nil {
-				return fmt.Errorf("resolve leader address: %w", err)
+				return fmt.Errorf("resolve server address: %w", err)
 			}
 		}
 		if err := ValidateIPv4(address, true); err != nil {
-			return fmt.Errorf("resolved leader address: %w", err)
+			return fmt.Errorf("resolved server address: %w", err)
 		}
-		doc.Leader.Address = address
+		doc.Server.Address = address
 		doc.Node.IP = address
 	}
 	peers, err := measurements.Format(v.pins)
@@ -93,7 +93,7 @@ func stageVerified(cfg Config, v *Verified) error {
 	}
 	cds, err := measurements.Format(v.cdsPins)
 	if err != nil {
-		return fmt.Errorf("format leader policy: %w", err)
+		return fmt.Errorf("format server policy: %w", err)
 	}
 	encoded, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -115,7 +115,7 @@ func stageVerified(cfg Config, v *Verified) error {
 		outputs = append(outputs, outputFile{Dir + "/workloads.json", []byte(doc.Workloads)})
 	}
 	marker := agentMarker
-	if doc.Role == Leader {
+	if doc.Role == Server {
 		manifest, err := runtimeManifest(doc, cds)
 		if err != nil {
 			return err
@@ -152,11 +152,11 @@ type roleFragment struct {
 
 func rke2Fragment(doc *Document) roleFragment {
 	out := roleFragment{TokenFile: agentTokenPath, NodeName: doc.Node.Name, NodeIP: doc.Node.IP, NodeExternalIP: doc.Node.ExternalIP}
-	if doc.Role == Leader {
+	if doc.Role == Server {
 		out.TokenFile = serverTokenPath
 		out.AgentTokenFile = agentTokenPath
 	} else {
-		out.Server = "https://" + doc.Leader.Address + ":9345"
+		out.Server = "https://" + doc.Server.Address + ":9345"
 	}
 	return out
 }
@@ -184,7 +184,7 @@ func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
 var chooseHostInterface = utilnet.ChooseHostInterface
 
 // PrimaryIPv4 uses Kubernetes' route-aware host-address selection, so the
-// address published to followers matches the node's own RKE2 registration.
+// address published to agents matches the node's own RKE2 registration.
 func PrimaryIPv4() (string, error) {
 	ip, err := chooseHostInterface()
 	if err != nil {

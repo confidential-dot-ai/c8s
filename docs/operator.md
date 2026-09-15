@@ -94,7 +94,7 @@ namespace carries `confidential.ai/baked=true`.
 
 ### Authenticated launch configuration
 
-A measured node uses one image for both `leader` and `follower`. Each boot
+A measured node uses one image for both `server` and `agent`. Each boot
 requires an ISO labelled `opkeydata` containing exactly the launch inputs
 `pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
 with the operator. `pubkey` is bound to the guest by the platform: the measured
@@ -107,52 +107,52 @@ It accepts an optional `workloads` string containing a complete
 `c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
 service arguments or component toggles; volume support remains disabled.
 
-Use **distinct launch keys for leader and follower roles, and new keys for
+Use **distinct launch keys for server and agent roles, and new keys for
 each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
 launch keys establish cluster separation during peer verification. Keep one
-leader key and one or more follower keys. A follower document must omit
+server key and one or more agent keys. An agent document must omit
 `rke2.serverToken` entirely, including an empty field; it receives only the
-agent token. Leader and agent tokens must differ and contain 64 lowercase
+agent token. Server and agent tokens must differ and contain 64 lowercase
 hexadecimal characters each.
 
-`c8s launch-config new` creates everything one cluster needs: a leader
-launch key, a follower launch key, fresh join tokens, a signed `launch.yaml`
-per node and the client policy that pins the leader. Give it the trusted
-`manifest.json` published with the exact node image, the leader's guest IPv4
-address that every node can reach, and the follower names. On SNP, also pass
+`c8s launch-config new` creates everything one cluster needs: a server
+launch key, an agent launch key, fresh join tokens, a signed `launch.yaml`
+per node and the client policy that pins the server. Give it the trusted
+`manifest.json` published with the exact node image, the server's guest IPv4
+address that every node can reach, and the agent names. On SNP, also pass
 the VM's vCPU count, which selects the launch digest.
 
 ```sh
 c8s launch-config new --out demo --cluster-id demo \
   --image-manifest manifest.json \
-  --leader-address 10.0.0.10 \
-  --follower demo-follower-1 --follower demo-follower-2
+  --server-address 10.0.0.10 \
+  --agent demo-agent-1 --agent demo-agent-2
 # SNP: add --vcpus 8 (the VM shape's launch digest); TDX has one per image.
 
-xorriso -as mkisofs -V opkeydata -o demo/leader.iso demo/leader
-xorriso -as mkisofs -V opkeydata -o demo/demo-follower-1.iso demo/demo-follower-1
+xorriso -as mkisofs -V opkeydata -o demo/server.iso demo/server
+xorriso -as mkisofs -V opkeydata -o demo/demo-agent-1.iso demo/demo-agent-1
 ```
 
 The bundle directory is created new and never reused:
 
 | Path | Purpose |
 |---|---|
-| `demo/leader.key` | leader launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
-| `demo/follower.key` | the follower launch key every follower boots with |
-| `demo/leader.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
-| `demo/leader/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the leader's opkeydata |
-| `demo/<follower>/` | the same three files for each follower |
+| `demo/server.key` | server launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
+| `demo/agent.key` | the agent launch key every agent boots with |
+| `demo/server.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
+| `demo/server/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the server's opkeydata |
+| `demo/<agent>/` | the same three files for each agent |
 
-A follower can be added to a running cluster without touching the leader:
-`c8s launch-config add-follower --bundle demo --name demo-follower-3` derives
-its document from the leader's (same cluster, image, agent token and keys,
-never the server token) and signs it with the follower key. A leader created
-without `--leader-address` autodetects its own; `add-follower` then needs
-`--leader-address`.
+An agent can be added to a running cluster without touching the server:
+`c8s launch-config add-agent --bundle demo --name demo-agent-3` derives
+its document from the server's (same cluster, image, agent token and keys,
+never the server token) and signs it with the agent key. A server created
+without `--server-address` autodetects its own; `add-agent` then needs
+`--server-address`.
 
 The generated document is the strict schema below; edit it only when a field
 the command does not expose is needed, then re-sign with
-`c8s keys sign-launch --key demo/leader.key --force demo/leader/launch.yaml`.
+`c8s keys sign-launch --key demo/server.key --force demo/server/launch.yaml`.
 
 Attach the corresponding ISO to each VM along with its required scratch
 disk, booting the **same image and supported VM shape** for both roles.
@@ -163,9 +163,9 @@ requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
 pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
 RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
 
-For a leader, `leader.address` may be omitted: staging uses `node.ip`, or
-selects the primary IPv4 address if that is also omitted. A follower must
-always carry its leader's reachable IPv4 address. `node.ip` is optional
+For a server, `server.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. An agent must
+always carry its server's reachable IPv4 address. `node.ip` is optional
 (`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
 IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
 to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
@@ -175,15 +175,15 @@ and CORS overrides are not launch settings in this image.
 For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
 
 ```sh
-kubectl -n YOUR_NAMESPACE create secret generic demo-leader-launch \
-  --from-file=pubkey=demo/leader/pubkey \
-  --from-file=launch.yaml=demo/leader/launch.yaml \
-  --from-file=launch.yaml.sig=demo/leader/launch.yaml.sig
+kubectl -n YOUR_NAMESPACE create secret generic demo-server-launch \
+  --from-file=pubkey=demo/server/pubkey \
+  --from-file=launch.yaml=demo/server/launch.yaml \
+  --from-file=launch.yaml.sig=demo/server/launch.yaml.sig
 ```
 
 Reference that Secret in the VM's volume with
-`secret: {secretName: demo-leader-launch, volumeLabel: opkeydata}` and attach
-it as a read-only virtio disk. Repeat with the follower's files and a separate
+`secret: {secretName: demo-server-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the agent's files and a separate
 Secret. On SNP, the launcher must additionally commit the corresponding
 public-key hash as HOST_DATA; attaching the disk alone is insufficient.
 
@@ -199,16 +199,16 @@ Changing role or launch configuration requires a relaunch with a newly
 signed bundle and the corresponding role's hardware-bound public key.
 
 The verified files live in root-only `/run/confos/launch`. `peers.json`
-contains the software/key tuples for this cluster's leader and permitted
-followers; `cds.json` contains only its leader. Their shared measurement-file
+contains the software/key tuples for this cluster's server and permitted
+agents; `cds.json` contains only its server. Their shared measurement-file
 schema carries `operator_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
-CDS clients require the authorized leader despite identical software images.
-The leader publishes only the CDS URL and leader policy to the public
+CDS clients require the authorized server despite identical software images.
+The server publishes only the CDS URL and server policy to the public
 `c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
 and private keys do not enter that ConfigMap. The operator forwards the full
-leader policy to injected workload helpers. NRI and host CDS clients use the
-same leader policy directly from the staged files.
+server policy to injected workload helpers. NRI and host CDS clients use the
+same server policy directly from the staged files.
 
 ### Chart-managed defaults
 
@@ -651,7 +651,7 @@ manifest is baked into the read-only root and everything RKE2 writes, the
 cluster state included, lives on the scratch disk, which is re-encrypted with
 a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
 are lost with it, so there is no in-guest switch that survives a restart, by
-design. To revoke durably, relaunch with a rotated leader launch key and
+design. To revoke durably, relaunch with a rotated server launch key and
 updated signed documents and peer key sets. Every boot requires valid
 `opkeydata`; omitting it prevents the node from starting. A certificate already
 issued remains usable against its original live cluster until expiry or an

@@ -86,82 +86,82 @@ func stageBundleNode(t *testing.T, dir, node string) {
 	}
 }
 
-func TestNewBundleBootsLeaderAndFollowersOnBothPlatforms(t *testing.T) {
+func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 	for _, platform := range []string{"tdx", "snp"} {
 		t.Run(platform, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "bundle")
 			args := []string{"new", "--out", dir, "--cluster-id", "demo", "--image-manifest", writeManifest(t, platform),
-				"--leader-address", "10.0.0.10", "--follower", "demo-f1", "--follower", "demo-f2"}
+				"--server-address", "10.0.0.10", "--agent", "demo-f1", "--agent", "demo-f2"}
 			if platform == "snp" {
 				args = append(args, "--vcpus", "8")
 			}
 			if err := runBundleCmd(t, args...); err != nil {
 				t.Fatal(err)
 			}
-			leader, _ := readBundleDocument(t, dir, leaderDir)
-			if leader.Role != Leader || leader.Node.Name != "demo-leader" || leader.ClusterID != "demo" || leader.TLSSAN != defaultTLSSAN {
-				t.Fatalf("unexpected leader document: %+v", leader)
+			server, _ := readBundleDocument(t, dir, serverDir)
+			if server.Role != Server || server.Node.Name != "demo-server" || server.ClusterID != "demo" || server.TLSSAN != defaultTLSSAN {
+				t.Fatalf("unexpected server document: %+v", server)
 			}
-			if leader.Image.Platform != platform {
-				t.Fatalf("leader image platform %q", leader.Image.Platform)
+			if server.Image.Platform != platform {
+				t.Fatalf("server image platform %q", server.Image.Platform)
 			}
 			if platform == "tdx" {
-				if leader.Image.Measurement != strings.Repeat("11", 48) || leader.Image.RTMRs[1] != strings.Repeat("22", 48) || leader.Image.RTMRs[2] != strings.Repeat("33", 48) {
-					t.Fatalf("TDX pins not taken from the manifest: %+v", leader.Image)
+				if server.Image.Measurement != strings.Repeat("11", 48) || server.Image.RTMRs[1] != strings.Repeat("22", 48) || server.Image.RTMRs[2] != strings.Repeat("33", 48) {
+					t.Fatalf("TDX pins not taken from the manifest: %+v", server.Image)
 				}
-			} else if leader.Image.Measurement != strings.Repeat("55", 48) || len(leader.Image.RTMRs) != 0 {
-				t.Fatalf("SNP pin is not the 8-vCPU variant: %+v", leader.Image)
+			} else if server.Image.Measurement != strings.Repeat("55", 48) || len(server.Image.RTMRs) != 0 {
+				t.Fatalf("SNP pin is not the 8-vCPU variant: %+v", server.Image)
 			}
-			if leader.RKE2.ServerToken == leader.RKE2.AgentToken || !tokenRE.MatchString(leader.RKE2.ServerToken) {
-				t.Fatalf("tokens not generated independently: %+v", leader.RKE2)
+			if server.RKE2.ServerToken == server.RKE2.AgentToken || !tokenRE.MatchString(server.RKE2.ServerToken) {
+				t.Fatalf("tokens not generated independently: %+v", server.RKE2)
 			}
 			for _, name := range []string{"demo-f1", "demo-f2"} {
-				follower, data := readBundleDocument(t, dir, name)
-				if follower.Role != Follower || follower.Node.Name != name || follower.Leader.Address != "10.0.0.10" {
-					t.Fatalf("unexpected follower %s: %+v", name, follower)
+				agent, data := readBundleDocument(t, dir, name)
+				if agent.Role != Agent || agent.Node.Name != name || agent.Server.Address != "10.0.0.10" {
+					t.Fatalf("unexpected agent %s: %+v", name, agent)
 				}
-				if bytes.Contains(data, []byte(leader.RKE2.ServerToken)) || bytes.Contains(data, []byte("serverToken")) {
-					t.Fatalf("follower %s carries the server token", name)
+				if bytes.Contains(data, []byte(server.RKE2.ServerToken)) || bytes.Contains(data, []byte("serverToken")) {
+					t.Fatalf("agent %s carries the server token", name)
 				}
-				if follower.RKE2.AgentToken != leader.RKE2.AgentToken || !reflect.DeepEqual(follower.Image, leader.Image) ||
-					follower.Leader.OperatorPublicKey != leader.Leader.OperatorPublicKey ||
-					follower.FollowerOperatorPublicKeys[0] != leader.FollowerOperatorPublicKeys[0] {
-					t.Fatalf("follower %s diverges from the leader's cluster facts", name)
+				if agent.RKE2.AgentToken != server.RKE2.AgentToken || !reflect.DeepEqual(agent.Image, server.Image) ||
+					agent.Server.OperatorPublicKey != server.Server.OperatorPublicKey ||
+					agent.AgentOperatorPublicKeys[0] != server.AgentOperatorPublicKeys[0] {
+					t.Fatalf("agent %s diverges from the server's cluster facts", name)
 				}
 				pub, _ := os.ReadFile(filepath.Join(dir, name, pubkeyFile))
-				if string(pub) != leader.FollowerOperatorPublicKeys[0] {
-					t.Fatalf("follower %s pubkey is not the trusted follower key", name)
+				if string(pub) != server.AgentOperatorPublicKeys[0] {
+					t.Fatalf("agent %s pubkey is not the trusted agent key", name)
 				}
 			}
-			// The leader's pubkey is the exact PEM the leader document names.
-			pub, _ := os.ReadFile(filepath.Join(dir, leaderDir, pubkeyFile))
-			if string(pub) != leader.Leader.OperatorPublicKey {
-				t.Fatal("leader pubkey differs from leader.operatorPublicKey")
+			// The server's pubkey is the exact PEM the server document names.
+			pub, _ := os.ReadFile(filepath.Join(dir, serverDir, pubkeyFile))
+			if string(pub) != server.Server.OperatorPublicKey {
+				t.Fatal("server pubkey differs from server.operatorPublicKey")
 			}
-			for _, node := range []string{leaderDir, "demo-f1", "demo-f2"} {
+			for _, node := range []string{serverDir, "demo-f1", "demo-f2"} {
 				stageBundleNode(t, dir, node)
 			}
-			// leader.key is the key the leader document was signed with, so it
+			// server.key is the key the server document was signed with, so it
 			// also serves get-kubeconfig --operator-key.
-			key, err := certutil.LoadECPrivateKeyFile(filepath.Join(dir, leaderKeyFile))
+			key, err := certutil.LoadECPrivateKeyFile(filepath.Join(dir, serverKeyFile))
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantPub, _ := publicKeyPEM(key)
-			if wantPub != leader.Leader.OperatorPublicKey {
-				t.Fatal("leader.key does not match the leader's launch public key")
+			if wantPub != server.Server.OperatorPublicKey {
+				t.Fatal("server.key does not match the server's launch public key")
 			}
-			// The client policy pins exactly the leader entry Stage derives.
-			policy, err := measurements.Load(filepath.Join(dir, leaderPolicy))
+			// The client policy pins exactly the server entry Stage derives.
+			policy, err := measurements.Load(filepath.Join(dir, serverPolicy))
 			if err != nil {
 				t.Fatal(err)
 			}
-			want, _ := leader.referenceValues()
+			want, _ := server.referenceValues()
 			if len(policy.Entries) != 1 || policy.TEE != want.TEE || !bytes.Equal(policy.Entries[0].OperatorKey, want.Entries[0].OperatorKey) ||
 				!bytes.Equal(policy.Entries[0].Digest, want.Entries[0].Digest) {
-				t.Fatalf("leader.json pins %+v, want the leader entry %+v", policy, want.Entries[0])
+				t.Fatalf("server.json pins %+v, want the server entry %+v", policy, want.Entries[0])
 			}
-			for _, f := range []string{leaderKeyFile, followerKeyFile, filepath.Join(leaderDir, documentFile), filepath.Join("demo-f1", signatureFile)} {
+			for _, f := range []string{serverKeyFile, agentKeyFile, filepath.Join(serverDir, documentFile), filepath.Join("demo-f1", signatureFile)} {
 				info, err := os.Stat(filepath.Join(dir, f))
 				if err != nil {
 					t.Fatal(err)
@@ -174,30 +174,30 @@ func TestNewBundleBootsLeaderAndFollowersOnBothPlatforms(t *testing.T) {
 	}
 }
 
-func TestAddFollowerExtendsAnExistingBundle(t *testing.T) {
+func TestAddAgentExtendsAnExistingBundle(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bundle")
 	if err := runBundleCmd(t, "new", "--out", dir, "--cluster-id", "demo", "--image-manifest", writeManifest(t, "tdx")); err != nil {
 		t.Fatal(err)
 	}
-	if err := runBundleCmd(t, "add-follower", "--bundle", dir, "--name", "late"); err == nil || !strings.Contains(err.Error(), "--leader-address") {
-		t.Fatalf("a follower of an autodetecting leader needs an explicit address, got %v", err)
+	if err := runBundleCmd(t, "add-agent", "--bundle", dir, "--name", "late"); err == nil || !strings.Contains(err.Error(), "--server-address") {
+		t.Fatalf("an agent of an autodetecting server needs an explicit address, got %v", err)
 	}
-	if err := runBundleCmd(t, "add-follower", "--bundle", dir, "--name", "late", "--leader-address", "10.0.0.10"); err != nil {
+	if err := runBundleCmd(t, "add-agent", "--bundle", dir, "--name", "late", "--server-address", "10.0.0.10"); err != nil {
 		t.Fatal(err)
 	}
-	leader, _ := readBundleDocument(t, dir, leaderDir)
-	follower, _ := readBundleDocument(t, dir, "late")
-	if follower.Role != Follower || follower.Leader.Address != "10.0.0.10" || follower.RKE2.AgentToken != leader.RKE2.AgentToken {
-		t.Fatalf("unexpected late follower: %+v", follower)
+	server, _ := readBundleDocument(t, dir, serverDir)
+	agent, _ := readBundleDocument(t, dir, "late")
+	if agent.Role != Agent || agent.Server.Address != "10.0.0.10" || agent.RKE2.AgentToken != server.RKE2.AgentToken {
+		t.Fatalf("unexpected late agent: %+v", agent)
 	}
 	stageBundleNode(t, dir, "late")
-	for _, bad := range []string{"late", leaderDir, "demo-leader", "Not_A_Label"} {
-		if err := runBundleCmd(t, "add-follower", "--bundle", dir, "--name", bad, "--leader-address", "10.0.0.10"); err == nil {
-			t.Fatalf("add-follower accepted %q", bad)
+	for _, bad := range []string{"late", serverDir, "demo-server", "Not_A_Label"} {
+		if err := runBundleCmd(t, "add-agent", "--bundle", dir, "--name", bad, "--server-address", "10.0.0.10"); err == nil {
+			t.Fatalf("add-agent accepted %q", bad)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, leaderDir, documentFile)); err != nil {
-		t.Fatal("a rejected follower must not disturb the bundle:", err)
+	if _, err := os.Stat(filepath.Join(dir, serverDir, documentFile)); err != nil {
+		t.Fatal("a rejected agent must not disturb the bundle:", err)
 	}
 }
 
@@ -212,10 +212,10 @@ func TestNewBundleRefusesBadInputsAndLeavesNothingBehind(t *testing.T) {
 		{"snp without vcpus", []string{"--image-manifest", snp}, "--vcpus is required"},
 		{"snp unknown vcpus", []string{"--image-manifest", snp, "--vcpus", "6"}, "no SNP launch digest"},
 		{"tdx with vcpus", []string{"--image-manifest", tdx, "--vcpus", "4"}, "SNP manifests only"},
-		{"follower without address", []string{"--image-manifest", tdx, "--follower", "f1"}, "--leader-address is required"},
+		{"agent without address", []string{"--image-manifest", tdx, "--agent", "f1"}, "--server-address is required"},
 		{"bad cluster id", []string{"--image-manifest", tdx, "--cluster-id", "Demo"}, "clusterID"},
-		{"bad follower name", []string{"--image-manifest", tdx, "--leader-address", "10.0.0.10", "--follower", "leader"}, "reserved"},
-		{"loopback leader", []string{"--image-manifest", tdx, "--leader-address", "127.0.0.1"}, "leader.address"},
+		{"bad agent name", []string{"--image-manifest", tdx, "--server-address", "10.0.0.10", "--agent", "server"}, "reserved"},
+		{"loopback server", []string{"--image-manifest", tdx, "--server-address", "127.0.0.1"}, "server.address"},
 		{"not a manifest", []string{"--image-manifest", filepath.Join(base, "missing.json")}, "--image-manifest"},
 	}
 	for _, tc := range cases {
@@ -251,9 +251,9 @@ func TestNewBundleCarriesAnInitialAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leader, _ := readBundleDocument(t, dir, leaderDir)
-	if leader.TLSSAN != "cluster.example" || leader.Workloads == "" {
-		t.Fatalf("SAN or workloads not carried: %+v", leader)
+	server, _ := readBundleDocument(t, dir, serverDir)
+	if server.TLSSAN != "cluster.example" || server.Workloads == "" {
+		t.Fatalf("SAN or workloads not carried: %+v", server)
 	}
-	stageBundleNode(t, dir, leaderDir)
+	stageBundleNode(t, dir, serverDir)
 }

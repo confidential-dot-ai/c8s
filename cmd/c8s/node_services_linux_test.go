@@ -11,7 +11,7 @@ import (
 // Exercise the real command registry: a typo in a fixed service argument must
 // fail CI rather than leave the measured image in a systemd restart loop.
 func TestNodeServiceArgumentsMatchCommands(t *testing.T) {
-	doc := &launchconfig.Document{Role: launchconfig.Leader, Image: launchconfig.Image{Platform: "tdx"}, Leader: launchconfig.LeaderConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
+	doc := &launchconfig.Document{Role: launchconfig.Server, Image: launchconfig.Image{Platform: "tdx"}, Server: launchconfig.ServerConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
 	for _, name := range []string{"cds", "mesh", "mesh-sync", "get-cert", "cds-attest", "allowlist-proxy", "attest-proxy"} {
 		t.Run(name, func(t *testing.T) {
 			args, err := nodeservices.Arguments(name, doc, "192.0.2.10")

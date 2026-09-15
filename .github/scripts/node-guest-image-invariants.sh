@@ -125,7 +125,7 @@ fi
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
 tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
-              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json' \
+              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json' \
               'bash node-guest-image/tests/apparmor-runtime-test.sh' \
               'import the exact published image into a private root PVC' \
               'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
@@ -379,7 +379,7 @@ for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-pro
       fi ;;
     *)
       if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must be leader-only"
+        echo "::error::$service must be server-only"
         exit 1
       fi ;;
   esac
@@ -393,7 +393,7 @@ require_launch_dependency "${nginx_files[0]}"
 if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "${nginx_files[0]}" \
    || ! grep -qxF "enable ${nginx_files[0]##*/}" "$preset" \
    || ! grep -qxF 'disable nginx.service' "$preset"; then
-  echo "::error::only the authenticated leader nginx service may be enabled"
+  echo "::error::only the authenticated server nginx service may be enabled"
   exit 1
 fi
 require_launch_dependency "$units/cred-release.service"

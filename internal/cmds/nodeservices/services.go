@@ -21,12 +21,12 @@ const (
 )
 
 // Arguments uses a typed document that has already passed LoadStaged. Every
-// CDS client receives the leader-only policy; peer listeners use the peer policy.
+// CDS client receives the server-only policy; peer listeners use the peer policy.
 func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]string, error) {
 	if d == nil {
 		return nil, fmt.Errorf("missing staged launch configuration")
 	}
-	if d.Role != launchconfig.Leader && d.Role != launchconfig.Follower {
+	if d.Role != launchconfig.Server && d.Role != launchconfig.Agent {
 		return nil, fmt.Errorf("invalid staged role")
 	}
 	switch {
@@ -35,8 +35,8 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 			return nil, fmt.Errorf("mesh requires the routable node IPv4 address")
 		}
 	case service == "attest-proxy":
-	case d.Role != launchconfig.Leader:
-		return nil, fmt.Errorf("%s is a leader-only service", service)
+	case d.Role != launchconfig.Server:
+		return nil, fmt.Errorf("%s is a server-only service", service)
 	}
 	cds := "--cds-url=" + d.CDSURL()
 	api := "--attestation-api-url=" + apiURL

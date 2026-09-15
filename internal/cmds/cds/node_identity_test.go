@@ -13,17 +13,17 @@ import (
 func TestAttestKeepsNodeOperatorBoundToImage(t *testing.T) {
 	digest := make([]byte, 48)
 	digest[0] = 0xaa
-	leader, follower := []byte("leader key"), []byte("follower key")
+	server, agent := []byte("server key"), []byte("agent key")
 	stub := newStubAttestationApi(t, hex.EncodeToString(digest))
 	h := newTestAttestHandler(t, stub.URL(), nil)
-	h.NodeEntries = []measurements.Entry{{Name: "leader", Digest: digest, OperatorKey: leader}}
+	h.NodeEntries = []measurements.Entry{{Name: "server", Digest: digest, OperatorKey: server}}
 	csr, _ := generateCSR(t)
 	for _, tc := range []struct {
 		name   string
 		key    []byte
 		status int
 	}{
-		{"leader", leader, http.StatusOK}, {"same image wrong operator", follower, http.StatusForbidden},
+		{"server", server, http.StatusOK}, {"same image wrong operator", agent, http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			verdict := mockapi.PassingVerdict(hex.EncodeToString(digest))

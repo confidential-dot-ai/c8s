@@ -14,28 +14,28 @@ import (
 )
 
 func document(role launchconfig.Role) *launchconfig.Document {
-	return &launchconfig.Document{Role: role, Image: launchconfig.Image{Platform: "tdx"}, Leader: launchconfig.LeaderConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
+	return &launchconfig.Document{Role: role, Image: launchconfig.Image{Platform: "tdx"}, Server: launchconfig.ServerConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
 }
 
-func TestFollowerCannotRunLeaderServices(t *testing.T) {
+func TestAgentCannotRunServerServices(t *testing.T) {
 	for _, name := range []string{"cds", "get-cert", "cds-attest", "allowlist-proxy"} {
-		if _, err := Arguments(name, document(launchconfig.Follower), "192.0.2.11"); err == nil {
-			t.Errorf("follower can run %s", name)
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err == nil {
+			t.Errorf("agent can run %s", name)
 		}
 	}
 	for _, name := range []string{"mesh", "mesh-sync", "attest-proxy"} {
-		if _, err := Arguments(name, document(launchconfig.Follower), "192.0.2.11"); err != nil {
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if _, err := Arguments("arbitrary", document(launchconfig.Leader), ""); err == nil {
+	if _, err := Arguments("arbitrary", document(launchconfig.Server), ""); err == nil {
 		t.Fatal("unknown service accepted")
 	}
 }
 
-func TestEveryCDSClientUsesLeaderPolicy(t *testing.T) {
+func TestEveryCDSClientUsesServerPolicy(t *testing.T) {
 	for _, name := range []string{"mesh", "get-cert", "allowlist-proxy"} {
-		args, err := Arguments(name, document(launchconfig.Leader), "192.0.2.10")
+		args, err := Arguments(name, document(launchconfig.Server), "192.0.2.10")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,14 +48,14 @@ func TestEveryCDSClientUsesLeaderPolicy(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("%s has no complete leader policy: %v", name, args)
+			t.Errorf("%s has no complete server policy: %v", name, args)
 		}
 		if !slices.Contains(args, "--cds-url=https://192.0.2.10:30808") {
-			t.Errorf("%s ignores leader endpoint", name)
+			t.Errorf("%s ignores server endpoint", name)
 		}
 	}
 	for _, ip := range []string{"", "0.0.0.0", "127.0.0.1", "192.0.2.10 --other-flag"} {
-		if _, err := Arguments("mesh", document(launchconfig.Leader), ip); err == nil {
+		if _, err := Arguments("mesh", document(launchconfig.Server), ip); err == nil {
 			t.Errorf("accepted node IP %q", ip)
 		}
 	}
@@ -79,8 +79,8 @@ func prepareRoot(t *testing.T) string {
 	return root
 }
 
-func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
-	for _, role := range []launchconfig.Role{launchconfig.Leader, launchconfig.Follower} {
+func TestPreparePreservesFloorAndPinsServerBeforeRKE2(t *testing.T) {
+	for _, role := range []launchconfig.Role{launchconfig.Server, launchconfig.Agent} {
 		t.Run(string(role), func(t *testing.T) {
 			root := prepareRoot(t)
 			doc := document(role)
@@ -110,10 +110,10 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 				t.Fatal("flat pins retained")
 			}
 			_, err = os.Stat(filepath.Join(root, launchDir, "allowlist-seed.json"))
-			if role == launchconfig.Follower && !os.IsNotExist(err) {
-				t.Fatal("follower received leader seed")
+			if role == launchconfig.Agent && !os.IsNotExist(err) {
+				t.Fatal("agent received server seed")
 			}
-			if role == launchconfig.Leader && err != nil {
+			if role == launchconfig.Server && err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -122,7 +122,7 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 
 func TestPrepareCannotReplaceBakedWorkload(t *testing.T) {
 	root := prepareRoot(t)
-	doc := document(launchconfig.Leader)
+	doc := document(launchconfig.Server)
 	doc.Workloads = seed
 	if err := Prepare(root, doc); err == nil || !strings.Contains(err.Error(), "replaces a baked component") {
 		t.Fatalf("got %v", err)
@@ -147,7 +147,7 @@ func TestPrepareCannotReplaceBakedWorkload(t *testing.T) {
 
 func TestPublishNodeIPHonorsAuthenticatedAddress(t *testing.T) {
 	root := t.TempDir()
-	doc := document(launchconfig.Follower)
+	doc := document(launchconfig.Agent)
 	doc.Node.IP = "192.0.2.22"
 	if err := PublishNodeIP(root, doc); err != nil {
 		t.Fatal(err)

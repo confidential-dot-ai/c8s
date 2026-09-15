@@ -301,7 +301,7 @@ runs:
       # The CLI comes from the paired source; baked services stay in the image.
       c8s --version || true
 
-  - name: sign the leader launch and attach opkeydata
+  - name: sign the server launch and attach opkeydata
     # The same exact public PEM is signed into launch.yaml, bound by the
     # measured initrd into RTMR3, and pinned by the external clients.
     shell: bash
@@ -309,15 +309,15 @@ runs:
       set -euo pipefail
       # The refs ConfigMap is the pinned image tuple here (the published
       # manifest is resolved after boot); hand it to the generator in the
-      # manifest shape get-kubeconfig reads. leader.key is the run's operator key.
+      # manifest shape get-kubeconfig reads. server.key is the run's operator key.
       jq -n --arg mrtd "$mrtd" --arg rtmr1 "$rtmr1" --arg rtmr2 "$rtmr2" \
         '{tdx: {mrtd: $mrtd, rtmr1: $rtmr1, rtmr2: $rtmr2}}' > /tmp/pinned-manifest.json
-      c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --leader-name c8s-node \
+      c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
         --image-manifest /tmp/pinned-manifest.json
       kubectl -n "$NS" create secret generic "$VM-opkey" \
-        --from-file=pubkey=/tmp/launch-data/leader/pubkey \
-        --from-file=launch.yaml=/tmp/launch-data/leader/launch.yaml \
-        --from-file=launch.yaml.sig=/tmp/launch-data/leader/launch.yaml.sig \
+        --from-file=pubkey=/tmp/launch-data/server/pubkey \
+        --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
+        --from-file=launch.yaml.sig=/tmp/launch-data/server/launch.yaml.sig \
         --dry-run=client -o yaml | kubectl apply -f -
 
   - name: boot the TDX CVM
@@ -518,7 +518,7 @@ runs:
     shell: bash
     run: |
       set -euo pipefail
-      c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/leader.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
+      c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/server.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
       [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
       WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
       [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
@@ -545,7 +545,7 @@ runs:
       export KUBECONFIG=/tmp/guest.kubeconfig
       export C8S_NODE_IMAGE=1
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
       if ! bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"; then
         # components-ready prints the listing and a describe tail; the reason a
         # pod is stuck is in its containers' logs, init containers included.
@@ -564,14 +564,14 @@ runs:
 
   - name: assert the image floor denies, then opens to a signed write
     # Baked nginx fronts /allowlist; clients pin the complete image tuple
-    # together with this launch's leader operator key.
+    # together with this launch's server operator key.
     shell: bash
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-      export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+      export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
       bash "$C8S_SOURCE_DIR/test/e2e/allowlist-enforcement.sh"
 
   - name: assert a confidential workload runs with an injected cert
@@ -580,8 +580,8 @@ runs:
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-      export C8S_OPERATOR_KEY=/tmp/launch-data/leader.key
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+      export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
       bash "$C8S_SOURCE_DIR/test/e2e/cw-workload.sh"
 
   - name: assert confidential workload label integrity

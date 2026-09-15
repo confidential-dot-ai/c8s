@@ -63,8 +63,8 @@ case "$1 $2" in
     [[ $(cat "$signature") == valid-test-signature ]]
     rm -f /run/confos/role-server /run/confos/role-agent
     case "$(cat "$config")" in
-        leader) : > /run/confos/role-server ;;
-        follower) : > /run/confos/role-agent ;;
+        server) : > /run/confos/role-server ;;
+        agent) : > /run/confos/role-agent ;;
         *) exit 31 ;;
     esac
     ;;

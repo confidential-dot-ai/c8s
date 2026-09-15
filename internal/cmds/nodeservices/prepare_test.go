@@ -24,7 +24,7 @@ func TestNodeIPRoundTrip(t *testing.T) {
 	if _, err := readNodeIP(root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing node IP: %v", err)
 	}
-	doc := document(launchconfig.Follower)
+	doc := document(launchconfig.Agent)
 	doc.Node.IP = "192.0.2.22"
 	if err := PublishNodeIP(root, doc); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestNodeIPRoundTrip(t *testing.T) {
 func TestPublishNodeIPResolvesTheHostRoute(t *testing.T) {
 	old := primaryIPv4
 	t.Cleanup(func() { primaryIPv4 = old })
-	doc := document(launchconfig.Follower)
+	doc := document(launchconfig.Agent)
 
 	primaryIPv4 = func() (string, error) { return "", errors.New("no default route") }
 	if err := PublishNodeIP(t.TempDir(), doc); err == nil || !strings.Contains(err.Error(), "no default route") {
@@ -82,14 +82,14 @@ func TestPrepareFailsClosedOnBrokenBakedInputs(t *testing.T) {
 		break_ func(root string)
 		want   string
 	}{
-		{"missing policy", launchconfig.Follower, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/image-policy.yaml")) }, "image-policy.yaml"},
-		{"invalid policy yaml", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "allowlist: [") }, "baked NRI policy"},
-		{"policy without allowlist", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "platform: tdx\n") }, "missing allowlist"},
-		{"policy without pull", launchconfig.Follower, func(root string) { overwrite(root, "image-policy.yaml", "allowlist:\n  base: {}\n") }, "missing pull"},
-		{"missing nginx template", launchconfig.Leader, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/nginx.conf.in")) }, "nginx.conf.in"},
-		{"nginx template without hostname", launchconfig.Leader, func(root string) { overwrite(root, "nginx.conf.in", "server_name other;\n") }, "missing hostname"},
-		{"missing seed", launchconfig.Leader, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/allowlist-seed.json")) }, "allowlist-seed.json"},
-		{"invalid seed", launchconfig.Leader, func(root string) { overwrite(root, "allowlist-seed.json", "{") }, "baked workload seed"},
+		{"missing policy", launchconfig.Agent, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/image-policy.yaml")) }, "image-policy.yaml"},
+		{"invalid policy yaml", launchconfig.Agent, func(root string) { overwrite(root, "image-policy.yaml", "allowlist: [") }, "baked NRI policy"},
+		{"policy without allowlist", launchconfig.Agent, func(root string) { overwrite(root, "image-policy.yaml", "platform: tdx\n") }, "missing allowlist"},
+		{"policy without pull", launchconfig.Agent, func(root string) { overwrite(root, "image-policy.yaml", "allowlist:\n  base: {}\n") }, "missing pull"},
+		{"missing nginx template", launchconfig.Server, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/nginx.conf.in")) }, "nginx.conf.in"},
+		{"nginx template without hostname", launchconfig.Server, func(root string) { overwrite(root, "nginx.conf.in", "server_name other;\n") }, "missing hostname"},
+		{"missing seed", launchconfig.Server, func(root string) { os.Remove(filepath.Join(root, "usr/lib/c8s/allowlist-seed.json")) }, "allowlist-seed.json"},
+		{"invalid seed", launchconfig.Server, func(root string) { overwrite(root, "allowlist-seed.json", "{") }, "baked workload seed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestPrepareFailsClosedOnBrokenBakedInputs(t *testing.T) {
 
 func TestPrepareRejectsInvalidLaunchWorkloads(t *testing.T) {
 	root := prepareRoot(t)
-	doc := document(launchconfig.Leader)
+	doc := document(launchconfig.Server)
 	doc.Workloads = `{"schema":"c8s.allowlist/v1","workloads":`
 	err := Prepare(root, doc)
 	if err == nil || !strings.Contains(err.Error(), "launch workloads") {

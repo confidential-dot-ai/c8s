@@ -106,7 +106,7 @@ func init() {
 }
 
 // operatorMeasurementsPolicy preserves each image's runtime and operator-key
-// bindings instead of flattening independently authorized leader identities.
+// bindings instead of flattening independently authorized server identities.
 func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, error) {
 	if path == "" {
 		return "", nil

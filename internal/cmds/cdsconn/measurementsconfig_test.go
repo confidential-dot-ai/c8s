@@ -38,13 +38,13 @@ func TestOperatorCLIConfigRejectsDowngrades(t *testing.T) {
 	}
 }
 
-func TestOperatorCLIVerifierRejectsFollowerAndCrossedTuple(t *testing.T) {
+func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 	all, err := measurements.Load(nodePolicyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pins := measurements.ReferenceValues{TEE: all.TEE, Entries: all.Entries[:1]}
-	leader := pins.Entries[0]
+	server := pins.Entries[0]
 	var report *teetypes.VerificationResult
 	o := Options{MeasurementsConfig: nodePolicyPath, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return report, nil
@@ -56,17 +56,17 @@ func TestOperatorCLIVerifierRejectsFollowerAndCrossedTuple(t *testing.T) {
 		register []byte
 		accept   bool
 	}{
-		{"leader", leader.OperatorKey, leader.RTMRs[1], true},
-		{"follower same image", all.Entries[1].OperatorKey, leader.RTMRs[1], false},
-		{"leader wrong image registers", leader.OperatorKey, leader.RTMRs[2], false},
+		{"server", server.OperatorKey, server.RTMRs[1], true},
+		{"agent same image", all.Entries[1].OperatorKey, server.RTMRs[1], false},
+		{"server wrong image registers", server.OperatorKey, server.RTMRs[2], false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			seed := runtimemeasure.Seed(test.key)
 			report = &teetypes.VerificationResult{Platform: teetypes.PlatformTDX, SignatureValid: true}
-			report.Claims.LaunchDigest = hex.EncodeToString(leader.Digest)
+			report.Claims.LaunchDigest = hex.EncodeToString(server.Digest)
 			report.Claims.PlatformData = map[string]any{
 				"rtmr_1": hex.EncodeToString(test.register),
-				"rtmr_2": hex.EncodeToString(leader.RTMRs[2]),
+				"rtmr_2": hex.EncodeToString(server.RTMRs[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
 			_, err := verify(context.Background(), "tdx", nil, localverify.Params{})

@@ -29,7 +29,7 @@ with the placeholder intact, so its own container must leave `HOST_IP` unset.
 `c8s.attestationApiConfig` takes a dict with `root` and renders the API's TOML.
 
 With `node.bakedServices=true`, the attester and proxy run as systemd services.
-The operator obtains the signed leader endpoint and complete CDS identity policy
+The operator obtains the signed server endpoint and complete CDS identity policy
 from `c8s-node-runtime`; workload sidecars retain NRI socket injection.
 
 `c8s.cdsURL` builds the in-cluster CDS Service URL; `c8s.trustRootURL` delegates

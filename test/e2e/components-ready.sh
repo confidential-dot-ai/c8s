@@ -12,7 +12,7 @@ set -euo pipefail
 ns=c8s-system
 
 if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
-  : "${C8S_MEASUREMENTS_CONFIG:?node-image checks require the full leader policy}"
+  : "${C8S_MEASUREMENTS_CONFIG:?node-image checks require the full server policy}"
   : "${C8S_ALLOWLIST_URL:?node-image checks require the measured CDS front door}"
   kubectl -n "$ns" rollout status deployment/c8s-operator --timeout=8m
   runtime=$(kubectl -n "$ns" get configmap c8s-node-runtime -o json)
@@ -20,7 +20,7 @@ if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
     || fail "node runtime ConfigMap has no concrete CDS URL"
   expected=$(jq -cS 'del(.measurements[].name)' "$C8S_MEASUREMENTS_CONFIG")
   actual=$(jq -cer '.data["cds.json"] | fromjson | del(.measurements[].name)' <<< "$runtime" | jq -cS .)
-  [ "$actual" = "$expected" ] || fail "node runtime lost or changed the leader image/operator pins"
+  [ "$actual" = "$expected" ] || fail "node runtime lost or changed the server image/operator pins"
   chart=$(kubectl -n kube-system get helmcharts.helm.cattle.io c8s --ignore-not-found -o name)
   [ -z "$chart" ] || fail "node image unexpectedly started a runtime c8s Helm installation"
 fi
@@ -73,7 +73,7 @@ if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
     fi
     sleep 5
   done
-  [ "$ready" = 1 ] || fail "measured CDS/front-door services did not become ready under the leader policy"
+  [ "$ready" = 1 ] || fail "measured CDS/front-door services did not become ready under the server policy"
 fi
 
 echo "PASS: all $total c8s Kubernetes components Running"
