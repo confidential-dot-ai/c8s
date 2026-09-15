@@ -552,8 +552,12 @@ runs:
         for p in $(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") print $1}'); do
           echo "::group::$p"
           kubectl -n c8s-system describe pod "$p" 2>&1 | sed -n '/^Events:/,$p' | tail -15
-          kubectl -n c8s-system logs "$p" --all-containers --tail=60 2>&1
-          kubectl -n c8s-system logs "$p" --all-containers --previous --tail=30 2>&1 || true
+          # The node image's kubelet serves no debugging handlers, so pods/log
+          # is refused; exit codes and termination messages are still in status.
+          kubectl -n c8s-system get pod "$p" -o json 2>/dev/null | jq -r '
+            (.status.initContainerStatuses // []) + (.status.containerStatuses // []) | .[]
+            | "\(.name): restarts=\(.restartCount) state=\(.state | keys[0]) last=\(.lastState.terminated // {} | "exit=\(.exitCode // "-") reason=\(.reason // "-") message=\(.message // "-" | tostring | .[0:600])")"'
+          kubectl -n c8s-system logs "$p" --all-containers --tail=60 2>&1 | head -80 || true
           echo "::endgroup::"
         done
         exit 1
