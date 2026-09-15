@@ -7,16 +7,20 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 )
 
 // Config is the get-kubeconfig client configuration.
 type Config struct {
-	// AttestURL is the guest attestation-api /attest endpoint (e.g.
-	// http://<node>:8400/attest) used for the RTMR[3] trust gate.
+	// AttestURL optionally selects a legacy attestation-api /attest endpoint.
+	// Empty uses operator-authenticated attestation over ReleaseBaseURL.
 	AttestURL string
 	// ReleaseBaseURL is the cred-release endpoint base (e.g. https://<node>:8443).
 	ReleaseBaseURL string
@@ -47,13 +51,20 @@ type Config struct {
 	OutPath string
 	// Timeout bounds each network step.
 	Timeout time.Duration
-	// ReleaseWait bounds retries while cred-release is not yet listening.
+	// ReleaseWait bounds refused-connection retries for each cred-release step.
 	ReleaseWait time.Duration
 }
 
 // Run executes the client flow: attest + RTMR[3] gate, then CSR -> cred-release
 // -> kubeconfig.
 func Run(ctx context.Context, cfg Config) error {
+	// Signed requests must always pass through the RA-TLS verifier. An HTTP
+	// URL would bypass TLS entirely, even with VerifyConnection installed.
+	releaseURL, err := url.Parse(cfg.ReleaseBaseURL)
+	if err != nil || releaseURL.Scheme != "https" || releaseURL.Host == "" || releaseURL.User != nil || releaseURL.RawQuery != "" || releaseURL.Fragment != "" {
+		return fmt.Errorf("--release-url must be an absolute HTTPS URL without userinfo, query or fragment")
+	}
+	cfg.ReleaseBaseURL = strings.TrimRight(cfg.ReleaseBaseURL, "/")
 	keyPEM, err := os.ReadFile(cfg.OperatorKeyPath)
 	if err != nil {
 		return fmt.Errorf("read operator key: %w", err)
@@ -67,17 +78,23 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// 1. Trust gate: attest the node and enforce the full measured identity —
-	//    the image tuple (MRTD, RTMR[1], RTMR[2]) from the manifest plus the
-	//    RTMR[3] chain seeded by THIS key and extended by the expected
-	//    workload images — with no host trust and not TOFU. Everything
-	//    downstream depends on it.
-	attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	if err := attestAndVerify(attestCtx, cfg.AttestURL, exp); err != nil {
+	// 1. Verify the channel and a fresh nonce-bound report before releasing
+	// credentials. The certificate quote binds the TLS key, but may predate
+	// later workload extends; it cannot replace the fresh report.
+	httpClient := newRATLSClient(cfg, exp)
+	defer httpClient.CloseIdleConnections()
+	if cfg.AttestURL != "" {
+		attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		err = attestAndVerify(attestCtx, cfg.AttestURL, exp)
 		cancel()
+	} else {
+		err = retryCredentialRelease(ctx, cfg, func(stepCtx context.Context) error {
+			return attestCredentialRelease(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, exp)
+		})
+	}
+	if err != nil {
 		return fmt.Errorf("attestation gate: %w", err)
 	}
-	cancel()
 
 	// 2. Generate the kube-client identity + CSR.
 	id, err := newClientIdentity()
@@ -94,26 +111,12 @@ func Run(ctx context.Context, cfg Config) error {
 	//    (newRATLSClient): the serving cert's embedded quote must bind to the
 	//    cert key AND satisfy the same full measured-identity policy as the
 	//    attest gate, so the host can't MITM the channel.
-	httpClient := newRATLSClient(cfg, exp)
-	// cred-release starts listening well after attest answers (it waits on
-	// the node's own boot chain), so a refused dial right after the attest
-	// gate is boot ordering, not failure. Retry exactly that, bounded.
 	var resp *credrelease.ReleaseResponse
-	releaseDeadline := time.Now().Add(cfg.ReleaseWait)
-	for {
-		relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
-		resp, err = requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
-		cancel2()
-		if !shouldRetryCredentialRelease(err, releaseDeadline) {
-			break
-		}
-		fmt.Fprintln(os.Stderr, "cred-release not listening yet; retrying")
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("credential release: %w", ctx.Err())
-		case <-time.After(5 * time.Second):
-		}
-	}
+	err = retryCredentialRelease(ctx, cfg, func(stepCtx context.Context) error {
+		var requestErr error
+		resp, requestErr = requestCredential(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
+		return requestErr
+	})
 	if err != nil {
 		return fmt.Errorf("credential release: %w", err)
 	}
@@ -127,8 +130,47 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// retryCredentialRelease waits only for the listener to start. Authentication,
+// attestation and HTTP failures are final; only refused dials are retried.
+func retryCredentialRelease(ctx context.Context, cfg Config, operation func(context.Context) error) error {
+	deadline := time.Now().Add(cfg.ReleaseWait)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stepCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		err := operation(stepCtx)
+		cancel()
+		if !shouldRetryCredentialRelease(err, deadline) {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "cred-release not listening yet; retrying")
+		timer := time.NewTimer(min(5*time.Second, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+			if !time.Now().Before(deadline) {
+				return err
+			}
+		}
+	}
+}
+
 func shouldRetryCredentialRelease(err error, deadline time.Time) bool {
-	return err != nil && errors.Is(err, syscall.ECONNREFUSED) && time.Now().Before(deadline)
+	if !time.Now().Before(deadline) {
+		return false
+	}
+	var requestErr *url.Error
+	if !errors.As(err, &requestErr) {
+		return false
+	}
+	// A verifier may itself fetch collateral. Only a direct HTTP transport
+	// dial failure means the credential listener has not started; a wrapped
+	// collateral or policy failure must never enter the readiness retry.
+	dialErr, ok := requestErr.Err.(*net.OpError)
+	return ok && dialErr.Op == "dial" && errors.Is(dialErr.Err, syscall.ECONNREFUSED)
 }
 
 // publicKeyPEMFromPrivate derives the PKIX PEM public key from an ECDSA

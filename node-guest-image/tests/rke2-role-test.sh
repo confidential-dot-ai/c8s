@@ -27,14 +27,14 @@ run_script() {
 }
 
 for platform in tdx snp; do
-    for role in leader follower; do
+    for role in server agent; do
         CASE="$platform/$role"
         reset_launch_fixture
         launch_media "$role"
         CRED_PLATFORM=$platform run_script
         ok "verified boot succeeds" test "$RC" -eq 0
         marker=server; other=agent
-        if [[ $role == follower ]]; then marker=agent; other=server; fi
+        if [[ $role == agent ]]; then marker=agent; other=server; fi
         ok "selected role marker remains" test -f "/run/confos/role-$marker"
         ok "other role stays absent" test ! -e "/run/confos/role-$other"
         ok "prepare runs only after stage" test -f "$C8S_ROLE_FIXTURE/prepared"
@@ -48,7 +48,7 @@ done
 for scenario in missing-disk missing-config missing-signature invalid-signature invalid-config udev-failure mount-failure mount-timeout prepare-failure; do
     CASE=$scenario
     reset_launch_fixture
-    launch_media leader
+    launch_media server
     case "$scenario" in
         missing-disk) rm "$C8S_ROLE_FIXTURE/disk-present" ;;
         missing-config) rm "$C8S_ROLE_FIXTURE/media/launch.yaml" ;;
@@ -72,7 +72,7 @@ done
 
 CASE=invalid-baked-platform
 reset_launch_fixture
-launch_media leader
+launch_media server
 CRED_PLATFORM=invalid run_script
 ok "invalid build platform fails" test "$RC" -ne 0
 ok "invalid platform cannot reach c8s" test ! -e "$C8S_ROLE_FIXTURE/stage-args"

@@ -94,7 +94,7 @@ namespace carries `confidential.ai/baked=true`.
 
 ### Authenticated launch configuration
 
-A measured node uses one image for both `leader` and `follower`. Each boot
+A measured node uses one image for both `server` and `agent`. Each boot
 requires an ISO labelled `opkeydata` containing exactly the launch inputs
 `pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
 with the operator. `pubkey` is bound to the guest by the platform: the measured
@@ -108,79 +108,54 @@ It accepts an optional `workloads` string containing a complete
 `c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
 service arguments or component toggles; volume support remains disabled.
 
-Use **distinct launch keys for leader and follower roles, and new keys for
+Use **distinct launch keys for server and agent roles, and new keys for
 each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
 launch keys establish cluster separation during peer verification. Keep one
-leader key and one or more follower keys. The leader generates its separate
+server key and one or more agent keys. The server generates its separate
 agent credential inside the guest; RKE2 generates the privileged server token.
 Neither credential is present on the host launch disk. Existing v1 bundles
 must remove the `rke2` field, set `schemaVersion: c8s-launch/v2`, and be signed
 again before use with this image.
 
-The following creates launch bundles for one leader and one follower. Select
-the trusted `manifest.json` published with the exact node image and VM shape;
-set `LEADER_ADDRESS` to the leader's guest IPv4 address reachable by every node.
-The example uses Python 3 and writes YAML with numeric RTMR indices.
+`c8s launch-config new` creates everything one cluster needs: a server
+launch key, an agent launch key, a signed `launch.yaml`
+per node and the client policy that pins the server. Give it the trusted
+`manifest.json` published with the exact node image, the server's guest IPv4
+address that every node can reach, and the agent names. On SNP, also pass
+the VM's vCPU count, which selects the launch digest.
 
 ```sh
-umask 077
-mkdir -p demo/leader demo/follower
-c8s keys new --out demo/leader.key --pub-out demo/leader/pubkey
-c8s keys new --out demo/follower.key --pub-out demo/follower/pubkey
+c8s launch-config new --out demo --cluster-id demo \
+  --image-manifest manifest.json \
+  --server-address 10.0.0.10 \
+  --agent demo-agent-1 --agent demo-agent-2
+# SNP: add --vcpus 8 (the VM shape's launch digest); TDX has one per image.
 
-export NODE_PLATFORM=tdx       # tdx or snp
-export NODE_VCPUS=8            # SNP: select this exact manifest variant
-export LEADER_ADDRESS=10.0.0.10  # replace with the actual leader guest address
-python3 - manifest.json <<'PYTHON'
-import copy, json, os, sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text())
-platform = os.environ["NODE_PLATFORM"]
-if platform == "tdx":
-    measured = manifest["tdx"]
-    image = {"platform": "tdx", "measurement": measured["mrtd"],
-             "rtmrs": {1: measured["rtmr1"], 2: measured["rtmr2"]}}
-elif platform == "snp":
-    variants = [v for v in manifest["snp_variants"]
-                if v["smp"] == int(os.environ["NODE_VCPUS"])]
-    assert len(variants) == 1, "select exactly one matching SNP vCPU variant"
-    image = {"platform": "snp",
-             "measurement": variants[0]["measurement"]["snp_launch_digest"]}
-else:
-    raise ValueError("NODE_PLATFORM must be tdx or snp")
-
-leader = {
-    "schemaVersion": "c8s-launch/v2",
-    "clusterID": "demo",
-    "role": "leader",
-    "image": image,
-    "node": {"name": "demo-leader"},
-    "leader": {"address": os.environ["LEADER_ADDRESS"],
-               "operatorPublicKey": Path("demo/leader/pubkey").read_text()},
-    "followerOperatorPublicKeys": [Path("demo/follower/pubkey").read_text()],
-    "tlsSAN": "c8s.local",
-}
-follower = copy.deepcopy(leader)
-follower["role"] = "follower"
-follower["node"]["name"] = "demo-follower"
-for role, document in [("leader", leader), ("follower", follower)]:
-    lines = [f"{field}: {json.dumps(value)}" for field, value in document.items()
-             if field != "image"]
-    lines += ["image:", "  platform: " + image["platform"],
-              "  measurement: " + json.dumps(image["measurement"])]
-    if "rtmrs" in image:
-        # RTMR indices must be numeric YAML keys, not quoted JSON keys.
-        lines += ["  rtmrs:", *[f"    {i}: {json.dumps(digest)}"
-                                for i, digest in image["rtmrs"].items()]]
-    Path(f"demo/{role}/launch.yaml").write_text("\n".join(lines) + "\n")
-PYTHON
-
-c8s keys sign-launch --key demo/leader.key demo/leader/launch.yaml
-c8s keys sign-launch --key demo/follower.key demo/follower/launch.yaml
-xorriso -as mkisofs -V opkeydata -o demo/leader.iso demo/leader
-xorriso -as mkisofs -V opkeydata -o demo/follower.iso demo/follower
+xorriso -as mkisofs -V opkeydata -o demo/server.iso demo/server
+xorriso -as mkisofs -V opkeydata -o demo/demo-agent-1.iso demo/demo-agent-1
 ```
+
+The bundle directory is created new and never reused:
+
+| Path | Purpose |
+|---|---|
+| `demo/server.key` | server launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
+| `demo/agent.key` | the agent launch key every agent boots with |
+| `demo/server.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
+| `demo/server/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the server's opkeydata |
+| `demo/<agent>/` | the same three files for each agent |
+
+An agent can be added to a running cluster without touching the server:
+`c8s launch-config add-agent --bundle demo --name demo-agent-3` derives
+its document from the server's (same cluster, image and authorized keys)
+and signs it with the agent key. The agent obtains its credential through
+attested enrollment after launch. A server created
+without `--server-address` autodetects its own; `add-agent` then needs
+`--server-address`.
+
+The generated document is the strict schema below; edit it only when a field
+the command does not expose is needed, then re-sign with
+`c8s keys sign-launch --key demo/server.key --force demo/server/launch.yaml`.
 
 Attach the corresponding ISO to each VM along with its required scratch
 disk, booting the **same image and supported VM shape** for both roles.
@@ -191,9 +166,9 @@ requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
 pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
 RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
 
-For a leader, `leader.address` may be omitted: staging uses `node.ip`, or
-selects the primary IPv4 address if that is also omitted. A follower must
-always carry its leader's reachable IPv4 address. `node.ip` is optional
+For a server, `server.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. An agent must
+always carry its server's reachable IPv4 address. `node.ip` is optional
 (`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
 IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
 to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
@@ -203,15 +178,15 @@ and CORS overrides are not launch settings in this image.
 For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
 
 ```sh
-kubectl -n YOUR_NAMESPACE create secret generic demo-leader-launch \
-  --from-file=pubkey=demo/leader/pubkey \
-  --from-file=launch.yaml=demo/leader/launch.yaml \
-  --from-file=launch.yaml.sig=demo/leader/launch.yaml.sig
+kubectl -n YOUR_NAMESPACE create secret generic demo-server-launch \
+  --from-file=pubkey=demo/server/pubkey \
+  --from-file=launch.yaml=demo/server/launch.yaml \
+  --from-file=launch.yaml.sig=demo/server/launch.yaml.sig
 ```
 
 Reference that Secret in the VM's volume with
-`secret: {secretName: demo-leader-launch, volumeLabel: opkeydata}` and attach
-it as a read-only virtio disk. Repeat with the follower's files and a separate
+`secret: {secretName: demo-server-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the agent's files and a separate
 Secret. On SNP, the launcher must additionally commit the corresponding
 public-key hash as HOST_DATA; attaching the disk alone is insufficient.
 
@@ -227,40 +202,46 @@ Changing role or launch configuration requires a relaunch with a newly
 signed bundle and the corresponding role's hardware-bound public key.
 
 The verified files live in root-only `/run/confos/launch`. `peers.json`
-contains the software/key tuples for this cluster's leader and permitted
-followers; `cds.json` contains only its leader. On a leader with authorized
-followers, `followers.json` contains only those follower identities. Their
+contains the software/key tuples for this cluster's server and permitted
+agents; `cds.json` contains only its server. On a server with authorized
+agents, `agents.json` contains only those agent identities. Their
 shared measurement-file
 schema carries `operator_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
-CDS clients require the authorized leader despite identical software images.
-The leader publishes only the CDS URL and leader policy to the public
+CDS clients require the authorized server despite identical software images.
+The schema belongs to attestation-go's `refvalues` package: `operator_key`
+maps to `remote.ImagePin.Anchor`. `remote.EnforceImages` checks the image and
+calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
+borrow another entry's authorized key. c8s passes these complete pins through
+`remote.Policy.Images`; legacy flags that cannot carry anchors are refused
+where they would weaken enforcement.
+The server publishes only the CDS URL and server policy to the public
 `c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
 and private keys do not enter that ConfigMap. The operator forwards the full
-leader policy to injected workload helpers. NRI and host CDS clients use the
-same leader policy directly from the staged files.
+server policy to injected workload helpers. NRI and host CDS clients use the
+same server policy directly from the staged files.
 
-On leaders with an authorized follower policy, `c8s-join-release.service`
-listens on TCP `8444`. A follower's `c8s-join.service` authenticates that leader
-with the pinned image and designated leader key; the leader checks the
-follower's pinned image and an explicitly authorized follower key. Both
+On servers with an authorized agent policy, `c8s-join-release.service`
+listens on TCP `8444`. An agent's `c8s-join.service` authenticates that server
+with the pinned image and designated server key; the server checks the
+agent's pinned image and an explicitly authorized agent key. Both
 endpoints prove possession of their attested TLS keys. This works with TDX
 and SNP, using the same image and platform tuple throughout each cluster.
-Only the agent credential with its RKE2 CA pin is released, and the follower
+Only the agent credential with its RKE2 CA pin is released, and the agent
 stages it in root-only `/run/confos/rke2-agent-token` before RKE2 may start.
-A leader without authorized followers does not start the release listener.
+A server without authorized agents does not start the release listener.
 
-Enrollment waits indefinitely while the leader is unavailable: the unit
+Enrollment waits indefinitely while the server is unavailable: the unit
 restarts on failure with a five-second backoff. Until it succeeds,
 RKE2 agent startup remains blocked; enrollment does not depend on CDS, the
-mesh, Kubernetes or kubelet. Nodes in different datacenters need follower-to-
-leader TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
+mesh, Kubernetes or kubelet. Nodes in different datacenters need agent-to-
+server TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
 for the mesh and CNI. There is no NAT traversal or control-plane failover.
 
-The leader's generated agent credential survives launch staging and service
+The server's generated agent credential survives launch staging and service
 restarts within the same boot. All guest runtime state, including RKE2's
-server credential and CA, resets on a full VM reboot. Relaunch followers
-after a leader reboot so they enroll against the new ephemeral cluster.
+server credential and CA, resets on a full VM reboot. Relaunch agents
+after a server reboot so they enroll against the new ephemeral cluster.
 
 ### Chart-managed defaults
 
@@ -497,7 +478,7 @@ poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
 (an RWO PVC); otherwise re-apply the entries after any CDS restart. The
 chart-seeded component entries are unaffected — they are re-seeded and, unlike
-dynamic entries, are also admitted from the plugin's `always_allow`. The restart also resets the allowlist version counter, and
+dynamic entries, are also admitted from the plugin's base allowlist. The restart also resets the allowlist version counter, and
 every enforcer ignores a served version at or below the one it last applied
 (`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
 that had applied version N stays on that policy until the restarted
@@ -648,8 +629,7 @@ Caveats the output surfaces:
 
 `c8s get-kubeconfig` obtains an admin kubeconfig from a measured node CVM.
 Before any credential flows it enforces the node's **full measured identity**,
-and it enforces the identical policy twice — on the initial attestation gate
-and again on the RA-TLS credential-release connection:
+both on the RA-TLS connection and on a fresh nonce-bound attestation report:
 
 - **platform** — the `--image-manifest` shape selects it (a TDX tuple or SNP
   `snp_variants`); a node of any other platform is refused up front;
@@ -670,6 +650,30 @@ and again on the RA-TLS credential-release connection:
   its validity window (NotBefore with a bounded 5-minute skew, NotAfter with
   none) and, being self-signed, verify its own signature with its attested
   key.
+
+By default the client sends a signed, 32-byte nonce to `POST /attest` on the
+credential-release service at port **8443**. That service authenticates the
+operator token before asking its configured local attester for evidence.
+The client verifies the returned report in-process before generating the
+credential CSR. The fresh report is still required: the TLS certificate's
+key-bound quote may have been created before later workload measurements.
+The raw attester remains on guest loopback; external bootstrap only needs
+the credential service and the Kubernetes API on port **6443**.
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key demo/server.key --image-manifest manifest.json \
+  --out demo/kubeconfig --release-wait 5m
+```
+
+For SSH tunnels or non-default ports, supply `--release-url` and
+`--apiserver-url` instead of `--node`. Release URLs must use HTTPS, and
+signed requests never follow redirects. `--release-wait` retries refused
+connections while the service starts; attestation and authorization failures
+stop the flow. An explicit `--attest-url` retains the separate nonce check
+for older images with a reachable attestation API. There is no automatic
+fallback: images without the authenticated `/attest` endpoint need a rebuild
+to use the default flow.
 
 The released kubeconfig's client certificate is
 `CN=operator, O=c8s:node-operators`, with a one-hour default (and baked
@@ -703,7 +707,7 @@ manifest is baked into the read-only root and everything RKE2 writes, the
 cluster state included, lives on the scratch disk, which is re-encrypted with
 a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
 are lost with it, so there is no in-guest switch that survives a restart, by
-design. To revoke durably, relaunch with a rotated leader launch key and
+design. To revoke durably, relaunch with a rotated server launch key and
 updated signed documents and peer key sets. Every boot requires valid
 `opkeydata`; omitting it prevents the node from starting. A certificate already
 issued remains usable against its original live cluster until expiry or an

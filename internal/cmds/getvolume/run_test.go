@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"context"
+	"path/filepath"
+
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"path/filepath"
 )
 
 func TestParseVolumeSpec(t *testing.T) {

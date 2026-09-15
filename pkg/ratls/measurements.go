@@ -1,23 +1,14 @@
 package ratls
 
-import (
-	"github.com/confidential-dot-ai/attestation-go/remote"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
-)
+import "github.com/confidential-dot-ai/attestation-go/remote"
 
-// Pins carries shared image pins and optional c8s launch-bound node identities.
-// Entries replace the image pins; the complete tuple is enforced on one response.
-type Pins struct {
-	Measurements [][]byte
-	RTMRs        map[int][]byte
-	Entries      []measurements.Entry
-}
+// Pins carries the shared evidence policy to c8s peer verifiers.
+type Pins remote.Policy
 
-// VerifyPolicy is the single conversion used by c8s peer verifiers.
+// VerifyPolicy adds the local attestation service to the shared policy.
 func (p Pins) VerifyPolicy(url string) *VerifyPolicy {
 	return &VerifyPolicy{
-		Policy:            remote.Policy{Measurements: p.Measurements, RTMRs: p.RTMRs},
-		Entries:           p.Entries,
+		Policy:            remote.Policy(p),
 		AttestationApiURL: url,
 	}
 }

@@ -39,11 +39,25 @@ const tdxEnvelope = `{"platform":"tdx","evidence":{}}`
 // same shape the cred-release endpoint serves.
 func newAttestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
+	return newPlatformAttestedTLSServer(t, teetypes.PlatformTDX, handler)
+}
+
+func newPlatformAttestedTLSServer(t *testing.T, platform teetypes.PlatformType, handler http.Handler) *httptest.Server {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	att := &ratls.Attestation{Family: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}
+	if platform == teetypes.PlatformSNP {
+		rd, err := ratls.ReportDataForKey(&key.PublicKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report := make([]byte, 1184)
+		copy(report[0x50:], rd[:])
+		att = &ratls.Attestation{Family: ratls.TEETypeSEVSNP, Report: report}
+	}
 	der, err := ratls.CreateAttestedCert(key, att, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -258,10 +272,9 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	res.Claims.PlatformData["rtmr_3"] = strings.Repeat("00", 48)
 	stubVerify(t, res, nil) // overrides the env's stub
 
-	// Count cred-release hits on a plain-HTTP server so any request — even one
-	// that would fail the RA-TLS handshake — reaches the handler and is counted.
+	// A failure of the explicit nonce gate must prevent the release request.
 	var releaseHits atomic.Int32
-	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	release := newAttestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		releaseHits.Add(1)
 		releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
 	}))

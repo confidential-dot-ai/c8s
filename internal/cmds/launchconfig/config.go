@@ -1,6 +1,6 @@
 // Package launchconfig authenticates and stages the boot configuration of a
-// measured node image. It is the only source of leader/follower selection.
-// Each cluster needs its own distinct leader/follower launch keys: ClusterID
+// measured node image. It is the only source of server/agent selection.
+// Each cluster needs its own distinct server/agent launch keys: ClusterID
 // names a cluster, while the launch keys establish its remote trust boundary.
 package launchconfig
 
@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/remote"
+	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"io"
 	"net/netip"
 	"os"
@@ -21,10 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -36,28 +38,29 @@ const (
 	DefaultStagedPath = Dir + "/config.json"
 	MaxDocumentSize   = 1024 * 1024
 	maxSignatureSize  = 4096
-	maxFollowerKeys   = 128
+	maxAgentKeys      = 128
+	defaultTLSSAN     = "c8s.local"
 )
 
 // Role selects the services started for this boot, without changing its image.
 type Role string
 
 const (
-	Leader   Role = "leader"
-	Follower Role = "follower"
+	Server Role = "server"
+	Agent  Role = "agent"
 )
 
 // Document is the public signed launch.yaml wire contract. Join credentials
 // are generated inside the guest and never accepted from launch media.
 type Document struct {
-	SchemaVersion              string       `yaml:"schemaVersion" json:"schemaVersion"`
-	ClusterID                  string       `yaml:"clusterID" json:"clusterID"`
-	Role                       Role         `yaml:"role" json:"role"`
-	Image                      Image        `yaml:"image" json:"image"`
-	Node                       Node         `yaml:"node" json:"node"`
-	Leader                     LeaderConfig `yaml:"leader" json:"leader"`
-	FollowerOperatorPublicKeys []string     `yaml:"followerOperatorPublicKeys" json:"followerOperatorPublicKeys"`
-	TLSSAN                     string       `yaml:"tlsSAN,omitempty" json:"tlsSAN"`
+	SchemaVersion           string       `yaml:"schemaVersion" json:"schemaVersion"`
+	ClusterID               string       `yaml:"clusterID" json:"clusterID"`
+	Role                    Role         `yaml:"role" json:"role"`
+	Image                   Image        `yaml:"image" json:"image"`
+	Node                    Node         `yaml:"node" json:"node"`
+	Server                  ServerConfig `yaml:"server" json:"server"`
+	AgentOperatorPublicKeys []string     `yaml:"agentOperatorPublicKeys" json:"agentOperatorPublicKeys"`
+	TLSSAN                  string       `yaml:"tlsSAN,omitempty" json:"tlsSAN"`
 	// Workloads is an optional strict c8s.allowlist/v1 JSON document. Keeping
 	// its existing wire schema avoids an independent YAML policy language.
 	Workloads string `yaml:"workloads,omitempty" json:"workloads,omitempty"`
@@ -77,8 +80,8 @@ type Node struct {
 	ExternalIP string `yaml:"externalIP,omitempty" json:"externalIP,omitempty"`
 }
 
-type LeaderConfig struct {
-	// Address may be omitted only for a leader; Stage resolves its own IP.
+type ServerConfig struct {
+	// Address may be omitted only for a server; Stage resolves its own IP.
 	Address string `yaml:"address,omitempty" json:"address"`
 	// Exact PEM bytes are hardware-bound. Equivalent PEM encodings of one
 	// key are still one authorization identity, not two different roles.
@@ -103,8 +106,8 @@ var loadMeasuredOperatorKeyAndOwnMeasurement = credrelease.LoadMeasuredOperatorK
 type Verified struct {
 	document    Document
 	operatorPub []byte
-	pins        measurements.ReferenceValues
-	cdsPins     measurements.ReferenceValues
+	pins        refvalues.ReferenceValues
+	cdsPins     refvalues.ReferenceValues
 }
 
 // Verify checks the signature before parsing host input and compares all image
@@ -169,7 +172,7 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	}
 	return &Verified{
 		document: *doc, operatorPub: pub, pins: pins,
-		cdsPins: measurements.ReferenceValues{TEE: pins.TEE, Entries: pins.Entries[:1]},
+		cdsPins: refvalues.ReferenceValues{Family: pins.Family, Images: pins.Images[:1]},
 	}, nil
 }
 
@@ -253,8 +256,8 @@ func (d *Document) validate() error {
 	if !dnsLabel(d.Node.Name) {
 		return fmt.Errorf("node.name must be an RFC1123 label")
 	}
-	if d.Role != Leader && d.Role != Follower {
-		return fmt.Errorf("role must be leader or follower")
+	if d.Role != Server && d.Role != Agent {
+		return fmt.Errorf("role must be server or agent")
 	}
 	if d.Image.Platform != "tdx" && d.Image.Platform != "snp" {
 		return fmt.Errorf("image.platform must be tdx or snp")
@@ -269,9 +272,9 @@ func (d *Document) validate() error {
 	} else if len(d.Image.RTMRs) != 0 {
 		return fmt.Errorf("SNP image cannot carry RTMR pins")
 	}
-	if d.Leader.Address != "" || d.Role == Follower {
-		if err := ValidateIPv4(d.Leader.Address, true); err != nil {
-			return fmt.Errorf("leader.address: %w", err)
+	if d.Server.Address != "" || d.Role == Agent {
+		if err := ValidateIPv4(d.Server.Address, true); err != nil {
+			return fmt.Errorf("server.address: %w", err)
 		}
 	}
 	if d.Node.IP != "" {
@@ -287,31 +290,31 @@ func (d *Document) validate() error {
 			return fmt.Errorf("node.externalIP: %w", err)
 		}
 	}
-	leader, err := parseLaunchKey(d.Leader.OperatorPublicKey)
+	server, err := parseLaunchKey(d.Server.OperatorPublicKey)
 	if err != nil {
-		return fmt.Errorf("leader.operatorPublicKey: %w", err)
+		return fmt.Errorf("server.operatorPublicKey: %w", err)
 	}
-	if len(d.FollowerOperatorPublicKeys) > maxFollowerKeys {
-		return fmt.Errorf("too many follower operator keys")
+	if len(d.AgentOperatorPublicKeys) > maxAgentKeys {
+		return fmt.Errorf("too many agent operator keys")
 	}
-	if d.Role == Follower && len(d.FollowerOperatorPublicKeys) == 0 {
-		return fmt.Errorf("follower requires followerOperatorPublicKeys")
+	if d.Role == Agent && len(d.AgentOperatorPublicKeys) == 0 {
+		return fmt.Errorf("agent requires agentOperatorPublicKeys")
 	}
-	seen := []*ecdsa.PublicKey{leader}
-	for _, raw := range d.FollowerOperatorPublicKeys {
+	seen := []*ecdsa.PublicKey{server}
+	for _, raw := range d.AgentOperatorPublicKeys {
 		key, err := parseLaunchKey(raw)
 		if err != nil {
-			return fmt.Errorf("followerOperatorPublicKeys: %w", err)
+			return fmt.Errorf("agentOperatorPublicKeys: %w", err)
 		}
 		for _, previous := range seen {
 			if key.Equal(previous) {
-				return fmt.Errorf("leader and follower public keys must be distinct and nonduplicated")
+				return fmt.Errorf("server and agent public keys must be distinct and nonduplicated")
 			}
 		}
 		seen = append(seen, key)
 	}
 	if d.TLSSAN == "" {
-		d.TLSSAN = "c8s.local"
+		d.TLSSAN = defaultTLSSAN
 	}
 	if len(d.TLSSAN) > 253 {
 		return fmt.Errorf("tlsSAN exceeds DNS name length")
@@ -333,29 +336,29 @@ func (d *Document) validate() error {
 }
 
 func (d *Document) authorizeKey(pub []byte, key *ecdsa.PublicKey) error {
-	leader, _ := parseLaunchKey(d.Leader.OperatorPublicKey) // validated above
-	if d.Role == Leader {
-		if !bytes.Equal(pub, []byte(d.Leader.OperatorPublicKey)) {
-			return fmt.Errorf("leader launch key does not match leader.operatorPublicKey bytes")
+	server, _ := parseLaunchKey(d.Server.OperatorPublicKey) // validated above
+	if d.Role == Server {
+		if !bytes.Equal(pub, []byte(d.Server.OperatorPublicKey)) {
+			return fmt.Errorf("server launch key does not match server.operatorPublicKey bytes")
 		}
 		return nil
 	}
-	if key.Equal(leader) {
-		return fmt.Errorf("follower must use a different launch key from its leader")
+	if key.Equal(server) {
+		return fmt.Errorf("agent must use a different launch key from its server")
 	}
-	for _, follower := range d.FollowerOperatorPublicKeys {
-		if bytes.Equal(pub, []byte(follower)) {
+	for _, agent := range d.AgentOperatorPublicKeys {
+		if bytes.Equal(pub, []byte(agent)) {
 			return nil
 		}
 	}
-	return fmt.Errorf("this follower's measured launch key is not in followerOperatorPublicKeys")
+	return fmt.Errorf("this agent's measured launch key is not in agentOperatorPublicKeys")
 }
 
 func parseLaunchKey(raw string) (*ecdsa.PublicKey, error) {
 	if len(raw) > 8192 {
 		return nil, fmt.Errorf("launch public key is too large")
 	}
-	return measurements.ParsePublicKeyPEM([]byte(raw))
+	return runtimemeasure.ParsePublicKeyPEM([]byte(raw))
 }
 
 func dnsLabel(s string) bool { return len(validation.IsDNS1123Label(s)) == 0 }
@@ -406,37 +409,37 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func (d *Document) referenceValues() (measurements.ReferenceValues, error) {
-	tee := measurements.TEESNP
+func (d *Document) referenceValues() (refvalues.ReferenceValues, error) {
+	tee := teetypes.FamilySNP
 	if d.Image.Platform == "tdx" {
-		tee = measurements.TEETDX
+		tee = teetypes.FamilyTDX
 	}
-	pins := measurements.ReferenceValues{TEE: tee}
-	keys := append([]string{d.Leader.OperatorPublicKey}, d.FollowerOperatorPublicKeys...)
+	pins := refvalues.ReferenceValues{Family: tee}
+	keys := append([]string{d.Server.OperatorPublicKey}, d.AgentOperatorPublicKeys...)
 	for i, pub := range keys {
-		name := "leader"
+		name := "server"
 		if i > 0 {
-			name = fmt.Sprintf("follower-%d", i)
+			name = fmt.Sprintf("agent-%d", i)
 		}
-		entry := measurements.Entry{Name: name, Digest: mustDecodeHex(d.Image.Measurement), OperatorKey: []byte(pub)}
+		entry := remote.ImagePin{Name: name, Digest: mustDecodeHex(d.Image.Measurement), Anchor: []byte(pub)}
 		if len(d.Image.RTMRs) > 0 {
 			entry.RTMRs = make(map[int][]byte, len(d.Image.RTMRs))
 			for idx, digest := range d.Image.RTMRs {
 				entry.RTMRs[idx] = mustDecodeHex(digest)
 			}
 		}
-		pins.Entries = append(pins.Entries, entry)
+		pins.Images = append(pins.Images, entry)
 	}
 	// Use the shared parser as a final schema check on the emitted policy.
-	data, err := measurements.Format(pins)
+	data, err := refvalues.Format(pins)
 	if err != nil {
-		return measurements.ReferenceValues{}, err
+		return refvalues.ReferenceValues{}, err
 	}
-	return measurements.Parse(data)
+	return refvalues.Parse(data)
 }
 
-// CDSURL is derived from the signed leader address and the image's fixed port.
-func (d *Document) CDSURL() string { return "https://" + d.Leader.Address + ":30808" }
+// CDSURL is derived from the signed server address and the image's fixed port.
+func (d *Document) CDSURL() string { return "https://" + d.Server.Address + ":30808" }
 
 // LoadStaged reads a root-owned boot artifact produced by Stage. It is not an
 // authentication API for host input; only the fixed staged path is trusted.
@@ -459,8 +462,8 @@ func LoadStaged(path string) (*Document, error) {
 	if err := doc.validate(); err != nil {
 		return nil, err
 	}
-	if doc.Leader.Address == "" {
-		return nil, fmt.Errorf("staged configuration must contain a resolved leader address")
+	if doc.Server.Address == "" {
+		return nil, fmt.Errorf("staged configuration must contain a resolved server address")
 	}
 	return &doc, nil
 }

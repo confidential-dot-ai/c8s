@@ -1,6 +1,7 @@
 package credrelease
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/json"
@@ -10,10 +11,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
-// maxBodyBytes caps the request body — a CSR is small; refuse anything large.
+// maxBodyBytes caps requests; both a CSR and a bootstrap nonce are small.
 const maxBodyBytes = 1 << 16 // 64 KiB
 
 // ReleasePath is the credential-release endpoint. The wire contract is
@@ -37,16 +40,16 @@ type ReleaseResponse struct {
 	CAPEM   string `json:"ca"`
 }
 
-// Handler serves POST /release-credential. It authorizes the caller against
-// the measured operator key, validates the CSR, and issues a short-lived kube
-// client cert signed by the cluster CA.
+// Handler serves operator-authorized bootstrap attestation and credential
+// release against the measured operator key.
 type Handler struct {
-	verifier operatorauth.Verifier
-	ca       *clusterCA
-	certTTL  time.Duration
-	certOrg  string // Kubernetes group (O) for the issued cert
-	certCN   string // Kubernetes user (CN)
-	now      func() time.Time
+	generateEvidence func(context.Context, []byte) (teetypes.AttestationEvidence, error)
+	verifier         operatorauth.Verifier
+	ca               *clusterCA
+	certTTL          time.Duration
+	certOrg          string // Kubernetes group (O) for the issued cert
+	certCN           string // Kubernetes user (CN)
+	now              func() time.Time
 }
 
 // NewHandler builds the release handler from the measured operator pubkey (PEM)
@@ -74,7 +77,7 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != ReleasePath {
+	if r.URL.Path != ReleasePath && r.URL.Path != AttestPath {
 		http.NotFound(w, r)
 		return
 	}
@@ -82,19 +85,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
+	if len(body) > maxBodyBytes {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	// AUTHORIZE: the caller must hold the operator private key whose public
-	// half is measured into RTMR[3]. operatorauth verifies the Bearer JWT
+	// half is bound into TDX RTMR[3] or SNP HOSTDATA. operatorauth verifies the Bearer JWT
 	// (ES256/384/512) under the pinned key, enforces <=5min validity, and
 	// binds the token to this method/path/body (pbh) — so a captured token
-	// can't be replayed against a different CSR.
+	// can't be replayed against a different CSR or nonce.
 	if err := h.verifier.Authorize(r, body); err != nil {
-		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.URL.Path == AttestPath {
+		h.serveAttest(w, r, body)
 		return
 	}
 

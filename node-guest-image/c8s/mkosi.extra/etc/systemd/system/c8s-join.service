@@ -1,6 +1,8 @@
 [Unit]
-Description=Enroll the measured follower with its authorized leader
+Description=Enroll the measured agent with its authorized server
 Requires=rke2-role.service attestation-api.service
+# Requeue the agent after a failed enrollment cancels its initial start job.
+Wants=rke2-agent.service
 After=rke2-role.service attestation-api.service
 Before=rke2-agent.service
 ConditionPathExists=/run/confos/role-agent
@@ -13,7 +15,7 @@ RemainAfterExit=yes
 # failed state stays observable (systemctl is-failed, OnFailure=), and each
 # attempt is a fresh start job rather than a child this unit must reap.
 # StartLimitIntervalSec=0 keeps the restarts unbounded, so dependent RKE2
-# still starts whenever the leader recovers.
+# still starts whenever the server recovers.
 ExecStart=/usr/local/bin/c8s node-services run join
 Restart=on-failure
 RestartSec=5

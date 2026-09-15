@@ -3,25 +3,26 @@ package verify
 import (
 	"encoding/hex"
 	"errors"
+	"github.com/confidential-dot-ai/attestation-go/remote"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 func TestNodePolicyPinsActualEvidence(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "pkg", "measurements", "testdata", "node-identities.json")
+	path := filepath.Join("..", "..", "..", "internal", "testdata", "node-identities.json")
 	plan, err := buildPolicy(config{measurementsConfig: path})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture contains leader and follower identities. Constrain this
-	// verdict to the leader, as a client connecting to CDS does.
-	entry := plan.refValues.Entries[0]
-	plan.refValues.Entries = []measurementspkg.Entry{entry}
+	// The fixture contains server and agent identities. Constrain this
+	// verdict to the server, as a client connecting to CDS does.
+	entry := plan.refValues.Images[0]
+	plan.refValues.Images = []remote.ImagePin{entry}
 	bound := func(key []byte) *teetypes.VerificationResult {
 		r := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformTDX}
 		r.Claims.LaunchDigest = hex.EncodeToString(entry.Digest)
@@ -38,15 +39,15 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 		change func(*teetypes.VerificationResult)
 		want   bool
 	}{
-		{"matching leader", func(*teetypes.VerificationResult) {}, true},
+		{"matching server", func(*teetypes.VerificationResult) {}, true},
 		{"wrong image", func(r *teetypes.VerificationResult) { r.Claims.LaunchDigest = strings.Repeat("ff", 48) }, false},
 		{"wrong kernel", func(r *teetypes.VerificationResult) { r.Claims.PlatformData["rtmr_1"] = strings.Repeat("ff", 48) }, false},
 		{"wrong rootfs", func(r *teetypes.VerificationResult) { r.Claims.PlatformData["rtmr_2"] = strings.Repeat("ff", 48) }, false},
-		{"follower on same image", func(r *teetypes.VerificationResult) { *r = *bound([]byte("another role key")) }, false},
+		{"agent on same image", func(r *teetypes.VerificationResult) { *r = *bound([]byte("another role key")) }, false},
 		{"wrong platform", func(r *teetypes.VerificationResult) { r.Platform = teetypes.PlatformSNP }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := bound(entry.OperatorKey)
+			r := bound(entry.Anchor)
 			tc.change(r)
 			got := newOutcome(config{}, &evidence{platform: "tdx"}, r, nil, plan)
 			if got.Verified != tc.want || !got.Pinned {
@@ -55,7 +56,7 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 		})
 	}
 	// Hardware rejection dominates even if all untrusted claim fields match.
-	if got := newOutcome(config{}, &evidence{}, bound(entry.OperatorKey), errors.New("invalid hardware signature"), plan); got.Verified {
+	if got := newOutcome(config{}, &evidence{}, bound(entry.Anchor), errors.New("invalid hardware signature"), plan); got.Verified {
 		t.Fatal("failed hardware evidence became verified")
 	}
 	// A matching weak alternative may not borrow a different image's complete
@@ -64,20 +65,20 @@ func TestNodePolicyPinsActualEvidence(t *testing.T) {
 	complete.Digest = []byte(strings.Repeat("x", 48))
 	weak := entry
 	weak.RTMRs = nil
-	plan.refValues.Entries = []measurementspkg.Entry{weak, complete}
-	if got := newOutcome(config{}, &evidence{}, bound(entry.OperatorKey), nil, plan); got.Verified || !strings.Contains(got.Error, "MRTD only") {
+	plan.refValues.Images = []remote.ImagePin{weak, complete}
+	if got := newOutcome(config{}, &evidence{}, bound(entry.Anchor), nil, plan); got.Verified || !strings.Contains(got.Error, "MRTD only") {
 		t.Fatalf("weak matching image borrowed unrelated pins: %+v", got)
 	}
 }
 
 func TestServedNodePolicyDetectsDroppedOperatorKey(t *testing.T) {
-	want, err := measurementspkg.Load(filepath.Join("..", "..", "..", "pkg", "measurements", "testdata", "node-identities.json"))
+	want, err := refvalues.Load(filepath.Join("..", "..", "..", "internal", "testdata", "node-identities.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	served := want
-	served.Entries = append([]measurementspkg.Entry(nil), want.Entries...)
-	served.Entries[0].OperatorKey = nil
+	served.Images = append([]remote.ImagePin(nil), want.Images...)
+	served.Images[0].Anchor = nil
 	fail, messages := collectFailures()
 	checkServedMeasurements(want, measurementsReport{served: served, fetched: true}, fail)
 	if len(*messages) != 2 {

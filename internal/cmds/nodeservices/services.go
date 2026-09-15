@@ -21,12 +21,12 @@ const (
 )
 
 // Arguments uses a typed document that has already passed LoadStaged. Every
-// CDS client receives the leader-only policy; peer listeners use the peer policy.
+// CDS client receives the server-only policy; peer listeners use the peer policy.
 func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]string, error) {
 	if d == nil {
 		return nil, fmt.Errorf("missing staged launch configuration")
 	}
-	if d.Role != launchconfig.Leader && d.Role != launchconfig.Follower {
+	if d.Role != launchconfig.Server && d.Role != launchconfig.Agent {
 		return nil, fmt.Errorf("invalid staged role")
 	}
 	switch {
@@ -36,25 +36,25 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 		}
 	case service == "join":
 	case service == "attest-proxy":
-	case d.Role != launchconfig.Leader:
-		return nil, fmt.Errorf("%s is a leader-only service", service)
+	case d.Role != launchconfig.Server:
+		return nil, fmt.Errorf("%s is a server-only service", service)
 	}
 	cds := "--cds-url=" + d.CDSURL()
 	api := "--attestation-api-url=" + apiURL
 	pins := "--measurements-config=" + launchDir + "cds.json"
 	switch service {
 	case "join-release":
-		if len(d.FollowerOperatorPublicKeys) == 0 {
-			return nil, fmt.Errorf("join-release requires authorized followers")
+		if len(d.AgentOperatorPublicKeys) == 0 {
+			return nil, fmt.Errorf("join-release requires authorized agents")
 		}
 		return []string{"join-release", "--listen=:8444", "--platform=" + d.Image.Platform, api,
-			"--measurements-config=" + launchDir + "followers.json",
+			"--measurements-config=" + launchDir + "agents.json",
 			"--token-path=/var/lib/rancher/rke2/server/agent-token"}, nil
 	case "join":
-		if d.Role != launchconfig.Follower {
-			return nil, fmt.Errorf("join is a follower-only service")
+		if d.Role != launchconfig.Agent {
+			return nil, fmt.Errorf("join is an agent-only service")
 		}
-		return []string{"join", "--server=" + d.Leader.Address + ":8444", "--platform=" + d.Image.Platform, api,
+		return []string{"join", "--server=" + d.Server.Address + ":8444", "--platform=" + d.Image.Platform, api,
 			pins, "--token-out=/run/confos/rke2-agent-token"}, nil
 	case "attest-proxy":
 		return []string{"attest-proxy", "--socket=/var/run/nri-image-policy/attestation-api.sock", "--socket-gid=65532", "--upstream=" + apiURL}, nil

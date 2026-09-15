@@ -23,13 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // SandboxPath is the token route on the local Unix socket; SandboxDigestsPrefix

@@ -1,7 +1,7 @@
 // Package nriimagepolicy is an NRI plugin that validates container images
 // against a digest allowlist. Every plugin polls a remote CDS service (pull
-// mode) for the allowlist, with a bootstrap file on disk (always_allow) as the
-// cold-boot baseline.
+// mode) for the allowlist, with a base allowlist baked into its boot config
+// (allowlist.base) as the cold-boot baseline.
 package nriimagepolicy
 
 import (
@@ -28,7 +28,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -52,8 +51,8 @@ func startupSourceMode(cfg *config) string {
 	}
 
 	sources := make([]string, 0, 2)
-	if len(cfg.Allowlist.AlwaysAllow) > 0 {
-		sources = append(sources, "always_allow")
+	if cfg.baseEnabled() {
+		sources = append(sources, "base")
 	}
 	if len(cfg.Policy.LabelRules) > 0 {
 		sources = append(sources, "label_rules")
@@ -108,7 +107,7 @@ func Run(args []string) error {
 
 	auditLogger := audit.NewLogger()
 
-	store := newPolicyStore(cfg.Allowlist.AlwaysAllow)
+	store := newPolicyStore(cfg.Allowlist.Base)
 
 	var wlClient allowlistclient.Client
 	if cfg.PullEnabled() {
@@ -136,7 +135,7 @@ func Run(args []string) error {
 		cancel()
 	}()
 
-	logger.Info("policy store seeded", "always_allow_entries", len(cfg.Allowlist.AlwaysAllow))
+	logger.Info("policy store seeded", "base_entries", store.base.Size())
 
 	addr := *healthAddr
 	if cfg.Plugin.HealthAddr != "" {
@@ -203,10 +202,10 @@ func Run(args []string) error {
 			case errors.Is(err, errPluginDied):
 				return err
 			default:
-				// The cache already holds the bootstrap floor (always_allow), so
-				// stay up serving it rather than crash-loop the plugin and block
+				// The cache already holds the base allowlist, so stay up
+				// serving it rather than crash-loop the plugin and block
 				// container creation node-wide. runPullLoop keeps retrying.
-				logger.Warn("initial allowlist pull failed; serving bootstrap floor and retrying in background", "error", err)
+				logger.Warn("initial allowlist pull failed; serving the base allowlist and retrying in background", "error", err)
 			}
 		}
 	}
@@ -249,7 +248,7 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Images) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
 	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
@@ -266,11 +265,11 @@ func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
 		if len(cfg.CDSMeasurements) != 0 || len(cfg.CDSRTMRs) != 0 {
 			return ratls.Pins{}, fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
 		}
-		set, err := measurements.Load(cfg.CDSMeasurementsConfig)
+		set, err := refvalues.Load(cfg.CDSMeasurementsConfig)
 		if err != nil {
 			return ratls.Pins{}, err
 		}
-		return ratls.Pins{Entries: set.Entries}, nil
+		return ratls.Pins(set.Policy()), nil
 	}
 	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
 	if err != nil {
@@ -512,7 +511,7 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 	if err != nil {
 		return err
 	}
-	if len(pins.Measurements) == 0 && len(pins.Entries) == 0 {
+	if len(pins.Measurements) == 0 && len(pins.Images) == 0 {
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL

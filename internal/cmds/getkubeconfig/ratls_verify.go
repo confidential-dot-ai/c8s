@@ -31,6 +31,10 @@ import (
 func newRATLSClient(cfg Config, exp platformVerifier) *http.Client {
 	return &http.Client{
 		Timeout: cfg.Timeout,
+		// Never move signed bootstrap requests onto another endpoint or HTTP.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec // RA-TLS in VerifyConnection is the real check

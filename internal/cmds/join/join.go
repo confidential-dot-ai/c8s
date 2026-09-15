@@ -36,7 +36,7 @@ type JoinConfig struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "sev-snp").
 	Platform string
-	// MeasurementsConfig pins exactly one designated leader image and operator key.
+	// MeasurementsConfig pins exactly one designated server image and operator key.
 	MeasurementsConfig string
 	// TokenOut is where the received token is written. Must be on a RAM-backed
 	// filesystem, held open from verification through the atomic token write.
@@ -48,7 +48,7 @@ type JoinConfig struct {
 	Timeout time.Duration
 }
 
-// RunJoin verifies the designated leader, presents this node's quote-bound
+// RunJoin verifies the designated server, presents this node's quote-bound
 // client certificate, and stages the received agent token for rke2-agent.
 func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if cfg.Platform == "" {

@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/controller"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 var operatorCmd = &cobra.Command{
@@ -106,7 +106,7 @@ func init() {
 }
 
 // operatorMeasurementsPolicy preserves each image's runtime and operator-key
-// bindings instead of flattening independently authorized leader identities.
+// bindings instead of flattening independently authorized server identities.
 func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, error) {
 	if path == "" {
 		return "", nil
@@ -118,7 +118,7 @@ func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, e
 	if err != nil {
 		return "", err
 	}
-	encoded, err := measurements.Format(pins)
+	encoded, err := refvalues.Format(pins)
 	if err != nil {
 		return "", err
 	}

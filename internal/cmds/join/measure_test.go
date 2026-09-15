@@ -24,10 +24,10 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/remote/mockapi"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -114,7 +114,7 @@ func operatorKey(t *testing.T) []byte {
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
-func policyEntry(t *testing.T, platform teetypes.PlatformType, key []byte) measurements.Entry {
+func policyEntry(t *testing.T, platform teetypes.PlatformType, key []byte) remote.ImagePin {
 	t.Helper()
 	decode := func(s string) []byte {
 		b, err := hex.DecodeString(s)
@@ -123,15 +123,15 @@ func policyEntry(t *testing.T, platform teetypes.PlatformType, key []byte) measu
 		}
 		return b
 	}
-	e := measurements.Entry{Name: "authorized", Digest: decode(digestA), OperatorKey: key}
+	e := remote.ImagePin{Name: "authorized", Digest: decode(digestA), Anchor: key}
 	if platform == teetypes.PlatformTDX {
 		e.RTMRs = map[int][]byte{1: decode(rtmr1A), 2: decode(rtmr2A)}
 	}
 	return e
 }
-func policyFile(t *testing.T, platform teetypes.PlatformType, entries ...measurements.Entry) string {
+func policyFile(t *testing.T, platform teetypes.PlatformType, entries ...remote.ImagePin) string {
 	t.Helper()
-	data, err := measurements.Format(measurements.ReferenceValues{TEE: string(platform.Family()), Entries: entries})
+	data, err := refvalues.Format(refvalues.ReferenceValues{Family: platform.Family(), Images: entries})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,31 +210,31 @@ func TestLoadPeerPolicy(t *testing.T) {
 			valid := policyEntry(t, platform, key)
 			for _, tc := range []struct {
 				name          string
-				edit          func(*measurements.Entry)
+				edit          func(*remote.ImagePin)
 				otherPlatform string
-				leader        bool
+				server        bool
 				second        bool
 			}{
-				{name: "image only", edit: func(e *measurements.Entry) { e.OperatorKey = nil }},
+				{name: "image only", edit: func(e *remote.ImagePin) { e.Anchor = nil }},
 				{name: "wrong family", otherPlatform: map[teetypes.PlatformType]string{teetypes.PlatformTDX: "snp", teetypes.PlatformSNP: "tdx"}[platform]},
-				{name: "multiple leaders", leader: true, second: true},
+				{name: "multiple servers", server: true, second: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					e := valid
 					if tc.edit != nil {
 						tc.edit(&e)
 					}
-					entries := []measurements.Entry{e}
+					entries := []remote.ImagePin{e}
 					if tc.second {
 						e.Name = "second"
-						e.OperatorKey = operatorKey(t)
+						e.Anchor = operatorKey(t)
 						entries = append(entries, e)
 					}
 					p := string(platform)
 					if tc.otherPlatform != "" {
 						p = tc.otherPlatform
 					}
-					if _, err := loadPeerPolicy(policyFile(t, platform, entries...), p, "http://127.0.0.1:1", time.Second, tc.leader); err == nil {
+					if _, err := loadPeerPolicy(policyFile(t, platform, entries...), p, "http://127.0.0.1:1", time.Second, tc.server); err == nil {
 						t.Fatal("unsafe policy accepted")
 					}
 				})

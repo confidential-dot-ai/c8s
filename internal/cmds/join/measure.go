@@ -1,6 +1,6 @@
 // Package join releases an RKE2 agent token only after mutually attested TLS
 // authenticates the exact launch-authorized image and operator key. The shared
-// measurements and ratls packages own evidence parsing and verification; this
+// refvalues and ratls packages own evidence parsing and verification; this
 // package adds role-specific policy requirements and token staging.
 package join
 
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -21,14 +21,14 @@ const (
 )
 
 // peerPolicy is constructed only after every image entry pins its operator.
-// The client requires one designated leader; the server permits explicit
-// follower entries. A missing policy never falls back to same-image trust.
+// The client requires one designated server; the server permits explicit
+// agent entries. A missing policy never falls back to same-image trust.
 type peerPolicy struct {
 	family ratls.TEEType
 	verify *ratls.VerifyPolicy
 }
 
-func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, leader bool) (peerPolicy, error) {
+func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, server bool) (peerPolicy, error) {
 	if path == "" {
 		return peerPolicy{}, fmt.Errorf("--measurements-config is required")
 	}
@@ -36,25 +36,25 @@ func loadPeerPolicy(path, platform, apiURL string, timeout time.Duration, leader
 	if err != nil {
 		return peerPolicy{}, fmt.Errorf("--platform: %w", err)
 	}
-	refs, err := measurements.Load(path)
+	refs, err := refvalues.Load(path)
 	if err != nil {
 		return peerPolicy{}, err
 	}
-	if refs.TEE != string(family) || refs.Empty() {
+	if refs.Family != family || refs.Empty() {
 		return peerPolicy{}, fmt.Errorf("join: policy must contain authorized %s identities", family)
 	}
-	if leader && len(refs.Entries) != 1 {
-		return peerPolicy{}, fmt.Errorf("join: policy must designate exactly one leader")
+	if server && len(refs.Images) != 1 {
+		return peerPolicy{}, fmt.Errorf("join: policy must designate exactly one server")
 	}
-	for _, entry := range refs.Entries {
-		if len(entry.OperatorKey) == 0 {
+	for _, entry := range refs.Images {
+		if len(entry.Anchor) == 0 {
 			return peerPolicy{}, fmt.Errorf("join: policy entry %q requires operator_key", entry.Name)
 		}
-		if family == ratls.TEETypeTDX && (len(entry.RTMRs[1]) != measurements.DigestSize || len(entry.RTMRs[2]) != measurements.DigestSize) {
+		if family == ratls.TEETypeTDX && (len(entry.RTMRs[1]) != refvalues.DigestSize || len(entry.RTMRs[2]) != refvalues.DigestSize) {
 			return peerPolicy{}, fmt.Errorf("join: TDX policy entry %q requires RTMR[1] and RTMR[2]", entry.Name)
 		}
 	}
-	policy := (ratls.Pins{Entries: refs.Entries}).VerifyPolicy(apiURL)
+	policy := (ratls.Pins{Images: refs.Images}).VerifyPolicy(apiURL)
 	policy.AttestationVerifyTimeout = timeout
 	return peerPolicy{family: family, verify: policy}, nil
 }
@@ -67,7 +67,7 @@ func verifyPeer(ctx context.Context, leaf *x509.Certificate, policy peerPolicy) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if policy.verify == nil || len(policy.verify.Entries) == 0 {
+	if policy.verify == nil || len(policy.verify.Policy.Images) == 0 {
 		return fmt.Errorf("join: peer policy is required")
 	}
 	att, err := ratls.ExtractAttestation(leaf)

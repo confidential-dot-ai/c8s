@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
-func TestLeaderCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) {
-	doc, key, pub := testDocument(t, "tdx", Leader)
+func TestServerCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) {
+	doc, key, pub := testDocument(t, "tdx", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 	if err := Stage(context.Background(), cfg); err != nil {
@@ -30,7 +30,7 @@ func TestLeaderCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("agent credential is not private")
 	}
-	for _, path := range []string{cfg.DocumentPath, cfg.path(DefaultStagedPath), cfg.path(runtimeManifestPath), cfg.path(Dir + "/peers.json"), cfg.path(Dir + "/followers.json")} {
+	for _, path := range []string{cfg.DocumentPath, cfg.path(DefaultStagedPath), cfg.path(runtimeManifestPath), cfg.path(Dir + "/peers.json"), cfg.path(Dir + "/agents.json")} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -39,12 +39,12 @@ func TestLeaderCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 			t.Fatalf("credential disclosed in %s", path)
 		}
 	}
-	followers, err := measurements.Load(cfg.path(Dir + "/followers.json"))
+	agents, err := refvalues.Load(cfg.path(Dir + "/agents.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(followers.Entries) != 1 || !bytes.Equal(followers.Entries[0].OperatorKey, []byte(doc.FollowerOperatorPublicKeys[0])) {
-		t.Fatal("enrollment policy does not contain only authorized followers")
+	if len(agents.Images) != 1 || !bytes.Equal(agents.Images[0].Anchor, []byte(doc.AgentOperatorPublicKeys[0])) {
+		t.Fatal("enrollment policy does not contain only authorized agents")
 	}
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
@@ -66,13 +66,13 @@ func TestLeaderCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	if !bytes.Equal(after, token) {
 		t.Fatal("restaging rotated the running cluster credential")
 	}
-	// Removing follower authorization closes the enrollment listener on restart.
-	doc.FollowerOperatorPublicKeys = nil
+	// Removing agent authorization closes the enrollment listener on restart.
+	doc.AgentOperatorPublicKeys = nil
 	signDocument(t, cfg, doc, key)
 	if err := Stage(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	requireAbsent(t, cfg.path(Dir+"/followers.json"))
+	requireAbsent(t, cfg.path(Dir+"/agents.json"))
 	// A separate boot gets an independently generated credential.
 	fresh := testConfig(t, doc, key)
 	if err := Stage(context.Background(), fresh); err != nil {
@@ -87,10 +87,10 @@ func TestLeaderCredentialSurvivesRestagingWithoutPublicDisclosure(t *testing.T) 
 	}
 }
 
-func TestLeaderCredentialStorageFailsClosed(t *testing.T) {
+func TestServerCredentialStorageFailsClosed(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(map[bool]string{false: "new", true: "existing"}[existing], func(t *testing.T) {
-			doc, key, pub := testDocument(t, "snp", Leader)
+			doc, key, pub := testDocument(t, "snp", Server)
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
 			if existing {
@@ -112,10 +112,10 @@ func TestLeaderCredentialStorageFailsClosed(t *testing.T) {
 	}
 }
 
-func TestLeaderRejectsUnsafeExistingCredential(t *testing.T) {
+func TestServerRejectsUnsafeExistingCredential(t *testing.T) {
 	for _, kind := range []string{"permissions", "malformed", "directory", "symlink", "oversized"} {
 		t.Run(kind, func(t *testing.T) {
-			doc, key, pub := testDocument(t, "snp", Leader)
+			doc, key, pub := testDocument(t, "snp", Server)
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
 			path := cfg.path(agentTokenPath)

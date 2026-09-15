@@ -27,36 +27,36 @@ func TestValidateRejectsEachMalformedField(t *testing.T) {
 		change func(*Document)
 		want   string
 	}{
-		{"schema", Leader, func(d *Document) { d.SchemaVersion = "c8s-launch/v0" }, "schemaVersion"},
-		{"cluster label", Leader, func(d *Document) { d.ClusterID = "Cluster_One" }, "clusterID"},
-		{"node label", Leader, func(d *Document) { d.Node.Name = "-node" }, "node.name"},
-		{"platform", Leader, func(d *Document) { d.Image.Platform = "sgx" }, "image.platform"},
-		{"measurement length", Leader, func(d *Document) { d.Image.Measurement = "abcd" }, "image.measurement"},
-		{"measurement case", Leader, func(d *Document) { d.Image.Measurement = strings.Repeat("AB", 48) }, "image.measurement"},
-		{"measurement hex", Leader, func(d *Document) { d.Image.Measurement = strings.Repeat("zz", 48) }, "image.measurement"},
-		{"snp with rtmrs", Leader, func(d *Document) {
+		{"schema", Server, func(d *Document) { d.SchemaVersion = "c8s-launch/v0" }, "schemaVersion"},
+		{"cluster label", Server, func(d *Document) { d.ClusterID = "Cluster_One" }, "clusterID"},
+		{"node label", Server, func(d *Document) { d.Node.Name = "-node" }, "node.name"},
+		{"platform", Server, func(d *Document) { d.Image.Platform = "sgx" }, "image.platform"},
+		{"measurement length", Server, func(d *Document) { d.Image.Measurement = "abcd" }, "image.measurement"},
+		{"measurement case", Server, func(d *Document) { d.Image.Measurement = strings.Repeat("AB", 48) }, "image.measurement"},
+		{"measurement hex", Server, func(d *Document) { d.Image.Measurement = strings.Repeat("zz", 48) }, "image.measurement"},
+		{"snp with rtmrs", Server, func(d *Document) {
 			d.Image.RTMRs = map[int]string{1: strings.Repeat("22", 48), 2: strings.Repeat("33", 48)}
 		}, "SNP image cannot"},
-		{"leader address", Leader, func(d *Document) { d.Leader.Address = "224.0.0.1" }, "leader.address"},
-		{"leader address v6", Leader, func(d *Document) { d.Leader.Address = "2001:db8::1" }, "leader.address"},
-		{"node ip", Leader, func(d *Document) { d.Node.IP = "not-an-ip" }, "node.ip"},
-		{"external ip", Leader, func(d *Document) { d.Node.ExternalIP = "127.0.0.1" }, "node.externalIP"},
-		{"leader key", Leader, func(d *Document) { d.Leader.OperatorPublicKey = "not a key" }, "leader.operatorPublicKey"},
-		{"follower key", Leader, func(d *Document) { d.FollowerOperatorPublicKeys = []string{"not a key"} }, "followerOperatorPublicKeys"},
-		{"duplicate follower keys", Leader, func(d *Document) {
-			d.FollowerOperatorPublicKeys = append(d.FollowerOperatorPublicKeys, d.FollowerOperatorPublicKeys[0])
+		{"server address", Server, func(d *Document) { d.Server.Address = "224.0.0.1" }, "server.address"},
+		{"server address v6", Server, func(d *Document) { d.Server.Address = "2001:db8::1" }, "server.address"},
+		{"node ip", Server, func(d *Document) { d.Node.IP = "not-an-ip" }, "node.ip"},
+		{"external ip", Server, func(d *Document) { d.Node.ExternalIP = "127.0.0.1" }, "node.externalIP"},
+		{"server key", Server, func(d *Document) { d.Server.OperatorPublicKey = "not a key" }, "server.operatorPublicKey"},
+		{"agent key", Server, func(d *Document) { d.AgentOperatorPublicKeys = []string{"not a key"} }, "agentOperatorPublicKeys"},
+		{"duplicate agent keys", Server, func(d *Document) {
+			d.AgentOperatorPublicKeys = append(d.AgentOperatorPublicKeys, d.AgentOperatorPublicKeys[0])
 		}, "nonduplicated"},
-		{"too many follower keys", Leader, func(d *Document) {
-			d.FollowerOperatorPublicKeys = make([]string, maxFollowerKeys+1)
-			for i := range d.FollowerOperatorPublicKeys {
-				d.FollowerOperatorPublicKeys[i] = otherPub
+		{"too many agent keys", Server, func(d *Document) {
+			d.AgentOperatorPublicKeys = make([]string, maxAgentKeys+1)
+			for i := range d.AgentOperatorPublicKeys {
+				d.AgentOperatorPublicKeys[i] = otherPub
 			}
 		}, "too many"},
-		{"follower without keys", Follower, func(d *Document) { d.FollowerOperatorPublicKeys = nil }, "requires followerOperatorPublicKeys"},
-		{"tls san length", Leader, func(d *Document) { d.TLSSAN = strings.Repeat("a", 254) }, "DNS name length"},
-		{"tls san label", Leader, func(d *Document) { d.TLSSAN = "C8S.Local" }, "lowercase DNS hostname"},
-		{"workloads json", Leader, func(d *Document) { d.Workloads = "{" }, "valid JSON"},
-		{"workloads schema", Leader, func(d *Document) { d.Workloads = `{"schema":"other/v1","workloads":{}}` }, "workloads:"},
+		{"agent without keys", Agent, func(d *Document) { d.AgentOperatorPublicKeys = nil }, "requires agentOperatorPublicKeys"},
+		{"tls san length", Server, func(d *Document) { d.TLSSAN = strings.Repeat("a", 254) }, "DNS name length"},
+		{"tls san label", Server, func(d *Document) { d.TLSSAN = "C8S.Local" }, "lowercase DNS hostname"},
+		{"workloads json", Server, func(d *Document) { d.Workloads = "{" }, "valid JSON"},
+		{"workloads schema", Server, func(d *Document) { d.Workloads = `{"schema":"other/v1","workloads":{}}` }, "workloads:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,9 +78,9 @@ func TestParseRejectsEmptyAndMalformedYAML(t *testing.T) {
 	for name, data := range map[string][]byte{
 		"empty":            nil,
 		"oversized":        bytes.Repeat([]byte("a"), MaxDocumentSize+1),
-		"invalid":          []byte("role: [leader"),
-		"merge key":        []byte("base: &b {}\nrole: leader\n<<: *b\n"),
-		"non-scalar key":   []byte("? [a, b]\n: leader\n"),
+		"invalid":          []byte("role: [server"),
+		"merge key":        []byte("base: &b {}\nrole: server\n<<: *b\n"),
+		"non-scalar key":   []byte("? [a, b]\n: server\n"),
 		"deep nesting":     []byte(strings.Repeat("[", 40) + strings.Repeat("]", 40)),
 		"rtmr index alias": []byte("image:\n  rtmrs:\n    0x1: a\n"),
 	} {
@@ -150,7 +150,7 @@ func TestReadBoundedRejectsIrregularFiles(t *testing.T) {
 }
 
 func TestVerifyRejectsBadConfigBeforeReadingFiles(t *testing.T) {
-	doc, key, pub := testDocument(t, "snp", Leader)
+	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 
@@ -187,7 +187,7 @@ func TestVerifyRejectsBadConfigBeforeReadingFiles(t *testing.T) {
 }
 
 func TestLoadStagedTrustsOnlyCompleteArtifacts(t *testing.T) {
-	doc, _, _ := testDocument(t, "snp", Leader)
+	doc, _, _ := testDocument(t, "snp", Server)
 	write := func(t *testing.T, data []byte) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "config.json")
@@ -219,9 +219,9 @@ func TestLoadStagedTrustsOnlyCompleteArtifacts(t *testing.T) {
 		t.Errorf("invalid document: %v", err)
 	}
 	unresolved := doc
-	unresolved.Leader.Address = ""
-	if _, err := LoadStaged(write(t, encode(t, unresolved))); err == nil || !strings.Contains(err.Error(), "resolved leader address") {
-		t.Errorf("unresolved leader: %v", err)
+	unresolved.Server.Address = ""
+	if _, err := LoadStaged(write(t, encode(t, unresolved))); err == nil || !strings.Contains(err.Error(), "resolved server address") {
+		t.Errorf("unresolved server: %v", err)
 	}
 	staged, err := LoadStaged(write(t, encode(t, doc)))
 	if err != nil || staged.ClusterID != doc.ClusterID {
@@ -241,10 +241,10 @@ func TestPrimaryIPv4FollowsTheHostRoute(t *testing.T) {
 		t.Fatalf("got %q, %v", ip, err)
 	}
 
-	// Stage consults it only when a leader omits both addresses and no
+	// Stage consults it only when a server omits both addresses and no
 	// resolver is configured.
-	doc, key, pub := testDocument(t, "snp", Leader)
-	doc.Leader.Address = ""
+	doc, key, pub := testDocument(t, "snp", Server)
+	doc.Server.Address = ""
 	doc.Node.IP = ""
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
@@ -252,7 +252,7 @@ func TestPrimaryIPv4FollowsTheHostRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	staged, err := LoadStaged(cfg.path(DefaultStagedPath))
-	if err != nil || staged.Leader.Address != "192.0.2.9" {
+	if err != nil || staged.Server.Address != "192.0.2.9" {
 		t.Fatalf("got %v, %v", staged, err)
 	}
 }
@@ -267,7 +267,7 @@ func TestConfigPathWithoutRootIsAbsolute(t *testing.T) {
 }
 
 func TestStageCommandFailsClosed(t *testing.T) {
-	doc, key, pub := testDocument(t, "snp", Leader)
+	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 
@@ -293,7 +293,7 @@ func TestStageCommandFailsClosed(t *testing.T) {
 func TestVerifyPassesTheFamilyNameToTheSelfReport(t *testing.T) {
 	for platform, family := range map[string]string{"snp": "sev-snp", "tdx": "tdx"} {
 		t.Run(platform, func(t *testing.T) {
-			doc, key, pub := testDocument(t, platform, Leader)
+			doc, key, pub := testDocument(t, platform, Server)
 			testLoader(t, doc, pub)
 			inner := loadMeasuredOperatorKeyAndOwnMeasurement
 			var got string

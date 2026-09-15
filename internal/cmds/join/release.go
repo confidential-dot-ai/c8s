@@ -44,7 +44,7 @@ type ReleaseConfig struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "sev-snp").
 	Platform string
-	// MeasurementsConfig pins the authorized follower images and operator keys.
+	// MeasurementsConfig pins the authorized agent images and operator keys.
 	MeasurementsConfig string
 	// TokenPath is the agent-only rke2 join token file (the full-format
 	// K10<ca-hash>::node:... token rke2-server writes once initialised).

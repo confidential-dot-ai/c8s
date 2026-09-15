@@ -5,16 +5,16 @@ import (
 	"os"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 func TestCDSPinsPreserveOperatorIdentities(t *testing.T) {
-	const path = "../../../pkg/measurements/testdata/node-identities.json"
+	const path = "../../../internal/testdata/node-identities.json"
 	doc, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := measurements.Parse(doc)
+	want, err := refvalues.Parse(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestCDSPinsPreserveOperatorIdentities(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(pins.Entries) != len(want.Entries) || !bytes.Equal(pins.Entries[0].OperatorKey, want.Entries[0].OperatorKey) {
+		if len(pins.Images) != len(want.Images) || !bytes.Equal(pins.Images[0].Anchor, want.Images[0].Anchor) {
 			t.Fatal("CDS client dropped the operator identity")
 		}
 		if len(pins.Measurements) != 0 || len(pins.RTMRs) != 0 {

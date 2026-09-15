@@ -10,7 +10,7 @@ func TestLintAcceptsCompleteNodePolicy(t *testing.T) {
 	cmd := newLintCmd()
 	out := new(strings.Builder)
 	cmd.SetOut(out)
-	cmd.SetArgs([]string{filepath.Join("..", "..", "..", "pkg", "measurements", "testdata", "node-identities.json")})
+	cmd.SetArgs([]string{filepath.Join("..", "..", "..", "internal", "testdata", "node-identities.json")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("valid image/operator-key policy rejected: %v", err)
 	}

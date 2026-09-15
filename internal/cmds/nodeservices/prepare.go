@@ -52,7 +52,7 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 	if err := write("/etc/nri/conf.d/image-policy.yaml", data); err != nil {
 		return err
 	}
-	if d.Role != launchconfig.Leader {
+	if d.Role != launchconfig.Server {
 		return nil
 	}
 

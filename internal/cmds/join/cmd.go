@@ -8,15 +8,15 @@ import (
 
 // NewReleaseCmd builds the `join-release` subcommand: the in-guest service on
 // an rke2 server node that releases the cluster join token to attested
-// authorized followers. Baked as a systemd unit in the c8s node image; not run by
+// authorized agents. Baked as a systemd unit in the c8s node image; not run by
 // hand in normal operation.
 func NewReleaseCmd() *cobra.Command {
 	var cfg ReleaseConfig
 	cmd := &cobra.Command{
 		Use:   "join-release",
-		Short: "Release the rke2 agent join token to attested authorized followers",
+		Short: "Release the rke2 agent join token to attested authorized agents",
 		Long: "join-release serves the RKE2 agent-only token over mutually attested TLS.\n" +
-			"Each follower must match an authorized image and measured operator key\n" +
+			"Each agent must match an authorized image and measured operator key\n" +
 			"in --measurements-config. The policy supports TDX and SEV-SNP.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return RunRelease(cmd.Context(), cfg)
@@ -27,7 +27,7 @@ func NewReleaseCmd() *cobra.Command {
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (serving-cert quote source and peer-quote verifier)")
 	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (tdx or sev-snp)")
 	f.StringVar(&cfg.TokenPath, "token-path", "/var/lib/rancher/rke2/server/agent-token", "rke2 agent-only join token file (appears once rke2-server has initialised)")
-	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "authorized follower image/operator policy (required)")
+	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "authorized agent image/operator policy (required)")
 	_ = cmd.MarkFlagRequired("measurements-config")
 	f.DurationVar(&cfg.VerifyTimeout, "verify-timeout", 10*time.Second, "per-request peer verification timeout")
 	return cmd
@@ -40,8 +40,8 @@ func NewJoinCmd() *cobra.Command {
 	var cfg JoinConfig
 	cmd := &cobra.Command{
 		Use:   "join",
-		Short: "Fetch the rke2 join token from an attested designated leader",
-		Long: "join verifies the designated leader image and measured operator key\n" +
+		Short: "Fetch the rke2 join token from an attested designated server",
+		Long: "join verifies the designated server image and measured operator key\n" +
 			"in --measurements-config, presents its own attested client certificate,\n" +
 			"and stages the agent token in RAM. Retries belong to the calling unit.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -53,7 +53,7 @@ func NewJoinCmd() *cobra.Command {
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (client-cert quote source and server-quote verifier)")
 	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (tdx or sev-snp)")
 	f.StringVar(&cfg.TokenOut, "token-out", "/run/confos/join-token", "where to write the token (rejected unless RAM-backed; never persistent storage)")
-	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "designated leader image/operator policy (required)")
+	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "designated server image/operator policy (required)")
 	_ = cmd.MarkFlagRequired("measurements-config")
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
 	_ = cmd.MarkFlagRequired("server")

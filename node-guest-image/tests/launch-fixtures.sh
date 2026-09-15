@@ -63,14 +63,14 @@ case "$1 $2" in
     [[ $(cat "$signature") == valid-test-signature ]]
     rm -f /run/confos/role-server /run/confos/role-agent
     case "$(cat "$config")" in
-        leader)
+        server)
             mkdir -p /run/confos/launch
-            if [[ ! -e "$C8S_ROLE_FIXTURE/no-followers" ]]; then
-                printf '%s\n' '{"test":"authorized-followers"}' > /run/confos/launch/followers.json
+            if [[ ! -e "$C8S_ROLE_FIXTURE/no-agents" ]]; then
+                printf '%s\n' '{"test":"authorized-agents"}' > /run/confos/launch/agents.json
             fi
             : > /run/confos/role-server
             ;;
-        follower) : > /run/confos/role-agent ;;
+        agent) : > /run/confos/role-agent ;;
         *) exit 31 ;;
     esac
     ;;

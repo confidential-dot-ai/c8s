@@ -98,7 +98,7 @@ WantedBy=multi-user.target
 EOF
 done
 
-# A real follower payload must never execute before enrollment writes its token.
+# A real agent payload must never execute before enrollment writes its token.
 install -D -m644 /dev/stdin "$UNITDIR/rke2-agent.service.d/90-test-payload.conf" <<'EOF'
 [Service]
 ExecStart=
@@ -162,7 +162,7 @@ for role in server agent; do
         test -L "/etc/systemd/system/rke2-$role.service.requires/apparmor-enforce.service"
 done
 
-for role in leader follower; do
+for role in server agent; do
     CASE="boot-$role"
     scenario_reset
     launch_media "$role"
@@ -171,39 +171,39 @@ for role in leader follower; do
     ok "launch verification is active" active rke2-role.service
     ok "AppArmor gate is active" active apparmor-enforce.service
     selected=rke2-server.service; skipped=rke2-agent.service
-    if [[ $role == follower ]]; then selected=rke2-agent.service; skipped=rke2-server.service; fi
+    if [[ $role == agent ]]; then selected=rke2-agent.service; skipped=rke2-server.service; fi
     ok "$selected active" active "$selected"
     ok "$skipped inactive" not_active "$skipped"
     ok "$skipped condition skipped" cond_skipped "$skipped"
-    if [[ $role == follower ]]; then
+    if [[ $role == agent ]]; then
         ok "enrollment is complete" active c8s-join.service
         ok "agent ran after enrollment" test -f /run/confos/test-agent-started
         ok "credential is private" test "$(stat -c %a /run/confos/rke2-agent-token)" = 600
     else
-        ok "leader skips follower enrollment" cond_skipped c8s-join.service
-        ok "leader never fetched a credential" test ! -e /run/confos/test-join-attempts
+        ok "server skips agent enrollment" cond_skipped c8s-join.service
+        ok "server never fetched a credential" test ! -e /run/confos/test-join-attempts
     fi
     for unit in "${core_units[@]}"; do
-        if [[ $role == follower ]] && grep -qF 'ConditionPathExists=/run/confos/role-server' "$SOURCE_UNITS/$unit"; then
-            ok "$unit inactive on follower" not_active "$unit"
-            ok "$unit condition skipped on follower" cond_skipped "$unit"
+        if [[ $role == agent ]] && grep -qF 'ConditionPathExists=/run/confos/role-server' "$SOURCE_UNITS/$unit"; then
+            ok "$unit inactive on agent" not_active "$unit"
+            ok "$unit condition skipped on agent" cond_skipped "$unit"
         else
             ok "$unit active on $role" active "$unit"
         fi
     done
 done
 
-CASE=leader-without-followers
+CASE=server-without-agents
 scenario_reset
-launch_media leader
-: > "$C8S_ROLE_FIXTURE/no-followers"
-ok "leader without followers boots" boot_roles
-ok "release is skipped without follower policy" cond_skipped c8s-join-release.service
-ok "leader control plane remains active" active rke2-server.service
+launch_media server
+: > "$C8S_ROLE_FIXTURE/no-agents"
+ok "server without agents boots" boot_roles
+ok "release is skipped without agent policy" cond_skipped c8s-join-release.service
+ok "server control plane remains active" active rke2-server.service
 
 CASE=enrollment-failure
 scenario_reset
-launch_media follower
+launch_media agent
 : > "$C8S_ROLE_FIXTURE/join-fails"
 systemctl start --no-block "${payload_units[@]}"
 for _ in $(seq 1 80); do
@@ -224,9 +224,14 @@ ok "stop prevents additional attempts" test "$(cat /run/confos/test-join-attempt
 
 CASE=enrollment-retry
 scenario_reset
-launch_media follower
+launch_media agent
 : > "$C8S_ROLE_FIXTURE/join-fails-once"
-ok "retry completes original boot job" boot_roles
+ok "initial boot jobs queued" systemctl start --no-block "${payload_units[@]}"
+# The first failure cancels the original agent job; the retry queues a new one.
+for _ in $(seq 1 80); do
+    active rke2-agent.service && [[ -f /run/confos/test-agent-started ]] && break
+    sleep 0.1
+done
 ok "enrollment retried automatically" test "$(cat /run/confos/test-join-attempts)" -ge 2
 ok "recovered enrollment starts agent" active rke2-agent.service
 ok "recovered agent has its credential" test -f /run/confos/test-agent-started
@@ -235,7 +240,7 @@ for scenario in missing-launch invalid-signature prepare-failure; do
     CASE="boot-$scenario"
     scenario_reset
     if [[ $scenario != missing-launch ]]; then
-        launch_media leader
+        launch_media server
         : > /dev/disk/by-label/opkeydata
     fi
     case "$scenario" in
@@ -248,7 +253,7 @@ for scenario in missing-launch invalid-signature prepare-failure; do
     for unit in "${payload_units[@]}"; do ok "$unit stayed down" not_active "$unit"; done
 done
 
-for role in leader follower; do
+for role in server agent; do
     CASE="boot-$role-AppArmor-failure"
     scenario_reset
     launch_media "$role"

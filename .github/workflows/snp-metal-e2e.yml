@@ -32,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  # The reaper needs the owning run status; without this it falls back to age.
   actions: read
 
 concurrency:
@@ -55,14 +56,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: tools (kubectl, go, crane, launch generator)
+      - name: tools (kubectl, go, crane)
         run: |
           set -euo pipefail
           # Every fetch here crosses the public internet from an ephemeral ARC
           # pod, and one hiccup fails the lane before it reaches a CVM.
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends jq openssl python3
+          if ! command -v openssl >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends openssl
+          fi
           mkdir -p "$PWD/bin"
           # A file because each run block starts a fresh shell. Arguments are
           # executed directly, including refs, without evaluating shell text.
@@ -102,6 +107,11 @@ jobs:
           # on a shared self-hosted host. The ephemeral ARC pod has no crane,
           # unlike the host, so install rather than assume.
           command -v crane >/dev/null || retry go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          # Avoid apt's intermittent IPv6 mirror failures on the launcher.
+          if ! command -v jq >/dev/null; then
+            retry curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o bin/jq
+            chmod +x bin/jq
+          fi
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
       # Fail SAFE: only reap on a positive "completed", or on age. An unknown
@@ -133,10 +143,12 @@ jobs:
               echo "reaping $vm (run ${orepo:-${{ github.repository }}}#$rid completed)"
               kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
               kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete secret "${vm#virtualmachine.kubevirt.io/}-opkey" "${vm#virtualmachine.kubevirt.io/}-cloudinit" --ignore-not-found
             elif [ -z "$st" ] && [ "$age" -gt 10800 ]; then
               echo "reaping $vm (status unknown, age ${age}s > 3h -> orphaned)"
               kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
               kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete secret "${vm#virtualmachine.kubevirt.io/}-opkey" "${vm#virtualmachine.kubevirt.io/}-cloudinit" --ignore-not-found
             else
               echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
             fi
@@ -222,17 +234,33 @@ jobs:
           popd >/dev/null
           c8s --version || true
 
-      - name: sign the leader launch and attach opkeydata
+      - name: preflight, SEV-SNP device capacity
+        run: |
+          set -uo pipefail
+          # The launcher's bm-e2e SA is namespace-scoped; node reads are a
+          # nicety it may not have, so the check is skipped without them.
+          if kubectl auth can-i get nodes >/dev/null 2>&1; then
+            N=$(kubectl get node -l confidential.ai/sev-snp=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/sev}' 2>/dev/null)
+            echo "devices.kubevirt.io/sev = ${N:-unknown}"
+            [ "${N:-0}" != "0" ] || { echo "::error::the SNP node advertises no devices.kubevirt.io/sev: the VMI would sit Scheduling forever"; exit 1; }
+          else
+            echo "no node read permission; skipping the SEV device capacity preflight"
+          fi
+
+      - name: sign the server launch and attach opkeydata
         # The same exact public PEM is signed into launch.yaml, bound by the
         # measured initrd against HOSTDATA, and pinned by external clients.
         run: |
           set -euo pipefail
-          bash .github/scripts/node-launch-data.sh /tmp/launch-data snp "$VM" "$snpLaunchDigest"
-          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/pubkey | base64 -w0)" >> "$GITHUB_ENV"
+          # The published manifest pins this SMP count's launch digest (checked
+          # above); the bundle's server.key doubles as the run's operator key.
+          c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
+            --image-manifest /tmp/image-manifest.json --vcpus "$smp"
+          echo "SNP_HOST_DATA=$(openssl dgst -sha256 -binary /tmp/launch-data/server/pubkey | base64 -w0)" >> "$GITHUB_ENV"
           kubectl -n "$NS" create secret generic "$VM-opkey" \
-            --from-file=pubkey=/tmp/launch-data/pubkey \
-            --from-file=launch.yaml=/tmp/launch-data/launch.yaml \
-            --from-file=launch.yaml.sig=/tmp/launch-data/launch.yaml.sig \
+            --from-file=pubkey=/tmp/launch-data/server/pubkey \
+            --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
+            --from-file=launch.yaml.sig=/tmp/launch-data/server/launch.yaml.sig \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: boot the SNP CVM
@@ -270,7 +298,11 @@ jobs:
             namespace: $NS
             labels:
               ci.confidential.ai/managed: "true"
+              ci.confidential.ai/standing: "false"
               ci.confidential.ai/run-id: "${{ github.run_id }}"
+              ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
+              ci.confidential.ai/platform: "snp-metal"
+              ci.confidential.ai/flavor: "rke2-node"
             annotations:
               ci.confidential.ai/repo: "${{ github.repository }}"
               ci.confidential.ai/run-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -338,20 +370,28 @@ jobs:
             echo "::error::VMI not Running (phase=${PHASE:-none}). check SNP host capacity, the measured IGVM, and the host-data hook"
             exit 1
           fi
-          IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}')
-          [ -n "$IP" ] || { echo "::error::no guest IP"; exit 1; }
+          for _ in $(seq 1 60); do
+            IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || true)
+            [ -n "$IP" ] && break
+            sleep 5
+          done
+          [ -n "${IP:-}" ] || { echo "::error::the VMI never reported an IP"; kubectl -n "$NS" describe vmi "$VM" | tail -20; exit 1; }
           echo "GUEST_IP=$IP" >> "$GITHUB_ENV"
           echo "VMI Running at $IP"
 
-      - name: assert genuine SNP launch
+      - name: assert genuine SEV-SNP launch with the bound HOSTDATA
         run: |
           set -euo pipefail
           POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name | head -1)
-          kubectl -n "$NS" exec -i "$POD" -c compute -- bash -s <<'CHECK' | tee /tmp/snp.cnt
-          tr "\0" "\n" < "/proc/$(pgrep -f qemu-system | head -1)/cmdline" | grep -c "sev-snp-guest"
-          CHECK
-          [ "$(cat /tmp/snp.cnt)" -ge 1 ] || { echo "::error::qemu has no sev-snp-guest object: not a genuine SNP guest"; exit 1; }
-          echo "OK: qemu launched with -object sev-snp-guest"
+          kubectl -n "$NS" exec "$POD" -c compute -- \
+            sh -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline' > /tmp/qemu.cmdline
+          # libvirt renders the object either as key=value or as JSON
+          # ("host-data":"..."), so match the object and the value, not a syntax.
+          OBJ=$(grep -A1 -x -- '-object' /tmp/qemu.cmdline | grep 'sev-snp-guest' | head -1 || true)
+          echo "sev-snp-guest object: ${OBJ:-<none>}"
+          [ -n "$OBJ" ] || { echo "::error::qemu has no sev-snp-guest object: not a genuine SNP guest"; exit 1; }
+          case "$OBJ" in *"$SNP_HOST_DATA"*) ;; *) echo "::error::the sev-snp-guest object carries no host-data equal to this run's operator-key hash; the binding is missing"; exit 1 ;; esac
+          echo "OK: qemu launched with -object sev-snp-guest and host-data bound to this run's operator key"
 
       - name: wait for the credential-release listener
         # HTTP reachability only; the next step verifies hardware evidence,
@@ -373,8 +413,16 @@ jobs:
           # The immutable published manifest was checked before launch. The
           # credential gate verifies SNP hardware evidence, launch digest and
           # HOSTDATA=SHA256(our exact operator public PEM); no TOFU fallback.
-          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/operator.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
-          [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
+          # cred-release opens :8443 a little before its release handler can
+          # serve (first RA-TLS quote, client CA); that window answers a POST
+          # with EOF. Retry a bounded number of times and print each failure.
+          ok=""
+          for attempt in 1 2 3 4 5 6; do
+            if c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/server.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s; then ok=1; break; fi
+            echo "get-kubeconfig attempt $attempt failed; retrying in 20s"
+            sleep 20
+          done
+          [ -n "$ok" ] && [ -s /tmp/guest.kubeconfig ] || { echo "::error::no attested kubeconfig after 6 attempts"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
           echo "OK: attested kubeconfig, identity=$WHO"
@@ -384,25 +432,25 @@ jobs:
         run: .github/scripts/cidata-tripwire.sh
 
       - name: assert measured services and Kubernetes integration converged
-        # components-ready verifies c8s-node-runtime and the full leader policy,
+        # components-ready verifies c8s-node-runtime and the full server policy,
         # then reaches the baked CDS service over authenticated discovery.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_NODE_IMAGE=1
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
           bash /tmp/c8s-src/test/e2e/components-ready.sh
 
       - name: assert the image floor denies, then opens to a signed write
         # Baked nginx fronts /allowlist on 443; discovery pins the whole
-        # measured image tuple and the leader operator key.
+        # measured image tuple and the server operator key.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
           bash /tmp/c8s-src/test/e2e/allowlist-enforcement.sh
 
       - name: assert a confidential workload runs with an injected cert
@@ -410,8 +458,8 @@ jobs:
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json
-          export C8S_OPERATOR_KEY=/tmp/launch-data/operator.key
+          export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+          export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
           bash /tmp/c8s-src/test/e2e/cw-workload.sh
 
       - name: assert confidential workload label integrity
@@ -419,6 +467,41 @@ jobs:
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
           bash /tmp/c8s-src/test/e2e/cw-label-policy.sh
+
+      - name: diagnostics (on failure)
+        if: failure() || cancelled()
+        run: |
+          set +e
+          echo "::group::host-side VMI and launcher"
+          kubectl -n "$NS" describe vmi "$VM" 2>&1 | tail -30
+          POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name 2>/dev/null | head -1)
+          [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" --all-containers --tail=40 2>&1 | grep -iE 'igvm|host-data|hostData|sev|error' | tail -20
+          echo "::endgroup::"
+          # The guest's serial console is read-only here (no autologin), but its
+          # boot log names the unit that did not come up.
+          echo "::group::guest console (systemd units, cred-release, psa-ready, initrd)"
+          [ -n "$POD" ] && kubectl -n "$NS" logs "$POD" -c guest-console-log --tail=400 2>/dev/null \
+            | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+            | grep -iE 'initrd|opkey|HOSTDATA|cred-release|psa-ready|rke2|Failed|failed|error' | tail -40
+          echo "::endgroup::"
+          # Guest-side state exists only once the attested kubeconfig was issued.
+          [ -s /tmp/guest.kubeconfig ] || exit 0
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          echo "::group::c8s-system pods and events"
+          kubectl -n c8s-system get pods -o wide 2>&1
+          kubectl -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -25
+          echo "::endgroup::"
+          # The node image's kubelet serves no debugging handlers, so pods/log
+          # is refused; exit codes and termination messages are still in status.
+          for p in $(kubectl -n c8s-system get pods -o name 2>/dev/null); do
+            echo "::group::$p"
+            kubectl -n c8s-system describe "$p" 2>&1 | sed -n '/^Events:/,$p' | tail -12
+            kubectl -n c8s-system get "$p" -o json 2>/dev/null | jq -r '
+              (.status.initContainerStatuses // []) + (.status.containerStatuses // []) | .[]
+              | "\(.name): restarts=\(.restartCount) state=\(.state | keys[0]) last=\(.lastState.terminated // {} | "exit=\(.exitCode // "-") reason=\(.reason // "-") message=\(.message // "-" | tostring | .[0:600])")"'
+            echo "::endgroup::"
+          done
+          exit 0
 
       - name: summary
         if: always()
@@ -439,7 +522,9 @@ jobs:
         if: always() && inputs.keep_cvm != true
         run: |
           set +e
-          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s
-          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found
-          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false
-          exit 0
+          cleanup_failed=0
+          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s || cleanup_failed=1
+          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found || cleanup_failed=1
+          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false || cleanup_failed=1
+          [ "$cleanup_failed" = 0 ] || echo "::error::SNP cleanup incomplete; owned resources may need orphan reaping"
+          exit "$cleanup_failed"

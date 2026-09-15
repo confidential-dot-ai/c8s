@@ -17,8 +17,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
@@ -37,22 +37,22 @@ func testKey(t *testing.T) (*ecdsa.PrivateKey, string) {
 
 func testDocument(t *testing.T, platform string, role Role) (Document, *ecdsa.PrivateKey, string) {
 	t.Helper()
-	leaderKey, leaderPub := testKey(t)
-	followerKey, followerPub := testKey(t)
+	serverKey, serverPub := testKey(t)
+	agentKey, agentPub := testKey(t)
 	doc := Document{
 		SchemaVersion: SchemaVersion, ClusterID: "cluster-one", Role: role,
-		Image:                      Image{Platform: platform, Measurement: strings.Repeat("11", 48)},
-		Node:                       Node{Name: "node-one", IP: "10.0.0.2", ExternalIP: "192.0.2.4"},
-		Leader:                     LeaderConfig{Address: "10.0.0.1", OperatorPublicKey: leaderPub},
-		FollowerOperatorPublicKeys: []string{followerPub},
+		Image:                   Image{Platform: platform, Measurement: strings.Repeat("11", 48)},
+		Node:                    Node{Name: "node-one", IP: "10.0.0.2", ExternalIP: "192.0.2.4"},
+		Server:                  ServerConfig{Address: "10.0.0.1", OperatorPublicKey: serverPub},
+		AgentOperatorPublicKeys: []string{agentPub},
 	}
 	if platform == "tdx" {
 		doc.Image.RTMRs = map[int]string{1: strings.Repeat("22", 48), 2: strings.Repeat("33", 48)}
 	}
-	if role == Leader {
-		return doc, leaderKey, leaderPub
+	if role == Server {
+		return doc, serverKey, serverPub
 	}
-	return doc, followerKey, followerPub
+	return doc, agentKey, agentPub
 }
 
 func testLoader(t *testing.T, doc Document, pub string) {
@@ -106,7 +106,7 @@ func signBytes(t *testing.T, cfg Config, data []byte, key *ecdsa.PrivateKey) {
 
 func TestStageBothRolesAndPlatforms(t *testing.T) {
 	for _, platform := range []string{"snp", "tdx"} {
-		for _, role := range []Role{Leader, Follower} {
+		for _, role := range []Role{Server, Agent} {
 			t.Run(platform+"/"+string(role), func(t *testing.T) {
 				doc, key, pub := testDocument(t, platform, role)
 				doc.Node.IP = "0.0.0.0"
@@ -123,18 +123,18 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				if staged.Role != role || staged.TLSSAN != "c8s.local" || staged.Node.IP != "" {
 					t.Fatalf("incorrect staged role/default/address")
 				}
-				peers, err := measurements.Load(cfg.path(Dir + "/peers.json"))
+				peers, err := refvalues.Load(cfg.path(Dir + "/peers.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				cds, err := measurements.Load(cfg.path(Dir + "/cds.json"))
+				cds, err := refvalues.Load(cfg.path(Dir + "/cds.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(peers.Entries) != 2 || len(cds.Entries) != 1 || !bytes.Equal(cds.Entries[0].OperatorKey, []byte(doc.Leader.OperatorPublicKey)) {
-					t.Fatal("node and leader policy sets are not separated")
+				if len(peers.Images) != 2 || len(cds.Images) != 1 || !bytes.Equal(cds.Images[0].Anchor, []byte(doc.Server.OperatorPublicKey)) {
+					t.Fatal("node and server policy sets are not separated")
 				}
-				for _, entry := range peers.Entries {
+				for _, entry := range peers.Images {
 					if !bytes.Equal(entry.Digest, mustDecodeHex(doc.Image.Measurement)) {
 						t.Fatal("peer policy changed the shared image")
 					}
@@ -149,7 +149,7 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				if strings.Contains(string(fragment), "node-ip:") {
 					t.Fatal("RKE2 must autodetect 0.0.0.0")
 				}
-				if role == Leader {
+				if role == Server {
 					requirePresent(t, cfg.path(serverMarker))
 					requireAbsent(t, cfg.path(agentMarker))
 					requireAbsent(t, cfg.path(serverTokenPath))
@@ -159,14 +159,14 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 						t.Fatal(err)
 					}
 					if roleConfig.TokenFile != "" || roleConfig.AgentTokenFile != agentTokenPath {
-						t.Fatal("leader must configure the separate agent token")
+						t.Fatal("server must configure the separate agent token")
 					}
 					manifest, err := os.ReadFile(cfg.path(runtimeManifestPath))
 					if err != nil {
 						t.Fatal(err)
 					}
 					if !bytes.Contains(manifest, []byte("cds-url: https://10.0.0.1:30808")) {
-						t.Fatal("runtime ConfigMap must contain leader discovery but no credentials")
+						t.Fatal("runtime ConfigMap must contain server discovery but no credentials")
 					}
 				} else {
 					requirePresent(t, cfg.path(agentMarker))
@@ -175,7 +175,7 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					requireAbsent(t, cfg.path(runtimeManifestPath))
 					requireAbsent(t, cfg.path(agentTokenPath))
 					if !bytes.Contains(fragment, []byte("server: https://10.0.0.1:9345")) {
-						t.Fatal("follower does not join signed leader")
+						t.Fatal("agent does not join signed server")
 					}
 				}
 				for _, path := range []string{DefaultStagedPath, Dir + "/workloads.json", rke2FragmentPath} {
@@ -199,18 +199,18 @@ func TestVerifyRejectsUnauthorizedRoleOrImage(t *testing.T) {
 		change func(*Document)
 		want   string
 	}{
-		{"MRTD", Leader, func(d *Document) { d.Image.Measurement = strings.Repeat("44", 48) }, "measurement"},
-		{"kernel RTMR", Leader, func(d *Document) { d.Image.RTMRs[1] = strings.Repeat("44", 48) }, "RTMR[1]"},
-		{"rootfs RTMR", Leader, func(d *Document) { d.Image.RTMRs[2] = strings.Repeat("44", 48) }, "RTMR[2]"},
-		{"missing RTMR", Leader, func(d *Document) { delete(d.Image.RTMRs, 2) }, "exactly RTMR"},
-		{"platform", Leader, func(d *Document) { d.Image.Platform = "snp"; d.Image.RTMRs = nil }, "platform"},
-		{"follower as leader", Follower, func(d *Document) { d.Role = Leader }, "leader launch key"},
-		{"leader as follower", Leader, func(d *Document) { d.Role = Follower }, "different launch key"},
-		{"shared role keys", Follower, func(d *Document) {
-			d.FollowerOperatorPublicKeys = []string{strings.TrimSpace(d.Leader.OperatorPublicKey)}
+		{"MRTD", Server, func(d *Document) { d.Image.Measurement = strings.Repeat("44", 48) }, "measurement"},
+		{"kernel RTMR", Server, func(d *Document) { d.Image.RTMRs[1] = strings.Repeat("44", 48) }, "RTMR[1]"},
+		{"rootfs RTMR", Server, func(d *Document) { d.Image.RTMRs[2] = strings.Repeat("44", 48) }, "RTMR[2]"},
+		{"missing RTMR", Server, func(d *Document) { delete(d.Image.RTMRs, 2) }, "exactly RTMR"},
+		{"platform", Server, func(d *Document) { d.Image.Platform = "snp"; d.Image.RTMRs = nil }, "platform"},
+		{"agent as server", Agent, func(d *Document) { d.Role = Server }, "server launch key"},
+		{"server as agent", Server, func(d *Document) { d.Role = Agent }, "different launch key"},
+		{"shared role keys", Agent, func(d *Document) {
+			d.AgentOperatorPublicKeys = []string{strings.TrimSpace(d.Server.OperatorPublicKey)}
 		}, "distinct"},
-		{"unlisted follower", Follower, func(d *Document) { _, pub := testKey(t); d.FollowerOperatorPublicKeys = []string{pub} }, "not in"},
-		{"missing role", Leader, func(d *Document) { d.Role = "" }, "role"},
+		{"unlisted agent", Agent, func(d *Document) { _, pub := testKey(t); d.AgentOperatorPublicKeys = []string{pub} }, "not in"},
+		{"missing role", Server, func(d *Document) { d.Role = "" }, "role"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,7 +228,7 @@ func TestVerifyRejectsUnauthorizedRoleOrImage(t *testing.T) {
 }
 
 func TestSignaturePrecedesParsing(t *testing.T) {
-	doc, key, pub := testDocument(t, "tdx", Leader)
+	doc, key, pub := testDocument(t, "tdx", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 	wrong, _ := testKey(t)
@@ -240,17 +240,17 @@ func TestSignaturePrecedesParsing(t *testing.T) {
 }
 
 func TestParseRejectsAmbiguousOrUnexpectedFields(t *testing.T) {
-	doc, _, _ := testDocument(t, "snp", Follower)
+	doc, _, _ := testDocument(t, "snp", Agent)
 	raw, err := yaml.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cases := map[string][]byte{
-		"duplicate":          append(append([]byte{}, raw...), []byte("role: leader\n")...),
+		"duplicate":          append(append([]byte{}, raw...), []byte("role: server\n")...),
 		"multiple":           append(append([]byte{}, raw...), []byte("---\n{}\n")...),
 		"unknown":            append(append([]byte{}, raw...), []byte("helmValues: {}\n")...),
 		"nested unknown":     bytes.Replace(raw, []byte("    name:"), []byte("    arbitraryFlag: hello\n    name:"), 1),
-		"alias":              bytes.Replace(raw, []byte("role: follower"), []byte("role: &role follower"), 1),
+		"alias":              bytes.Replace(raw, []byte("role: agent"), []byte("role: &role agent"), 1),
 		"empty server token": append(append([]byte{}, raw...), []byte("rke2: {serverToken: ''}\n")...),
 		"null server token":  append(append([]byte{}, raw...), []byte("rke2: {serverToken: null}\n")...),
 		"agent token":        append(append([]byte{}, raw...), []byte("rke2: {agentToken: secret}\n")...),
@@ -266,7 +266,7 @@ func TestParseRejectsAmbiguousOrUnexpectedFields(t *testing.T) {
 }
 
 func TestParseRejectsNoncanonicalRTMRIndex(t *testing.T) {
-	doc, _, _ := testDocument(t, "tdx", Leader)
+	doc, _, _ := testDocument(t, "tdx", Server)
 	raw, err := yaml.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +283,7 @@ func TestParseRejectsNoncanonicalRTMRIndex(t *testing.T) {
 func TestKeylessAndFailedAttestationNeverStageARole(t *testing.T) {
 	for _, keyErr := range []error{credrelease.ErrNoOperatorKey, os.ErrNotExist, errors.New("binding mismatch")} {
 		t.Run(keyErr.Error(), func(t *testing.T) {
-			doc, key, pub := testDocument(t, "snp", Leader)
+			doc, key, pub := testDocument(t, "snp", Server)
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
 			loadMeasuredOperatorKeyAndOwnMeasurement = func(context.Context, string, string) ([]byte, error, []byte, map[int][]byte, error) {
@@ -299,7 +299,7 @@ func TestKeylessAndFailedAttestationNeverStageARole(t *testing.T) {
 }
 
 func TestFailedRestagingClosesGatesAndPreservesLocalCredential(t *testing.T) {
-	doc, key, pub := testDocument(t, "snp", Leader)
+	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 	if err := Stage(context.Background(), cfg); err != nil {
@@ -312,13 +312,13 @@ func TestFailedRestagingClosesGatesAndPreservesLocalCredential(t *testing.T) {
 		t.Fatal("accepted tampered signature")
 	}
 	requirePresent(t, cfg.path(agentTokenPath))
-	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, DefaultStagedPath, runtimeManifestPath, rke2FragmentPath, Dir + "/followers.json"} {
+	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, DefaultStagedPath, runtimeManifestPath, rke2FragmentPath, Dir + "/agents.json"} {
 		requireAbsent(t, cfg.path(path))
 	}
 }
 
 func TestWriteFailureCannotPublishRole(t *testing.T) {
-	doc, key, pub := testDocument(t, "snp", Leader)
+	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 	verified, err := Verify(context.Background(), cfg)
@@ -339,7 +339,7 @@ func TestWriteFailureCannotPublishRole(t *testing.T) {
 }
 
 func TestBoundedDocumentAndMissingConfig(t *testing.T) {
-	doc, key, pub := testDocument(t, "snp", Leader)
+	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
 	if err := os.WriteFile(cfg.DocumentPath, bytes.Repeat([]byte("a"), MaxDocumentSize+1), 0o600); err != nil {
@@ -369,7 +369,7 @@ func requirePresent(t *testing.T, path string) {
 	}
 }
 
-func TestLeaderAddressResolution(t *testing.T) {
+func TestServerAddressResolution(t *testing.T) {
 	tests := []struct {
 		name, nodeIP, resolved, want string
 		resolveErr                   error
@@ -382,8 +382,8 @@ func TestLeaderAddressResolution(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			doc, key, pub := testDocument(t, "snp", Leader)
-			doc.Leader.Address = ""
+			doc, key, pub := testDocument(t, "snp", Server)
+			doc.Server.Address = ""
 			doc.Node.IP = tc.nodeIP
 			testLoader(t, doc, pub)
 			cfg := testConfig(t, doc, key)
@@ -414,18 +414,18 @@ func TestLeaderAddressResolution(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if staged.Leader.Address != tc.want || staged.Node.IP != tc.want {
+			if staged.Server.Address != tc.want || staged.Node.IP != tc.want {
 				t.Fatal("resolved address not staged consistently")
 			}
 		})
 	}
-	doc, _, _ := testDocument(t, "snp", Follower)
-	doc.Leader.Address = ""
+	doc, _, _ := testDocument(t, "snp", Agent)
+	doc.Server.Address = ""
 	data, err := yaml.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Parse(data); err == nil {
-		t.Fatal("follower requires an explicit leader address")
+		t.Fatal("agent requires an explicit server address")
 	}
 }

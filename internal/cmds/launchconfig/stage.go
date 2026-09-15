@@ -12,8 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
-	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 const (
@@ -56,7 +56,7 @@ func clearOutputs(cfg Config) error {
 	// it across retries, including failed verification; role gates still close.
 	var errs []error
 	paths := []string{serverMarker, agentMarker, serverTokenPath, rke2FragmentPath, runtimeManifestPath}
-	for _, name := range []string{"peers.json", "cds.json", "followers.json", "operator-pubkey", "config.json", "workloads.json"} {
+	for _, name := range []string{"peers.json", "cds.json", "agents.json", "operator-pubkey", "config.json", "workloads.json"} {
 		paths = append(paths, Dir+"/"+name)
 	}
 	for _, path := range paths {
@@ -74,28 +74,28 @@ type outputFile struct {
 
 func stageVerified(cfg Config, v *Verified) error {
 	doc := &v.document
-	if doc.Role == Leader && doc.Leader.Address == "" {
+	if doc.Role == Server && doc.Server.Address == "" {
 		address := doc.Node.IP
 		if address == "" {
 			var err error
 			address, err = PrimaryIPv4()
 			if err != nil {
-				return fmt.Errorf("resolve leader address: %w", err)
+				return fmt.Errorf("resolve server address: %w", err)
 			}
 		}
 		if err := ValidateIPv4(address, true); err != nil {
-			return fmt.Errorf("resolved leader address: %w", err)
+			return fmt.Errorf("resolved server address: %w", err)
 		}
-		doc.Leader.Address = address
+		doc.Server.Address = address
 		doc.Node.IP = address
 	}
-	peers, err := measurements.Format(v.pins)
+	peers, err := refvalues.Format(v.pins)
 	if err != nil {
 		return fmt.Errorf("format node peer policy: %w", err)
 	}
-	cds, err := measurements.Format(v.cdsPins)
+	cds, err := refvalues.Format(v.cdsPins)
 	if err != nil {
-		return fmt.Errorf("format leader policy: %w", err)
+		return fmt.Errorf("format server policy: %w", err)
 	}
 	encoded, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -116,7 +116,7 @@ func stageVerified(cfg Config, v *Verified) error {
 		outputs = append(outputs, outputFile{Dir + "/workloads.json", []byte(doc.Workloads)})
 	}
 	marker := agentMarker
-	if doc.Role == Leader {
+	if doc.Role == Server {
 		manifest, err := runtimeManifest(doc, cds)
 		if err != nil {
 			return err
@@ -125,14 +125,14 @@ func stageVerified(cfg Config, v *Verified) error {
 			return err
 		}
 		outputs = append(outputs, outputFile{runtimeManifestPath, manifest})
-		if len(v.pins.Entries) > 1 {
-			followers, err := measurements.Format(measurements.ReferenceValues{
-				TEE: v.pins.TEE, Entries: v.pins.Entries[1:],
+		if len(v.pins.Images) > 1 {
+			agents, err := refvalues.Format(refvalues.ReferenceValues{
+				Family: v.pins.Family, Images: v.pins.Images[1:],
 			})
 			if err != nil {
-				return fmt.Errorf("format follower enrollment policy: %w", err)
+				return fmt.Errorf("format agent enrollment policy: %w", err)
 			}
-			outputs = append(outputs, outputFile{Dir + "/followers.json", followers})
+			outputs = append(outputs, outputFile{Dir + "/agents.json", agents})
 		}
 		marker = serverMarker
 	}
@@ -162,12 +162,12 @@ type roleFragment struct {
 
 func rke2Fragment(doc *Document) roleFragment {
 	out := roleFragment{TokenFile: agentTokenPath, NodeName: doc.Node.Name, NodeIP: doc.Node.IP, NodeExternalIP: doc.Node.ExternalIP}
-	if doc.Role == Leader {
+	if doc.Role == Server {
 		// Omit token-file so RKE2 generates its privileged token inside the guest.
 		out.TokenFile = ""
 		out.AgentTokenFile = agentTokenPath
 	} else {
-		out.Server = "https://" + doc.Leader.Address + ":9345"
+		out.Server = "https://" + doc.Server.Address + ":9345"
 	}
 	return out
 }
@@ -195,7 +195,7 @@ func runtimeManifest(doc *Document, cds []byte) ([]byte, error) {
 var chooseHostInterface = utilnet.ChooseHostInterface
 
 // PrimaryIPv4 uses Kubernetes' route-aware host-address selection, so the
-// address published to followers matches the node's own RKE2 registration.
+// address published to agents matches the node's own RKE2 registration.
 func PrimaryIPv4() (string, error) {
 	ip, err := chooseHostInterface()
 	if err != nil {

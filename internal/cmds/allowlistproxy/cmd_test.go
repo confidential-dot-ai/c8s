@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"strings"
+
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 )
 
 func TestProxyPreservesAuthorizedRequests(t *testing.T) {

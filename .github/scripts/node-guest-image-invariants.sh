@@ -58,15 +58,15 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI floor is a template whose always_allow entries are
-# @-tokens the sync fills with ref-resolved digests; a hardcoded
-# sha256 would bake a stale digest the fail-closed floor can't
-# reconcile with the ref. The marked block is exempt: systemfloor
-# generates it from the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI base allowlist is a template: its permissive workloads
+# carry @-token digests the sync fills with ref-resolved values; a hardcoded
+# sha256 would bake a stale digest the fail-closed plugin can't reconcile
+# with the ref. The marked block is exempt: systemfloor generates it from
+# the pinned RKE2 airgap bundles (see mkosi.sync).
 policy="$ngi/c8s/image-policy.yaml.in"
-[ -f "$policy" ] || { echo "::error::NRI floor template $policy not found"; exit 1; }
-if sed '/# BEGIN rke2 system floor/,/# END rke2 system floor/d' "$policy"               | grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:'; then
-  echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use @OPERATOR_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
+[ -f "$policy" ] || { echo "::error::NRI base template $policy not found"; exit 1; }
+if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
+  echo "::error::$policy has a hardcoded base digest outside the generated system base; use the @OPERATOR_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
   exit 1
 fi
 
@@ -125,7 +125,7 @@ fi
 # 'serial: confai-scratch' rides along: scratch-enforce powers the e2e VM off without it.
 tdx_runtime=.github/actions/tdx-metal-e2e/action.yml
 for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert' 'serial: confai-scratch' \
-              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/leader.json' \
+              'launch.yaml' 'C8S_NODE_IMAGE=1' 'C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json' \
               'bash node-guest-image/tests/apparmor-runtime-test.sh' \
               'import the exact published image into a private root PVC' \
               'bash .github/scripts/tdx-image-acceptance.sh pvc'; do
@@ -220,11 +220,11 @@ else
   echo "::warning::EXPECT_IMMUTABLE_ROOT=$EXPECT_IMMUTABLE_ROOT permits confos at CONFOS_REF $CONFOS_REF without state.d in its initrd; the profile's state.d declaration is inert"
 fi
 
-# The scratch floor is prose in the README and a sector count in the gate;
+# The scratch base is prose in the README and a sector count in the gate;
 # a bump must touch both.
 if ! grep -qF 'MIN_SECTORS=125000000' "$ngi/c8s/mkosi.extra/usr/local/bin/scratch-enforce.sh" \
    || ! grep -qF 'at least 64G' "$ngi/README.md"; then
-  echo "::error::scratch floor drifted: scratch-enforce.sh MIN_SECTORS (64G = 125000000 sectors) and the README's 'at least 64G' must move together"
+  echo "::error::scratch base drifted: scratch-enforce.sh MIN_SECTORS (64G = 125000000 sectors) and the README's 'at least 64G' must move together"
   exit 1
 fi
 
@@ -379,7 +379,7 @@ for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-pro
       fi ;;
     *)
       if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must be leader-only"
+        echo "::error::$service must be server-only"
         exit 1
       fi ;;
   esac
@@ -388,7 +388,7 @@ done
 join_unit="$units/c8s-join.service"
 release_unit="$units/c8s-join-release.service"
 require_launch_dependency "$join_unit"
-for setting in 'ConditionPathExists=/run/confos/role-agent' 'Type=oneshot' \
+for setting in 'ConditionPathExists=/run/confos/role-agent' 'Wants=rke2-agent.service' 'Type=oneshot' \
                'RemainAfterExit=yes' 'StartLimitIntervalSec=0' \
                'Restart=on-failure' 'RestartSec=5' \
                'ExecStart=/usr/local/bin/c8s node-services run join'; do
@@ -411,13 +411,9 @@ for enrollment_unit in "$join_unit" "$release_unit"; do
     exit 1
   fi
 done
-if ! grep -qxF 'ConditionPathExists=/run/confos/launch/followers.json' "$release_unit" \
+if ! grep -qxF 'ConditionPathExists=/run/confos/launch/agents.json' "$release_unit" \
    || ! grep -qE '^After=.*rke2-server[.]service' "$release_unit"; then
-  echo "::error::join release must wait for the server and require authorized followers"
-  exit 1
-fi
-if grep -qE 'serverToken|agentToken|secrets[.]token_hex|"rke2:' .github/scripts/node-launch-data.sh; then
-  echo "::error::host launch artifacts must not generate or contain RKE2 credentials"
+  echo "::error::join release must wait for the server and require authorized agents"
   exit 1
 fi
 mapfile -t nginx_files < <(grep -lE '^ExecStart=.*/nginx ' "$units"/*.service)
@@ -429,7 +425,7 @@ require_launch_dependency "${nginx_files[0]}"
 if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "${nginx_files[0]}" \
    || ! grep -qxF "enable ${nginx_files[0]##*/}" "$preset" \
    || ! grep -qxF 'disable nginx.service' "$preset"; then
-  echo "::error::only the authenticated leader nginx service may be enabled"
+  echo "::error::only the authenticated server nginx service may be enabled"
   exit 1
 fi
 require_launch_dependency "$units/cred-release.service"

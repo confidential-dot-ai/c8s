@@ -105,7 +105,7 @@ func (c *Config) ParsePins() (ratls.Pins, error) {
 		if err != nil {
 			return ratls.Pins{}, err
 		}
-		return ratls.Pins{Entries: set.Entries}, nil
+		return ratls.Pins(set.Policy()), nil
 	}
 	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {

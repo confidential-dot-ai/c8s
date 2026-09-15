@@ -1,9 +1,9 @@
 [Unit]
-Description=Release agent credentials to authorized measured followers
+Description=Release agent credentials to authorized measured agents
 Requires=rke2-role.service attestation-api.service
 After=rke2-role.service attestation-api.service rke2-server.service
 ConditionPathExists=/run/confos/role-server
-ConditionPathExists=/run/confos/launch/followers.json
+ConditionPathExists=/run/confos/launch/agents.json
 StartLimitIntervalSec=0
 
 [Service]

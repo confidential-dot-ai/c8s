@@ -14,28 +14,28 @@ import (
 )
 
 func document(role launchconfig.Role) *launchconfig.Document {
-	return &launchconfig.Document{Role: role, Image: launchconfig.Image{Platform: "tdx"}, Leader: launchconfig.LeaderConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
+	return &launchconfig.Document{Role: role, Image: launchconfig.Image{Platform: "tdx"}, Server: launchconfig.ServerConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
 }
 
-func TestFollowerCannotRunLeaderServices(t *testing.T) {
+func TestAgentCannotRunServerServices(t *testing.T) {
 	for _, name := range []string{"cds", "get-cert", "cds-attest", "allowlist-proxy", "join-release"} {
-		if _, err := Arguments(name, document(launchconfig.Follower), "192.0.2.11"); err == nil {
-			t.Errorf("follower can run %s", name)
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err == nil {
+			t.Errorf("agent can run %s", name)
 		}
 	}
 	for _, name := range []string{"mesh", "mesh-sync", "attest-proxy", "join"} {
-		if _, err := Arguments(name, document(launchconfig.Follower), "192.0.2.11"); err != nil {
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if _, err := Arguments("arbitrary", document(launchconfig.Leader), ""); err == nil {
+	if _, err := Arguments("arbitrary", document(launchconfig.Server), ""); err == nil {
 		t.Fatal("unknown service accepted")
 	}
 }
 
-func TestEveryCDSClientUsesLeaderPolicy(t *testing.T) {
+func TestEveryCDSClientUsesServerPolicy(t *testing.T) {
 	for _, name := range []string{"mesh", "get-cert", "allowlist-proxy"} {
-		args, err := Arguments(name, document(launchconfig.Leader), "192.0.2.10")
+		args, err := Arguments(name, document(launchconfig.Server), "192.0.2.10")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,20 +48,20 @@ func TestEveryCDSClientUsesLeaderPolicy(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("%s has no complete leader policy: %v", name, args)
+			t.Errorf("%s has no complete server policy: %v", name, args)
 		}
 		if !slices.Contains(args, "--cds-url=https://192.0.2.10:30808") {
-			t.Errorf("%s ignores leader endpoint", name)
+			t.Errorf("%s ignores server endpoint", name)
 		}
 	}
 	for _, ip := range []string{"", "0.0.0.0", "127.0.0.1", "192.0.2.10 --other-flag"} {
-		if _, err := Arguments("mesh", document(launchconfig.Leader), ip); err == nil {
+		if _, err := Arguments("mesh", document(launchconfig.Server), ip); err == nil {
 			t.Errorf("accepted node IP %q", ip)
 		}
 	}
 }
 
-const floor = "platform: tdx\nallowlist:\n  always_allow:\n    immutable: system\n  pull:\n    url: https://127.0.0.1:30808\n    timeout: 30s\n    cds_measurements: []\npolicy:\n  mode: fail-closed\n  enforce_existing: true\n"
+const floor = "platform: tdx\nallowlist:\n  base:\n    schema: c8s.allowlist/v1\n    workloads:\n      system:\n        containers:\n          - digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n            command: {policy: any}\n            args: {policy: any}\n  pull:\n    url: https://127.0.0.1:30808\n    timeout: 30s\n    cds_measurements: []\npolicy:\n  mode: fail-closed\n  enforce_existing: true\n"
 const seed = `{"schema":"c8s.allowlist/v1","workloads":{"operator":{"containers":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`
 
 func prepareRoot(t *testing.T) string {
@@ -79,8 +79,8 @@ func prepareRoot(t *testing.T) string {
 	return root
 }
 
-func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
-	for _, role := range []launchconfig.Role{launchconfig.Leader, launchconfig.Follower} {
+func TestPreparePreservesFloorAndPinsServerBeforeRKE2(t *testing.T) {
+	for _, role := range []launchconfig.Role{launchconfig.Server, launchconfig.Agent} {
 		t.Run(string(role), func(t *testing.T) {
 			root := prepareRoot(t)
 			doc := document(role)
@@ -99,7 +99,7 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 				t.Fatal(err)
 			}
 			ga := got["allowlist"].(map[string]any)
-			if !reflect.DeepEqual(got["policy"], before["policy"]) || !reflect.DeepEqual(ga["always_allow"], before["allowlist"].(map[string]any)["always_allow"]) {
+			if !reflect.DeepEqual(got["policy"], before["policy"]) || !reflect.DeepEqual(ga["base"], before["allowlist"].(map[string]any)["base"]) {
 				t.Fatal("changed baked floor")
 			}
 			pull := ga["pull"].(map[string]any)
@@ -110,10 +110,10 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 				t.Fatal("flat pins retained")
 			}
 			_, err = os.Stat(filepath.Join(root, launchDir, "allowlist-seed.json"))
-			if role == launchconfig.Follower && !os.IsNotExist(err) {
-				t.Fatal("follower received leader seed")
+			if role == launchconfig.Agent && !os.IsNotExist(err) {
+				t.Fatal("agent received server seed")
 			}
-			if role == launchconfig.Leader && err != nil {
+			if role == launchconfig.Server && err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -122,7 +122,7 @@ func TestPreparePreservesFloorAndPinsLeaderBeforeRKE2(t *testing.T) {
 
 func TestPrepareCannotReplaceBakedWorkload(t *testing.T) {
 	root := prepareRoot(t)
-	doc := document(launchconfig.Leader)
+	doc := document(launchconfig.Server)
 	doc.Workloads = seed
 	if err := Prepare(root, doc); err == nil || !strings.Contains(err.Error(), "replaces a baked component") {
 		t.Fatalf("got %v", err)
@@ -147,7 +147,7 @@ func TestPrepareCannotReplaceBakedWorkload(t *testing.T) {
 
 func TestPublishNodeIPHonorsAuthenticatedAddress(t *testing.T) {
 	root := t.TempDir()
-	doc := document(launchconfig.Follower)
+	doc := document(launchconfig.Agent)
 	doc.Node.IP = "192.0.2.22"
 	if err := PublishNodeIP(root, doc); err != nil {
 		t.Fatal(err)
@@ -165,22 +165,22 @@ func TestPublishNodeIPHonorsAuthenticatedAddress(t *testing.T) {
 }
 
 func TestJoinServicesRequireTheirSeparateRolePolicies(t *testing.T) {
-	leader := document(launchconfig.Leader)
-	if _, err := Arguments("join", leader, ""); err == nil {
-		t.Fatal("leader can execute follower enrollment")
+	server := document(launchconfig.Server)
+	if _, err := Arguments("join", server, ""); err == nil {
+		t.Fatal("server can execute agent enrollment")
 	}
-	if _, err := Arguments("join-release", leader, ""); err == nil {
-		t.Fatal("leader with no authorized followers can release join tokens")
+	if _, err := Arguments("join-release", server, ""); err == nil {
+		t.Fatal("server with no authorized agents can release join tokens")
 	}
-	leader.FollowerOperatorPublicKeys = []string{"authorized follower"}
-	args, err := Arguments("join-release", leader, "")
+	server.AgentOperatorPublicKeys = []string{"authorized agent"}
+	args, err := Arguments("join-release", server, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(args, "--measurements-config="+launchDir+"followers.json") {
-		t.Fatal("join release does not restrict callers to the follower policy")
+	if !slices.Contains(args, "--measurements-config="+launchDir+"agents.json") {
+		t.Fatal("join release does not restrict callers to the agent policy")
 	}
-	args, err = Arguments("join", document(launchconfig.Follower), "")
+	args, err = Arguments("join", document(launchconfig.Agent), "")
 	if err != nil {
 		t.Fatal(err)
 	}

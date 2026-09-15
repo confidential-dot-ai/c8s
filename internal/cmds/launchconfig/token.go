@@ -17,7 +17,7 @@ import (
 var requireTokenRAM = fileutil.RequireRAMBackedRoot
 
 // initializeAgentToken creates a separate agent password before the first
-// leader RKE2 start. The serialized role oneshot preserves it across restarts;
+// server RKE2 start. The serialized role oneshot preserves it across restarts;
 // omitting this credential would let RKE2 reuse its privileged server token.
 func initializeAgentToken(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {

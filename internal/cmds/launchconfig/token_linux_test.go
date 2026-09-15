@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLeaderCredentialRequiresRealRAMFilesystem(t *testing.T) {
+func TestServerCredentialRequiresRealRAMFilesystem(t *testing.T) {
 	dir, err := os.MkdirTemp("/dev/shm", "c8s-launch-token-")
 	if err != nil {
 		t.Skipf("tmpfs unavailable: %v", err)

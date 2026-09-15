@@ -67,27 +67,28 @@ at its root:
   `/etc/confai/operator-pubkey`, and binds them into TDX RTMR[3]. An SNP
   launcher must set HOST_DATA to the SHA-256 of
   those same bytes.
-- `launch.yaml`: the strict `c8s-launch/v2` document selecting `leader` or
-  `follower`, the image measurements, cluster/node identity,
+- `launch.yaml`: the strict `c8s-launch/v2` document selecting `server` or
+  `agent`, the image measurements, cluster/node identity,
   trusted role keys and TLS SAN.
-- `launch.yaml.sig`: the detached signature produced by
-  `c8s keys sign-launch --key <role-private-key> launch.yaml`.
+- `launch.yaml.sig`: the detached signature over those exact bytes.
 
-Use distinct leader and follower keys and generate fresh keys for each
-cluster. The private keys stay with the operator. Launch documents contain
+`c8s launch-config new` writes the signed launch files with distinct server
+and agent keys for each cluster. `c8s launch-config add-agent` extends a bundle
+later; `c8s keys sign-launch` re-signs a hand-edited document. The private keys stay
+with the operator. Launch documents contain
 no credentials: the `rke2` field is rejected, even if empty. Existing v1
 bundles need that field removed, the v2 schema version, and a new signature.
-The leader generates its separate agent credential inside the guest; RKE2
-generates its own server token. Followers receive only the agent credential
+The server generates its separate agent credential inside the guest; RKE2
+generates its own server token. Agents receive only the agent credential
 and CA pin through mutually attested enrollment.
-There is no diskless/default-leader boot. Missing or invalid signed input
+There is no diskless/default-server boot. Missing or invalid signed input
 fails the role gate before RKE2 or core services can start.
 
 See [Authenticated launch configuration](../docs/operator.md#authenticated-launch-configuration)
-for complete leader/follower bundle creation, image-manifest extraction,
-ISO and KubeVirt attachment examples, and the exact schema. A leader may
+for complete server/agent bundle creation, image-manifest extraction,
+ISO and KubeVirt attachment examples, and the exact schema. A server may
 omit its address to use `node.ip` or primary-interface IPv4 autodetection;
-a follower must specify the leader's reachable IPv4 address. Switching roles
+an agent must specify the server's reachable IPv4 address. Switching roles
 requires relaunching with the new role's authorized bundle and launch key.
 
 Additional optional disks:
@@ -98,29 +99,53 @@ Additional optional disks:
   `/var/lib/models`. It is unencrypted and host-writable; attach public
   weights whose digests the workload verifies (`models-disk.service`).
 
+## Operator kubeconfig bootstrap
+
+After launching the server with its signed `opkeydata`, use the matching
+image manifest and server private key to obtain a kubeconfig:
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key demo/server.key --image-manifest manifest.json \
+  --out demo/kubeconfig --release-wait 5m
+```
+
+Bootstrap uses the RA-TLS credential service on port 8443 for both the
+operator-authenticated nonce attestation and credential release. The raw
+attester stays on loopback. The client verifies the full image and launch-key
+binding in both the serving certificate and the fresh report before requesting
+credentials. Port 6443 is the Kubernetes API; `--release-url` and
+`--apiserver-url` support forwarded ports. The credential listener starts only
+after the RKE2, operator-RBAC and PodSecurity readiness gates pass.
+
+Use a rebuilt image containing the authenticated credential-service `/attest`
+endpoint. Updating only the operator CLI does not add this guest endpoint.
+See [the operator trust gate](../docs/operator.md#trust-gate-c8s-get-kubeconfig)
+for the explicit legacy attestation URL option and verification rules.
+
 ## Measured services and Kubernetes integration
 
 One image contains all service binaries and role conditions:
 
-| Service | Leader | Follower |
+| Service | Server | Agent |
 |---|---|---|
 | Local attestation API and Unix-socket proxy | Run | Run |
 | NRI image admission | Run under containerd | Run under containerd |
 | RA-TLS mesh and iptables reconciliation | Run | Run |
 | RKE2 | Server | Agent after enrollment |
-| Attested agent enrollment | Release if followers are authorized | Enroll before RKE2 |
+| Attested agent enrollment | Release if agents are authorized | Enroll before RKE2 |
 | CDS, certificate renewal, TLS front door and attestation routes | Run | Disabled |
 | Attested operator credential release | Run | Disabled |
 
 `rke2-role.service` verifies and stages the launch configuration once.
 Every dependent service requires that gate. The host attester listens only
 on `127.0.0.1:8400`; workload helpers use its Unix socket in the existing
-admission-inventory directory. CDS listens on the leader's port `30808`;
-attested enrollment listens on `8444`; RKE2 followers join at `9345`; nginx
-serves the front door on `443`. A follower requires its designated leader's
-full image/key policy, and the leader accepts only keys in its staged
-`followers.json`. An empty follower list disables the enrollment listener.
-`c8s-join.service` retries unavailable leaders and blocks RKE2 agent startup
+admission-inventory directory. CDS listens on the server's port `30808`;
+attested enrollment listens on `8444`; RKE2 agents join at `9345`; nginx
+serves the front door on `443`. An agent requires its designated server's
+full image/key policy, and the server accepts only keys in its staged
+`agents.json`. An empty agent list disables the enrollment listener.
+`c8s-join.service` retries unavailable servers and blocks RKE2 agent startup
 until it stages `/run/confos/rke2-agent-token`. It depends only on verified
 launch staging and local attestation, so enrollment can run before the mesh
 or kubelet exists. Routed connectivity is required across datacenters.
@@ -148,10 +173,10 @@ operator image and NRI floor still resolve from `C8S_REF` there.
 integration at `server/manifests/c8s-integration.yaml`. At boot, verified
 launch settings produce root-only `/run/confos/launch` files and the public
 `c8s-node-runtime` ConfigMap in `c8s-system`. Its `cds-url` and `cds.json`
-fields contain only the leader endpoint and full software/launch-key policy.
+fields contain only the server endpoint and full software/launch-key policy.
 The operator passes that policy into workload helpers. Host services use the
 same staged policy; peer connections accept authorized roles, while every
-CDS client requires the leader's key. The shared image measurement alone
+CDS client requires the server's key. The shared image measurement alone
 does not distinguish the two roles.
 
 `c8s install` refuses this image's cluster: `c8s-system` carries the baked
@@ -163,9 +188,9 @@ and arbitrary front-door routes are not enabled by launch settings.
 
 CDS keeps its database at `/run/c8s-cds/allowlist.db`; the directory survives
 a service restart, but every VM reboot resets the database and the cluster's
-ephemeral state. The leader's separate agent credential also survives service
-restarts and repeat launch staging within one boot. After a leader reboot,
-relaunch its followers to enroll against its new CA and credentials. The
+ephemeral state. The server's separate agent credential also survives service
+restarts and repeat launch staging within one boot. After a server reboot,
+relaunch its agents to enroll against its new CA and credentials. The
 baked component seed and signed initial workload entries
 are reapplied on the next boot. The mesh CA key lives only in CDS process
 memory, so a CDS process restart also requires certificate re-bootstrap.
@@ -193,9 +218,9 @@ from the publication run's validated evidence; it does not read these
 ConfigMaps.
 
 Before either platform boots, the lane builds the paired CLI and generates
-a fresh operator key and signed leader launch document. The `opkeydata` disk
+a fresh operator key and signed server launch document. The `opkeydata` disk
 carries `pubkey`, `launch.yaml` and `launch.yaml.sig`. Clients use the matching
-full image tuple and leader-key policy when testing the baked services.
+full image tuple and server-key policy when testing the baked services.
 
 ## Immutable root checks
 
