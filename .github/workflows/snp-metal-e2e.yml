@@ -637,11 +637,14 @@ jobs:
           kubectl -n c8s-system get pods -o wide 2>&1
           kubectl -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -25
           echo "::endgroup::"
+          # The node image's kubelet serves no debugging handlers, so pods/log
+          # is refused; exit codes and termination messages are still in status.
           for p in $(kubectl -n c8s-system get pods -o name 2>/dev/null); do
             echo "::group::$p"
             kubectl -n c8s-system describe "$p" 2>&1 | sed -n '/^Events:/,$p' | tail -12
-            kubectl -n c8s-system logs "$p" --all-containers --tail=40 2>&1
-            kubectl -n c8s-system logs "$p" --all-containers --previous --tail=20 2>&1
+            kubectl -n c8s-system get "$p" -o json 2>/dev/null | jq -r '
+              (.status.initContainerStatuses // []) + (.status.containerStatuses // []) | .[]
+              | "\(.name): restarts=\(.restartCount) state=\(.state | keys[0]) last=\(.lastState.terminated // {} | "exit=\(.exitCode // "-") reason=\(.reason // "-") message=\(.message // "-" | tostring | .[0:600])")"'
             echo "::endgroup::"
           done
           exit 0
