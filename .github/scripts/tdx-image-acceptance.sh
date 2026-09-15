@@ -76,7 +76,9 @@ case ${1:-} in
         nodeSelector: {"kubevirt.io/tdx": "true"},
         securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: "RuntimeDefault"}},
         containers: [{name: "pause",
-          image: "docker.io/rancher/mirrored-pause@sha256:16974531848218d24822bf606be022d030ab8c9b05b2ecf11076c4c1c6885c95",
+          # The airgap-imported node pause: admitted by the baked floor,
+          # present on every node. Bump with RKE2_VERSION (mkosi.sync).
+          image: "docker.io/rancher/mirrored-pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4",
           resources: {requests: {cpu: "4", memory: "16Gi"}, limits: {cpu: "4", memory: "16Gi"}},
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}}],
         volumes: [{name: "root", persistentVolumeClaim: {claimName: ($vm + "-root"), readOnly: true}}]}}
