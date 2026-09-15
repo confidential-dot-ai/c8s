@@ -24,8 +24,9 @@ and derives from its own image values. Argv-pinned components and RKE2
 containerd-prep images are seeded through `c8s.argvPinnedEntries`.
 
 `c8s.anyArgvDigests` extracts workload digests whose command and args policies
-are both `any`. `c8s.alwaysAllow` merges these with `c8s.imageAllowlist` for the
-host plugin's local admission list. Workloads that pin argv remain in the served
+are both `any`. `c8s.baseWorkloads` renders these, merged with
+`c8s.imageAllowlist`, as any-argv workload entries for the host plugin's boot
+base, excluding `c8s.argvPinnedDigests`. Workloads that pin argv remain in the served
 seed without being added by `c8s.anyArgvDigests`.
 
 `c8s.digestWorkloadName` takes `digest` and `image`, strips the image reference
@@ -63,6 +64,6 @@ calling `argvPinnedEntries` there would recurse through the install script's
 boot config. Keep the inclusion conditions of both helpers aligned.
 
 [pinned_seed_test.go](../../../pinned_seed_test.go) checks rendered invocations,
-rejection of different argv, and exclusion from the boot config's local floor.
+rejection of different argv, and exclusion from the boot config's local base.
 The operator-facing bootstrap behavior is described in
 [Allowlist and capabilities](../../../../../docs/allowlist-and-capabilities.md#bootstrap).

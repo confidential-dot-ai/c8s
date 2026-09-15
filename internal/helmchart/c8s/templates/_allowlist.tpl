@@ -66,8 +66,20 @@
 {{ $digests | toJson }}
 {{- end -}}
 
-{{- define "c8s.alwaysAllow" -}}
-{{ merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson) | toJson }}
+{{/* The plugin boot base, as allowlist workloads: every digest the base
+     admits under any command line, keyed by its DigestEntryName. The boot
+     config excludes argv-pinned images, which are admitted by the served seed. */ -}}
+{{- define "c8s.baseWorkloads" -}}
+{{- $workloads := dict -}}
+{{- $pinnedDigests := include "c8s.argvPinnedDigests" . | fromJsonArray -}}
+{{- range $digest, $image := (merge (include "c8s.anyArgvDigests" . | fromJson) (include "c8s.imageAllowlist" . | fromJson)) -}}
+{{- if not (has $digest $pinnedDigests) -}}
+{{- $name := include "c8s.digestWorkloadName" (dict "digest" $digest "image" $image) -}}
+{{- $container := dict "digest" $digest "image" $image "command" (dict "policy" "any") "args" (dict "policy" "any") -}}
+{{- $_ := set $workloads $name (dict "label" $image "initContainers" list "containers" (list $container)) -}}
+{{- end -}}
+{{- end -}}
+{{ $workloads | toJson }}
 {{- end -}}
 
 {{- define "c8s.digestWorkloadName" -}}

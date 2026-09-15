@@ -19,7 +19,7 @@
 # RKE2 pins: bump RKE2_VERSION and the three sha256s together, from
 # sha256sum-amd64.txt at
 #   https://github.com/rancher/rke2/releases/tag/<RKE2_VERSION>
-# then regenerate the system floor in image-policy.yaml.in (the bundles are
+# then regenerate the system images in image-policy.yaml.in (the bundles are
 # in mkosi.pkgcache/c8s after a build):
 #   go run ./node-guest-image/c8s/systemfloor -write \
 #     -template node-guest-image/c8s/image-policy.yaml.in \
@@ -27,14 +27,15 @@
 #     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml \
 #     -manifest node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/nvidia-device-plugin.yaml \
 #     -exclude-ref busybox
-# -exclude-ref omits busybox from the node's baked always_allow list;
+# -exclude-ref omits busybox from the node's baked base;
 # the chart supplies its argv-pinned entry through the served allowlist.
 # After a bump, re-verify on first boot that the rendered containerd
 # config.toml has exactly ONE `imports` line — see the baked
 # config-v3.toml.tmpl in this profile's mkosi.extra for why.
 #
-# c8s components (nri plugin binary + the CDS digest in the baked NRI floor)
-# are NOT hardcoded: both resolve from a single c8s ref (C8S_REF, default: the
+# c8s components (nri plugin binary + the CDS digest in the baked NRI base
+# allowlist) are NOT hardcoded: both resolve from a single c8s ref (C8S_REF,
+# default: the
 # pinned commit below) so they always match each other and the chart's images.
 #
 # Downloads are cached under mkosi.pkgcache/c8s/ — that dir survives across
@@ -52,8 +53,9 @@ RKE2_TARBALL_SHA256="7bcbd3167d6947e1d79cdf722acdc740b28021fefb50dd5b974a1980776
 RKE2_IMAGES_CORE_SHA256="8988a2eff587dd88b8eab86fe719703e9541a1f08d22771a94cbec446a13db86"
 RKE2_IMAGES_CILIUM_SHA256="6c76903f258b12bc0f322bcb029247ee49544b925170d320409401beeecd41bd"
 
-# The baked c8s components — the nri plugin binary AND the CDS digest in the NRI
-# floor — resolve from a single c8s ref, so they never drift from each other or
+# The baked c8s components — the nri plugin binary AND the CDS digest in the
+# NRI base allowlist — resolve from a single c8s ref, so they never drift from
+# each other or
 # from the images the chart later deploys. C8S_REF pins a specific commit (short
 # SHA) for testing an unmerged build; it arrives via
 # `confos build --sync-input c8s-ref=...` (passed by node-guest-image/build — an
@@ -70,7 +72,8 @@ C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
 # The image's TEE platform, from build's --sync-input. Required: the NRI
-# floor types the RA-TLS identity CDS checks against attestation evidence,
+# base allowlist types the RA-TLS identity CDS checks against attestation
+# evidence,
 # so a wrong or defaulted value denies every adopted workload a certificate.
 PLATFORM=$(cat "$SYNC_INPUTS/platform" 2>/dev/null || true)
 case "$PLATFORM" in
@@ -79,15 +82,15 @@ case "$PLATFORM" in
 esac
 
 # Platform drop-ins rendered from the one sync-input: cred-release's
-# platform and the node self-label; the NRI floor's platform: is substituted
-# below together with the digests. Rendered paths must stay disjoint from
+# platform and the node self-label; the NRI base allowlist's platform: is
+# substituted below together with the digests. Rendered paths must stay disjoint from
 # the profile's mkosi.extra tree (copy precedence between the two is
 # undocumented; today every rendered path is a new file).
 #
 # The label key is the one consumer with its own vocabulary: the chart
 # selector and c8s install use confidential.ai/sev-snp (NOT /snp — nothing
-# selects on that), while cred-release and the NRI floor normalize snp
-# themselves (ratls.NormalizePlatform).
+# selects on that), while cred-release and the NRI base allowlist normalize
+# snp themselves (ratls.NormalizePlatform).
 case "$PLATFORM" in
     snp) LABEL_PLATFORM=sev-snp ;;
     *)   LABEL_PLATFORM=$PLATFORM ;;
@@ -126,22 +129,22 @@ CDS_DIGEST=$(resolve_digest "$CDS_REPO" "$C8S_REF")
 NRI_IMAGE="${NRI_REPO}@${NRI_DIGEST}"
 echo "c8s sync: ref ${C8S_REF} -> nri ${NRI_DIGEST}, cds ${CDS_DIGEST}"
 
-# Render the NRI floor template into the stage tree, substituting the resolved
-# nri + cds digests into always_allow. The template lives outside mkosi.extra
+# Render the NRI base template into the stage tree, substituting the resolved
+# CDS digest into the base. The template lives outside mkosi.extra
 # (image-policy.yaml.in) so mkosi never copies the raw template; this rendered
 # copy is the only one at etc/nri/conf.d/image-policy.yaml, so it lands with no
 # extra-tree precedence ambiguity. Both digests track C8S_REF.
-render_nri_floor() {
+render_nri_base() {
     local tmpl="$SRCDIR/mkosi.profiles/c8s/image-policy.yaml.in"
     local dst="$STAGE_DIR/etc/nri/conf.d/image-policy.yaml"
-    [ -f "$tmpl" ] || { echo "c8s sync: FATAL floor template $tmpl missing" >&2; exit 1; }
+    [ -f "$tmpl" ] || { echo "c8s sync: FATAL base-allowlist template $tmpl missing" >&2; exit 1; }
     mkdir -p "$(dirname "$dst")"
     sed \
         -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
         -e "s|@CDS_IMAGE@|${CDS_REPO}@${CDS_DIGEST}|g" \
         -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
-    echo "c8s sync: NRI floor rendered (cds ${CDS_DIGEST})"
+    echo "c8s sync: NRI base rendered (cds ${CDS_DIGEST})"
 }
 
 # Download <url> to <dest>, verifying its sha256. Skip if dest exists and
@@ -231,7 +234,7 @@ if [ -f "$PLUGIN_CACHE" ]; then
     echo "c8s sync: cached nri-image-policy (${NRI_IMAGE##*@})"
     install -D -m 0755 "$PLUGIN_CACHE" "$PLUGIN_TARGET"
     install -D -m 0755 "$PLUGIN_CACHE" "$C8S_TARGET"
-    render_nri_floor
+    render_nri_base
     echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"
     exit 0
 fi
@@ -298,6 +301,6 @@ install -D -m 0644 "$BIN" "$PLUGIN_CACHE"
 install -D -m 0755 "$BIN" "$PLUGIN_TARGET"
 install -D -m 0755 "$BIN" "$C8S_TARGET"
 
-render_nri_floor
+render_nri_base
 
 echo "c8s sync: staged rke2 ${RKE2_VERSION} + airgap bundles + nri-image-policy + c8s"

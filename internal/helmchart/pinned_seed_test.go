@@ -2,7 +2,7 @@
 // platform images that carry a shell — the nri-image-policy installer image
 // and the rke2 busybox uses (containerd-prep, local-path helper) — must be
 // admitted by the served allowlist only under their exact expected argv,
-// never by digest alone. The boot config's always_allow is digest-only
+// never by digest alone. The boot config's base is digest-only
 // admission, so it must not carry any of them either.
 package helmchart
 
@@ -139,7 +139,7 @@ func TestChartPinnedSeedAdmitsLocalPathHelperArgv(t *testing.T) {
 	denyArgvs(t, seed, helperDigest, []string{"/bin/busybox", "/script/setup"})
 }
 
-// always_allow is digest-only admission — carrying an argv-pinned image there
+// base is digest-only admission — carrying an argv-pinned image there
 // would bypass the pin. Neither the installer image nor any busybox may
 // appear, in either the k8s or the rke2 shape.
 func TestChartPinnedDigestsAbsentFromBootConfig(t *testing.T) {
@@ -152,15 +152,15 @@ func TestChartPinnedDigestsAbsentFromBootConfig(t *testing.T) {
 			t.Fatalf("helm template %v: %v\n%s", args, err, out)
 		}
 		cfg := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
-		if len(cfg.Allowlist.AlwaysAllow) == 0 {
-			t.Fatalf("always_allow must stay non-empty (pull bootstrap): %v", args)
+		if len(baseImages(cfg.Allowlist.Base)) == 0 {
+			t.Fatalf("base must stay non-empty (pull bootstrap): %v", args)
 		}
-		for digest, image := range cfg.Allowlist.AlwaysAllow {
+		for digest, image := range baseImages(cfg.Allowlist.Base) {
 			if digest == baseNRIDigest {
-				t.Errorf("installer image self-allowed in always_allow (%v): the argv pin would be bypassed", args)
+				t.Errorf("installer image self-allowed in base (%v): the argv pin would be bypassed", args)
 			}
 			if strings.Contains(image, "busybox") {
-				t.Errorf("busybox %s in always_allow (%v): admits any command line on any pod", digest, args)
+				t.Errorf("busybox %s in base (%v): admits any command line on any pod", digest, args)
 			}
 		}
 	}

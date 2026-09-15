@@ -213,7 +213,7 @@ echo "==> nri-image-policy installer finished; plugin healthy: $health"
 
 {{/*
 Pins script for a node-as-CVM (--cvm-mode=bare-metal), where the node image bakes the
-plugin binary, its containerd registration and the boot config — floor included,
+plugin binary, its containerd registration and the boot config — base included,
 whose RKE2 system digests only the image build resolves. This release's CDS pins
 are the one thing that config cannot carry, so the installer patches those two
 keys into it and restarts containerd when they change.
@@ -241,9 +241,8 @@ fi
 
 {{/*
 Boot config (image-policy.yaml). Caller passes a dict with .root. Every plugin
-runs pull mode (polls CDS); allowlist.always_allow is the digest-only boot
-floor (CDS + any-argv bootstrap digests), so a roll admits the new images
-before the first pull lands.
+runs pull mode (polls CDS); allowlist.base is the boot base for CDS and
+any-argv bootstrap digests. Argv-pinned images are admitted by the served seed.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
@@ -276,18 +275,9 @@ allowlist:
 {{- else }}
       []
 {{- end }}
-{{- /* always_allow is digest-only admission, so it must never carry an
-       argv-pinned image (the installer itself, the busybox prep/helper
-       images): those are admitted by the served argv-pinned entries, whose
-       pull this config bootstraps. The CDS self-entry keeps the map non-empty
-       (the plugin validates it when pull.url is set). */ -}}
-{{- $pinnedDigests := include "c8s.argvPinnedDigests" $root | fromJsonArray }}
-  always_allow:
-{{- range $digest, $image := (include "c8s.alwaysAllow" $root | fromJson) }}
-{{- if not (has $digest $pinnedDigests) }}
-    {{ $digest | quote }}: {{ $image | quote }}
-{{- end }}
-{{- end }}
+  base:
+    {{- $base := include "c8s.baseWorkloads" $root | fromJson -}}
+    {{- dict "schema" "c8s.allowlist/v1" "workloads" $base | toYaml | nindent 4 }}
 containerd:
   socket: {{ include "nri-image-policy.containerdSocket" $root | quote }}
   namespace: {{ $root.Values.nriImagePolicy.containerd.namespace | quote }}
