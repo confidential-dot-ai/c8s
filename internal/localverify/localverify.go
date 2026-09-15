@@ -36,6 +36,12 @@ const (
 	kdsMaxFetchTime  = 2 * time.Minute
 )
 
+// kdsGetter builds the network getter behind the VCEK cache; a variable so a
+// test can stand in a fake KDS and prove what does and does not reach it.
+var kdsGetter = func() trust.HTTPSGetter {
+	return snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)
+}
+
 // Params is the policy a Verify call enforces on the evidence.
 type Params struct {
 	// VerifyParams is what attestation-go's verifier enforces itself: the
@@ -79,7 +85,7 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 	// the Getter lets the snp and gcp-snp arms fetch it from AMD KDS, bounded
 	// by ctx. Nothing else here reaches the network.
 	res, err := teeverify.VerifyEnvelope(ctx, envelope, p.VerifyParams, teeverify.Options{
-		SNP: snp.Options{Getter: snp.DefaultKDSGetter(kdsMaxFetchTime, kdsMaxRetryDelay)},
+		SNP: snp.Options{Getter: newCachingGetter(defaultKDSCacheDir(), kdsGetter())},
 	})
 	if err != nil {
 		var re *trust.AttestationRecreationErr
