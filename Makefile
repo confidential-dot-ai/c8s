@@ -93,8 +93,8 @@ test-integration:
 test-integration-cluster:
 	./test/integration/cluster/run.sh
 
-# The byte-exact rke2-role.sh against real ISO9660 loop devices. Root (loop
-# mounts, writes /run/confos) — sudo on a disposable box.
+# The byte-exact launch script with device and c8s stubs in disposable Linux.
+# Needs Docker; host files are mounted read-only and no privileges are added.
 test-node-guest-image-role:
 	./node-guest-image/tests/rke2-role-test.sh
 

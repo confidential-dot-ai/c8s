@@ -26,10 +26,12 @@ import (
 // of it; each command adds its own fields for what it fetches and where it
 // puts the result.
 type Config struct {
-	CDSURL            string
-	AttestationApiURL string
-	Measurements      []string
-	RTMRs             []string
+	CDSURL                 string
+	AttestationApiURL      string
+	Measurements           []string
+	RTMRs                  []string
+	MeasurementsConfig     string
+	MeasurementsConfigJSON string
 
 	CertPath string
 	KeyPath  string
@@ -54,6 +56,8 @@ func (c Config) Endpoint() string {
 // shape also moves the volume daemon onto guest loopback) overrides the
 // affected flag's Usage via f.Lookup after this call.
 func BindFlags(f *pflag.FlagSet, cfg *Config) {
+	f.StringVar(&cfg.MeasurementsConfig, "measurements-config", "", "path to the complete CDS image and operator identity policy")
+	f.StringVar(&cfg.MeasurementsConfigJSON, "measurements-config-json", "", "inline complete CDS image and operator identity policy")
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
@@ -93,6 +97,16 @@ func (c *Config) Validate() error {
 
 // ParsePins decodes --measurements and --rtmrs, warning when measurements are unpinned.
 func (c *Config) ParsePins() (ratls.Pins, error) {
+	if c.MeasurementsConfig != "" || c.MeasurementsConfigJSON != "" {
+		if len(c.Measurements) != 0 || len(c.RTMRs) != 0 {
+			return ratls.Pins{}, fmt.Errorf("a measurements config cannot be combined with --measurements or --rtmrs")
+		}
+		set, err := cmdsutil.LoadMeasurementsSource(c.MeasurementsConfig, c.MeasurementsConfigJSON)
+		if err != nil {
+			return ratls.Pins{}, err
+		}
+		return ratls.Pins{Entries: set.Entries}, nil
+	}
 	measurements, err := refvalues.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
 		return ratls.Pins{}, fmt.Errorf("--measurements: %w", err)

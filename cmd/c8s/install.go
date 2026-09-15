@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -239,6 +239,32 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 		return fmt.Errorf("no node is labelled %s=%s, so the CDS pod cannot schedule (image policy pins it there). Label one: kubectl label node <node> %s=%s", key, val, key, val)
 	}
 	return nil
+}
+
+// preflightNotBakedNode refuses a second installation over the image-owned
+// operator and admission resources. A missing namespace is an ordinary empty
+// result; connectivity and authorization failures remain visible.
+func preflightNotBakedNode(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "namespace", "c8s-system",
+		"-o", "json", "--ignore-not-found").Output()
+	if err != nil {
+		return fmt.Errorf("inspect c8s-system namespace: %w", withStderr(err))
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+	var ns struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &ns); err != nil {
+		return fmt.Errorf("decode c8s-system namespace: %w", err)
+	}
+	if ns.Metadata.Labels["confidential.ai/baked"] != "true" {
+		return nil
+	}
+	return fmt.Errorf("c8s-system carries confidential.ai/baked=true: this node image owns the core services, operator and admission policies; configure its signed launch.yaml and workloads instead of running c8s install")
 }
 
 // preflightRouterHostPort fails fast when router's host port is already bound on
@@ -967,6 +993,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if _, err := exec.LookPath("kubectl"); err != nil {
 			return fmt.Errorf("kubectl CLI not found on PATH: %w", err)
 		}
+		if err := preflightNotBakedNode(cmd.Context()); err != nil {
+			return err
+		}
 		// Always read the adopted workloads, even when --resolve-digests=false
 		// discards workloadImages: this is the only pre-install existence check,
 		// so it fails fast before any helm install or post-install patch runs.
@@ -1467,7 +1496,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// list matches exactly what was validated (a blank/whitespace entry, e.g.
 	// from a trailing comma, is dropped by the parser, not silently emitted as
 	// an empty pin that would disable pinning at that index).
-	measurements, rtmrs, pinArgs, err := installPins()
+	digests, rtmrs, pinArgs, err := installPins()
 	if err != nil {
 		return nil, err
 	}
@@ -1475,7 +1504,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In bare-metal/gke/aks the node IS the CVM, so that
 	// is the node image's M.
-	for i, m := range measurements {
+	for i, m := range digests {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
@@ -1486,8 +1515,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
-		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
+	for i, pin := range measurements.FormatRTMRPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
@@ -2070,27 +2098,12 @@ func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (m
 		if err := yaml.Unmarshal(raw, &overlay); err != nil {
 			return nil, fmt.Errorf("parse values file %q: %w", vf, err)
 		}
-		mergeValues(tree, overlay)
+		helmchart.MergeValues(tree, overlay)
 	}
 	if err := overlaySetArgs(tree, setArgs); err != nil {
 		return nil, err
 	}
 	return tree, nil
-}
-
-// mergeValues deep-merges src onto dst the way helm coalesces a -f file: a map
-// value merges recursively, anything else (scalar, list) replaces. dst is
-// mutated in place.
-func mergeValues(dst, src map[string]any) {
-	for k, sv := range src {
-		if sm, ok := sv.(map[string]any); ok {
-			if dm, ok := dst[k].(map[string]any); ok {
-				mergeValues(dm, sm)
-				continue
-			}
-		}
-		dst[k] = sv
-	}
 }
 
 // overlaySetArgs applies the scalar --set/--set-string overrides in setArgs onto

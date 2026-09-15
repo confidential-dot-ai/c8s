@@ -30,6 +30,7 @@ import (
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	measurementspkg "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -495,7 +496,7 @@ type verifyPlan struct {
 	initDataHash []byte
 	// refValues is the parsed --measurements-config, empty when unset. It
 	// both pins the target and is compared against what the target serves.
-	refValues refvalues.ReferenceValues
+	refValues measurementspkg.ReferenceValues
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -534,9 +535,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}
 
 	// Read once, here, like every other file-backed pin on this path.
-	var refValues refvalues.ReferenceValues
+	var refValues measurementspkg.ReferenceValues
 	if cfg.measurementsConfig != "" {
-		loaded, err := refvalues.Load(cfg.measurementsConfig)
+		loaded, err := measurementspkg.Load(cfg.measurementsConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -625,8 +626,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
-		policy: &ratls.VerifyPolicy{Policy: remote.Policy{
-			Images:       refValues.Images,
+		policy: &ratls.VerifyPolicy{Entries: refValues.Entries, Policy: remote.Policy{
 			Measurements: measurements,
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
@@ -1254,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil || !plan.refValues.Empty()
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1290,6 +1290,29 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
 		return oc
+	}
+
+	fullImagePinned := plan.pins.image != nil
+	if !plan.refValues.Empty() {
+		if teetypes.NormalizePlatform(plan.refValues.TEE) != teetypes.NormalizePlatform(oc.Platform) {
+			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.TEE, oc.Platform)
+			return oc
+		}
+		response := remote.VerifyResponse{Result: *result}
+		if err := measurementspkg.EnforceEntries(response, plan.refValues.Entries, oc.Platform); err != nil {
+			oc.Error = fmt.Sprintf("--measurements-config: %v", err)
+			return oc
+		}
+		// A TDX tuple covers the guest only when the matching entry pins both
+		// kernel and rootfs registers. A weak alternative must not borrow the
+		// completeness of an unrelated entry in the same policy.
+		for _, entry := range plan.refValues.Entries {
+			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+				measurementspkg.EnforceEntries(response, []measurementspkg.Entry{entry}, oc.Platform) == nil {
+				fullImagePinned = true
+				break
+			}
+		}
 	}
 
 	if pinned {
@@ -1337,7 +1360,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// anchor) does not downgrade this: chosen by the responder, it anchors
 	// nothing the operator asked about — the same rule the JS verifier applies
 	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
+	if isTDX(oc.Platform) && pinned && !fullImagePinned {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
 		if plan.meshCA == nil {
 			oc.Verified = false

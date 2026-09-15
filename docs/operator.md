@@ -21,7 +21,8 @@ The operator tree is built around these pieces:
   workload can fetch and renew a leaf certificate through CDS.
 
 The operator does not inject the RA-TLS mesh sidecar. Pod-to-pod mTLS remains
-the responsibility of the node-level `ratls-mesh` DaemonSet. The chart-managed
+the responsibility of node-level `ratls-mesh`, deployed as a DaemonSet by
+the chart or as systemd services by the measured node image. The chart-managed
 mesh excludes `kube-system` and its own release namespace as local traffic
 sources, so c8s control-plane agents (and, on kind/kubeadm-style clusters where
 the API server runs as a `kube-system` pod, in-cluster webhook callers) do not
@@ -82,6 +83,134 @@ The main source directories are:
 
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
+
+`c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
+The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
+RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
+CRDs, webhook and admission policies are rendered from this same chart at
+**image build time**. RKE2 applies those manifests at boot; there is no c8s
+Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
+namespace carries `confidential.ai/baked=true`.
+
+### Authenticated launch configuration
+
+A measured node uses one image for both `server` and `agent`. Each boot
+requires an ISO labelled `opkeydata` containing exactly the launch inputs
+`pubkey`, `launch.yaml`, and `launch.yaml.sig`. The private signing key stays
+with the operator. `pubkey` is bound to the guest by the platform: the measured
+initrd extends TDX RTMR[3], while an SNP launcher must set HOST_DATA to
+`SHA-256(pubkey)` over the exact PEM file bytes.
+
+The strict `c8s-launch/v1` document selects the role, cluster identity, node
+addresses, RKE2 join credentials, trusted role keys, image pins and TLS SAN.
+It accepts an optional `workloads` string containing a complete
+`c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
+service arguments or component toggles; volume support remains disabled.
+
+Use **distinct launch keys for server and agent roles, and new keys for
+each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
+launch keys establish cluster separation during peer verification. Keep one
+server key and one or more agent keys. An agent document must omit
+`rke2.serverToken` entirely, including an empty field; it receives only the
+agent token. Server and agent tokens must differ and contain 64 lowercase
+hexadecimal characters each.
+
+`c8s launch-config new` creates everything one cluster needs: a server
+launch key, an agent launch key, fresh join tokens, a signed `launch.yaml`
+per node and the client policy that pins the server. Give it the trusted
+`manifest.json` published with the exact node image, the server's guest IPv4
+address that every node can reach, and the agent names. On SNP, also pass
+the VM's vCPU count, which selects the launch digest.
+
+```sh
+c8s launch-config new --out demo --cluster-id demo \
+  --image-manifest manifest.json \
+  --server-address 10.0.0.10 \
+  --agent demo-agent-1 --agent demo-agent-2
+# SNP: add --vcpus 8 (the VM shape's launch digest); TDX has one per image.
+
+xorriso -as mkisofs -V opkeydata -o demo/server.iso demo/server
+xorriso -as mkisofs -V opkeydata -o demo/demo-agent-1.iso demo/demo-agent-1
+```
+
+The bundle directory is created new and never reused:
+
+| Path | Purpose |
+|---|---|
+| `demo/server.key` | server launch key; also the operator key for `c8s get-kubeconfig --operator-key` and signed CDS writes |
+| `demo/agent.key` | the agent launch key every agent boots with |
+| `demo/server.json` | `C8S_MEASUREMENTS_CONFIG` for clients of this cluster |
+| `demo/server/` | `pubkey`, `launch.yaml`, `launch.yaml.sig`: the server's opkeydata |
+| `demo/<agent>/` | the same three files for each agent |
+
+An agent can be added to a running cluster without touching the server:
+`c8s launch-config add-agent --bundle demo --name demo-agent-3` derives
+its document from the server's (same cluster, image, agent token and keys,
+never the server token) and signs it with the agent key. A server created
+without `--server-address` autodetects its own; `add-agent` then needs
+`--server-address`.
+
+The generated document is the strict schema below; edit it only when a field
+the command does not expose is needed, then re-sign with
+`c8s keys sign-launch --key demo/server.key --force demo/server/launch.yaml`.
+
+Attach the corresponding ISO to each VM along with its required scratch
+disk, booting the **same image and supported VM shape** for both roles.
+The image is built separately for TDX and SNP; their image digests and
+measurements are different. SNP's launch digest also depends on vCPU count.
+Every `image.measurement` is 96 lowercase hexadecimal characters. TDX
+requires exactly `image.rtmrs[1]` and `[2]`, each also 96 characters; MRTD alone
+pins firmware, not the guest kernel and verity root. Do not put RTMR[0] or
+RTMR[3] in the image pins: RTMR[3] is checked against each role's launch key.
+
+For a server, `server.address` may be omitted: staging uses `node.ip`, or
+selects the primary IPv4 address if that is also omitted. An agent must
+always carry its server's reachable IPv4 address. `node.ip` is optional
+(`0.0.0.0` means autodetect); `node.externalIP` is an optional explicit unicast
+IPv4 address. `node.name` must be unique within the cluster. `tlsSAN` defaults
+to `c8s.local` and must be a lowercase DNS hostname. The built-in front door
+serves a CDS-issued certificate; arbitrary routes, public WebPKI configuration
+and CORS overrides are not launch settings in this image.
+
+For KubeVirt, the same three files can be supplied as a Secret-backed ISO:
+
+```sh
+kubectl -n YOUR_NAMESPACE create secret generic demo-server-launch \
+  --from-file=pubkey=demo/server/pubkey \
+  --from-file=launch.yaml=demo/server/launch.yaml \
+  --from-file=launch.yaml.sig=demo/server/launch.yaml.sig
+```
+
+Reference that Secret in the VM's volume with
+`secret: {secretName: demo-server-launch, volumeLabel: opkeydata}` and attach
+it as a read-only virtio disk. Repeat with the agent's files and a separate
+Secret. On SNP, the launcher must additionally commit the corresponding
+public-key hash as HOST_DATA; attaching the disk alone is insufficient.
+
+`c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
+and writes an ASN.1 DER signature encoded as one base64 line to
+`<file>.sig`. It does not overwrite an existing signature unless `--force`
+is passed. Any later edit requires a new signature. At boot, `rke2-role.service` calls
+`c8s launch-config stage`, which authenticates those bytes before parsing,
+checks the complete software measurement and role-key relationship against
+verified self-attestation, then publishes the role marker last. Missing,
+unsigned or inconsistent input leaves RKE2 and role-dependent services down.
+Changing role or launch configuration requires a relaunch with a newly
+signed bundle and the corresponding role's hardware-bound public key.
+
+The verified files live in root-only `/run/confos/launch`. `peers.json`
+contains the software/key tuples for this cluster's server and permitted
+agents; `cds.json` contains only its server. Their shared measurement-file
+schema carries `operator_key` as the exact PEM string alongside each entry's
+image measurement and TDX RTMR tuple. This lets peers accept both roles while
+CDS clients require the authorized server despite identical software images.
+The server publishes only the CDS URL and server policy to the public
+`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
+and private keys do not enter that ConfigMap. The operator forwards the full
+server policy to injected workload helpers. NRI and host CDS clients use the
+same server policy directly from the staged files.
+
+### Chart-managed defaults
 
 - The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
@@ -296,6 +425,16 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
+For the measured node image, CDS stores its database at
+`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
+restarts, but a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the next boot; reapply any later
+operator changes. The CA signing key is in process memory and changes on a
+CDS process restart, so plan for certificate re-bootstrap. This image does
+not expose a persistent-volume switch in launch configuration.
+
+For chart-managed CDS:
+
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
 whatever an operator writes with `c8s allowlist add` or `apply`. With
@@ -498,7 +637,7 @@ is only meaningful where such a binding exists: on a cluster that is not the
 c8s node image, create an equivalent `ClusterRoleBinding` or pass `--cert-org`
 for a group that cluster already authorizes.
 
-Do not read the binding as a privilege boundary. On this single-node cluster
+Do not read the binding as a privilege boundary. In this node cluster
 `cluster-admin` is root-equivalent on the guest: `kube-system` is exempt from
 PodSecurity admission, so a privileged pod with a hostPath mount of `/` is one
 `kubectl` away. RBAC is used for revocability and policy, not containment; the
@@ -512,9 +651,11 @@ manifest is baked into the read-only root and everything RKE2 writes, the
 cluster state included, lives on the scratch disk, which is re-encrypted with
 a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
 are lost with it, so there is no in-guest switch that survives a restart, by
-design. To revoke durably, relaunch without `opkeydata`, or with a rotated
-operator key, so the old key can no longer obtain a certificate. A certificate
-already issued stays usable for the remainder of its one-hour TTL.
+design. To revoke durably, relaunch with a rotated server launch key and
+updated signed documents and peer key sets. Every boot requires valid
+`opkeydata`; omitting it prevents the node from starting. A certificate already
+issued remains usable against its original live cluster until expiry or an
+RBAC change.
 
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,

@@ -52,7 +52,7 @@ jobs:
           ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
           test -n "$ref"
           echo "c8s_ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "node-image relevant: $image (components at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "node-image relevant: $image (c8s binary from this checkout, operator at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
 
       # PR code must never run with the production module-signing key. This
       # keypair is shared by both legs, used only in unpublished gate images,

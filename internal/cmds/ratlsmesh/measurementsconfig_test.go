@@ -1,3 +1,5 @@
+//go:build linux
+
 package ratlsmesh
 
 import (
@@ -7,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -46,8 +49,8 @@ func TestResolveFillsPeerAndCDSFieldsFromOneFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(set.Images) != 2 {
-		t.Fatalf("got %d entries, want 2", len(set.Images))
+	if len(set.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(set.Entries))
 	}
 	if c.measurements == "" || c.cdsMeasurements == "" {
 		t.Fatalf("a pin field was left empty: peers=%q cds=%q", c.measurements, c.cdsMeasurements)
@@ -89,7 +92,7 @@ func TestResolveDropsDivergentRTMRs(t *testing.T) {
 	if strings.Count(c.measurements, ",") != 1 {
 		t.Errorf("--measurements = %q, want both digests", c.measurements)
 	}
-	for _, img := range set.Images {
+	for _, img := range set.Entries {
 		if len(img.RTMRs) == 0 {
 			t.Errorf("entry %s lost its register pins", img.Name)
 		}
@@ -133,11 +136,11 @@ func TestResolveFailsClosed(t *testing.T) {
 // --platform=auto resolves by probing the guest devices, so the config's
 // platform is compared against what this node actually attests on.
 func TestCheckTEEMatchesPlatform(t *testing.T) {
-	snp, err := refvalues.Parse([]byte(snpDoc(`{"name":"a","measurement":"00` + meshDigestA + `"}`)))
+	snp, err := measurements.Parse([]byte(snpDoc(`{"name":"a","measurement":"00` + meshDigestA + `"}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tdx, err := refvalues.Parse([]byte(tdxDoc(`{"name":"a","mrtd":"00` + meshDigestA + `"}`)))
+	tdx, err := measurements.Parse([]byte(tdxDoc(`{"name":"a","mrtd":"00` + meshDigestA + `"}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +154,44 @@ func TestCheckTEEMatchesPlatform(t *testing.T) {
 	if err := checkTEEMatchesPlatform(tdx, ratls.TEETypeSEVSNP); err == nil {
 		t.Error("accepted a tdx config on an SNP node")
 	}
-	if err := checkTEEMatchesPlatform(refvalues.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
+	if err := checkTEEMatchesPlatform(measurements.ReferenceValues{}, ratls.TEETypeSEVSNP); err != nil {
 		t.Errorf("an unset config reported a mismatch: %v", err)
+	}
+}
+
+func TestSeparateCDSConfigDoesNotWidenServerTrustOrNarrowMesh(t *testing.T) {
+	const peersPath = "../../../pkg/measurements/testdata/node-identities.json"
+	peers, err := measurements.Load(peersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := peers
+	server.Entries = peers.Entries[:1]
+	doc, err := measurements.Format(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &proxyConfig{measurementsConfig: peersPath, cdsMeasurementsConfig: writeMeshConfig(t, string(doc))}
+	got, err := resolveMeasurementsConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != 2 || len(c.cdsPins.Entries) != 1 || c.cdsPins.Entries[0].Name != "server" {
+		t.Fatal("CDS and peer policies were conflated")
+	}
+	if len(c.cdsPins.Entries[0].OperatorKey) == 0 || len(got.Entries[1].OperatorKey) == 0 {
+		t.Fatal("role identity dropped")
+	}
+	missing := &proxyConfig{measurementsConfig: peersPath, cdsMeasurementsConfig: "missing-file"}
+	if _, err := resolveMeasurementsConfig(missing); err == nil {
+		t.Fatal("missing server policy fell back to broad peer policy")
+	}
+	if !missing.cdsPins.Empty() || missing.measurements != "" {
+		t.Fatal("a partial policy was applied after a failed load")
+	}
+	// A dedicated CDS config may also accompany legacy mesh pin flags.
+	flat := &proxyConfig{measurements: "00" + meshDigestA, cdsMeasurementsConfig: peersPath}
+	if _, err := resolveMeasurementsConfig(flat); err != nil || flat.measurements != "00"+meshDigestA {
+		t.Fatalf("separate CDS policy changed legacy mesh pins: %v", err)
 	}
 }

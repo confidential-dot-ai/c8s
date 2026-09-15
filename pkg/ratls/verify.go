@@ -16,14 +16,8 @@ import (
 	agratls "github.com/confidential-dot-ai/attestation-go/ratls"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
-
-// Pins is the peer-identity pin set an in-cluster RA-TLS verifier enforces:
-// launch-measurement reference values, whole-image pins, and the TDX runtime
-// measurement registers. It is [remote.Policy] under the name the c8s flag
-// plumbing uses; the zero value pins nothing (accept any attested TEE —
-// development only; callers warn).
-type Pins = remote.Policy
 
 // VerifyPolicy defines what attestation claims are acceptable.
 type VerifyPolicy struct {
@@ -33,6 +27,9 @@ type VerifyPolicy struct {
 	// verifying paths derive it from the certificate key and refuse a value
 	// that disagrees.
 	Policy remote.Policy
+
+	// Entries binds each c8s node image to its launch-authorized operator key.
+	Entries []measurements.Entry
 
 	// Nonce, when set, is verified against the attestation report's REPORTDATA.
 	// REPORTDATA must equal hash(pubkey || nonce). Use when both sides agree on
@@ -246,6 +243,14 @@ func verifyOnline(att *Attestation, pub crypto.PublicKey, policy *VerifyPolicy, 
 		return nil, mapVerifyError(att.Family, err)
 	}
 
+	envelope, err := att.Envelope()
+	if err != nil {
+		return nil, err
+	}
+	if err := measurements.EnforceEntries(resp, policy.Entries, string(envelope.Platform)); err != nil {
+		return nil, mapVerifyError(att.Family, err)
+	}
+
 	result := &VerifyResult{TEEType: att.Family, ReportData: expectedReportData}
 	if att.Family == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 {
 		// The claims map came out of json.Unmarshal, so re-marshaling it
@@ -268,7 +273,7 @@ func mapVerifyError(family TEEType, err error) error {
 		return ErrSignatureInvalid
 	case errors.Is(err, remote.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, remote.ErrMeasurementNotAllowed), errors.Is(err, remote.ErrRTMRNotAllowed):
+	case errors.Is(err, remote.ErrMeasurementNotAllowed), errors.Is(err, remote.ErrRTMRNotAllowed), errors.Is(err, measurements.ErrOperatorKeyNotAllowed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, remote.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

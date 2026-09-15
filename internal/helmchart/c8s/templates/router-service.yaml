@@ -1,4 +1,4 @@
-{{- if .Values.router.enabled }}
+{{- if and .Values.router.enabled (not .Values.node.bakedServices) }}
 {{- $svc := .Values.router.service }}
 apiVersion: v1
 kind: Service

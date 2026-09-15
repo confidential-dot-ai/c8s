@@ -17,30 +17,34 @@ inputs:
 runs:
   using: composite
   steps:
-  - name: tools (kubectl, go, crane, helm)
+  - name: tools (kubectl, go, crane)
     shell: bash
     run: |
       set -euo pipefail
       # Every fetch here crosses the public internet from an ephemeral ARC
       # pod, and one hiccup fails the lane before it reaches a CVM.
+      if ! command -v openssl >/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends openssl
+      fi
       mkdir -p "$PWD/bin"
-      # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
-      # A file, not a function, because each `run:` block is a fresh shell.
-      printf '%s\n' \
-        'retry() {' \
-        '  local i delay=2' \
-        '  for i in 1 2 3 4; do' \
-        '    if eval "$1"; then return 0; fi' \
-        '    [ "$i" -eq 4 ] && break' \
-        '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
-        '    sleep "$delay"' \
-        '    delay=$((delay * 2))' \
-        '  done' \
-        '  echo "::error::gave up after 4 attempts: $1" >&2' \
-        '  return 1' \
-        '}' > bin/retry.sh
+      # Keep retry arguments literal; the helper is shared across run blocks.
+      cat > bin/retry.sh <<'RETRY'
+      retry() {
+        local attempt delay=2
+        for attempt in 1 2 3 4; do
+          if "$@"; then return 0; fi
+          [ "$attempt" -eq 4 ] && break
+          echo "attempt $attempt failed; retrying in ${delay}s" >&2
+          sleep "$delay"
+          delay=$((delay * 2))
+        done
+        return 1
+      }
+      RETRY
       . bin/retry.sh
-      retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
+      kube_version=$(retry curl -fsSL https://dl.k8s.io/release/stable.txt)
+      retry curl -fsSL "https://dl.k8s.io/release/$kube_version/bin/linux/amd64/kubectl" -o bin/kubectl
       chmod +x bin/kubectl
       echo "$PWD/bin" >> "$GITHUB_PATH"
       if ! command -v go >/dev/null; then
@@ -48,21 +52,21 @@ runs:
         # pinned fallback on the next line can be reached.
         GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
         [ -n "$GOVER" ] || GOVER=1.26.3
-        retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
+        retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+        sudo tar -C /usr/local -xzf /tmp/go.tar.gz
       fi
       # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
       # inside THIS one. `go install crane` below needs it here and now.
       export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
       echo "/usr/local/go/bin" >> "$GITHUB_PATH"
       echo "$HOME/go/bin" >> "$GITHUB_PATH"
-      # crane: `c8s install --resolve-digests=true` below shells out to it.
-      # Pinned rather than fetched through the GitHub releases API, which
-      # rate-limits by IP on a shared self-hosted host.
-      command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
-      # helm: c8s install shells out to it too. The ephemeral ARC pod has
-      # neither binary, unlike the host, so install rather than assume.
-      if ! command -v helm >/dev/null; then
-        retry 'curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm'
+      # crane resolves the published image and manifest digests. Helm is only
+      # used while building the measured image; no runtime installer runs here.
+      command -v crane >/dev/null || retry go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+      # Avoid apt's intermittent IPv6 mirror failures on the launcher.
+      if ! command -v jq >/dev/null; then
+        retry curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o bin/jq
+        chmod +x bin/jq
       fi
 
   # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
@@ -160,21 +164,30 @@ runs:
     shell: bash
     run: |
       set -euo pipefail
-      for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef; do
+      for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef launchConfigVersion; do
         v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
         [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
+        case "$k" in
+          launchConfigVersion) [[ "$v" == c8s-launch/v1 ]] ;;
+          image) [[ "$v" =~ ^ghcr[.]io/[a-zA-Z0-9_./:@-]+$ ]] ;;
+          rootPvc) [[ "$v" =~ ^[a-z0-9][a-z0-9.-]*$ ]] ;;
+          mrtd|rtmr1|rtmr2) [[ "$v" =~ ^[0-9a-f]{96}$ ]] ;;
+          c8sRef) [[ "$v" =~ ^[0-9a-f]{7,40}$ ]] ;;
+        esac || { echo "::error::$REFS_CM invalid '$k'; publish compatible signed-launch image metadata"; exit 1; }
         echo "$k=$v" >> "$GITHUB_ENV"
       done
       # Optional manifest tag when the digest-to-tag lookup cannot derive it.
       # Keep the ConfigMap fallback alongside the required image tuple.
       v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.imageTag}' 2>/dev/null)
       if [ -n "$v" ]; then
+        [[ "$v" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo "::error::invalid imageTag"; exit 1; }
         echo "imageTag=$v" >> "$GITHUB_ENV"
       fi
       # An explicit input overrides the pin, but say so loudly: the floor is
       # fail-closed, so an unpaired ref is the likeliest cause of a red run.
       if [ -n "$C8S_REF_OVERRIDE" ]; then
-        echo "::warning title=version pairing::testing c8s_ref='$C8S_REF_OVERRIDE' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': components may be denied by the baked floor"
+        [[ "$C8S_REF_OVERRIDE" =~ ^[a-zA-Z0-9_./-]+$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
+        echo "::warning title=version pairing::testing c8s_ref='$C8S_REF_OVERRIDE' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': the CLI and test source change; node services remain the pinned image"
         echo "c8sRef=$C8S_REF_OVERRIDE" >> "$GITHUB_ENV"
       fi
 
@@ -235,20 +248,77 @@ runs:
         echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
       fi
 
-  - name: per-run operator key + opkeydata secret
-    # The initrd mounts the ISO labelled "opkeydata", SHA-384s the file
-    # named `pubkey`, and extends that into RTMR[3]. cred-release then
-    # refuses to serve if the on-disk key does not match RTMR[3], so the
-    # kubeconfig we fetch is cryptographically bound to THIS keypair.
+  - name: build the c8s CLI at the paired ref
+    env:
+      EXACT_IMAGE: ${{ inputs.exact_image == 'true' }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
     shell: bash
     run: |
       set -euo pipefail
-      umask 077
-      openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
-      openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+      # Same exposure as the tools step: this clone and the module fetches
+      # behind `go install` cross the public internet under `set -e`.
+      . "$GITHUB_WORKSPACE/bin/retry.sh"
+      # This clone reproduces fine anonymously from a pod in arc-runners and
+      # from this runner image, so when it fails HERE the cause is something
+      # in the job's own context, and the bare error says nothing useful:
+      #   fatal: could not read Username for 'https://github.com'
+      # Capture the config git actually reads and the exchange it actually
+      # gets, redacting any credential the trace would otherwise print.
+      clone_diag() {
+        echo "::group::c8s clone diagnostics"
+        git config --list --show-origin 2>&1 \
+          | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
+          | sed 's/^/cfg  /' | head -40
+        env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
+          | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
+        GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
+          git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
+          | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
+          | tail -40 | sed 's/^/wire /'
+        echo "::endgroup::"
+      }
+      if [ "$EXACT_IMAGE" = true ]; then
+        # The wrapper verified main ancestry and checked out this full SHA.
+        # Reuse it: a tag can shadow the short ref used for OCI image tags.
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid exact-image source SHA"; exit 1; }
+        [ "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA" ] \
+          || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
+        C8S_SOURCE_DIR=$GITHUB_WORKSPACE
+      else
+        clone_c8s_source() {
+          rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
+        }
+        retry clone_c8s_source || { clone_diag; exit 1; }
+        git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+        C8S_SOURCE_DIR=/tmp/c8s-src
+      fi
+      export C8S_SOURCE_DIR
+      echo "C8S_SOURCE_DIR=$C8S_SOURCE_DIR" >> "$GITHUB_ENV"
+      echo "c8s ref sha: $(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)"
+      pushd "$C8S_SOURCE_DIR" >/dev/null
+      retry go install ./cmd/c8s
+      popd >/dev/null
+      # The CLI comes from the paired source; baked services stay in the image.
+      c8s --version || true
+
+  - name: sign the server launch and attach opkeydata
+    # The same exact public PEM is signed into launch.yaml, bound by the
+    # measured initrd into RTMR3, and pinned by the external clients.
+    shell: bash
+    run: |
+      set -euo pipefail
+      # The refs ConfigMap is the pinned image tuple here (the published
+      # manifest is resolved after boot); hand it to the generator in the
+      # manifest shape get-kubeconfig reads. server.key is the run's operator key.
+      jq -n --arg mrtd "$mrtd" --arg rtmr1 "$rtmr1" --arg rtmr2 "$rtmr2" \
+        '{tdx: {mrtd: $mrtd, rtmr1: $rtmr1, rtmr2: $rtmr2}}' > /tmp/pinned-manifest.json
+      c8s launch-config new --out /tmp/launch-data --cluster-id "$VM" --server-name c8s-node \
+        --image-manifest /tmp/pinned-manifest.json
       kubectl -n "$NS" create secret generic "$VM-opkey" \
-        --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl apply -f -
-      echo "operator key bound (sha384 $(sha384sum < /tmp/op.pub | cut -c1-16)...)"
+        --from-file=pubkey=/tmp/launch-data/server/pubkey \
+        --from-file=launch.yaml=/tmp/launch-data/server/launch.yaml \
+        --from-file=launch.yaml.sig=/tmp/launch-data/server/launch.yaml.sig \
+        --dry-run=client -o yaml | kubectl apply -f -
 
   - name: boot the TDX CVM
     shell: bash
@@ -312,7 +382,7 @@ runs:
                     # SHARED qemu lock so concurrent CVMs coexist; a
                     # writable open takes an EXCLUSIVE one and starves every
                     # other guest on the same PVC (cost the SNP lane a day).
-                    # NB: readonly is a field of `disk`, not a sibling of it;
+                    # NB: readonly is a field of disk, not a sibling of it;
                     # KubeVirt's strict decoder rejects the sibling form.
                     disk: {bus: virtio, readonly: true}
                   - name: scratch
@@ -369,76 +439,20 @@ runs:
       [ "$(cat /tmp/tdx.cnt)" -ge 1 ] || { echo "::error::qemu has no tdx-guest object: not a genuine trust domain"; exit 1; }
       echo "OK: qemu launched with -object tdx-guest"
 
-  - name: wait for guest services (attestation-api, apiserver, cred-release)
+  - name: wait for the credential-release listener
+    # HTTP reachability only; the next step verifies hardware evidence,
+    # the full image tuple and our operator key before accepting credentials.
+    # The raw attestation API is loopback-only in the measured image.
     shell: bash
     run: |
       set -euo pipefail
-      for i in $(seq 1 90); do
-        H=$(curl -s --connect-timeout 2 --max-time 4 "http://$GUEST_IP:8400/health" 2>/dev/null || true)
-        [ -n "$H" ] && { echo "attestation-api: $H"; break; }
-        sleep 10
-      done
-      echo "$H" | grep -q '"platform":"tdx"' || { echo "::error::attestation-api did not report platform=tdx"; exit 1; }
-      for i in $(seq 1 60); do
-        C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:6443/livez" 2>/dev/null || true)
-        case "$C" in 200|401|403) echo "kube-apiserver: HTTP $C"; break;; esac
+      ready=0
+      for _ in $(seq 1 120); do
+        code=$(curl -sk --connect-timeout 2 --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
+        if [ -n "$code" ] && [ "$code" != 000 ]; then ready=1; break; fi
         sleep 5
       done
-      for i in $(seq 1 60); do
-        C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
-        [ -n "$C" ] && [ "$C" != 000 ] && { echo "cred-release: HTTP $C"; break; }
-        sleep 5
-      done
-
-  - name: build the c8s CLI at the paired ref
-    env:
-      EXACT_IMAGE: ${{ inputs.exact_image == 'true' }}
-      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-    shell: bash
-    run: |
-      set -euo pipefail
-      # Same exposure as the tools step: this clone and the module fetches
-      # behind `go install` cross the public internet under `set -e`.
-      . "$GITHUB_WORKSPACE/bin/retry.sh"
-      # This clone reproduces fine anonymously from a pod in arc-runners and
-      # from this runner image, so when it fails HERE the cause is something
-      # in the job's own context, and the bare error says nothing useful:
-      #   fatal: could not read Username for 'https://github.com'
-      # Capture the config git actually reads and the exchange it actually
-      # gets, redacting any credential the trace would otherwise print.
-      clone_diag() {
-        echo "::group::c8s clone diagnostics"
-        git config --list --show-origin 2>&1 \
-          | sed -E 's/(extraheader|authorization|helper|password|token)=.*/\1=<redacted>/I' \
-          | sed 's/^/cfg  /' | head -40
-        env | grep -iE '^(GIT_|GH_|GITHUB_TOKEN|https?_proxy|HTTPS?_PROXY)' \
-          | sed -E 's/=.*/=<set>/' | sed 's/^/env  /'
-        GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 \
-          git ls-remote https://github.com/confidential-dot-ai/c8s.git HEAD 2>&1 \
-          | sed -E 's/(authorization|Authorization|AUTHORIZATION):.*/\1: <redacted>/' \
-          | tail -40 | sed 's/^/wire /'
-        echo "::endgroup::"
-      }
-      if [ "$EXACT_IMAGE" = true ]; then
-        # The wrapper verified main ancestry and checked out this full SHA.
-        # Reuse it: a tag can shadow the short ref used for OCI image tags.
-        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid exact-image source SHA"; exit 1; }
-        [ "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA" ] \
-          || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
-        C8S_SOURCE_DIR=$GITHUB_WORKSPACE
-      else
-        retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
-          || { clone_diag; exit 1; }
-        git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
-        C8S_SOURCE_DIR=/tmp/c8s-src
-      fi
-      export C8S_SOURCE_DIR
-      echo "C8S_SOURCE_DIR=$C8S_SOURCE_DIR" >> "$GITHUB_ENV"
-      echo "c8s ref sha: $(git -C "$C8S_SOURCE_DIR" rev-parse HEAD)"
-      retry '( cd "$C8S_SOURCE_DIR" && go install ./cmd/c8s )'
-      # An unstamped build reports "dev", which is exactly why --image-tag
-      # is passed explicitly at install rather than trusting build metadata.
-      c8s --version || true
+      [ "$ready" = 1 ] || { echo "::error::credential release did not start; signed launch or measured service startup failed"; exit 1; }
 
   - name: resolve the staged image's published manifest
     if: inputs.exact_image != 'true'
@@ -504,7 +518,7 @@ runs:
     shell: bash
     run: |
       set -euo pipefail
-      c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
+      c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/launch-data/server.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
       [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
       WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
       [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
@@ -524,28 +538,14 @@ runs:
     shell: bash
     run: bash node-guest-image/tests/apparmor-runtime-test.sh
 
-  - name: install the c8s bundle under test
-    shell: bash
-    run: |
-      set -euo pipefail
-      export KUBECONFIG=/tmp/guest.kubeconfig
-      # The CLI was built at the paired ref, which can predate the node ->
-      # bare-metal rename (#607). Ask it which name it takes.
-      mode=bare-metal
-      c8s install --help 2>&1 | grep -q -- '--cvm-mode.*bare-metal' || mode=node
-      echo "cvm-mode for c8s@$c8sRef: $mode"
-      c8s install --cvm-mode "$mode" --single-node --hardware-platform tdx \
-        --image-tag "$c8sRef" \
-        --operator-keys /tmp/op.pub \
-        --measurements "$mrtd" \
-        --resolve-digests=true
-      kubectl -n c8s-system get pods -o wide
-
   - name: assert components converged
     shell: bash
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
+      export C8S_NODE_IMAGE=1
+      export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
       if ! bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"; then
         # components-ready prints the listing and a describe tail; the reason a
         # pod is stuck is in its containers' logs, init containers included.
@@ -563,15 +563,15 @@ runs:
       fi
 
   - name: assert the image floor denies, then opens to a signed write
-    # router fronts /allowlist on hostPort 443, and bare-metal mode puts CDS in
-    # the node CVM, so the endpoint pins to the node MRTD.
+    # Baked nginx fronts /allowlist; clients pin the complete image tuple
+    # together with this launch's server operator key.
     shell: bash
     run: |
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-      export C8S_MEASUREMENTS="$mrtd"
-      export C8S_OPERATOR_KEY=/tmp/op.key
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+      export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
       bash "$C8S_SOURCE_DIR/test/e2e/allowlist-enforcement.sh"
 
   - name: assert a confidential workload runs with an injected cert
@@ -580,9 +580,16 @@ runs:
       set -euo pipefail
       export KUBECONFIG=/tmp/guest.kubeconfig
       export C8S_ALLOWLIST_URL="https://$GUEST_IP:443"
-      export C8S_MEASUREMENTS="$mrtd"
-      export C8S_OPERATOR_KEY=/tmp/op.key
+      export C8S_MEASUREMENTS_CONFIG=/tmp/launch-data/server.json
+      export C8S_OPERATOR_KEY=/tmp/launch-data/server.key
       bash "$C8S_SOURCE_DIR/test/e2e/cw-workload.sh"
+
+  - name: assert confidential workload label integrity
+    shell: bash
+    run: |
+      set -euo pipefail
+      export KUBECONFIG=/tmp/guest.kubeconfig
+      bash "$C8S_SOURCE_DIR/test/e2e/cw-label-policy.sh"
 
   - name: summary
     if: always()

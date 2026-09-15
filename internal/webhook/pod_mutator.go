@@ -173,6 +173,9 @@ type Config struct {
 	// registers.
 	CDSRTMRs []string
 
+	// CDSMeasurementsConfigJSON retains the complete identity policy for injected clients.
+	CDSMeasurementsConfigJSON string
+
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
 
@@ -654,19 +657,17 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Injection is idempotent by reconstruction (mutatePod rebuilds the sidecar
 	// every call), so it no longer keys off the confidential.ai/c8s-injected
 	// marker: an author cannot skip injection by pre-setting it.
-	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
 	if inj == nil {
 		return admission.Allowed("no c8s annotation — passthrough")
 	}
+	getCertNeeded := m.cfg.GetCertImage != ""
 
 	// Only the webhook may place a container under the reserved c8s-cert name.
 	// The init sidecar is rebuilt below (injectInitContainers), but a
 	// regular/ephemeral collision cannot be, so reject it: get-cert injection
 	// integrity is name-based.
-	if inj != nil {
-		if err := rejectReservedCertContainer(pod); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
+	if err := rejectReservedCertContainer(pod); err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	if getCertNeeded {
@@ -872,18 +873,10 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// get-cert names this one --cds-measurements and takes it comma-joined,
-	// where the secret and volume fetchers take a repeatable --measurements.
-	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
-		args = append(args, "--cds-measurements="+joined)
-	}
-	if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
-		args = append(args, "--cds-rtmrs="+joined)
-	}
+	args = append(args, cdsPinArgs(cfg, true)...)
 	// get-cert redeems a sandbox token from the node's inventory over the
 	// mounted socket.
-	switch {
-	case cfg.WorkloadClaimsHostDir != "":
+	if cfg.WorkloadClaimsHostDir != "" {
 		args = append(args, "--workload-claims")
 	}
 	if inj.Verbose {
@@ -1272,12 +1265,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Volumes.Specs {
 		args = append(args, "--volume="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1313,12 +1301,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	for _, spec := range inj.Secrets.Specs {
 		args = append(args, "--secret="+spec)
 	}
-	for _, m := range cfg.CDSMeasurements {
-		args = append(args, "--measurements="+m)
-	}
-	for _, r := range cfg.CDSRTMRs {
-		args = append(args, "--rtmrs="+r)
-	}
+	args = append(args, cdsPinArgs(cfg, false)...)
 
 	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
@@ -1504,4 +1487,29 @@ func containerMount(c *corev1.Container, name string) *corev1.VolumeMount {
 		}
 	}
 	return nil
+}
+
+// cdsPinArgs propagates the complete CDS identity without weakening operator
+// pins into a digest-only policy. Legacy flag callers keep their old shape.
+func cdsPinArgs(cfg Config, certificate bool) []string {
+	if cfg.CDSMeasurementsConfigJSON != "" {
+		return []string{"--measurements-config-json=" + cfg.CDSMeasurementsConfigJSON}
+	}
+	var args []string
+	if certificate {
+		if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
+			args = append(args, "--cds-measurements="+joined)
+		}
+		if joined := strings.Join(cfg.CDSRTMRs, ","); joined != "" {
+			args = append(args, "--cds-rtmrs="+joined)
+		}
+		return args
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, "--measurements="+m)
+	}
+	for _, r := range cfg.CDSRTMRs {
+		args = append(args, "--rtmrs="+r)
+	}
+	return args
 }

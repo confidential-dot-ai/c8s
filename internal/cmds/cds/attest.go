@@ -24,6 +24,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	nodepolicy "github.com/confidential-dot-ai/c8s/pkg/measurements"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -58,9 +59,8 @@ type AttestHandler struct {
 	// its launch digest). Empty = no RTMR pinning.
 	RTMRs map[int][]byte
 
-	// ImagePins pins whole images. When set it replaces Measurements and RTMRs,
-	// so a digest from one image cannot be paired with another's registers.
-	ImagePins []remote.ImagePin
+	// NodeEntries binds each node image to an authorized launch key.
+	NodeEntries []nodepolicy.Entry
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
@@ -205,10 +205,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// measurement is admitted, so the digest a leaf was issued against is the
 	// only record of what actually attested.
 	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-	if len(h.ImagePins) > 0 {
-		if err := remote.EnforceImages(verifyResp, h.ImagePins, req.Evidence.Platform); err != nil {
-			slog.Warn("no pinned image matches this evidence", "launch_digest", launchDigest, "error", err, "remote_addr", r.RemoteAddr)
-			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+	if len(h.NodeEntries) > 0 {
+		if err := nodepolicy.EnforceEntries(verifyResp, h.NodeEntries, string(req.Evidence.Platform)); err != nil {
+			slog.Warn("node identity does not match policy", "error", err, "remote_addr", r.RemoteAddr)
+			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "node identity not allowed")
 			return
 		}
 	} else {

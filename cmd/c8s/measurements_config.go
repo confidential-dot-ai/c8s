@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/pkg/measurements"
 )
 
 // installPins resolves the pins install fans into the chart, from either the
@@ -36,16 +37,19 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("--measurements-config: %w", err)
 	}
-	set, err := refvalues.Load(path)
+	set, err := measurements.Load(path)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if set.PinsOperatorKeys() {
+		return nil, nil, nil, fmt.Errorf("operator_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
 	}
 	common, uniform := set.CommonRTMRs()
 	if !uniform {
 		// The flat values carry one register set, so images that disagree can
 		// only be fanned out as digests.
 		slog.Warn("measurements config pins different registers per image: components matching whole images keep them, the flat values are digest-only",
-			"images", len(set.Images))
+			"images", len(set.Entries))
 	}
 	// The chart takes the file's content; helm reads the same path this
 	// command just validated.

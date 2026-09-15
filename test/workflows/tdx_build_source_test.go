@@ -77,9 +77,9 @@ func TestTDXExactBuildUsesVerifiedSource(t *testing.T) {
 	// The earlier tools step supplies retry.sh. Refuse cloning/deletion here so
 	// a failing regression cannot touch the launcher's absolute /tmp/c8s-src.
 	write(filepath.Join(workspace, "bin/retry.sh"), `retry() {
-  printf '%s\n' "$1" >> "$TDX_TEST_RETRIES"
-  case "$1" in *clone*|*'rm '*) return 1 ;; esac
-  eval "$1"
+  printf '%s\n' "$*" >> "$TDX_TEST_RETRIES"
+  case "$*" in *clone*|*'rm '*) return 1 ;; esac
+  "$@"
 }
 `, 0o644)
 	bin := filepath.Join(fixture, "bin")

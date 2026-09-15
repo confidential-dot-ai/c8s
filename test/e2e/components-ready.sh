@@ -11,6 +11,20 @@ set -euo pipefail
 
 ns=c8s-system
 
+if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
+  : "${C8S_MEASUREMENTS_CONFIG:?node-image checks require the full server policy}"
+  : "${C8S_ALLOWLIST_URL:?node-image checks require the measured CDS front door}"
+  kubectl -n "$ns" rollout status deployment/c8s-operator --timeout=8m
+  runtime=$(kubectl -n "$ns" get configmap c8s-node-runtime -o json)
+  jq -e '.data["cds-url"] | test("^https://[0-9.]+:30808$")' <<< "$runtime" >/dev/null \
+    || fail "node runtime ConfigMap has no concrete CDS URL"
+  expected=$(jq -cS 'del(.measurements[].name)' "$C8S_MEASUREMENTS_CONFIG")
+  actual=$(jq -cer '.data["cds.json"] | fromjson | del(.measurements[].name)' <<< "$runtime" | jq -cS .)
+  [ "$actual" = "$expected" ] || fail "node runtime lost or changed the server image/operator pins"
+  chart=$(kubectl -n kube-system get helmcharts.helm.cattle.io c8s --ignore-not-found -o name)
+  [ -z "$chart" ] || fail "node image unexpectedly started a runtime c8s Helm installation"
+fi
+
 select_pods() {
   if [ "$#" -eq 0 ]; then cat; return 0; fi
   local pat="" p
@@ -51,4 +65,15 @@ if [ -z "$converged" ]; then
   fail "c8s components did not converge (${n:-?} of ${total:-0} not ready)"
 fi
 
-echo "PASS: all $total c8s components Running"
+if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
+  ready=0
+  for _ in $(seq 1 60); do
+    if c8s allowlist list --url "$C8S_ALLOWLIST_URL" --measurements-config "$C8S_MEASUREMENTS_CONFIG" >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 5
+  done
+  [ "$ready" = 1 ] || fail "measured CDS/front-door services did not become ready under the server policy"
+fi
+
+echo "PASS: all $total c8s Kubernetes components Running"
