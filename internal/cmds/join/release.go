@@ -7,8 +7,8 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/net/netutil"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -74,6 +76,10 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	// so the service comes up healthy and denies the entire cluster.
 	if cfg.VerifyTimeout <= 0 {
 		return fmt.Errorf("--verify-timeout must be positive (got %s)", cfg.VerifyTimeout)
+	}
+
+	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.AttestationAPIURL); err != nil {
+		return err
 	}
 
 	policy, err := loadPeerPolicy(cfg.MeasurementsConfig, cfg.Platform, cfg.AttestationAPIURL, cfg.VerifyTimeout, false)
@@ -138,9 +144,8 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutCtx)
+		cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
+		return nil
 	case err := <-errCh:
 		return err
 	}
@@ -242,12 +247,12 @@ func readTokenFile(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxTokenRespBytes+1))
+	b, err := readutil.ReadAll(f, maxTokenRespBytes)
 	if err != nil {
+		if errors.Is(err, readutil.ErrTooLarge) {
+			return "", fmt.Errorf("token file exceeds size limit")
+		}
 		return "", err
-	}
-	if len(b) > maxTokenRespBytes {
-		return "", fmt.Errorf("token file exceeds size limit")
 	}
 	return strings.TrimSpace(string(b)), nil
 }

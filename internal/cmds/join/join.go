@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,7 +16,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/internal/readutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -57,6 +60,9 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	}
 	if _, _, err := net.SplitHostPort(cfg.ServerAddr); err != nil {
 		return fmt.Errorf("--server must be host:port: %w", err)
+	}
+	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.AttestationAPIURL); err != nil {
+		return err
 	}
 	policy, err := loadPeerPolicy(cfg.MeasurementsConfig, cfg.Platform, cfg.AttestationAPIURL, cfg.Timeout, true)
 	if err != nil {
@@ -146,17 +152,17 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenRespBytes+1))
+	body, err := readutil.ReadAll(resp.Body, maxTokenRespBytes)
 	if err != nil {
+		if errors.Is(err, readutil.ErrTooLarge) {
+			return "", fmt.Errorf("join-release response exceeds size limit")
+		}
 		return "", fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// The body is server-controlled but the server is attested by now;
 		// still, don't echo more than the status line needs.
 		return "", fmt.Errorf("join-release returned %s", resp.Status)
-	}
-	if len(body) > maxTokenRespBytes {
-		return "", fmt.Errorf("join-release response exceeds size limit")
 	}
 	return decodeTokenResponse(body)
 }
@@ -198,15 +204,7 @@ func prepareTokenDir(path string) (*os.Root, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	if err := fileutil.RequireRAMBackedRoot(root); err != nil {
-		_ = root.Close()
-		return nil, fmt.Errorf("--token-out: %w", err)
-	}
-	return root, nil
+	return cmdsutil.OpenRAMBackedDir("--token-out", dir)
 }
 
 // writeStaged replaces the token within the already verified RAM directory.
