@@ -12,7 +12,7 @@ if [[ "${1:-}" != --inside ]]; then
     WORK=$(mktemp -d)
     IMG=c8s-nginx-systemd-test
     CTR=c8s-nginx-systemd-$$
-    # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
+    # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
     cleanup() {
         local result=$?
         if (( result != 0 )); then
