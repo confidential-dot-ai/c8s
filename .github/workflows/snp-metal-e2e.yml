@@ -120,7 +120,7 @@ jobs:
           echo "$PWD/bin" >> "$GITHUB_PATH"
           if ! command -v go >/dev/null; then
             GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
-            [ -n "$GOVER" ] || GOVER=1.26.3
+            [ -n "$GOVER" ] || GOVER=1.27.1
             retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
           fi
           export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
