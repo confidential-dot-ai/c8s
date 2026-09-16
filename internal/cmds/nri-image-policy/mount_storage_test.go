@@ -68,8 +68,16 @@ func TestOverlayUpperDirDoesNotInheritHiddenAncestor(t *testing.T) {
 		want string
 	}{
 		{"lower-only overlay", "overlay overlay ro,lowerdir=/plaintext", ""},
+		{"empty upperdir", "overlay overlay rw,upperdir=,lowerdir=/lower", ""},
+		{"bare upperdir", "overlay overlay rw,upperdir,lowerdir=/lower", ""},
+		{"workdir only", "overlay overlay rw,workdir=/work", ""},
+		{"lookalike upperdir prefix", "overlay overlay rw,otherupperdir=/scratch", ""},
+		{"lookalike upperdir suffix", "overlay overlay rw,upperdir_extra=/scratch", ""},
 		{"non-overlay", "ext4 /dev/plaintext rw", ""},
 		{"writable overlay", "overlay overlay rw,upperdir=/child-upper,lowerdir=/lower", "/child-upper"},
+		{"upperdir first", "overlay overlay upperdir=/child-upper,rw,lowerdir=/lower", "/child-upper"},
+		{"upperdir last", "overlay overlay rw,lowerdir=/lower,upperdir=/child-upper", "/child-upper"},
+		{"equals in upperdir", "overlay overlay rw,upperdir=/child=upper", "/child=upper"},
 	} {
 		t.Run(nested.name, func(t *testing.T) {
 			ancestor := "21 20 0:2 / /var rw - overlay overlay rw,upperdir=/encrypted-upper,lowerdir=/lower\n"
@@ -133,6 +141,33 @@ func TestOverlayUpperDirUsesContainingMount(t *testing.T) {
 	got, ok := overlayUpperDir(file, "/var/lib/kubelet/pods/x")
 	if !ok || got != "/scratch upper" {
 		t.Fatalf("upper = %q, %v", got, ok)
+	}
+}
+
+func TestOverlayUpperDirEscapedPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, encoded, decoded string
+	}{
+		{"space", `\040`, " "},
+		{"tab", `\011`, "\t"},
+		{"newline", `\012`, "\n"},
+		{"backslash", `\134`, `\`},
+		{"literal octal sequence", `\134040`, `\040`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "mountinfo")
+			data := "21 20 0:2 / /var" + tc.encoded + "lib rw - overlay overlay rw,upperdir=/scratch" + tc.encoded + "upper\n"
+			if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []string{"/var" + tc.decoded + "lib", "/var" + tc.decoded + "lib/pods/x"} {
+				got, ok := overlayUpperDir(file, source)
+				want := "/scratch" + tc.decoded + "upper"
+				if !ok || got != want {
+					t.Fatalf("upper for %q = %q, %v; want %q", source, got, ok, want)
+				}
+			}
+		})
 	}
 }
 
