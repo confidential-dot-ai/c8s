@@ -1,7 +1,10 @@
 # shellcheck shell=sh
 # c8s host sweep — run by `c8s uninstall` as a privileged init container on
 # every linux node (a short-lived kubectl-applied DaemonSet; see
-# cmd/c8s/uninstall.go).
+# cmd/c8s/uninstall.go). These bytes are an interface: the chart pins them
+# into the served allowlist (c8s.argvPinnedEntries) and the CLI replays the
+# release's pinned bytes at uninstall, so edits stay admissible across
+# CLI/chart version skew.
 #
 # `helm uninstall` already drives the supported cleanup: the chart's
 # pre-delete hooks remove the NRI plugin and volumed mappings, and the mesh's
@@ -39,6 +42,12 @@
 #   NRI_CONFIG_DIR         — plugin config dir (nriImagePolicy.hostPaths.configDir)
 #   NRI_RUNTIME_DIR        — plugin runtime dir (nriImagePolicy.hostPaths.runtimeDir)
 #   NRI_CACHE_DIR          — plugin cache dir (nriImagePolicy.hostPaths.cacheDir)
+
+# The admission pin covers argv, not PATH resolution.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset IFS ENV CDPATH
+
 set -eu
 
 echo "==> c8s host sweep starting"

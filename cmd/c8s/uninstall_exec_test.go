@@ -15,6 +15,9 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 func hostReleaseValuesFile(t *testing.T) string {
@@ -276,8 +279,16 @@ func TestUninstallHostSweepOnlyUsesChartDefaults(t *testing.T) {
 	}
 	calls := s.f.calls(t)
 	mustNotContainPrefix(t, calls, "helm uninstall")
+	// No release, no seed to replay: the embedded spec runs.
+	mustNotContainPrefix(t, calls, "kubectl get configmap")
 	mustContainLine(t, calls, "kubectl rollout status daemonset/c8s-host-sweep -n c8s-system --timeout=5m")
 	ds := appliedDaemonSet(t, s.applied)
+	// With the release gone the baked plugin still enforces the release-pinned
+	// nri-image-policy digest, so the sweep runs the nri image at this CLI's
+	// version tag ("main" for this dev build) rather than the busybox default.
+	if want := "ghcr.io/confidential-dot-ai/nri-image-policy:main"; ds.Spec.Template.Spec.InitContainers[0].Image != want {
+		t.Errorf("sweep image = %q, want %q", ds.Spec.Template.Spec.InitContainers[0].Image, want)
+	}
 	env := map[string]string{}
 	for _, e := range ds.Spec.Template.Spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
@@ -460,5 +471,197 @@ func TestUninstallWithoutVolumedSkipsTheVolumeGuard(t *testing.T) {
 		if strings.Contains(l, "c8s-volumes") {
 			t.Errorf("volume guard queried for a release without volumed: %q", l)
 		}
+	}
+}
+
+// hostReleaseValuesNRIFile writes the computed-values JSON for a release whose
+// nri-image-policy image resolves to imageRef (repository@digest).
+func hostReleaseValuesNRIFile(t *testing.T, imageRef string) string {
+	t.Helper()
+	repo, digest, _ := strings.Cut(imageRef, "@")
+	tree := map[string]any{"nriImagePolicy": map[string]any{
+		"enabled": true, "distro": "k8s",
+		"image": map[string]any{"repository": repo, "digest": digest},
+	}}
+	data, err := json.Marshal(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "release-values.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// seedCMFile writes the release's allowlist seed ConfigMap as `kubectl get
+// configmap -o json` answers it: one workload entry named for imageRef's
+// digest, carrying shapes as command [/bin/sh -c] + exact args (or, for the
+// pause, command [/bin/sleep] + exact args).
+func seedCMFile(t *testing.T, imageRef string, shapes [][]string) string {
+	t.Helper()
+	_, digest, _ := strings.Cut(imageRef, "@")
+	d, err := types.ParseDigest(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := allowlist.DigestEntryName(d, imageRef)
+	containers := []map[string]any{}
+	for _, argv := range shapes {
+		containers = append(containers, map[string]any{
+			"digest":  d.String(),
+			"image":   imageRef,
+			"command": map[string]any{"policy": "exact", "argv": argv[:len(argv)-1]},
+			"args":    map[string]any{"policy": "exact", "argv": argv[len(argv)-1:]},
+		})
+	}
+	seed, err := json.Marshal(map[string]any{
+		"schema": "c8s.allowlist/v1",
+		"workloads": map[string]any{
+			name: map[string]any{"label": imageRef, "initContainers": []any{}, "containers": containers},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, err := json.Marshal(map[string]any{"data": map[string]string{"allowlist-seed.json": string(seed)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "seed-cm.json")
+	if err := os.WriteFile(path, cm, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func seedCMStub(cmFile string) string {
+	return `"get configmap c8s-cds-allowlist-seed -n c8s-system -o json") /bin/cat '` + cmFile + `' ;;
+`
+}
+
+// The sweep replays the argv the release's allowlist seed pins, verbatim: an
+// older install's pinned bytes win over this CLI's embedded spec, so the
+// sweep stays admissible across CLI/chart version skew.
+func TestUninstallSweepReplaysPinnedArgv(t *testing.T) {
+	imageRef := "ghcr.io/confidential-dot-ai/nri-image-policy@" + testDigest
+	values := hostReleaseValuesNRIFile(t, imageRef)
+	oldScript := "# older sweep bytes\necho '==> c8s host sweep starting (old)'\n"
+	cm := seedCMFile(t, imageRef, [][]string{
+		{"/bin/sh", "-c", "install script"},
+		{"/bin/sh", "-c", "sleep infinity"},
+		{"/bin/sh", "-c", oldScript},
+		{"/bin/sleep", "2147483646"},
+	})
+	s := newUninstallStubs(t, values, seedCMStub(cm), false)
+	if err := runC8s(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	calls := s.f.calls(t)
+	// The seed is read before helm uninstall deletes it.
+	gi := lineIndex(calls, "kubectl get configmap c8s-cds-allowlist-seed -n c8s-system -o json")
+	hi := lineIndex(calls, "helm uninstall c8s --namespace c8s-system --wait --timeout=5m")
+	if gi < 0 || hi < 0 || gi > hi {
+		t.Fatalf("seed read must precede helm uninstall (get=%d helm=%d):\n%s", gi, hi, strings.Join(calls, "\n"))
+	}
+	ds := appliedDaemonSet(t, s.applied)
+	init := ds.Spec.Template.Spec.InitContainers[0]
+	if want := []string{"/bin/sh", "-c", oldScript}; !reflect.DeepEqual(init.Command, want) || len(init.Args) != 0 {
+		t.Errorf("sweep argv = %v + %v, want the pinned %v", init.Command, init.Args, want)
+	}
+	pause := ds.Spec.Template.Spec.Containers[0]
+	if want := []string{"/bin/sleep", "2147483646"}; !reflect.DeepEqual(pause.Command, want) || len(pause.Args) != 0 {
+		t.Errorf("pause argv = %v + %v, want the pinned %v", pause.Command, pause.Args, want)
+	}
+}
+
+// The pinned shapes are identified by content, not position: a seed whose
+// entry sorts the sweep shapes first replays the same argvs.
+func TestUninstallSweepReplayIsPositionIndependent(t *testing.T) {
+	imageRef := "ghcr.io/confidential-dot-ai/nri-image-policy@" + testDigest
+	values := hostReleaseValuesNRIFile(t, imageRef)
+	oldScript := "# older sweep bytes\necho 'c8s host sweep'\n"
+	cm := seedCMFile(t, imageRef, [][]string{
+		{"/bin/sh", "-c", oldScript},
+		{"/bin/sleep", "2147483646"},
+		{"/bin/sh", "-c", "install script"},
+	})
+	s := newUninstallStubs(t, values, seedCMStub(cm), false)
+	if err := runC8s(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	ds := appliedDaemonSet(t, s.applied)
+	if want := []string{"/bin/sh", "-c", oldScript}; !reflect.DeepEqual(ds.Spec.Template.Spec.InitContainers[0].Command, want) {
+		t.Errorf("sweep argv = %v, want the pinned %v", ds.Spec.Template.Spec.InitContainers[0].Command, want)
+	}
+}
+
+// A seed without usable sweep pins (missing ConfigMap, a pre-fix entry, or a
+// tag-only sweep image whose digest cannot be computed) falls back to this
+// CLI's embedded spec — the pre-replay behavior.
+func TestUninstallSweepFallsBackToEmbeddedArgv(t *testing.T) {
+	imageRef := "ghcr.io/confidential-dot-ai/nri-image-policy@" + testDigest
+
+	t.Run("seed ConfigMap gone", func(t *testing.T) {
+		values := hostReleaseValuesNRIFile(t, imageRef)
+		s := newUninstallStubs(t, values, `"get configmap c8s-cds-allowlist-seed -n c8s-system -o json") exit 1 ;;
+`, false)
+		if err := runC8s(t, "uninstall"); err != nil {
+			t.Fatalf("uninstall: %v", err)
+		}
+		assertEmbeddedSweepArgv(t, appliedDaemonSet(t, s.applied))
+	})
+
+	t.Run("pre-fix entry pins no sweep shapes", func(t *testing.T) {
+		values := hostReleaseValuesNRIFile(t, imageRef)
+		cm := seedCMFile(t, imageRef, [][]string{
+			{"/bin/sh", "-c", "install script"},
+			{"/bin/sh", "-c", "uninstall script"},
+			{"/bin/sh", "-c", "sleep infinity"},
+		})
+		s := newUninstallStubs(t, values, seedCMStub(cm), false)
+		if err := runC8s(t, "uninstall"); err != nil {
+			t.Fatalf("uninstall: %v", err)
+		}
+		assertEmbeddedSweepArgv(t, appliedDaemonSet(t, s.applied))
+	})
+
+	t.Run("tag-only sweep image", func(t *testing.T) {
+		values := hostReleaseValuesNRIFile(t, "ghcr.io/confidential-dot-ai/nri-image-policy@"+testDigest)
+		tree := map[string]any{}
+		data, err := os.ReadFile(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &tree); err != nil {
+			t.Fatal(err)
+		}
+		tree["nriImagePolicy"].(map[string]any)["image"] = map[string]any{
+			"repository": "ghcr.io/confidential-dot-ai/nri-image-policy", "tag": "it",
+		}
+		if data, err = json.Marshal(tree); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(values, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := newUninstallStubs(t, values, "", false)
+		if err := runC8s(t, "uninstall"); err != nil {
+			t.Fatalf("uninstall: %v", err)
+		}
+		assertEmbeddedSweepArgv(t, appliedDaemonSet(t, s.applied))
+		mustNotContainPrefix(t, s.f.calls(t), "kubectl get configmap")
+	})
+}
+
+func assertEmbeddedSweepArgv(t *testing.T, ds *appsv1.DaemonSet) {
+	t.Helper()
+	init := ds.Spec.Template.Spec.InitContainers[0]
+	if want := []string{"/bin/sh", "-c", hostSweepScript}; !reflect.DeepEqual(init.Command, want) || len(init.Args) != 0 {
+		t.Errorf("sweep argv = %v + %v, want the embedded spec", init.Command, init.Args)
+	}
+	pause := ds.Spec.Template.Spec.Containers[0]
+	if want := []string{"/bin/sleep", "2147483647"}; !reflect.DeepEqual(pause.Command, want) || len(pause.Args) != 0 {
+		t.Errorf("pause argv = %v + %v, want the embedded spec", pause.Command, pause.Args)
 	}
 }

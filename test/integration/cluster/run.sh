@@ -186,14 +186,28 @@ log "Writing the allowlist floor"
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -Fq "docker.io/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
-python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" <<'PYEOF'
+NRI_STORE_DIGEST="$(awk -F'\t' '$2 ~ /nri-image-policy:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
+CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
+[ -n "$NRI_STORE_DIGEST" ] && [ -n "$CDS_STORE_DIGEST" ] || fail "loaded-image digests missing from the floor scan"
+# Client-side render: the chart's kubeVersion floor is checked against the
+# live server version, not helm's compiled-in default.
+KUBE_VERSION="$(kubectl version -o json \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["serverVersion"]["gitVersion"])')"
+# nriImagePolicy.exemptNamespaces must stay empty in this lane: the sweep pod
+# shares the installer's namespace and digest, so an exempt downgrade would
+# re-admit it despite the argv pin and hide a regression.
+python3 - "$WORKDIR/floor.tsv" "$WORKDIR/values.yaml" "docker.io/$CURL_IMAGE" "$NRI_STORE_DIGEST" <<'PYEOF'
 import re, sys, yaml
 floor = {}
 for line in open(sys.argv[1]):
     digest, ref = line.rstrip("\n").split("\t")
     floor.setdefault(digest, ref)
-# Kept out of the floor on purpose: the admission test's unseen digest.
-floor = {d: r for d, r in floor.items() if r != sys.argv[3]}
+# Kept out of the floor on purpose: the admission test's unseen digest (the
+# curl ref), and the nri-image-policy digest — production admits that image
+# only under the chart's argv-pinned entry, never by digest. The pinned entry
+# is injected from the chart render below; leaving an any-argv row here would
+# union-admit any argv and void the uninstall regression.
+floor = {d: r for d, r in floor.items() if r != sys.argv[3] and d != sys.argv[4]}
 
 def entry_name(digest, ref):
     # Mirrors pkg/allowlist DigestEntryName.
@@ -220,6 +234,44 @@ with open(sys.argv[2], "w") as f:
         },
     }, f)
 print(f"floor: {len(workloads)} any-argv entries")
+PYEOF
+
+log "Rendering the NRI installer and its argv-pinned seed entry"
+# One render feeds both the out-of-band installer DaemonSet and the pinned
+# seed entry injected into the floor: two renders could drift their flags,
+# and the plugin's enforce-existing check would kill the install init
+# container over an argv mismatch.
+helm template c8s internal/helmchart/c8s -n "$NS" \
+    --kube-version "$KUBE_VERSION" \
+    --set-string image.tag="$IMAGE_TAG" \
+    --set-string attestationApi.cvmMode=bare-metal \
+    --set attestationApi.enabled=false \
+    --set nriImagePolicy.enabled=true \
+    --set-string nriImagePolicy.image.tag="$IMAGE_TAG" \
+    --set-string nriImagePolicy.image.digest="$NRI_STORE_DIGEST" \
+    --set-string cds.image.digest="$CDS_STORE_DIGEST" \
+    --set-string "cds.measurements[0]=$MOCK_MEASUREMENT" \
+    --set router.enabled=false \
+    --set volumed.enabled=false \
+    --set ratlsMesh.enabled=false \
+    -f "$WORKDIR/values.yaml" > "$WORKDIR/nri-render.yaml" \
+    || fail "could not render the NRI installer chart documents"
+python3 - "$WORKDIR/nri-render.yaml" "$WORKDIR/values.yaml" "$WORKDIR/nri-installer.yaml" <<'PYEOF'
+import json, sys, yaml
+render_path, values_path, ds_path = sys.argv[1:4]
+docs = [d for d in yaml.safe_load_all(open(render_path)) if d]
+seed_cm = next(d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-allowlist-seed"))
+seed = json.loads(seed_cm["data"]["allowlist-seed.json"])
+pinned = {k: v for k, v in seed["workloads"].items() if k.startswith("nri-image-policy-")}
+assert len(pinned) == 1, f"want exactly one pinned nri-image-policy entry, got {sorted(pinned)}"
+values = yaml.safe_load(open(values_path))
+values["nriImagePolicy"]["bootstrapAllowlist"]["workloads"].update(pinned)
+with open(values_path, "w") as f:
+    yaml.safe_dump(values, f)
+installer = next(d for d in docs if d.get("kind") == "DaemonSet" and d["metadata"]["name"].endswith("-worker"))
+with open(ds_path, "w") as f:
+    yaml.safe_dump(installer, f)
+print(f"pinned seed entry {next(iter(pinned))} injected into the floor values")
 PYEOF
 
 # Digest-alias the loaded c8s images: the NRI installer renders its pod image
@@ -283,31 +335,8 @@ log "Installing the NRI image-policy plugin"
 # Under --cvm-mode=bare-metal the chart renders the installer only in its baked
 # pins-patching form, and the install above leaves even that off (values.yaml):
 # the kind node bakes no plugin for it to pin. The harness renders the full
-# installer from the chart source and applies it out-of-band — same installer,
-# same containerd patch, same plugin.
-NRI_STORE_DIGEST="$(awk -F'\t' '$2 ~ /nri-image-policy:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
-CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
-[ -n "$NRI_STORE_DIGEST" ] && [ -n "$CDS_STORE_DIGEST" ] || fail "loaded-image digests missing from the floor scan"
-# Client-side render: the chart's kubeVersion floor is checked against the
-# live server version, not helm's compiled-in default.
-KUBE_VERSION="$(kubectl version -o json \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["serverVersion"]["gitVersion"])')"
-helm template c8s internal/helmchart/c8s -n "$NS" \
-    --kube-version "$KUBE_VERSION" \
-    --set-string image.tag="$IMAGE_TAG" \
-    --set-string attestationApi.cvmMode=bare-metal \
-    --set attestationApi.enabled=false \
-    --set nriImagePolicy.enabled=true \
-    --set-string nriImagePolicy.image.tag="$IMAGE_TAG" \
-    --set-string nriImagePolicy.image.digest="$NRI_STORE_DIGEST" \
-    --set-string cds.image.digest="$CDS_STORE_DIGEST" \
-    --set-string "cds.measurements[0]=$MOCK_MEASUREMENT" \
-    --set router.enabled=false \
-    --set volumed.enabled=false \
-    --set ratlsMesh.enabled=false \
-    -f "$WORKDIR/values.yaml" \
-    --show-only templates/nri-image-policy-installer-daemonset.yaml > "$WORKDIR/nri-installer.yaml" \
-    || fail "could not render the NRI installer DaemonSet"
+# installer from the chart source (above, before c8s install) and applies it
+# out-of-band — same installer, same containerd patch, same plugin.
 kubectl apply -f "$WORKDIR/nri-installer.yaml"
 # The installer patches the node's containerd config and restarts it; the
 # DaemonSet reports Ready once the plugin answers its health socket.
@@ -699,6 +728,45 @@ case "$BODY" in
     *) fail "front door did not proxy the adopted workload: $BODY" ;;
 esac
 pass "router routes the front door to the adopted workload over the mesh"
+
+log "Checking the served allowlist pins the host sweep argv"
+# The port-forward can point at a CDS pod the second install rolled; recycle
+# it before reading the served document.
+kill "$PF_PID" 2>/dev/null || true; PF_PID=""
+cds_pf_start
+curl -sSk "https://127.0.0.1:$CDS_LOCAL_PORT/allowlist" > "$WORKDIR/served.json" \
+    || fail "could not read the served allowlist"
+python3 - "$WORKDIR/served.json" "$NRI_STORE_DIGEST" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+digest = sys.argv[2]
+# Operator-written entries can carry null for absent lists/policies.
+containers = [c for w in doc["workloads"].values()
+              for c in (w.get("initContainers") or []) + (w.get("containers") or [])
+              if c.get("digest") == digest]
+assert containers, f"no served entry carries {digest[:19]}"
+# Admission unions across entries per digest: one any-argv row for this
+# digest would admit the sweep regardless of the pin.
+for c in containers:
+    assert (c.get("command") or {}).get("policy") != "any" and (c.get("args") or {}).get("policy") != "any", \
+        f"any-argv admission for {digest[:19]}: {c}"
+shapes = [(tuple((c.get("command") or {}).get("argv") or []), tuple((c.get("args") or {}).get("argv") or []))
+          for c in containers]
+assert (("/bin/sleep",), ("2147483647",)) in shapes, f"no /bin/sleep pause pin for the sweep: {shapes}"
+assert any(s[0] == ("/bin/sh", "-c") and len(s[1]) == 1 and "c8s host sweep" in s[1][0] for s in shapes), \
+    f"no host-sweep script pin: {shapes}"
+print(f"served allowlist: {len(containers)} argv-pinned shapes for the nri image, sweep shapes pinned")
+PYEOF
+# The uninstall's sweep image resolution relies on the release carrying
+# tag=it and no digest for the nri image; a chart-default digest would flip
+# the sweep to an upstream image this lane never loaded.
+helm -n "$NS" get values c8s --all -o json | python3 -c '
+import json, sys
+img = json.load(sys.stdin)["nriImagePolicy"]["image"]
+assert img.get("tag") == "it" and not img.get("digest"), \
+    f"nriImagePolicy.image = {img}; want tag=it and no digest"
+'
+pass "served allowlist pins the host sweep argv (no any-argv hole for the nri digest)"
 
 log "Uninstall"
 ./build/c8s uninstall --namespace "$NS" || fail "c8s uninstall failed"

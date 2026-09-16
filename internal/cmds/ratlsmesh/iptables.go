@@ -45,8 +45,8 @@ const ipSetTmpSuffix = "-TMP"
 // owns. reconcileLiveSetMaxElem and runIptablesCleanup derive their name lists
 // (and the -TMP swap variants) from it, so adding a set is one edit here.
 // These names (and the chain/jump names below) are a fixed contract with the
-// uninstall host sweep (cmd/c8s/host-sweep.sh), pinned there by
-// TestHostSweepScriptMeshNetfilterNames.
+// uninstall host sweep (internal/helmchart/c8s/files/scripts/host-sweep.sh),
+// pinned there by TestHostSweepScriptMeshNetfilterNames.
 var managedIPSetNames = []string{
 	podIPSetName4, podIPSetName6,
 	localPodIPSetName4, localPodIPSetName6,
