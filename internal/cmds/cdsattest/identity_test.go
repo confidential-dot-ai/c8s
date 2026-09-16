@@ -432,8 +432,7 @@ func writeExpiredCAMeshIdentity(t *testing.T) testMeshIdentity {
 
 // The endpoints take no pq or binding parameter: each path serves exactly one
 // binding and there is nothing to negotiate. Any such param — even one naming
-// the served binding — must get a loud 400 invalid_request on every route,
-// including the retired /attestation path.
+// the served binding — must get a loud 400 invalid_request on every route.
 func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	certPath, _ := writeTestServingLeaf(t)
@@ -447,7 +446,7 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	for _, path := range []string{"/attest-pq", "/attest-lb", "/attestation"} {
+	for _, path := range []string{"/attest-pq", "/attest-lb"} {
 		for _, query := range []string{
 			"pq=false",
 			"pq=true",
@@ -473,24 +472,6 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 				t.Fatalf("%s?%s error code = %q", path, query, e.Error)
 			}
 		}
-	}
-}
-
-// The retired pre-split endpoint returns the explicit versioned 400 — no
-// alias, no downgrade — even for an otherwise well-formed request.
-func TestRetiredAttestationEndpointReturns400(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?nonce=" + b64url(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		resp.Body.Close()
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
-		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeInvalidRequest)
 	}
 }
 

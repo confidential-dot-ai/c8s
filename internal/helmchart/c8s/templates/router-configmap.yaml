@@ -280,10 +280,7 @@ data:
             # nginx serves the static cert(s) via discovery above; the dynamic
             # per-session endpoints — the attest-pq attestation + key exchange,
             # the attest-lb challenge, and the over-encrypted tunnel — are
-            # proxied to the in-pod `cds-attest` sidecar. The prefix also
-            # covers the retired /attestation and /handshake paths so the
-            # sidecar serves its explicit versioned 400 (no alias or
-            # downgrade) instead of nginx 404ing them.
+            # proxied to the in-pod `cds-attest` sidecar.
             # X-Real-IP is the address the sidecar meters each client by.
             location /.well-known/c8s/ {
                 {{- if default false .Values.router.cors.enabled }}
