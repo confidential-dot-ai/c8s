@@ -49,8 +49,10 @@ host can flip bits or roll it back, and c8s cannot detect that.
 
 The image is written as ciphertext and can travel by any means, including
 through the untrusted host. Attach it to the node as a raw block device whose
-disk serial is c8s-vol-<name> — with virtio-blk where the hypervisor allows it,
-or 'c8s volume attach' on the node where it does not.
+disk serial is c8s-vol-<name>. On QEMU/KVM, cold-plug virtio-blk at VM launch
+or hot-attach scsi-hd on a virtio-scsi controller provisioned at launch.
+'c8s volume attach' requires a Linux node with LIO support and is unsupported
+on the c8s node image. See docs/volumes.md for attachment recipes.
 
 The key is generated here and exists in exactly two places: the CDS process, and
 the escrow file. A CDS restart empties the store, and without the escrow file
