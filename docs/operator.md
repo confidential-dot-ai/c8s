@@ -342,8 +342,12 @@ It verifies **in-process** with `attestation-go` — the Go port of the same
 attestation-rs engine the cluster runs. That engine auto-detects the platform and
 AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
 classify. The only requirement on the machine running `c8s verify` is outbound
-HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
-report; no container runtime is needed.
+HTTPS to AMD KDS (`kdsintf.amd.com`) when a bare report's VCEK is not already
+cached; no container runtime is needed. `attestation-go` caches endorsement
+certificates under `os.UserCacheDir()/c8s/kds`, with `c8s` choosing that directory.
+Set `C8S_KDS_CACHE_DIR` to override it, or set it to an empty value to disable
+caching. Certificate verification still runs for every report; revocation data
+is never served from this disk cache. Cache failures do not block a successful fetch.
 
 ```bash
 # CDS's RA-TLS endpoint answers unattested clients:

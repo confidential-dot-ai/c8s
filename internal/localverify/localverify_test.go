@@ -82,6 +82,8 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 // CollateralError — no verdict — and returns promptly. A cancelled context
 // aborts http before any I/O, so no network is touched.
 func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
+	// This test needs a fetch even if the user already cached the fixture's VCEK.
+	t.Setenv(kdsCacheDirEnv, "")
 	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
 	var inner struct {
 		AttestationReport string `json:"attestation_report"`
