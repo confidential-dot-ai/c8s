@@ -45,15 +45,30 @@ func effectiveArgv(c corev1.Container) []string {
 // admitArgvs fails unless the seed admits (digest, argv) via some entry.
 func admitArgvs(t *testing.T, seed *pkgallowlist.Allowlist, digest string, argv []string) {
 	t.Helper()
-	if !seed.BuildIndex().AdmitsContainer(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	if !seed.BuildIndex().AdmitsProcess(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		t.Errorf("seed does not admit %s argv %q", digest[:19], argv[:2])
+	}
+}
+
+// admitPlatformContainer checks the full launch policy, including the host
+// mounts required by the rendered platform installer and prep scripts.
+func admitPlatformContainer(t *testing.T, seed *pkgallowlist.Allowlist, digest string, c corev1.Container) {
+	t.Helper()
+	mounts := make([]pkgallowlist.ObservedMount, 0, len(c.VolumeMounts))
+	for _, m := range c.VolumeMounts {
+		mounts = append(mounts, pkgallowlist.ObservedMount{
+			Destination: m.MountPath, Class: pkgallowlist.MountHost, Storage: pkgallowlist.MountUnknown,
+		})
+	}
+	if !seed.BuildIndex().AdmitsContainer(pkgallowlist.RunningContainer{Digest: digest, Argv: effectiveArgv(c), Mounts: mounts}) {
+		t.Errorf("seed refuses platform container %s with its rendered mounts: %+v", c.Name, mounts)
 	}
 }
 
 // denyArgvs fails if the seed admits (digest, argv) via any entry.
 func denyArgvs(t *testing.T, seed *pkgallowlist.Allowlist, digest string, argv []string) {
 	t.Helper()
-	if seed.BuildIndex().AdmitsContainer(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
+	if seed.BuildIndex().AdmitsProcess(pkgallowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		t.Errorf("seed admits %s argv %q — the argv pin is not enforcing", digest[:19], argv[:2])
 	}
 }
@@ -71,11 +86,11 @@ func TestChartPinnedSeedAdmitsNriInstallerArgv(t *testing.T) {
 
 	worker := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
 	for _, c := range allContainers(&worker) {
-		admitArgvs(t, seed, baseNRIDigest, effectiveArgv(c))
+		admitPlatformContainer(t, seed, baseNRIDigest, c)
 	}
 	uninstall := renderedDaemonSet(t, out, "c8s-nri-image-policy-uninstall")
 	for _, c := range allContainers(&uninstall) {
-		admitArgvs(t, seed, baseNRIDigest, effectiveArgv(c))
+		admitPlatformContainer(t, seed, baseNRIDigest, c)
 	}
 
 	// The pin is argv-exact: any other command line from the same image is denied.
@@ -94,7 +109,7 @@ func TestChartPinnedSeedAdmitsBakedPinsArgv(t *testing.T) {
 	seed := renderedSeed(t, out)
 	worker := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
 	for _, c := range allContainers(&worker) {
-		admitArgvs(t, seed, baseNRIDigest, effectiveArgv(c))
+		admitPlatformContainer(t, seed, baseNRIDigest, c)
 	}
 	denyArgvs(t, seed, baseNRIDigest, []string{"/bin/sh", "-c", "rm -rf /"})
 }
@@ -113,7 +128,7 @@ func TestChartPinnedSeedAdmitsRKE2ContainerdPrepArgv(t *testing.T) {
 	if !ok {
 		t.Fatalf("rke2 render missing the containerd-prep initContainer")
 	}
-	admitArgvs(t, seed, prepBusyboxDigest, effectiveArgv(prep))
+	admitPlatformContainer(t, seed, prepBusyboxDigest, prep)
 	denyArgvs(t, seed, prepBusyboxDigest, []string{"/bin/sh", "-c", "rm -rf /"})
 	denyArgvs(t, seed, prepBusyboxDigest, []string{"/bin/sh", "/script/setup"})
 }
@@ -129,9 +144,10 @@ func TestChartPinnedSeedAdmitsLocalPathHelperArgv(t *testing.T) {
 	helperDigest := localPathHelperDigest(t)
 
 	for _, script := range []string{"/script/setup", "/script/teardown"} {
-		admitArgvs(t, seed, helperDigest, []string{
-			"/bin/sh", script,
-			"-p", "/opt/local-path-provisioner/pvc-123", "-s", "1073741824", "-m", "Filesystem", "-a", "create",
+		admitPlatformContainer(t, seed, helperDigest, corev1.Container{
+			Name: "local-path-helper", Command: []string{"/bin/sh", script},
+			Args:         []string{"-p", "/opt/local-path-provisioner/pvc-123", "-s", "1073741824", "-m", "Filesystem", "-a", "create"},
+			VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/opt/local-path-provisioner"}, {Name: "script", MountPath: "/script"}},
 		})
 	}
 	denyArgvs(t, seed, helperDigest, []string{"/bin/sh", "-c", "rm -rf /"})

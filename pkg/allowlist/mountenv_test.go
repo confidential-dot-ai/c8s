@@ -36,7 +36,19 @@ func containerWith(t *testing.T, mounts MountPolicy, env EnvPolicy) Container {
 
 func running(digest string, mounts, env []string) RunningContainer {
 	observed, _ := ObserveEnv(env)
-	return RunningContainer{Digest: digest, BindMounts: mounts, Env: observed}
+	classified := make([]ObservedMount, len(mounts))
+	for i, destination := range mounts {
+		classified[i] = ObservedMount{Destination: destination, Class: MountEmptyDir, Storage: MountMemory}
+	}
+	return RunningContainer{Digest: digest, Mounts: classified, Env: observed}
+}
+
+func emptyDirRules(destinations ...string) []MountRule {
+	rules := make([]MountRule, len(destinations))
+	for i, destination := range destinations {
+		rules[i] = MountRule{Destination: destination, Kind: MountEmptyDir}
+	}
+	return rules
 }
 
 // The threat this policy exists for: the host stages bytes in the sandbox
@@ -46,7 +58,7 @@ func running(digest string, mounts, env []string) RunningContainer {
 func TestMountPolicyRefusesAnUndeclaredDestination(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts", "/var/run/secrets/kubernetes.io/serviceaccount"}},
+		MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/etc/hosts")},
 		EnvPolicy{Policy: PolicyAny})
 
 	if !c.admits(running(digest, []string{"/etc/hosts"}, nil)) {
@@ -57,17 +69,15 @@ func TestMountPolicyRefusesAnUndeclaredDestination(t *testing.T) {
 	}
 }
 
-// An absent policy has to mean "unconstrained": every container carries a mount
-// table it never declared, so a Deny default would refuse every real pod.
-func TestAbsentMountAndEnvPolicyAreUnconstrained(t *testing.T) {
+func TestAbsentMountPolicyAllowsOnlyPlatformMounts(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t, MountPolicy{}, EnvPolicy{})
 
-	if c.Mounts.Policy != PolicyAny || c.Env.Policy != PolicyAny {
-		t.Fatalf("normalized to %q/%q, want %q", c.Mounts.Policy, c.Env.Policy, PolicyAny)
+	if c.Mounts.Policy != PolicyDeny || c.Env.Policy != PolicyAny {
+		t.Fatalf("normalized to mounts=%q env=%q, want deny/any", c.Mounts.Policy, c.Env.Policy)
 	}
-	if !c.admits(running(digest, []string{"/anything", "/at/all"}, []string{"LD_PRELOAD"})) {
-		t.Error("an absent policy refused a container")
+	if c.admits(running(digest, []string{"/anything"}, []string{"LD_PRELOAD"})) {
+		t.Error("an absent mount policy admitted a workload mount")
 	}
 }
 
@@ -81,7 +91,7 @@ func TestContainerIsUnconstrained(t *testing.T) {
 		edit func(*Container)
 		want bool
 	}{
-		{name: "absent mount and env policies", want: true},
+		{name: "absent mount policy is deny"},
 		{name: "explicit any", edit: func(c *Container) {
 			c.Mounts.Policy = PolicyAny
 			c.Env.Policy = PolicyAny
@@ -93,7 +103,7 @@ func TestContainerIsUnconstrained(t *testing.T) {
 			c.Args = ArgvPolicy{Policy: PolicyDeny}
 		}},
 		{name: "pinned mounts", edit: func(c *Container) {
-			c.Mounts = MountPolicy{Policy: PolicyExact, Destinations: []string{"/data"}}
+			c.Mounts = MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/data")}
 		}},
 		{name: "pinned env", edit: func(c *Container) {
 			c.Env = EnvPolicy{Policy: PolicyDeny}
@@ -120,7 +130,7 @@ func TestContainerConstraintsNormalizeEveryPolicy(t *testing.T) {
 	}
 	c = cs[0]
 	if c.Command.Policy != PolicyDeny || c.Args.Policy != PolicyDeny ||
-		c.Mounts.Policy != PolicyAny || c.Env.Policy != PolicyAny {
+		c.Mounts.Policy != PolicyDeny || c.Env.Policy != PolicyAny {
 		t.Fatalf("normalized policies = command %q, args %q, mounts %q, env %q",
 			c.Command.Policy, c.Args.Policy, c.Mounts.Policy, c.Env.Policy)
 	}
@@ -129,7 +139,7 @@ func TestContainerConstraintsNormalizeEveryPolicy(t *testing.T) {
 func TestContainerConstraintsAllParticipateInAdmission(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: []string{"/data"}},
+		MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/data")},
 		EnvPolicy{Policy: PolicyExact, Values: map[string]string{"MODE": "prod"}})
 	c.Command = ArgvPolicy{Policy: PolicyExact, Argv: []string{"/app"}}
 	c.Args = ArgvPolicy{Policy: PolicyExact, Argv: []string{"serve"}}
@@ -146,7 +156,9 @@ func TestContainerConstraintsAllParticipateInAdmission(t *testing.T) {
 	}{
 		{name: "command", edit: func(r *RunningContainer) { r.Argv[0] = "/bin/sh" }},
 		{name: "args", edit: func(r *RunningContainer) { r.Argv[1] = "debug" }},
-		{name: "mounts", edit: func(r *RunningContainer) { r.BindMounts = []string{"/host"} }},
+		{name: "mounts", edit: func(r *RunningContainer) {
+			r.Mounts = []ObservedMount{{Destination: "/host", Class: MountHost, Storage: MountUnknown}}
+		}},
 		{name: "env", edit: func(r *RunningContainer) {
 			r.Env, _ = ObserveEnv([]string{"MODE=dev"})
 		}},
@@ -178,17 +190,14 @@ func TestEnvPolicyRefusesAnUndeclaredName(t *testing.T) {
 	}
 }
 
-// An enforcer that cannot see a field leaves it nil. That is not a violation —
-// the host-side NRI plugin gates images on a node CVM and never sees a guest's
-// mount table, and refusing there would deny every pod it checks.
-func TestUnobservedMountsAreNotViolations(t *testing.T) {
+func TestUnobservedMountsCannotSatisfyExact(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	c := containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: []string{"/etc/hosts"}},
+		MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/etc/hosts")},
 		EnvPolicy{Policy: PolicyAny})
 
-	if !c.admits(RunningContainer{Digest: digest}) {
-		t.Error("an enforcer that observes neither field was refused")
+	if c.admits(RunningContainer{Digest: digest}) {
+		t.Error("unavailable mount evidence satisfied exact policy")
 	}
 }
 
@@ -197,9 +206,12 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 		name string
 		c    Container
 	}{
-		{"exact mounts with no destinations", Container{Mounts: MountPolicy{Policy: PolicyExact}}},
-		{"any mounts carrying destinations", Container{Mounts: MountPolicy{Policy: PolicyAny, Destinations: []string{"/x"}}}},
-		{"relative destination", Container{Mounts: MountPolicy{Policy: PolicyExact, Destinations: []string{"etc/hosts"}}}},
+		{"exact mounts with no rules", Container{Mounts: MountPolicy{Policy: PolicyExact}}},
+		{"any mounts carrying rules", Container{Mounts: MountPolicy{Policy: PolicyAny, Rules: emptyDirRules("/x")}}},
+		{"relative destination", Container{Mounts: MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("etc/hosts")}}},
+		{"duplicate destination", Container{Mounts: MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/x", "/x")}}},
+		{"platform rule", Container{Mounts: MountPolicy{Policy: PolicyExact, Rules: []MountRule{{Destination: "/x", Kind: MountPlatform}}}}},
+		{"data outside prefix", Container{Mounts: MountPolicy{Policy: PolicyExact, Rules: []MountRule{{Destination: "/config", Kind: MountData}}}}},
 		{"unknown mount policy", Container{Mounts: MountPolicy{Policy: "sometimes"}}},
 		{"exact env with no values", Container{Env: EnvPolicy{Policy: PolicyExact}}},
 		{"any env carrying values", Container{Env: EnvPolicy{Policy: PolicyAny, Values: map[string]string{"PATH": "/bin"}}}},
@@ -218,13 +230,65 @@ func TestMountAndEnvPolicyValidation(t *testing.T) {
 
 // Canonical is compared byte-for-byte across pulls, so the lists have to be a
 // function of content rather than of the order an operator wrote them.
-func TestMountDestinationsAreOrderIndependent(t *testing.T) {
+func TestMountRulesAreOrderIndependent(t *testing.T) {
 	c := containerWith(t,
-		MountPolicy{Policy: PolicyExact, Destinations: []string{"/b", "/a", "/b"}},
+		MountPolicy{Policy: PolicyExact, Rules: emptyDirRules("/b", "/a")},
 		EnvPolicy{Policy: PolicyAny})
 
-	if got := strings.Join(c.Mounts.Destinations, ","); got != "/a,/b" {
-		t.Errorf("destinations = %q, want sorted and deduplicated", got)
+	if got := c.Mounts.Rules; got[0].Destination != "/a" || got[1].Destination != "/b" {
+		t.Errorf("rules = %#v, want destination order /a,/b", got)
+	}
+}
+
+func TestTypedMountPolicy(t *testing.T) {
+	policy := MountPolicy{Policy: PolicyExact, Rules: []MountRule{
+		{Destination: "/cache", Kind: MountEmptyDir},
+		{Destination: "/mnt/c8s-data/config", Kind: MountData},
+	}}
+	if err := normalizeMounts(&policy); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mounts []ObservedMount
+		want   bool
+	}{
+		{"memory emptyDir and encrypted data", []ObservedMount{
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountMemory},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountEncrypted},
+		}, true},
+		{"platform baseline ignored", []ObservedMount{
+			{Destination: "/etc/hosts", Class: MountPlatform, Storage: MountUnknown},
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountEncrypted},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountMemory},
+		}, true},
+		{"plain emptyDir", []ObservedMount{
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountUnknown},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountEncrypted},
+		}, false},
+		{"wrong kind", []ObservedMount{
+			{Destination: "/cache", Class: MountData, Storage: MountMemory},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountEncrypted},
+		}, false},
+		{"missing rule", []ObservedMount{{Destination: "/cache", Class: MountEmptyDir, Storage: MountMemory}}, false},
+		{"duplicate destination", []ObservedMount{
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountMemory},
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountMemory},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountEncrypted},
+		}, false},
+		{"host mount", []ObservedMount{
+			{Destination: "/cache", Class: MountEmptyDir, Storage: MountMemory},
+			{Destination: "/mnt/c8s-data/config", Class: MountData, Storage: MountEncrypted},
+			{Destination: "/host", Class: MountHost, Storage: MountUnknown},
+		}, false},
+		{"unavailable", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := policy.admits(tt.mounts); got != tt.want {
+				t.Fatalf("admits = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

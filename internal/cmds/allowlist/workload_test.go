@@ -197,11 +197,11 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 }
 
 // The entry a new one is shadowed by is usually one already served — a seeded
-// any-argv entry for the same image — so apply checks against the live
+// unconstrained entry for the same image — so apply checks against the live
 // document too.
 func TestWorkloadApplyRefusesEntryShadowedByLive(t *testing.T) {
 	live := mustParseAllowlist(t, `{"schema":"c8s.allowlist/v1","workloads":{
-		"app-aaaaaaaaaaaa":{"containers":[{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+		"app-aaaaaaaaaaaa":{"containers":[{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}}}`)
 	url, methods := servingAllowlistCDS(t, live)
 
 	file := writeFile(t, "wl.json", `{"schema":"c8s.allowlist/v1","workloads":{
