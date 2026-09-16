@@ -154,8 +154,12 @@ runs:
       timeout 130 kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$VM-root" --timeout=120s
       bash .github/scripts/tdx-image-acceptance.sh start-import \
         "$RUNNER_TEMP/tdx-image-acceptance" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$VM" "$NS" "$GITHUB_REPOSITORY"
-      bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+      # The binder has done its job once the PVC is bound to the TDX node and
+      # the import is requested. CDI will not create its importer while any
+      # pod still mounts the claim (ImportTargetInUse), so release it before
+      # waiting, not after.
       bash .github/scripts/tdx-image-acceptance.sh cleanup-binder "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
+      bash .github/scripts/tdx-image-acceptance.sh wait "$VM" "$NS" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY"
 
   - name: resolve image refs + the paired c8s ref
     if: inputs.exact_image != 'true'

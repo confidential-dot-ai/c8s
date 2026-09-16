@@ -2,17 +2,45 @@ package credrelease
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"golang.org/x/net/netutil"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
+
+// maxConcurrentConns caps accepted sockets. cred-release is the external
+// credential choke point and binds every interface, so an unbounded accept
+// loop lets any peer that can route to the guest spend its memory and its
+// attestation-api budget on handshakes alone.
+const maxConcurrentConns = 64
+
+// newServer builds the release HTTP server. The resource bounds live here so
+// they are stated once and can be asserted: none of them changes how the
+// service answers a legitimate request, so a regression is otherwise silent.
+func newServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		// Allow the bounded body read, attestation, and response write.
+		WriteTimeout: attestTimeout + 20*time.Second,
+		IdleTimeout:  30 * time.Second,
+		// Go's 1MiB default lets one unauthenticated request buy far more
+		// memory than any real CSR needs.
+		MaxHeaderBytes: 16 << 10,
+	}
+}
 
 // Config is the release service configuration.
 type Config struct {
@@ -110,18 +138,19 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("warm up RA-TLS serving cert: %w", err)
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           handler,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       10 * time.Second,
+	srv := newServer(cfg.ListenAddr, handler, tlsCfg)
+
+	// Bind explicitly so the accepted sockets can be capped: every connection
+	// costs an RA-TLS handshake before the operator token is ever checked.
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		// certs come from tlsCfg (RA-TLS), so no cert/key files.
-		errCh <- srv.ListenAndServeTLS("", "")
+		errCh <- srv.ServeTLS(netutil.LimitListener(ln, maxConcurrentConns), "", "")
 	}()
 
 	select {

@@ -137,18 +137,19 @@ func (c Container) admits(r RunningContainer) bool {
 	if c.Digest.String() != r.Digest {
 		return false
 	}
-	if !c.admitsProcess(r) {
-		return false
+	for _, constraint := range c.constraints() {
+		if !constraint.admits(r) {
+			return false
+		}
 	}
-	return c.Mounts.admits(r.BindMounts) && c.Env.matches(r)
+	return true
 }
 
 func (c Container) admitsProcess(r RunningContainer) bool {
 	if c.Digest.String() != r.Digest {
 		return false
 	}
-	rest, ok := c.Command.matchCommand(r.Argv)
-	return ok && c.Args.matchArgs(rest)
+	return (processConstraint{command: &c.Command, args: &c.Args}).admits(r)
 }
 
 // admits reports whether every bind destination is one this policy names.
@@ -157,10 +158,6 @@ func (p MountPolicy) admits(destinations []string) bool {
 		return true
 	}
 	return everyIn(destinations, p.Destinations)
-}
-
-func (p EnvPolicy) matches(r RunningContainer) bool {
-	return p.admitsObservation(r.Env)
 }
 
 // everyIn reports whether every observed value appears in allowed. An empty

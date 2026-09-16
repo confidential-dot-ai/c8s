@@ -29,9 +29,10 @@
 #     -exclude-ref busybox
 # -exclude-ref omits busybox from the node's baked base;
 # the chart supplies its argv-pinned entry through the served allowlist.
-# After a bump, re-verify on first boot that the rendered containerd
-# config.toml has exactly ONE `imports` line — see the baked
-# config-v3.toml.tmpl in this profile's mkosi.extra for why.
+# rke2's own containerd base template imports config-v3.toml.d/*.toml since
+# v1.36 (k3s b51167a9), which is where the NRI drop-in lives, so this profile
+# bakes no config-v3.toml.tmpl: one that added the import produced a duplicate
+# `imports` key that containerd refuses, and rke2-server never came up.
 #
 # The multi-command c8s binary and operator/get-cert image resolve from one
 # C8S_REF. The binary contains the chart, so Kubernetes integration, nginx

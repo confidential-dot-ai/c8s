@@ -1,0 +1,84 @@
+package allowlist
+
+// containerConstraint is the common lifecycle for a concrete field in a
+// container policy. Implementations remain private: the serialized allowlist
+// is made exclusively from the concrete policy structs in allowlist.go.
+type containerConstraint interface {
+	normalize() (field string, err error)
+	admits(RunningContainer) bool
+	hostIndependent() bool
+	isUnconstrained() bool
+}
+
+// constraints is the single inventory of the independently constrained parts
+// of a container launch. Command and args intentionally form one constraint:
+// command consumes a prefix of OCI process.args and args evaluates only the
+// remainder.
+func (c *Container) constraints() []containerConstraint {
+	return []containerConstraint{
+		processConstraint{command: &c.Command, args: &c.Args},
+		mountConstraint{policy: &c.Mounts},
+		envConstraint{policy: &c.Env},
+	}
+}
+
+type processConstraint struct {
+	command *ArgvPolicy
+	args    *ArgvPolicy
+}
+
+func (p processConstraint) normalize() (string, error) {
+	if err := normalizeArgv(p.command); err != nil {
+		return "command", err
+	}
+	if err := normalizeArgv(p.args); err != nil {
+		return "args", err
+	}
+	return "", nil
+}
+
+func (p processConstraint) admits(r RunningContainer) bool {
+	rest, ok := p.command.matchCommand(r.Argv)
+	return ok && p.args.matchArgs(rest)
+}
+
+func (p processConstraint) hostIndependent() bool {
+	return argvHostIndependent(p.command.Policy) && argvHostIndependent(p.args.Policy)
+}
+
+func argvHostIndependent(policy string) bool {
+	return policy == "" || policy == PolicyDeny || policy == PolicyExact
+}
+
+func (p processConstraint) isUnconstrained() bool {
+	return p.command.Policy == PolicyAny && p.args.Policy == PolicyAny
+}
+
+type mountConstraint struct {
+	policy *MountPolicy
+}
+
+func (m mountConstraint) normalize() (string, error) { return "mounts", normalizeMounts(m.policy) }
+func (m mountConstraint) admits(r RunningContainer) bool {
+	return m.policy.admits(r.BindMounts)
+}
+
+// A destination-only mount policy does not constrain the content supplied by
+// the host, even when every destination is pinned.
+func (m mountConstraint) hostIndependent() bool { return false }
+func (m mountConstraint) isUnconstrained() bool { return m.policy.Policy != PolicyExact }
+
+type envConstraint struct {
+	policy *EnvPolicy
+}
+
+func (e envConstraint) normalize() (string, error) { return "env", normalizeEnv(e.policy) }
+func (e envConstraint) admits(r RunningContainer) bool {
+	return e.policy.admitsObservation(r.Env)
+}
+func (e envConstraint) hostIndependent() bool {
+	return e.policy.Policy == PolicyDeny || e.policy.Policy == PolicyExact
+}
+func (e envConstraint) isUnconstrained() bool {
+	return e.policy.Policy == PolicyAny || e.policy.Policy == ""
+}
