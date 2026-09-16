@@ -140,7 +140,7 @@ admission-inventory directory. CDS listens on the server's port `30808`;
 RKE2 agents join at `9345`; nginx serves the front door on `443`.
 
 The baked nginx configuration sends errors to stderr, captured by systemd's
-journal, and access logs to `/dev/log` with the `c8s-nginx` syslog tag.
+journal, and access logs to `/dev/log` with the `c8s_nginx` syslog tag.
 Both startup invocations also direct early nginx errors to stderr. Logging
 uses the existing reduced capability set and leaves distribution-owned
 `/var/log/nginx` files untouched.
@@ -555,7 +555,7 @@ nginx diagnostics and access logs for the current boot:
 
 ```sh
 journalctl -b -u c8s-nginx.service
-journalctl -b -t c8s-nginx
+journalctl -b -t c8s_nginx
 ```
 
 **`Read-only file system` inside a service** — check that unit's systemd

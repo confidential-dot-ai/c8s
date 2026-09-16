@@ -111,7 +111,7 @@ workers_replaced() {
     done
 }
 access_logged() {
-    journalctl -t c8s-nginx --no-pager -o cat > "$WORK/access-journal"
+    journalctl -t c8s_nginx --no-pager -o cat > "$WORK/access-journal"
     grep -Fq "\"GET /$1 HTTP/" "$WORK/access-journal"
 }
 request_logged() {
