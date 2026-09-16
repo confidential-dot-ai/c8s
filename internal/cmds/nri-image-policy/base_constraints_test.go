@@ -46,8 +46,15 @@ func TestBaseAllowlistEnforcesFinalEnvAndMounts(t *testing.T) {
 				if phase == launchPreliminary {
 					want = verdictAllow
 				}
-				got, reason := p.checkImagePhase(context.Background(), p.cfg, "default", "pod", "ctr",
-					"registry/app@"+pushDigestA, []string{"/app"}, tc.env, tc.mounts, phase)
+				got, reason := p.checkImagePhase(context.Background(), p.cfg, imageCheck{
+					Namespace: "default",
+					PodName:   "pod",
+					Container: "ctr",
+					ImageRef:  "registry/app@" + pushDigestA,
+					Argv:      []string{"/app"},
+					Env:       tc.env,
+					Mounts:    tc.mounts,
+				}, phase)
 				if got != want {
 					t.Fatalf("phase %d: verdict=%d want=%d reason=%q", phase, got, want, reason)
 				}

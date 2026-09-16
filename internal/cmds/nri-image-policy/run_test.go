@@ -21,6 +21,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -125,7 +126,13 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	// failure path is exercised without a multi-second wait.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	verdict, reason := p.checkImage(ctx, p.cfg, "default", "pod", "ctr", "registry/repo:latest", nil)
+	verdict, reason := p.checkImagePhase(ctx, p.cfg, imageCheck{
+		Namespace: "default",
+		PodName:   "pod",
+		Container: "ctr",
+		ImageRef:  "registry/repo:latest",
+		Mounts:    []allowlist.ObservedMount{},
+	}, launchFinal)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny when digest resolution fails, got %d", verdict)
 	}
