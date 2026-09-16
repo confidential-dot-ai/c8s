@@ -208,8 +208,8 @@ jobs:
       - uses: ./.github/actions/setup-go-c8s
 
       - name: Render the effective containerd config and check its handlers
-        # containerdcheck renders the baked template with RKE2's own base
-        # template and merges the drop-ins containerd imports, so a handler
+        # containerdcheck renders RKE2's own base template and merges the
+        # drop-ins containerd imports, so a handler
         # that would reach an unwrapped runc fails here instead of shipping an
         # image where `kubectl exec` works.
         run: |

@@ -13,8 +13,8 @@ const wrapper = "/usr/local/bin/c8s-runc"
 // checks.
 const bakedConfigDir = "../mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd"
 
-// The image as committed must pass: RKE2's own base template, the baked
-// user template, and the baked drop-ins.
+// The image as committed must pass: RKE2's own base template and the baked
+// drop-ins.
 func TestBakedConfigWrapsEveryHandler(t *testing.T) {
 	cfg, err := effectiveConfig(bakedConfigDir, nil)
 	if err != nil {
@@ -48,13 +48,11 @@ func TestAutoDetectedRuntimeFails(t *testing.T) {
 	}
 }
 
-// buildConfigDir writes a template, its drop-ins, and returns the directory.
-func buildConfigDir(t *testing.T, template string, dropIns map[string]string) string {
+// buildConfigDir writes the drop-ins and returns the directory. Like the
+// profile, it bakes no user template.
+func buildConfigDir(t *testing.T, dropIns map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, userTemplateName), []byte(template), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	dropInDir := filepath.Join(dir, dropInDirName)
 	if err := os.MkdirAll(dropInDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -65,17 +63,6 @@ func buildConfigDir(t *testing.T, template string, dropIns map[string]string) st
 		}
 	}
 	return dir
-}
-
-// bakedTemplate is the profile's own template, read once so the fixtures
-// differ from the shipped image in exactly the drop-ins.
-func bakedTemplate(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(bakedConfigDir, userTemplateName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
 }
 
 func TestCheckRejectsUnwrappedHandlers(t *testing.T) {
@@ -131,7 +118,7 @@ func TestCheckRejectsUnwrappedHandlers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := buildConfigDir(t, bakedTemplate(t), tt.dropIns)
+			dir := buildConfigDir(t, tt.dropIns)
 			cfg, err := effectiveConfig(dir, nil)
 			if err != nil {
 				t.Fatalf("effectiveConfig = %v", err)
@@ -150,7 +137,7 @@ func TestCheckRejectsUnwrappedHandlers(t *testing.T) {
 // A kata handler is out of scope — its exec denial lives in the guest — but
 // only as long as the runc handler beside it stays wrapped.
 func TestKataHandlerIsAllowedBesideAWrappedRunc(t *testing.T) {
-	dir := buildConfigDir(t, bakedTemplate(t), map[string]string{
+	dir := buildConfigDir(t, map[string]string{
 		"10-c8s-runc.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc.options]\n" +
 			`BinaryName = "` + wrapper + `"` + "\n",
 		"20-kata.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.kata-qemu-tdx]\n" +
@@ -162,6 +149,21 @@ func TestKataHandlerIsAllowedBesideAWrappedRunc(t *testing.T) {
 	}
 	if _, err := checkHandlers(cfg, wrapper); err != nil {
 		t.Fatalf("checkHandlers rejected a kata handler beside a wrapped runc: %v", err)
+	}
+}
+
+// A baked user template replaces the base as the root of the render, so one
+// that does not include the base loses the drop-in import and fails.
+func TestUserTemplateWithoutBaseFails(t *testing.T) {
+	dir := buildConfigDir(t, map[string]string{
+		"10-c8s-runc.toml": "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc.options]\n" +
+			`BinaryName = "` + wrapper + `"` + "\n",
+	})
+	if err := os.WriteFile(filepath.Join(dir, userTemplateName), []byte("version = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := effectiveConfig(dir, nil); err == nil || !strings.Contains(err.Error(), "no import matching") {
+		t.Fatalf("effectiveConfig(user template without base) = %v, want an error about the missing import", err)
 	}
 }
 

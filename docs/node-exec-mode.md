@@ -44,10 +44,10 @@ first start; the wrapper never resolves `runc` through `PATH`.
 measured binary the NRI plugin is, under the name `cmd/c8s/main.go` dispatches
 on — and the baked drop-in
 `config-v3.toml.d/10-c8s-runc.toml` points the runc handler's containerd
-`BinaryName` at it. The setting is a drop-in rather than a line in
-`config-v3.toml.tmpl` because RKE2's base template already defines that table
-and containerd's TOML parser rejects a duplicate; containerd merges each
-import over the main config key by key.
+`BinaryName` at it. The setting is a drop-in because the profile bakes no
+`config-v3.toml.tmpl`: RKE2's base template already defines that table and
+imports the drop-in directory, and containerd's TOML parser rejects a
+duplicate key. containerd merges each import over the main config key by key.
 
 `C8S_DEV=1` renders `60-dev-runc.toml` over it, restoring the unwrapped
 runtime. The dev image already ships a serial root shell and the kubelet
@@ -56,7 +56,7 @@ property of the image, not a setting.
 
 ## The build gate
 
-`node-guest-image/c8s/containerdcheck` renders the profile's template the way
+`node-guest-image/c8s/containerdcheck` renders RKE2's base template the way
 RKE2 does, merges the drop-ins containerd imports, and asserts that every
 enabled ordinary-pod handler runs the wrapper. It fails on an empty
 `BinaryName` (which means `PATH` runc), an alternate runc, a later drop-in that

@@ -1,8 +1,8 @@
 # VENDORED from k3s pkg/agent/templates/templates.go, const
 # ContainerdConfigTemplateV3, at k3s a2fc9574e060 — the k3s revision
 # rke2 v1.36.4+rke2r1 builds against (its go.mod `github.com/k3s-io/k3s`
-# replace target). RKE2 renders the profile's config-v3.toml.tmpl with this
-# as the "base" template, so the gate must parse the same bytes RKE2 emits.
+# replace target). RKE2 renders this when the profile bakes no
+# config-v3.toml.tmpl, so the gate must parse the same bytes RKE2 emits.
 # RKE2_VERSION: v1.36.4+rke2r1
 #
 # Re-vendor whenever mkosi.sync's RKE2_VERSION moves; the invariants gate

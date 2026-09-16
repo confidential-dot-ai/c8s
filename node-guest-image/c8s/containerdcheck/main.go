@@ -2,10 +2,10 @@
 // the node image reaches the measured runtime wrapper (c8s-runc), and not runc
 // itself.
 //
-// The check renders the profile's containerd template the way RKE2 does — the
-// baked config-v3.toml.tmpl as the user template, the vendored RKE2 base
-// template as `base` — then merges the drop-ins containerd imports, in the
-// lexical order containerd merges them. It asserts against the effective
+// The check renders the containerd config the way RKE2 does — the vendored
+// RKE2 base template, through the profile's config-v3.toml.tmpl if it bakes
+// one — then merges the drop-ins containerd imports, in the lexical order
+// containerd merges them. It asserts against the effective
 // configuration, so a drop-in that overrides a handler, an alternate runc, an
 // empty BinaryName or a runtime RKE2's auto-detection introduced all fail
 // here rather than on a node.
@@ -20,6 +20,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
@@ -33,8 +34,9 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
-// The base template RKE2 renders `{{ template "base" . }}` with. Vendored:
-// see the file's header for the pin and the re-vendor rule.
+// The base template RKE2 renders, alone or as `{{ template "base" . }}` from
+// a user template. Vendored: see the file's header for the pin and the
+// re-vendor rule.
 //
 //go:embed rke2-base-v3.toml.tmpl
 var baseTemplate string
@@ -56,7 +58,7 @@ const kataShimPrefix = "io.containerd.kata"
 
 func main() {
 	wrapper := flag.String("wrapper", "/usr/local/bin/c8s-runc", "absolute path every ordinary-pod handler must run")
-	configDir := flag.String("config-dir", "", "containerd config directory holding "+userTemplateName+" and "+dropInDirName)
+	configDir := flag.String("config-dir", "", "containerd config directory holding "+dropInDirName+" and, optionally, "+userTemplateName)
 	var extra extraRuntimes
 	flag.Var(&extra, "extra-runtime", "NAME=BINARY handler RKE2 auto-detection would add (repeatable; for negative tests)")
 	flag.Parse()
@@ -144,11 +146,16 @@ func checkImports(cfg map[string]any) error {
 	return fmt.Errorf("the rendered config has no import matching %q; the drop-in that wraps runc would never be read", want)
 }
 
-// render executes the profile's template with RKE2's base template and the
-// node's rendering inputs.
+// render executes RKE2's base template with the node's rendering inputs,
+// through the user template at path when one exists. RKE2 renders the base
+// alone when the profile bakes none (k3s pkg/agent/containerd), and the c8s
+// profile bakes none: the base already emits the drop-in import, and a user
+// template that repeated it produced a duplicate key containerd refused.
 func render(path string, extra extraRuntimes) (string, error) {
-	user, err := os.ReadFile(path)
-	if err != nil {
+	user := `{{ template "base" . }}`
+	if data, err := os.ReadFile(path); err == nil {
+		user = string(data)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	funcs := template.FuncMap{
@@ -157,7 +164,7 @@ func render(path string, extra extraRuntimes) (string, error) {
 		"deschemify":   func(s string) string { return s },
 		"filepathjoin": filepath.Join,
 	}
-	t, err := template.New(userTemplateName).Funcs(funcs).Parse(string(user))
+	t, err := template.New(userTemplateName).Funcs(funcs).Parse(user)
 	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", path, err)
 	}
