@@ -73,6 +73,15 @@ type Container struct {
 	Args    ArgvPolicy   `json:"args" yaml:"args"`
 	Mounts  MountPolicy  `json:"mounts,omitempty" yaml:"mounts,omitempty"`
 	Env     EnvPolicy    `json:"env,omitempty" yaml:"env,omitempty"`
+
+	// NodeTCB is RESERVED and must stay false. Node-TCB status — exemption
+	// from an enforcer's fixed host-privilege policy — is a property of the
+	// measured node boot config (nri-image-policy's allowlist.node_tcb), never
+	// of a document: a document is authored by the same cluster admin that
+	// policy defends against. The field exists so both parse paths refuse an
+	// entry carrying the marker by name rather than silently ignoring it on
+	// the served path.
+	NodeTCB bool `json:"nodeTCB,omitempty" yaml:"nodeTCB,omitempty"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -191,6 +200,11 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	sortContainers(w.Containers)
 	return &w, nil
 }
+
+// ErrNodeTCBInDocument refuses the node-TCB marker in an allowlist document,
+// on the operator-authored path (`c8s allowlist lint`, the CDS write path) and
+// on the CDS-served path alike. Only a measured node boot config grants it.
+var ErrNodeTCBInDocument = fmt.Errorf("nodeTCB is reserved for the measured node boot config and cannot appear in an allowlist document")
 
 // errGrantUnpinned refuses a secrets grant on an entry that leaves any
 // container's argv to the host: the value would be released to whatever
@@ -369,6 +383,9 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		c := &cs[i]
 		if c.Digest.String() == "" {
 			return fmt.Errorf("workload %q %s[%d]: digest is required", workload, field, i)
+		}
+		if c.NodeTCB {
+			return fmt.Errorf("workload %q %s[%d]: %w", workload, field, i, ErrNodeTCBInDocument)
 		}
 		for _, constraint := range c.constraints() {
 			if policyField, err := constraint.normalize(); err != nil {

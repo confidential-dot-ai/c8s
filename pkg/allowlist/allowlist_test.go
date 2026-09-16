@@ -2,6 +2,7 @@ package allowlist
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -390,5 +391,25 @@ func TestParseServedJSON_StillRejectsBadWorkloadNameGrammar(t *testing.T) {
 	body := `{"schema":"c8s.allowlist/v1","workloads":{"a/b":{"containers":[{"digest":"` + digestA + `"}]}}}`
 	if _, err := ParseServedJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "workload name") {
 		t.Fatalf("expected workload name error, got %v", err)
+	}
+}
+
+func TestParseRefusesNodeTCBMarker(t *testing.T) {
+	doc := `{"schema":"c8s.allowlist/v1","workloads":{"w":{"initContainers":[],"containers":[
+		{"digest":"sha256:` + strings.Repeat("a", 64) + `","command":{"policy":"any"},"args":{"policy":"any"},"nodeTCB":true}]}}}`
+
+	tests := []struct {
+		name  string
+		parse func([]byte) (*Allowlist, error)
+	}{
+		{"operator authored", ParseJSON},
+		{"served by CDS", ParseServedJSON},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.parse([]byte(doc)); err == nil || !errors.Is(err, ErrNodeTCBInDocument) {
+				t.Fatalf("parse(nodeTCB document) = %v, want ErrNodeTCBInDocument", err)
+			}
+		})
 	}
 }
