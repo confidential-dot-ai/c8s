@@ -17,7 +17,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
-const overlayFSMagic = 0x794c7630
+const overlayFSMagic int64 = 0x794c7630
 
 // scratchDiskSerial must match the scratch disk serial expected by
 // confidential-os-builder's initrd; changes require coordination with that repo.
@@ -56,7 +56,7 @@ func (i linuxStorageInspector) inspect(source string, seen map[string]bool) allo
 	if fs.Type == unix.TMPFS_MAGIC {
 		return allowlist.MountMemory
 	}
-	if uint64(fs.Type) == overlayFSMagic {
+	if fs.Type == overlayFSMagic {
 		upper, ok := overlayUpperDir(i.mountInfo, clean)
 		if !ok {
 			return allowlist.MountUnknown
