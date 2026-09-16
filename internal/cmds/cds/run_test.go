@@ -308,7 +308,7 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 
 	cfg := validRunConfig(t, api.URL)
 	cfg.port = freePort(t)
-	cfg.measurements = []string{"deadbeef"}
+	cfg.measurements = []string{strings.Repeat("ab", 48)}
 	cfg.dnsSANPatterns = []string{`^[a-z.-]+$`}
 	cfg.allowedCNPattern = `^.*$`
 	cfg.operatorKeys = writeOperatorKeysPEM(t)
@@ -435,7 +435,7 @@ func TestRun_LogsMeasurementPinning(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 	cfg := validRunConfig(t, api.URL)
 	cfg.logLevel = "info"
-	cfg.measurements = []string{"deadbeef"}
+	cfg.measurements = []string{strings.Repeat("ab", 48)}
 	cfg.dnsSANPatterns = []string{"("}
 
 	r, w, err := os.Pipe()
