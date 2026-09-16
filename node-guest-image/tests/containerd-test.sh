@@ -40,6 +40,7 @@ CMD ["sleep", "infinity"]
 EOF
 container=$(docker run -d --privileged "$image")
 config_dir=/var/lib/rancher/rke2/agent/etc/containerd
+containerd_bin=/var/lib/rancher/rke2/bin/containerd
 docker exec "$container" mkdir -p "$config_dir" /var/lib/rancher/rke2/agent/images
 docker cp node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/agent/etc/containerd/. "$container:$config_dir/"
 docker cp "$tmp/rke2-images-core.linux-amd64.tar.zst" "$container:/var/lib/rancher/rke2/agent/images/"
@@ -48,18 +49,23 @@ render() {
   docker exec "$container" rm -f "$config_dir/config.toml"
   docker exec -d "$container" sh -c 'exec rke2 server --cni=none --snapshotter=native > /rke2.log 2>&1'
   for _ in $(seq 1 120); do
-    if docker exec "$container" test -s "$config_dir/config.toml"; then return; fi
+    if docker exec "$container" test -s "$config_dir/config.toml" &&
+       docker exec "$container" test -x "$containerd_bin"; then return; fi
     sleep 1
   done
-  echo 'RKE2 did not generate a nonempty containerd config within 120 seconds' >&2
+  echo 'RKE2 config and containerd binary were not ready within 120 seconds' >&2
   return 1
 }
 dump() {
-  docker exec "$container" /var/lib/rancher/rke2/bin/containerd \
+  docker exec "$container" "$containerd_bin" \
     --config "$config_dir/config.toml" config dump
 }
 render
-dump > "$tmp/effective.toml"
+containerd_bin=$(docker exec "$container" readlink -f "$containerd_bin")
+if ! dump > "$tmp/effective.toml"; then
+  cat "$tmp/effective.toml" >&2
+  exit 1
+fi
 docker cp "$container:$config_dir/config.toml" "$tmp/config.toml"
 python3 - "$tmp" <<'PY'
 import pathlib
