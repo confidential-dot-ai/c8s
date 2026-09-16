@@ -195,7 +195,7 @@ func overlayUpperDir(mountInfo, source string) (string, bool) {
 }
 
 func optionValue(options, name string) string {
-	for _, option := range strings.Split(options, ",") {
+	for option := range strings.SplitSeq(options, ",") {
 		if value, ok := strings.CutPrefix(option, name+"="); ok {
 			return value
 		}

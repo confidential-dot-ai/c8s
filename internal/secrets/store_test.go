@@ -419,23 +419,19 @@ func TestMemoryStoreQuotaUnderConcurrentWrites(t *testing.T) {
 	for h, name := range names {
 		by := WorkloadHolder(name)
 		for i := range 32 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if _, _, err := s.PutIfAbsent(ctx, fmt.Sprintf("/%s/%d", name, i), []byte("ok"), by); err == nil {
 					stored[h].Add(1)
 				}
-			}()
+			})
 		}
 	}
 	// The census is taken under the same lock the writers hold, so -race sees
 	// both sides.
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s.TopHolders(censusHolders)
-		}()
+		})
 	}
 	wg.Wait()
 

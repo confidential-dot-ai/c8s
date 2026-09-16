@@ -837,7 +837,7 @@ func TestRouterHostPort(t *testing.T) {
 func TestHostPortConflict(t *testing.T) {
 	pod := func(ns, name, node string, port int32) corev1.Pod {
 		return corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+			Namespace: ns, Name: name,
 			Spec: corev1.PodSpec{
 				NodeName:   node,
 				Containers: []corev1.Container{{Name: "c", Ports: []corev1.ContainerPort{{HostPort: port}}}},
@@ -1724,12 +1724,10 @@ func TestAdmissibleDigests(t *testing.T) {
 // platformPod builders for the denial check.
 func daemonSetPod(ns, name, image, imageID string) corev1.Pod {
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       ns,
-			Name:            name,
-			OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "ds"}},
-		},
-		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Image: image, ImageID: imageID}}},
+		Namespace:       ns,
+		Name:            name,
+		OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "ds"}},
+		Status:          corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Image: image, ImageID: imageID}}},
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
@@ -71,22 +70,20 @@ func TestParseSecretSpec(t *testing.T) {
 func validConfig(t *testing.T) config {
 	t.Helper()
 	return config{
-		Config: sidecar.Config{
-			CDSURL:            "https://cds.example",
-			AttestationApiURL: "http://127.0.0.1:8080",
-			Attempts:          3,
-			RetryInterval:     time.Second,
-			RequestTimeout:    time.Second,
-			InventoryTimeout:  time.Second,
-		},
-		Secrets:  []secretRequest{{Name: "DB", Path: "/api/db"}},
-		OutDir:   t.TempDir(),
-		FileMode: "0640",
+		CDSURL:            "https://cds.example",
+		AttestationApiURL: "http://127.0.0.1:8080",
+		Attempts:          3,
+		RetryInterval:     time.Second,
+		RequestTimeout:    time.Second,
+		InventoryTimeout:  time.Second,
+		Secrets:           []secretRequest{{Name: "DB", Path: "/api/db"}},
+		OutDir:            t.TempDir(),
+		FileMode:          "0640",
 	}
 }
 
 func TestValidate(t *testing.T) {
-	if err := validate(ptr(validConfig(t))); err != nil {
+	if err := validate(new(validConfig(t))); err != nil {
 		t.Fatalf("a valid config was refused: %v", err)
 	}
 	for _, tc := range []struct {
@@ -248,7 +245,8 @@ func TestParseFileMode(t *testing.T) {
 	}
 }
 
-func ptr(c config) *config { return &c }
+//go:fix inline
+func ptr(c config) *config { return new(c) }
 
 // An unwritable output directory fails loudly rather than reporting success
 // with no file on disk.

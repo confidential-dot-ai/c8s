@@ -13,7 +13,6 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -107,7 +106,7 @@ func TestPatchCABundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "c8s-mutating"},
+		Name: "c8s-mutating",
 		Webhooks: []admissionv1.MutatingWebhook{
 			{Name: "pods.c8s.dev"},
 			{Name: "other.c8s.dev"},

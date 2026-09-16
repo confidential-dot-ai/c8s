@@ -24,7 +24,6 @@ import (
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -111,7 +110,7 @@ func writeSelfSignedCertPEM(t *testing.T) string {
 
 func testPod(name, ns, podIP, hostIP string, labels map[string]string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("uid-" + name), Labels: labels},
+		Name: name, Namespace: ns, UID: types.UID("uid-" + name), Labels: labels,
 		Status: corev1.PodStatus{
 			Phase:  corev1.PodRunning,
 			PodIP:  podIP,

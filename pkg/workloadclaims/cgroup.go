@@ -35,7 +35,7 @@ func ContainerIDCandidatesForPID(procRoot string, pid int) ([]string, error) {
 	}
 	var candidates []string
 	seen := map[string]struct{}{}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		for _, id := range containerIDPattern.FindAllString(line, -1) {
 			if _, dup := seen[id]; dup {
 				continue

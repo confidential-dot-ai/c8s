@@ -495,7 +495,7 @@ func tcpFlagValue(t *testing.T, spec string) uint8 {
 		return 0
 	}
 	var bits uint8
-	for _, name := range strings.Split(spec, ",") {
+	for name := range strings.SplitSeq(spec, ",") {
 		b, ok := tcpFlagBits[name]
 		if !ok {
 			t.Fatalf("unknown TCP flag %q in %q", name, spec)

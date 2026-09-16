@@ -56,7 +56,7 @@ type logRecord struct {
 // trailing lines that may exist while the writer is still running.
 func decodeLogRecords(s string) []logRecord {
 	var out []logRecord
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -169,8 +169,7 @@ func TestInboundHeaderAtSizeLimitAccepted(t *testing.T) {
 		metrics:           testMetrics(),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -229,8 +228,7 @@ func TestOutboundDialFailureClassifiedAsTLSError(t *testing.T) {
 		metrics:     m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -343,7 +341,7 @@ func (f *proxyRunFixture) roundTrip(t *testing.T, payload string) string {
 	// and a persistent failure surfaces the proxy's access log so the cause
 	// is visible instead of an opaque ECONNRESET.
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if attempt > 0 {
 			time.Sleep(100 * time.Millisecond)
 		}

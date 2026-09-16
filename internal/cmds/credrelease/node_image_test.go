@@ -82,7 +82,7 @@ func TestNodeImageCredentialReleaseConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, line := range strings.Split(string(conf), "\n") {
+		for line := range strings.SplitSeq(string(conf), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "Exec") || strings.HasPrefix(line, "Environment") {
 				t.Errorf("%s overrides the unit: %q", path, line)

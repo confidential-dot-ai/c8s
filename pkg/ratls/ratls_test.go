@@ -47,7 +47,7 @@ func fakeSNPReport(reportData [64]byte) []byte {
 	copy(report[0x50:0x90], reportData[:])
 
 	// MEASUREMENT (offset 0x90): 48 bytes
-	for i := 0; i < 48; i++ {
+	for i := range 48 {
 		report[0x90+i] = byte(i) // deterministic fake measurement
 	}
 

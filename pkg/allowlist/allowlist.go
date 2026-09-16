@@ -71,8 +71,8 @@ type Container struct {
 	Image   string       `json:"image,omitempty" yaml:"image,omitempty"`
 	Command ArgvPolicy   `json:"command" yaml:"command"`
 	Args    ArgvPolicy   `json:"args" yaml:"args"`
-	Mounts  MountPolicy  `json:"mounts,omitempty" yaml:"mounts,omitempty"`
-	Env     EnvPolicy    `json:"env,omitempty" yaml:"env,omitempty"`
+	Mounts  MountPolicy  `json:"mounts" yaml:"mounts,omitempty"`
+	Env     EnvPolicy    `json:"env" yaml:"env,omitempty"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args

@@ -270,7 +270,7 @@ func preflightRouterHostPort(ctx context.Context, chartPath, namespace string) e
 		return fmt.Errorf("kubectl get nodes: %w", err)
 	}
 	var nodes []string
-	for _, n := range strings.Split(strings.TrimSpace(string(nodesOut)), "\n") {
+	for n := range strings.SplitSeq(strings.TrimSpace(string(nodesOut)), "\n") {
 		if n = strings.TrimSpace(n); n != "" {
 			nodes = append(nodes, n)
 		}
@@ -301,7 +301,7 @@ func preflightRouterHostPort(ctx context.Context, chartPath, namespace string) e
 // bool at it, or false if a segment is missing or the leaf is not a bool.
 func boolAtPath(tree map[string]any, path string) bool {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
 			return false
@@ -737,7 +737,7 @@ func nestedMap(tree map[string]any, keys ...string) (map[string]any, bool) {
 // string at it, erroring if a segment is missing or the leaf is not a string.
 func stringAtPath(tree map[string]any, path string) (string, error) {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
 			return "", fmt.Errorf("path %q: %q is not a mapping", path, seg)
@@ -759,7 +759,7 @@ func stringAtPath(tree map[string]any, path string) (string, error) {
 // distinguishable from one that is absent.
 func valueAtPath(tree map[string]any, path string) (value any, ok bool) {
 	var cur any = tree
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		m, isMap := cur.(map[string]any)
 		if !isMap {
 			return nil, false
@@ -1190,14 +1190,12 @@ func applyNamespace(ctx context.Context, namespace string) error {
 // stricter (e.g. CIS-hardened restricted).
 func namespaceManifest(namespace string) ([]byte, error) {
 	ns := corev1.Namespace{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespace,
-			Labels: map[string]string{
-				"pod-security.kubernetes.io/enforce": "privileged",
-				"pod-security.kubernetes.io/warn":    "privileged",
-				"pod-security.kubernetes.io/audit":   "privileged",
-			},
+		APIVersion: "v1", Kind: "Namespace",
+		Name: namespace,
+		Labels: map[string]string{
+			"pod-security.kubernetes.io/enforce": "privileged",
+			"pod-security.kubernetes.io/warn":    "privileged",
+			"pod-security.kubernetes.io/audit":   "privileged",
 		},
 	}
 	return json.Marshal(ns)
@@ -2099,11 +2097,11 @@ func mergeValues(dst, src map[string]any) {
 func overlaySetArgs(tree map[string]any, setArgs []string) error {
 	for i := 0; i+1 < len(setArgs); i += 2 {
 		flag, kv := setArgs[i], setArgs[i+1]
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
+		before, after, ok := strings.Cut(kv, "=")
+		if !ok {
 			continue
 		}
-		path, raw := kv[:eq], kv[eq+1:]
+		path, raw := before, after
 		var err error
 		switch flag {
 		case "--set":

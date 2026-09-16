@@ -302,7 +302,7 @@ func parseCWPassthrough(raw string) ([]cwPassthrough, error) {
 		return nil, nil
 	}
 	var out []cwPassthrough
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue

@@ -1149,7 +1149,7 @@ func TestSwapProvider_ConcurrentAccess(t *testing.T) {
 	for i := range goroutines {
 		go func(idx int) {
 			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				_, err := tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
 				if err != nil {
 					errs[idx] = err

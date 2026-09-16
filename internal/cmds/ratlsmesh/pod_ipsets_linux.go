@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -109,9 +110,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
-	for family, ip := range discovered {
-		nodeIPsByFamily[family] = ip
-	}
+	maps.Copy(nodeIPsByFamily, discovered)
 	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
 		return err
 	}
@@ -154,7 +153,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 	syncCh := make(chan struct{}, 1)
-	notifySync := func(interface{}) {
+	notifySync := func(any) {
 		select {
 		case syncCh <- struct{}{}:
 		default:
@@ -162,7 +161,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	}
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    notifySync,
-		UpdateFunc: func(_, obj interface{}) { notifySync(obj) },
+		UpdateFunc: func(_, obj any) { notifySync(obj) },
 		DeleteFunc: notifySync,
 	}); err != nil {
 		return fmt.Errorf("iptables sync: add pod event handler: %w", err)
@@ -359,7 +358,7 @@ func (m podIPSetMembers) exceeds(maxElem int) bool {
 		len(m.cwIPv6) > maxElem
 }
 
-func collectPodIPSetMembers(objs []interface{}, nodeIPs []string, excludedSourceNamespaces map[string]struct{}) podIPSetMembers {
+func collectPodIPSetMembers(objs []any, nodeIPs []string, excludedSourceNamespaces map[string]struct{}) podIPSetMembers {
 	ourNodeIPs := make(map[string]struct{}, len(nodeIPs))
 	for _, ip := range nodeIPs {
 		if canon := normalizeIP(ip); canon != "" {
@@ -819,7 +818,7 @@ func readIPSetMaxElem(name string) (int, bool, error) {
 // vary (e.g. comment, counters, skbinfo), so scan rather than hardcoding
 // positions.
 func parseIPSetMaxElemHeader(out string) (int, error) {
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "Header:") {
 			continue

@@ -210,12 +210,8 @@ func newDeleteCmd(o *options) *cobra.Command {
 // already named those.
 func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallowlist.Allowlist) []finding {
 	merged := make(map[string]pkgallowlist.Workload, len(live.Workloads)+len(entries))
-	for name, w := range live.Workloads {
-		merged[name] = w
-	}
-	for name, w := range entries {
-		merged[name] = w
-	}
+	maps.Copy(merged, live.Workloads)
+	maps.Copy(merged, entries)
 	groups, err := indistinguishableGroups(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: merged})
 	if err != nil {
 		return []finding{errorf("workload entries could not be compared with the served allowlist: %v", err)}

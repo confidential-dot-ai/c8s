@@ -92,10 +92,7 @@ func (h *holders) admit(capacity int, want string) (string, bool) {
 	if h.count(want) == 0 {
 		entitled++
 	}
-	share := capacity / entitled
-	if share < minShare {
-		share = minShare
-	}
+	share := max(capacity/entitled, minShare)
 	if h.max <= share {
 		return "", false
 	}

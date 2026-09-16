@@ -16,7 +16,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -233,11 +232,11 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			AttestationApiURL:     opts.AttestationApiURL,
 			CDSMeasurements:       opts.CDSMeasurements,
 			CDSRTMRs:              opts.CDSRTMRs,
-			CertFSGroup:           ptr.To(opts.CertFSGroup),
+			CertFSGroup:           new(opts.CertFSGroup),
 			CertRenewInterval:     opts.CertRenewInterval,
-			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot:   ptr.To(opts.GetCertRunAsNonRoot),
+			GetCertRunAsUser:      new(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:     new(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:   new(opts.GetCertRunAsNonRoot),
 			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
