@@ -245,9 +245,6 @@ func TestParseFileMode(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func ptr(c config) *config { return new(c) }
-
 // An unwritable output directory fails loudly rather than reporting success
 // with no file on disk.
 func TestWriteAllUnwritable(t *testing.T) {
