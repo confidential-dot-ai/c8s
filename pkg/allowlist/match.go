@@ -14,6 +14,15 @@ type RunningContainer struct {
 	Env        *EnvObservation
 }
 
+// ObservedMount is a bind mount classified by the node. Source is diagnostic
+// node-local detail and is excluded from workload identity serialization.
+type ObservedMount struct {
+	Destination string       `json:"destination"`
+	Source      string       `json:"-"`
+	Class       MountClass   `json:"class"`
+	Storage     MountStorage `json:"storage"`
+}
+
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
 // more than one does. Both are refusals, but they say different things to an
 // operator: the first is a set that matches nothing, the second a pair of

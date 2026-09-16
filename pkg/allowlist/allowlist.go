@@ -104,6 +104,28 @@ type MountPolicy struct {
 	Destinations []string `json:"destinations,omitempty" yaml:"destinations,omitempty"`
 }
 
+// MountClass identifies who controls the content behind a bind mount.
+type MountClass string
+
+const (
+	MountPlatform MountClass = "platform"
+	MountEmptyDir MountClass = "emptyDir"
+	MountData     MountClass = "data"
+	MountHost     MountClass = "host"
+)
+
+// MountStorage records the storage guarantee established by the node.
+type MountStorage string
+
+const (
+	MountMemory    MountStorage = "memory"
+	MountEncrypted MountStorage = "encrypted"
+	MountUnknown   MountStorage = "unknown"
+)
+
+// DataMountPrefix is reserved for operator-supplied data.
+const DataMountPrefix = "/mnt/c8s-data/"
+
 // EnvPolicy constrains the complete OCI launch environment. An absent policy means Any.
 type EnvPolicy struct {
 	Policy string            `json:"policy" yaml:"policy"`
