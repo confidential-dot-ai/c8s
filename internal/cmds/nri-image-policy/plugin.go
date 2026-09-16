@@ -72,14 +72,16 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
-// baseAdmits reports whether the base allowlist admits the container. The
-// chart's base entries are any-argv, so their digests are admitted by digest
-// alone.
-func (s *policyStore) baseAdmits(digest string, argv []string) bool {
+// baseAdmits applies the same launch phases as the served allowlist: argv at
+// preliminary admission, then all constraints once runtime evidence is available.
+func (s *policyStore) baseAdmits(r allowlist.RunningContainer, phase launchPhase) bool {
 	if s == nil {
 		return false
 	}
-	return s.base.AdmitsProcess(allowlist.RunningContainer{Digest: digest, Argv: argv})
+	if phase == launchPreliminary {
+		return s.base.AdmitsProcess(r)
+	}
+	return s.base.AdmitsContainer(r)
 }
 
 // apply installs the pulled document at version, unless version is below the
@@ -451,7 +453,7 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 	if phase == launchFinal {
 		admitted = snap.index.AdmitsContainer(rc)
 	}
-	if !p.policy.baseAdmits(digest, argv) && !admitted {
+	if !p.policy.baseAdmits(rc, phase) && !admitted {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.

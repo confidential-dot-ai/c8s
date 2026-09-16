@@ -9,6 +9,58 @@ import (
 	"testing"
 )
 
+func TestTrustedC8sCryptDeviceThroughVerity(t *testing.T) {
+	for _, tc := range []struct {
+		name, mapper, uuid string
+		want               bool
+	}{
+		{"encrypted volume", "c8s-crypt-pod-data", "CRYPT-PLAIN-test", true},
+		{"name without crypt", "c8s-crypt-pod-data", "DM-LINEAR-test", false},
+		{"crypt without c8s name", "unrelated", "CRYPT-PLAIN-test", false},
+		{"missing uuid", "c8s-crypt-pod-data", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			crypt, verity := filepath.Join(root, "crypt"), filepath.Join(root, "verity")
+			for _, dir := range []string{filepath.Join(crypt, "dm"), filepath.Join(verity, "slaves")} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, value := range map[string]string{"name": tc.mapper, "uuid": tc.uuid} {
+				if err := os.WriteFile(filepath.Join(crypt, "dm", name), []byte(value+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(crypt, filepath.Join(verity, "slaves", "crypt")); err != nil {
+				t.Fatal(err)
+			}
+			inspector := linuxStorageInspector{}
+			for _, device := range []string{crypt, verity} {
+				if got := inspector.trustedEncryptedDevice(device, map[string]bool{}); got != tc.want {
+					t.Fatalf("device %s trusted=%v, want %v", device, got, tc.want)
+				}
+			}
+			if inspector.trustedEncryptedDevice(filepath.Join(root, "missing"), map[string]bool{}) {
+				t.Fatal("missing device reported encrypted")
+			}
+		})
+	}
+}
+
+func TestTrustedEncryptedDeviceRejectsSlaveCycle(t *testing.T) {
+	device := t.TempDir()
+	if err := os.Mkdir(filepath.Join(device, "slaves"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(device, filepath.Join(device, "slaves", "self")); err != nil {
+		t.Fatal(err)
+	}
+	if (linuxStorageInspector{}).trustedEncryptedDevice(device, map[string]bool{}) {
+		t.Fatal("device cycle reported encrypted")
+	}
+}
+
 func TestOverlayUpperDirDoesNotInheritHiddenAncestor(t *testing.T) {
 	for _, nested := range []struct {
 		name string

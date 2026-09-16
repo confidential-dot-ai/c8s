@@ -231,6 +231,12 @@ explicit command/args. Choose the policies to match the workload's actual
 mounts; the pod spec alone cannot establish source class or storage protection.
 Omitting `--mounts-file` leaves each container's mount policy at `deny`.
 
+Lint includes mount rules when checking whether workload entries are
+indistinguishable. It also rejects exact `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`,
+or `NODE_PATH` values whose search directories overlap a declared `data` mount:
+those directories could load mounted content as code. The deprecated
+`lint --cvm-mode` flag has no effect; NRI observes both environment and mounts.
+
 The pod UID embedded in a kubelet source must equal the pod being admitted, and
 containerd sandbox sources must name its exact sandbox. These runtime IDs prove
 local ownership only and are not serialized into the stable allowlist.
@@ -381,24 +387,24 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
-Each enforcer also carries a **base enforcement allowlist** that admits by
-digest alone ahead of the served document and is never touched by a pull: the
-host NRI plugin's `allowlist.base` (an allowlist document baked into its boot
-config, chart-rendered from the chart's own component digests plus every
-`bootstrapAllowlist.workloads` container admitted under any command and args).
-That is what lets a node enforce at t=0 offline and bring the platform's own images
-up before CDS is reachable.
+The host NRI plugin also carries a **base enforcement allowlist** in
+`allowlist.base`, baked into its boot config and never changed by a pull.
+Either a base entry or a served entry must satisfy the launch constraints.
+Both sources check argv at preliminary admission, then argv, environment, and
+mounts at final admission; unavailable evidence fails constrained policies.
+Generated system-image entries explicitly allow mounts and leave the other
+launch fields unconstrained so the platform can start before CDS is reachable.
 
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
 digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
 unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
-digest>` with a single container under `command: any, args: any`; an
+digest>` with a single container under `command: any, args: any, env: any, mounts: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
-rendered seed. Operator entries admitting a digest under any command and args
-also feed the host plugin's base allowlist; an entry that pins a command line
-is seed-only. The
+rendered seed. Operator entries with unconstrained command, args, environment,
+and mounts also feed the host plugin's base allowlist; constrained entries
+are seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
 running the old image keep matching while they recycle. The seed never
