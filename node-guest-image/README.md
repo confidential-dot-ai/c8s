@@ -57,7 +57,9 @@ Without the disk
 the initrd falls back to a 2G RAM tmpfs: the guest comes up Ready, then
 wedges once RKE2 fills it — a flapping node, not a boot error.
 `scratch-enforce.service` closes that hole by checking for the dm mapping
-and powering the VM off before rke2 starts.
+and powering the VM off before rke2 starts. It also verifies the crypt UUID and
+`confai-scratch` backing device, then writes boot-local provenance under
+`/run/c8s/scratch-provenance.json` for NRI mount classification.
 
 Every boot also requires an ISO labelled `opkeydata` with these three files
 at its root:

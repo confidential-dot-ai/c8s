@@ -201,10 +201,10 @@ signed bundle and the corresponding role's hardware-bound public key.
 The verified files live in root-only `/run/confos/launch`. `peers.json`
 contains the software/key tuples for this cluster's server and permitted
 agents; `cds.json` contains only its server. Their shared measurement-file
-schema carries `operator_key` as the exact PEM string alongside each entry's
+schema carries `approver_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
 CDS clients require the authorized server despite identical software images.
-The schema belongs to attestation-go's `refvalues` package: `operator_key`
+The schema belongs to attestation-go's `refvalues` package: `approver_key`
 maps to `remote.ImagePin.Anchor`. `remote.EnforceImages` checks the image and
 calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
 borrow another entry's authorized key. c8s passes these complete pins through
@@ -487,8 +487,12 @@ It verifies **in-process** with `attestation-go` — the Go port of the same
 attestation-rs engine the cluster runs. That engine auto-detects the platform and
 AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
 classify. The only requirement on the machine running `c8s verify` is outbound
-HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
-report; no container runtime is needed.
+HTTPS to AMD KDS (`kdsintf.amd.com`) when a bare report's VCEK is not already
+cached; no container runtime is needed. `attestation-go` caches endorsement
+certificates under `os.UserCacheDir()/c8s/kds`, with `c8s` choosing that directory.
+Set `C8S_KDS_CACHE_DIR` to override it, or set it to an empty value to disable
+caching. Certificate verification still runs for every report; revocation data
+is never served from this disk cache. Cache failures do not block a successful fetch.
 
 ```bash
 # CDS's RA-TLS endpoint answers unattested clients:

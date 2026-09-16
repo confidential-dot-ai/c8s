@@ -5,7 +5,7 @@ go 1.26.3
 require github.com/confidential-dot-ai/c8s v0.0.0
 
 require (
-	github.com/confidential-dot-ai/attestation-go v0.7.1-0.20260915170421-300eb04a84ca
+	github.com/confidential-dot-ai/attestation-go v0.7.1-0.20260916145602-cb2540ee1355
 	github.com/google/go-sev-guest v0.15.0 // indirect
 	github.com/google/logger v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect

@@ -44,6 +44,21 @@ permissions:
   contents: read
 
 jobs:
+  containerd:
+    name: pinned RKE2 containerd config
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check RKE2-generated config with bundled containerd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: bash node-guest-image/tests/containerd-test.sh
+
   lint:
     name: node-guest-image invariants
     runs-on: ubuntu-latest
