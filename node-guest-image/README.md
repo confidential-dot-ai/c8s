@@ -67,17 +67,20 @@ at its root:
   `/etc/confai/operator-pubkey`, and binds them into TDX RTMR[3]. An SNP
   launcher must set HOST_DATA to the SHA-256 of
   those same bytes.
-- `launch.yaml`: the strict `c8s-launch/v1` document selecting `server` or
-  `agent`, the image measurements, cluster/node identity, join tokens,
+- `launch.yaml`: the strict `c8s-launch/v2` document selecting `server` or
+  `agent`, the image measurements, cluster/node identity,
   trusted role keys and TLS SAN.
 - `launch.yaml.sig`: the detached signature over those exact bytes.
 
-`c8s launch-config new` writes all three for a server and its agents,
-with distinct server and agent keys and fresh tokens per cluster
-(`c8s launch-config add-agent` extends a bundle later; `c8s keys
-sign-launch` re-signs a hand-edited document). The private keys stay with
-the operator. Agents receive only the
-RKE2 agent token; their documents must omit the server token entirely.
+`c8s launch-config new` writes the signed launch files with distinct server
+and agent keys for each cluster. `c8s launch-config add-agent` extends a bundle
+later; `c8s keys sign-launch` re-signs a hand-edited document. The private keys stay
+with the operator. Launch documents contain
+no credentials: the `rke2` field is rejected, even if empty. Existing v1
+bundles need that field removed, the v2 schema version, and a new signature.
+The server generates its separate agent credential inside the guest; RKE2
+generates its own server token. Agents receive only the agent credential
+and CA pin through mutually attested enrollment.
 There is no diskless/default-server boot. Missing or invalid signed input
 fails the role gate before RKE2 or core services can start.
 
@@ -129,7 +132,8 @@ One image contains all service binaries and role conditions:
 | Local attestation API and Unix-socket proxy | Run | Run |
 | NRI image admission | Run under containerd | Run under containerd |
 | RA-TLS mesh and iptables reconciliation | Run | Run |
-| RKE2 | Server | Agent |
+| RKE2 | Server | Agent after enrollment |
+| Attested agent enrollment | Release if agents are authorized | Enroll before RKE2 |
 | CDS, certificate renewal, TLS front door and attestation routes | Run | Disabled |
 | Attested operator credential release | Run | Disabled |
 
@@ -137,7 +141,14 @@ One image contains all service binaries and role conditions:
 Every dependent service requires that gate. The host attester listens only
 on `127.0.0.1:8400`; workload helpers use its Unix socket in the existing
 admission-inventory directory. CDS listens on the server's port `30808`;
-RKE2 agents join at `9345`; nginx serves the front door on `443`.
+attested enrollment listens on `8444`; RKE2 agents join at `9345`; nginx
+serves the front door on `443`. An agent requires its designated server's
+full image/key policy, and the server accepts only keys in its staged
+`agents.json`. An empty agent list disables the enrollment listener.
+`c8s-join.service` retries unavailable servers and blocks RKE2 agent startup
+until it stages `/run/confos/rke2-agent-token`. It depends only on verified
+launch staging and local attestation, so enrollment can run before the mesh
+or kubelet exists. Routed connectivity is required across datacenters.
 
 The mesh preserves the chart defaults of 10,000 concurrent connections and
 a 128 MiB memory limit. These are fixed in the measured service arguments
@@ -177,7 +188,10 @@ and arbitrary front-door routes are not enabled by launch settings.
 
 CDS keeps its database at `/run/c8s-cds/allowlist.db`; the directory survives
 a service restart, but every VM reboot resets the database and the cluster's
-ephemeral state. The baked component seed and signed initial workload entries
+ephemeral state. The server's separate agent credential also survives service
+restarts and repeat launch staging within one boot. After a server reboot,
+relaunch its agents to enroll against its new CA and credentials. The
+baked component seed and signed initial workload entries
 are reapplied on the next boot. The mesh CA key lives only in CDS process
 memory, so a CDS process restart also requires certificate re-bootstrap.
 Public certificates and discovery files live at `/run/c8s-tls`; launch
@@ -187,7 +201,7 @@ The local unit and rendering checks validate these contracts. They do not
 replace booting the resulting image on the target TEE hardware.
 
 The staged TDX and SNP metal CI lanes require compatible image metadata in
-their respective ConfigMaps; both must set `launchConfigVersion=c8s-launch/v1`:
+their respective ConfigMaps; both must set `launchConfigVersion=c8s-launch/v2`:
 
 | ConfigMap | Additional required fields |
 |---|---|
@@ -199,7 +213,7 @@ and `igvmHookImage`, and a hook that sets HOST_DATA from the launch public key.
 Its `smp` is currently `4`; `snpLaunchDigest` must match that variant in the
 published `manifest.json`. The paired `c8sRef` identifies the image build.
 Changing the attester requires a new measured image. Automatic TDX acceptance
-instead reads the image identity and `launch_config_version=c8s-launch/v1`
+instead reads the image identity and `launch_config_version=c8s-launch/v2`
 from the publication run's validated evidence; it does not read these
 ConfigMaps.
 
@@ -337,7 +351,7 @@ Automatic main-push publication in `c8s-image-publish.yml` calls the separate
 automatic publisher can call exact-image acceptance; neither workflow has a
 manual-dispatch trigger. It consumes the same run and attempt's
 immutable evidence: the source SHA, CDI and ORAS digests, the published
-manifest, and `launch_config_version=c8s-launch/v1`. Evidence validation
+manifest, and `launch_config_version=c8s-launch/v2`. Evidence validation
 binds these to the publication run and attempt and rejects a missing or
 incompatible launch version. Disk and UKI hashes plus MRTD/RTMR1/RTMR2 must
 match the fresh build; a differing nonmeasured build timestamp is not a

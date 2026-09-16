@@ -54,7 +54,7 @@ type BundleOptions struct {
 	WorkloadsPath string
 }
 
-// NewBundle generates the cluster's two launch keys and join tokens, writes
+// NewBundle generates the cluster's two launch keys, writes
 // and signs the server document plus one agent document per name, and
 // emits the client policy. Dir must not exist; a failed run removes it so a
 // half-written bundle can never be attached.
@@ -99,21 +99,12 @@ func NewBundle(opts BundleOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	serverToken, err := newToken()
-	if err != nil {
-		return err
-	}
-	agentToken, err := newToken()
-	if err != nil {
-		return err
-	}
 	server := Document{
 		SchemaVersion:           SchemaVersion,
 		ClusterID:               opts.ClusterID,
 		Role:                    Server,
 		Image:                   image,
 		Node:                    Node{Name: opts.ServerName},
-		RKE2:                    RKE2{ServerToken: serverToken, AgentToken: agentToken},
 		Server:                  ServerConfig{Address: opts.ServerAddress, OperatorPublicKey: serverPub},
 		AgentOperatorPublicKeys: []string{agentPub},
 		TLSSAN:                  opts.TLSSAN,
@@ -142,7 +133,7 @@ func NewBundle(opts BundleOptions) (err error) {
 }
 
 // AddAgent derives an agent document from the bundle's server document
-// (same cluster, image, agent token, keys and SAN; never the server token),
+// (same cluster, image, keys and SAN, without join credentials),
 // signs it with the bundle's agent key and writes <dir>/<name>. It works
 // on a bundle created earlier, so a cluster can grow without regenerating or
 // re-signing anything the server already booted with.
@@ -184,7 +175,6 @@ func AddAgent(dir, name, serverAddress string) (err error) {
 	agent := *server
 	agent.Role = Agent
 	agent.Node = Node{Name: name}
-	agent.RKE2 = RKE2{AgentToken: server.RKE2.AgentToken}
 	agent.Server.Address = serverAddress
 	return writeSignedDocument(filepath.Join(dir, name), agent, key, pub)
 }
@@ -259,7 +249,7 @@ func writeSignedDocument(dir string, doc Document, key *ecdsa.PrivateKey, pub st
 		data []byte
 		mode os.FileMode
 	}{{pubkeyFile, []byte(pub), 0o644}, {documentFile, data, 0o600}, {signatureFile, []byte(signature + "\n"), 0o600}} {
-		// The document carries the join tokens: operator-readable only.
+		// Keep signed launch artifacts private to the operator.
 		if err := writeNew(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
 			return err
 		}
@@ -292,14 +282,6 @@ func publicKeyPEM(key *ecdsa.PrivateKey) (string, error) {
 		return "", fmt.Errorf("encode launch public key: %w", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
-}
-
-func newToken() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generate join token: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
 }
 
 func writeNew(path string, data []byte, mode os.FileMode) error {

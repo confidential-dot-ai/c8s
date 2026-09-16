@@ -43,7 +43,6 @@ func testDocument(t *testing.T, platform string, role Role) (Document, *ecdsa.Pr
 		SchemaVersion: SchemaVersion, ClusterID: "cluster-one", Role: role,
 		Image:                   Image{Platform: platform, Measurement: strings.Repeat("11", 48)},
 		Node:                    Node{Name: "node-one", IP: "10.0.0.2", ExternalIP: "192.0.2.4"},
-		RKE2:                    RKE2{AgentToken: strings.Repeat("a", 64)},
 		Server:                  ServerConfig{Address: "10.0.0.1", OperatorPublicKey: serverPub},
 		AgentOperatorPublicKeys: []string{agentPub},
 	}
@@ -51,7 +50,6 @@ func testDocument(t *testing.T, platform string, role Role) (Document, *ecdsa.Pr
 		doc.Image.RTMRs = map[int]string{1: strings.Repeat("22", 48), 2: strings.Repeat("33", 48)}
 	}
 	if role == Server {
-		doc.RKE2.ServerToken = strings.Repeat("b", 64)
 		return doc, serverKey, serverPub
 	}
 	return doc, agentKey, agentPub
@@ -73,6 +71,9 @@ func testLoader(t *testing.T, doc Document, pub string) {
 
 func testConfig(t *testing.T, doc Document, key *ecdsa.PrivateKey) Config {
 	t.Helper()
+	oldRAM := requireTokenRAM
+	requireTokenRAM = func(*os.Root) error { return nil }
+	t.Cleanup(func() { requireTokenRAM = oldRAM })
 	cfg := Config{Platform: doc.Image.Platform, RootDir: t.TempDir()}
 	cfg.DocumentPath = filepath.Join(t.TempDir(), "launch.yaml")
 	cfg.SignaturePath = cfg.DocumentPath + ".sig"
@@ -151,15 +152,20 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 				if role == Server {
 					requirePresent(t, cfg.path(serverMarker))
 					requireAbsent(t, cfg.path(agentMarker))
-					requirePresent(t, cfg.path(serverTokenPath))
-					if !bytes.Contains(fragment, []byte("agent-token-file: "+agentTokenPath)) {
+					requireAbsent(t, cfg.path(serverTokenPath))
+					requirePresent(t, cfg.path(agentTokenPath))
+					var roleConfig roleFragment
+					if err := yaml.Unmarshal(fragment, &roleConfig); err != nil {
+						t.Fatal(err)
+					}
+					if roleConfig.TokenFile != "" || roleConfig.AgentTokenFile != agentTokenPath {
 						t.Fatal("server must configure the separate agent token")
 					}
 					manifest, err := os.ReadFile(cfg.path(runtimeManifestPath))
 					if err != nil {
 						t.Fatal(err)
 					}
-					if !bytes.Contains(manifest, []byte("cds-url: https://10.0.0.1:30808")) || bytes.Contains(manifest, []byte(doc.RKE2.ServerToken)) {
+					if !bytes.Contains(manifest, []byte("cds-url: https://10.0.0.1:30808")) {
 						t.Fatal("runtime ConfigMap must contain server discovery but no credentials")
 					}
 				} else {
@@ -167,11 +173,12 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					requireAbsent(t, cfg.path(serverMarker))
 					requireAbsent(t, cfg.path(serverTokenPath))
 					requireAbsent(t, cfg.path(runtimeManifestPath))
+					requireAbsent(t, cfg.path(agentTokenPath))
 					if !bytes.Contains(fragment, []byte("server: https://10.0.0.1:9345")) {
 						t.Fatal("agent does not join signed server")
 					}
 				}
-				for _, path := range []string{DefaultStagedPath, agentTokenPath, Dir + "/workloads.json", rke2FragmentPath} {
+				for _, path := range []string{DefaultStagedPath, Dir + "/workloads.json", rke2FragmentPath} {
 					info, err := os.Stat(cfg.path(path))
 					if err != nil {
 						t.Fatal(err)
@@ -197,15 +204,13 @@ func TestVerifyRejectsUnauthorizedRoleOrImage(t *testing.T) {
 		{"rootfs RTMR", Server, func(d *Document) { d.Image.RTMRs[2] = strings.Repeat("44", 48) }, "RTMR[2]"},
 		{"missing RTMR", Server, func(d *Document) { delete(d.Image.RTMRs, 2) }, "exactly RTMR"},
 		{"platform", Server, func(d *Document) { d.Image.Platform = "snp"; d.Image.RTMRs = nil }, "platform"},
-		{"agent as server", Agent, func(d *Document) { d.Role = Server; d.RKE2.ServerToken = strings.Repeat("b", 64) }, "server launch key"},
-		{"server as agent", Server, func(d *Document) { d.Role = Agent; d.RKE2.ServerToken = "" }, "different launch key"},
-		{"agent carries server token", Agent, func(d *Document) { d.RKE2.ServerToken = strings.Repeat("b", 64) }, "must not carry"},
+		{"agent as server", Agent, func(d *Document) { d.Role = Server }, "server launch key"},
+		{"server as agent", Server, func(d *Document) { d.Role = Agent }, "different launch key"},
 		{"shared role keys", Agent, func(d *Document) {
 			d.AgentOperatorPublicKeys = []string{strings.TrimSpace(d.Server.OperatorPublicKey)}
 		}, "distinct"},
 		{"unlisted agent", Agent, func(d *Document) { _, pub := testKey(t); d.AgentOperatorPublicKeys = []string{pub} }, "not in"},
 		{"missing role", Server, func(d *Document) { d.Role = "" }, "role"},
-		{"token equality", Server, func(d *Document) { d.RKE2.ServerToken = d.RKE2.AgentToken }, "must differ"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,10 +249,12 @@ func TestParseRejectsAmbiguousOrUnexpectedFields(t *testing.T) {
 		"duplicate":          append(append([]byte{}, raw...), []byte("role: server\n")...),
 		"multiple":           append(append([]byte{}, raw...), []byte("---\n{}\n")...),
 		"unknown":            append(append([]byte{}, raw...), []byte("helmValues: {}\n")...),
-		"nested unknown":     bytes.Replace(raw, []byte("    agentToken:"), []byte("    arbitraryFlag: hello\n    agentToken:"), 1),
+		"nested unknown":     bytes.Replace(raw, []byte("    name:"), []byte("    arbitraryFlag: hello\n    name:"), 1),
 		"alias":              bytes.Replace(raw, []byte("role: agent"), []byte("role: &role agent"), 1),
-		"empty server token": bytes.Replace(raw, []byte("    agentToken:"), []byte("    serverToken: ''\n    agentToken:"), 1),
-		"null server token":  bytes.Replace(raw, []byte("    agentToken:"), []byte("    serverToken: null\n    agentToken:"), 1),
+		"empty server token": append(append([]byte{}, raw...), []byte("rke2: {serverToken: ''}\n")...),
+		"null server token":  append(append([]byte{}, raw...), []byte("rke2: {serverToken: null}\n")...),
+		"agent token":        append(append([]byte{}, raw...), []byte("rke2: {agentToken: secret}\n")...),
+		"old schema":         bytes.Replace(raw, []byte(SchemaVersion), []byte("c8s-launch/v1"), 1),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -291,7 +298,7 @@ func TestKeylessAndFailedAttestationNeverStageARole(t *testing.T) {
 	}
 }
 
-func TestFailedRestagingClearsAuthorizationAndSecrets(t *testing.T) {
+func TestFailedRestagingClosesGatesAndPreservesLocalCredential(t *testing.T) {
 	doc, key, pub := testDocument(t, "snp", Server)
 	testLoader(t, doc, pub)
 	cfg := testConfig(t, doc, key)
@@ -304,7 +311,8 @@ func TestFailedRestagingClearsAuthorizationAndSecrets(t *testing.T) {
 	if err := Stage(context.Background(), cfg); err == nil {
 		t.Fatal("accepted tampered signature")
 	}
-	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, DefaultStagedPath, runtimeManifestPath, rke2FragmentPath} {
+	requirePresent(t, cfg.path(agentTokenPath))
+	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, DefaultStagedPath, runtimeManifestPath, rke2FragmentPath, Dir + "/agents.json"} {
 		requireAbsent(t, cfg.path(path))
 	}
 }

@@ -101,8 +101,9 @@ with the operator. `pubkey` is bound to the guest by the platform: the measured
 initrd extends TDX RTMR[3], while an SNP launcher must set HOST_DATA to
 `SHA-256(pubkey)` over the exact PEM file bytes.
 
-The strict `c8s-launch/v1` document selects the role, cluster identity, node
-addresses, RKE2 join credentials, trusted role keys, image pins and TLS SAN.
+The strict `c8s-launch/v2` document selects the role, cluster identity, node
+addresses, trusted role keys, image pins and TLS SAN. It contains no RKE2
+credentials and rejects the entire `rke2` field, including empty values.
 It accepts an optional `workloads` string containing a complete
 `c8s.allowlist/v1` JSON document. It does not accept Helm values, arbitrary
 service arguments or component toggles; volume support remains disabled.
@@ -110,13 +111,14 @@ service arguments or component toggles; volume support remains disabled.
 Use **distinct launch keys for server and agent roles, and new keys for
 each cluster**. `clusterID` is a descriptive RFC1123 label; the distinct
 launch keys establish cluster separation during peer verification. Keep one
-server key and one or more agent keys. An agent document must omit
-`rke2.serverToken` entirely, including an empty field; it receives only the
-agent token. Server and agent tokens must differ and contain 64 lowercase
-hexadecimal characters each.
+server key and one or more agent keys. The server generates its separate
+agent credential inside the guest; RKE2 generates the privileged server token.
+Neither credential is present on the host launch disk. Existing v1 bundles
+must remove the `rke2` field, set `schemaVersion: c8s-launch/v2`, and be signed
+again before use with this image.
 
 `c8s launch-config new` creates everything one cluster needs: a server
-launch key, an agent launch key, fresh join tokens, a signed `launch.yaml`
+launch key, an agent launch key, a signed `launch.yaml`
 per node and the client policy that pins the server. Give it the trusted
 `manifest.json` published with the exact node image, the server's guest IPv4
 address that every node can reach, and the agent names. On SNP, also pass
@@ -145,8 +147,9 @@ The bundle directory is created new and never reused:
 
 An agent can be added to a running cluster without touching the server:
 `c8s launch-config add-agent --bundle demo --name demo-agent-3` derives
-its document from the server's (same cluster, image, agent token and keys,
-never the server token) and signs it with the agent key. A server created
+its document from the server's (same cluster, image and authorized keys)
+and signs it with the agent key. The agent obtains its credential through
+attested enrollment after launch. A server created
 without `--server-address` autodetects its own; `add-agent` then needs
 `--server-address`.
 
@@ -200,7 +203,9 @@ signed bundle and the corresponding role's hardware-bound public key.
 
 The verified files live in root-only `/run/confos/launch`. `peers.json`
 contains the software/key tuples for this cluster's server and permitted
-agents; `cds.json` contains only its server. Their shared measurement-file
+agents; `cds.json` contains only its server. On a server with authorized
+agents, `agents.json` contains only those agent identities. Their
+shared measurement-file
 schema carries `operator_key` as the exact PEM string alongside each entry's
 image measurement and TDX RTMR tuple. This lets peers accept both roles while
 CDS clients require the authorized server despite identical software images.
@@ -215,6 +220,28 @@ The server publishes only the CDS URL and server policy to the public
 and private keys do not enter that ConfigMap. The operator forwards the full
 server policy to injected workload helpers. NRI and host CDS clients use the
 same server policy directly from the staged files.
+
+On servers with an authorized agent policy, `c8s-join-release.service`
+listens on TCP `8444`. An agent's `c8s-join.service` authenticates that server
+with the pinned image and designated server key; the server checks the
+agent's pinned image and an explicitly authorized agent key. Both
+endpoints prove possession of their attested TLS keys. This works with TDX
+and SNP, using the same image and platform tuple throughout each cluster.
+Only the agent credential with its RKE2 CA pin is released, and the agent
+stages it in root-only `/run/confos/rke2-agent-token` before RKE2 may start.
+A server without authorized agents does not start the release listener.
+
+Enrollment waits indefinitely while the server is unavailable: the unit
+restarts on failure with a five-second backoff. Until it succeeds,
+RKE2 agent startup remains blocked; enrollment does not depend on CDS, the
+mesh, Kubernetes or kubelet. Nodes in different datacenters need agent-to-
+server TCP `8444`, RKE2 TCP `9345` and `6443`, and routed guest connectivity
+for the mesh and CNI. There is no NAT traversal or control-plane failover.
+
+The server's generated agent credential survives launch staging and service
+restarts within the same boot. All guest runtime state, including RKE2's
+server credential and CA, resets on a full VM reboot. Relaunch agents
+after a server reboot so they enroll against the new ephemeral cluster.
 
 ### Chart-managed defaults
 

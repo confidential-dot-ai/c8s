@@ -68,6 +68,9 @@ func stageBundleNode(t *testing.T, dir, node string) {
 		t.Fatal(err)
 	}
 	testLoader(t, *doc, string(pub))
+	oldRAM := requireTokenRAM
+	requireTokenRAM = func(*os.Root) error { return nil }
+	t.Cleanup(func() { requireTokenRAM = oldRAM })
 	cfg := Config{
 		Platform:      doc.Image.Platform,
 		RootDir:       t.TempDir(),
@@ -98,7 +101,7 @@ func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 			if err := runBundleCmd(t, args...); err != nil {
 				t.Fatal(err)
 			}
-			server, _ := readBundleDocument(t, dir, serverDir)
+			server, serverData := readBundleDocument(t, dir, serverDir)
 			if server.Role != Server || server.Node.Name != "demo-server" || server.ClusterID != "demo" || server.TLSSAN != defaultTLSSAN {
 				t.Fatalf("unexpected server document: %+v", server)
 			}
@@ -112,18 +115,18 @@ func TestNewBundleBootsServerAndAgentsOnBothPlatforms(t *testing.T) {
 			} else if server.Image.Measurement != strings.Repeat("55", 48) || len(server.Image.RTMRs) != 0 {
 				t.Fatalf("SNP pin is not the 8-vCPU variant: %+v", server.Image)
 			}
-			if server.RKE2.ServerToken == server.RKE2.AgentToken || !tokenRE.MatchString(server.RKE2.ServerToken) {
-				t.Fatalf("tokens not generated independently: %+v", server.RKE2)
+			if bytes.Contains(serverData, []byte("rke2:")) || bytes.Contains(serverData, []byte("serverToken:")) || bytes.Contains(serverData, []byte("agentToken:")) {
+				t.Fatal("server launch document carries join credentials")
 			}
 			for _, name := range []string{"demo-f1", "demo-f2"} {
 				agent, data := readBundleDocument(t, dir, name)
 				if agent.Role != Agent || agent.Node.Name != name || agent.Server.Address != "10.0.0.10" {
 					t.Fatalf("unexpected agent %s: %+v", name, agent)
 				}
-				if bytes.Contains(data, []byte(server.RKE2.ServerToken)) || bytes.Contains(data, []byte("serverToken")) {
-					t.Fatalf("agent %s carries the server token", name)
+				if bytes.Contains(data, []byte("rke2:")) || bytes.Contains(data, []byte("serverToken:")) || bytes.Contains(data, []byte("agentToken:")) {
+					t.Fatalf("agent %s launch document carries join credentials", name)
 				}
-				if agent.RKE2.AgentToken != server.RKE2.AgentToken || !reflect.DeepEqual(agent.Image, server.Image) ||
+				if !reflect.DeepEqual(agent.Image, server.Image) ||
 					agent.Server.OperatorPublicKey != server.Server.OperatorPublicKey ||
 					agent.AgentOperatorPublicKeys[0] != server.AgentOperatorPublicKeys[0] {
 					t.Fatalf("agent %s diverges from the server's cluster facts", name)
@@ -187,7 +190,7 @@ func TestAddAgentExtendsAnExistingBundle(t *testing.T) {
 	}
 	server, _ := readBundleDocument(t, dir, serverDir)
 	agent, _ := readBundleDocument(t, dir, "late")
-	if agent.Role != Agent || agent.Server.Address != "10.0.0.10" || agent.RKE2.AgentToken != server.RKE2.AgentToken {
+	if agent.Role != Agent || agent.Server.Address != "10.0.0.10" || !reflect.DeepEqual(agent.Image, server.Image) || agent.Server.OperatorPublicKey != server.Server.OperatorPublicKey {
 		t.Fatalf("unexpected late agent: %+v", agent)
 	}
 	stageBundleNode(t, dir, "late")

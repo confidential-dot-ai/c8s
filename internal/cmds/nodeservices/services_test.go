@@ -18,12 +18,12 @@ func document(role launchconfig.Role) *launchconfig.Document {
 }
 
 func TestAgentCannotRunServerServices(t *testing.T) {
-	for _, name := range []string{"cds", "get-cert", "cds-attest", "allowlist-proxy"} {
+	for _, name := range []string{"cds", "get-cert", "cds-attest", "allowlist-proxy", "join-release"} {
 		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err == nil {
 			t.Errorf("agent can run %s", name)
 		}
 	}
-	for _, name := range []string{"mesh", "mesh-sync", "attest-proxy"} {
+	for _, name := range []string{"mesh", "mesh-sync", "attest-proxy", "join"} {
 		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -160,6 +160,33 @@ func TestPublishNodeIPHonorsAuthenticatedAddress(t *testing.T) {
 		doc.Node.IP = ip
 		if err := PublishNodeIP(t.TempDir(), doc); err == nil {
 			t.Errorf("accepted %s", ip)
+		}
+	}
+}
+
+func TestJoinServicesRequireTheirSeparateRolePolicies(t *testing.T) {
+	server := document(launchconfig.Server)
+	if _, err := Arguments("join", server, ""); err == nil {
+		t.Fatal("server can execute agent enrollment")
+	}
+	if _, err := Arguments("join-release", server, ""); err == nil {
+		t.Fatal("server with no authorized agents can release join tokens")
+	}
+	server.AgentOperatorPublicKeys = []string{"authorized agent"}
+	args, err := Arguments("join-release", server, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(args, "--measurements-config="+launchDir+"agents.json") {
+		t.Fatal("join release does not restrict callers to the agent policy")
+	}
+	args, err = Arguments("join", document(launchconfig.Agent), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"--measurements-config=" + launchDir + "cds.json", "--server=192.0.2.10:8444", "--token-out=/run/confos/rke2-agent-token"} {
+		if !slices.Contains(args, required) {
+			t.Fatalf("missing enrollment argument %s", required)
 		}
 	}
 }

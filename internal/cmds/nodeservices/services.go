@@ -34,6 +34,7 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 		if err := launchconfig.ValidateIPv4(nodeIP, true); err != nil {
 			return nil, fmt.Errorf("mesh requires the routable node IPv4 address")
 		}
+	case service == "join":
 	case service == "attest-proxy":
 	case d.Role != launchconfig.Server:
 		return nil, fmt.Errorf("%s is a server-only service", service)
@@ -42,6 +43,19 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 	api := "--attestation-api-url=" + apiURL
 	pins := "--measurements-config=" + launchDir + "cds.json"
 	switch service {
+	case "join-release":
+		if len(d.AgentOperatorPublicKeys) == 0 {
+			return nil, fmt.Errorf("join-release requires authorized agents")
+		}
+		return []string{"join-release", "--listen=:8444", "--platform=" + d.Image.Platform, api,
+			"--measurements-config=" + launchDir + "agents.json",
+			"--token-path=/var/lib/rancher/rke2/server/agent-token"}, nil
+	case "join":
+		if d.Role != launchconfig.Agent {
+			return nil, fmt.Errorf("join is an agent-only service")
+		}
+		return []string{"join", "--server=" + d.Server.Address + ":8444", "--platform=" + d.Image.Platform, api,
+			pins, "--token-out=/run/confos/rke2-agent-token"}, nil
 	case "attest-proxy":
 		return []string{"attest-proxy", "--socket=/var/run/nri-image-policy/attestation-api.sock", "--socket-gid=65532", "--upstream=" + apiURL}, nil
 	case "cds":
