@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 )
 
