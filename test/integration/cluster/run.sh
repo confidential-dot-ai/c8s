@@ -740,16 +740,18 @@ python3 - "$WORKDIR/served.json" "$NRI_STORE_DIGEST" <<'PYEOF'
 import json, sys
 doc = json.load(open(sys.argv[1]))
 digest = sys.argv[2]
+# Operator-written entries can carry null for absent lists/policies.
 containers = [c for w in doc["workloads"].values()
-              for c in w.get("initContainers", []) + w.get("containers", [])
+              for c in (w.get("initContainers") or []) + (w.get("containers") or [])
               if c.get("digest") == digest]
 assert containers, f"no served entry carries {digest[:19]}"
 # Admission unions across entries per digest: one any-argv row for this
 # digest would admit the sweep regardless of the pin.
 for c in containers:
-    assert c["command"].get("policy") != "any" and c["args"].get("policy") != "any", \
+    assert (c.get("command") or {}).get("policy") != "any" and (c.get("args") or {}).get("policy") != "any", \
         f"any-argv admission for {digest[:19]}: {c}"
-shapes = [(tuple(c["command"].get("argv", [])), tuple(c["args"].get("argv", []))) for c in containers]
+shapes = [(tuple((c.get("command") or {}).get("argv") or []), tuple((c.get("args") or {}).get("argv") or []))
+          for c in containers]
 assert (("/bin/sleep",), ("2147483647",)) in shapes, f"no /bin/sleep pause pin for the sweep: {shapes}"
 assert any(s[0] == ("/bin/sh", "-c") and len(s[1]) == 1 and "c8s host sweep" in s[1][0] for s in shapes), \
     f"no host-sweep script pin: {shapes}"

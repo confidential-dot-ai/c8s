@@ -69,8 +69,8 @@ type hostUninstallConfig struct {
 	// release exists, resolveSweepArgvs replays the argv its allowlist seed
 	// pins instead, so a newer CLI's sweep stays admissible on a cluster
 	// installed by an older chart (the pin is rendered at install time).
-	SweepArgv           []string
-	PauseArgv           []string
+	SweepArgv []string
+	PauseArgv []string
 	// NRI image-policy host paths (nriImagePolicy.*): where the chart's
 	// installer DaemonSet wrote the plugin, or where the node image baked it.
 	// The sweep distinguishes the two via a baked-only marker on the host.
