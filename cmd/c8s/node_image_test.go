@@ -125,10 +125,13 @@ func TestNodeImageRender(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, directive := range []string{"listen 443 ssl;", "server_name c8s-node.invalid;", "pid /run/nginx.pid;", "/run/c8s-tls/cert.pem", "/run/c8s-tls/key.pem", "/run/c8s-tls/ca.pem", "/run/c8s-tls/discovery.json", "location = /allowlist", "limit_req zone=allowlist_write", "127.0.0.1:8801", "127.0.0.1:8800", "location /healthz"} {
+			for _, directive := range []string{"listen 443 ssl;", "server_name c8s-node.invalid;", "pid /run/nginx.pid;", "error_log stderr warn;", "access_log syslog:server=unix:/dev/log,tag=c8s-nginx,nohostname main;", "/run/c8s-tls/cert.pem", "/run/c8s-tls/key.pem", "/run/c8s-tls/ca.pem", "/run/c8s-tls/discovery.json", "location = /allowlist", "limit_req zone=allowlist_write", "127.0.0.1:8801", "127.0.0.1:8800", "location /healthz"} {
 				if !bytes.Contains(nginx, []byte(directive)) {
 					t.Errorf("nginx missing %q", directive)
 				}
+			}
+			if bytes.Contains(nginx, []byte("/var/log/nginx/")) {
+				t.Error("baked nginx still opens distribution-owned log files")
 			}
 			if bytes.Contains(nginx, []byte("upstream catch_all")) {
 				t.Error("unexpected catch-all upstream")

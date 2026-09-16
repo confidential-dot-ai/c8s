@@ -273,3 +273,25 @@ jobs:
 
       - name: Run the systemd-level harness
         run: make test-node-guest-image-role-systemd
+
+  nginx-systemd:
+    name: nginx logging and lifecycle (systemd)
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - name: Check the nginx systemd harness
+        run: shellcheck -x -P SCRIPTDIR node-guest-image/tests/nginx-systemd-test.sh
+
+      - name: Run the production nginx unit and rendered configuration
+        env:
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: make test-node-guest-image-nginx-systemd

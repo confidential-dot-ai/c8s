@@ -139,6 +139,12 @@ on `127.0.0.1:8400`; workload helpers use its Unix socket in the existing
 admission-inventory directory. CDS listens on the server's port `30808`;
 RKE2 agents join at `9345`; nginx serves the front door on `443`.
 
+The baked nginx configuration sends errors to stderr, captured by systemd's
+journal, and access logs to `/dev/log` with the `c8s-nginx` syslog tag.
+Both startup invocations also direct early nginx errors to stderr. Logging
+uses the existing reduced capability set and leaves distribution-owned
+`/var/log/nginx` files untouched.
+
 The mesh preserves the chart defaults of 10,000 concurrent connections and
 a 128 MiB memory limit. These are fixed in the measured service arguments
 and systemd unit for both roles.
@@ -155,10 +161,11 @@ There is no c8s chart archive, Helm installation job or runtime values merge.
 Published images need a `C8S_REF` containing the new commands;
 `v0.1.0-rc2` is incompatible and fails the build with an explicit error.
 
-The build stages measured templates at `/usr/lib/c8s/` and Kubernetes
-The image repro gate instead builds the binary from the gated checkout and
+The image reproducibility gate builds the binary from the gated checkout and
 pre-stages it (`C8S_BINARY`), so a PR is gated on its own code; only the
 operator image and NRI floor still resolve from `C8S_REF` there.
+
+The build stages measured templates at `/usr/lib/c8s/` and Kubernetes
 integration at `server/manifests/c8s-integration.yaml`. At boot, verified
 launch settings produce root-only `/run/confos/launch` files and the public
 `c8s-node-runtime` ConfigMap in `c8s-system`. Its `cds-url` and `cds.json`
@@ -207,6 +214,25 @@ Before either platform boots, the lane builds the paired CLI and generates
 a fresh operator key and signed server launch document. The `opkeydata` disk
 carries `pubkey`, `launch.yaml` and `launch.yaml.sig`. Clients use the matching
 full image tuple and server-key policy when testing the baked services.
+
+## Nginx systemd checks
+
+From the repository root on Linux, with Docker, Go and Helm installed, run:
+
+```sh
+CONFOS_RELEASE=resolute make test-node-guest-image-nginx-systemd
+```
+
+The harness builds a native c8s CLI and renders the actual nginx configuration
+with Helm. It runs the production nginx unit in a disposable privileged Ubuntu
+systemd container, with fixture TLS material and stubs for its two required
+prerequisite services. It checks journal logging, HUP, USR1 and restart with
+inaccessible legacy log files, verifying that their ownership and contents and
+the nginx capability set stay unchanged. CI takes `CONFOS_RELEASE` from the
+pinned confos base release.
+
+These local checks do not establish acceptance of a rebuilt image. Boot and
+attestation must still be tested on the target TDX or SNP hardware.
 
 ## Immutable root checks
 
@@ -460,6 +486,10 @@ tags move will not match.
 
 ### TDX
 
+The authenticated launch gate requires a freshly generated and verified
+quote. Host quote-generation or certificate-provisioning failures block that
+gate before RKE2 and dependent services can start.
+
 - `qgsd` running on the host — the Intel DCAP Quote Generation Service
   that signs the TDREPORT into a full TDX quote. Talks over vsock.
 - Intel PCS API key in `/etc/sgx_default_qcnl.conf` — DCAP fetches
@@ -519,6 +549,14 @@ Provision it with your host-provisioning system before installing c8s:
 - On SEV-SNP hosts, `kvm_amd.sev_snp=1` and an IOMMU on the host cmdline.
 
 ## Troubleshooting
+
+On a debug image (`C8S_DEV=1`), use the guest's serial console to inspect
+nginx diagnostics and access logs for the current boot:
+
+```sh
+journalctl -b -u c8s-nginx.service
+journalctl -b -t c8s-nginx
+```
 
 **`Read-only file system` inside a service** — check that unit's systemd
 sandbox first (`ProtectSystem` and `ReadWritePaths`), then the measured
