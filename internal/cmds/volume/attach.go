@@ -283,7 +283,7 @@ func (a Attacher) loadModules(ctx context.Context) error {
 	}
 	for _, m := range lioModules {
 		if _, err := run(ctx, "modprobe", m); err != nil {
-			return fmt.Errorf("volume: load %s: %w", m, err)
+			return fmt.Errorf("volume: attach requires LIO kernel support; the c8s node image omits LIO and disables module loading after boot; attach through the hypervisor instead (see docs/volumes.md): load %s: %w", m, err)
 		}
 	}
 	return nil
@@ -343,11 +343,14 @@ func newAttachCmd(a Attacher) *cobra.Command {
 		Long: `Expose --image as a block device whose disk serial is c8s-vol-<name>, which is
 what the node matches on to find a volume.
 
-Run this ON THE NODE holding the image, as root. It is only needed where the
-hypervisor cannot give you a disk with a serial of your choosing: a QEMU/KVM
-node can attach the image directly with virtio-blk and skip this entirely.
-Hyper-V exposes no virtio bus, and a cloud disk's serial is the provider's, so
-this drives LIO's loopback target to build a local SCSI disk instead.
+Run this ON THE NODE holding the image, as root, on a Linux node with LIO
+kernel support and configfs mounted. Use it where the hypervisor cannot set
+the disk serial. It builds a local SCSI disk through LIO's loopback target.
+
+This command is unsupported on the c8s node image, which omits LIO and disables
+module loading after boot. For QEMU/KVM, cold-plug virtio-blk at VM launch or
+hot-attach scsi-hd on a virtio-scsi controller provisioned at launch; see
+docs/volumes.md for both recipes.
 
 The image is ciphertext and this does not read it. Pointing a pod at the wrong
 device fails closed — the key will not decrypt it to anything that mounts.

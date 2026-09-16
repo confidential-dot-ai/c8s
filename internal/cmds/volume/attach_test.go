@@ -205,12 +205,21 @@ func TestAttachUnwindsWhatItBuiltOnFailure(t *testing.T) {
 // to says nothing about the cause.
 func TestAttachReportsAModuleThatWillNotLoad(t *testing.T) {
 	a := testAttacher(t)
+	loadErr := errors.New("modprobe: module not found")
 	a.Run = func(context.Context, string, ...string) ([]byte, error) {
-		return nil, errors.New("modprobe: module not found")
+		return nil, loadErr
 	}
 	_, err := a.Attach(context.Background(), "weights", imageFile(t, 1))
-	if err == nil || !strings.Contains(err.Error(), lioModules[0]) {
-		t.Fatalf("attach = %v, want an error naming %s", err, lioModules[0])
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("attach = %v, want the module load error", err)
+	}
+	for _, hint := range []string{lioModules[0], "LIO", "c8s node image", "disables module loading", "hypervisor", "docs/volumes.md"} {
+		if !strings.Contains(err.Error(), hint) {
+			t.Errorf("attach = %v, want guidance containing %q", err, hint)
+		}
+	}
+	if _, err := os.Stat(a.backstore("weights")); !os.IsNotExist(err) {
+		t.Fatalf("module load failure created a backstore: %v", err)
 	}
 }
 
