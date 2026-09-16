@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func secretsConfig() Config {
@@ -20,8 +19,8 @@ func secretsConfig() Config {
 
 func podWithApp() *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "tenant"},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Name: "api", Namespace: "tenant",
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
 	}
 }
 
@@ -268,7 +267,7 @@ func TestEphemeralContainerCannotMountReservedVolumes(t *testing.T) {
 				name = "debugger"
 			}
 			ec := corev1.EphemeralContainer{
-				EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: name},
+				Name: name,
 			}
 			if tc.mount != "" {
 				ec.VolumeMounts = []corev1.VolumeMount{{Name: tc.mount, MountPath: "/x"}}

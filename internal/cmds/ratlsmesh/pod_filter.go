@@ -18,7 +18,7 @@ func defaultMeshExcludedSourceNamespacesCSV() string {
 
 func parseExcludedNamespaces(raw string) map[string]struct{} {
 	out := make(map[string]struct{})
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		ns := strings.TrimSpace(part)
 		if ns == "" {
 			continue

@@ -106,9 +106,7 @@ func TestPolicySnapshotCacheConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			snap, err := cache.snapshot(store)
 			if err != nil {
 				t.Error(err)
@@ -122,7 +120,7 @@ func TestPolicySnapshotCacheConcurrent(t *testing.T) {
 			if string(want) != string(snap.Digest) {
 				t.Error("snapshot digest does not match its own document")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if n := store.loadCount(); n != 1 {

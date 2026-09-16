@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -105,8 +106,8 @@ func (a Attacher) Attach(ctx context.Context, name, image string) (serial string
 		if err == nil {
 			return
 		}
-		for i := len(undo) - 1; i >= 0; i-- {
-			undo[i]()
+		for _, u := range slices.Backward(undo) {
+			u()
 		}
 	}()
 

@@ -17,8 +17,6 @@ import (
 
 	"github.com/google/go-sev-guest/verify/trust"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -50,7 +48,7 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 	if platform != "az-snp" {
 		t.Fatalf("platform = %q, want az-snp", platform)
 	}
-	anchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("challenge")}}
+	anchor := Params{ExpectedReportData: []byte("challenge")}
 
 	res, err := Verify(context.Background(), platform, evidence, anchor)
 	if err != nil {
@@ -73,7 +71,7 @@ func TestVerifyRealAzSnpEvidence_MeasurementPin(t *testing.T) {
 		t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
 	}
 
-	wrongAnchor := Params{VerifyParams: teetypes.VerifyParams{ExpectedReportData: []byte("not-the-nonce")}}
+	wrongAnchor := Params{ExpectedReportData: []byte("not-the-nonce")}
 	if _, err := Verify(context.Background(), platform, evidence, wrongAnchor); err == nil {
 		t.Fatal("a wrong binding anchor must fail closed")
 	}
@@ -155,8 +153,7 @@ func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("expired ctx took %v, want prompt return", elapsed)
 	}
-	var ce *CollateralError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CollateralError](err); !ok {
 		t.Fatalf("KDS fetch failure must classify as CollateralError, got: %v", err)
 	}
 }

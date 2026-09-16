@@ -1000,12 +1000,10 @@ func cwPodStore(t *testing.T) cache.Store {
 	t.Helper()
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	if err := store.Add(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "serving",
-			Namespace: "demo",
-			Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
-		},
-		Status: corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
+		Name:      "serving",
+		Namespace: "demo",
+		Labels:    map[string]string{labelConfidentialWorkload: "vllm"},
+		Status:    corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "10.244.0.9"},
 	}); err != nil {
 		t.Fatalf("seed pod store: %v", err)
 	}

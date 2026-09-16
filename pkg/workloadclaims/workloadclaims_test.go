@@ -183,8 +183,7 @@ func TestTokenRouteLoopbackHasNoPeerPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := &fakeResolver{pid: -1, sandboxID: "sandbox-1"}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = ServeTokens(ctx, l, resolver, testSigner(t)) }()
 
 	requester := testRequesterKey(t)
@@ -682,8 +681,7 @@ func TestServeSurfacesListenerError(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	if err := ServeDigests(ctx, l, &fakeResolver{}, nil); err == nil {
 		t.Fatal("ServeDigests on a closed listener returned nil")
 	}

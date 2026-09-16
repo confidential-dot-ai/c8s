@@ -3,6 +3,7 @@ package cds
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -167,10 +168,5 @@ func TestResolveMeasurementsConfigFailsClosed(t *testing.T) {
 }
 
 func containsPin(pins []string, want string) bool {
-	for _, p := range pins {
-		if p == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(pins, want)
 }

@@ -131,8 +131,7 @@ func Retry(ctx context.Context, cfg Config, what string, attempt func(context.Co
 			return nil
 		}
 		lastErr = err
-		var t terminal
-		if errors.As(err, &t) {
+		if _, ok := errors.AsType[terminal](err); ok {
 			slog.Error(what+" release cannot succeed", "attempt", n, "of", cfg.Attempts, "error", err)
 			return err
 		}

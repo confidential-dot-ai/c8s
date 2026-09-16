@@ -27,7 +27,7 @@ func NewCmd() *cobra.Command {
 }
 
 func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{Options: cdsconn.Options{Verify: verify}}
+	o := &options{Verify: verify}
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Build encrypted volumes and store their keys in CDS",

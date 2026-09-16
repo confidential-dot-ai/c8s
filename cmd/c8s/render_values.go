@@ -261,11 +261,11 @@ func valueArgsToTree(setArgs []string) (map[string]any, error) {
 			return nil, fmt.Errorf("dangling %s with no key=value", flag)
 		}
 		kv := setArgs[i+1]
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
+		before, after, ok := strings.Cut(kv, "=")
+		if !ok {
 			return nil, fmt.Errorf("malformed value arg %q (no '=')", kv)
 		}
-		path, raw := kv[:eq], kv[eq+1:]
+		path, raw := before, after
 		var value any
 		switch flag {
 		case "--set":

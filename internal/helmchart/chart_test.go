@@ -968,12 +968,7 @@ func hasCapability(c corev1.Container, want corev1.Capability) bool {
 	if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil {
 		return false
 	}
-	for _, got := range c.SecurityContext.Capabilities.Add {
-		if got == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.SecurityContext.Capabilities.Add, want)
 }
 
 // PrometheusRule's types live in a separate go module (prometheus-operator)
@@ -3366,13 +3361,13 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 	}
 
 	var stack []*nginxBlock
-	for _, line := range strings.Split(conf, "\n") {
+	for line := range strings.SplitSeq(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasSuffix(trimmed, "{") {
-			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+		if before, ok := strings.CutSuffix(trimmed, "{"); ok {
+			fields := strings.Fields(strings.TrimSpace(before))
 			block := &nginxBlock{directives: make(map[string][][]string)}
 			cfg.all = append(cfg.all, block)
 			if len(fields) == 1 && fields[0] == "http" {
@@ -4387,7 +4382,7 @@ type docMeta struct {
 // we silently drop.
 func splitManifestDocs(manifest string) []string {
 	var out []string
-	for _, doc := range strings.Split(manifest, "\n---\n") {
+	for doc := range strings.SplitSeq(manifest, "\n---\n") {
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}

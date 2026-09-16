@@ -226,8 +226,7 @@ func TestInboundHandler(t *testing.T) {
 		metrics:     testMetrics(),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Start inbound listener manually to get the actual port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -295,8 +294,7 @@ func TestOutboundLocal(t *testing.T) {
 		metrics:     testMetrics(),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go func() {
 		for {
@@ -362,8 +360,7 @@ func TestEndToEnd(t *testing.T) {
 	_, node2PortStr, _ := net.SplitHostPort(node2Ln.Addr().String())
 
 	node2 := &Proxy{logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go func() {
 		for {
@@ -440,8 +437,7 @@ func TestConcurrentConnections(t *testing.T) {
 	tlsLn := tls.NewListener(inboundLn, serverTLS)
 
 	p := &Proxy{logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go func() {
 		for {
@@ -505,8 +501,7 @@ func TestDestHeaderTimeout(t *testing.T) {
 		metrics:           testMetrics(),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -553,8 +548,7 @@ func TestInvalidDestination(t *testing.T) {
 		metrics:           testMetrics(),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -618,11 +612,9 @@ func TestGracefulDrain(t *testing.T) {
 			if err != nil {
 				return
 			}
-			p.activeConns.Add(1)
-			go func() {
-				defer p.activeConns.Done()
+			p.activeConns.Go(func() {
 				p.handleInbound(ctx, conn)
-			}()
+			})
 		}
 	}()
 
@@ -733,8 +725,7 @@ func TestConnectionLimit(t *testing.T) {
 		connSem:   make(chan struct{}, 1), // limit to 1 concurrent
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -850,8 +841,7 @@ func TestRouteErrorMetrics(t *testing.T) {
 		metrics: m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -893,8 +883,7 @@ func TestOutboundRejectsNonPodOriginalDestination(t *testing.T) {
 		metrics: m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -945,8 +934,7 @@ func TestDestHeaderReadErrorMetrics(t *testing.T) {
 		metrics:           m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1050,8 +1038,7 @@ func TestMetricsAccounting(t *testing.T) {
 		metrics:   m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1101,8 +1088,7 @@ func TestInboundDialFailureMetrics(t *testing.T) {
 		metrics:     m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1154,8 +1140,7 @@ func TestRATLSDialFailureMetrics(t *testing.T) {
 		metrics:        m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1249,8 +1234,7 @@ func TestInboundDestRejected(t *testing.T) {
 		metrics:           m,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

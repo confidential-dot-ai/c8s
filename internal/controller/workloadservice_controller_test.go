@@ -29,10 +29,8 @@ func cwTemplate(cwID string, ports ...corev1.ContainerPort) corev1.PodTemplateSp
 		annotations = map[string]string{webhook.AnnotationWorkload: cwID}
 	}
 	return corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      map[string]string{"app": "x"},
-			Annotations: annotations,
-		},
+		Labels:      map[string]string{"app": "x"},
+		Annotations: annotations,
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "app", Image: "img", Ports: ports}},
 		},
@@ -41,7 +39,7 @@ func cwTemplate(cwID string, ports ...corev1.ContainerPort) corev1.PodTemplateSp
 
 func cwDeployment(ns, name, cwID string, ports ...corev1.ContainerPort) *appsv1.Deployment {
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("uid-" + name)},
+		Name: name, Namespace: ns, UID: types.UID("uid-" + name),
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}},
 			Template: cwTemplate(cwID, ports...),
@@ -62,7 +60,7 @@ func reconcilerFor(kind v1alpha2.WorkloadKind, excluded map[string]struct{}, obj
 
 func reconcile(t *testing.T, r *WorkloadServiceReconciler, ns, name string) {
 	t.Helper()
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}
+	req := ctrl.Request{Namespace: ns, Name: name}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -110,14 +108,14 @@ func TestWorkloadServiceCreatesHeadlessService(t *testing.T) {
 
 func TestWorkloadServiceSupportsStatefulSetAndDaemonSet(t *testing.T) {
 	sts := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "tenant", UID: "uid-db"},
+		Name: "db", Namespace: "tenant", UID: "uid-db",
 		Spec: appsv1.StatefulSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}},
 			Template: cwTemplate("db"),
 		},
 	}
 	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "tenant", UID: "uid-agent"},
+		Name: "agent", Namespace: "tenant", UID: "uid-agent",
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}},
 			Template: cwTemplate("agent"),
@@ -202,7 +200,7 @@ func TestWorkloadServiceSkipsInvalidCwID(t *testing.T) {
 
 func TestWorkloadServiceDoesNotAdoptForeignService(t *testing.T) {
 	foreign := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "c8s-api", Namespace: "tenant", UID: "uid-foreign"},
+		Name: "c8s-api", Namespace: "tenant", UID: "uid-foreign",
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "user-owned"},
 			Ports:    []corev1.ServicePort{{Name: "web", Port: 80}},
@@ -211,7 +209,7 @@ func TestWorkloadServiceDoesNotAdoptForeignService(t *testing.T) {
 	dep := cwDeployment("tenant", "api", "api")
 	r := reconcilerFor(v1alpha2.WorkloadKindDeployment, nil, dep, foreign)
 	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -293,15 +291,14 @@ func reconcilerWithClient(c client.Client) *WorkloadServiceReconciler {
 // Deployment under a name the reconciler no longer desires.
 func staleManagedService(name string, dep *appsv1.Deployment) *corev1.Service {
 	controller := true
-	return &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+	return &corev1.Service{
 		Name:      name,
 		Namespace: dep.Namespace,
 		Labels:    map[string]string{managedByLabel: managedByValue},
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: "apps/v1", Kind: "Deployment",
 			Name: dep.Name, UID: dep.UID, Controller: &controller,
-		}},
-	}}
+		}}}
 }
 
 func TestWorkloadServiceMissingWorkloadIsNoOp(t *testing.T) {
@@ -319,7 +316,7 @@ func TestWorkloadServiceGetErrorSurfaces(t *testing.T) {
 	}).Build()
 	r := reconcilerWithClient(c)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	// The reconciler returns the Get failure unwrapped (only NotFound is
 	// swallowed), so the exact injected error must surface.
@@ -341,7 +338,7 @@ func TestWorkloadServiceListErrorSurfaces(t *testing.T) {
 		}).Build()
 	r := reconcilerWithClient(c)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	if err == nil || !strings.Contains(err.Error(), "list managed Services") {
 		t.Fatalf("err = %v, want list managed Services failure", err)
@@ -359,7 +356,7 @@ func TestWorkloadServiceDeleteStaleErrorSurfaces(t *testing.T) {
 		}).Build()
 	r := reconcilerWithClient(c)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	if err == nil || !strings.Contains(err.Error(), "delete stale Service") {
 		t.Fatalf("err = %v, want delete stale Service failure", err)
@@ -394,7 +391,7 @@ func TestWorkloadServiceCreateErrorSurfaces(t *testing.T) {
 		}).Build()
 	r := reconcilerWithClient(c)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	if err == nil || !strings.Contains(err.Error(), "ensure headless Service") {
 		t.Fatalf("err = %v, want ensure headless Service failure", err)
@@ -413,7 +410,7 @@ func TestWorkloadServiceAlreadyExistsRequeues(t *testing.T) {
 		}).Build()
 	r := reconcilerWithClient(c)
 	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -443,7 +440,7 @@ func TestWorkloadServiceLogsUnnameableCwID(t *testing.T) {
 			rec := newLogRecorder()
 			ctx := log.IntoContext(context.Background(), rec.logger())
 			if _, err := r.Reconcile(ctx, ctrl.Request{
-				NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+				Namespace: "tenant", Name: "api",
 			}); err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
@@ -463,7 +460,7 @@ func TestWorkloadServiceLogsReconcileOnlyOnChange(t *testing.T) {
 	first := newLogRecorder()
 	ctx := log.IntoContext(context.Background(), first.logger())
 	if _, err := r.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -474,7 +471,7 @@ func TestWorkloadServiceLogsReconcileOnlyOnChange(t *testing.T) {
 	second := newLogRecorder()
 	ctx = log.IntoContext(context.Background(), second.logger())
 	if _, err := r.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+		Namespace: "tenant", Name: "api",
 	}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}

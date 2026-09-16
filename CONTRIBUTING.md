@@ -70,7 +70,7 @@ comment, and PRs cannot merge until the check passes.
 
 ## Development setup
 
-You need Go 1.26 or later (the toolchain version is derived from `go.mod`).
+You need Go 1.27 or later (the toolchain version is derived from `go.mod`).
 
 ```sh
 make build   # build all binaries

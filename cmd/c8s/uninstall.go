@@ -696,12 +696,10 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: n})
 	}
 	return &appsv1.DaemonSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "DaemonSet"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      hostSweepName(release),
-			Namespace: namespace,
-			Labels:    labels,
-		},
+		APIVersion: "apps/v1", Kind: "DaemonSet",
+		Name:      hostSweepName(release),
+		Namespace: namespace,
+		Labels:    labels,
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
@@ -765,10 +763,8 @@ func hostSweepDaemonSet(release, namespace string, cfg hostUninstallConfig) *app
 						},
 					}},
 					Volumes: []corev1.Volume{{
-						Name: "host",
-						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{Path: "/"},
-						},
+						Name:     "host",
+						HostPath: &corev1.HostPathVolumeSource{Path: "/"},
 					}},
 				},
 			},

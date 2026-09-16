@@ -20,7 +20,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 )
 
@@ -139,11 +138,10 @@ func TestRunCreateStoresBlobAndPrintsGuidance(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	o := &options{Options: cdsconn.Options{
+	o := &options{
 		URL:         srv.URL,
 		Insecure:    true,
-		OperatorKey: operatorKeyFile(t, f.dir),
-	}}
+		OperatorKey: operatorKeyFile(t, f.dir)}
 	cfg := f.config(fake)
 	cfg.node = "node-1"
 
@@ -199,9 +197,8 @@ func TestRunCreateSurfacesCDSRefusal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	o := &options{Options: cdsconn.Options{
-		URL: srv.URL, Insecure: true, OperatorKey: operatorKeyFile(t, f.dir),
-	}}
+	o := &options{
+		URL: srv.URL, Insecure: true, OperatorKey: operatorKeyFile(t, f.dir)}
 	cmd, _ := captureCmd()
 	err := runCreate(cmd, o, f.config(newFake()))
 	if err == nil || !strings.Contains(err.Error(), "not replaceable") {

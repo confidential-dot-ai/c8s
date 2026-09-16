@@ -5,6 +5,7 @@ package ratlsmesh
 import (
 	"fmt"
 	"net"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 )
@@ -37,10 +38,5 @@ func defaultLocalRouteCheck(destIP string, allowedIfaces []string) (bool, error)
 }
 
 func ifaceAllowed(iface string, allowedIfaces []string) bool {
-	for _, allowed := range allowedIfaces {
-		if iface == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowedIfaces, iface)
 }

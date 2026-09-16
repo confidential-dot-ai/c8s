@@ -4,12 +4,12 @@ package ratlsmesh
 
 import (
 	"context"
+	"maps"
 	"net"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -495,7 +495,7 @@ func TestK8sResolverCanonicalizesHostIPForLocalChecks(t *testing.T) {
 	}
 
 	r.onPod(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-v6"},
+		UID: "uid-v6",
 		Status: corev1.PodStatus{
 			HostIP: "FD00:0:0:0:0:0:0:10",
 			PodIP:  "fd00:1::5",
@@ -594,7 +594,7 @@ func TestK8sResolverValidateLocalDestVsCIDRRefresh(t *testing.T) {
 
 	const readers = 8
 	done := make(chan struct{})
-	for i := 0; i < readers; i++ {
+	for range readers {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for ctx.Err() == nil {
@@ -621,14 +621,14 @@ func TestK8sResolverValidateLocalDestVsCIDRRefresh(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < readers+1; i++ {
+	for range readers + 1 {
 		<-done
 	}
 }
 
 func TestK8sResolverPodEvents(t *testing.T) {
 	dualStack := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-1"},
+		UID: "uid-1",
 		Status: corev1.PodStatus{
 			PodIP:  "10.244.0.5",
 			HostIP: "10.0.0.1",
@@ -636,8 +636,8 @@ func TestK8sResolverPodEvents(t *testing.T) {
 		},
 	}
 	hostNetwork := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-host"},
-		Spec:       corev1.PodSpec{HostNetwork: true},
+		UID:  "uid-host",
+		Spec: corev1.PodSpec{HostNetwork: true},
 		Status: corev1.PodStatus{
 			PodIP:  "10.0.0.1",
 			HostIP: "10.0.0.1",
@@ -646,7 +646,7 @@ func TestK8sResolverPodEvents(t *testing.T) {
 	}
 	pending := &corev1.Pod{Status: corev1.PodStatus{PodIP: "10.244.0.5"}}
 	succeeded := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-1"},
+		UID: "uid-1",
 		Status: corev1.PodStatus{
 			Phase:  corev1.PodSucceeded,
 			PodIP:  "10.244.0.5",
@@ -655,7 +655,7 @@ func TestK8sResolverPodEvents(t *testing.T) {
 		},
 	}
 	failed := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-1"},
+		UID: "uid-1",
 		Status: corev1.PodStatus{
 			Phase:  corev1.PodFailed,
 			PodIP:  "10.244.0.5",
@@ -665,7 +665,7 @@ func TestK8sResolverPodEvents(t *testing.T) {
 	}
 	tombstone := cache.DeletedFinalStateUnknown{
 		Obj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{UID: "uid-tomb"},
+			UID: "uid-tomb",
 			Status: corev1.PodStatus{
 				PodIP:  "10.244.0.5",
 				HostIP: "10.0.0.1",
@@ -733,9 +733,7 @@ func TestK8sResolverPodEvents(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			seed := make(map[string]podEntry, len(tc.seed))
-			for k, v := range tc.seed {
-				seed[k] = v
-			}
+			maps.Copy(seed, tc.seed)
 			r := &k8sResolver{nodeIP: "10.0.0.1", logger: testLogger(), podMap: seed}
 			tc.event(r)
 			for _, k := range tc.wantIn {
@@ -755,7 +753,7 @@ func TestK8sResolverPodEvents(t *testing.T) {
 func TestK8sResolverInformer(t *testing.T) {
 	clientset := fake.NewSimpleClientset(
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", UID: "uid-a"},
+			Name: "pod-a", Namespace: "default", UID: "uid-a",
 			Status: corev1.PodStatus{
 				PodIP:  "10.244.0.10",
 				HostIP: "10.0.0.1",
@@ -763,7 +761,7 @@ func TestK8sResolverInformer(t *testing.T) {
 			},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: "default", UID: "uid-b"},
+			Name: "pod-b", Namespace: "default", UID: "uid-b",
 			Status: corev1.PodStatus{
 				PodIP:  "10.244.1.10",
 				HostIP: "10.0.0.2",
@@ -799,14 +797,14 @@ func TestK8sResolverInformer(t *testing.T) {
 // advances on cache-mutating events.
 func TestK8sResolverLastEventTime(t *testing.T) {
 	full := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-evt"},
+		UID: "uid-evt",
 		Status: corev1.PodStatus{
 			PodIP:  "10.244.0.5",
 			HostIP: "10.0.0.1",
 			PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
 		},
 	}
-	pending := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "uid-pending"}, Status: corev1.PodStatus{}}
+	pending := &corev1.Pod{UID: "uid-pending", Status: corev1.PodStatus{}}
 
 	for _, tc := range []struct {
 		name  string
@@ -838,7 +836,7 @@ func TestK8sResolverDeleteGuardsIPReuse(t *testing.T) {
 
 	// Pod A gets IP 10.244.0.5.
 	podA := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-a"},
+		UID: "uid-a",
 		Status: corev1.PodStatus{
 			PodIP:  "10.244.0.5",
 			HostIP: "10.0.0.1",
@@ -849,7 +847,7 @@ func TestK8sResolverDeleteGuardsIPReuse(t *testing.T) {
 
 	// Pod B gets the same IP (reuse) on the same node.
 	podB := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{UID: "uid-b"},
+		UID: "uid-b",
 		Status: corev1.PodStatus{
 			PodIP:  "10.244.0.5",
 			HostIP: "10.0.0.1",

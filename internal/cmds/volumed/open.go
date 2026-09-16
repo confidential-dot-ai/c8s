@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -217,8 +218,8 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	fail := func(err error) (*mount, error) {
 		cleanup, cancel := cleanupContext(ctx)
 		defer cancel()
-		for i := len(undo) - 1; i >= 0; i-- {
-			undo[i](cleanup)
+		for _, u := range slices.Backward(undo) {
+			u(cleanup)
 		}
 		return nil, err
 	}
