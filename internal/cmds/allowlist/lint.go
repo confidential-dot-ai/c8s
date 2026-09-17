@@ -291,14 +291,19 @@ func searchPathFindings(al *pkgallowlist.Allowlist) []finding {
 					continue
 				}
 				for _, rule := range c.Mounts.Rules {
-					if rule.Kind == pkgallowlist.MountData && searchPathReachesMount(value, rule.Destination) {
-						out = append(out, errorf("workload %q container %s pins %s to a search path overlapping data mount %q; operator-supplied content could be loaded as code", name, c.Digest.String(), variable, rule.Destination))
+					if searchPathLoadsMountedContent(value, rule) {
+						out = append(out, errorf("workload %q container %s pins %s to a search path overlapping %s mount %q; operator-supplied content could be loaded as code", name, c.Digest.String(), variable, rule.Kind, rule.Destination))
 					}
 				}
 			}
 		}
 	}
 	return out
+}
+
+func searchPathLoadsMountedContent(value string, rule pkgallowlist.MountRule) bool {
+	operatorSupplied := rule.Kind == pkgallowlist.MountData || rule.Kind == pkgallowlist.MountHost
+	return operatorSupplied && searchPathReachesMount(value, rule.Destination)
 }
 
 func searchPathReachesMount(value, destination string) bool {

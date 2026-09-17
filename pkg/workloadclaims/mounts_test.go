@@ -87,3 +87,30 @@ func TestMountEvidenceJSONRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestHostMountIdentityRoundTrip(t *testing.T) {
+	mount := allowlist.ObservedMount{Destination: "/config", Class: allowlist.MountHost, Source: "/etc/service", HostSourceDigest: allowlist.HostSourceDigest("/etc/service"), ReadOnly: true}
+	c := SandboxContainer{Mounts: []allowlist.ObservedMount{mount}}
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), mount.Source) {
+		t.Fatal("source path escaped into inventory")
+	}
+	var roundTrip SandboxContainer
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.Key() != c.Key() {
+		t.Fatal("host identity changed on round trip")
+	}
+	for _, source := range []string{"/etc/service", "/etc/other"} {
+		changed := mount
+		changed.HostSourceDigest = allowlist.HostSourceDigest(source)
+		changed.ReadOnly = source != "/etc/service"
+		if (SandboxContainer{Mounts: []allowlist.ObservedMount{changed}}).Key() == c.Key() {
+			t.Fatal("host authority collapsed in inventory key")
+		}
+	}
+}

@@ -1,0 +1,59 @@
+package allowlist
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestHostMountPolicy(t *testing.T) {
+	policy := MountPolicy{Policy: PolicyExact, Rules: []MountRule{{Destination: "/config", Kind: MountHost, Source: "/etc/service", ReadOnly: true}}}
+	if err := normalizeMounts(&policy); err != nil {
+		t.Fatal(err)
+	}
+	good := ObservedMount{Destination: "/config", Class: MountHost, Storage: MountUnknown, HostSourceDigest: HostSourceDigest("/etc/service"), ReadOnly: true}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ObservedMount)
+		want   bool
+	}{
+		{"pinned", func(*ObservedMount) {}, true},
+		{"source", func(m *ObservedMount) { m.HostSourceDigest = HostSourceDigest("/etc/other") }, false},
+		{"missing source", func(m *ObservedMount) { m.HostSourceDigest = "" }, false},
+		{"destination", func(m *ObservedMount) { m.Destination = "/other" }, false},
+		{"writable", func(m *ObservedMount) { m.ReadOnly = false }, false},
+		{"class", func(m *ObservedMount) { m.Class = MountData }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := good
+			tc.mutate(&m)
+			if policy.admits([]ObservedMount{m}) != tc.want {
+				t.Fatalf("unexpected admission for %+v", m)
+			}
+		})
+	}
+	encoded, err := json.Marshal(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip ObservedMount
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if !policy.admits([]ObservedMount{roundTrip}) {
+		t.Fatal("serialized host evidence failed release matching")
+	}
+	if (mountConstraint{policy: &policy}).hostIndependent() {
+		t.Fatal("pinned host content reported host-independent")
+	}
+	for _, source := range []string{"", "relative", "/etc/../service", "/etc/service/", "/etc/\x00service"} {
+		policy.Rules[0].Source = source
+		if err := normalizeMounts(&policy); err == nil {
+			t.Errorf("accepted source %q", source)
+		}
+	}
+	policy.Rules[0].Kind = MountEmptyDir
+	policy.Rules[0].Source = "/etc/service"
+	if err := normalizeMounts(&policy); err == nil {
+		t.Fatal("accepted host fields on emptyDir")
+	}
+}
