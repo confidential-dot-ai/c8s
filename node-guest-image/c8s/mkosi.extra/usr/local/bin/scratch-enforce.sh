@@ -35,10 +35,13 @@ for d in "$SYS_BLOCK_ROOT"/dm-*; do
     case "$uuid" in CRYPT-*) ;; *) fail "scratch mapping is not a crypt target" ;; esac
     device=$(cat "$d/dev" 2>/dev/null || true)
     case "$device" in ''|*[!0-9:]*|:*|*:) fail "scratch mapping has no valid device number" ;; esac
+    # virtio-blk publishes the disk serial as the block device's own attribute,
+    # /sys/block/<dev>/serial, which is what the initrd matched to build this
+    # mapping; the parent virtio device under <dev>/device carries no serial.
     scratch_slave=false
     for slave in "$d"/slaves/*; do
         [ -e "$slave" ] || continue
-        if [ "$(cat "$slave/device/serial" 2>/dev/null || true)" = "confai-scratch" ]; then
+        if [ "$(cat "$slave/serial" 2>/dev/null || true)" = "confai-scratch" ]; then
             scratch_slave=true
         fi
     done
