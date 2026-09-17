@@ -177,6 +177,14 @@ if "/" not in repo or ("." not in repo.split("/")[0] and ":" not in repo.split("
 print(repo + "@" + img["digest"])')"
 node_exec ctr -n k8s.io images pull "$ROUTER_NGINX_REF" >/dev/null \
     || fail "could not pull $ROUTER_NGINX_REF into the node"
+# kind's local-path provisioner spawns a per-PVC helper pod from its config's
+# helperPod.yaml; the floor must admit that image for the provisioning test below.
+HELPER_IMAGE="$(kubectl -n local-path-storage get configmap local-path-config \
+    -o jsonpath='{.data.helperPod\.yaml}' | awk '/image:/ {print $2; exit}')"
+[ -n "$HELPER_IMAGE" ] || fail "kind local-path helper image not found in local-path-config"
+if [ "${HELPER_IMAGE#*/}" = "$HELPER_IMAGE" ]; then HELPER_IMAGE="library/$HELPER_IMAGE"; fi
+node_exec ctr -n k8s.io images pull "docker.io/$HELPER_IMAGE" >/dev/null \
+    || fail "could not pull local-path helper image $HELPER_IMAGE into the node"
 
 log "Writing the allowlist floor"
 # Every image in the node's store (kind system images, the loaded c8s images,
@@ -456,6 +464,30 @@ pod_fixture bad-hostnet bad-hostnet demo sleep 3600 > "$WORKDIR/bad-hostnet.yaml
 OUT="$(kubectl apply -f "$WORKDIR/bad-hostnet.yaml" 2>&1 || true)"
 echo "$OUT" | grep -q "c8s-deny-host-namespaces" || fail "hostNetwork tenant pod not rejected: $OUT"
 pass "hostNetwork tenant pod rejected by the host-namespace policy"
+
+log "Dynamic provisioning (issue #210)"
+# kind's default class is local-path, the node cluster's shape: the provisioner's
+# hostPath helper runs in VAP-exempt local-path-storage. If the exemption
+# regresses, the helper is denied and this PVC stays Pending.
+kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: prov-check, namespace: demo}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 16Mi}}
+EOF
+# WORKLOAD_IMAGE, not the floor-excluded curl fixture: the pod must clear NRI image admission.
+python3 "$SCRIPT_DIR/pod-fixture.py" pvc prov-check demo "$WORKLOAD_IMAGE" -- \
+    sh -c 'echo c8s > /data/probe && sleep 3600' > "$WORKDIR/prov-check.yaml"
+kubectl apply -f "$WORKDIR/prov-check.yaml" >/dev/null
+kubectl -n demo wait --for=condition=Ready pod/prov-check --timeout=120s \
+    || fail "local-path PVC never bound — the provisioner's helper pod must admit in VAP-exempt local-path-storage (kubectl -n demo describe pvc prov-check)"
+[ "$(kubectl -n demo exec prov-check -- cat /data/probe)" = "c8s" ] \
+    || fail "read-back through the provisioned local-path volume failed"
+kubectl -n demo delete pod prov-check --wait=false >/dev/null
+kubectl -n demo delete pvc prov-check --wait=false >/dev/null
+pass "PVC on the default class dynamically provisioned and writable"
 
 log "Image admission (NRI fail-closed)"
 pod_fixture client denied demo sleep 3600 > "$WORKDIR/denied.yaml"
