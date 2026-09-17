@@ -101,6 +101,11 @@ func TestReadyHandler(t *testing.T) {
 	if got := get(); got != http.StatusServiceUnavailable {
 		t.Errorf("GET /readyz with no certificate = %d, want %d", got, http.StatusServiceUnavailable)
 	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /healthz with no certificate = %d, want %d", rec.Code, http.StatusOK)
+	}
 	if err := os.WriteFile(cert, []byte("cert"), 0o644); err != nil {
 		t.Fatal(err)
 	}

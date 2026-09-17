@@ -74,7 +74,7 @@ CA's duplicate-certificate limits.`,
 	f.StringVar(&cfg.email, "acme-email", "", "contact email registered with the ACME account")
 	f.IntVar(&cfg.challengePort, "challenge-port", 8402, "loopback port answering ACME HTTP-01 challenges (nginx's :80 server proxies /.well-known/acme-challenge/ to it)")
 	f.IntVar(&cfg.httpPort, "http-port", 8080, "loopback port of nginx's :80 server, probed round-trip before each order so no validation is sent at a listener that is still starting")
-	f.IntVar(&cfg.readyPort, "ready-port", 0, "port serving GET /readyz, 200 once cert.pem and key.pem exist (0 disables it). nginx's startup probe uses it: a locked node image denies exec probes")
+	f.IntVar(&cfg.readyPort, "ready-port", 0, "port serving GET /healthz, and GET /readyz, 200 once cert.pem and key.pem exist (0 disables it). nginx's startup probe uses it: a locked node image denies exec probes")
 	f.StringVar(&cfg.certDir, "cert-dir", "/etc/c8s-acme-tls", "directory for cert.pem, key.pem, and the ACME account key")
 	f.BoolVar(&cfg.reloadNginx, "reload-nginx", true, "SIGHUP nginx after a certificate install")
 	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
@@ -186,6 +186,10 @@ func run(cfg config) error {
 // own listener on the pod IP. It exposes existence, never content.
 func readyHandler(paths ...string) http.Handler {
 	mux := http.NewServeMux()
+	// Liveness is the process answering; the same shape as the other sidecars.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		for _, path := range paths {
 			if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
