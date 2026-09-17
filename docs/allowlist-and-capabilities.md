@@ -213,6 +213,41 @@ alone does not establish platform ownership. `any` leaves mounts unconstrained;
 }
 ```
 
+To supply mount policies when deriving an entry, use `--mounts-file`. The file
+maps container names to explicit policies and must include every init and main
+container in the input object; missing or unknown names are rejected. For a pod
+with an init container named `seed` and main containers named `frontend` and
+`worker`, save this as `mounts.json`:
+
+```json
+{
+  "seed": {"policy": "deny"},
+  "frontend": {
+    "policy": "exact",
+    "rules": [
+      {"destination": "/var/cache/app", "kind": "emptyDir"},
+      {"destination": "/mnt/c8s-data/config", "kind": "data"}
+    ]
+  },
+  "worker": {"policy": "deny"}
+}
+```
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts-file mounts.json > entry.json
+```
+
+Here `pod.json` contains the Kubernetes object with digest-pinned images and
+explicit command/args. Choose the policies to match the workload's actual
+mounts; the pod spec alone cannot establish source class or storage protection.
+Omitting `--mounts-file` leaves each container's mount policy at `deny`.
+
+Lint includes mount rules when checking whether workload entries are
+indistinguishable. It also rejects exact `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`,
+or `NODE_PATH` values whose search directories overlap a declared `data` mount:
+those directories could load mounted content as code. The deprecated
+`lint --cvm-mode` flag has no effect; NRI observes both environment and mounts.
+
 The pod UID embedded in a kubelet source must equal the pod being admitted, and
 containerd sandbox sources must name its exact sandbox. These runtime IDs prove
 local ownership only and are not serialized into the stable allowlist.
