@@ -134,7 +134,7 @@ func (r *WorkloadServiceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desiredName, Namespace: obj.GetNamespace()}}
+	svc := &corev1.Service{Name: desiredName, Namespace: obj.GetNamespace()}
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		if svc.UID != "" && !metav1.IsControlledBy(svc, obj) {
 			return errServiceNotManaged

@@ -5,8 +5,10 @@ name: confidential-e2e
 # Never pull_request: these jobs use the organization's self-hosted hardware.
 on:
   workflow_run:
-    workflows: ["Docker"]      # chain off a completed Docker run so retag-unchanged
-    types: [completed]         # has completed image publication
+    # Wait for node-image publication, which follows component publication.
+    # Staged lanes also require their producer metadata to select that image.
+    workflows: ["c8s-image"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       c8s_ref:
@@ -37,7 +39,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
-       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'workflow_run') &&
        (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')))
     # Reusable lane pinned by commit SHA (bump deliberately when the lane changes);
     # the trailing @main tag is a human label only.

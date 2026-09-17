@@ -207,7 +207,7 @@ func TestSidecarRepeatIsIdempotent(t *testing.T) {
 
 	cfg := flowConfig(t, url)
 	cfg.SocketDir = socketDir
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		daemon, daemonBase := daemonClient(cfg)
 		if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
 			t.Fatalf("attempt %d: %v", i, err)

@@ -18,7 +18,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -89,7 +88,7 @@ func stubWebhookCertDir(t *testing.T) string {
 
 func mutatingWebhookConfig(name string) *admissionv1.MutatingWebhookConfiguration {
 	return &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Webhooks: []admissionv1.MutatingWebhook{
 			{Name: "pods.c8s.dev"},
 			{Name: "other.c8s.dev"},

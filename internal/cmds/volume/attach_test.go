@@ -357,7 +357,7 @@ func TestDetachToleratesAPartialTree(t *testing.T) {
 func TestAttachIsRoundTrippable(t *testing.T) {
 	a := testAttacher(t)
 	img := imageFile(t, 1)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := a.Attach(context.Background(), "weights", img); err != nil {
 			t.Fatalf("attach %d: %v", i, err)
 		}

@@ -14,11 +14,10 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestCollectPodIPSetMembersSkipsHostNetworkAndDeduplicates(t *testing.T) {
-	sets := collectPodIPSetMembers([]interface{}{
+	sets := collectPodIPSetMembers([]any{
 		&corev1.Pod{
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.1",
@@ -46,7 +45,7 @@ func TestCollectPodIPSetMembersSkipsHostNetworkAndDeduplicates(t *testing.T) {
 		},
 		// Excluded-namespace pod: in neither the all (dst) nor local (src) sets.
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system"},
+			Namespace: "kube-system",
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.1",
 				PodIP:  "10.244.0.7",
@@ -77,10 +76,10 @@ func TestCollectPodIPSetMembersSkipsHostNetworkAndDeduplicates(t *testing.T) {
 
 func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 	cwLabels := map[string]string{labelConfidentialWorkload: "vllm"}
-	sets := collectPodIPSetMembers([]interface{}{
+	sets := collectPodIPSetMembers([]any{
 		// Local cw pod: in the cw sets and the regular sets.
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: cwLabels},
+			Labels: cwLabels,
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.1",
 				PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}, {IP: "fd00::5"}},
@@ -88,7 +87,7 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 		},
 		// Remote cw pod: membership is cluster-wide.
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: cwLabels},
+			Labels: cwLabels,
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.2",
 				PodIP:  "10.244.1.9",
@@ -104,7 +103,7 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 		// Empty label value: not a cw pod (managed Service selectors never
 		// match an empty cw id).
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelConfidentialWorkload: ""}},
+			Labels: map[string]string{labelConfidentialWorkload: ""},
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.1",
 				PodIP:  "10.244.0.7",
@@ -112,7 +111,7 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 		},
 		// cw pod in an excluded namespace: out of the mesh, so in no set.
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Labels: cwLabels},
+			Namespace: "kube-system", Labels: cwLabels,
 			Status: corev1.PodStatus{
 				HostIP: "10.0.0.1",
 				PodIP:  "10.244.0.99",
@@ -120,14 +119,14 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 		},
 		// hostNetwork and completed cw pods: excluded like everywhere else.
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: cwLabels},
-			Spec:       corev1.PodSpec{HostNetwork: true},
+			Labels: cwLabels,
+			Spec:   corev1.PodSpec{HostNetwork: true},
 			Status: corev1.PodStatus{
 				PodIP: "10.0.0.10",
 			},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Labels: cwLabels},
+			Labels: cwLabels,
 			Status: corev1.PodStatus{
 				Phase: corev1.PodSucceeded,
 				PodIP: "10.244.0.8",

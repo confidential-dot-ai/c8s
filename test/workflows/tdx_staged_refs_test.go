@@ -86,7 +86,7 @@ esac
 				t.Fatal(err)
 			}
 			got := make(map[string]string)
-			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
 				key, value, ok := strings.Cut(line, "=")
 				if !ok {
 					t.Fatalf("invalid environment assignment %q", line)

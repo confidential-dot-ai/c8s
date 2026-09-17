@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -64,10 +62,8 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 				defer cancel()
 			}
 			if _, err := verify(ctx, platform, evidence, Params{
-				Measurements: measurements,
-				VerifyParams: teetypes.VerifyParams{
-					ExpectedReportData: erd,
-				},
+				Measurements:       measurements,
+				ExpectedReportData: erd,
 			}); err != nil {
 				return fmt.Errorf("localverify: peer attestation failed: %w", err)
 			}

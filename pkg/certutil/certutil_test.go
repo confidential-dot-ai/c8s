@@ -45,7 +45,7 @@ func selfSigned(t *testing.T, cn string, notAfter time.Time) (*x509.Certificate,
 
 func TestGenerateSerialWithinBound(t *testing.T) {
 	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		s, err := GenerateSerial()
 		if err != nil {
 			t.Fatalf("GenerateSerial: %v", err)

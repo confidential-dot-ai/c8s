@@ -640,7 +640,7 @@ func meshVerifyPolicy(attestationApiURL, measurements, rtmrs string) (*ratls.Ver
 	if measurements == "" {
 		return policy, nil
 	}
-	for _, h := range strings.Split(measurements, ",") {
+	for h := range strings.SplitSeq(measurements, ",") {
 		h = strings.TrimSpace(h)
 		b, err := hex.DecodeString(h)
 		if err != nil {

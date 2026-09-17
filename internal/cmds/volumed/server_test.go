@@ -199,7 +199,7 @@ func TestServerReportsAFailedOpen(t *testing.T) {
 // mapping or fail.
 func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
 	f := newServerFixture(t, resolvedIdentity())
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
 			t.Fatalf("attempt %d: status %d", i, got)
 		}
@@ -292,7 +292,7 @@ func TestServerBoundsTheRequestBody(t *testing.T) {
 func TestAcquireBoundsConcurrentOpensPerPod(t *testing.T) {
 	s := &Server{}
 	var releases []func()
-	for i := 0; i < maxInFlightPerPod; i++ {
+	for i := range maxInFlightPerPod {
 		release, ok := s.acquire(testPodUID)
 		if !ok {
 			t.Fatalf("slot %d refused below the cap", i)
@@ -317,14 +317,12 @@ func TestAcquireBoundsConcurrentOpensPerPod(t *testing.T) {
 func TestAcquireIsRaceFree(t *testing.T) {
 	s := &Server{}
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 32 {
+		wg.Go(func() {
 			if release, ok := s.acquire(testPodUID); ok {
 				release()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	s.mu.Lock()

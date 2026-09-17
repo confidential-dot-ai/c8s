@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,12 +25,7 @@ func argsAfter(args []string, flag string) string {
 }
 
 func hasFlag(args []string, flag string) bool {
-	for _, a := range args {
-		if a == flag {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(args, flag)
 }
 
 // Without --hash plain, cryptsetup runs a passphrase hash over the key file in

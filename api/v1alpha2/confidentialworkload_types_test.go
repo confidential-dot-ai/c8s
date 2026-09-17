@@ -13,17 +13,13 @@ import (
 // branch of the generated DeepCopy functions.
 func fullCW() *ConfidentialWorkload {
 	return &ConfidentialWorkload{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfidentialWorkload",
-			APIVersion: "confidential.ai/v1alpha2",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "cw-1",
-			Namespace:   "default",
-			Labels:      map[string]string{"app": "demo"},
-			Annotations: map[string]string{"k": "v"},
-			Finalizers:  []string{"confidential.ai/finalizer"},
-		},
+		Kind:        "ConfidentialWorkload",
+		APIVersion:  "confidential.ai/v1alpha2",
+		Name:        "cw-1",
+		Namespace:   "default",
+		Labels:      map[string]string{"app": "demo"},
+		Annotations: map[string]string{"k": "v"},
+		Finalizers:  []string{"confidential.ai/finalizer"},
 		Spec: ConfidentialWorkloadSpec{
 			WorkloadRef: WorkloadRef{
 				Kind: WorkloadKindDeployment,
@@ -122,9 +118,9 @@ func TestConfidentialWorkload_DeepCopyObject(t *testing.T) {
 
 func TestConfidentialWorkloadList_DeepCopy_RoundTrip(t *testing.T) {
 	orig := &ConfidentialWorkloadList{
-		TypeMeta: metav1.TypeMeta{Kind: "ConfidentialWorkloadList", APIVersion: "confidential.ai/v1alpha2"},
-		ListMeta: metav1.ListMeta{ResourceVersion: "42", Continue: "next"},
-		Items:    []ConfidentialWorkload{*fullCW(), *fullCW()},
+		Kind: "ConfidentialWorkloadList", APIVersion: "confidential.ai/v1alpha2",
+		ResourceVersion: "42", Continue: "next",
+		Items: []ConfidentialWorkload{*fullCW(), *fullCW()},
 	}
 	cp := orig.DeepCopy()
 

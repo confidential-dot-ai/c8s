@@ -16,7 +16,6 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
@@ -168,7 +167,7 @@ func podListFile(t *testing.T, pods ...corev1.Pod) string {
 
 func hostPortPod(ns, name, node string, port int32) corev1.Pod {
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Namespace: ns, Name: name,
 		Spec: corev1.PodSpec{
 			NodeName:   node,
 			Containers: []corev1.Container{{Name: "c", Ports: []corev1.ContainerPort{{HostPort: port}}}},
@@ -1222,11 +1221,9 @@ const etcdDigest = "sha256:11111111111111111111111111111111111111111111111111111
 
 func staticEtcdPod() corev1.Pod {
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "kube-system",
-			Name:        "etcd-node-a",
-			Annotations: map[string]string{corev1.MirrorPodAnnotationKey: "mirror"},
-		},
+		Namespace:   "kube-system",
+		Name:        "etcd-node-a",
+		Annotations: map[string]string{corev1.MirrorPodAnnotationKey: "mirror"},
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
 			Name:    "etcd",
 			Image:   "index.docker.io/rancher/hardened-etcd:v3.6.12-k3s1",

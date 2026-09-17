@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -797,7 +797,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	})
 
 	if effective.Reload.Nginx {
-		pod.Spec.ShareProcessNamespace = ptr.To(true)
+		pod.Spec.ShareProcessNamespace = new(true)
 	}
 
 	injected := []corev1.Container{certContainer(&effective, cfg), certWaitContainer(&effective, cfg)}
@@ -1038,19 +1038,19 @@ func (cfg Config) withDefaults() Config {
 		cfg.CertDir = "/etc/c8s/certs"
 	}
 	if cfg.CertFSGroup == nil {
-		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
+		cfg.CertFSGroup = new(defaultCertFSGroup)
 	}
 	if cfg.CertRenewInterval <= 0 {
 		cfg.CertRenewInterval = defaultCertRenewInterval
 	}
 	if cfg.GetCertRunAsUser == nil {
-		cfg.GetCertRunAsUser = ptr.To(defaultGetCertRunAsUser)
+		cfg.GetCertRunAsUser = new(defaultGetCertRunAsUser)
 	}
 	if cfg.GetCertRunAsGroup == nil {
-		cfg.GetCertRunAsGroup = ptr.To(defaultGetCertRunAsGroup)
+		cfg.GetCertRunAsGroup = new(defaultGetCertRunAsGroup)
 	}
 	if cfg.GetCertRunAsNonRoot == nil {
-		cfg.GetCertRunAsNonRoot = ptr.To(defaultGetCertRunAsNonRoot)
+		cfg.GetCertRunAsNonRoot = new(defaultGetCertRunAsNonRoot)
 	}
 	return cfg
 }
@@ -1075,10 +1075,8 @@ func getCertSecurityContext(inj *injection) *corev1.SecurityContext {
 func secretsVolume() corev1.Volume {
 	return corev1.Volume{
 		Name: secretsVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium: corev1.StorageMediumMemory,
-			},
+		EmptyDir: &corev1.EmptyDirVolumeSource{
+			Medium: corev1.StorageMediumMemory,
 		},
 	}
 }
@@ -1187,8 +1185,8 @@ func volumeNames(specs []string) []string {
 func openedVolume(name string) corev1.Volume {
 	src := &corev1.EmptyDirVolumeSource{}
 	return corev1.Volume{
-		Name:         volume.KubeVolumeName(name),
-		VolumeSource: corev1.VolumeSource{EmptyDir: src},
+		Name:     volume.KubeVolumeName(name),
+		EmptyDir: src,
 	}
 }
 
@@ -1324,10 +1322,8 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 
 func certsVolume(name string) corev1.Volume {
 	return corev1.Volume{
-		Name: name,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
-		},
+		Name:     name,
+		EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
 	}
 }
 
@@ -1369,10 +1365,8 @@ func ensureSupplementalGroup(pod *corev1.Pod, gid int64) {
 	if pod.Spec.SecurityContext == nil {
 		pod.Spec.SecurityContext = &corev1.PodSecurityContext{}
 	}
-	for _, g := range pod.Spec.SecurityContext.SupplementalGroups {
-		if g == gid {
-			return
-		}
+	if slices.Contains(pod.Spec.SecurityContext.SupplementalGroups, gid) {
+		return
 	}
 	pod.Spec.SecurityContext.SupplementalGroups = append(pod.Spec.SecurityContext.SupplementalGroups, gid)
 }

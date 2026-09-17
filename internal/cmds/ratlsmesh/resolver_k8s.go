@@ -105,9 +105,9 @@ func newK8sResolver(ctx context.Context, clientset kubernetes.Interface, nodeIP 
 	podInformer := factory.Core().V1().Pods().Informer()
 
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { r.onPod(obj) },
-		UpdateFunc: func(_, obj interface{}) { r.onPod(obj) },
-		DeleteFunc: func(obj interface{}) { r.onDeletePod(obj) },
+		AddFunc:    func(obj any) { r.onPod(obj) },
+		UpdateFunc: func(_, obj any) { r.onPod(obj) },
+		DeleteFunc: func(obj any) { r.onDeletePod(obj) },
 	}); err != nil {
 		return nil, fmt.Errorf("k8s resolver: add event handler: %w", err)
 	}
@@ -134,7 +134,7 @@ func newK8sResolver(ctx context.Context, clientset kubernetes.Interface, nodeIP 
 	return r, nil
 }
 
-func (r *k8sResolver) onPod(obj interface{}) {
+func (r *k8sResolver) onPod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return
@@ -171,7 +171,7 @@ func (r *k8sResolver) applyPod(pod *corev1.Pod) bool {
 	return true
 }
 
-func (r *k8sResolver) onDeletePod(obj interface{}) {
+func (r *k8sResolver) onDeletePod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
@@ -441,10 +441,7 @@ func (r *k8sResolver) bootstrapLocalCIDRs(ctx context.Context, budget time.Durat
 		if remaining <= 0 {
 			return
 		}
-		wait := localCIDRBootInterval
-		if wait > remaining {
-			wait = remaining
-		}
+		wait := min(localCIDRBootInterval, remaining)
 		select {
 		case <-ctx.Done():
 			return

@@ -216,14 +216,14 @@ func containerSummary(c pkgallowlist.Container) string {
 }
 
 func shellJoin(argv []string) string {
-	out := ""
+	var out strings.Builder
 	for i, a := range argv {
 		if i > 0 {
-			out += " "
+			out.WriteString(" ")
 		}
-		out += a
+		out.WriteString(a)
 	}
-	return out
+	return out.String()
 }
 
 func summarizeEnv(w pkgallowlist.Workload) string {

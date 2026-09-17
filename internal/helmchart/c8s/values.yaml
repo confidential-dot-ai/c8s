@@ -1185,7 +1185,7 @@ router:
       # core modules router uses; the full/perl variants ship image-filter,
       # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
       # Accepted CVEs against this pin live in .grype.yaml.
-      digest: "sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+      digest: "sha256:daa17b944bac2b578e962da4c61ad72a59233b3c63abea17113acaf4e6b9aea4"
       tag: ""
       pullPolicy: IfNotPresent
     # -- Number of nginx replicas.

@@ -40,8 +40,7 @@ func TestNewRequestBinding(t *testing.T) {
 		{http.MethodPut, "/empty", []byte{}},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			req, err := NewRequest(ctx, tc.method, server.URL+tc.path, tc.body, signer)
 			if err != nil {
 				t.Fatal(err)

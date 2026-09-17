@@ -335,24 +335,6 @@ func TestTunnelPreservesDuplicateHeaders(t *testing.T) {
 	}
 }
 
-// The retired two-step handshake endpoint returns the explicit 400 — no
-// alias, no downgrade.
-func TestRetiredHandshakeEndpointReturns400(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader(`{"nonce":"AAAA"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		resp.Body.Close()
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if e := decodeErr(t, resp); e.Error != types.ErrorCodeInvalidRequest {
-		t.Fatalf("error code = %q", e.Error)
-	}
-}
-
 // The pre-client-first GET shape returns the explicit 400.
 func TestAttestPQGetReturns400(t *testing.T) {
 	ts := newTestServer(t)

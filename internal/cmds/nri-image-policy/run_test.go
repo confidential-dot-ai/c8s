@@ -595,7 +595,7 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 		Failed int    `json:"failed"`
 	}
 	var summary *summaryRecord
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
 		if line == "" {
 			continue
 		}
@@ -716,8 +716,7 @@ func TestStartHealthServer_HealthzReflectsReadiness(t *testing.T) {
 }
 
 func TestStartHealthServer_InvalidAddr(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	err := startHealthServer(ctx, healthServerConfig{
 		logger:       discardLogger(),
 		plugin:       &plugin{},

@@ -114,7 +114,7 @@ func TestPeerNotUpYetMatchesARealMissingSocketError(t *testing.T) {
 func hexReportData() string {
 	const b = "ab"
 	out := ""
-	for i := 0; i < 48; i++ {
+	for range 48 {
 		out += b
 	}
 	return out

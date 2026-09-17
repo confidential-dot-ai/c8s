@@ -49,7 +49,7 @@ entry names to workload policies for these platform images:
 
 | Image/use | Included when | Pinned invocation |
 |---|---|---|
-| NRI installer | `nriImagePolicy.enabled` | Install script (pins script when baked), optional uninstall script, and `sleep infinity` |
+| NRI installer | `nriImagePolicy.enabled` | Install script (pins script when baked), optional uninstall script, `sleep infinity`, and the `c8s uninstall` host-sweep script with its `/bin/sleep 2147483647` pause |
 | NRI containerd-prep | NRI enabled, RKE2, and not baked | Containerd-prep script |
 | Local-path helper | `attestationApi.cvmMode=bare-metal`, helper digest configured | `/bin/sh /script/setup` or `/bin/sh /script/teardown`; args accept per-PVC flags |
 

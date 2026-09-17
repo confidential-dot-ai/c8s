@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -180,12 +181,7 @@ func TestNewCmdRegistersCreate(t *testing.T) {
 }
 
 func containsStr(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hay, needle)
 }
 
 func TestWriteEscrowReportsAnUnwritableDestination(t *testing.T) {

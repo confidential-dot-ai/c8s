@@ -29,7 +29,11 @@ set_dm() { # set_dm NAME... — one 80Gi dm-N per name; none = tmpfs fallback bo
         printf '253:%s' "$i" > "$WORK/sys/block/dm-$i/dev"
         printf 'CRYPT-PLAIN-%s' "$name" > "$WORK/sys/block/dm-$i/dm/uuid"
         if [[ "$name" == scratch ]]; then
+            # The serial lives on the block device itself (/sys/block/vdb/serial),
+            # the attribute the initrd reads; a serial under vdb/device/ is the
+            # wrong node and must not satisfy the check.
             mkdir -p "$WORK/sys/block/vdb/device" "$WORK/sys/block/dm-$i/slaves"
+            printf 'confai-scratch' > "$WORK/sys/block/vdb/serial"
             printf 'confai-scratch' > "$WORK/sys/block/vdb/device/serial"
             ln -s "$WORK/sys/block/vdb" "$WORK/sys/block/dm-$i/slaves/vdb"
         fi
@@ -75,7 +79,7 @@ ok "fails closed" not run_enforce
 
 CASE="scratch has wrong backing serial"
 set_dm scratch
-printf 'host-lookalike' > "$WORK/sys/block/vdb/device/serial"
+printf 'host-lookalike' > "$WORK/sys/block/vdb/serial"
 ok "fails closed" not run_enforce
 
 summarize "scratch-enforce"

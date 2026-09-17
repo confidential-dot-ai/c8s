@@ -342,7 +342,7 @@ type loggedHolder struct {
 func logCensus(t *testing.T, out string) []loggedHolder {
 	t.Helper()
 	var found []loggedHolder
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		var rec struct {
 			Holders []loggedHolder `json:"holders"`
 		}

@@ -723,8 +723,8 @@ func validateHostname(s string) error {
 	if len(s) > 253 {
 		return fmt.Errorf("'%s' exceeds maximum hostname length of 253 characters", s)
 	}
-	labels := strings.Split(s, ".")
-	for _, label := range labels {
+	labels := strings.SplitSeq(s, ".")
+	for label := range labels {
 		if !hostnameLabelRe.MatchString(label) {
 			return fmt.Errorf("'%s' is not a valid RFC 1123 hostname", s)
 		}

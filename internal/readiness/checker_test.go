@@ -117,8 +117,7 @@ func TestSetReady(t *testing.T) {
 
 func TestRunBecomesReadyOnHealthyAPI(t *testing.T) {
 	c := NewChecker(healthServer(t, "ok", http.StatusOK), time.Hour)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go c.Run(ctx)
 
@@ -128,8 +127,7 @@ func TestRunBecomesReadyOnHealthyAPI(t *testing.T) {
 func TestRunStaysNotReadyOnUnhealthyStatus(t *testing.T) {
 	c := NewChecker(healthServer(t, "degraded", http.StatusOK), time.Hour)
 	c.SetReady(true) // ensure check actually flips it to false
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go c.Run(ctx)
 
@@ -139,8 +137,7 @@ func TestRunStaysNotReadyOnUnhealthyStatus(t *testing.T) {
 func TestRunNotReadyOnHTTPError(t *testing.T) {
 	c := NewChecker(healthServer(t, "", http.StatusInternalServerError), time.Hour)
 	c.SetReady(true)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go c.Run(ctx)
 

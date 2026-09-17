@@ -442,8 +442,7 @@ func TestPullInitialSucceedsAfterTransientFailures(t *testing.T) {
 	store := newPolicyStore(anyAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
 
 	pluginErrCh := make(chan error, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	etag, err := pullInitial(ctx, pullArgs{
 		client:      client,
@@ -479,8 +478,7 @@ func TestPullInitialFailsAfterMaxRetries(t *testing.T) {
 	client := allowlistclient.NewClientWithHTTP(srv.URL, &http.Client{Timeout: 200 * time.Millisecond})
 	store := newPolicyStore(anyAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
 	pluginErrCh := make(chan error, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_, err := pullInitial(ctx, pullArgs{
 		client:      client,
@@ -539,8 +537,7 @@ func TestPullInitialNotModifiedDoesNotDereferenceNilAllowlist(t *testing.T) {
 	store := newPolicyStore(anyAllowlist(map[string]string{pushDigestA: "bootstrap-image"}))
 	before := store.current()
 	pluginErrCh := make(chan error, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_, err := pullInitial(ctx, pullArgs{
 		client:      client,

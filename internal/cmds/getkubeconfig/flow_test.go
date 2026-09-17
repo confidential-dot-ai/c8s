@@ -217,7 +217,7 @@ func TestAttestNonceIsFreshPerRun(t *testing.T) {
 	exp := testPolicy(t, operatorPub(t))
 	rec := stubVerify(t, verifiedResultFor(exp), nil)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := attestAndVerify(context.Background(), attest.URL()+"/attest", exp); err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}

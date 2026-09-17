@@ -120,7 +120,7 @@ func validateDomain(domain string) error {
 	if len(domain) > 253 {
 		return fmt.Errorf("%q exceeds 253 characters", domain)
 	}
-	for _, label := range strings.Split(domain, ".") {
+	for label := range strings.SplitSeq(domain, ".") {
 		if len(validation.IsDNS1123Label(label)) > 0 {
 			return fmt.Errorf("%q is not a valid RFC 1123 hostname", domain)
 		}

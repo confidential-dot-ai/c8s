@@ -95,9 +95,9 @@ func watchNodeInventoryHosts(ctx context.Context, kubeconfig string) (workloadcl
 		mu.Unlock()
 	}
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { resync() },
-		UpdateFunc: func(_, _ interface{}) { resync() },
-		DeleteFunc: func(interface{}) { resync() },
+		AddFunc:    func(any) { resync() },
+		UpdateFunc: func(_, _ any) { resync() },
+		DeleteFunc: func(any) { resync() },
 	}); err != nil {
 		return nil, fmt.Errorf("node informer: add event handler: %w", err)
 	}

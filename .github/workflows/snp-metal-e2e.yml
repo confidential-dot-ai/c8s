@@ -9,7 +9,7 @@ on:
   workflow_call:
     inputs:
       c8s_ref:
-        description: 'c8s ref to test. Defaults to the ref paired with the node image.'
+        description: 'CLI/test ref; must resolve to the staged node image revision. Empty uses the image build ref.'
         required: false
         type: string
         default: ''
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: 'Compatible c8s CLI/test ref; empty uses the node image build ref in snp-rke2-image-refs.'
+        description: 'CLI/test ref; must resolve to the staged node image revision. Empty uses the image build ref.'
         required: false
         default: ''
       keep_cvm:
@@ -93,7 +93,7 @@ jobs:
             # `|| true`: under `set -e` a failed substitution exits before the
             # pinned fallback on the next line can be reached.
             GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
-            [ -n "$GOVER" ] || GOVER=1.26.3
+            [ -n "$GOVER" ] || GOVER=1.27.1
             retry curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
             sudo tar -C /usr/local -xzf /tmp/go.tar.gz
           fi
@@ -182,6 +182,8 @@ jobs:
           for k in image rootPvc manifestRef igvmFile igvmHookImage smp snpLaunchDigest c8sRef; do
             printf '%s=%s\n' "$k" "$(jq -r --arg k "$k" '.data[$k]' /tmp/snp-refs.json)" >> "$GITHUB_ENV"
           done
+          # Keep the immutable image revision separate from the CLI override.
+          echo "IMAGE_C8S_REF=$(jq -r .data.c8sRef /tmp/snp-refs.json)" >> "$GITHUB_ENV"
           if [ -n "$REQUESTED_C8S_REF" ]; then
             [[ "$REQUESTED_C8S_REF" =~ ^[a-zA-Z0-9_./-]+$ ]] || { echo "::error::invalid c8s_ref"; exit 1; }
             echo "c8sRef=$REQUESTED_C8S_REF" >> "$GITHUB_ENV"
@@ -228,7 +230,13 @@ jobs:
           retry git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src \
             || { clone_diag; exit 1; }
           git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
-          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
+          # Compare the actual commit, not another ref lookup: a tag can
+          # shadow a short hexadecimal image revision.
+          source_sha=$(git -C /tmp/c8s-src rev-parse HEAD)
+          [[ "$IMAGE_C8S_REF" =~ ^[0-9a-f]{7,40}$ && "$source_sha" == "$IMAGE_C8S_REF"* ]] || {
+            echo "::error::c8s source $source_sha does not match staged SNP image revision $IMAGE_C8S_REF; publish and stage the requested commit's node image and matching metadata"; exit 1;
+          }
+          echo "c8s ref sha: $source_sha (matches staged image $IMAGE_C8S_REF)"
           pushd /tmp/c8s-src >/dev/null
           retry go install ./cmd/c8s
           popd >/dev/null
