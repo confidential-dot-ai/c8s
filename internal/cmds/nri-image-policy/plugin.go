@@ -72,14 +72,16 @@ func (s *policyStore) current() *policySnapshot {
 	return s.snap.Load()
 }
 
-// baseAdmits reports whether the base allowlist admits the container. The
-// chart's base entries are any-argv, so their digests are admitted by digest
-// alone.
-func (s *policyStore) baseAdmits(digest string, argv []string) bool {
+// baseAdmits applies the same launch phases as the served allowlist: argv at
+// preliminary admission, then all constraints once runtime evidence is available.
+func (s *policyStore) baseAdmits(r allowlist.RunningContainer, phase launchPhase) bool {
 	if s == nil {
 		return false
 	}
-	return s.base.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv})
+	if phase == launchPreliminary {
+		return s.base.AdmitsProcess(r)
+	}
+	return s.base.AdmitsContainer(r)
 }
 
 // apply installs the pulled document at version, unless version is below the
@@ -264,7 +266,7 @@ func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) erro
 // fail-closed, and logged at error because it costs the pod its claim.
 //
 // INVARIANT: callers record what runs, not what passed the checks.
-func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) {
+func (p *plugin) recordForInventory(ctx context.Context, pod *api.PodSandbox, ctr *api.Container, imageRef string) {
 	if p.inventory == nil {
 		return
 	}
@@ -276,30 +278,37 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 			p.logger.Error("cannot resolve the image digest of a running container; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
 		}
 	}
-	p.recordDigest(ctr, digest)
+	p.recordDigest(ctr, digest, observedMounts(pod, ctr))
 }
 
 // recordUncheckedForInventory records the digest inlined in the reference
 // without resolving; the pre-Ready hook must answer inside NRI's
 // plugin_request_timeout, so recording adds no containerd round-trip.
-func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) {
-	p.recordDigest(ctr, extractDigest(imageRef))
+func (p *plugin) recordUncheckedForInventory(pod *api.PodSandbox, ctr *api.Container, imageRef string) {
+	p.recordDigest(ctr, extractDigest(imageRef), observedMounts(pod, ctr))
 }
 
 // recordDigest is the only inventory.record call site. ctr.Args is the
 // effective OCI process.args, the same value the checks read.
-func (p *plugin) recordDigest(ctr *api.Container, digest string) {
+func (p *plugin) recordDigest(ctr *api.Container, digest string, mounts []allowlist.ObservedMount) {
 	if p.inventory == nil {
 		return
 	}
 	env := containerEnv(ctr)
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), env)
+	p.inventory.recordObserved(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs(), env, mounts)
+}
+
+func observedMounts(pod *api.PodSandbox, ctr *api.Container) []allowlist.ObservedMount {
+	if pod == nil {
+		return nil
+	}
+	return newMountObserver(nil).Observe(pod, ctr)
 }
 
 // resolveDigest returns the canonical store digest for imageRef using the same
-// path checkImage admits on: the inline digest if present, else the containerd
+// path checkImagePhase admits on: the inline digest if present, else the containerd
 // content store. Empty on an unresolvable or absent reference. Quiet — the
-// callers that need an audit trail (checkImage) do their own logging.
+// callers that need an audit trail (checkImagePhase) do their own logging.
 func (p *plugin) resolveDigest(ctx context.Context, imageRef string) string {
 	if d := extractDigest(imageRef); d != "" {
 		return d
@@ -349,37 +358,45 @@ func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName stri
 	return verdictAllow, ""
 }
 
-// checkImage validates a container's image against the allowlist. argv is the
-// container's effective OCI process.args (NRI api.Container.Args): any-argv
-// base digests are admitted regardless of it, served digests only when it
-// satisfies an entry's entrypoint/cmd policy. Returns the verdict and an error
-// string.
-func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, env ...*allowlist.EnvObservation) (imageVerdict, string) {
-	var observed *allowlist.EnvObservation
-	if len(env) > 0 {
-		observed = env[0]
-	}
-	return p.checkImagePhase(ctx, cfg, namespace, podName, containerName, imageRef, argv, observed, true)
+// imageCheck contains the container identity and observed launch specification.
+// Argv is the effective OCI process.args; nil Mounts means unobserved mounts.
+type imageCheck struct {
+	Namespace string
+	PodName   string
+	Container string
+	ImageRef  string
+	Argv      []string
+	Env       *allowlist.EnvObservation
+	Mounts    []allowlist.ObservedMount
 }
 
-func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, podName, containerName, imageRef string, argv []string, observed *allowlist.EnvObservation, final bool) (imageVerdict, string) {
+type launchPhase uint8
+
+const (
+	launchPreliminary launchPhase = iota
+	launchFinal
+)
+
+// checkImagePhase checks the image and observed launch specification against
+// the base and served allowlists for the requested admission phase.
+func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, check imageCheck, phase launchPhase) (imageVerdict, string) {
 	log := p.logger.With(
-		"namespace", namespace,
-		"pod", podName,
-		"container", containerName,
-		"image", imageRef,
+		"namespace", check.Namespace,
+		"pod", check.PodName,
+		"container", check.Container,
+		"image", check.ImageRef,
 	)
 
 	// If no image ref found, deny by default (missing annotation means kubelet was bypassed)
-	if imageRef == "" {
+	if check.ImageRef == "" {
 		if cfg.Policy.DenyMissingAnnotation {
 			log.Warn("no image reference found in annotations, denying")
 			p.audit.Log(audit.Event{
 				Action:    "deny",
 				Reason:    "no_image_annotation",
-				Namespace: namespace,
-				Pod:       podName,
-				Container: containerName,
+				Namespace: check.Namespace,
+				Pod:       check.PodName,
+				Container: check.Container,
 			})
 			return verdictDeny, "container has no image annotation"
 		}
@@ -387,30 +404,30 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 		p.audit.Log(audit.Event{
 			Action:    "allow",
 			Reason:    "no_image_annotation",
-			Namespace: namespace,
-			Pod:       podName,
-			Container: containerName,
+			Namespace: check.Namespace,
+			Pod:       check.PodName,
+			Container: check.Container,
 		})
 		return verdictSkip, ""
 	}
 
 	// Extract digest from image reference (e.g. repo@sha256:abc)
-	digest := extractDigest(imageRef)
+	digest := extractDigest(check.ImageRef)
 	if digest == "" {
 		// No digest in reference — resolve tag via containerd image store
-		resolved, err := p.containerd.Resolve(ctx, imageRef)
+		resolved, err := p.containerd.Resolve(ctx, check.ImageRef)
 		if err != nil {
 			log.Warn("cannot resolve image digest via containerd", "error", err)
 			p.audit.Log(audit.Event{
 				Action:    "deny",
 				Reason:    "resolve_failed",
-				Namespace: namespace,
-				Pod:       podName,
-				Container: containerName,
-				Image:     imageRef,
+				Namespace: check.Namespace,
+				Pod:       check.PodName,
+				Container: check.Container,
+				Image:     check.ImageRef,
 				Error:     err.Error(),
 			})
-			return verdictDeny, fmt.Sprintf("cannot resolve digest for %s: %v", imageRef, err)
+			return verdictDeny, fmt.Sprintf("cannot resolve digest for %s: %v", check.ImageRef, err)
 		}
 		digest = resolved
 		log.Debug("resolved tag to digest via containerd", "digest", digest)
@@ -422,39 +439,38 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 		p.audit.Log(audit.Event{
 			Action:    "deny",
 			Reason:    "no_allowlist_available",
-			Namespace: namespace,
-			Pod:       podName,
-			Container: containerName,
-			Image:     imageRef,
+			Namespace: check.Namespace,
+			Pod:       check.PodName,
+			Container: check.Container,
+			Image:     check.ImageRef,
 		})
-		return verdictDeny, fmt.Sprintf("no allowlist available for %s", imageRef)
+		return verdictDeny, fmt.Sprintf("no allowlist available for %s", check.ImageRef)
 	}
 
-	// The base allowlist admits what its entries admit — the chart's are any-argv, so
-	// their digests run anything. Served entries are matched against the final
-	// OCI argv and environment; mounts remain unobserved on this backend.
-	rc := allowlist.RunningContainer{Digest: digest, Argv: argv, Env: observed}
+	// The base allowlist admits what its entries admit. Served entries are
+	// matched against the final OCI argv, environment, and classified mounts.
+	rc := allowlist.RunningContainer{Digest: digest, Argv: check.Argv, Env: check.Env, Mounts: check.Mounts}
 	admitted := snap.index.AdmitsProcess(rc)
-	if final {
+	if phase == launchFinal {
 		admitted = snap.index.AdmitsContainer(rc)
 	}
-	if !p.policy.baseAdmits(digest, argv) && !admitted {
+	if !p.policy.baseAdmits(rc, phase) && !admitted {
 		// INVARIANT: the returned reason reaches a namespace-readable kubelet
 		// event, so it names only the image — argv can carry credentials and
 		// stays in the node-local log.
-		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
+		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", check.ImageRef)
 		if listed := snap.index.AdmitsDigest(digest); listed {
 			reason = "launch_not_admitted"
-			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args or env policy", imageRef)
+			denial = fmt.Sprintf("image %s is allowlisted, but its launch specification satisfies no workload entry's command, args, env or mounts policy", check.ImageRef)
 		}
-		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
+		log.Warn("image not admitted by allowlist", "digest", digest, "argv", check.Argv, "reason", reason)
 		p.audit.Log(audit.Event{
 			Action:    "deny",
 			Reason:    reason,
-			Namespace: namespace,
-			Pod:       podName,
-			Container: containerName,
-			Image:     imageRef,
+			Namespace: check.Namespace,
+			Pod:       check.PodName,
+			Container: check.Container,
+			Image:     check.ImageRef,
 		})
 		return verdictDeny, denial
 	}
@@ -464,10 +480,10 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 	p.audit.Log(audit.Event{
 		Action:    "allow",
 		Reason:    "verified",
-		Namespace: namespace,
-		Pod:       podName,
-		Container: containerName,
-		Image:     imageRef,
+		Namespace: check.Namespace,
+		Pod:       check.PodName,
+		Container: check.Container,
+		Image:     check.ImageRef,
 	})
 	return verdictAllow, ""
 }
@@ -481,19 +497,31 @@ func (p *plugin) checkImagePhase(ctx context.Context, cfg *config, namespace, po
 // then. The exemption runs last, only downgrades, and is keyed on the resolved
 // digest — a local fact — not the namespace name the control plane chooses.
 func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
-	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, true)
+	return p.checkContainerPhase(ctx, cfg, pod, ctr, imageRef, launchFinal)
 }
 
-func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool) (imageVerdict, string) {
-	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, final, containerEnv(ctr))
+func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase) (imageVerdict, string) {
+	var mounts []allowlist.ObservedMount
+	if phase == launchFinal {
+		mounts = newMountObserver(nil).Observe(pod, ctr)
+	}
+	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr), mounts)
 }
 
-func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, final bool, env *allowlist.EnvObservation) (imageVerdict, string) {
+func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		verdict, reason = p.checkImagePhase(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs(), env, final)
+		verdict, reason = p.checkImagePhase(ctx, cfg, imageCheck{
+			Namespace: namespace,
+			PodName:   podName,
+			Container: ctrName,
+			ImageRef:  imageRef,
+			Argv:      ctr.GetArgs(),
+			Env:       env,
+			Mounts:    mounts,
+		}, phase)
 	}
 
 	if verdict == verdictDeny && slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
@@ -666,9 +694,8 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 	for _, ctr := range ctrs {
 		// Recorded ahead of the lookup that can skip it; the record needs no pod.
 		imageRef := ctr.GetAnnotations()[annotationImageName]
-		p.recordForInventory(ctx, ctr, imageRef)
-
 		pod := podByID[ctr.GetPodSandboxId()]
+		p.recordForInventory(ctx, pod, ctr, imageRef)
 		if pod == nil {
 			continue
 		}
@@ -754,7 +781,7 @@ func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *a
 // OCI spec after all NRI/CDI edits.
 // Nothing is added to the admission history until that final check.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], false)
+	verdict, reason := p.checkContainerPhase(ctx, p.cfg, pod, ctr, ctr.GetAnnotations()[annotationImageName], launchPreliminary)
 	if verdict == verdictDeny && p.cfg.Policy.Mode != ModeAudit {
 		if !p.Ready() {
 			return nil, nil, fmt.Errorf("image policy plugin initializing: %s", reason)
@@ -775,14 +802,14 @@ func (p *plugin) StartContainer(ctx context.Context, pod *api.PodSandbox, ctr *a
 		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
 			return err
 		}
-		p.recordUncheckedForInventory(ctr, imageRef)
+		p.recordUncheckedForInventory(pod, ctr, imageRef)
 		return nil
 	}
 	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
 	if verdict == verdictDeny && cfg.Policy.Mode != ModeAudit {
 		return fmt.Errorf("%s", reason)
 	}
-	p.recordForInventory(ctx, ctr, imageRef)
+	p.recordForInventory(ctx, pod, ctr, imageRef)
 	return nil
 }
 

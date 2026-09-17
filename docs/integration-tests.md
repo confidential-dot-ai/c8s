@@ -69,6 +69,9 @@ a port-forward).
   after the plugin's next pull.
 - Admission rejections: cw label/annotation mismatch (webhook) and
   hostNetwork tenant pods (host-namespace policy).
+- Dynamic provisioning: a PVC on kind's default (local-path) class binds and
+  is writable — the provisioner's hostPath helper admits in the VAP-exempt
+  `local-path-storage` namespace (issue #210's regression).
 - Mesh: a pod-IP dial to a cw workload is wrapped (the inbound counter
   moves); a dial from a mesh-excluded namespace hits the FORWARD guard and
   DROPs, and a Service-VIP dial is either dropped or mesh-wrapped — never

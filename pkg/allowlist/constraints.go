@@ -60,13 +60,15 @@ type mountConstraint struct {
 
 func (m mountConstraint) normalize() (string, error) { return "mounts", normalizeMounts(m.policy) }
 func (m mountConstraint) admits(r RunningContainer) bool {
-	return m.policy.admits(r.BindMounts)
+	return m.policy.admits(r.Mounts)
 }
 
-// A destination-only mount policy does not constrain the content supplied by
-// the host, even when every destination is pinned.
-func (m mountConstraint) hostIndependent() bool { return false }
-func (m mountConstraint) isUnconstrained() bool { return m.policy.Policy != PolicyExact }
+// Deny and exact retain verified platform mounts (/etc/hosts, /etc/resolv.conf,
+// etc.), which the runtime adds to the OCI mount table even without workload volumes.
+func (m mountConstraint) hostIndependent() bool {
+	return m.policy.Policy == PolicyDeny || m.policy.Policy == PolicyExact || m.policy.Policy == ""
+}
+func (m mountConstraint) isUnconstrained() bool { return m.policy.Policy == PolicyAny }
 
 type envConstraint struct {
 	policy *EnvPolicy

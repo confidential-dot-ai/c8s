@@ -106,11 +106,39 @@ func TestInspectImageJSON(t *testing.T) {
 
 // --- shadowed entries ---
 
-// An any-argv entry for a digest shadows a narrower entry declaring only that
+func TestLintUnconstrainedChecksAllLaunchFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		wantAny      bool
+	}{
+		{"all any", `"mounts":{"policy":"any"},"env":{"policy":"any"}`, true},
+		{"default mounts", `"env":{"policy":"any"}`, false},
+		{"deny mounts", `"mounts":{"policy":"deny"},"env":{"policy":"any"}`, false},
+		{"deny env", `"mounts":{"policy":"any"},"env":{"policy":"deny"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wide := `[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},` + tc.fields + `}]`
+			narrow := `[` + ctrJSON(digA, "/app") + `]`
+			al := entryPair(t, wide, narrow)
+			var gotAny bool
+			for _, f := range lintOffline(al) {
+				gotAny = gotAny || strings.Contains(f.msg, "effective admission for that digest is 'any'")
+			}
+			if gotAny != tc.wantAny {
+				t.Fatalf("unconstrained warning = %v, want %v", gotAny, tc.wantAny)
+			}
+			if got := shadows(al.Workloads["alpha"], al.Workloads["beta"]); got != tc.wantAny {
+				t.Fatalf("unconstrained shadow = %v, want %v", got, tc.wantAny)
+			}
+		})
+	}
+}
+
+// An unconstrained entry for a digest shadows a narrower entry declaring only that
 // digest: every pod the narrow entry describes matches both, so the narrow
 // entry can never be released to.
 func TestLintShadowedEntry(t *testing.T) {
-	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}]}`
+	wide := `{"containers":[{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]}`
 	narrow := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
 
 	errs := func(doc string) []string {
@@ -165,7 +193,7 @@ func entryPair(t *testing.T, a, b string) *pkgallowlist.Allowlist {
 func ambiguityErrors(findings []finding) []string {
 	var out []string
 	for _, f := range findings {
-		if f.err && strings.Contains(f.msg, "same containers with the same command, args and env policy") {
+		if f.err && strings.Contains(f.msg, "same containers with the same command, args, mounts and env policy") {
 			out = append(out, f.msg)
 		}
 	}
@@ -308,5 +336,65 @@ func TestWorkloadApplyDoesNotDoubleReportInFileCollision(t *testing.T) {
 	}
 	if len(ambiguityErrors(lintOffline(incoming))) != 1 {
 		t.Fatal("the file lint should have reported it")
+	}
+}
+
+func TestLintRejectsSearchPathsOverlappingDataMounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable, value, kind string
+		refused                     bool
+	}{
+		{"same directory", "PATH", "/usr/bin:/mnt/c8s-data/tools", "data", true},
+		{"parent directory", "PYTHONPATH", "/mnt/c8s-data", "data", true},
+		{"descendant directory", "LD_LIBRARY_PATH", "/mnt/c8s-data/tools/lib", "data", true},
+		{"cleaned traversal", "NODE_PATH", "/mnt/c8s-data/tools/lib/../modules", "data", true},
+		{"root directory", "PATH", "/", "data", true},
+		{"unrelated directory", "NODE_PATH", "/usr/lib/node_modules", "data", false},
+		{"lookalike prefix", "PATH", "/mnt/c8s-data/toolset", "data", false},
+		{"application data variable", "DATA_PATH", "/mnt/c8s-data/tools", "data", false},
+		{"emptyDir is not operator data", "PATH", "/mnt/c8s-data/tools", "emptyDir", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},` +
+				`"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/tools","kind":"` + tc.kind + `"}]},` +
+				`"env":{"policy":"exact","values":{"` + tc.variable + `":"` + tc.value + `"}}}`
+			// Use an init container as well as a main to exercise both lists.
+			file := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"initContainers":[`+container+`],"containers":[`+ctrJSON(digB, "/main")+`]}}}`)
+			for _, flags := range [][]string{nil, {"--cvm-mode=pod"}, {"--cvm-mode=node"}} {
+				args := append([]string{"lint", "--strict", file}, flags...)
+				out, _, err := runCmd(args...)
+				if (err != nil) != tc.refused {
+					t.Fatalf("lint %v error = %v, want refusal %v; output: %s", flags, err, tc.refused, out)
+				}
+				if tc.refused && !strings.Contains(out, "overlapping data mount") {
+					t.Fatalf("lint did not explain the search-path conflict: %s", out)
+				}
+			}
+		})
+	}
+}
+
+func TestLintAmbiguityIncludesMountPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+		ambiguous           bool
+	}{
+		{"omitted means deny", ``, `,"mounts":{"policy":"deny"}`, true},
+		{"different destinations", `,"mounts":{"policy":"exact","rules":[{"destination":"/cache","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/work","kind":"emptyDir"}]}`, false},
+		{"different classes", `,"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/config","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/mnt/c8s-data/config","kind":"data"}]}`, false},
+		{"reordered rules", `,"mounts":{"policy":"exact","rules":[{"destination":"/cache","kind":"emptyDir"},{"destination":"/work","kind":"emptyDir"}]}`, `,"mounts":{"policy":"exact","rules":[{"destination":"/work","kind":"emptyDir"},{"destination":"/cache","kind":"emptyDir"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}`
+			al := entryPair(t, `[`+container+tc.first+`}]`, `[`+container+tc.second+`}]`)
+			if got := len(ambiguityErrors(lintOffline(al))) != 0; got != tc.ambiguous {
+				t.Fatalf("ambiguity = %v, want %v", got, tc.ambiguous)
+			}
+			incoming := map[string]pkgallowlist.Workload{"beta": al.Workloads["beta"]}
+			live := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{"alpha": al.Workloads["alpha"]}}
+			if got := countErrors(collisionsWithLive(incoming, live)) != 0; got != tc.ambiguous {
+				t.Fatalf("live collision = %v, want %v", got, tc.ambiguous)
+			}
+		})
 	}
 }

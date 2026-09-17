@@ -26,8 +26,9 @@ With `node.bakedServices=true`, only the operator/get-cert image is derived;
 CDS, nginx and the other host services need no container image exemptions.
 The local-path helper remains argv-pinned in the seed for baked nodes.
 
-`c8s.anyArgvDigests` extracts workload digests whose command, args, environment
-and mounts policies are all `any`. `c8s.baseWorkloads` renders these, merged with
+`c8s.anyArgvDigests` extracts workload digests whose command, args, environment,
+and mount policies are all unconstrained. An omitted mount policy is `deny`
+and prevents inclusion. `c8s.baseWorkloads` renders these, merged with
 `c8s.imageAllowlist`, as any-argv workload entries for the host plugin's boot
 base, excluding `c8s.argvPinnedDigests`. Workloads that pin any of those fields remain in the served
 seed without being added by `c8s.anyArgvDigests`.
@@ -38,8 +39,8 @@ to its final repository segment, truncates it to 50 characters, substitutes
 Keep this naming rule aligned with `pkg/allowlist.DigestEntryName`.
 
 `c8s.allowlistSeedJSON` emits `c8s.allowlist/v1`: one workload per derived image
-digest outside `c8s.argvPinnedDigests`, with command, args and environment policies set to
-`any`, followed by `c8s.argvPinnedEntries` and `bootstrapAllowlist.workloads`.
+digest outside `c8s.argvPinnedDigests`, with command, args, environment, and mount
+policies set to `any`, followed by `c8s.argvPinnedEntries` and `bootstrapAllowlist.workloads`.
 A supplied workload replaces the entire derived entry of the same name. The document must satisfy `pkg/allowlist.ParseJSON`.
 
 ## Argv-pinned entries
@@ -57,6 +58,12 @@ Script argv comes from the same includes/files as the DaemonSets. Trailing
 newlines collapse to one, matching YAML block-scalar clipping. Image
 references are digest-pinned.
 
+Install, uninstall, containerd-prep, and local-path helper entries explicitly
+set `mounts: {policy: any}` because these platform scripts require host mounts,
+which exact workload mount rules do not support. Their command/args pins still
+apply. The pause container has no workload mounts and retains the default
+`deny` policy. Operator-supplied workload policies are preserved as authored.
+
 Names use `c8s.digestWorkloadName`. `c8s.allowlistSeedJSON` excludes these
 digests from its any-argv derivations, adds the pinned entries, then applies
 same-named `bootstrapAllowlist.workloads` overrides. An image bump produces
@@ -66,7 +73,7 @@ a new entry name for additive seeding.
 calling `argvPinnedEntries` there would recurse through the install script's
 boot config. Keep the inclusion conditions of both helpers aligned.
 
-[pinned_seed_test.go](../../../pinned_seed_test.go) checks rendered invocations,
+[pinned_seed_test.go](../../../pinned_seed_test.go) checks rendered invocations and mounts,
 rejection of different argv, and exclusion from the boot config's local base.
 The operator-facing bootstrap behavior is described in
 [Allowlist and capabilities](../../../../../docs/allowlist-and-capabilities.md#bootstrap).

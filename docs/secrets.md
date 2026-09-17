@@ -361,10 +361,13 @@ kept for operator-authored input, where an unknown field is a typo.
 
 `GET /digests/{sandboxID}` answers with two views of the same sandbox:
 
-| field | shape | used by |
+| field | contents | used by |
 |---|---|---|
-| `digests` | deduplicated digest set | cert issuance (membership) |
-| `containers` | `[{digest, argv}]`, **not** deduplicated | secret release |
+| `digests` | image digests | cert issuance (membership) |
+| `containers` | image digest and launch evidence: `argv`, `env`, `mounts` | secret release |
+
+Both views omit duplicates. An image appears once in `digests`, but can have
+multiple records in `containers` if it ran with different launch evidence.
 
 `argv` is the effective OCI `process.args` a container runs, so release can hold
 a sandbox to the `(digest, argv)` pairs that ran in it rather than to a digest
@@ -373,6 +376,13 @@ Without it, two entries differing only in argv are indistinguishable, and the
 argv admission enforces is a **union across every entry listing the digest** — so
 an entry that pins `command: exact` gives no guarantee at release time if another
 entry widens the same digest.
+
+The mount evidence records each destination's observed class and storage. Its
+node-local source path is deliberately omitted from the inventory response.
+`mounts: []` means no bind mounts were observed. `mounts: null` or a missing
+`mounts` field means mount evidence is unavailable; exact and deny mount
+policies fail closed in that case. Inventory responses retain the `mounts` field
+even for an empty set so consumers can preserve this distinction.
 
 `containers` is absent on an inventory older than the field. A consumer that
 needs it must treat that as "cannot answer" rather than "no containers"

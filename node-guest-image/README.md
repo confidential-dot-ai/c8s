@@ -310,6 +310,18 @@ sidecar or chart image never exempts the volume. Admission does not evict
 already-running Pods. The ephemeral policy also preserves the host-namespace
 and host-port checks over the full Pod.
 
+### Cluster storage
+
+The image bakes rancher/local-path-provisioner as the default StorageClass
+(`local-path`), so a PVC with no `storageClassName` binds dynamically. The
+provisioner's helper pods mount hostPath and run as root, which is what the
+`local-path-storage` PSA and admission-policy exemptions exist for. Volumes
+live under `/var/lib/local-path-provisioner` on the writable state overlay
+and are local to the node; the helper creates them mode 0777, so a non-root
+consumer writes without an init container. The requested capacity is
+advisory — nothing enforces it. For encrypted, attested volumes see
+[../docs/volumes.md](../docs/volumes.md).
+
 Ephemeral containers may inherit safe pod-level `runAsNonRoot` and seccomp
 settings when their own settings are absent. Explicit unsafe Pod settings,
 including root UID, Unconfined seccomp or AppArmor, disallowed SELinux settings,
