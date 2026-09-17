@@ -195,7 +195,7 @@ source ownership against this baseline:
 | Destination | Required source |
 | --- | --- |
 | `/etc/hosts` | The current pod's kubelet `etc-hosts` file. |
-| `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm` | The current sandbox's corresponding containerd file or directory under a recognized RKE2/containerd root. |
+| `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm` | The current sandbox's corresponding containerd file or directory under the standard containerd or RKE2 root/state directories. |
 | `/dev/termination-log` | A file in the current pod and container's kubelet `containers` directory. |
 | `/var/run/secrets/kubernetes.io/serviceaccount` | The current pod's kubelet projected volume named `kube-api-access-*`. |
 
