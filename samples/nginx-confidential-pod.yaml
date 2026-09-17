@@ -31,7 +31,7 @@ spec:
           # this reference and admits it against the allowlist, and a tag names
           # whatever the registry serves at pull time. Bump with
           # `c8s allowlist inspect-image nginxinc/nginx-unprivileged:<tag>`.
-          image: nginxinc/nginx-unprivileged@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0 # 1.27-alpine
+          image: nginxinc/nginx-unprivileged@sha256:daa17b944bac2b578e962da4c61ad72a59233b3c63abea17113acaf4e6b9aea4 # 1.30-alpine
           ports:
             - containerPort: 8080
           securityContext:

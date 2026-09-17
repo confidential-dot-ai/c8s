@@ -18,7 +18,7 @@ services:
 
   # A simple backend that the nginx proxy forwards to.
   backend:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     # Default nginx serves a welcome page on port 80.
 
   # Keeps the tmpfs volume mounted across the get-cert → nginx-lb handoff,
@@ -26,7 +26,7 @@ services:
   # volume (discarding it) once no container uses it, and get-cert exits
   # before nginx-lb starts.
   tls-holder:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     entrypoint: ["sleep", "2147483647"]
     volumes:
       - tls-certs:/tls
@@ -54,7 +54,7 @@ services:
       - tls-holder
 
   nginx-lb:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     ports:
       - "8443:443"
     volumes:
