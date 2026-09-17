@@ -20,8 +20,9 @@ enable nri-node-ip.service
 # Label GPU launches before rke2 registers the node; the baked
 # nvidia-device-plugin DaemonSet selects on the label.
 enable gpu-node-label.service
-# Fail closed on a non-CC GPU before rke2 registers the node; RequiredBy the
-# rke2 pair so a failed gate never schedules the GPU.
+# Fail closed on a non-CC or unattested GPU before nvidia-cc-ready sets the
+# CC Ready state; RequiredBy nvidia-cc-ready and the rke2 pair so a failed
+# gate never readies or schedules the GPU.
 enable gpu-cc-enforce.service
 # Fail closed when the initrd fell back to the tmpfs for writable state; RequiredBy
 # the rke2 pair so a scratch-less node powers off instead of flapping.
