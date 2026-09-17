@@ -309,17 +309,9 @@ func serveReadiness(ctx context.Context, addr string, logger *slog.Logger) (*ato
 	if addr == "" {
 		return &ready, nil
 	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("--ready-addr %q: %w", addr, err)
+	if _, err := cmdsutil.ServeInBackground(ctx, addr, readinessHandler(&ready), logger); err != nil {
+		return nil, fmt.Errorf("--ready-addr: %w", err)
 	}
-	srv := &http.Server{Handler: readinessHandler(&ready), ReadHeaderTimeout: 5 * time.Second}
-	go cmdsutil.ShutdownOnDone(ctx, srv, 2*time.Second)
-	go func() {
-		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("iptables sync readiness endpoint failed", "addr", addr, "error", err)
-		}
-	}()
 	return &ready, nil
 }
 

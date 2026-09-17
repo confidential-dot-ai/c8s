@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -163,30 +162,15 @@ func run(cfg config) error {
 	})
 	mgr.httpPort = cfg.httpPort
 
-	challengeSrv := &http.Server{
-		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.challengePort)),
-		Handler:           mgr.handler(),
-		ReadHeaderTimeout: 5 * time.Second,
+	challengeAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.challengePort))
+	if _, err := cmdsutil.ServeInBackground(ctx, challengeAddr, mgr.handler(), logger); err != nil {
+		return fmt.Errorf("--challenge-port: %w", err)
 	}
-	go cmdsutil.ShutdownOnDone(ctx, challengeSrv, 5*time.Second)
-	go func() {
-		if err := challengeSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("acme challenge listener failed", "error", err)
-		}
-	}()
-
 	if cfg.readyPort != 0 {
-		readySrv := &http.Server{
-			Addr:              net.JoinHostPort("", strconv.Itoa(cfg.readyPort)),
-			Handler:           readyHandler(mgr.certPath(), mgr.keyPath()),
-			ReadHeaderTimeout: 5 * time.Second,
+		readyAddr := net.JoinHostPort("", strconv.Itoa(cfg.readyPort))
+		if _, err := cmdsutil.ServeInBackground(ctx, readyAddr, readyHandler(mgr.certPath(), mgr.keyPath()), logger); err != nil {
+			return fmt.Errorf("--ready-port: %w", err)
 		}
-		go cmdsutil.ShutdownOnDone(ctx, readySrv, 5*time.Second)
-		go func() {
-			if err := readySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("acme readiness listener failed", "error", err)
-			}
-		}()
 	}
 
 	logger.Info("acme sidecar running", "domains", cfg.domains, "cert_dir", cfg.certDir)

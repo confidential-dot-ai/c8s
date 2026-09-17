@@ -128,18 +128,11 @@ func serve(ctx context.Context, cfg config, proxy http.Handler, listener net.Lis
 	// Started after the socket is bound so a probe never passes before the
 	// front door is up.
 	if cfg.healthAddr != "" {
-		health := &http.Server{
-			Addr:              cfg.healthAddr,
-			Handler:           healthHandler(cfg.socket),
-			ReadHeaderTimeout: cfg.readHeaderTimeout,
+		addr, err := cmdsutil.ServeInBackground(ctx, cfg.healthAddr, healthHandler(cfg.socket), slog.Default())
+		if err != nil {
+			return fmt.Errorf("--health-addr: %w", err)
 		}
-		go cmdsutil.ShutdownOnDone(ctx, health, 5*time.Second)
-		go func() {
-			slog.Info("attestation proxy health endpoint listening", "addr", cfg.healthAddr)
-			if err := health.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("attestation proxy health endpoint failed", "error", err)
-			}
-		}()
+		slog.Info("attestation proxy health endpoint listening", "addr", addr)
 	}
 
 	slog.Info("attestation proxy listening", "socket", cfg.socket, "upstream", cfg.upstream)

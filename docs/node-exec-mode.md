@@ -40,6 +40,9 @@ first start; the wrapper never resolves `runc` through `PATH`.
 
 ## Wiring in the image
 
+The wrapper ships only in the RKE2 node image. The chart installs nothing of
+it on kubeadm or hosted clusters, which keep the ordinary exec path.
+
 `mkosi.sync` installs the wrapper at `/usr/local/bin/c8s-runc` — the same
 measured binary the NRI plugin is, under the name `cmd/c8s/main.go` dispatches
 on — and the baked drop-in

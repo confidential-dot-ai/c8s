@@ -88,6 +88,10 @@ func (g *bootGate) check(ctx context.Context, p *plugin, pods []*api.PodSandbox,
 		g.logger.Info("first registration since boot: no container exists yet, as a static boot requires")
 		return false
 	}
+	// Not stopped: each has already run on a node whose measurement claims
+	// nothing ran before admission, so stopping it would prove nothing. Only
+	// the node image sets policy.fatal_existing; a hosted cluster re-checks
+	// what it finds against the allowlist and stops what fails (plugin.go).
 	for _, ctr := range logLines(ctx, p, pods, ctrs) {
 		g.logger.Error("container running before admission was in place", ctr...)
 	}

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +101,53 @@ func TestParseFlagsHelpReturnsErrHelp(t *testing.T) {
 	err := ParseFlags(fs, []string{"-h"})
 	if err != flag.ErrHelp {
 		t.Errorf("err = %v, want flag.ErrHelp", err)
+	}
+}
+
+func TestServeInBackground(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
+	addr, err := ServeInBackground(ctx, "127.0.0.1:0", handler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("ServeInBackground = %v", err)
+	}
+
+	resp, err := http.Get("http://" + addr.String() + "/")
+	if err != nil {
+		t.Fatalf("GET %s = %v", addr, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Errorf("GET = %d %q, want 200 \"ok\"", resp.StatusCode, body)
+	}
+
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", addr.String())
+		if err != nil {
+			break
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listener still accepts connections after context cancel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A bind failure is the caller's error, not a log line.
+func TestServeInBackgroundReportsBindFailure(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	_, err = ServeInBackground(context.Background(), taken.Addr().String(), http.NotFoundHandler(), slog.Default())
+	if err == nil {
+		t.Fatalf("ServeInBackground(%s) = nil, want an address-in-use error", taken.Addr())
 	}
 }
 

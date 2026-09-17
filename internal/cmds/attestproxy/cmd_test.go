@@ -3,10 +3,12 @@ package attestproxy
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -185,5 +187,32 @@ func TestHealthEndpointWithoutSocket(t *testing.T) {
 	healthHandler(filepath.Join(t.TempDir(), "gone.sock")).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("GET /healthz with no socket = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// The health endpoint binds before the proxy serves, and a bind failure is
+// a startup error rather than a pod whose probes never pass.
+func TestServeHealthAddr(t *testing.T) {
+	upstream := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	serveProxy(t, config{upstream: upstream, healthAddr: "127.0.0.1:0"})
+
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	cfg := config{socket: filepath.Join(t.TempDir(), "attest.sock"), upstream: upstream, readHeaderTimeout: time.Second, healthAddr: taken.Addr().String()}
+	proxy, err := newProxy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := workloadclaims.ListenUnix(cfg.socket, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serve(context.Background(), cfg, proxy, listener); err == nil || !strings.Contains(err.Error(), "--health-addr") {
+		t.Fatalf("serve with a taken --health-addr = %v, want a --health-addr error", err)
 	}
 }
