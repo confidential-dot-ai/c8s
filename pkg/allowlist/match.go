@@ -19,10 +19,12 @@ type RunningContainer struct {
 // ObservedMount is a bind mount classified by the node. Source is diagnostic
 // node-local detail and is excluded from workload identity serialization.
 type ObservedMount struct {
-	Destination string       `json:"destination"`
-	Source      string       `json:"-"`
-	Class       MountClass   `json:"class"`
-	Storage     MountStorage `json:"storage"`
+	Destination      string       `json:"destination"`
+	Source           string       `json:"-"`
+	Class            MountClass   `json:"class"`
+	Storage          MountStorage `json:"storage"`
+	HostSourceDigest string       `json:"hostSourceDigest,omitempty"`
+	ReadOnly         bool         `json:"readOnly,omitempty"`
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -200,10 +202,6 @@ func (p MountPolicy) admitsMount(mount ObservedMount) bool {
 	if i < 0 {
 		return false
 	}
-	switch mount.Class {
-	case MountEmptyDir, MountData:
-		return mount.Storage == MountMemory || mount.Storage == MountEncrypted
-	default:
-		return false
-	}
+	behavior := p.Rules[i].behavior()
+	return behavior != nil && behavior.admits(mount)
 }

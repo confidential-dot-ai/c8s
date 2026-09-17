@@ -8,7 +8,7 @@ import (
 )
 
 // Key identifies a (digest, argv, env, mounts) admission in the
-// cumulative inventory. Mount source paths are excluded from identity.
+// cumulative inventory. Host source commitments and access modes are included in identity.
 // The framing must be injective: a collision erases historical evidence and can
 // allow a sandbox to match a workload it did not actually run.
 func (c SandboxContainer) Key() string {
@@ -37,6 +37,12 @@ func (c SandboxContainer) Key() string {
 			field(m.Destination)
 			field(string(m.Class))
 			field(string(m.Storage))
+			field(m.HostSourceDigest)
+			if m.ReadOnly {
+				b = append(b, 1)
+			} else {
+				b = append(b, 0)
+			}
 		}
 	}
 	return string(b)
