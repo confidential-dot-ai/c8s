@@ -70,7 +70,9 @@ echo "gpu-cc-enforce: all NVIDIA GPUs in CC mode"
 # Every GPU the driver enumerates must appear in the verified claims:
 # attestation-api tolerates a per-device collection failure (it only rejects
 # an empty bundle), so a count mismatch means a GPU slipped past NRAS.
-gpu_count=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | grep -c . || true)
+gpu_uuids=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>&1) \
+    || fail "nvidia-smi --query-gpu failed: $gpu_uuids"
+gpu_count=$(printf '%s\n' "$gpu_uuids" | grep -c . || true)
 [ "$gpu_count" -gt 0 ] || fail "nvidia-smi enumerates no GPU despite CC mode on"
 
 # post PATH JSON — POST to attestation-api; print the body on 200, else fail
@@ -93,8 +95,8 @@ until curl -sf "$API/health" >/dev/null 2>&1; do
     sleep 2
 done
 
-platform=$(curl -sf "$API/platform" | jq -r '.platform // empty') \
-    || fail "GET /platform failed"
+platform_json=$(curl -sf "$API/platform") || fail "GET /platform failed"
+platform=$(printf '%s' "$platform_json" | jq -r '.platform // empty')
 [ -n "$platform" ] || fail "attestation-api detected no TEE platform"
 
 nonce=$(head -c 32 /dev/urandom | base64 -w0)

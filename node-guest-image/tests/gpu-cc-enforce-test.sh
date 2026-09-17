@@ -130,8 +130,20 @@ stub_smi 9 "NVIDIA-SMI has failed because it couldn't communicate with the NVIDI
 ok "fails when nvidia-smi errors" not run_enforce
 ok "names the cause" stderr_has "conf-compute -f failed"
 
-CASE="attestation-api down"
+CASE="gpu query fails after cc check"
 stub_smi 0 "CC status: ON"
+all_up
+sed -i 's|^--query-gpu=uuid) .*|--query-gpu=uuid) echo "Unable to determine the device handle"; exit 15 ;;|' "$WORK/bin/nvidia-smi"
+ok "fails when nvidia-smi cannot enumerate" not run_enforce
+ok "names the cause" stderr_has "query-gpu failed"
+
+CASE="platform endpoint down"
+stub_smi 0 "CC status: ON"
+all_up; api_down platform
+ok "fails when GET /platform errors" not run_enforce
+ok "names the cause" stderr_has "GET /platform failed"
+
+CASE="attestation-api down"
 all_up; api_down health
 ok "fails when attestation-api never answers" not run_enforce
 ok "names the cause" stderr_has "attestation-api not up"
