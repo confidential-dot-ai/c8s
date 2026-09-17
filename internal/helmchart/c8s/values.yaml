@@ -1175,11 +1175,8 @@ router:
   nginx:
     image:
       repository: nginxinc/nginx-unprivileged
-      # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
-      # core modules router uses; the full/perl variants ship image-filter,
-      # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
-      # Accepted CVEs against this pin live in .grype.yaml.
-      digest: "sha256:daa17b944bac2b578e962da4c61ad72a59233b3c63abea17113acaf4e6b9aea4"
+      # Resolve nginxinc/nginx-unprivileged:1.30.5-alpine-slim to bump this digest.
+      digest: "sha256:c2c3905bda3dc8de80023e19bed0a45745279d26e5586cdee64370c8f9b12348"
       tag: ""
       pullPolicy: IfNotPresent
     # -- Number of nginx replicas.
