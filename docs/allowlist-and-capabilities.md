@@ -188,9 +188,20 @@ classifies each source rather than trusting the destination alone: a hostPath,
 an `emptyDir`, and a ConfigMap can all be placed at the same destination while
 carrying very different authority over the container.
 
-An absent policy is `deny`, which permits only mounts the node verified as its
-fixed platform baseline. `any` explicitly leaves mounts unconstrained. `exact`
-requires the observed non-platform set to equal its concrete rules:
+An absent policy is `deny`, which permits only the platform mounts defined by
+the c8s NRI plugin in the node image. The plugin checks both destination and
+source ownership against this baseline:
+
+| Destination | Required source |
+| --- | --- |
+| `/etc/hosts` | The current pod's kubelet `etc-hosts` file. |
+| `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm` | The current sandbox's corresponding containerd file or directory under a recognized RKE2/containerd root. |
+| `/dev/termination-log` | A file in the current pod and container's kubelet `containers` directory. |
+| `/var/run/secrets/kubernetes.io/serviceaccount` | The current pod's kubelet projected volume named `kube-api-access-*`. |
+
+These mounts are also permitted implicitly by `exact`. A matching destination
+alone does not establish platform ownership. `any` leaves mounts unconstrained;
+`exact` requires the observed non-platform set to equal its concrete rules:
 
 ```json
 "mounts": {

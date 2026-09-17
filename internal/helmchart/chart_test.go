@@ -7422,3 +7422,43 @@ func TestRouterProbesUseHTTPSHealthChecks(t *testing.T) {
 	}
 
 }
+
+func TestChartSweepMountAdmission(t *testing.T) {
+	for _, baked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("baked=%v", baked), func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", "nriImagePolicy.baked="+strconv.FormatBool(baked))
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile("c8s/files/scripts/host-sweep.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idx := seed.BuildIndex()
+			for _, tc := range []struct {
+				name            string
+				argv            []string
+				hostMount, want bool
+			}{
+				{"sweep", []string{"/bin/sh", "-c", strings.TrimRight(string(script), "\n") + "\n"}, true, true},
+				{"pause", []string{"/bin/sleep", "2147483647"}, false, true},
+				{"pause with host mount", []string{"/bin/sleep", "2147483647"}, true, false},
+				{"shell pause with host mount", []string{"/bin/sh", "-c", "sleep infinity"}, true, false},
+				{"unpinned script", []string{"/bin/sh", "-c", "echo unexpected"}, true, false},
+			} {
+				mounts := []pkgallowlist.ObservedMount{}
+				if tc.hostMount {
+					mounts = append(mounts, pkgallowlist.ObservedMount{Source: "/", Destination: "/host", Class: pkgallowlist.MountHost, Storage: pkgallowlist.MountUnknown})
+				}
+				if got := idx.AdmitsContainer(pkgallowlist.RunningContainer{Digest: baseNRIDigest, Argv: tc.argv, Mounts: mounts}); got != tc.want {
+					t.Errorf("%s admitted=%v, want %v", tc.name, got, tc.want)
+				}
+			}
+		})
+	}
+}

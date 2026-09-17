@@ -501,18 +501,18 @@ func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSa
 }
 
 func (p *plugin) checkContainerPhase(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase) (imageVerdict, string) {
-	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr))
+	var mounts []allowlist.ObservedMount
+	if phase == launchFinal {
+		mounts = newMountObserver(nil).Observe(pod, ctr)
+	}
+	return p.checkContainerObserved(ctx, cfg, pod, ctr, imageRef, phase, containerEnv(ctr), mounts)
 }
 
-func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase, env *allowlist.EnvObservation) (imageVerdict, string) {
+func (p *plugin) checkContainerObserved(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string, phase launchPhase, env *allowlist.EnvObservation, mounts []allowlist.ObservedMount) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
 	if verdict != verdictDeny && cfg.AllowlistEnabled() {
-		var mounts []allowlist.ObservedMount
-		if phase == launchFinal {
-			mounts = newMountObserver(nil).Observe(pod, ctr)
-		}
 		verdict, reason = p.checkImagePhase(ctx, cfg, imageCheck{
 			Namespace: namespace,
 			PodName:   podName,

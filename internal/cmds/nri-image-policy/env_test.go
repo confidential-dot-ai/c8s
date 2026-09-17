@@ -8,6 +8,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/containerd/nri/pkg/api"
+	"google.golang.org/protobuf/proto"
 )
 
 // Exercise containerd's create/start lifecycle for older admission tests.
@@ -106,6 +107,7 @@ func TestEnvCreationValidatorChecksCumulativeEdits(t *testing.T) {
 				policy = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
 			}
 			al.Workloads["w"].Containers[0].Env = policy
+			al.Workloads["w"].Containers[0].Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyAny}
 			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{Base: anyAllowlist(map[string]string{pushDigestA: "base"})}}, al)
 			p.SetReady()
 			p.inventory = newAdmissionInventory(t.TempDir())
@@ -129,6 +131,69 @@ func TestEnvCreationValidatorChecksCumulativeEdits(t *testing.T) {
 			}
 			if err != nil && strings.Contains(err.Error(), "unsafe") {
 				t.Fatal("denial disclosed env value")
+			}
+		})
+	}
+}
+
+func TestMountCreationValidatorChecksCumulativeEdits(t *testing.T) {
+	pod := makePod("default", "pod")
+	pod.Uid = "pod-a"
+	platform := &api.Mount{Source: kubeletRoot + "/pods/pod-a/etc-hosts", Destination: "/etc/hosts"}
+	host := &api.Mount{Source: "/", Destination: "/etc/hosts"}
+	remove := &api.Mount{Destination: "-/etc/hosts"}
+	for _, tc := range []struct {
+		name           string
+		initial, edits []*api.Mount
+		policy         string
+		cdi, want      bool
+	}{
+		{name: "observed empty", want: true},
+		{name: "platform addition", edits: []*api.Mount{platform}, want: true},
+		{name: "host addition", edits: []*api.Mount{host}},
+		{name: "host replaces platform", initial: []*api.Mount{platform}, edits: []*api.Mount{host}},
+		{name: "platform replaces host", initial: []*api.Mount{host}, edits: []*api.Mount{platform}, want: true},
+		{name: "remove host", initial: []*api.Mount{host}, edits: []*api.Mount{remove}, want: true},
+		{name: "remove missing", edits: []*api.Mount{remove}, want: true},
+		{name: "add then remove", edits: []*api.Mount{host, remove}, want: true},
+		{name: "remove then add", initial: []*api.Mount{host}, edits: []*api.Mount{remove, host}},
+		{name: "last replacement wins", edits: []*api.Mount{host, platform}, want: true},
+		{name: "nil edit", edits: []*api.Mount{nil}},
+		{name: "CDI deny", cdi: true},
+		{name: "CDI exact", cdi: true, policy: allowlist.PolicyExact},
+		{name: "CDI any", cdi: true, policy: allowlist.PolicyAny, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
+			mountPolicy := allowlist.MountPolicy{Policy: tc.policy}
+			if tc.policy == allowlist.PolicyExact {
+				mountPolicy.Rules = []allowlist.MountRule{{Destination: "/cache", Kind: allowlist.MountEmptyDir}}
+			}
+			al.Workloads["w"].Containers[0].Mounts = mountPolicy
+			al.Workloads["w"].Containers[0].Env = allowlist.EnvPolicy{Policy: allowlist.PolicyAny}
+			p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}, Allowlist: allowlistConfig{Base: anyAllowlist(map[string]string{pushDigestA: "base"})}}, al)
+			p.SetReady()
+			p.inventory = newAdmissionInventory(t.TempDir())
+			ctr := makeCtrWithImageArgs(pod.Id, "ctr", "registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
+			ctr.Mounts = tc.initial
+			adjust := &api.ContainerAdjustment{Mounts: tc.edits}
+			if tc.cdi {
+				adjust.CDIDevices = []*api.CDIDevice{{Name: "vendor/device=gpu"}}
+			}
+			req := &api.ValidateContainerAdjustmentRequest{Pod: pod, Container: ctr, Adjust: adjust}
+			before := proto.Clone(req)
+			if tc.cdi && adjustedMounts(req, proto.Clone(ctr).(*api.Container)) != nil {
+				t.Fatal("deferred CDI produced complete mount evidence")
+			}
+			err := p.ValidateContainerAdjustment(context.Background(), req)
+			if (err == nil) != tc.want {
+				t.Fatalf("validation=%v, want admitted=%v", err, tc.want)
+			}
+			if !proto.Equal(req, before) {
+				t.Fatal("validation mutated its request")
+			}
+			if len(p.inventory.containers) != 0 {
+				t.Fatal("validator prematurely recorded admission")
 			}
 		})
 	}
