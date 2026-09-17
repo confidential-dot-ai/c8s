@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -57,27 +58,38 @@ const (
 const kataShimPrefix = "io.containerd.kata"
 
 func main() {
-	wrapper := flag.String("wrapper", "/usr/local/bin/c8s-runc", "absolute path every ordinary-pod handler must run")
-	configDir := flag.String("config-dir", "", "containerd config directory holding "+dropInDirName+" and, optionally, "+userTemplateName)
-	var extra extraRuntimes
-	flag.Var(&extra, "extra-runtime", "NAME=BINARY handler RKE2 auto-detection would add (repeatable; for negative tests)")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
+// run is main with its inputs and outputs injected. It returns the process
+// exit status: 0 when every handler is wrapped, 1 when the check fails, 2 on
+// a usage error.
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("containerdcheck", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	wrapper := flags.String("wrapper", "/usr/local/bin/c8s-runc", "absolute path every ordinary-pod handler must run")
+	configDir := flags.String("config-dir", "", "containerd config directory holding "+dropInDirName+" and, optionally, "+userTemplateName)
+	var extra extraRuntimes
+	flags.Var(&extra, "extra-runtime", "NAME=BINARY handler RKE2 auto-detection would add (repeatable; for negative tests)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
 	if *configDir == "" {
-		fmt.Fprintln(os.Stderr, "containerdcheck: -config-dir is required")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "containerdcheck: -config-dir is required")
+		return 2
 	}
 	cfg, err := effectiveConfig(*configDir, extra)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "containerdcheck: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "containerdcheck: %v\n", err)
+		return 1
 	}
 	handlers, err := checkHandlers(cfg, *wrapper)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "::error::%v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "::error::%v\n", err)
+		return 1
 	}
-	fmt.Printf("every ordinary-pod handler runs %s: %s\n", *wrapper, strings.Join(handlers, ", "))
+	fmt.Fprintf(stdout, "every ordinary-pod handler runs %s: %s\n", *wrapper, strings.Join(handlers, ", "))
+	return 0
 }
 
 // extraRuntimes collects repeated -extra-runtime NAME=BINARY flags.

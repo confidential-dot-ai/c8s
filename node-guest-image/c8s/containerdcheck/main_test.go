@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,6 +180,71 @@ func TestConfigWithoutDropInImportFails(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := checkImports(cfg); err == nil || !strings.Contains(err.Error(), "no import matching") {
 				t.Fatalf("checkImports(%v) = %v, want an error about the missing import", cfg, err)
+			}
+		})
+	}
+}
+
+// The command line the lint workflow runs, positive and negative, plus the
+// usage errors: every exit status the gate can produce.
+func TestRun(t *testing.T) {
+	const runcOptions = "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc.options]\n"
+	unwrapped := buildConfigDir(t, map[string]string{"10-c8s-runc.toml": runcOptions + `BinaryName = "/usr/bin/runc"` + "\n"})
+	broken := buildConfigDir(t, map[string]string{"10-c8s-runc.toml": "not = [toml\n"})
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{
+			name:       "baked image passes",
+			args:       []string{"-config-dir", bakedConfigDir},
+			wantStdout: "every ordinary-pod handler runs " + wrapper + ": runc",
+		},
+		{
+			name:       "auto-detected runtime fails",
+			args:       []string{"-config-dir", bakedConfigDir, "-extra-runtime", "crun=/usr/bin/crun"},
+			wantCode:   1,
+			wantStderr: "::error::",
+		},
+		{
+			name:       "unwrapped handler fails",
+			args:       []string{"-config-dir", unwrapped},
+			wantCode:   1,
+			wantStderr: "want the measured wrapper",
+		},
+		{
+			name:       "malformed drop-in fails",
+			args:       []string{"-config-dir", broken},
+			wantCode:   1,
+			wantStderr: "parse drop-in",
+		},
+		{
+			name:       "missing config dir is a usage error",
+			args:       nil,
+			wantCode:   2,
+			wantStderr: "-config-dir is required",
+		},
+		{
+			name:       "malformed extra runtime is a usage error",
+			args:       []string{"-config-dir", bakedConfigDir, "-extra-runtime", "crun"},
+			wantCode:   2,
+			wantStderr: "want NAME=BINARY",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tt.args, &stdout, &stderr); code != tt.wantCode {
+				t.Fatalf("run(%v) = %d, want %d\nstdout: %s\nstderr: %s", tt.args, code, tt.wantCode, &stdout, &stderr)
+			}
+			if !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Errorf("run(%v) stdout = %q, want it to contain %q", tt.args, &stdout, tt.wantStdout)
+			}
+			if !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("run(%v) stderr = %q, want it to contain %q", tt.args, &stderr, tt.wantStderr)
 			}
 		})
 	}
