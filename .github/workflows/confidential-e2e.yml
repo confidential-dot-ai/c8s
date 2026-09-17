@@ -8,8 +8,14 @@ name: confidential-e2e
 # This wrapper only decides WHEN. Never pull_request (self-hosted org hardware).
 on:
   workflow_run:
-    workflows: ["Docker"]      # chain off a completed Docker run so retag-unchanged
-    types: [completed]         # has published this sha's image tags before we install
+    # Chain off the node-image publish (itself chained off Docker), so when
+    # the lanes start this sha has BOTH its component images and its node
+    # images. The metal lanes install a commit's chart on the node image
+    # built from that same commit: the image bakes a fail-closed NRI plugin
+    # whose floor pins its own CDS digest, and a chart from another commit
+    # gets its CDS denied at container create, so no other pair can work.
+    workflows: ["c8s-image"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       c8s_ref:
@@ -40,7 +46,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
-       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'workflow_run') &&
        (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')))
     # Reusable lane pinned by commit SHA (bump deliberately when the lane changes);
     # the trailing @main tag is a human label only.

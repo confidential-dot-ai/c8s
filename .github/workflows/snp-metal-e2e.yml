@@ -32,13 +32,14 @@
 # reads launch digests from the build's own manifest.json. A stale pin cannot
 # exist because there is no pin.
 #
-# WHAT IT TESTS. When the image was built from the very commit under test the
-# pair is exact and nri-image-policy runs FAIL-CLOSED with the image floor
-# probe. A merge-triggered run usually lands before that commit's image has
-# built, so it boots the nearest ancestor's image and installs in AUDIT mode:
-# the image's measured floor pins its own CDS digest, and a newer CDS would be
-# denied fail-closed before it could serve the allowlist. The summary says
-# which pair a run got.
+# WHAT IT TESTS. The commit under test on the node image built from that same
+# commit, nri-image-policy fail-closed, floor probe included. No other pair can
+# work: the image bakes a fail-closed plugin whose floor pins its own CDS
+# digest, so a chart from another commit has its CDS denied at container
+# create, and the chart's policy.mode never reaches a baked plugin. The lane
+# therefore requires the exact image and fails with the publish to wait for
+# when it is missing; c8s's merge-triggered run chains off the node-image
+# publish so it always exists.
 name: snp-metal-e2e
 
 on:
@@ -221,29 +222,23 @@ jobs:
       - name: resolve the node image for the ref under test
         run: |
           set -euo pipefail
-          # Newest rke2-snp-cdi-<sha> at or before the ref under test: c8s-image
-          # builds per main commit, so a merge run usually lands before its own
-          # image exists and takes the parent's. Only a 404 walks; anything
-          # else is retried, then fatal, so a registry hiccup never silently
-          # picks an older image.
+          # The node image built from the commit under test, rke2-snp-cdi-<sha>.
+          # c8s-image publishes one per main commit (retagging when the rootfs
+          # is unchanged). A registry hiccup is retried, then fatal.
           tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
           accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'
-          IMG_SHA=""; IMG_DIGEST=""
-          for sha in $(git -C "$C8S_SOURCE_DIR" log --format=%h --abbrev=7 -50); do
-            for attempt in 1 2 3 4; do
-              hdr=$(curl -sI --max-time 20 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
-                "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-cdi-${sha}" | tr -d '\r')
-              code=$(awk 'NR==1{print $2}' <<<"$hdr")
-              case "$code" in
-                200) IMG_SHA=$sha; IMG_DIGEST=$(awk 'tolower($1)=="docker-content-digest:"{print $2}' <<<"$hdr"); break 2 ;;
-                404) break ;;
-                *)   sleep $((attempt * 3)) ;;
-              esac
-            done
-            [ "$code" = 404 ] || { echo "::error::ghcr answered ${code:-none} for rke2-snp-cdi-${sha} on 4 attempts; refusing to fall back to an older image"; exit 1; }
+          IMG_SHA=${C8S_SHA:0:7}; IMG_DIGEST=""
+          for attempt in 1 2 3 4; do
+            hdr=$(curl -sI --max-time 20 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
+              "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-snp-cdi-${IMG_SHA}" | tr -d '\r')
+            code=$(awk 'NR==1{print $2}' <<<"$hdr")
+            case "$code" in
+              200) IMG_DIGEST=$(awk 'tolower($1)=="docker-content-digest:"{print $2}' <<<"$hdr"); break ;;
+              404) echo "::error::no node image for the commit under test: ${IMAGE_REPO}:rke2-snp-cdi-${IMG_SHA} is not published. The lane needs the exact pair (see the header); wait for this commit's c8s-image run, or dispatch with a c8s_ref whose image exists"; exit 1 ;;
+              *)   sleep $((attempt * 3)) ;;
+            esac
           done
-          [ -n "$IMG_SHA" ] || { echo "::error::no rke2-snp-cdi image in the last 50 commits of the ref under test"; exit 1; }
-          [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for rke2-snp-cdi-$IMG_SHA"; exit 1; }
+          [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ghcr answered ${code:-none} for rke2-snp-cdi-${IMG_SHA} on 4 attempts"; exit 1; }
           # The manifest the image build published: manifest.json is a layer of
           # the oras artifact beside the CDI disk, as are the per-vCPU IGVMs.
           oras=$(curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "$accept" -H "Accept: $accept" \
@@ -268,9 +263,7 @@ jobs:
             echo "IGVM_SHA256=$IGVM_SHA256"
             echo "launchDigest=$LAUNCH_DIGEST"
           } >> "$GITHUB_ENV"
-          # Enforce is coherent only for the exact pair (see the header).
-          if [ "${C8S_SHA:0:7}" = "$IMG_SHA" ]; then echo "POLICY_MODE=fail-closed" >> "$GITHUB_ENV"; else echo "POLICY_MODE=audit" >> "$GITHUB_ENV"; fi
-          echo "c8s under test ${C8S_SHA:0:7}; node image rke2-snp-cdi-${IMG_SHA} (${IMG_DIGEST:0:19}...), smp${SMP} launch digest ${LAUNCH_DIGEST:0:24}..."
+          echo "c8s under test ${C8S_SHA:0:7} on its own node image rke2-snp-cdi-${IMG_SHA} (${IMG_DIGEST:0:19}...), smp${SMP} launch digest ${LAUNCH_DIGEST:0:24}..."
 
       - name: stage the node image on the host (no-op when already staged)
         run: |
@@ -563,19 +556,11 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
-          # fail-closed is the chart default; only audit needs a values file.
-          EXTRA=()
-          if [ "$POLICY_MODE" = audit ]; then
-            printf 'nriImagePolicy:\n  policy:\n    mode: audit\n' > /tmp/lane-values.yaml
-            EXTRA=(-f /tmp/lane-values.yaml)
-          fi
-          echo "nri-image-policy mode: $POLICY_MODE (c8s ${C8S_SHA:0:7} on an image built from $IMG_SHA)"
           c8s install --cvm-mode bare-metal --single-node --hardware-platform sev-snp \
             --image-tag "$IMAGE_TAG" \
             --operator-keys /tmp/op.pub \
             --measurements "$launchDigest" \
-            --resolve-digests=true \
-            "${EXTRA[@]}"
+            --resolve-digests=true
           kubectl -n c8s-system get pods -o wide
 
       - name: assert components converged
@@ -585,9 +570,8 @@ jobs:
           bash "$C8S_SOURCE_DIR/test/e2e/components-ready.sh"
 
       - name: assert the image floor denies, then opens to a signed write
-        # Only coherent fail-closed (see the header): the router fronts
-        # /allowlist on hostPort 443 and the endpoint pins to the launch digest.
-        if: env.POLICY_MODE == 'fail-closed'
+        # The router fronts /allowlist on hostPort 443 and the endpoint pins to
+        # the launch digest.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
@@ -660,7 +644,7 @@ jobs:
             echo "| node image | \`${image:-?}\` (\`rke2-snp-cdi-${IMG_SHA:-?}\`) |"
             echo "| manifest | \`${imageTag:-?}\` (smp${SMP}) |"
             echo "| launch digest | \`${launchDigest:0:32}...\` |"
-            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy \`${POLICY_MODE:-?}\` (${POLICY_MODE:+$([ "$POLICY_MODE" = fail-closed ] && echo exact pair || echo 'image from an ancestor')}) |"
+            echo "| c8s under test | \`${C8S_SHA:-?}\` at images \`:${IMAGE_TAG:-?}\`, nri-image-policy fail-closed, exact pair |"
             echo "| guest | \`${GUEST_IP:-?}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
