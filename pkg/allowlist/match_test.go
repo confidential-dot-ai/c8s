@@ -36,7 +36,7 @@ func exactly(t *testing.T, digest string, argv ...string) Container {
 }
 
 func run(digest string, argv ...string) RunningContainer {
-	return RunningContainer{Digest: digest, Argv: argv}
+	return RunningContainer{Digest: digest, Argv: argv, Mounts: []ObservedMount{}}
 }
 
 func TestMatchWorkload(t *testing.T) {
@@ -131,7 +131,7 @@ func TestMatchWorkloadDistinguishesByArgv(t *testing.T) {
 	}
 
 	idx := al.BuildIndex()
-	if !idx.AdmitsContainer(RunningContainer{Digest: dApp, Argv: []string{"/serve", "--model", "a"}}) {
+	if !idx.AdmitsContainer(RunningContainer{Digest: dApp, Argv: []string{"/serve", "--model", "a"}, Mounts: []ObservedMount{}}) {
 		t.Fatal("precondition: Index should admit either argv for the shared digest")
 	}
 }

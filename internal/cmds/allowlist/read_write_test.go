@@ -425,7 +425,7 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		"empty":{},
 		"tagged":{"label":"docker.io/library/busybox:latest","containers":[
 			{"digest":"`+digA+`","image":"docker.io/library/busybox:latest",
-			 "command":{"policy":"any"},"args":{"policy":"any"}}]},
+			 "command":{"policy":"any"},"args":{"policy":"any"},"mounts":{"policy":"any"}}]},
 		"other":{"secrets":{"policy":"allow","read":["/**"]},"containers":[
 			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
 			{"digest":"`+digB+`","command":{"policy":"deny"},"args":{"policy":"deny"}}]}}}`)

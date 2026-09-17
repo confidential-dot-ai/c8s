@@ -31,7 +31,7 @@ func namedEntry(t *testing.T, mainDigests ...string) pkgallowlist.Workload {
 func containersView(digests ...string) []workloadclaims.SandboxContainer {
 	out := make([]workloadclaims.SandboxContainer, 0, len(digests))
 	for _, d := range digests {
-		out = append(out, workloadclaims.SandboxContainer{Digest: d})
+		out = append(out, workloadclaims.SandboxContainer{Digest: d, Mounts: []pkgallowlist.ObservedMount{}})
 	}
 	return out
 }
@@ -110,7 +110,7 @@ func TestAttest_MatchedWorkload_StampsUniqueMatch(t *testing.T) {
 func TestAttest_MatchedWorkload_DropsInjectedContainers(t *testing.T) {
 	store := completeAPIStore(t)
 	containers := []workloadclaims.SandboxContainer{
-		{Digest: wlDigestA},
+		{Digest: wlDigestA, Mounts: []pkgallowlist.ObservedMount{}},
 		{Digest: wlDigestC, Argv: []string{"get-cert", "--renew-interval=6h"}},
 	}
 	matched := issueWithInventory(t, store, []string{wlDigestA, wlDigestC}, containers, nil)
@@ -279,6 +279,29 @@ func TestAttest_WorkloadStampRequiresEnv(t *testing.T) {
 			if tc.known {
 				containers[0].Env, _ = pkgallowlist.ObserveEnv([]string{"MODE=" + tc.value})
 			}
+			matched := issueWithInventory(t, store, []string{wlDigestA}, containers, nil)
+			if (matched != nil) != tc.want {
+				t.Fatalf("stamp=%v", matched)
+			}
+		})
+	}
+}
+
+func TestAttest_WorkloadStampRequiresMountEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mounts []pkgallowlist.ObservedMount
+		want   bool
+	}{
+		{"memory data", []pkgallowlist.ObservedMount{{Destination: "/mnt/c8s-data/config", Class: pkgallowlist.MountData, Storage: pkgallowlist.MountMemory}}, true},
+		{"foreign destination", []pkgallowlist.ObservedMount{{Destination: "/other", Class: pkgallowlist.MountData, Storage: pkgallowlist.MountUnknown}}, false},
+		{"unobserved", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := completeAPIStore(t)
+			store.workloads["api"].Containers[0].Mounts = pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyExact, Rules: []pkgallowlist.MountRule{{Destination: "/mnt/c8s-data/config", Kind: pkgallowlist.MountData}}}
+			containers := containersView(wlDigestA)
+			containers[0].Mounts = tc.mounts
 			matched := issueWithInventory(t, store, []string{wlDigestA}, containers, nil)
 			if (matched != nil) != tc.want {
 				t.Fatalf("stamp=%v", matched)

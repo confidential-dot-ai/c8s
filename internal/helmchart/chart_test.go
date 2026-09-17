@@ -5204,7 +5204,7 @@ func seedLabel(seed *pkgallowlist.Allowlist, digest string) string {
 }
 
 // anyArgvEntryArgs renders one bootstrapAllowlist.workloads entry admitting
-// digest under any command and args, as `helm --set-string` arguments.
+// digest under any command, args, and mounts, as `helm --set-string` arguments.
 func anyArgvEntryArgs(name, digest, image string) []string {
 	p := "nriImagePolicy.bootstrapAllowlist.workloads." + name + "."
 	return []string{
@@ -5213,6 +5213,7 @@ func anyArgvEntryArgs(name, digest, image string) []string {
 		"--set-string", p + "containers[0].image=" + image,
 		"--set-string", p + "containers[0].command.policy=any",
 		"--set-string", p + "containers[0].args.policy=any",
+		"--set-string", p + "containers[0].mounts.policy=any",
 	}
 }
 
@@ -5260,6 +5261,65 @@ func TestChartSeedsCDSAllowlistFromBootstrapEntries(t *testing.T) {
 	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
 	if got := seedLabel(seed, cdsDigest); got != cdsRef {
 		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Workloads)
+	}
+	for _, al := range []pkgallowlist.Allowlist{*seed, worker.Allowlist.Base} {
+		for _, entry := range al.Workloads {
+			for _, c := range entry.Containers {
+				if c.Digest.String() == cdsDigest && c.Mounts.Policy != pkgallowlist.PolicyAny {
+					t.Errorf("generated CDS mount policy = %+v, want explicit any", c.Mounts)
+				}
+			}
+		}
+	}
+}
+
+func TestChartBasePreservesOperatorMountConstraints(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy string
+		want   pkgallowlist.MountPolicy
+	}{
+		{"omitted", "", pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"deny", pkgallowlist.PolicyDeny, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyDeny}},
+		{"exact", pkgallowlist.PolicyExact, pkgallowlist.MountPolicy{Policy: pkgallowlist.PolicyExact, Rules: []pkgallowlist.MountRule{{Destination: "/cache", Kind: pkgallowlist.MountEmptyDir}}}},
+	}
+	var args []string
+	for i, tc := range cases {
+		p := "nriImagePolicy.bootstrapAllowlist.workloads." + tc.name + ".containers[0]."
+		args = append(args,
+			"--set-string", p+"digest="+fmt.Sprintf("sha256:abcdef%058d", i),
+			"--set-string", p+"command.policy=any",
+			"--set-string", p+"args.policy=any",
+		)
+		if tc.policy != "" {
+			args = append(args, "--set-string", p+"mounts.policy="+tc.policy)
+		}
+		if tc.policy == pkgallowlist.PolicyExact {
+			args = append(args,
+				"--set-string", p+"mounts.rules[0].destination=/cache",
+				"--set-string", p+"mounts.rules[0].kind=emptyDir",
+			)
+		}
+	}
+	out, err := helmTemplate(t, args...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	seed := renderedSeed(t, out)
+	worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+	base := baseImages(worker.Allowlist.Base)
+	for _, tc := range cases {
+		entry, ok := seed.Workloads[tc.name]
+		if !ok || len(entry.Containers) != 1 {
+			t.Fatalf("operator entry %q missing from served seed", tc.name)
+		}
+		c := entry.Containers[0]
+		if !reflect.DeepEqual(c.Mounts, tc.want) {
+			t.Errorf("operator entry %q mount policy = %+v, want %+v", tc.name, c.Mounts, tc.want)
+		}
+		if _, ok := base[c.Digest.String()]; ok {
+			t.Errorf("operator entry %q with constrained mounts entered the boot base", tc.name)
+		}
 	}
 }
 
@@ -7361,4 +7421,44 @@ func TestRouterProbesUseHTTPSHealthChecks(t *testing.T) {
 		}
 	}
 
+}
+
+func TestChartSweepMountAdmission(t *testing.T) {
+	for _, baked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("baked=%v", baked), func(t *testing.T) {
+			out, err := helmTemplate(t, "--set", "nriImagePolicy.baked="+strconv.FormatBool(baked))
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+			seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile("c8s/files/scripts/host-sweep.sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idx := seed.BuildIndex()
+			for _, tc := range []struct {
+				name            string
+				argv            []string
+				hostMount, want bool
+			}{
+				{"sweep", []string{"/bin/sh", "-c", strings.TrimRight(string(script), "\n") + "\n"}, true, true},
+				{"pause", []string{"/bin/sleep", "2147483647"}, false, true},
+				{"pause with host mount", []string{"/bin/sleep", "2147483647"}, true, false},
+				{"shell pause with host mount", []string{"/bin/sh", "-c", "sleep infinity"}, true, false},
+				{"unpinned script", []string{"/bin/sh", "-c", "echo unexpected"}, true, false},
+			} {
+				mounts := []pkgallowlist.ObservedMount{}
+				if tc.hostMount {
+					mounts = append(mounts, pkgallowlist.ObservedMount{Source: "/", Destination: "/host", Class: pkgallowlist.MountHost, Storage: pkgallowlist.MountUnknown})
+				}
+				if got := idx.AdmitsContainer(pkgallowlist.RunningContainer{Digest: baseNRIDigest, Argv: tc.argv, Mounts: mounts}); got != tc.want {
+					t.Errorf("%s admitted=%v, want %v", tc.name, got, tc.want)
+				}
+			}
+		})
+	}
 }

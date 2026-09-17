@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -332,12 +333,8 @@ func TestExplainAgreesWithTheMatcher(t *testing.T) {
 			_, resp := eh.serve(testSandbox)
 
 			al, _ := eh.h.Policy.Allowlist()
-			var candidates []pkgallowlist.RunningContainer
-			for _, c := range tc.running {
-				if !isInjected(al, c) {
-					candidates = append(candidates, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
-				}
-			}
+			reported, _ := eh.inv.FetchSandbox(context.Background(), "", testSandbox)
+			candidates := WorkloadContainers(al, reported.Containers)
 			name, _, err := al.MatchWorkload(candidates)
 			if err != nil {
 				name = ""

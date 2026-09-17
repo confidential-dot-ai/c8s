@@ -17,8 +17,8 @@ into attestation).
 The allowlist is a map of named **workload entries**. Each entry pins an
 init/main container set. Every container binds a **digest** to the process
 policy (`command`, `args`) permitted for those bytes, optionally to the
-environment values it may launch with (`env`), and the entry as a whole may
-carry a secret-store grant (`secrets`).
+environment values it may launch with (`env`) and the bind mounts it may receive
+(`mounts`), and the entry as a whole may carry a secret-store grant (`secrets`).
 The entry name is operator-chosen; the entry `label` and per-container `image`
 are informational. Policy is always resolved by container digest.
 
@@ -181,6 +181,68 @@ The NRI plugin enforces env after cumulative NRI adjustments, and the admission
 inventory carries an environment fingerprint for CDS workload matching and
 secret release.
 
+## Mount policy (`mounts`)
+
+`mounts` constrains bind mounts in the final OCI specification. The node
+classifies each source rather than trusting the destination alone: a hostPath,
+an `emptyDir`, and a ConfigMap can all be placed at the same destination while
+carrying very different authority over the container.
+
+An absent policy is `deny`, which permits only the platform mounts defined by
+the c8s NRI plugin in the node image. The plugin checks both destination and
+source ownership against this baseline:
+
+| Destination | Required source |
+| --- | --- |
+| `/etc/hosts` | The current pod's kubelet `etc-hosts` file. |
+| `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm` | The current sandbox's corresponding containerd file or directory under the standard containerd or RKE2 root/state directories. |
+| `/dev/termination-log` | A file in the current pod and container's kubelet `containers` directory. |
+| `/var/run/secrets/kubernetes.io/serviceaccount` | The current pod's kubelet projected volume named `kube-api-access-*`. |
+
+These mounts are also permitted implicitly by `exact`. A matching destination
+alone does not establish platform ownership. `any` leaves mounts unconstrained;
+`exact` requires the observed non-platform set to equal its concrete rules:
+
+```json
+"mounts": {
+  "policy": "exact",
+  "rules": [
+    {"destination": "/var/cache/app", "kind": "emptyDir"},
+    {"destination": "/mnt/c8s-data/config", "kind": "data"}
+  ]
+}
+```
+
+The pod UID embedded in a kubelet source must equal the pod being admitted, and
+containerd sandbox sources must name its exact sandbox. These runtime IDs prove
+local ownership only and are not serialized into the stable allowlist.
+
+| Observed source | Class | Storage | `exact` behavior |
+|---|---|---|---|
+| Node-created platform mount at its fixed destination | `platform` | not relevant | admitted without a rule |
+| Current pod's `emptyDir` on tmpfs | `emptyDir` | `memory` | requires a matching `emptyDir` rule |
+| Current pod's `emptyDir` whose backing chain reaches encrypted boot scratch | `emptyDir` | `encrypted` | requires a matching `emptyDir` rule |
+| Another pod's `emptyDir` | `host` | `unknown` | denied |
+| Mapping merely named `scratch` | `emptyDir` | `unknown` | denied |
+| Missing or inconsistent scratch evidence | `emptyDir` | `unknown` | denied |
+| Plain disk-backed `emptyDir` | `emptyDir` | `unknown` | denied |
+| ConfigMap, Secret, projected, PVC, CSI, local data, or a subpath | `data` | observed | requires a matching `data` rule under `/mnt/c8s-data/` and memory or encrypted storage |
+| Reserved `c8s-volume-*` placeholder or propagated volume | `data` | observed | requires the same `data` rule, including before volume propagation |
+| Host path or unrecognized source | `host` | `unknown` | denied |
+
+The Linux observer resolves tmpfs directly. For disk storage it resolves the
+containing mount, follows an overlay upper directory when necessary, and walks
+the device-mapper slave graph. The current scratch contract requires the exact
+`scratch` mapper, a crypt device UUID, and ancestry reaching the virtio device
+with serial `confai-scratch`. The serial or mapper name alone is never proof.
+
+The initrd that creates scratch and generates its random in-memory key is part
+of the measured node image. Before RKE2 starts, `scratch-enforce` verifies the
+crypt mapping and backing device and writes a record tied to the current boot ID
+and device number under `/run/c8s`. NRI requires that record as well as the live
+backing chain. Fresh key creation remains an attested-initrd property; failure
+to establish any runtime evidence remains `unknown` and is denied.
+
 
 ## Secret grants (`secrets`)
 
@@ -301,24 +363,24 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
-Each enforcer also carries a **base enforcement allowlist** that admits by
-digest alone ahead of the served document and is never touched by a pull: the
-host NRI plugin's `allowlist.base` (an allowlist document baked into its boot
-config, chart-rendered from the chart's own component digests plus every
-`bootstrapAllowlist.workloads` container admitted under any command and args).
-That is what lets a node enforce at t=0 offline and bring the platform's own images
-up before CDS is reachable.
+The host NRI plugin also carries a **base enforcement allowlist** in
+`allowlist.base`, baked into its boot config and never changed by a pull.
+Either a base entry or a served entry must satisfy the launch constraints.
+Both sources check argv at preliminary admission, then argv, environment, and
+mounts at final admission; unavailable evidence fails constrained policies.
+Generated system-image entries explicitly allow mounts and leave the other
+launch fields unconstrained so the platform can start before CDS is reachable.
 
 ## Bootstrap
 
 The chart renders the seed (`--allowlist-seed`) from the resolved component
 digests, argv-pinned platform entries, and `bootstrapAllowlist.workloads`. Each
 unrestricted component digest becomes one entry named `<image basename>-<first 12 hex of
-digest>` with a single container under `command: any, args: any`; an
+digest>` with a single container under `command: any, args: any, env: any, mounts: any`; an
 operator-authored `workloads` entry of the same name replaces it whole in the
-rendered seed. Operator entries admitting a digest under any command and args
-also feed the host plugin's base allowlist; an entry that pins a command line
-is seed-only. The
+rendered seed. Operator entries with unconstrained command, args, environment,
+and mounts also feed the host plugin's base allowlist; constrained entries
+are seed-only. The
 name is a function of the digest because CDS seeds **additively by name**: an
 image bump adds the new digest's entry beside the old one, which pods still
 running the old image keep matching while they recycle. The seed never
