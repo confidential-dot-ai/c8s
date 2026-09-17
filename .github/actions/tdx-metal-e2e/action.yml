@@ -204,16 +204,15 @@ runs:
         [ "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA" ] \
           || { echo "::error::exact-image workspace does not match the verified source SHA"; exit 1; }
         C8S_SOURCE_DIR=$GITHUB_WORKSPACE
+      elif [ -z "${C8S_REF_INPUT:-}" ]; then
+        # The c8s this action runs from: the merge head under c8s's own
+        # trigger, lane_ref's HEAD under confidential-ci's wrapper. No clone:
+        # a pull_request checkout is a merge commit no remote branch has.
+        C8S_SOURCE_DIR=$GITHUB_WORKSPACE
       else
-        REF="${C8S_REF_INPUT:-}"
-        if [ -z "$REF" ]; then
-          # The c8s this action runs from: the merge head under c8s's own
-          # trigger, or lane_ref's HEAD under confidential-ci's wrapper.
-          REF=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
-        fi
         retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src' \
           || { clone_diag; exit 1; }
-        git -C /tmp/c8s-src checkout -q "$REF" || { echo "::error::bad c8s ref '$REF'"; exit 1; }
+        git -C /tmp/c8s-src checkout -q "$C8S_REF_INPUT" || { echo "::error::bad c8s ref '$C8S_REF_INPUT'"; exit 1; }
         C8S_SOURCE_DIR=/tmp/c8s-src
       fi
       export C8S_SOURCE_DIR
@@ -242,7 +241,8 @@ runs:
       # container create. c8s-image publishes one image per main commit, and
       # the merge-triggered e2e chains off that publish, so for a merge run
       # it exists; for a dispatch it must too.
-      tok=$(curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull" | jq -er .token)
+      . "$GITHUB_WORKSPACE/bin/retry.sh"
+      tok=$(retry 'curl -fsSL --max-time 20 "https://ghcr.io/token?scope=repository:${IMAGE_REPO#ghcr.io/}:pull"' | jq -er .token)
       accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'
       IMG_DIGEST=""; code=""
       for attempt in 1 2 3 4; do
@@ -256,10 +256,9 @@ runs:
         esac
       done
       [[ "$IMG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ghcr answered ${code:-none} for rke2-tdx-cdi-${c8sRef} on 4 attempts"; exit 1; }
-      oras=$(curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "Accept: $accept" \
-        "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-tdx-${c8sRef}")
+      oras=$(retry 'curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" -H "Accept: $accept" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/manifests/rke2-tdx-${c8sRef}"')
       mlayer=$(jq -er '.layers[] | select(.annotations["org.opencontainers.image.title"]=="manifest.json") | .digest' <<<"$oras")
-      curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$mlayer" > /tmp/image-manifest.json
+      retry 'curl -fsSL --max-time 60 -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${IMAGE_REPO#ghcr.io/}/blobs/$mlayer" > /tmp/image-manifest.json'
       jq -e '.build.platform == "tdx" and (.tdx.mrtd | length) == 96' /tmp/image-manifest.json >/dev/null \
         || { echo "::error::rke2-tdx-${c8sRef} manifest.json is not a TDX node image manifest"; exit 1; }
       short12=${IMG_DIGEST#sha256:}; short12=${short12:0:12}
