@@ -177,14 +177,6 @@ if "/" not in repo or ("." not in repo.split("/")[0] and ":" not in repo.split("
 print(repo + "@" + img["digest"])')"
 node_exec ctr -n k8s.io images pull "$ROUTER_NGINX_REF" >/dev/null \
     || fail "could not pull $ROUTER_NGINX_REF into the node"
-# kind's local-path provisioner spawns a per-PVC helper pod from its config's
-# helperPod.yaml; the floor must admit that image for the provisioning test below.
-HELPER_IMAGE="$(kubectl -n local-path-storage get configmap local-path-config \
-    -o jsonpath='{.data.helperPod\.yaml}' | awk '/image:/ {print $2; exit}')"
-[ -n "$HELPER_IMAGE" ] || fail "kind local-path helper image not found in local-path-config"
-if [ "${HELPER_IMAGE#*/}" = "$HELPER_IMAGE" ]; then HELPER_IMAGE="library/$HELPER_IMAGE"; fi
-node_exec ctr -n k8s.io images pull "docker.io/$HELPER_IMAGE" >/dev/null \
-    || fail "could not pull local-path helper image $HELPER_IMAGE into the node"
 
 log "Writing the allowlist floor"
 # Every image in the node's store (kind system images, the loaded c8s images,
@@ -195,6 +187,13 @@ log "Writing the allowlist floor"
 store_digests > "$WORKDIR/floor.tsv"
 [ -s "$WORKDIR/floor.tsv" ] || fail "containerd store scan came back empty"
 grep -Fq "docker.io/$WORKLOAD_IMAGE" "$WORKDIR/floor.tsv" || fail "workload image missing from the store scan"
+# kind preloads its local-path helper image into the node, so the scan admits
+# the provisioner's per-PVC helper pods (the provisioning test below).
+HELPER_IMAGE="$(kubectl -n local-path-storage get configmap local-path-config \
+    -o jsonpath='{.data.helperPod\.yaml}' \
+    | python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["spec"]["containers"][0]["image"])')"
+grep -Fq "$HELPER_IMAGE" "$WORKDIR/floor.tsv" \
+    || fail "kind local-path helper image $HELPER_IMAGE missing from the floor scan"
 NRI_STORE_DIGEST="$(awk -F'\t' '$2 ~ /nri-image-policy:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 CDS_STORE_DIGEST="$(awk -F'\t' '$2 ~ /\/cds:it$/ {print $1; exit}' "$WORKDIR/floor.tsv")"
 [ -n "$NRI_STORE_DIGEST" ] && [ -n "$CDS_STORE_DIGEST" ] || fail "loaded-image digests missing from the floor scan"
