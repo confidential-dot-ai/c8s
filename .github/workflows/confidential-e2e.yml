@@ -1,19 +1,12 @@
 name: confidential-e2e
-# merge to main -> integration happens -> issues surfaced: run the c8s e2e
-# inside a measured SEV-SNP CVM for every main merge (boot a fresh RKE2-node
-# CVM, self-discover its launch measurement, install this commit's c8s, prove a
-# confidential workload gets a CDS-issued cert under the enforced digest).
-# Mechanics + rationale (trigger precedent, merge-burst semantics):
-#   confidential-dot-ai/confidential-ci/USING-THE-PRIMITIVE.md
-# This wrapper only decides WHEN. Never pull_request (self-hosted org hardware).
+# Trigger product tests with the CLI/test source from each accepted merge.
+# Metal lanes boot the measured image published in their producer refs CM;
+# testing a newer node implementation requires rebuilding/reseeding that image.
+# Never pull_request: these jobs use the organization's self-hosted hardware.
 on:
   workflow_run:
-    # Chain off the node-image publish (itself chained off Docker), so when
-    # the lanes start this sha has BOTH its component images and its node
-    # images. The metal lanes install a commit's chart on the node image
-    # built from that same commit: the image bakes a fail-closed NRI plugin
-    # whose floor pins its own CDS digest, and a chart from another commit
-    # gets its CDS denied at container create, so no other pair can work.
+    # Wait for node-image publication, which follows component publication.
+    # Staged lanes also require their producer metadata to select that image.
     workflows: ["c8s-image"]
     types: [completed]
   workflow_dispatch:
@@ -52,8 +45,6 @@ jobs:
     # the trailing @main tag is a human label only.
     uses: ./.github/workflows/e2e-c8s.yml
     with:
-      # Test the merge head. The metal lane installs the chart's own
-      # attestation-api DaemonSet + attest-proxy socket as the node-local
-      # endpoint, so the staged rke2 image needs no baked AA for cvmMode=bare-metal
-      # (#88).
+      # This selects the external CLI/tests. The measured node image and
+      # baked attester remain pinned by each lane's producer metadata.
       c8s_ref: ${{ inputs.c8s_ref || github.event.workflow_run.head_sha }}
