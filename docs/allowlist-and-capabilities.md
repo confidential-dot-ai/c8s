@@ -403,6 +403,11 @@ trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
 
+`nriImagePolicy.refresh.interval` sets the poll, so a node runs the previous
+document for up to one interval after CDS commits a write; a node has taken a
+write once its plugin logs `pull loop: allowlist refreshed` with a version at or
+above the one `c8s allowlist list` reports.
+
 The host NRI plugin also carries a **base enforcement allowlist** in
 `allowlist.base`, baked into its boot config and never changed by a pull.
 Either a base entry or a served entry must satisfy the launch constraints.
