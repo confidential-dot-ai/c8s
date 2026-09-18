@@ -104,6 +104,18 @@ endpoint. Updating only the operator CLI does not add this guest endpoint.
 See [the operator trust gate](../docs/operator.md#trust-gate-c8s-get-kubeconfig)
 for the explicit legacy attestation URL option and verification rules.
 
+## Signed launch tools
+
+`c8s node launch-config new`, `c8s node launch-config add-agent` and `c8s keys sign-launch`
+create and extend signed `c8s-launch/v1` bundles. See
+[Authenticated launch configuration](../docs/operator.md#authenticated-launch-configuration)
+for the schema, key separation, bundle layout and ISO commands.
+
+These commands are additive in this layer. The next layer connects signature
+verification and staging to guest boot; the `joindata` role selector above is
+still the current image behavior here. The complete stack, including #552's
+hardware launchers, must land together before publishing the new image.
+
 ## Immutable root checks
 
 From the repository root on a disposable Linux system, check out the
