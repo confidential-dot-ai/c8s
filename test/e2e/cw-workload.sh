@@ -4,7 +4,8 @@
 #
 # Needs kubectl pointed at a cluster with c8s installed. Under fail-closed image
 # admission the workload digest must be allowlisted first: set C8S_OPERATOR_KEY
-# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS and this applies an entry for it.
+# with C8S_ALLOWLIST_URL and C8S_MEASUREMENTS_CONFIG (or C8S_MEASUREMENTS)
+# and this applies an entry for it.
 # Audit mode admits it without them.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -31,9 +32,9 @@ image=$(grep -oE '[[:graph:]]+@sha256:[0-9a-f]{64}' "$manifest" | head -1)
 
 if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
   : "${C8S_ALLOWLIST_URL:?needed alongside C8S_OPERATOR_KEY}"
-  : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
+  cds_measurement_args
   c8s allowlist add "${image#*@}" "$image" \
-    --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
+    --url "$C8S_ALLOWLIST_URL" "${measurement_args[@]}" >/dev/null \
     || fail "signed allowlist write rejected for the workload digest"
   echo "ok: workload digest admitted"
 fi

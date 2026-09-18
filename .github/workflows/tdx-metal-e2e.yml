@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: 'c8s git ref to install + test, on the node image built from that exact commit (rke2-tdx-cdi-<sha> must be published). Empty = the checked-out HEAD.'
+        description: 'c8s ref for the CLI and tests, on the node image built from that exact commit (rke2-tdx-cdi-<sha> must be published). Empty = the checked-out HEAD.'
         required: false
         default: ''
       keep_cvm:
