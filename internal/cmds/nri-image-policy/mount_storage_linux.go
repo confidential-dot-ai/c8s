@@ -38,8 +38,10 @@ type linuxStorageInspector struct {
 
 func newMountStorageInspector() mountStorageInspector {
 	return linuxStorageInspector{
-		sysDevBlock: "/sys/dev/block", sysClassBlock: "/sys/class/block",
-		mountInfo: "/proc/self/mountinfo", stateDir: "/usr/lib/confai/state.d",
+		sysDevBlock:    "/sys/dev/block",
+		sysClassBlock:  "/sys/class/block",
+		mountInfo:      "/proc/self/mountinfo",
+		stateDir:       "/usr/lib/confai/state.d",
 		provenanceFile: "/run/c8s/scratch-provenance.json",
 		bootIDFile:     "/proc/sys/kernel/random/boot_id",
 	}
@@ -72,15 +74,15 @@ func (i linuxStorageInspector) inspect(source string, seen map[string]bool) allo
 		return allowlist.MountUnknown
 	}
 	dev := fmt.Sprintf("%d:%d", unix.Major(uint64(st.Dev)), unix.Minor(uint64(st.Dev)))
-	if i.trustedEncryptedDevice(filepath.Join(i.sysDevBlock, dev), map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(filepath.Join(i.sysDevBlock, dev), map[string]bool{}) {
 		return allowlist.MountEncrypted
 	}
 	return allowlist.MountUnknown
 }
 
-// trustedEncryptedDevice accepts c8s volume mappings and the measured initrd
+// isTrustedEncryptedDevice accepts c8s volume mappings and the measured initrd
 // scratch contract. A host-controlled serial by itself is never sufficient.
-func (i linuxStorageInspector) trustedEncryptedDevice(device string, seen map[string]bool) bool {
+func (i linuxStorageInspector) isTrustedEncryptedDevice(device string, seen map[string]bool) bool {
 	real, err := filepath.EvalSymlinks(device)
 	if err != nil {
 		return false
@@ -93,7 +95,7 @@ func (i linuxStorageInspector) trustedEncryptedDevice(device string, seen map[st
 		strings.HasPrefix(readTrim(filepath.Join(real, "dm/name")), "c8s-crypt-") {
 		return true
 	}
-	if i.trustedScratchMapping(real) {
+	if i.isTrustedScratchMapping(real) {
 		return true
 	}
 	entries, err := os.ReadDir(filepath.Join(real, "slaves"))
@@ -101,18 +103,18 @@ func (i linuxStorageInspector) trustedEncryptedDevice(device string, seen map[st
 		return false
 	}
 	return slices.ContainsFunc(entries, func(entry os.DirEntry) bool {
-		return i.trustedEncryptedDevice(filepath.Join(real, "slaves", entry.Name()), seen)
+		return i.isTrustedEncryptedDevice(filepath.Join(real, "slaves", entry.Name()), seen)
 	})
 }
 
-// trustedScratchMapping accepts the measured initrd's scratch contract, which
+// isTrustedScratchMapping accepts the measured initrd's scratch contract, which
 // needs all three facts: exact mapper name, a crypt target UUID, and a backing
 // virtio device whose exact serial is the launch contract.
-func (i linuxStorageInspector) trustedScratchMapping(device string) bool {
+func (i linuxStorageInspector) isTrustedScratchMapping(device string) bool {
 	uuid := readTrim(filepath.Join(device, "dm/uuid"))
 	return readTrim(filepath.Join(device, "dm/name")) == scratchMapperName &&
 		strings.HasPrefix(uuid, "CRYPT-") &&
-		i.trustedScratchProvenance(device, uuid) &&
+		i.isTrustedScratchProvenance(device, uuid) &&
 		i.hasScratchSlave(device, map[string]bool{})
 }
 
@@ -125,17 +127,17 @@ func (i linuxStorageInspector) overlayStorage(source string, seen map[string]boo
 	if !ok {
 		return allowlist.MountUnknown
 	}
-	if device, ok := i.bootScratchDevice(); ok && i.declaredStateDir(mountpoint) && i.trustedScratchMapping(device) {
+	if device, ok := i.bootScratchDevice(); ok && i.isDeclaredStateDir(mountpoint) && i.isTrustedScratchMapping(device) {
 		return allowlist.MountEncrypted
 	}
 	return i.inspect(upper, seen)
 }
 
-// declaredStateDir reports whether mountpoint is one of the directories the
+// isDeclaredStateDir reports whether mountpoint is one of the directories the
 // measured image declares for a writable state overlay, parsed the way the
 // initrd parses them: one path per line, blank lines and # comments skipped,
 // a leading slash tolerated.
-func (i linuxStorageInspector) declaredStateDir(mountpoint string) bool {
+func (i linuxStorageInspector) isDeclaredStateDir(mountpoint string) bool {
 	if i.stateDir == "" {
 		return false
 	}
@@ -194,7 +196,7 @@ type scratchProvenance struct {
 	UUID    string `json:"uuid"`
 }
 
-func (i linuxStorageInspector) trustedScratchProvenance(device, uuid string) bool {
+func (i linuxStorageInspector) isTrustedScratchProvenance(device, uuid string) bool {
 	b, err := os.ReadFile(i.provenanceFile)
 	if err != nil {
 		return false

@@ -39,11 +39,11 @@ func TestTrustedC8sCryptDeviceThroughVerity(t *testing.T) {
 			}
 			inspector := linuxStorageInspector{}
 			for _, device := range []string{crypt, verity} {
-				if got := inspector.trustedEncryptedDevice(device, map[string]bool{}); got != tc.want {
+				if got := inspector.isTrustedEncryptedDevice(device, map[string]bool{}); got != tc.want {
 					t.Fatalf("device %s trusted=%v, want %v", device, got, tc.want)
 				}
 			}
-			if inspector.trustedEncryptedDevice(filepath.Join(root, "missing"), map[string]bool{}) {
+			if inspector.isTrustedEncryptedDevice(filepath.Join(root, "missing"), map[string]bool{}) {
 				t.Fatal("missing device reported encrypted")
 			}
 		})
@@ -58,7 +58,7 @@ func TestTrustedEncryptedDeviceRejectsSlaveCycle(t *testing.T) {
 	if err := os.Symlink(device, filepath.Join(device, "slaves", "self")); err != nil {
 		t.Fatal(err)
 	}
-	if (linuxStorageInspector{}).trustedEncryptedDevice(device, map[string]bool{}) {
+	if (linuxStorageInspector{}).isTrustedEncryptedDevice(device, map[string]bool{}) {
 		t.Fatal("device cycle reported encrypted")
 	}
 }
@@ -118,14 +118,14 @@ func TestTrustedScratchRejectsIncompleteProvenance(t *testing.T) {
 				}
 			}
 			i := linuxStorageInspector{provenanceFile: provenance, bootIDFile: bootID}
-			if i.trustedScratchProvenance(root, "CRYPT-test") {
+			if i.isTrustedScratchProvenance(root, "CRYPT-test") {
 				t.Fatal("incomplete provenance trusted")
 			}
 			if missing == "device" {
 				if err := os.Remove(filepath.Join(root, "dev")); err != nil {
 					t.Fatal(err)
 				}
-				if i.trustedScratchProvenance(root, "CRYPT-test") {
+				if i.isTrustedScratchProvenance(root, "CRYPT-test") {
 					t.Fatal("missing provenance and sysfs device numbers trusted")
 				}
 			}
@@ -198,32 +198,32 @@ func TestTrustedScratchRequiresCryptAndBackingSerial(t *testing.T) {
 	write(bootID, "boot-a\n")
 	write(provenance, `{"version":1,"boot_id":"boot-a","device":"253:0","name":"scratch","uuid":"CRYPT-PLAIN-test"}`)
 	i := linuxStorageInspector{sysClassBlock: class, provenanceFile: provenance, bootIDFile: bootID}
-	if !i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if !i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("complete scratch proof rejected")
 	}
 	write(filepath.Join(dev, "dm/uuid"), "DM-LINEAR-test\n")
-	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("non-crypt scratch trusted")
 	}
 	write(filepath.Join(dev, "dm/uuid"), "CRYPT-PLAIN-test\n")
 	write(filepath.Join(class, "vda", "device/serial"), "confai-scratch\n")
 	write(filepath.Join(class, "vda", "serial"), "scratch-lookalike\n")
-	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("wrong backing serial trusted")
 	}
 	if err := os.Remove(filepath.Join(class, "vda", "serial")); err != nil {
 		t.Fatal(err)
 	}
-	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("parent device serial trusted without block device serial")
 	}
 	write(filepath.Join(class, "vda", "serial"), "")
-	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("empty block device serial trusted")
 	}
 	write(filepath.Join(class, "vda", "serial"), "confai-scratch\n")
 	write(bootID, "boot-b\n")
-	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+	if i.isTrustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("stale boot provenance trusted")
 	}
 }
