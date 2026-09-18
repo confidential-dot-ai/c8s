@@ -127,3 +127,30 @@ func TestPrepareRejectsInvalidLaunchWorkloads(t *testing.T) {
 		t.Fatalf("nginx.conf = %q", conf)
 	}
 }
+
+func TestMissingLaunchDocumentHasNoBootSideEffects(t *testing.T) {
+	old := primaryIPv4
+	t.Cleanup(func() { primaryIPv4 = old })
+	primaryIPv4 = func() (string, error) {
+		t.Fatal("resolved a host route without a launch document")
+		return "", nil
+	}
+	for name, run := range map[string]func(string, *launchconfig.Document) error{
+		"prepare":         Prepare,
+		"publish node IP": PublishNodeIP,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := run(root, nil); err == nil || !strings.Contains(err.Error(), "missing staged launch configuration") {
+				t.Fatalf("missing document: %v", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("missing document created boot state: %v", entries)
+			}
+		})
+	}
+}
