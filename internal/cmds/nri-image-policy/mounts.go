@@ -44,7 +44,7 @@ type mountHandler interface {
 }
 
 // mountObserver applies handlers in order. Each handler owns a disjoint,
-// readable piece of the node's mount contract; the last handler fails closed.
+// readable piece of the node's mount contract; unmatched mounts are host-backed.
 type mountObserver struct {
 	handlers []mountHandler
 	storage  mountStorageInspector
@@ -56,7 +56,6 @@ func newMountObserver(storage mountStorageInspector) mountObserver {
 		emptyDirMountHandler{},
 		kubeletDataMountHandler{},
 		kubeletSubpathHandler{},
-		unknownMountHandler{},
 	}}
 }
 
@@ -64,17 +63,28 @@ func (o mountObserver) Observe(pod *api.PodSandbox, ctr *api.Container) []allowl
 	ctx := MountContext{PodUID: pod.GetUid(), SandboxID: pod.GetId(), Container: ctr, Storage: o.storage}
 	out := make([]allowlist.ObservedMount, 0, len(ctr.GetMounts()))
 	for _, m := range ctr.GetMounts() {
-		if m == nil || !path.IsAbs(m.GetSource()) { // filesystem mounts carry no host bytes
-			continue
-		}
-		for _, handler := range o.handlers {
-			if observed, ok := handler.Observe(ctx, m); ok {
-				out = append(out, observed)
-				break
-			}
+		if carriesHostBytes(m) {
+			out = append(out, o.observeMount(ctx, m))
 		}
 	}
 	return out
+}
+
+func carriesHostBytes(m *api.Mount) bool {
+	return m != nil && (path.IsAbs(m.GetSource()) || isBindMount(m))
+}
+
+func isBindMount(m *api.Mount) bool {
+	return m.GetType() == "bind" || slices.Contains(m.GetOptions(), "bind") || slices.Contains(m.GetOptions(), "rbind")
+}
+
+func (o mountObserver) observeMount(ctx MountContext, m *api.Mount) allowlist.ObservedMount {
+	for _, handler := range o.handlers {
+		if mount, ok := handler.Observe(ctx, m); ok {
+			return mount
+		}
+	}
+	return observeHostMount(m)
 }
 
 func defaultStorage(s mountStorageInspector) mountStorageInspector {
@@ -183,13 +193,26 @@ func cutTwoOrMore(s string) (string, string, bool) {
 	return a, b, ok && a != "" && b != ""
 }
 
-type unknownMountHandler struct{}
-
-func (unknownMountHandler) Observe(_ MountContext, m *api.Mount) (allowlist.ObservedMount, bool) {
-	return observed(m, allowlist.MountHost, allowlist.MountUnknown), true
+func observeHostMount(m *api.Mount) allowlist.ObservedMount {
+	mount := observed(m, allowlist.MountHost, allowlist.MountUnknown)
+	for _, option := range m.GetOptions() {
+		switch option {
+		case "ro":
+			mount.ReadOnly = true
+		case "rw":
+			mount.ReadOnly = false
+		case "rro", "rrw":
+			return mount
+		}
+	}
+	mount.HostSourceDigest = allowlist.HostSourceDigest(m.GetSource())
+	return mount
 }
 
 func observed(m *api.Mount, class allowlist.MountClass, storage allowlist.MountStorage) allowlist.ObservedMount {
 	return allowlist.ObservedMount{Destination: m.GetDestination(), Source: m.GetSource(), Class: class, Storage: storage}
 }
-func cleanAbsolute(p string) bool { return path.IsAbs(p) && path.Clean(p) == p }
+
+func cleanAbsolute(p string) bool {
+	return path.IsAbs(p) && path.Clean(p) == p
+}

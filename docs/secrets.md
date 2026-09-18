@@ -378,7 +378,8 @@ an entry that pins `command: exact` gives no guarantee at release time if anothe
 entry widens the same digest.
 
 The mount evidence records each destination's observed class and storage. Its
-node-local source path is deliberately omitted from the inventory response.
+node-local source path is deliberately omitted from the inventory response;
+host mounts carry a source commitment and read-only mode.
 `mounts: []` means no bind mounts were observed. `mounts: null` or a missing
 `mounts` field means mount evidence is unavailable; exact and deny mount
 policies fail closed in that case. Inventory responses retain the `mounts` field

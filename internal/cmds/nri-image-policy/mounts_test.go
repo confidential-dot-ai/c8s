@@ -111,3 +111,31 @@ func TestMountObserverRejectsUncleanAndLookalikePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestHostMountSourceAndAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name, source    string
+		options         []string
+		readOnly, valid bool
+	}{
+		{"read-only", "/etc/service", []string{"rbind", "ro"}, true, true},
+		{"writable", "/etc/service", []string{"bind", "rw"}, false, true},
+		{"last read-only", "/etc/service", []string{"rw", "ro"}, true, true},
+		{"last writable", "/etc/service", []string{"ro", "rw"}, false, true},
+		{"recursive writable", "/etc/service", []string{"ro", "rrw"}, true, false},
+		{"recursive read-only", "/etc/service", []string{"rro"}, false, false},
+		{"relative bind", "service", []string{"bind"}, false, false},
+		{"unclean", "/etc/../service", []string{"bind"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctr := &api.Container{Mounts: []*api.Mount{{Type: "bind", Source: tc.source, Destination: "/config", Options: tc.options}}}
+			got := newMountObserver(nil).Observe(&api.PodSandbox{}, ctr)
+			if len(got) != 1 || got[0].Class != allowlist.MountHost {
+				t.Fatalf("host bind disappeared: %+v", got)
+			}
+			if (got[0].HostSourceDigest != "") != tc.valid || got[0].ReadOnly != tc.readOnly {
+				t.Fatalf("unexpected host evidence: %+v", got[0])
+			}
+		})
+	}
+}
