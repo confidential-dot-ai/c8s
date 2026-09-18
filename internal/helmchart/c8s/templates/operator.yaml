@@ -53,7 +53,11 @@ spec:
             - --leader-election-namespace={{ .Release.Namespace }}
             - --status-mirror-enabled={{ .Values.statusMirror.enabled }}
             - --get-cert-image={{ include "c8s.image" . }}
+            {{- if .Values.node.bakedServices }}
+            - --cds-url=$(C8S_CDS_URL)
+            {{- else }}
             - --cds-url={{ include "c8s.trustRootURL" . }}
+            {{- end }}
             - --webhook-config-name={{ include "c8s.fullname" . }}-pod-injector
             - --webhook-service-name={{ include "c8s.operatorName" . }}
             - --webhook-service-namespace={{ .Release.Namespace }}
@@ -61,7 +65,7 @@ spec:
             {{- /* The same measurements CDS is pinned to elsewhere: the
                    injected secret fetcher verifies CDS before handing it a
                    sandbox token and taking a value back. */}}
-            {{- if .Values.cds.measurementsConfig }}
+            {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
             - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- range .Values.cds.measurements }}
@@ -91,6 +95,14 @@ spec:
             {{- range .Values.operator.extraArgs }}
             - {{ . | quote }}
             {{- end }}
+          {{- if .Values.node.bakedServices }}
+          env:
+            - name: C8S_CDS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: c8s-node-runtime
+                  key: cds-url
+          {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
@@ -110,7 +122,7 @@ spec:
             # this emptyDir rather than the immutable image.
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.cds.measurementsConfig }}
+            {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
             - name: measurements-config
               mountPath: /etc/c8s-measurements
               readOnly: true
@@ -118,10 +130,17 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if .Values.cds.measurementsConfig }}
+        {{- if or .Values.node.bakedServices .Values.cds.measurementsConfig }}
         - name: measurements-config
           configMap:
+            {{- if .Values.node.bakedServices }}
+            name: c8s-node-runtime
+            items:
+              - key: cds.json
+                path: cds.json
+            {{- else }}
             name: {{ include "c8s.fullname" . }}-measurements
+            {{- end }}
         {{- end }}
 ---
 apiVersion: v1

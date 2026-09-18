@@ -19,6 +19,7 @@
    gate a no-op, deriving even disabled components that carry a digest. */ -}}
 {{- $enabled := true -}}
 {{- if $c.enabledPath -}}{{- $enabled = eq (include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath)) "true" -}}{{- end -}}
+{{- if and $root.Values.node.bakedServices (ne $c.valuePath "image") -}}{{- $enabled = false -}}{{- end -}}
 {{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt "argvPinned" (get $c "argvPinned" | default false)) -}}
 {{- end -}}
 {{ $out | toJson }}
@@ -35,7 +36,7 @@
 {{- end -}}
 {{- end -}}
 {{- $cdsImg := .Values.cds.image -}}
-{{- if $cdsImg.digest -}}
+{{- if and $cdsImg.digest (not .Values.node.bakedServices) -}}
 {{- $_ := set $digests $cdsImg.digest (printf "%s@%s" $cdsImg.repository $cdsImg.digest) -}}
 {{- end -}}
 {{- /* router nginx self-entry: a chart-deployed non-c8s system image. It is
@@ -45,7 +46,7 @@
        enabled — like the CDS self-entry above, independent of deriveComponents
        — so a default install admits the nginx it ships without the operator
        hand-writing an entry for it. */}}
-{{- if .Values.router.enabled -}}
+{{- if and .Values.router.enabled (not .Values.node.bakedServices) -}}
 {{- $lbImg := .Values.router.nginx.image -}}
 {{- if $lbImg.digest -}}
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}

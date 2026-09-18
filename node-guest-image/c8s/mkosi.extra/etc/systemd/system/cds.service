@@ -1,0 +1,25 @@
+[Unit]
+Description=Measured certificate distribution service
+Requires=rke2-role.service attestation-api.service
+After=rke2-role.service attestation-api.service nri-node-ip.service rke2-server.service
+ConditionPathExists=/run/confos/role-server
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -s /etc/rancher/rke2/rke2.yaml ] && exit 0; sleep 5; done; exit 1'
+RuntimeDirectory=c8s-cds
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+ExecStart=/usr/local/bin/c8s node-services run cds
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=630
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

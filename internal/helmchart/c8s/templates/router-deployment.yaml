@@ -1,4 +1,4 @@
-{{- if .Values.router.enabled }}
+{{- if and .Values.router.enabled (not .Values.node.bakedServices) }}
 {{- if not (kindIs "bool" .Values.router.hostPort.enabled) -}}
 {{- /* A string "false" is truthy and would both bind the node port and force
 Recreate, silently defeating the operator's opt-out. */ -}}
