@@ -51,12 +51,7 @@ func (h Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	etag := `W/"` + version + `"`
-	w.Header().Set("ETag", etag)
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
+	w.Header().Set("ETag", `W/"`+version+`"`)
 
 	body, err := doc.Canonical()
 	if err != nil {
