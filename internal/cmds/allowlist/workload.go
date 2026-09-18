@@ -254,8 +254,12 @@ func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error)
 		return al.Workloads, nil
 	}
 
-	wrapped := append([]byte(`{"schema":"`+pkgallowlist.Schema+`","workloads":`), data...)
-	mapped, mapErr := pkgallowlist.ParseJSON(append(wrapped, '}'))
+	const prefix = `{"schema":"` + pkgallowlist.Schema + `","workloads":`
+	wrapped := make([]byte, 0, len(prefix)+len(data)+1)
+	wrapped = append(wrapped, prefix...)
+	wrapped = append(wrapped, data...)
+	wrapped = append(wrapped, '}')
+	mapped, mapErr := pkgallowlist.ParseJSON(wrapped)
 	if mapErr != nil {
 		return nil, fmt.Errorf("parse workload entries: not a name-keyed workload map (%v); not an allowlist document (%v)", mapErr, docErr)
 	}
