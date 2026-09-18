@@ -166,6 +166,9 @@ func splitNodeImageArtifacts(rendered []byte) (integration, nginx, seed []byte, 
 	if err := yaml.Unmarshal(namespace, &ns); err != nil {
 		return nil, nil, nil, err
 	}
+	if ns.Labels == nil {
+		ns.Labels = make(map[string]string)
+	}
 	ns.Labels["confidential.ai/baked"] = "true"
 	namespace, err = yaml.Marshal(ns)
 	if err != nil {

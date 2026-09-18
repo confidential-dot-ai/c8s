@@ -110,6 +110,9 @@ func readNodeIP(rootDir string) (string, error) {
 // PublishNodeIP selects the same address as RKE2, including an explicit
 // authenticated node.ip. RootDir only rebases the fixed output for tests.
 func PublishNodeIP(rootDir string, d *launchconfig.Document) error {
+	if d == nil {
+		return fmt.Errorf("missing staged launch configuration")
+	}
 	address := d.Node.IP
 	if address == "" {
 		var err error
