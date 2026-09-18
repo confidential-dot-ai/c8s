@@ -1,0 +1,26 @@
+{
+  "schema_version": "1",
+  "tee": "tdx",
+  "measurements": [
+    {
+      "name": "server",
+      "mrtd": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "rtmr": [
+        null,
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+      ],
+      "approver_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaaBz1ISIaMWDuPRjgg152EBIYRab\nILbNz0VOO47mubLnNsK8igqlET/44vuAzyC+Zw4aha2ag3HgzfBWZxbuog==\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "name": "agent",
+      "mrtd": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "rtmr": [
+        null,
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+      ],
+      "approver_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEOWcPXzuSJWO5Fb3pKOHgc9/ANsox\nOeK9DUpT3CYKRiq5HrQaPtiZjmdjSNWQaO93cabjUT73qxx3Q+qmi2jqag==\n-----END PUBLIC KEY-----\n"
+    }
+  ]
+}

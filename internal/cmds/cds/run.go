@@ -276,7 +276,7 @@ func run(cfg config) error {
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			RTMRs:             rtmrPins,
-			ImagePins:         pinned.Images,
+			Images:            pinned.Images,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,

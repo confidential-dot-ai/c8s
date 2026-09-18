@@ -234,14 +234,22 @@ func postAttest(ctx context.Context, attestURL string, nonce []byte) ([]byte, er
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	return readAttestationResponse(http.DefaultClient, req)
+}
+
+// readAttestationResponse bounds the evidence envelope on both bootstrap paths.
+func readAttestationResponse(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(respBody) > 8<<20 {
+		return nil, fmt.Errorf("attestation response exceeds 8 MiB")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("attest HTTP %d: %s", resp.StatusCode, respBody)

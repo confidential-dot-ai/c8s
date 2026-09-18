@@ -1,67 +1,61 @@
+//go:build linux
+
 package ratlsmesh
 
 import (
 	"fmt"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"log/slog"
-	"sort"
 	"strings"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-// resolveMeasurementsConfig loads --measurements-config and fills every flat
-// pin field from it: one file lists the images this cluster runs, and both the
-// peers this proxy talks to and the CDS it dials are drawn from that one set.
-// Filling the flat fields keeps the gates that can only express a digest list
-// pinning exactly what they pin today.
+// resolveMeasurementsConfig loads whole peer identities. Without a separate
+// CDS config the legacy behavior accepts the same set for both purposes.
 func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error) {
-	if c.measurementsConfig == "" {
+	if c.measurementsConfig == "" && c.cdsMeasurementsConfig == "" {
 		return refvalues.ReferenceValues{}, nil
 	}
-	for _, f := range []struct{ name, value string }{
-		{"--measurements", c.measurements},
-		{"--rtmrs", c.rtmrs},
-		{"--cds-measurements", c.cdsMeasurements},
-		{"--cds-rtmrs", c.cdsRTMRs},
-	} {
-		if f.value != "" {
-			return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with %s", f.name)
+	if c.measurementsConfig != "" && (c.measurements != "" || c.rtmrs != "") {
+		return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
+	}
+	if c.cdsMeasurements != "" || c.cdsRTMRs != "" {
+		return refvalues.ReferenceValues{}, fmt.Errorf("measurements configs cannot be combined with --cds-measurements or --cds-rtmrs")
+	}
+	var peers refvalues.ReferenceValues
+	if c.measurementsConfig != "" {
+		var err error
+		peers, err = refvalues.Load(c.measurementsConfig)
+		if err != nil {
+			return refvalues.ReferenceValues{}, err
 		}
 	}
-	set, err := refvalues.Load(c.measurementsConfig)
-	if err != nil {
-		return refvalues.ReferenceValues{}, err
+	cds := peers
+	if c.cdsMeasurementsConfig != "" {
+		var err error
+		cds, err = refvalues.Load(c.cdsMeasurementsConfig)
+		if err != nil {
+			return refvalues.ReferenceValues{}, fmt.Errorf("--cds-measurements-config: %w", err)
+		}
+		if !peers.Empty() && peers.Family != cds.Family {
+			return refvalues.ReferenceValues{}, fmt.Errorf("peer and CDS measurements configs declare different TEEs")
+		}
 	}
-
-	hexDigests, common, uniform := set.Flatten()
-	digests := strings.Join(hexDigests, ",")
-	if !uniform {
-		// A single register set cannot express per-image tuples; say so
-		// rather than appearing to pin them.
-		slog.Warn("measurements config pins different registers per image: peers and CDS are matched as whole images, but flags carrying one register set are digest-only",
-			"images", len(set.Images))
+	if !peers.Empty() {
+		c.measurements, c.rtmrs = flatPins(peers)
 	}
-	joined := make([]string, 0, len(common))
-	for _, idx := range sortedRTMRIndices(common) {
-		joined = append(joined, fmt.Sprintf("%d=%x", idx, common[idx]))
-	}
-	pins := strings.Join(joined, ",")
-
-	c.measurements, c.cdsMeasurements = digests, digests
-	c.rtmrs, c.cdsRTMRs = pins, pins
-	slog.Info("measurements config loaded", "tee", set.Family.String(), "images", len(set.Images))
-	return set, nil
+	c.cdsMeasurements, c.cdsRTMRs = flatPins(cds)
+	c.cdsPins = cds
+	slog.Info("measurements configs loaded", "peer_identities", len(peers.Images), "cds_identities", len(cds.Images))
+	return peers, nil
 }
 
-func sortedRTMRIndices(m map[int][]byte) []int {
-	out := make([]int, 0, len(m))
-	for i := range m {
-		out = append(out, i)
-	}
-	sort.Ints(out)
-	return out
+// flatPins fills legacy diagnostics; verification always keeps the entries.
+func flatPins(set refvalues.ReferenceValues) (string, string) {
+	digests, common, _ := set.Flatten()
+	return strings.Join(digests, ","), strings.Join(refvalues.FormatRTMRPins(common), ",")
 }
 
 // checkTEEMatchesPlatform reports a config written for the other platform. It
@@ -71,17 +65,17 @@ func checkTEEMatchesPlatform(set refvalues.ReferenceValues, teeType ratls.TEETyp
 	if set.Empty() {
 		return nil
 	}
-	var family teetypes.Family
+	var platform teetypes.Family
 	switch teeType {
 	case ratls.TEETypeSEVSNP:
-		family = teetypes.FamilySNP
+		platform = teetypes.FamilySNP
 	case ratls.TEETypeTDX:
-		family = teetypes.FamilyTDX
+		platform = teetypes.FamilyTDX
 	default:
 		return nil
 	}
-	if set.Family != family {
-		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.Family, family)
+	if set.Family != platform {
+		return fmt.Errorf("--measurements-config declares tee %q but this node attests as %q", set.Family, platform)
 	}
 	return nil
 }

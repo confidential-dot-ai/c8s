@@ -40,6 +40,9 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if set.HasAnchors() {
+		return nil, nil, nil, fmt.Errorf("approver_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
+	}
 	common, uniform := set.CommonRTMRs()
 	if !uniform {
 		// The flat values carry one register set, so images that disagree can

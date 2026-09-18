@@ -1254,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil || !plan.refValues.Empty()
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1290,6 +1290,29 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
 		return oc
+	}
+
+	fullImagePinned := plan.pins.image != nil
+	if !plan.refValues.Empty() {
+		if plan.refValues.Family != teetypes.NormalizePlatform(oc.Platform).Family() {
+			oc.Error = fmt.Sprintf("--measurements-config is for %q but the evidence platform is %q", plan.refValues.Family, oc.Platform)
+			return oc
+		}
+		response := remote.VerifyResponse{Result: *result}
+		if err := remote.EnforceImages(response, plan.refValues.Images, teetypes.NormalizePlatform(oc.Platform)); err != nil {
+			oc.Error = fmt.Sprintf("--measurements-config: %v", err)
+			return oc
+		}
+		// A TDX tuple covers the guest only when the matching entry pins both
+		// kernel and rootfs registers. A weak alternative must not borrow the
+		// completeness of an unrelated entry in the same policy.
+		for _, entry := range plan.refValues.Images {
+			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+				remote.EnforceImages(response, []remote.ImagePin{entry}, teetypes.NormalizePlatform(oc.Platform)) == nil {
+				fullImagePinned = true
+				break
+			}
+		}
 	}
 
 	if pinned {
@@ -1337,7 +1360,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// anchor) does not downgrade this: chosen by the responder, it anchors
 	// nothing the operator asked about — the same rule the JS verifier applies
 	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
+	if isTDX(oc.Platform) && pinned && !fullImagePinned {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
 		if plan.meshCA == nil {
 			oc.Verified = false

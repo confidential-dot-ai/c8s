@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
@@ -1465,7 +1465,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// list matches exactly what was validated (a blank/whitespace entry, e.g.
 	// from a trailing comma, is dropped by the parser, not silently emitted as
 	// an empty pin that would disable pinning at that index).
-	measurements, rtmrs, pinArgs, err := installPins()
+	digests, rtmrs, pinArgs, err := installPins()
 	if err != nil {
 		return nil, err
 	}
@@ -1473,7 +1473,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In bare-metal/gke/aks the node IS the CVM, so that
 	// is the node image's M.
-	for i, m := range measurements {
+	for i, m := range digests {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
@@ -1484,8 +1484,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// firmware alone, and RTMR[1]/[2] are what pin the guest kernel and the
 	// command line carrying the dm-verity root hash. Emitted normalized and in
 	// index order so the fanned values match what was validated.
-	for i, idx := range slices.Sorted(maps.Keys(rtmrs)) {
-		pin := fmt.Sprintf("%d=%s", idx, hex.EncodeToString(rtmrs[idx]))
+	for i, pin := range refvalues.FormatRTMRPins(rtmrs) {
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.rtmrs[%d]=%s", i, pin),
 			"--set-string", fmt.Sprintf("ratlsMesh.rtmrs[%d]=%s", i, pin),
