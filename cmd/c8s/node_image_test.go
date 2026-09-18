@@ -89,7 +89,7 @@ func TestNodeImageRender(t *testing.T) {
 			if container.Image != "registry.example.com/c8s-operator@"+testDigest {
 				t.Errorf("operator image = %s", container.Image)
 			}
-			for _, arg := range []string{"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock", "--cds-url=$(C8S_CDS_URL)", "--measurements-config=/etc/c8s-measurements/cds.json", "--workload-claims-host-dir=/var/run/nri-image-policy"} {
+			for _, arg := range []string{"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock", "--cds-url=$(C8S_CDS_URL)", "--image-policy-file=/etc/c8s-measurements/cds.json", "--workload-claims-host-dir=/var/run/nri-image-policy"} {
 				if !slices.Contains(container.Args, arg) {
 					t.Errorf("operator missing %s", arg)
 				}

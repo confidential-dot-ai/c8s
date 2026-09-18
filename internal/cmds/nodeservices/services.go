@@ -40,7 +40,7 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 	}
 	cds := "--cds-url=" + d.CDSURL()
 	api := "--attestation-api-url=" + apiURL
-	pins := "--measurements-config=" + launchDir + "cds.json"
+	pins := "--image-policy-file=" + launchDir + "cds.json"
 	switch service {
 	case "attest-proxy":
 		return []string{"attest-proxy", "--socket=/var/run/nri-image-policy/attestation-api.sock", "--socket-gid=65532", "--upstream=" + apiURL}, nil
@@ -49,15 +49,15 @@ func Arguments(service string, d *launchconfig.Document, nodeIP string) ([]strin
 			"--kubeconfig=/etc/rancher/rke2/rke2.yaml",
 			"--allowlist-db=/run/c8s-cds/allowlist.db",
 			"--allowlist-persistent=false", "--allowlist-seed=" + launchDir + "allowlist-seed.json",
-			"--measurements-config=" + launchDir + "peers.json", "--operator-keys=" + launchDir + "operator-pubkey",
+			"--image-policy-file=" + launchDir + "peers.json", "--operator-keys=" + launchDir + "operator-pubkey",
 			"--max-request-size=262144", "--san-validation=false",
 			"--dns-san-pattern=^[a-z0-9-]+[.][a-z0-9-]+[.]svc$",
 			"--dns-san-pattern=^" + regexp.QuoteMeta(d.TLSSAN) + "$"}, nil
 	case "mesh":
 		return []string{"ratls-mesh", "--platform=" + d.Image.Platform, api,
 			"--kubeconfig=" + kubeletConfig, "--node-ip=" + nodeIP,
-			"--measurements-config=" + launchDir + "peers.json",
-			"--cds-measurements-config=" + launchDir + "cds.json", cds,
+			"--image-policy-file=" + launchDir + "peers.json",
+			"--cds-image-policy-file=" + launchDir + "cds.json", cds,
 			"--cert-mode=cds", "--cert-dns-san=ratls-mesh.c8s.svc",
 			"--max-conns=10000",
 			"--iptables-metrics-file=/run/ratls-mesh/iptables-metrics.json"}, nil
