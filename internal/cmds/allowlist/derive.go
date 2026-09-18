@@ -117,7 +117,7 @@ func unknownContainerErr(kind, name string) error {
 func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
-	var envMode, envFile, mountsFile string
+	var envMode, envFile, mountsMode, mountsFile string
 	cmd := &cobra.Command{
 		Use:   "derive <name> <file|->",
 		Short: "Build an entry from a live Kubernetes object",
@@ -137,9 +137,12 @@ map of container names to env policies. Exact values describe the complete OCI
 launch environment, including image/runtime additions. Pod env/envFrom alone
 cannot establish it.
 
-Use --mounts-file with a JSON map of container names to mount policies to pin
-bind mounts for every derived init and main container. The pod spec alone cannot
-prove which sources are node-provided or how persistent storage is protected.
+Mount policy comes from --mounts=any|deny or --mounts-file, a JSON map of
+container names to mount policies covering every derived init and main
+container. Omitting both leaves every container at "deny", which admits the
+platform mounts alone — a pod the webhook injects into needs "any" or explicit
+rules. Exact rules go in --mounts-file: the pod spec alone cannot prove which
+sources are node-provided or how persistent storage is protected.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
@@ -173,6 +176,9 @@ derives the same entry as the manifest it was admitted from.`,
 			}
 			if (envMode == "") == (envFile == "") {
 				return fmt.Errorf("specify exactly one of --env=any|deny or --env-file")
+			}
+			if mountsMode != "" && mountsMode != allowlist.PolicyAny && mountsMode != allowlist.PolicyDeny {
+				return fmt.Errorf("--mounts must be any or deny; use --mounts-file for exact rules")
 			}
 			var policies map[string]allowlist.EnvPolicy
 			var mountPolicies map[string]allowlist.MountPolicy
@@ -216,13 +222,16 @@ derives the same entry as the manifest it was admitted from.`,
 						used[c.Name] = true
 					}
 					part.containers[i].Env = p
-					if mountsFile != "" {
+					switch {
+					case mountsFile != "":
 						mount, ok := mountPolicies[c.Name]
 						if !ok {
 							return fmt.Errorf("missing mount policy for container %q", c.Name)
 						}
 						part.containers[i].Mounts = mount
 						usedMounts[c.Name] = true
+					case mountsMode != "":
+						part.containers[i].Mounts = allowlist.MountPolicy{Policy: mountsMode}
 					}
 				}
 			}
@@ -256,7 +265,9 @@ derives the same entry as the manifest it was admitted from.`,
 		"grant read on this secret path (repeatable); omit for no secrets block")
 	cmd.Flags().StringVar(&envMode, "env", "", "environment policy for every container: any or deny")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "JSON map of container names to explicit env policies (including exact values)")
+	cmd.Flags().StringVar(&mountsMode, "mounts", "", "mount policy for every container: any or deny (default deny)")
 	cmd.Flags().StringVar(&mountsFile, "mounts-file", "", "JSON map of container names to explicit mount policies")
 	cmd.Flags().StringVar(&label, "label", "", "optional entry label")
+	cmd.MarkFlagsMutuallyExclusive("mounts", "mounts-file")
 	return cmd
 }
