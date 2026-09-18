@@ -724,9 +724,11 @@ nriImagePolicy:
     restartCommand: ""
 
   refresh:
-    # How often the worker plugin pulls the current allowlist from CDS. This
-    # bounds how long a freshly applied workload entry is still refused at
-    # container start.
+    # How often the worker plugin pulls the current allowlist from CDS. A
+    # written entry keeps its previous admission verdict at container start —
+    # an added entry refused, a narrowed one still admitted — for up to one
+    # interval after CDS commits the write. Under `baked` the plugin runs the
+    # equal value measured into the node image, which an override cannot reach.
     interval: 5s
 
   # --- Bootstrap allowlist ---

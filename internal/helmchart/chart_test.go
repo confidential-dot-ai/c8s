@@ -7145,6 +7145,40 @@ func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
 	}
 }
 
+// The node image bakes the pull interval too, and under nriImagePolicy.baked
+// the installer runs set-cds-pins, which rewrites only the CDS pins. So the
+// interval a node-CVM's gate actually runs on is the baked one, and a drift
+// surfaces only as a policy change that bites later than the chart says.
+func TestChartRefreshIntervalMatchesTheBakedNRIPull(t *testing.T) {
+	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
+	baked, err := os.ReadFile(bakedPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", bakedPath, err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*interval:\s*"([^"]+)"`).FindSubmatch(baked)
+	if m == nil {
+		t.Fatalf("%s carries no allowlist pull interval", bakedPath)
+	}
+	want, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("baked pull interval %q: %v", m[1], err)
+	}
+
+	var values struct {
+		NRIImagePolicy struct {
+			Refresh struct {
+				Interval time.Duration `yaml:"interval"`
+			} `yaml:"refresh"`
+		} `yaml:"nriImagePolicy"`
+	}
+	readChartFile(t, "values.yaml", &values)
+
+	if got := values.NRIImagePolicy.Refresh.Interval; got != want {
+		t.Errorf("baked NRI pull interval is %s but nriImagePolicy.refresh.interval is %s — a tightened entry reaches a node-CVM's gate on the baked value (%s)",
+			want, got, bakedPath)
+	}
+}
+
 // The root key set is closed, so a values file carried over from an older
 // release — or one with a typo above the sealed subtrees — is refused instead
 // of being silently dropped. This is the class that caused the incident the

@@ -34,6 +34,17 @@ type WriteAuthorizer func(r *http.Request, body []byte) error
 // JSON. Emits a weak ETag from the store version; a matching If-None-Match
 // returns 304.
 func (h Handler) HandleList(w http.ResponseWriter, r *http.Request) {
+	// Every enforcer polls this route on its refresh interval and is current
+	// almost every time, so settle the 304 on the single-row version read
+	// rather than loading every entry under the writers' lock.
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		if version, err := h.Store.Version(); err == nil && match == `W/"`+version+`"` {
+			w.Header().Set("ETag", match)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
 	doc, version, err := h.Store.LoadAll()
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
