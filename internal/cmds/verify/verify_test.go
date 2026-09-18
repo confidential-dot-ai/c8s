@@ -1363,7 +1363,7 @@ func TestRenderTextSections(t *testing.T) {
 			"sandbox id:   sandbox-1",
 			"vouched by the mesh CA",
 			"operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):",
-			"    sha256:fp-one",
+			"    sha256(SPKI DER):fp-one",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("output missing %q:\n%s", want, got)
@@ -1384,6 +1384,23 @@ func TestRenderTextSections(t *testing.T) {
 			if strings.Contains(got, absent) {
 				t.Errorf("output has %q without the datum:\n%s", absent, got)
 			}
+		}
+	})
+
+	// The fingerprint list alone is identical whether or not --operator-keys was
+	// supplied, so the verdict must be rendered beneath it — not dropped, as it
+	// was when the note only ever printed for an empty list.
+	t.Run("operator-keys verdict renders under the fingerprints", func(t *testing.T) {
+		got := renderOut(Outcome{
+			Verified:         true,
+			Fresh:            true,
+			Pinned:           true,
+			OperatorKeys:     []string{"fp-one", "fp-two"},
+			OperatorKeysNote: "matched: the set served over the attested cert equals --operator-keys",
+		})
+		want := "    sha256(SPKI DER):fp-one\n    sha256(SPKI DER):fp-two\n    matched: the set served over the attested cert equals --operator-keys\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("verdict not rendered under the fingerprint list, want\n%s\ngot\n%s", want, got)
 		}
 	})
 
