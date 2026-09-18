@@ -139,10 +139,9 @@ cannot establish it.
 
 Mount policy comes from --mounts=any|deny or --mounts-file, a JSON map of
 container names to mount policies covering every derived init and main
-container. Omitting both leaves every container at "deny", which admits the
-platform mounts alone — a pod the webhook injects into needs "any" or explicit
-rules. Exact rules go in --mounts-file: the pod spec alone cannot prove which
-sources are node-provided or how persistent storage is protected.
+container. Omitting both leaves every container at "deny", which admits platform
+mounts alone. The pod spec cannot prove which sources are node-provided or how
+persistent storage is protected, so exact rules go in --mounts-file.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.

@@ -142,14 +142,22 @@ func TestDeriveMountShorthand(t *testing.T) {
 			}
 		}
 	}
-	// Absent, the policy stays empty and normalizes to deny on apply.
+	// Without either flag the entry carries no policy and applying it denies.
 	got, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range allContainers(got["dynamo"]) {
-		if c.Mounts.Policy != "" {
-			t.Fatalf("mounts = %+v without --mounts", c.Mounts)
+	raw, err := json.Marshal(got["dynamo"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := pkgallowlist.ParseWorkloadJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range allContainers(*applied) {
+		if c.Mounts.Policy != pkgallowlist.PolicyDeny {
+			t.Fatalf("mounts = %+v without --mounts, want deny", c.Mounts)
 		}
 	}
 	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=exact"); err == nil {
@@ -162,6 +170,16 @@ func TestDeriveMountShorthand(t *testing.T) {
 	}
 	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any", "--mounts-file", file); err == nil {
 		t.Fatal("conflicting mount policies accepted")
+	}
+	// --mounts leaves the file path's per-container bookkeeping alone.
+	stray := t.TempDir() + "/stray.json"
+	if err := os.WriteFile(stray, []byte(`{"seed":{"policy":"deny"},"frontend":{"policy":"any"},"worker":{"policy":"deny"},"ghost":{"policy":"any"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts-file", stray); err == nil {
+		t.Fatal("mount policy naming an unknown container accepted")
+	} else if !strings.Contains(err.Error(), `unknown container "ghost"`) {
+		t.Fatalf("error = %v, want the unnamed container", err)
 	}
 }
 

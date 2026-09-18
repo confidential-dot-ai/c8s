@@ -214,13 +214,19 @@ alone does not establish platform ownership. `any` leaves mounts unconstrained;
 ```
 
 When deriving an entry, `--mounts=any|deny` applies one policy to every
-container it derives. `--mounts-file` takes explicit per-container policies
-instead: the file maps container names to policies and must include every init
-and main container the entry declares; missing or unknown names are rejected.
-`derive` drops c8s's own injected containers from its input and names them on
-stderr, so a pod read back after admission derives the same entry as the
-manifest it was admitted from. For a pod with an init container named `seed` and
-main containers named `frontend` and `worker`, save this as `mounts.json`:
+container it derives:
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts=any > entry.json
+```
+
+`--mounts-file` takes explicit per-container policies instead: the file maps
+container names to policies and must include every init and main container the
+entry declares; missing or unknown names are rejected. `derive` drops c8s's own
+injected containers from its input and names them on stderr, so a pod read back
+after admission derives the same entry as the manifest it was admitted from. For
+a pod with an init container named `seed` and main containers named `frontend`
+and `worker`, save this as `mounts.json`:
 
 ```json
 {
@@ -243,7 +249,7 @@ c8s allowlist derive app pod.json --env=any --mounts-file mounts.json > entry.js
 Here `pod.json` contains the Kubernetes object with digest-pinned images and
 explicit command/args. Choose the policies to match the workload's actual
 mounts; the pod spec alone cannot establish source class or storage protection.
-Omitting both leaves each container's mount policy at `deny`.
+Omitting both flags leaves each container's mount policy at `deny`.
 
 Lint includes mount rules when checking whether workload entries are
 indistinguishable. It also rejects exact `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`,
