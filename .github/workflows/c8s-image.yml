@@ -215,6 +215,25 @@ jobs:
           install -m 0644 gate-signing/module-signing.crt \
             c8s/node-guest-image/module-signing.crt
 
+      # The gate bakes the c8s binary built from the gated checkout, so a PR
+      # that changes the baked binary or its `node-image render` command is
+      # gated on its own code rather than on the last published C8S_REF.
+      # Both legs build the same commit with the same toolchain; -trimpath
+      # removes the workspace path so the bytes do not depend on the runner.
+      - name: Setup Go (gate)
+        if: inputs.gate == true
+        uses: ./c8s/.github/actions/setup-go-c8s
+        with:
+          go-version-file: c8s/go.mod
+          cache-dependency-path: c8s/go.sum
+
+      - name: Build c8s from the gated checkout
+        if: inputs.gate == true
+        working-directory: c8s
+        env:
+          GOFLAGS: -trimpath
+        run: make build-c8s
+
       - name: Checkout attestation-rs (for the gpu-attest binary)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -470,6 +489,7 @@ jobs:
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+          C8S_BINARY: ${{ inputs.gate == true && format('{0}/c8s/build/c8s', github.workspace) || '' }}
           # Private half of the module signing certificate (org secret) — the
           # fetch script signs the NVIDIA modules with it and fails closed
           # without it. Signatures are deterministic (sign-file uses no

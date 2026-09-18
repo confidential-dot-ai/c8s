@@ -24,18 +24,18 @@ func node(name, internalIP string) *corev1.Node {
 	}
 }
 
-func stubKubeClientset(t *testing.T, cs kubernetes.Interface, err error) {
+func stubInClusterKubeClientset(t *testing.T, cs kubernetes.Interface, err error) {
 	t.Helper()
-	prev := newKubeClientset
-	t.Cleanup(func() { newKubeClientset = prev })
-	newKubeClientset = func() (kubernetes.Interface, error) { return cs, err }
+	prev := newInClusterKubeClientset
+	t.Cleanup(func() { newInClusterKubeClientset = prev })
+	newInClusterKubeClientset = func() (kubernetes.Interface, error) { return cs, err }
 }
 
 // An explicit --sandbox-inventory-cidr is the static mode: no Kubernetes
 // client is consulted at all.
 func TestBuildInventoryHostsExplicit(t *testing.T) {
-	stubKubeClientset(t, nil, errors.New("must not be called"))
-	hosts, err := buildInventoryHosts(t.Context(), []string{"10.0.0.0/24"})
+	stubInClusterKubeClientset(t, nil, errors.New("must not be called"))
+	hosts, err := buildInventoryHosts(t.Context(), []string{"10.0.0.0/24"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,9 +48,9 @@ func TestBuildInventoryHostsExplicit(t *testing.T) {
 // startup, extended on scale-up, shrunk on node removal — without a restart.
 func TestWatchNodeInventoryHosts(t *testing.T) {
 	cs := k8sfake.NewSimpleClientset(node("a", "10.0.1.4"))
-	stubKubeClientset(t, cs, nil)
+	stubInClusterKubeClientset(t, cs, nil)
 
-	hosts, err := buildInventoryHosts(t.Context(), nil)
+	hosts, err := buildInventoryHosts(t.Context(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,12 +91,12 @@ func TestWatchNodeInventoryHostsUnreadable(t *testing.T) {
 	cs.PrependReactor("list", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(corev1.Resource("nodes"), "", errors.New("no node-reader binding"))
 	})
-	stubKubeClientset(t, cs, nil)
+	stubInClusterKubeClientset(t, cs, nil)
 	prev := nodeCacheSyncTimeout
 	t.Cleanup(func() { nodeCacheSyncTimeout = prev })
 	nodeCacheSyncTimeout = 100 * time.Millisecond
 
-	_, err := buildInventoryHosts(t.Context(), nil)
+	_, err := buildInventoryHosts(t.Context(), nil, "")
 	if err == nil {
 		t.Fatal("an unreadable node list must fail startup, not hang")
 	}
@@ -108,8 +108,8 @@ func TestWatchNodeInventoryHostsUnreadable(t *testing.T) {
 // Outside a cluster (local dev) the lister degrades to the old posture: an
 // empty bound that refuses every sandbox token, not a startup failure.
 func TestWatchNodeInventoryHostsNoCluster(t *testing.T) {
-	stubKubeClientset(t, nil, errors.New("no in-cluster config"))
-	hosts, err := buildInventoryHosts(t.Context(), nil)
+	stubInClusterKubeClientset(t, nil, errors.New("no in-cluster config"))
+	hosts, err := buildInventoryHosts(t.Context(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

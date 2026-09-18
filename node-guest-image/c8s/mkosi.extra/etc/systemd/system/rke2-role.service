@@ -1,14 +1,16 @@
 [Unit]
-Description=RKE2 role dispatch from the joindata disk
-# Role-gated units Requires= + After= this unit and condition on the
-# /run/confos/role-* verdict it writes. Requires=, not just After=: a failed
-# dispatch fails them visibly; the unselected role still condition-skips.
+Description=Authenticate the measured node's launch configuration
+Requires=attestation-api.service
+After=network-online.target attestation-api.service
+Wants=network-online.target
+Before=rke2-server.service rke2-agent.service
 
 [Service]
 Type=oneshot
-# Stays active (exited) so Requires= dependents bind to a live unit.
 RemainAfterExit=yes
+Environment=PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/rke2-role.sh
+TimeoutStartSec=180
 
 [Install]
 WantedBy=multi-user.target

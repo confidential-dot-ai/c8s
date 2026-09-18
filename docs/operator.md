@@ -21,7 +21,8 @@ The operator tree is built around these pieces:
   workload can fetch and renew a leaf certificate through CDS.
 
 The operator does not inject the RA-TLS mesh sidecar. Pod-to-pod mTLS remains
-the responsibility of the node-level `ratls-mesh` DaemonSet. The chart-managed
+the responsibility of node-level `ratls-mesh`, deployed as a DaemonSet by
+the chart or as systemd services by the measured node image. The chart-managed
 mesh excludes `kube-system` and its own release namespace as local traffic
 sources, so c8s control-plane agents (and, on kind/kubeadm-style clusters where
 the API server runs as a `kube-system` pod, in-cluster webhook callers) do not
@@ -83,13 +84,19 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-### Authenticated launch configuration
+This is the guest-activation layer of a stack. Its signed launch contract
+requires the matching hardware-launcher changes in #552. Land the complete
+stack together before publishing or deploying images from it.
 
-This layer adds the signed-launch CLI and schema. The next layer wires them
-into guest boot and baked services; existing guest role selection is unchanged
-here. The complete stack, including the hardware launchers in #552, must land
-together before publishing and deploying the new image contract. The boot
-requirements below describe that completed integration.
+`c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
+The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
+RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
+CRDs, webhook and admission policies are rendered from this same chart at
+**image build time**. RKE2 applies those manifests at boot; there is no c8s
+Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
+namespace carries `confidential.ai/baked=true`.
+
+### Authenticated launch configuration
 
 A measured node uses one image for both `server` and `agent`. Each boot
 requires an ISO labelled `opkeydata` containing exactly the launch inputs
@@ -150,8 +157,8 @@ never the server token) and signs it with the agent key. A server created
 without `--server-address` autodetects its own; `add-agent` then needs
 `--server-address`.
 
-The generated document uses the strict schema described here; edit it only
-when a field the command does not expose is needed, then re-sign with
+The generated document is the strict schema below; edit it only when a field
+the command does not expose is needed, then re-sign with
 `c8s keys sign-launch --key demo/server.key --force demo/server/launch.yaml`.
 
 Attach the corresponding ISO to each VM along with its required scratch
@@ -190,14 +197,13 @@ public-key hash as HOST_DATA; attaching the disk alone is insufficient.
 `c8s keys sign-launch` signs the exact file bytes with ECDSA P-256/SHA-256
 and writes an ASN.1 DER signature encoded as one base64 line to
 `<file>.sig`. It does not overwrite an existing signature unless `--force`
-is passed. Any later edit requires a new signature. `c8s launch-config stage`
-authenticates those bytes before parsing, checks the complete software
-measurement and role-key relationship against verified self-attestation, then
-publishes the role marker last. Integration with `rke2-role.service` follows
-in the baked-node layer; the command alone does not change the existing boot
-sequence. In that integration, changing role or launch configuration requires
-a relaunch with a newly signed bundle and the corresponding role's
-hardware-bound public key.
+is passed. Any later edit requires a new signature. At boot, `rke2-role.service` calls
+`c8s launch-config stage`, which authenticates those bytes before parsing,
+checks the complete software measurement and role-key relationship against
+verified self-attestation, then publishes the role marker last. Missing,
+unsigned or inconsistent input leaves RKE2 and role-dependent services down.
+Changing role or launch configuration requires a relaunch with a newly
+signed bundle and the corresponding role's hardware-bound public key.
 
 The verified files live in root-only `/run/confos/launch`. `peers.json`
 contains the software/key tuples for this cluster's server and permitted
@@ -211,6 +217,11 @@ calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
 borrow another entry's authorized key. c8s passes these complete pins through
 `remote.Policy.Images`; legacy flags that cannot carry anchors are refused
 where they would weaken enforcement.
+The server publishes only the CDS URL and server policy to the public
+`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
+and private keys do not enter that ConfigMap. The operator forwards the full
+server policy to injected workload helpers. NRI and host CDS clients use the
+same server policy directly from the staged files.
 
 ### Chart-managed defaults
 
@@ -427,6 +438,16 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
+For the measured node image, CDS stores its database at
+`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
+restarts, but a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the next boot; reapply any later
+operator changes. The CA signing key is in process memory and changes on a
+CDS process restart, so plan for certificate re-bootstrap. This image does
+not expose a persistent-volume switch in launch configuration.
+
+For chart-managed CDS:
+
 The same restart that re-bootstraps the mesh CA also resets the **served
 allowlist**. CDS seeds its store from the install seed at startup, then serves
 whatever an operator writes with `c8s allowlist add` or `apply`. With
@@ -639,13 +660,13 @@ operator token before asking its configured local attester for evidence.
 The client verifies the returned report in-process before generating the
 credential CSR. The fresh report is still required: the TLS certificate's
 key-bound quote may have been created before later workload measurements.
-The raw attester can remain on guest loopback; external bootstrap only needs
+The raw attester remains on guest loopback; external bootstrap only needs
 the credential service and the Kubernetes API on port **6443**.
 
 ```sh
 c8s get-kubeconfig --node "$SERVER_IP" \
-  --operator-key "$OPERATOR_KEY" --image-manifest manifest.json \
-  --out kubeconfig --release-wait 5m
+  --operator-key demo/server.key --image-manifest manifest.json \
+  --out demo/kubeconfig --release-wait 5m
 ```
 
 For SSH tunnels or non-default ports, supply `--release-url` and
@@ -689,9 +710,11 @@ manifest is baked into the read-only root and everything RKE2 writes, the
 cluster state included, lives on the scratch disk, which is re-encrypted with
 a fresh random key every boot. `.skip` markers and `config.yaml.d` drop-ins
 are lost with it, so there is no in-guest switch that survives a restart, by
-design. To revoke durably, relaunch without `opkeydata`, or with a rotated
-operator key, so the old key can no longer obtain a certificate. A certificate
-already issued stays usable for the remainder of its one-hour TTL.
+design. To revoke durably, relaunch with a rotated server launch key and
+updated signed documents and peer key sets. Every boot requires valid
+`opkeydata`; omitting it prevents the node from starting. A certificate already
+issued remains usable against its original live cluster until expiry or an
+RBAC change.
 
 What the gate proves: a genuine guest of the manifest's platform booted
 exactly the pinned image, was launched to trust exactly this operator key,

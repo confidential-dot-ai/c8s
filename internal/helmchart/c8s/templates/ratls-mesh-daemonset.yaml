@@ -1,4 +1,4 @@
-{{- if .Values.ratlsMesh.enabled }}
+{{- if and .Values.ratlsMesh.enabled (not .Values.node.bakedServices) }}
 {{- $attestationApiURL := include "c8s.attestationApiURL" . -}}
 {{/*
   cds mode points a single --cds-url at the unified CDS, which serves both
