@@ -865,3 +865,16 @@ func TestSandboxTokenUnavailableFailsClosed(t *testing.T) {
 		t.Fatalf("err = %v, want a temporary HTTP failure without unsupported fallback", err)
 	}
 }
+
+func TestIsInjectedContainerName(t *testing.T) {
+	for _, name := range []string{CertContainerName, CertWaitContainerName, SecretContainerName, VolumeContainerName} {
+		if !IsInjectedContainerName(name) {
+			t.Errorf("%q is injected by the webhook but not recognized", name)
+		}
+	}
+	for _, name := range []string{"app", "c8s", "c8s-certs", "c8s-cert-waiter"} {
+		if IsInjectedContainerName(name) {
+			t.Errorf("%q is a workload container but was treated as injected", name)
+		}
+	}
+}

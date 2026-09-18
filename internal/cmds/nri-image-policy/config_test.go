@@ -188,8 +188,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.Allowlist.Pull.Timeout != 30*time.Second {
 		t.Errorf("expected default timeout 30s, got %s", cfg.Allowlist.Pull.Timeout)
 	}
-	if cfg.Allowlist.Pull.Interval != 30*time.Second {
-		t.Errorf("expected default interval 30s, got %s", cfg.Allowlist.Pull.Interval)
+	if cfg.Allowlist.Pull.Interval != 5*time.Second {
+		t.Errorf("expected default interval 5s, got %s", cfg.Allowlist.Pull.Interval)
 	}
 	if cfg.Policy.Mode != "fail-closed" {
 		t.Errorf("expected default mode fail-closed, got %s", cfg.Policy.Mode)

@@ -303,7 +303,8 @@ allowlist:
     # pull loop retries and the plugin stays Ready on the base allowlist
     # above.
     url: "https://127.0.0.1:30808"
-    interval: "30s"
+    # INVARIANT: equal to the chart's nriImagePolicy.refresh.interval.
+    interval: "5s"
     timeout: "30s"
     # The BAKED attestation-api (attest/attest-gpu profile, host service on
     # :8400). The plugin runs in the host netns as a containerd child, so

@@ -175,6 +175,33 @@ The write is refused with no `--mesh-ca`. `--force` writes without the check
 and says so on stderr; it governs the CA check only, and is unrelated to
 `--overwrite`, which governs replacing a value already at the path.
 
+### Reading the mesh CA bundle
+
+`c8s cds ca` reads the bundle over the same attested connection the write uses:
+
+```sh
+c8s cds ca --url "$CDS" --measurements "$M" --out mesh-ca.pem
+```
+
+Endpoint pins are required: use `--image-policy-file` for a complete image
+policy, or `--measurements` / `--measurements-file` for launch digests. Pin CDS
+for a direct URL or the router for a front door. The SHA-256 of each certificate
+goes to stderr.
+Record it. The read proves an attested build at `$M` served these bytes, which
+is the bound the gate has too: comparing that digest against an earlier read, or
+against a copy taken another way, is what separates your CDS from another one at
+the same measurement.
+
+`GET /ca` carries every CA CDS still signs leaves against, newest first, and the
+gate wants all of them — so pin the whole bundle. Without `--out` it goes to
+stdout instead.
+
+CDS generates its mesh CA in process and a restart replaces it (see
+[operator.md](operator.md), "CDS is a singleton"), so read the bundle once CDS
+has settled. A bundle captured before a restart reads afterwards as the CDS
+serving a mesh CA that is not in `--mesh-ca` — the same refusal as the wrong
+CDS.
+
 ```
 PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 201 {"created": true}
@@ -356,6 +383,33 @@ Serving the field is safe ahead of the consumers: `secrets` appears only once an
 operator writes a real grant, and the pull path
 (`allowlist.ParseServedJSON`) ignores fields it does not know. Strict parsing is
 kept for operator-authored input, where an unknown field is a typo.
+
+## The mount policy
+
+Every container in the entry also needs a `mounts` policy admitting what the
+webhook injects: the cert volume, and the secret directory. An absent policy is
+`deny`, which admits platform mounts alone and so refuses the pod at container
+creation.
+
+Both are memory-backed `emptyDir`s, so an `exact` policy names them by
+destination:
+
+```json
+"mounts": {"policy": "exact", "rules": [
+  {"destination": "/etc/c8s/certs", "kind": "emptyDir"},
+  {"destination": "/run/c8s/secrets", "kind": "emptyDir"}
+]}
+```
+
+The destinations follow `confidential.ai/c8s-cert-dir` and
+`confidential.ai/c8s-secret-dir` where the pod sets them. `exact` is set
+equality, so the rules also cover every other non-platform mount the pod
+declares; a configMap, projected or PVC source classes as `data`, whose
+destination sits below `/mnt/c8s-data/`.
+
+`{"policy": "any"}` admits any mount table, leaving the host free to add one.
+It is what the chart seeds for c8s's own components. See
+[`allowlist-and-capabilities.md`](allowlist-and-capabilities.md#mount-policy-mounts).
 
 ## What the inventory reports
 

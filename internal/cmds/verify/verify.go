@@ -1050,6 +1050,8 @@ type Outcome struct {
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
 	// operator public keys the target pins for allowlist writes (served list,
 	// kind=cds only), fetched over the attested serving cert.
+	// OperatorKeysNote says what stands behind them: matched against
+	// --operator-keys, reported unpinned, or why the set is absent.
 	OperatorKeys     []string `json:"operator_keys,omitempty"`
 	OperatorKeysNote string   `json:"operator_keys_note,omitempty"`
 
@@ -1130,6 +1132,8 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		// the ID.
 		if err := ratls.CheckSandboxPin(ev.leaf, cfg.sandboxID); err != nil {
 			fail("%v", err)
+		} else if oc.SandboxIDNote != "" {
+			oc.SandboxIDNote += ", and the ID matches --sandbox-id"
 		}
 	}
 
@@ -1145,6 +1149,9 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		return
 	}
 	if len(expected) == 0 {
+		if oc.Verified && len(opKeys.fingerprints) > 0 {
+			oc.OperatorKeysNote = "not pinned: the set the target reports, compared against nothing (pass --operator-keys to pin it)"
+		}
 		return
 	}
 	if opKeys.fetchErr != nil {
@@ -1155,11 +1162,15 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		// Never fetched (wrong --kind, or a --from-file target). Say that,
 		// rather than comparing against an empty digest and reporting a
 		// mismatch the operator cannot act on.
-		fail("--operator-keys cannot be checked: %s", opKeys.note)
+		fail("--operator-keys cannot be checked: %s", orDefault(opKeys.note, "the target was never queried for its key set"))
 		return
 	}
 	if !bytes.Equal(opKeys.digest, expected) {
 		fail("served /operator-keys digest %x does not match the --operator-keys set (%x)", opKeys.digest, expected)
+		return
+	}
+	if oc.Verified {
+		oc.OperatorKeysNote = "matched: the set served over the attested cert equals --operator-keys"
 	}
 }
 
@@ -1634,7 +1645,10 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"
 		fmt.Fprintf(out, "  %s\n", label)
 		for _, fp := range oc.OperatorKeys {
-			fmt.Fprintf(out, "    sha256:%s\n", fp)
+			fmt.Fprintf(out, "    sha256(SPKI DER):%s\n", fp)
+		}
+		if oc.OperatorKeysNote != "" {
+			fmt.Fprintf(out, "    %s\n", oc.OperatorKeysNote)
 		}
 	} else if oc.OperatorKeysNote != "" {
 		fmt.Fprintf(out, "  operator keys: %s\n", oc.OperatorKeysNote)

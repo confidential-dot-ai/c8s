@@ -213,11 +213,20 @@ alone does not establish platform ownership. `any` leaves mounts unconstrained;
 }
 ```
 
-To supply mount policies when deriving an entry, use `--mounts-file`. The file
-maps container names to explicit policies and must include every init and main
-container in the input object; missing or unknown names are rejected. For a pod
-with an init container named `seed` and main containers named `frontend` and
-`worker`, save this as `mounts.json`:
+When deriving an entry, `--mounts=any|deny` applies one policy to every
+container it derives:
+
+```sh
+c8s allowlist derive app pod.json --env=any --mounts=any > entry.json
+```
+
+`--mounts-file` takes explicit per-container policies instead: the file maps
+container names to policies and must include every init and main container the
+entry declares; missing or unknown names are rejected. `derive` drops c8s's own
+injected containers from its input and names them on stderr, so a pod read back
+after admission derives the same entry as the manifest it was admitted from. For
+a pod with an init container named `seed` and main containers named `frontend`
+and `worker`, save this as `mounts.json`:
 
 ```json
 {
@@ -240,7 +249,7 @@ c8s allowlist derive app pod.json --env=any --mounts-file mounts.json > entry.js
 Here `pod.json` contains the Kubernetes object with digest-pinned images and
 explicit command/args. Choose the policies to match the workload's actual
 mounts; the pod spec alone cannot establish source class or storage protection.
-Omitting `--mounts-file` leaves each container's mount policy at `deny`.
+Omitting both flags leaves each container's mount policy at `deny`.
 
 Lint includes mount rules when checking whether workload entries are
 indistinguishable. It also rejects exact `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`,
@@ -353,11 +362,14 @@ is not implemented and is out of scope here.
 
 ### The injected-container carve-out
 
-c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: the injected image is seeded as its own entry, so a workload entry
-never has to enumerate c8s's own sidecars. Nothing rests on the container
-*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+c8s injects its own init containers into every confidential pod — `c8s-cert`
+(get-cert) and `c8s-cert-wait`, joined by `c8s-secret` and `c8s-volume` when the
+pod asks for them. They pass the issuance gate by **digest**, not by name: the
+injected image is seeded as its own entry, so a workload entry never has to
+enumerate c8s's own sidecars. Matching rests on nothing the host writes, and the
+container *name* is one of those things; the names identify injection only over
+authored input, where admission reserves them and `c8s allowlist derive` drops
+them. get-cert runs with per-pod dynamic arguments,
 which is exactly why the seeded component entries carry `command: any, args:
 any`: their argv is not fixed and must not be argv-policed. Before matching, a
 container admitted that way and running an injected entrypoint is dropped from
@@ -397,6 +409,11 @@ a restart the first version seen is
 trusted and state re-syncs from CDS. A reboot-durable guarantee needs an
 attested freshness / monotonic-counter mechanism the host cannot reset — a
 tracked follow-on.
+
+`nriImagePolicy.refresh.interval` sets the poll, so a node runs the previous
+document for up to one interval after CDS commits a write; a node has taken a
+write once its plugin logs `pull loop: allowlist refreshed` with a version at or
+above the one `c8s allowlist list` reports.
 
 The host NRI plugin also carries a **base enforcement allowlist** in
 `allowlist.base`, baked into its boot config and never changed by a pull.

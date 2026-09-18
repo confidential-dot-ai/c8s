@@ -189,10 +189,14 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 		t.Fatalf("expected a read error, got %v", err)
 	}
 
-	garbage := writeFile(t, "bad.json", `not json at all`)
-	if _, _, err := runCmd("apply", garbage, "--url", url, "--insecure"); err == nil ||
-		!strings.Contains(err.Error(), "parse workload entries") {
-		t.Fatalf("expected a parse error, got %v", err)
+	// A body with neither a schema nor an entry is refused by the decoder: it
+	// names no shape, so it must not read as an allowlist with nothing in it.
+	for _, body := range []string{`not json at all`, `{}`, `null`} {
+		f := writeFile(t, "bad.json", body)
+		if _, _, err := runCmd("apply", f, "--url", url, "--insecure"); err == nil ||
+			!strings.Contains(err.Error(), "parse workload entries") {
+			t.Fatalf("expected a parse error for %q, got %v", body, err)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // podTemplate is the slice of a Deployment/StatefulSet/DaemonSet/Pod we need.
@@ -56,6 +57,21 @@ func podSpecOf(data []byte) (podTemplate, error) {
 	return podTemplate{}, fmt.Errorf("%s carries no containers: expected a Pod or a workload with a pod template", kind)
 }
 
+// dropInjected removes the containers c8s's admission webhook adds and returns
+// their names.
+func dropInjected(cs []templateContainer) ([]templateContainer, []string) {
+	out := make([]templateContainer, 0, len(cs))
+	var dropped []string
+	for _, c := range cs {
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			dropped = append(dropped, c.Name)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, dropped
+}
+
 // argvPolicy renders one half of a container's argv policy.
 //
 // An empty argv is Deny, never Exact: Exact requires equality against a
@@ -89,10 +105,19 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 	return out, nil
 }
 
+// unknownContainerErr names a policy no derived container claimed. A dropped
+// container is visibly in the input, so it is not reported as unknown.
+func unknownContainerErr(kind, name string) error {
+	if workloadclaims.IsInjectedContainerName(name) {
+		return fmt.Errorf("%s policy names %q, a container c8s injects and derive drops", kind, name)
+	}
+	return fmt.Errorf("%s policy names unknown container %q", kind, name)
+}
+
 func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
-	var envMode, envFile, mountsFile string
+	var envMode, envFile, mountsMode, mountsFile string
 	cmd := &cobra.Command{
 		Use:   "derive <name> <file|->",
 		Short: "Build an entry from a live Kubernetes object",
@@ -112,15 +137,17 @@ map of container names to env policies. Exact values describe the complete OCI
 launch environment, including image/runtime additions. Pod env/envFrom alone
 cannot establish it.
 
-Use --mounts-file with a JSON map of container names to mount policies to pin
-bind mounts for every init and main container. The pod spec alone cannot prove
-which sources are node-provided or how persistent storage is protected.
+Mount policy comes from --mounts=any|deny or --mounts-file, a JSON map of
+container names to mount policies covering every derived init and main
+container. Omitting both leaves every container at "deny", which admits platform
+mounts alone. The pod spec cannot prove which sources are node-provided or how
+persistent storage is protected, so exact rules go in --mounts-file.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
 
-c8s injects its own sidecars and drops them before matching, so they are
-deliberately absent from the derived entry.`,
+Containers c8s injects are dropped and named on stderr, so an admitted pod
+derives the same entry as the manifest it was admitted from.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := readFileOrStdin(cmd, args[1])
@@ -130,6 +157,13 @@ deliberately absent from the derived entry.`,
 			spec, err := podSpecOf(data)
 			if err != nil {
 				return err
+			}
+			var dropped, mains []string
+			spec.InitContainers, dropped = dropInjected(spec.InitContainers)
+			spec.Containers, mains = dropInjected(spec.Containers)
+			dropped = append(dropped, mains...)
+			if len(dropped) > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "dropped %s: injected by c8s\n", strings.Join(dropped, ", "))
 			}
 			containers, err := deriveContainers(spec.Containers)
 			if err != nil {
@@ -141,6 +175,13 @@ deliberately absent from the derived entry.`,
 			}
 			if (envMode == "") == (envFile == "") {
 				return fmt.Errorf("specify exactly one of --env=any|deny or --env-file")
+			}
+			if mountsMode != "" && mountsMode != allowlist.PolicyAny && mountsMode != allowlist.PolicyDeny {
+				return fmt.Errorf("--mounts must be any or deny; use --mounts-file for exact rules")
+			}
+			if mountsMode == "" && mountsFile == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					`mounts: no policy given; every container is "deny", which admits platform mounts alone`)
 			}
 			var policies map[string]allowlist.EnvPolicy
 			var mountPolicies map[string]allowlist.MountPolicy
@@ -184,24 +225,27 @@ deliberately absent from the derived entry.`,
 						used[c.Name] = true
 					}
 					part.containers[i].Env = p
-					if mountsFile != "" {
+					switch {
+					case mountsFile != "":
 						mount, ok := mountPolicies[c.Name]
 						if !ok {
 							return fmt.Errorf("missing mount policy for container %q", c.Name)
 						}
 						part.containers[i].Mounts = mount
 						usedMounts[c.Name] = true
+					case mountsMode != "":
+						part.containers[i].Mounts = allowlist.MountPolicy{Policy: mountsMode}
 					}
 				}
 			}
 			for name := range policies {
 				if !used[name] {
-					return fmt.Errorf("env policy names unknown container %q", name)
+					return unknownContainerErr("env", name)
 				}
 			}
 			for name := range mountPolicies {
 				if !usedMounts[name] {
-					return fmt.Errorf("mount policy names unknown container %q", name)
+					return unknownContainerErr("mount", name)
 				}
 			}
 			w := allowlist.Workload{
@@ -224,7 +268,9 @@ deliberately absent from the derived entry.`,
 		"grant read on this secret path (repeatable); omit for no secrets block")
 	cmd.Flags().StringVar(&envMode, "env", "", "environment policy for every container: any or deny")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "JSON map of container names to explicit env policies (including exact values)")
+	cmd.Flags().StringVar(&mountsMode, "mounts", "", "mount policy for every container: any or deny (default deny)")
 	cmd.Flags().StringVar(&mountsFile, "mounts-file", "", "JSON map of container names to explicit mount policies")
 	cmd.Flags().StringVar(&label, "label", "", "optional entry label")
+	cmd.MarkFlagsMutuallyExclusive("mounts", "mounts-file")
 	return cmd
 }

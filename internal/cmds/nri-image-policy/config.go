@@ -148,7 +148,7 @@ type loggingConfig struct {
 	Level string `yaml:"level"`
 }
 
-const defaultPullInterval = 30 * time.Second
+const defaultPullInterval = 5 * time.Second
 const defaultPullTimeout = 30 * time.Second
 
 // NodeIPFile is the filename, inside SocketDir, the installer writes this

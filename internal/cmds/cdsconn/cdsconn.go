@@ -192,12 +192,22 @@ func (o *Options) requirePinnedEndpoint() error {
 	if u, err := url.Parse(o.URL); err == nil && u.Scheme == "http" {
 		return nil
 	}
-	pins, err := o.loadPins()
+	pinned, err := o.Pinned()
 	if err != nil {
 		return err
 	}
-	if pins.Empty() {
-		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
+	if !pinned {
+		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --image-policy-file <policy.json>, --measurements <endpoint build ID>, or --measurements-file; use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
 	}
 	return nil
+}
+
+// Pinned reports whether the image policy or measurement flags name at least
+// one trusted endpoint image.
+func (o *Options) Pinned() (bool, error) {
+	pins, err := o.loadPins()
+	if err != nil {
+		return false, err
+	}
+	return !pins.Empty(), nil
 }

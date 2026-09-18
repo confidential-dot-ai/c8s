@@ -28,6 +28,106 @@ func TestLintCleanAllowlistReportsOK(t *testing.T) {
 	}
 }
 
+// The derive -> lint -> apply loop: what 'derive' emits is a bare name-keyed
+// map, and 'lint' must pre-flight it rather than reject it as a document with
+// an unknown field.
+func TestLintAcceptsDeriveOutput(t *testing.T) {
+	pod := writeFile(t, "pod.json", deployJSON())
+
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		entry string
+		wants []string
+	}{
+		{
+			name:  "clean",
+			args:  []string{"derive", "dynamo", pod, "--env=deny"},
+			entry: "dynamo",
+			wants: []string{"ok: no findings"},
+		},
+		{
+			name:  "secret grant is linted, not rejected",
+			args:  []string{"derive", "dynamo-secret", pod, "--env=any", "--secret-read", "/test/hello"},
+			entry: "dynamo-secret",
+			wants: []string{`workload "dynamo-secret" grants secrets without pinning environment values`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			derived, _, err := runCmd(tc.args...)
+			if err != nil {
+				t.Fatalf("derive: %v", err)
+			}
+
+			// "ok: no findings" is also what linting nothing prints, so pin the
+			// entries the shared decoder actually recovered from that output.
+			entries, err := parseWorkloadEntries([]byte(derived))
+			if err != nil {
+				t.Fatalf("decode derived output: %v\n%s", err, derived)
+			}
+			w, ok := entries[tc.entry]
+			if !ok {
+				t.Fatalf("derived output is not keyed by %q: %v", tc.entry, entries)
+			}
+			if len(w.InitContainers) != 1 || len(w.Containers) != 2 {
+				t.Fatalf("entry %q has %d init / %d containers, want 1 / 2", tc.entry, len(w.InitContainers), len(w.Containers))
+			}
+
+			out, _, err := runCmd("lint", writeFile(t, "entry.json", derived))
+			if err != nil {
+				t.Fatalf("lint of derived entry: %v\n%s", err, out)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(out, want) {
+					t.Errorf("lint output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// Accepting the shapes 'apply' accepts must not make lint lenient. Wrapping a
+// bare map into a document puts it under the document rules, so everything
+// ParseJSON refuses on the way in is still refused.
+func TestLintRejectsForeignAndMalformedInput(t *testing.T) {
+	entry := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
+
+	for name, body := range map[string]string{
+		"pod spec":             deployJSON(),
+		"unknown schema":       `{"schema":"other/v1","workloads":{}}`,
+		"empty object":         `{}`,
+		"json null":            `null`,
+		"not json":             `schema: c8s.allowlist/v1`,
+		"illegal entry name":   `{"foo/bar":` + entry + `}`,
+		"oversized entry name": `{"` + strings.Repeat("a", 64) + `":` + entry + `}`,
+		// encoding/json keeps the last value for a repeated key, so a body that
+		// shows one entry to a reader could lint and apply another.
+		"duplicate entry name": `{"app":` + entry + `,"app":` + entry + `}`,
+		"two documents":        `{"app":` + entry + `}` + "\n" + `{"evil":` + entry + `}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := runCmd("lint", writeFile(t, "in.json", body)); err == nil {
+				t.Fatalf("lint accepted %s", name)
+			}
+		})
+	}
+}
+
+// A bare map carrying more than one entry must reach the cross-entry checks and
+// fail the lint, not just the per-entry ones.
+func TestLintBareMapReportsIndistinguishableEntries(t *testing.T) {
+	entry := `{"containers":[` + ctrJSON(digA, "/app") + `]}`
+	f := writeFile(t, "entries.json", `{"one":`+entry+`,"two":`+entry+`}`)
+
+	out, _, err := runCmd("lint", f)
+	if err == nil {
+		t.Fatalf("expected a lint error, got:\n%s", out)
+	}
+	if !strings.Contains(out, "declare the same containers") {
+		t.Fatalf("lint output missing the ambiguity finding:\n%s", out)
+	}
+}
+
 func TestLintOnlineChecks(t *testing.T) {
 	cranetest.Install(t)
 	goodRef := "registry.example.com/app@" + digA
