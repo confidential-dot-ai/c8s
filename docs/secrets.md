@@ -357,6 +357,33 @@ operator writes a real grant, and the pull path
 (`allowlist.ParseServedJSON`) ignores fields it does not know. Strict parsing is
 kept for operator-authored input, where an unknown field is a typo.
 
+## The mount policy
+
+Every container in the entry also needs a `mounts` policy admitting what the
+webhook injects: the cert volume, and the secret directory. An absent policy is
+`deny`, which admits platform mounts alone and so refuses the pod at container
+creation.
+
+Both are memory-backed `emptyDir`s, so an `exact` policy names them by
+destination:
+
+```json
+"mounts": {"policy": "exact", "rules": [
+  {"destination": "/etc/c8s/certs", "kind": "emptyDir"},
+  {"destination": "/run/c8s/secrets", "kind": "emptyDir"}
+]}
+```
+
+The destinations follow `confidential.ai/c8s-cert-dir` and
+`confidential.ai/c8s-secret-dir` where the pod sets them. `exact` is set
+equality, so the rules also cover every other non-platform mount the pod
+declares; a configMap, projected or PVC source classes as `data`, whose
+destination sits below `/mnt/c8s-data/`.
+
+`{"policy": "any"}` admits any mount table, leaving the host free to add one.
+It is what the chart seeds for c8s's own components. See
+[`allowlist-and-capabilities.md`](allowlist-and-capabilities.md#mount-policy-mounts).
+
 ## What the inventory reports
 
 `GET /digests/{sandboxID}` answers with two views of the same sandbox:
