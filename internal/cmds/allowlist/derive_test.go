@@ -130,6 +130,75 @@ func TestDeriveMountPolicies(t *testing.T) {
 	}
 }
 
+func TestDeriveMountShorthand(t *testing.T) {
+	for _, mode := range []string{"any", "deny"} {
+		got, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts="+mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range allContainers(got["dynamo"]) {
+			if c.Mounts.Policy != mode {
+				t.Fatalf("mounts = %+v, want %s on every container", c.Mounts, mode)
+			}
+		}
+	}
+	// Without either flag the entry carries no policy and applying it denies.
+	got, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(got["dynamo"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := pkgallowlist.ParseWorkloadJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range allContainers(*applied) {
+		if c.Mounts.Policy != pkgallowlist.PolicyDeny {
+			t.Fatalf("mounts = %+v without --mounts, want deny", c.Mounts)
+		}
+	}
+	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=exact"); err == nil {
+		t.Fatal("accepted a rule-bearing policy as a shorthand")
+	}
+	file := t.TempDir() + "/mounts.json"
+	data := `{"seed":{"policy":"deny"},"frontend":{"policy":"any"},"worker":{"policy":"deny"}}`
+	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any", "--mounts-file", file); err == nil {
+		t.Fatal("conflicting mount policies accepted")
+	}
+	// --mounts leaves the file path's per-container bookkeeping alone.
+	stray := t.TempDir() + "/stray.json"
+	if err := os.WriteFile(stray, []byte(`{"seed":{"policy":"deny"},"frontend":{"policy":"any"},"worker":{"policy":"deny"},"ghost":{"policy":"any"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runDerive(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts-file", stray); err == nil {
+		t.Fatal("mount policy naming an unknown container accepted")
+	} else if !strings.Contains(err.Error(), `unknown container "ghost"`) {
+		t.Fatalf("error = %v, want the unnamed container", err)
+	}
+}
+
+func TestDeriveWarnsWhenNoMountPolicyIsGiven(t *testing.T) {
+	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "deny") {
+		t.Fatalf("stderr = %q, want the deny default named", stderr)
+	}
+	if _, stderr, err = runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any"); err != nil {
+		t.Fatal(err)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q with --mounts", stderr)
+	}
+}
+
 func TestDeriveAcceptsABarePod(t *testing.T) {
 	pod := `{"kind":"Pod","spec":{"containers":[{"name":"c","image":"` + testImage + `","command":["sleep","inf"]}]}}`
 	got, err := runDerive(t, pod, "p", "-", "--env=any")
@@ -250,7 +319,7 @@ func TestDeriveRejectsPolicyForDroppedContainer(t *testing.T) {
 // An input with nothing c8s injected is derived without a report, so the
 // message only appears when it says something.
 func TestDeriveReportsNothingWhenNothingIsDropped(t *testing.T) {
-	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any")
+	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
