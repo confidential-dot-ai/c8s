@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 func TestTrustedC8sCryptDeviceThroughVerity(t *testing.T) {
@@ -61,7 +63,7 @@ func TestTrustedEncryptedDeviceRejectsSlaveCycle(t *testing.T) {
 	}
 }
 
-func TestOverlayUpperDirDoesNotInheritHiddenAncestor(t *testing.T) {
+func TestContainingOverlayDoesNotInheritHiddenAncestor(t *testing.T) {
 	for _, nested := range []struct {
 		name string
 		fs   string
@@ -88,9 +90,9 @@ func TestOverlayUpperDirDoesNotInheritHiddenAncestor(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, source := range []string{"/var/lib", "/var/lib/kubelet/pods/x"} {
-					got, ok := overlayUpperDir(file, source)
-					if got != nested.want || ok != (nested.want != "") {
-						t.Fatalf("upper for %s = %q, %v; want %q", source, got, ok, nested.want)
+					mountpoint, got, ok := containingOverlay(file, source)
+					if mountpoint != "/var/lib" || got != nested.want || ok != (nested.want != "") {
+						t.Fatalf("containing overlay for %s = %q, %q, %v; want /var/lib, %q", source, mountpoint, got, ok, nested.want)
 					}
 				}
 			}
@@ -131,20 +133,20 @@ func TestTrustedScratchRejectsIncompleteProvenance(t *testing.T) {
 	}
 }
 
-func TestOverlayUpperDirUsesContainingMount(t *testing.T) {
+func TestContainingOverlayUsesMostSpecificMount(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "mountinfo")
 	data := "20 1 0:1 / / rw - ext4 /dev/root rw\n" +
 		"21 20 0:2 / /var rw - overlay overlay rw,lowerdir=/lower,upperdir=/scratch\\040upper,workdir=/work\n"
 	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := overlayUpperDir(file, "/var/lib/kubelet/pods/x")
-	if !ok || got != "/scratch upper" {
-		t.Fatalf("upper = %q, %v", got, ok)
+	mountpoint, got, ok := containingOverlay(file, "/var/lib/kubelet/pods/x")
+	if !ok || mountpoint != "/var" || got != "/scratch upper" {
+		t.Fatalf("containing overlay = %q, %q, %v", mountpoint, got, ok)
 	}
 }
 
-func TestOverlayUpperDirEscapedPaths(t *testing.T) {
+func TestContainingOverlayEscapedPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name, encoded, decoded string
 	}{
@@ -161,10 +163,10 @@ func TestOverlayUpperDirEscapedPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, source := range []string{"/var" + tc.decoded + "lib", "/var" + tc.decoded + "lib/pods/x"} {
-				got, ok := overlayUpperDir(file, source)
+				mountpoint, got, ok := containingOverlay(file, source)
 				want := "/scratch" + tc.decoded + "upper"
-				if !ok || got != want {
-					t.Fatalf("upper for %q = %q, %v; want %q", source, got, ok, want)
+				if !ok || mountpoint != "/var"+tc.decoded+"lib" || got != want {
+					t.Fatalf("containing overlay for %q = %q, %q, %v; want %q", source, mountpoint, got, ok, want)
 				}
 			}
 		})
@@ -223,5 +225,148 @@ func TestTrustedScratchRequiresCryptAndBackingSerial(t *testing.T) {
 	write(bootID, "boot-b\n")
 	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("stale boot provenance trusted")
+	}
+}
+
+// stateOverlayFixture reproduces a booted node image: an encrypted scratch
+// mapping in sysfs, the provenance record scratch-enforce.service wrote for
+// this boot, the state directories the measured image declares, and a /var
+// overlay whose recorded upperdir lives in the initrd's discarded namespace.
+type stateOverlayFixture struct {
+	inspector                        linuxStorageInspector
+	mountInfo, stateConf, provenance string
+	bootID, dmName, dmUUID, dmDev    string
+	serial                           string
+}
+
+const deadUpperDir = "/state/1/upper"
+
+func newStateOverlayFixture(t *testing.T) stateOverlayFixture {
+	t.Helper()
+	root := t.TempDir()
+	devBlock, class := filepath.Join(root, "dev"), filepath.Join(root, "class")
+	dm, slave := filepath.Join(root, "block", "dm-0"), filepath.Join(class, "vdb")
+	stateDir := filepath.Join(root, "state.d")
+	for _, dir := range []string{devBlock, stateDir, slave, filepath.Join(dm, "dm"), filepath.Join(dm, "slaves")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := stateOverlayFixture{
+		mountInfo:  filepath.Join(root, "mountinfo"),
+		stateConf:  filepath.Join(stateDir, "00-base.conf"),
+		provenance: filepath.Join(root, "scratch-provenance.json"),
+		bootID:     filepath.Join(root, "boot-id"),
+		dmName:     filepath.Join(dm, "dm/name"),
+		dmUUID:     filepath.Join(dm, "dm/uuid"),
+		dmDev:      filepath.Join(dm, "dev"),
+		serial:     filepath.Join(slave, "serial"),
+	}
+	for name, content := range map[string]string{
+		f.mountInfo: "20 1 253:1 / / ro - ext4 /dev/mapper/root ro\n" +
+			"21 20 0:33 / /var rw - overlay overlay rw,lowerdir=/sysroot/var,upperdir=" +
+			deadUpperDir + ",workdir=/state/1/work,uuid=on\n",
+		f.stateConf:  "# confos base\nvar\nhome\n",
+		f.provenance: `{"version":1,"boot_id":"boot-a","device":"253:0","name":"scratch","uuid":"CRYPT-PLAIN-test"}`,
+		f.bootID:     "boot-a\n",
+		f.dmName:     "scratch\n",
+		f.dmUUID:     "CRYPT-PLAIN-test\n",
+		f.dmDev:      "253:0\n",
+		f.serial:     "confai-scratch\n",
+	} {
+		writeFixture(t, name, content)
+	}
+	for target, link := range map[string]string{slave: filepath.Join(dm, "slaves", "vdb"), dm: filepath.Join(devBlock, "253:0")} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.inspector = linuxStorageInspector{
+		sysDevBlock: devBlock, sysClassBlock: class, mountInfo: f.mountInfo, stateDir: stateDir,
+		provenanceFile: f.provenance, bootIDFile: f.bootID,
+	}
+	return f
+}
+
+func writeFixture(t *testing.T, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The recorded upperdir is a path the initrd created before switch_root, so it
+// does not resolve in the root the inspector runs in. Following it is what the
+// synthetic-tree tests cannot reproduce, because they only ever record an
+// upperdir they just created.
+func TestOverlayStorageClassifiesInitrdStateOverlay(t *testing.T) {
+	const source = "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~empty-dir/cache"
+	if _, err := os.Stat(deadUpperDir); err == nil {
+		t.Skipf("%s resolves in this root", deadUpperDir)
+	}
+	f := newStateOverlayFixture(t)
+	if got := f.inspector.inspect(deadUpperDir, map[string]bool{}); got != allowlist.MountUnknown {
+		t.Fatalf("recorded upperdir resolved to %q", got)
+	}
+	if got := f.inspector.overlayStorage(source, map[string]bool{}); got != allowlist.MountEncrypted {
+		t.Fatalf("state overlay on encrypted scratch = %q, want %q", got, allowlist.MountEncrypted)
+	}
+}
+
+func TestOverlayStorageFailsClosed(t *testing.T) {
+	const source = "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~empty-dir/cache"
+	roOverlay := "21 20 0:33 / /var ro - overlay overlay ro,lowerdir=/sysroot/var\n"
+	for _, tc := range []struct {
+		name    string
+		corrupt func(t *testing.T, f *stateOverlayFixture)
+	}{
+		{"mountpoint not declared", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.stateConf, "home\n")
+		}},
+		{"mountpoint declared only as an ancestor", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.stateConf, "var/lib\n")
+		}},
+		{"declaration commented out", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.stateConf, "#var\n")
+		}},
+		{"no declarations in the image", func(t *testing.T, f *stateOverlayFixture) {
+			if err := os.Remove(f.stateConf); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"read-only overlay", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.mountInfo, roOverlay)
+		}},
+		{"no provenance record", func(t *testing.T, f *stateOverlayFixture) {
+			if err := os.Remove(f.provenance); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"provenance from an earlier boot", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.bootID, "boot-b\n")
+		}},
+		{"provenance device escapes sysfs", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.provenance, `{"version":1,"boot_id":"boot-a","device":"253:0/../../block/dm-0","name":"scratch","uuid":"CRYPT-PLAIN-test"}`)
+		}},
+		{"provenance device disagrees with sysfs", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.dmDev, "253:9\n")
+		}},
+		{"mapping is not a crypt target", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.dmUUID, "DM-LINEAR-test\n")
+		}},
+		{"mapping is merely named scratch elsewhere", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.dmName, "containerd\n")
+		}},
+		{"backing device is not the scratch disk", func(t *testing.T, f *stateOverlayFixture) {
+			writeFixture(t, f.serial, "confai-models\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStateOverlayFixture(t)
+			tc.corrupt(t, &f)
+			if got := f.inspector.overlayStorage(source, map[string]bool{}); got != allowlist.MountUnknown {
+				t.Fatalf("storage = %q, want %q", got, allowlist.MountUnknown)
+			}
+		})
 	}
 }
