@@ -6,8 +6,8 @@
 # by construction. The canonical data lives in .github/build-pins.json;
 # .github/scripts/pin-manifest.sh validates the full schema before updating it.
 #
-# One matrix leg per measurement domain, so each roll is its own PR:
-#   node-image: node rootfs / RTMR + SNP digests
+# The one measurement domain today is node-image (node rootfs / RTMR + SNP
+# digests); each roll is its own PR.
 #
 # Authentication prefers a short-lived, repository-scoped GitHub App token.
 # Checkout, push, and gh use one credential; an unconfigured App falls back to
@@ -30,11 +30,6 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - domain: node-image
     steps:
       - name: Create pin-watch GitHub App token
         id: pin-watch-app-token
@@ -53,7 +48,7 @@ jobs:
       - name: Bump stale pins and open the PR
         env:
           GH_TOKEN: ${{ steps.pin-watch-app-token.outputs.token || github.token }}
-          DOMAIN: ${{ matrix.domain }}
+          DOMAIN: node-image
         run: |
           set -euo pipefail
           confos=$(gh api repos/confidential-dot-ai/confidential-os-builder/commits/main --jq .sha)
@@ -121,8 +116,17 @@ jobs:
             new_oid=$remote_oid
           else
             if [ "$remote_tree" != "$base_tree" ]; then
-              echo "::error::candidate branch $branch contains a different tree; refusing to overwrite it"
-              exit 1
+              # A branch left behind by a pin-watch PR closed without merging
+              # differs from main only in the manifest; anything else on it
+              # is someone's work and stays put.
+              if [ "$(git diff-tree -r --name-only "$base_tree" "$remote_tree")" != ".github/build-pins.json" ]; then
+                echo "::error::candidate branch $branch carries changes beyond .github/build-pins.json; refusing to overwrite it (delete the branch to let pin-watch recreate it)"
+                exit 1
+              fi
+              echo "resetting stale pin-watch branch $branch to $base_oid" >> "$GITHUB_STEP_SUMMARY"
+              gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/$branch" \
+                -f sha="$base_oid" -F force=true >/dev/null
+              remote_oid=$base_oid
             fi
             mutation=$(cat <<'GRAPHQL'
           mutation($repository: String!, $branch: String!, $expected: GitObjectID!, $headline: String!, $path: String!, $contents: Base64String!) {
