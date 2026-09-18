@@ -437,3 +437,47 @@ func TestServerAddressResolution(t *testing.T) {
 		t.Fatal("agent requires an explicit server address")
 	}
 }
+
+// An ImageIdentity implementation can omit launch variants; verification must
+// reject that result before staging credentials or role authorization.
+type identityWithoutDigests struct{ runtimemeasure.ImageIdentity }
+
+func (identityWithoutDigests) LaunchDigests() []runtimemeasure.LaunchVariant { return nil }
+
+func TestMissingMeasuredImageCannotStageARole(t *testing.T) {
+	for _, missing := range []string{"image identity", "launch digests"} {
+		t.Run(missing, func(t *testing.T) {
+			doc, key, pub := testDocument(t, "snp", Server)
+			testLoader(t, doc, pub)
+			measured := testMeasuredIdentity(t, doc, pub)
+			if missing == "image identity" {
+				measured.Image = nil
+			} else {
+				measured.Image = identityWithoutDigests{measured.Image}
+			}
+			loadMeasuredIdentity = func(context.Context, string, string) (credrelease.MeasuredIdentity, error) { return measured, nil }
+			cfg := testConfig(t, doc, key)
+			if err := Stage(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "contains no "+missing) {
+				t.Fatalf("missing %s: %v", missing, err)
+			}
+			for _, path := range []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, DefaultStagedPath} {
+				requireAbsent(t, cfg.path(path))
+			}
+		})
+	}
+}
+
+func TestAuthorizeKeyRejectsUnparsedServerKey(t *testing.T) {
+	for _, role := range []Role{Server, Agent} {
+		t.Run(string(role), func(t *testing.T) {
+			doc, key, pub := testDocument(t, "snp", role)
+			doc.Server.OperatorPublicKey = "not a public key"
+			if role == Server {
+				pub = doc.Server.OperatorPublicKey
+			}
+			if err := doc.authorizeKey([]byte(pub), &key.PublicKey); err == nil || !strings.Contains(err.Error(), "parse server operator public key") {
+				t.Fatalf("authorized a document with an invalid server key: %v", err)
+			}
+		})
+	}
+}
