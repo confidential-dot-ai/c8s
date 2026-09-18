@@ -275,10 +275,15 @@ local ownership only and are not serialized into the stable allowlist.
 | Host path or unrecognized source | `host` | `unknown` | denied |
 
 The Linux observer resolves tmpfs directly. For disk storage it resolves the
-containing mount, follows an overlay upper directory when necessary, and walks
-the device-mapper slave graph. The current scratch contract requires the exact
-`scratch` mapper, a crypt device UUID, and ancestry reaching the virtio device
-with serial `confai-scratch`. The serial or mapper name alone is never proof.
+containing mount and walks the device-mapper slave graph. A writable overlay
+mounted at a directory the measured image declares in `/usr/lib/confai/state.d`
+is the initrd's state overlay, whose upper layer lives on the boot scratch
+mapping; the observer proves that mapping from sysfs, because the upper
+directory the initrd recorded belongs to a mount namespace `switch_root`
+discarded. Any other overlay is followed to its upper directory. The current
+scratch contract requires the exact `scratch` mapper, a crypt device UUID, and
+ancestry reaching the virtio device with serial `confai-scratch`. The serial or
+mapper name alone is never proof.
 
 The initrd that creates scratch and generates its random in-memory key is part
 of the measured node image. Before RKE2 starts, `scratch-enforce` verifies the
