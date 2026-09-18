@@ -460,14 +460,14 @@ Caveats the output surfaces:
 
 ### Complete measured identity policies
 
-Measurement files preserve each image measurement, its TDX RTMR tuple and
+Image policy files preserve each image measurement, its TDX RTMR tuple and
 optional `approver_key` as one policy entry. The key is the exact PEM string;
 attestation-go's `refvalues` package maps it to `remote.ImagePin.Anchor`.
 `remote.EnforceImages` checks the image and calls `runtimemeasure.VerifyBinding`
 for that same entry. An image cannot borrow another entry's authorized key.
 c8s passes these entries through `remote.Policy.Images` to its attestation
-clients and injected workload helpers. Legacy flags that cannot carry anchors
-are refused where they would weaken enforcement.
+clients and injected workload helpers. Each verifier enforces the complete
+entry, including its launch-key binding when present.
 
 ### Image policy inputs
 
@@ -479,13 +479,22 @@ File and inline inputs use the same JSON format:
 |---|---|
 | `--image-policy-file policy.json` | Path to a complete JSON image policy. |
 | `--image-policy-json '{...}'` | The JSON document itself; supported by workload helpers such as `get-cert` and `get-secret`. |
-| `--measurements-file digests.txt` | Legacy text file containing one launch digest per line; no per-image register or key bindings. |
+| `--measurements-file digests.txt` | Text file containing one launch digest per line; no per-image register or key bindings. Supported by `verify`, `allowlist`, and `secrets`. |
 
-`--measurements-config` remains an alias for `--image-policy-file`, and
-`--measurements-config-json` remains an alias for `--image-policy-json`.
-Choose one policy source. A complete policy cannot be combined with legacy
-measurement flags. Mesh peers and CDS can use separate files;
-`--cds-image-policy-file` selects the CDS-only policy for `ratls-mesh`.
+Choose one complete policy source. A complete policy cannot be combined with
+independent digest or register inputs such as `--measurements`,
+`--measurements-file`, or `--rtmrs` (including the `--cds-` variants where
+provided). These independent inputs remain available for policies expressed as
+a digest list and a shared register set. Mesh peers and CDS can use separate
+files; `--cds-image-policy-file` selects the CDS-only policy for `ratls-mesh`.
+
+`c8s install` and `c8s render-values` accept image policies only when every
+image has identical RTMR pins and no `approver_key`. The Helm NRI installer
+configures CDS trust through a digest list and one shared register set, so
+these commands reject policies whose per-image register or launch-key
+constraints would be lost. Operator-key-bound policies require the baked node
+launch flow. CDS, mesh, and workload helpers that receive a complete image
+policy enforce its per-image tuples directly.
 
 ### Trust gate: `c8s get-kubeconfig`
 

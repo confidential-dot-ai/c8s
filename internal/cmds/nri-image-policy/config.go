@@ -84,6 +84,14 @@ type pullConfig struct {
 	CDSMeasurementsConfig string        `yaml:"cds_measurements_config"` // complete CDS image and operator identity policy
 }
 
+// validatePolicyInputs rejects competing CDS identity policy sources before I/O.
+func (c pullConfig) validatePolicyInputs() error {
+	if c.CDSMeasurementsConfig != "" && (len(c.CDSMeasurements) != 0 || len(c.CDSRTMRs) != 0) {
+		return fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
+	}
+	return nil
+}
+
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
 type containerdConfig struct {
 	Socket    string `yaml:"socket"`
@@ -261,8 +269,8 @@ func (c *config) Validate() error {
 		return fmt.Errorf("allowlist.base must carry at least one workload when pull is configured (cold-boot baseline)")
 	}
 	if c.PullEnabled() {
-		if c.Allowlist.Pull.CDSMeasurementsConfig != "" && (len(c.Allowlist.Pull.CDSMeasurements) != 0 || len(c.Allowlist.Pull.CDSRTMRs) != 0) {
-			return fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
+		if err := c.Allowlist.Pull.validatePolicyInputs(); err != nil {
+			return err
 		}
 		if c.Allowlist.Pull.Timeout <= 0 {
 			return fmt.Errorf("allowlist.pull.timeout must be > 0 when pull.url is set")

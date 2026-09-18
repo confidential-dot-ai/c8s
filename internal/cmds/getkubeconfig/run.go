@@ -5,16 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
+	"github.com/confidential-dot-ai/c8s/internal/httputil"
 )
 
 // Config is the get-kubeconfig client configuration.
@@ -88,7 +86,7 @@ func Run(ctx context.Context, cfg Config) error {
 		err = attestAndVerify(attestCtx, cfg.AttestURL, exp)
 		cancel()
 	} else {
-		err = retryCredentialRelease(ctx, cfg, func(stepCtx context.Context) error {
+		err = httputil.RetryConnectionRefused(ctx, cfg.Timeout, cfg.ReleaseWait, func(stepCtx context.Context) error {
 			return attestCredentialRelease(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, exp)
 		})
 	}
@@ -112,7 +110,7 @@ func Run(ctx context.Context, cfg Config) error {
 	//    cert key AND satisfy the same full measured-identity policy as the
 	//    attest gate, so the host can't MITM the channel.
 	var resp *credrelease.ReleaseResponse
-	err = retryCredentialRelease(ctx, cfg, func(stepCtx context.Context) error {
+	err = httputil.RetryConnectionRefused(ctx, cfg.Timeout, cfg.ReleaseWait, func(stepCtx context.Context) error {
 		var requestErr error
 		resp, requestErr = requestCredential(stepCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
 		return requestErr
@@ -128,49 +126,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
 	return nil
-}
-
-// retryCredentialRelease waits only for the listener to start. Authentication,
-// attestation and HTTP failures are final; only refused dials are retried.
-func retryCredentialRelease(ctx context.Context, cfg Config, operation func(context.Context) error) error {
-	deadline := time.Now().Add(cfg.ReleaseWait)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		stepCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		err := operation(stepCtx)
-		cancel()
-		if !shouldRetryCredentialRelease(err, deadline) {
-			return err
-		}
-		fmt.Fprintln(os.Stderr, "cred-release not listening yet; retrying")
-		timer := time.NewTimer(min(5*time.Second, time.Until(deadline)))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-			if !time.Now().Before(deadline) {
-				return err
-			}
-		}
-	}
-}
-
-func shouldRetryCredentialRelease(err error, deadline time.Time) bool {
-	if !time.Now().Before(deadline) {
-		return false
-	}
-	var requestErr *url.Error
-	if !errors.As(err, &requestErr) {
-		return false
-	}
-	// A verifier may itself fetch collateral. Only a direct HTTP transport
-	// dial failure means the credential listener has not started; a wrapped
-	// collateral or policy failure must never enter the readiness retry.
-	dialErr, ok := requestErr.Err.(*net.OpError)
-	return ok && dialErr.Op == "dial" && errors.Is(dialErr.Err, syscall.ECONNREFUSED)
 }
 
 // publicKeyPEMFromPrivate derives the PKIX PEM public key from an ECDSA

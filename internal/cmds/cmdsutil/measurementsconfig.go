@@ -7,32 +7,33 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/remote"
 )
 
 // ImagePolicySource selects one complete refvalues JSON document. File and JSON
-// use the same format; neither is a newline-separated legacy digest list.
+// use the same format; neither is a newline-separated digest list.
 type ImagePolicySource struct {
 	File string
 	JSON string
 }
 
-// Set reports whether a complete policy was supplied.
-func (s ImagePolicySource) Set() bool { return s.File != "" || s.JSON != "" }
+// IsSet reports whether a complete policy was supplied.
+func (s ImagePolicySource) IsSet() bool { return s.File != "" || s.JSON != "" }
 
-// LegacyPins holds the separate digest/register flags. Prefix is "cds-" for
-// commands whose legacy flags name CDS explicitly; otherwise it is empty.
-type LegacyPins struct {
+// MeasurementPins holds the independent digest/register inputs. Prefix is "cds-"
+// for commands whose flags name CDS explicitly; otherwise it is empty.
+type MeasurementPins struct {
 	Measurements     []string
 	MeasurementsFile string
 	RTMRs            []string
 	Prefix           string
 }
 
-// LegacyPinsFromStrings adapts commands that accept comma-separated strings.
-func LegacyPinsFromStrings(measurements, rtmrs, prefix string) LegacyPins {
-	pins := LegacyPins{Prefix: prefix}
+// MeasurementPinsFromStrings adapts commands that accept comma-separated strings.
+func MeasurementPinsFromStrings(measurements, rtmrs, prefix string) MeasurementPins {
+	pins := MeasurementPins{Prefix: prefix}
 	if measurements != "" {
 		pins.Measurements = strings.Split(measurements, ",")
 	}
@@ -42,7 +43,7 @@ func LegacyPinsFromStrings(measurements, rtmrs, prefix string) LegacyPins {
 	return pins
 }
 
-func (p LegacyPins) flags() []string {
+func (p MeasurementPins) flags() []string {
 	var flags []string
 	if len(p.Measurements) > 0 {
 		flags = append(flags, "--"+p.Prefix+"measurements")
@@ -56,17 +57,16 @@ func (p LegacyPins) flags() []string {
 	return flags
 }
 
-// LoadValues loads a whole policy, refusing legacy flags beside it before any
-// input is read. Without a source it returns an empty set and leaves legacy
-// pins to the caller, including register-only policies with no image form.
-func (s ImagePolicySource) LoadValues(legacy LegacyPins) (refvalues.ReferenceValues, error) {
-	if !s.Set() {
+// LoadValues loads complete image identities, rejecting independent pin inputs
+// before reading a policy. Without a source it returns an empty set.
+func (s ImagePolicySource) LoadValues(pins MeasurementPins) (refvalues.ReferenceValues, error) {
+	if !s.IsSet() {
 		return refvalues.ReferenceValues{}, nil
 	}
 	if s.File != "" && s.JSON != "" {
-		return refvalues.ReferenceValues{}, fmt.Errorf("--image-policy-file cannot be combined with --image-policy-json (including their --measurements-config aliases)")
+		return refvalues.ReferenceValues{}, fmt.Errorf("--image-policy-file cannot be combined with --image-policy-json")
 	}
-	if flags := legacy.flags(); len(flags) != 0 {
+	if flags := pins.flags(); len(flags) != 0 {
 		return refvalues.ReferenceValues{}, fmt.Errorf("--image-policy-file/--image-policy-json cannot be combined with %s", strings.Join(flags, " or "))
 	}
 	if s.JSON != "" {
@@ -83,28 +83,59 @@ func (s ImagePolicySource) LoadValues(legacy LegacyPins) (refvalues.ReferenceVal
 	return set, nil
 }
 
-// Load returns either whole image/anchor pins or the original flat policy.
-// It never converts a complete image policy into independent digest/register
-// lists, and retains legacy RTMR-only policies without inventing image pins.
-func (s ImagePolicySource) Load(legacy LegacyPins) (remote.Policy, error) {
-	if s.Set() {
-		values, err := s.LoadValues(legacy)
+// ImagePolicyValuesConfig supplies a complete policy and optional platform check.
+// PlatformFlag names the caller's platform flag in validation errors.
+type ImagePolicyValuesConfig struct {
+	Source       ImagePolicySource
+	Pins         MeasurementPins
+	Platform     string
+	PlatformFlag string
+}
+
+// LoadImagePolicyValues loads complete identities and checks their TEE against
+// the configured platform when one is supplied.
+func LoadImagePolicyValues(cfg ImagePolicyValuesConfig) (refvalues.ReferenceValues, error) {
+	values, err := cfg.Source.LoadValues(cfg.Pins)
+	if err != nil || !cfg.Source.IsSet() {
+		return values, err
+	}
+	if cfg.Platform != "" {
+		flag := cfg.PlatformFlag
+		if flag == "" {
+			flag = "--platform"
+		}
+		family, err := teetypes.ParseFamily(cfg.Platform)
+		if err != nil {
+			return refvalues.ReferenceValues{}, fmt.Errorf("%s: %w", flag, err)
+		}
+		if family != values.Family {
+			return refvalues.ReferenceValues{}, fmt.Errorf("image policy declares tee %q but %s is %q", values.Family, flag, family)
+		}
+	}
+	return values, nil
+}
+
+// Load returns complete image identities or independent digest/register pins.
+// Complete identities are never flattened into independent lists.
+func (s ImagePolicySource) Load(pins MeasurementPins) (remote.Policy, error) {
+	if s.IsSet() {
+		values, err := s.LoadValues(pins)
 		return values.Policy(), err
 	}
-	measurements, err := LoadLegacyMeasurements(legacy.Measurements, legacy.MeasurementsFile)
+	measurements, err := LoadMeasurements(pins.Measurements, pins.MeasurementsFile)
 	if err != nil {
-		return remote.Policy{}, fmt.Errorf("--%smeasurements: %w", legacy.Prefix, err)
+		return remote.Policy{}, fmt.Errorf("--%smeasurements: %w", pins.Prefix, err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(legacy.RTMRs)
+	rtmrs, err := refvalues.ParseRTMRPins(pins.RTMRs)
 	if err != nil {
-		return remote.Policy{}, fmt.Errorf("--%srtmrs: %w", legacy.Prefix, err)
+		return remote.Policy{}, fmt.Errorf("--%srtmrs: %w", pins.Prefix, err)
 	}
 	return remote.Policy{Measurements: measurements, RTMRs: rtmrs}, nil
 }
 
-// LoadLegacyMeasurements combines digest flags and a newline-separated digest
+// LoadMeasurements combines digest flags and a newline-separated digest
 // file. JSON image policies belong to ImagePolicySource instead.
-func LoadLegacyMeasurements(values []string, path string) ([][]byte, error) {
+func LoadMeasurements(values []string, path string) ([][]byte, error) {
 	values = append([]string(nil), values...)
 	if path != "" {
 		data, err := os.ReadFile(path)
@@ -116,9 +147,9 @@ func LoadLegacyMeasurements(values []string, path string) ([][]byte, error) {
 	return refvalues.ParseHexMeasurementsList(values)
 }
 
-// BindImagePolicyFlags registers explicit JSON sources and compatibility
-// aliases. A nil inline pointer exposes only file input; prefix is "cds-" for
-// the mesh's independent CDS policy. Only one source spelling may be used.
+// BindImagePolicyFlags registers canonical JSON sources. A nil inline pointer
+// exposes only file input; prefix is "cds-" for the mesh's independent CDS policy.
+// Only one source may be used.
 func BindImagePolicyFlags(fs *pflag.FlagSet, file, inline *string, prefix, purpose string) {
 	selected := ""
 	bind := func(target *string, name, usage string) {
@@ -128,11 +159,9 @@ func BindImagePolicyFlags(fs *pflag.FlagSet, file, inline *string, prefix, purpo
 	jsonName := prefix + "image-policy-json"
 	*file = ""
 	bind(file, fileName, "path to a complete JSON image policy (image, RTMR and launch-key pins); "+purpose)
-	bind(file, prefix+"measurements-config", "compatibility alias for --"+fileName+"; a JSON policy file, not a newline digest file")
 	if inline != nil {
 		*inline = ""
 		bind(inline, jsonName, "inline complete JSON image policy, in the same format as --"+fileName+"; "+purpose)
-		bind(inline, prefix+"measurements-config-json", "compatibility alias for --"+jsonName+"; inline JSON, not a file path")
 	}
 }
 

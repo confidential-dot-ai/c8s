@@ -62,7 +62,7 @@ spec:
                    injected secret fetcher verifies CDS before handing it a
                    sandbox token and taking a value back. */}}
             {{- if .Values.cds.measurementsConfig }}
-            - --measurements-config=/etc/c8s-measurements/cds.json
+            - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- range .Values.cds.measurements }}
             - --cds-measurements={{ . }}

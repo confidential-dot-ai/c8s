@@ -25,7 +25,7 @@ func TestOperatorCLIConfigRejectsDowngrades(t *testing.T) {
 	}
 	for _, cfg := range []Options{
 		{MeasurementsConfig: nodePolicyPath, Measurements: []string{"ab"}},
-		{MeasurementsConfig: nodePolicyPath, MeasurementsFile: "legacy.txt"},
+		{MeasurementsConfig: nodePolicyPath, MeasurementsFile: "measurements.txt"},
 		{MeasurementsConfig: "missing-file"},
 	} {
 		if _, err := cfg.loadPins(); err == nil {
@@ -49,7 +49,7 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 	o := Options{MeasurementsConfig: nodePolicyPath, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return report, nil
 	}}
-	verify := o.pinnedVerifier(pins)
+	verify := o.pinVerifier(pins)
 	for _, test := range []struct {
 		name     string
 		key      []byte
@@ -69,14 +69,14 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 				"rtmr_2": hex.EncodeToString(server.RTMRs[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
-			_, err := verify(context.Background(), "tdx", nil, localverify.Params{})
+			_, err := verify.Verify(context.Background(), "tdx", nil, localverify.Params{})
 			if (err == nil) != test.accept {
 				t.Fatalf("accept=%v, error=%v", test.accept, err)
 			}
 		})
 	}
 	report = nil
-	if _, err := verify(context.Background(), "tdx", nil, localverify.Params{}); err == nil {
+	if _, err := verify.Verify(context.Background(), "tdx", nil, localverify.Params{}); err == nil {
 		t.Fatal("nil verified claims accepted")
 	}
 }

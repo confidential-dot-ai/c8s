@@ -203,7 +203,7 @@ responder chose).`,
 	f.StringVar(&cfg.fromFile, "from-file", "", "verify evidence from a saved PEM certificate or attestation-response JSON instead of dialing")
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE). On TDX this pins MRTD only, which covers just the TDVF firmware — use --image-manifest to pin the whole guest image instead (the two are mutually exclusive: the manifest already pins MRTD exactly)")
-	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "legacy text file of allowed launch measurements, one hex digest per line; use --image-policy-file for complete JSON policies; excludes --image-manifest")
+	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "text file of allowed launch measurements, one hex digest per line; use --image-policy-file for complete JSON policies; excludes --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
 	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node. TDX evidence only — with SNP evidence this is a policy error")
@@ -534,13 +534,13 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, fmt.Errorf("%s cannot be combined with --image-manifest: the manifest pins MRTD exactly (together with RTMR[1] and RTMR[2] from the same build), so a launch-measurement allowlist beside it can only narrow that single digest or contradict it, and a contradiction is a policy no guest can ever satisfy. To pin this image, drop %s; to accept several firmware images instead, drop --image-manifest — which also gives up its RTMR[1]/RTMR[2] guest kernel and rootfs pins", used, used)
 	}
 
-	// Read once, keeping complete image policies separate from legacy text.
+	// Read once, keeping complete image policies separate from digest lists.
 	refValues, err := (cmdsutil.ImagePolicySource{File: cfg.measurementsConfig}).LoadValues(
-		cmdsutil.LegacyPins{Measurements: cfg.measurements, MeasurementsFile: cfg.measurementsFile})
+		cmdsutil.MeasurementPins{Measurements: cfg.measurements, MeasurementsFile: cfg.measurementsFile})
 	if err != nil {
 		return nil, err
 	}
-	measurements, err := cmdsutil.LoadLegacyMeasurements(cfg.measurements, cfg.measurementsFile)
+	measurements, err := cmdsutil.LoadMeasurements(cfg.measurements, cfg.measurementsFile)
 	if err != nil {
 		return nil, err
 	}

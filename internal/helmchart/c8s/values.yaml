@@ -279,7 +279,7 @@ cds:
   ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
   ## Measurements config: the JSON document listing the VM images this cluster
   ## runs, each pinned as a whole image. Content, not a path — set it with
-  ## `c8s install --measurements-config <file>` or `helm --set-file`. Empty
+  ## `c8s install --image-policy-file <file>` or `helm --set-file`. Empty
   ## disables whole-image matching; `measurements` above still pins.
   measurementsConfig: ""
   operatorKeys: ""

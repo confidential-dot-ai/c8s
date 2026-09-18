@@ -75,23 +75,14 @@ func TestInstallPinsRefusesToDropOperatorIdentity(t *testing.T) {
 	}
 }
 
-// Images that disagree on registers cannot be flattened onto one register
-// list; the digests must still pin.
-func TestInstallPinsDropsDivergentRTMRs(t *testing.T) {
+// NRI receives a shared RTMR set, so nonuniform image policies must be refused.
+func TestInstallPinsRejectsDivergentRTMRs(t *testing.T) {
 	path := writePinConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
 		{"name":"a","mrtd":"00`+pinDigestA+`","rtmr":[null,"`+pinReg1+`"]},
 		{"name":"b","mrtd":"00`+pinDigestB+`","rtmr":[null,"`+pinReg2+`"]}]}`)
 	withInstallFlags(t, path, nil, nil)
-
-	digests, rtmrs, _, err := installPins()
-	if err != nil {
-		t.Fatalf("installPins: %v", err)
-	}
-	if len(rtmrs) != 0 {
-		t.Errorf("rtmrs = %v, want none: the images disagree", rtmrs)
-	}
-	if len(digests) != 2 {
-		t.Errorf("got %d digests, want both images still pinned", len(digests))
+	if digests, rtmrs, args, err := installPins(); err == nil || !strings.Contains(err.Error(), "identical RTMR pins") || len(digests)+len(rtmrs)+len(args) != 0 {
+		t.Fatalf("divergent RTMR policy was weakened: digests=%v rtmrs=%v args=%v err=%v", digests, rtmrs, args, err)
 	}
 }
 
@@ -115,8 +106,8 @@ func TestInstallPinsRejectsMixedFlags(t *testing.T) {
 	}
 }
 
-// Without the config the flat flags must behave exactly as before.
-func TestInstallPinsFlatModeUnchanged(t *testing.T) {
+// Independent digest and RTMR inputs are normalized for the chart.
+func TestInstallPinsMeasurementInputs(t *testing.T) {
 	withInstallFlags(t, "", []string{"00" + pinDigestA}, []string{"1=" + pinReg1})
 
 	digests, rtmrs, helmArgs, err := installPins()

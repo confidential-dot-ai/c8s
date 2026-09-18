@@ -309,7 +309,7 @@ allowlist:
     # :8400). The plugin runs in the host netns as a containerd child, so
     # loopback reaches it.
     attestation_api_url: "http://127.0.0.1:8400"
-    # `c8s install --measurements` / `--measurements-config` writes these; see
+    # `c8s install --measurements` / `--image-policy-file` writes these; see
     # TRUST POSTURE above. Empty = accept any RA-TLS-attested CDS measurement
     # (logged), which is what every boot starts from.
     cds_measurements: []

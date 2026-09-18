@@ -14,7 +14,7 @@ import (
 )
 
 // resolveMeasurementsConfig loads whole peer identities. Without a separate
-// CDS config the legacy behavior accepts the same set for both purposes.
+// CDS config the same set is accepted for both purposes.
 func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error) {
 	if c.measurementsConfig == "" && c.cdsMeasurementsConfig == "" {
 		return refvalues.ReferenceValues{}, nil
@@ -26,7 +26,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	if c.measurementsConfig != "" {
 		var err error
 		peers, err = (cmdsutil.ImagePolicySource{File: c.measurementsConfig}).LoadValues(
-			cmdsutil.LegacyPinsFromStrings(c.measurements, c.rtmrs, ""))
+			cmdsutil.MeasurementPinsFromStrings(c.measurements, c.rtmrs, ""))
 		if err != nil {
 			return refvalues.ReferenceValues{}, err
 		}
@@ -34,7 +34,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	cds := peers
 	if c.cdsMeasurementsConfig != "" {
 		var err error
-		cds, err = (cmdsutil.ImagePolicySource{File: c.cdsMeasurementsConfig}).LoadValues(cmdsutil.LegacyPins{})
+		cds, err = (cmdsutil.ImagePolicySource{File: c.cdsMeasurementsConfig}).LoadValues(cmdsutil.MeasurementPins{})
 		if err != nil {
 			return refvalues.ReferenceValues{}, fmt.Errorf("--cds-image-policy-file: %w", err)
 		}
@@ -51,7 +51,7 @@ func resolveMeasurementsConfig(c *proxyConfig) (refvalues.ReferenceValues, error
 	return peers, nil
 }
 
-// flatPins fills legacy diagnostics; verification always keeps the entries.
+// flatPins supplies digest/register diagnostics; verification keeps the entries.
 func flatPins(set refvalues.ReferenceValues) (string, string) {
 	digests, common, _ := set.Flatten()
 	return strings.Join(digests, ","), strings.Join(refvalues.FormatRTMRPins(common), ",")

@@ -4,24 +4,22 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"path/filepath"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
-// installPins resolves the pins install fans into the chart, from either the
-// flat flags or a measurements config. In config mode the file travels to the
-// components that match whole images, and the same values are also fanned out
-// flat for consumers that read a plain digest list, such as the NRI plugin.
+// installPins resolves the pins install supplies to the chart. Complete policies
+// must also be expressible by the NRI installer's digest/common-register inputs;
+// reject policies that would lose an image's register or launch-key constraint.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
 	source := cmdsutil.ImagePolicySource{File: installMeasurementsConfig}
-	legacy := cmdsutil.LegacyPins{Measurements: installMeasurements, RTMRs: installRTMRs}
-	if !source.Set() {
-		policy, err := source.Load(legacy)
+	pins := cmdsutil.MeasurementPins{Measurements: installMeasurements, RTMRs: installRTMRs}
+	if !source.IsSet() {
+		policy, err := source.Load(pins)
 		return policy.Measurements, policy.RTMRs, nil, err
 	}
-	set, err := source.LoadValues(legacy)
+	set, err := source.LoadValues(pins)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -37,10 +35,7 @@ func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, e
 	}
 	common, uniform := set.CommonRTMRs()
 	if !uniform {
-		// The flat values carry one register set, so images that disagree can
-		// only be fanned out as digests.
-		slog.Warn("measurements config pins different registers per image: components matching whole images keep them, the flat values are digest-only",
-			"images", len(set.Images))
+		return nil, nil, nil, fmt.Errorf("--image-policy-file contains different RTMR pins per image; Helm installation requires identical RTMR pins because the NRI installer accepts one shared register set")
 	}
 	// The chart takes the file's content; helm reads the same path this
 	// command just validated.

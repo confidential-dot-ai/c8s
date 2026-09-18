@@ -261,10 +261,10 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 
 // cdsPins is shared by outbound pulls and the CDS-only inventory endpoint.
 func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
+	if err := cfg.validatePolicyInputs(); err != nil {
+		return ratls.Pins{}, err
+	}
 	if cfg.CDSMeasurementsConfig != "" {
-		if len(cfg.CDSMeasurements) != 0 || len(cfg.CDSRTMRs) != 0 {
-			return ratls.Pins{}, fmt.Errorf("allowlist.pull.cds_measurements_config cannot be combined with cds_measurements or cds_rtmrs")
-		}
 		set, err := refvalues.Load(cfg.CDSMeasurementsConfig)
 		if err != nil {
 			return ratls.Pins{}, err

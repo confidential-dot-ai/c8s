@@ -111,7 +111,7 @@ func operatorMeasurementsPolicy(path string, digests, rtmrs []string) (string, e
 		return "", nil
 	}
 	pins, err := (cmdsutil.ImagePolicySource{File: path}).LoadValues(
-		cmdsutil.LegacyPins{Measurements: digests, RTMRs: rtmrs, Prefix: "cds-"})
+		cmdsutil.MeasurementPins{Measurements: digests, RTMRs: rtmrs, Prefix: "cds-"})
 	if err != nil {
 		return "", err
 	}

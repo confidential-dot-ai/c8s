@@ -1,6 +1,7 @@
 package nriimagepolicy
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -21,16 +22,30 @@ func TestPullAndInventoryUseCompleteCDSPolicy(t *testing.T) {
 	if _, err := allowlistPullHTTPClient(cfg.Allowlist.Pull); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Allowlist.Pull.CDSMeasurements = []string{"ab"}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("mixed full and flat policies accepted")
-	}
-	if _, err := cfg.Allowlist.Pull.cdsPins(); err == nil {
-		t.Fatal("inventory resolver accepted mixed policies")
-	}
-	cfg.Allowlist.Pull.CDSMeasurements = nil
 	cfg.Allowlist.Pull.CDSMeasurementsConfig = "missing-file"
 	if _, err := cfg.Allowlist.Pull.cdsPins(); err == nil {
 		t.Fatal("missing full policy fell back to unpinned")
+	}
+}
+
+func TestCDSPolicyConflictValidationIsShared(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		measurements, rtmrs []string
+	}{
+		{"digest", []string{"invalid"}, nil},
+		{"register", nil, []string{"invalid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Allowlist.Pull.CDSMeasurementsConfig = "missing-file"
+			cfg.Allowlist.Pull.CDSMeasurements = tc.measurements
+			cfg.Allowlist.Pull.CDSRTMRs = tc.rtmrs
+			validationErr := cfg.Validate()
+			_, loadErr := cfg.Allowlist.Pull.cdsPins()
+			if validationErr == nil || loadErr == nil || validationErr.Error() != loadErr.Error() || !strings.Contains(loadErr.Error(), "cannot be combined") {
+				t.Fatalf("conflict must precede parsing and file reads: validation=%v load=%v", validationErr, loadErr)
+			}
+		})
 	}
 }

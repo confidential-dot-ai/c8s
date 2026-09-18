@@ -1484,10 +1484,11 @@ func containerMount(c *corev1.Container, name string) *corev1.VolumeMount {
 }
 
 // cdsPinArgs propagates the complete CDS identity without weakening operator
-// pins into a digest-only policy. Legacy flag callers keep their old shape.
+// pins into a digest-only policy. Independent digest/register inputs use
+// their corresponding flags.
 func cdsPinArgs(cfg Config, certificate bool) []string {
 	if cfg.CDSMeasurementsConfigJSON != "" {
-		return []string{"--measurements-config-json=" + cfg.CDSMeasurementsConfigJSON}
+		return []string{"--image-policy-json=" + cfg.CDSMeasurementsConfigJSON}
 	}
 	var args []string
 	if certificate {

@@ -201,7 +201,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 
 func cdsPins(cfg config) (ratls.Pins, error) {
 	policy, err := (cmdsutil.ImagePolicySource{File: cfg.MeasurementsConfig, JSON: cfg.MeasurementsConfigJSON}).Load(
-		cmdsutil.LegacyPinsFromStrings(cfg.CDSMeasurements, cfg.CDSRTMRs, "cds-"))
+		cmdsutil.MeasurementPinsFromStrings(cfg.CDSMeasurements, cfg.CDSRTMRs, "cds-"))
 	if err != nil {
 		return ratls.Pins{}, err
 	}

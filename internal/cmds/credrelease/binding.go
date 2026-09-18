@@ -147,7 +147,11 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 }
 
 // MeasuredIdentity separates the verified guest image from the operator-key
-// binding result. OperatorKey is authorized only when OperatorKeyErr is nil.
+// binding result. Non-operator boots still need Image to pin peer nodes, so
+// a missing key must not discard a verified image. OperatorKeyErr distinguishes
+// that absence (ErrNoOperatorKey) from a read or binding failure; callers must
+// reject other key errors. OperatorKey is authorized only when OperatorKeyErr
+// is nil.
 type MeasuredIdentity struct {
 	OperatorKey    []byte
 	OperatorKeyErr error
@@ -165,9 +169,10 @@ func LoadMeasuredIdentity(ctx context.Context, platform, attestationAPIURL strin
 		return MeasuredIdentity{}, err
 	}
 	if pubErr == nil {
-		if verr := runtimemeasure.VerifyBinding(report, pub, nil); verr != nil {
-			pub, pubErr = nil, verr
-		}
+		pubErr = runtimemeasure.VerifyBinding(report, pub, nil)
+	}
+	if pubErr != nil {
+		pub = nil
 	}
 	identity, err := runtimemeasure.IdentityFromResult(report)
 	if err != nil {
