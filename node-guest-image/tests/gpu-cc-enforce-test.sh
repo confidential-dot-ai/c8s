@@ -1,8 +1,9 @@
 #!/bin/bash
 # Unit test for gpu-cc-enforce.sh: a GPU-less boot is a no-op, every CC-on
-# wording passes, and any GPU with CC off, an unparseable status, or a dead
-# driver fails the gate. Root-free: fakes the PCI sysfs tree under a temp root
-# and shadows nvidia-smi with a stub on PATH.
+# wording passes, and any GPU with CC off, an unparseable status, a dead
+# driver, or a failed/partial attestation fails the gate. Root-free: fakes
+# the PCI sysfs tree under a temp root and shadows nvidia-smi and curl with
+# stubs on PATH (jq is the real one).
 set -u
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -12,35 +13,99 @@ SCRIPT=${GPU_CC_SCRIPT:-"$TESTS_DIR/../c8s/mkosi.extra/usr/local/bin/gpu-cc-enfo
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/bin"
+mkdir -p "$WORK/bin" "$WORK/api"
 
-# Run the production script verbatim with the sysfs root rebased into $WORK
-# and the stub nvidia-smi first on PATH.
+# Run the production script verbatim with the sysfs root rebased into $WORK,
+# the stubs first on PATH, and zero wait budgets so a failing dependency
+# fails on its first probe.
 run_enforce() {
     sed -e "s|/sys/bus/pci/devices|$WORK/sys/bus/pci/devices|g" "$SCRIPT" \
-        | PATH="$WORK/bin:$PATH" sh 2>"$WORK/stderr"
+        | PATH="$WORK/bin:$PATH" GPU_CC_DRIVER_TIMEOUT=0 GPU_CC_API_TIMEOUT=0 sh 2>"$WORK/stderr"
 }
 set_vendor() { # set_vendor HEXID
     rm -rf "$WORK/sys/bus/pci/devices"
     mkdir -p "$WORK/sys/bus/pci/devices/0000:0b:00.0"
     printf '%s' "$1" > "$WORK/sys/bus/pci/devices/0000:0b:00.0/vendor"
 }
-# stub_smi RC OUTPUT... — nvidia-smi prints each OUTPUT line and exits RC.
+# stub_smi RC OUTPUT... — `nvidia-smi conf-compute -f` prints each OUTPUT
+# line and exits RC; `--query-gpu=uuid` lists $SMI_GPUS (default 1) GPUs.
 stub_smi() {
     local rc=$1; shift
-    { echo '#!/bin/sh'; printf 'echo "%s"\n' "$@"; echo "exit $rc"; } > "$WORK/bin/nvidia-smi"
+    {
+        echo '#!/bin/sh'
+        echo 'case "$1" in'
+        echo '--query-gpu=uuid) i=0; while [ $i -lt '"${SMI_GPUS:-1}"' ]; do echo "GPU-$i"; i=$((i+1)); done; exit 0 ;;'
+        echo 'esac'
+        printf 'echo "%s"\n' "$@"
+        echo "exit $rc"
+    } > "$WORK/bin/nvidia-smi"
     chmod +x "$WORK/bin/nvidia-smi"
+}
+
+# The curl stub serves $WORK/api/<endpoint>.{code,body}; a missing file is a
+# connection failure. POST bodies are recorded in $WORK/api/<endpoint>.req.
+cat > "$WORK/bin/curl" <<'EOF'
+#!/bin/sh
+out=""; url=""; data=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -o) out=$2; shift ;;
+    --data-binary) data=$2; shift ;;
+    http*) url=$1 ;;
+    esac
+    shift
+done
+ep=${url##*/}
+[ -n "$data" ] && printf '%s' "$data" > "$API_DIR/$ep.req"
+[ -e "$API_DIR/$ep.code" ] || { echo "curl: (7) Failed to connect" >&2; exit 7; }
+code=$(cat "$API_DIR/$ep.code")
+if [ -n "$out" ]; then
+    cp "$API_DIR/$ep.body" "$out"; printf '%s' "$code"; exit 0
+fi
+[ "$code" = 200 ] || exit 22   # -f
+cat "$API_DIR/$ep.body"
+EOF
+chmod +x "$WORK/bin/curl"
+export API_DIR=$WORK/api
+api() { # api ENDPOINT CODE BODY
+    printf '%s' "$2" > "$WORK/api/$1.code"
+    printf '%s' "$3" > "$WORK/api/$1.body"
+}
+api_down() { rm -f "$WORK/api/$1".*; }
+
+# verdict GPUS [OVERRIDE_JQ] — a passing /verify body for GPUS Hopper
+# devices plus one NVSwitch, optionally mutated by a jq expression.
+verdict() {
+    jq -cn --argjson n "$1" '{result: {
+        signature_valid: true, platform: "tdx", report_data_match: true,
+        claims: {nvidia_gpu: {overall_ok: true, nonce_binding_ok: true,
+            devices: ([range($n) | {arch: "HOPPER", secboot: true}] + [{arch: "LS10"}])}}}}' \
+        | jq -c "${2:-.}"
+}
+attest_body='{"platform":"tdx","evidence":{"quote":"AAAA"},"nvidia_gpu":{"devices":[{"arch":"HOPPER"}]}}'
+all_up() {
+    rm -f "$WORK/api"/*
+    api health 200 ok
+    api platform 200 '{"platform":"tdx"}'
+    api attest 200 "$attest_body"
+    api verify 200 "$(verdict "${SMI_GPUS:-1}")"
 }
 
 CASE="no nvidia device"
 set_vendor 0x8086
 stub_smi 1 "No devices were found"
+api_down health
 ok "no-op without a GPU even when nvidia-smi fails" run_enforce
 
 CASE="cc on (driver 595 wording)"
 set_vendor 0x10de
 stub_smi 0 "CC status: ON"
+all_up
 ok "passes" run_enforce
+ok "attest request binds a nonce and asks for GPU evidence" \
+    jq -e '.nvidia_gpu == true and .platform == "tdx" and (.report_data | length) >= 40' "$WORK/api/attest.req" >/dev/null
+ok "verify request forwards the same nonce and requires the GPU bundle" \
+    bash -c 'n=$(jq -r .report_data "$1/attest.req"); jq -e --arg n "$n" ".params.expected_report_data == \$n and .params.nvidia_gpu_user_nonce == \$n and .params.nvidia_gpu_required == true and .nvidia_gpu != null" "$1/verify.req" >/dev/null' _ "$WORK/api"
 
 CASE="cc on (older 'CC feature' wording)"
 stub_smi 0 "CC feature: ON"
@@ -64,5 +129,56 @@ CASE="driver not up"
 stub_smi 9 "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver"
 ok "fails when nvidia-smi errors" not run_enforce
 ok "names the cause" stderr_has "conf-compute -f failed"
+
+CASE="gpu query fails after cc check"
+stub_smi 0 "CC status: ON"
+all_up
+sed -i 's|^--query-gpu=uuid) .*|--query-gpu=uuid) echo "Unable to determine the device handle"; exit 15 ;;|' "$WORK/bin/nvidia-smi"
+ok "fails when nvidia-smi cannot enumerate" not run_enforce
+ok "names the cause" stderr_has "query-gpu failed"
+
+CASE="platform endpoint down"
+stub_smi 0 "CC status: ON"
+all_up; api_down platform
+ok "fails when GET /platform errors" not run_enforce
+ok "names the cause" stderr_has "GET /platform failed"
+
+CASE="attestation-api down"
+all_up; api_down health
+ok "fails when attestation-api never answers" not run_enforce
+ok "names the cause" stderr_has "attestation-api not up"
+
+CASE="attest fails"
+all_up; api attest 500 '{"error":"NVAT SDK init failed"}'
+ok "fails when /attest errors" not run_enforce
+ok "names the cause" stderr_has "POST /attest returned 500"
+
+CASE="attest without gpu evidence"
+all_up; api attest 200 '{"platform":"tdx","evidence":{"quote":"AAAA"}}'
+ok "fails when the bundle is missing" not run_enforce
+ok "names the cause" stderr_has "no GPU evidence"
+
+CASE="verify rejects"
+all_up; api verify 400 '{"error":"NVIDIA GPU attestation: NRAS overall result is false"}'
+ok "fails when /verify errors" not run_enforce
+ok "names the cause" stderr_has "NRAS overall result is false"
+
+CASE="verify passes but omits the gpu section"
+all_up; api verify 200 "$(verdict 1 'del(.result.claims.nvidia_gpu)')"
+ok "fails" not run_enforce
+ok "names the cause" stderr_has "overall_ok=null"
+
+CASE="verify passes but report_data differs"
+all_up; api verify 200 "$(verdict 1 '.result.report_data_match = false')"
+ok "fails" not run_enforce
+ok "names the cause" stderr_has "report_data_match=false"
+
+CASE="one of two gpus missing from the verified bundle"
+SMI_GPUS=2 stub_smi 0 "CC status: ON"
+api verify 200 "$(verdict 1)"
+ok "fails when fewer GPUs attested than enumerated" not run_enforce
+ok "names the cause" stderr_has "gpus=1 want=2"
+api verify 200 "$(verdict 2)"
+ok "passes once both attest (the NVSwitch does not count)" run_enforce
 
 summarize "gpu-cc-enforce"

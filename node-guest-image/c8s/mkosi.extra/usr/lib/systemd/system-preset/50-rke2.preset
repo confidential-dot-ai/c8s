@@ -6,6 +6,9 @@ enable containerd-data-disk.service
 enable models-disk.service
 enable nri-node-ip.service
 enable gpu-node-label.service
+# Fail closed on a non-CC or unattested GPU before nvidia-cc-ready sets the
+# CC Ready state; RequiredBy nvidia-cc-ready and the rke2 pair so a failed
+# gate never readies or schedules the GPU.
 enable gpu-cc-enforce.service
 enable scratch-enforce.service
 enable c8s-modules-latch.service
