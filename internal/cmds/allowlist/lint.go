@@ -29,6 +29,9 @@ root-subtree path grants, and pinned search paths that overlap data mounts.
 --online additionally checks each digest exists in
 its registry via crane.
 
+The file is either a full or partial allowlist document or a name-keyed map of
+entries, the shapes 'apply' accepts and 'derive' emits.
+
 Two entries declaring the same containers with the same launch policies are an
 error: release requires exactly one entry to match, so both are refused
 forever. Errors exit non-zero on their own; --strict makes warnings do the
@@ -39,10 +42,11 @@ same.`,
 			if err != nil {
 				return err
 			}
-			al, err := pkgallowlist.ParseJSON(data)
+			entries, err := parseWorkloadEntries(data)
 			if err != nil {
 				return err
 			}
+			al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries}
 			findings := lintOffline(al)
 			if online {
 				if err := crane.Require(); err != nil {
@@ -149,7 +153,7 @@ func countErrors(findings []finding) int {
 }
 
 // lintOffline reports semantic findings for an allowlist without any registry or
-// CDS access. The document is assumed already parsed/validated by ParseJSON.
+// CDS access. Its entries are assumed already parsed and validated.
 func lintOffline(al *pkgallowlist.Allowlist) []finding {
 	var warnings []finding
 

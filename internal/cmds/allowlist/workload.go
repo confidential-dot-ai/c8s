@@ -2,7 +2,6 @@ package allowlist
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,30 +242,29 @@ func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallow
 // --- shared helpers ---
 
 // parseWorkloadEntries accepts either a full/partial allowlist document or a
-// bare name-keyed map of workload entries.
+// bare name-keyed map of workload entries. The bare map is wrapped into a
+// document so both shapes reach ParseJSON under one set of rules: duplicate
+// keys, a single document, entry-name grammar, and argv-pinned secrets.
 func parseWorkloadEntries(data []byte) (map[string]pkgallowlist.Workload, error) {
-	if al, perr := pkgallowlist.ParseJSON(data); perr == nil {
+	al, docErr := pkgallowlist.ParseJSON(data)
+	if docErr == nil {
 		if al.Workloads == nil {
 			al.Workloads = map[string]pkgallowlist.Workload{}
 		}
 		return al.Workloads, nil
 	}
 
-	var raw map[string]json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if derr := dec.Decode(&raw); derr != nil {
-		return nil, fmt.Errorf("parse workload entries: not an allowlist document or a name-keyed workload map: %w", derr)
+	wrapped := append([]byte(`{"schema":"`+pkgallowlist.Schema+`","workloads":`), data...)
+	mapped, mapErr := pkgallowlist.ParseJSON(append(wrapped, '}'))
+	if mapErr != nil {
+		return nil, fmt.Errorf("parse workload entries: not a name-keyed workload map (%v); not an allowlist document (%v)", mapErr, docErr)
 	}
-	out := make(map[string]pkgallowlist.Workload, len(raw))
-	for name, body := range raw {
-		w, werr := pkgallowlist.ParseWorkloadJSON(body)
-		if werr != nil {
-			return nil, fmt.Errorf("workload %q: %w", name, werr)
-		}
-		out[name] = *w
+	// An allowlist document may legitimately carry no entries; a body with
+	// neither a schema nor an entry says nothing at all.
+	if len(mapped.Workloads) == 0 {
+		return nil, fmt.Errorf("parse workload entries: no schema field and no entries")
 	}
-	return out, nil
+	return mapped.Workloads, nil
 }
 
 func readFileOrStdin(cmd *cobra.Command, path string) ([]byte, error) {
