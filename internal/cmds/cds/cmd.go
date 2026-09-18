@@ -11,6 +11,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsca"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
@@ -106,6 +107,8 @@ func NewCmd() *cobra.Command {
 		Kind:        "cds",
 		DefaultPort: 8443,
 	}))
+
+	cmd.AddCommand(cdsca.NewCmd())
 
 	return cmd
 }
