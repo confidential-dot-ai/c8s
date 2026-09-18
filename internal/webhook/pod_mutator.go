@@ -147,7 +147,7 @@ const reservedCertContainerName = workloadclaims.CertContainerName
 // the workload until c8s-cert has written the initial cert (see
 // certWaitContainer). Operator-reserved like c8s-cert: a pod may not declare
 // its own container under it.
-const reservedCertWaitContainerName = "c8s-cert-wait"
+const reservedCertWaitContainerName = workloadclaims.CertWaitContainerName
 
 // Config tunes the injector.
 type Config struct {
@@ -1102,7 +1102,7 @@ func secretsVolume() corev1.Volume {
 func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
 	reserved := reservedVolumeNames(pod)
 	for _, c := range pod.Spec.EphemeralContainers {
-		if isReservedCertName(c.Name) {
+		if workloadclaims.IsInjectedContainerName(c.Name) {
 			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s containers",
 				errInvalidInjectionAnnotation, c.Name)
 		}
@@ -1139,7 +1139,7 @@ func reservedVolumeNames(pod *corev1.Pod) map[string]bool {
 	}
 	reserved := map[string]bool{secretsVolumeName: true, certVolume: true}
 	for _, c := range pod.Spec.InitContainers {
-		if !isReservedCertName(c.Name) {
+		if !workloadclaims.IsInjectedContainerName(c.Name) {
 			continue
 		}
 		for _, m := range c.VolumeMounts {
@@ -1411,32 +1411,25 @@ func injectInitContainers(existing []corev1.Container, injected ...corev1.Contai
 }
 
 // rejectReservedCertContainer denies an opted-in pod that parks a container
-// under the reserved c8s-cert name outside the init-container slot the webhook
+// under a name c8s injects, outside the init-container slot the webhook
 // rebuilds. Such a container would survive injection and collide with the
 // injected init sidecar (names are unique across all three lists), so it can
 // only be an attempt to shed or impersonate it; init-container collisions are
 // handled by injectInitContainers instead.
 func rejectReservedCertContainer(pod *corev1.Pod) error {
 	for _, c := range pod.Spec.Containers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: container name %q is reserved for the injected c8s cert containers",
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			return fmt.Errorf("%w: container name %q is reserved for the containers c8s injects",
 				errInvalidInjectionAnnotation, c.Name)
 		}
 	}
 	for _, c := range pod.Spec.EphemeralContainers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s cert containers",
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			return fmt.Errorf("%w: ephemeral container name %q is reserved for the containers c8s injects",
 				errInvalidInjectionAnnotation, c.Name)
 		}
 	}
 	return nil
-}
-
-func isReservedCertName(name string) bool {
-	return name == reservedCertContainerName ||
-		name == reservedCertWaitContainerName ||
-		name == reservedSecretContainerName ||
-		name == reservedVolumeContainerName
 }
 
 // rejectReservedCertVolume denies a pod that pre-declares the reserved cert

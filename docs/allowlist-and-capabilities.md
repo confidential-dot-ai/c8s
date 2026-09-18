@@ -215,9 +215,11 @@ alone does not establish platform ownership. `any` leaves mounts unconstrained;
 
 To supply mount policies when deriving an entry, use `--mounts-file`. The file
 maps container names to explicit policies and must include every init and main
-container in the input object; missing or unknown names are rejected. For a pod
-with an init container named `seed` and main containers named `frontend` and
-`worker`, save this as `mounts.json`:
+container the entry declares; missing or unknown names are rejected. `derive`
+drops c8s's own injected containers from its input and names them on stderr, so
+a pod read back after admission derives the same entry as the manifest it was
+admitted from. For a pod with an init container named `seed` and
+main containers named `frontend` and `worker`, save this as `mounts.json`:
 
 ```json
 {
@@ -353,11 +355,14 @@ is not implemented and is out of scope here.
 
 ### The injected-container carve-out
 
-c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
-by name: the injected image is seeded as its own entry, so a workload entry
-never has to enumerate c8s's own sidecars. Nothing rests on the container
-*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+c8s injects its own init containers into every confidential pod — `c8s-cert`
+(get-cert) and `c8s-cert-wait`, joined by `c8s-secret` and `c8s-volume` when the
+pod asks for them. They pass the issuance gate by **digest**, not by name: the
+injected image is seeded as its own entry, so a workload entry never has to
+enumerate c8s's own sidecars. Matching rests on nothing the host writes, and the
+container *name* is one of those things; the names identify injection only over
+authored input, where admission reserves them and `c8s allowlist derive` drops
+them. get-cert runs with per-pod dynamic arguments,
 which is exactly why the seeded component entries carry `command: any, args:
 any`: their argv is not fixed and must not be argv-policed. Before matching, a
 container admitted that way and running an injected entrypoint is dropped from
