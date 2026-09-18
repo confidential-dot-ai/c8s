@@ -133,7 +133,7 @@ func (i linuxStorageInspector) hasScratchSlave(device string, seen map[string]bo
 	}
 	seen[real] = true
 	base := filepath.Base(real)
-	if readTrim(filepath.Join(i.sysClassBlock, base, "device/serial")) == scratchDiskSerial {
+	if readTrim(filepath.Join(i.sysClassBlock, base, "serial")) == scratchDiskSerial {
 		return true
 	}
 	entries, err := os.ReadDir(filepath.Join(real, "slaves"))

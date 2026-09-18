@@ -36,7 +36,10 @@ percent() { # per-package coverage table from a coverprofile: "<pct> <stmts> <pk
 
 case "$cmd" in
 run)
-  go test ./... -count=1 -coverprofile="$profile" -coverpkg=./...
+  # Workflow tests exercise external tools and run in the required test job.
+  packages=$(go list ./... | grep -Fxv 'github.com/confidential-dot-ai/c8s/test/workflows')
+  mapfile -t packages <<< "$packages"
+  go test "${packages[@]}" -count=1 -coverprofile="$profile" -coverpkg=./...
   ;;
 total)
   percent "$profile" | awk '$3=="TOTAL" {print $1}'

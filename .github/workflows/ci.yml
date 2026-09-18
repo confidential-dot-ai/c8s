@@ -257,7 +257,7 @@ jobs:
         if: github.event_name == 'pull_request' && steps.baseline.outputs.cache-hit != 'true'
         working-directory: base
         run: |
-          go test ./... -count=1 -coverprofile=base.out -coverpkg=./...
+          ../scripts/coverage-gate.sh run base.out
           ../scripts/coverage-gate.sh total base.out > ../base-total.txt
 
       - name: Enforce non-decreasing total coverage

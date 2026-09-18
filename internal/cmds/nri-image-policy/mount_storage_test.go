@@ -187,7 +187,7 @@ func TestTrustedScratchRequiresCryptAndBackingSerial(t *testing.T) {
 	write(filepath.Join(dev, "dm/name"), "scratch\n")
 	write(filepath.Join(dev, "dm/uuid"), "CRYPT-PLAIN-test\n")
 	write(filepath.Join(dev, "dev"), "253:0\n")
-	write(filepath.Join(class, "vda", "device/serial"), "confai-scratch\n")
+	write(filepath.Join(class, "vda", "serial"), "confai-scratch\n")
 	if err := os.Symlink(filepath.Join(class, "vda"), filepath.Join(dev, "slaves", "vda")); err != nil {
 		t.Fatal(err)
 	}
@@ -204,11 +204,22 @@ func TestTrustedScratchRequiresCryptAndBackingSerial(t *testing.T) {
 		t.Fatal("non-crypt scratch trusted")
 	}
 	write(filepath.Join(dev, "dm/uuid"), "CRYPT-PLAIN-test\n")
-	write(filepath.Join(class, "vda", "device/serial"), "scratch-lookalike\n")
+	write(filepath.Join(class, "vda", "device/serial"), "confai-scratch\n")
+	write(filepath.Join(class, "vda", "serial"), "scratch-lookalike\n")
 	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("wrong backing serial trusted")
 	}
-	write(filepath.Join(class, "vda", "device/serial"), "confai-scratch\n")
+	if err := os.Remove(filepath.Join(class, "vda", "serial")); err != nil {
+		t.Fatal(err)
+	}
+	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+		t.Fatal("parent device serial trusted without block device serial")
+	}
+	write(filepath.Join(class, "vda", "serial"), "")
+	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
+		t.Fatal("empty block device serial trusted")
+	}
+	write(filepath.Join(class, "vda", "serial"), "confai-scratch\n")
 	write(bootID, "boot-b\n")
 	if i.trustedEncryptedDevice(dev, map[string]bool{}) {
 		t.Fatal("stale boot provenance trusted")
