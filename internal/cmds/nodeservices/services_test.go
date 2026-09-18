@@ -41,7 +41,7 @@ func TestEveryCDSClientUsesServerPolicy(t *testing.T) {
 		}
 		found := false
 		for _, arg := range args {
-			if strings.HasPrefix(arg, "--measurements-config=") || strings.HasPrefix(arg, "--cds-measurements-config=") {
+			if strings.HasPrefix(arg, "--image-policy-file=") || strings.HasPrefix(arg, "--cds-image-policy-file=") {
 				if strings.HasSuffix(arg, "/cds.json") {
 					found = true
 				}
