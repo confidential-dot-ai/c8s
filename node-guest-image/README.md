@@ -11,24 +11,13 @@ Layout:
   `confos build --profile-dir` (confos ≥ the release carrying
   confidential-os-builder#81); the dir basename **is** the profile name, so
   it must stay `c8s`.
-- Platform: the profile is platform-neutral; `build` requires
-  `C8S_PLATFORM` (`tdx`|`snp`, no default) and `c8s/mkosi.sync` renders the
-  **entire** tdx/snp divergence — three files — from it: cred-release's
-  `Environment=CRED_PLATFORM` drop-in, the node's self-label
-  (`confidential.ai/tdx` / `confidential.ai/sev-snp`, the k8s vocabulary
-  `c8s install --hardware-platform` selects on), and the NRI floor's
-  `platform:`. The sync refuses to render a missing/invalid value, so the
-  fail-closed gate is at **build** time; `--platform=${CRED_PLATFORM}` in
-  the unit is boot-time defense in depth (cred-release opens no quote
-  device — quotes come from attestation-api over HTTP, the operator-key
-  RTMR read is sysfs). The guest kernel carries both TEEs' symbols via
-  confos `kernel/required.config`, so the images differ only by those
-  three rendered files — which keeps a one-image-serves-both design
-  (boot-time platform probe, confos `--platform both`) evaluable later.
-  NOTE: the operator credential-release flow itself is TDX-only today
-  (RTMR[3] binding; SNP has no runtime-extend equivalent) — an SNP image
-  boots and attests, but operator flows fail closed pending an SNP
-  binding design.
+- Platform: `build` requires `C8S_PLATFORM=tdx|snp`. The selected platform
+  determines the guest's service settings, labels, measurement policy and
+  image artifacts. TDX and SNP do not share an image measurement; SNP also
+  has one launch digest per supported vCPU count. Operator credential release
+  verifies TDX RTMR[3] or SNP HOST_DATA against the exact public-key PEM bytes.
+  The SNP launcher must set HOST_DATA to `SHA-256(pubkey)`; attaching an
+  operator-key disk alone does not establish that binding.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
   `c8s-dev.config`), passed via `--kernel-config-fragment`.
   confos's `required`/`hardening`
@@ -89,6 +78,31 @@ The other disks are optional; each is owned by one unit under
   see [operator.md]). The baked `cred-release-rbac` RKE2 AddOn binds the
   issued certificate's group to `cluster-admin` through ordinary RBAC;
   identity, TTL and revocation are documented in [operator.md].
+
+## Operator kubeconfig bootstrap
+
+After launching the node with its operator public key, use the matching
+image manifest and operator private key to obtain a kubeconfig:
+
+```sh
+c8s get-kubeconfig --node "$SERVER_IP" \
+  --operator-key "$OPERATOR_KEY" --image-manifest manifest.json \
+  --out kubeconfig --release-wait 5m
+```
+
+Bootstrap uses the RA-TLS credential service on port 8443 for both the
+operator-authenticated nonce attestation and credential release. Bootstrap
+does not need direct access to the raw attester. The client verifies the full
+image and operator-key
+binding in both the serving certificate and the fresh report before requesting
+credentials. Port 6443 is the Kubernetes API; `--release-url` and
+`--apiserver-url` support forwarded ports. The credential listener starts only
+after the RKE2, operator-RBAC and PodSecurity readiness gates pass.
+
+Use a rebuilt image containing the authenticated credential-service `/attest`
+endpoint. Updating only the operator CLI does not add this guest endpoint.
+See [the operator trust gate](../docs/operator.md#trust-gate-c8s-get-kubeconfig)
+for the explicit legacy attestation URL option and verification rules.
 
 ## Immutable root checks
 

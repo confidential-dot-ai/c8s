@@ -176,7 +176,7 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		Platform:     platform,
 		AttestFunc:   attestFunc,
 		CertTTL:      certTTL,
-		ClientPolicy: &ratls.VerifyPolicy{Policy: cdsPins, AttestationApiURL: attestationApiURL},
+		ClientPolicy: cdsPins.VerifyPolicy(attestationApiURL),
 	})
 }
 
@@ -248,7 +248,7 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:     &ratls.VerifyPolicy{Policy: pins, AttestationApiURL: attestationApiURL},
+		Policy:     pins.VerifyPolicy(attestationApiURL),
 		Platform:   platform,
 		AttestFunc: attestFunc,
 	})

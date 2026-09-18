@@ -1,126 +1,187 @@
 package cmdsutil
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
-const (
-	utilDigestA = "aa11000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-	utilDigestB = "bb22000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-	utilReg1    = "111100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-	utilReg2    = "222200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-)
+const identityPolicyFile = "../../../internal/testdata/node-identities.json"
 
-func writeConfig(t *testing.T, doc string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "measurements.json")
-	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+func TestImagePolicySourceKeepsCompleteIdentities(t *testing.T) {
+	doc, err := os.ReadFile(identityPolicyFile)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
-}
-
-// The commands that can only carry a digest list read these fields, so the
-// loader must fill them or the gate would accept any attested peer.
-func TestLoadMeasurementsConfigFillsFlatFields(t *testing.T) {
-	path := writeConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
-		{"name":"a","mrtd":"00`+utilDigestA+`","rtmr":[null,"`+utilReg1+`","`+utilReg2+`"]},
-		{"name":"b","mrtd":"00`+utilDigestB+`","rtmr":[null,"`+utilReg1+`","`+utilReg2+`"]}]}`)
-
-	var digests, rtmrs []string
-	set, err := LoadMeasurementsConfig(path, "--measurements-config", "--cds-measurements", "--cds-rtmrs", &digests, &rtmrs)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(set.Images) != 2 {
-		t.Fatalf("got %d entries, want 2", len(set.Images))
-	}
-	if len(digests) != 2 {
-		t.Fatalf("digests = %v, want both images", digests)
-	}
-	if !slices.Contains(rtmrs, "1="+utilReg1) || !slices.Contains(rtmrs, "2="+utilReg2) {
-		t.Errorf("rtmrs = %v, want the shared register pins", rtmrs)
+	var previous any
+	for _, source := range []ImagePolicySource{{File: identityPolicyFile}, {JSON: string(doc)}} {
+		policy, err := source.Load(LegacyPins{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.Measurements) != 0 || len(policy.RTMRs) != 0 || len(policy.Images) != 2 {
+			t.Fatalf("complete identities were flattened: %+v", policy)
+		}
+		for _, pin := range policy.Images {
+			if len(pin.Digest) != 48 || len(pin.RTMRs[1]) != 48 || len(pin.RTMRs[2]) != 48 || len(pin.Anchor) == 0 {
+				t.Fatalf("incomplete image tuple: %+v", pin)
+			}
+		}
+		if bytes.Equal(policy.Images[0].Anchor, policy.Images[1].Anchor) {
+			t.Fatal("server and agent keys collapsed into one identity")
+		}
+		if previous != nil && !reflect.DeepEqual(previous, policy) {
+			t.Fatal("file and inline JSON formats produced different policies")
+		}
+		previous = policy
 	}
 }
 
-// Images that disagree on registers cannot share one flat set; the digests
-// must still pin and the entries must keep their tuples.
-func TestLoadMeasurementsConfigDropsDivergentRTMRs(t *testing.T) {
-	path := writeConfig(t, `{"schema_version":"1","tee":"tdx","measurements":[
-		{"name":"a","mrtd":"00`+utilDigestA+`","rtmr":[null,"`+utilReg1+`"]},
-		{"name":"b","mrtd":"00`+utilDigestB+`","rtmr":[null,"`+utilReg2+`"]}]}`)
+func TestImagePolicySourceRejectsConflictingInputsBeforeReading(t *testing.T) {
+	for _, source := range []ImagePolicySource{{File: "missing"}, {JSON: "invalid"}} {
+		for _, legacy := range []LegacyPins{
+			{Measurements: []string{"invalid"}},
+			{MeasurementsFile: "missing"},
+			{RTMRs: []string{"invalid"}},
+			{Measurements: []string{"invalid"}, Prefix: "cds-"},
+			{RTMRs: []string{"invalid"}, Prefix: "cds-"},
+		} {
+			_, err := source.Load(legacy)
+			if err == nil || !strings.Contains(err.Error(), "cannot be combined") || errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("source %+v with %+v: expected usage error before I/O, got %v", source, legacy, err)
+			}
+		}
+	}
+	_, err := (ImagePolicySource{File: "missing", JSON: "invalid"}).LoadValues(LegacyPins{})
+	if err == nil || !strings.Contains(err.Error(), "--image-policy-file cannot be combined with --image-policy-json") {
+		t.Fatalf("file plus inline: %v", err)
+	}
+}
 
-	var digests, rtmrs []string
-	set, err := LoadMeasurementsConfig(path, "--measurements-config", "--cds-measurements", "--cds-rtmrs", &digests, &rtmrs)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+func TestImagePolicySourceErrorsDoNotFallBack(t *testing.T) {
+	_, err := (ImagePolicySource{File: filepath.Join(t.TempDir(), "missing")}).Load(LegacyPins{})
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "--image-policy-file") {
+		t.Fatalf("missing policy lost its path error: %v", err)
 	}
-	if len(rtmrs) != 0 {
-		t.Errorf("rtmrs = %v, want none: the images disagree", rtmrs)
+	for _, inline := range []string{"{}", "not JSON", identityPolicyFile, strings.Repeat("ab", 48)} {
+		if _, err := (ImagePolicySource{JSON: inline}).Load(LegacyPins{}); err == nil || !strings.Contains(err.Error(), "--image-policy-json") {
+			t.Fatalf("invalid inline policy accepted or mislabeled: %q: %v", inline, err)
+		}
 	}
-	if len(digests) != 2 {
-		t.Errorf("digests = %v, want both images still pinned", digests)
+	legacy := filepath.Join(t.TempDir(), "digests.txt")
+	if err := os.WriteFile(legacy, []byte(strings.Repeat("ab", 48)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, img := range set.Images {
-		if len(img.RTMRs) == 0 {
-			t.Errorf("entry %s lost its register pins", img.Name)
+	if _, err := (ImagePolicySource{File: legacy}).Load(LegacyPins{}); err == nil {
+		t.Fatal("newline digest file accepted as a complete JSON policy")
+	}
+	if _, err := LoadLegacyMeasurements(nil, identityPolicyFile); err == nil {
+		t.Fatal("complete JSON policy accepted as a legacy digest list")
+	}
+}
+
+func TestLegacyPolicyPreservesDigestFileAndRegisterOnlyPins(t *testing.T) {
+	digest := strings.Repeat("ab", 48)
+	register := strings.Repeat("cd", 48)
+	path := filepath.Join(t.TempDir(), "digests.txt")
+	if err := os.WriteFile(path, []byte("\n"+digest+"\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := ImagePolicySource{}
+	policy, err := source.Load(LegacyPins{Measurements: []string{register}, MeasurementsFile: path, RTMRs: []string{"1=" + register}})
+	if err != nil || len(policy.Measurements) != 2 || len(policy.RTMRs[1]) != 48 || len(policy.Images) != 0 {
+		t.Fatalf("legacy union/register policy changed: %+v, %v", policy, err)
+	}
+	policy, err = source.Load(LegacyPinsFromStrings("", "1="+register, "cds-"))
+	if err != nil || len(policy.Measurements) != 0 || len(policy.RTMRs[1]) != 48 || len(policy.Images) != 0 {
+		t.Fatalf("register-only legacy policy was dropped: %+v, %v", policy, err)
+	}
+	policy, err = source.Load(LegacyPinsFromStrings("", "", ""))
+	if err != nil || len(policy.Measurements) != 0 || len(policy.RTMRs) != 0 || len(policy.Images) != 0 {
+		t.Fatalf("empty legacy policy changed: %+v, %v", policy, err)
+	}
+	for _, tc := range []struct{ measurements, rtmrs, flag string }{
+		{"bad", "", "--cds-measurements"},
+		{"", "bad", "--cds-rtmrs"},
+	} {
+		if _, err := source.Load(LegacyPinsFromStrings(tc.measurements, tc.rtmrs, "cds-")); err == nil || !strings.Contains(err.Error(), tc.flag) {
+			t.Fatalf("invalid legacy flag %s: %v", tc.flag, err)
 		}
 	}
 }
 
-func TestLoadMeasurementsConfigRejectsMixedFlags(t *testing.T) {
-	path := writeConfig(t, `{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"a","measurement":"00`+utilDigestA+`"}]}`)
-
-	for _, tc := range []struct {
-		name             string
-		digests, rtmrs   []string
-		wantFlagInErrMsg string
-	}{
-		{"with digests", []string{"00" + utilDigestB}, nil, "--cds-measurements"},
-		{"with rtmrs", nil, []string{"1=" + utilReg1}, "--cds-rtmrs"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			digests, rtmrs := tc.digests, tc.rtmrs
-			_, err := LoadMeasurementsConfig(path, "--measurements-config", "--cds-measurements", "--cds-rtmrs", &digests, &rtmrs)
-			if err == nil {
-				t.Fatal("accepted a mixed configuration")
+func TestImagePolicyFlagsCanonicalAndAliases(t *testing.T) {
+	doc, err := os.ReadFile(identityPolicyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"image-policy-file", "measurements-config", "image-policy-json", "measurements-config-json"} {
+		t.Run(flag, func(t *testing.T) {
+			fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			var source ImagePolicySource
+			BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test identity policy")
+			value := identityPolicyFile
+			if strings.HasSuffix(flag, "json") {
+				value = string(doc)
 			}
-			if !strings.Contains(err.Error(), tc.wantFlagInErrMsg) {
-				t.Errorf("error %q does not name %s", err, tc.wantFlagInErrMsg)
+			if err := fs.Parse([]string{"--" + flag, value}); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := source.Load(LegacyPins{})
+			if err != nil || len(policy.Images) != 2 || len(policy.Images[0].Anchor) == 0 {
+				t.Fatalf("flag lost identity policy: %+v, %v", policy, err)
+			}
+			if fs.Lookup(flag).Value.String() != value || fs.Lookup(flag).Value.Type() != "string" {
+				t.Fatal("flag did not retain its source value")
 			}
 		})
 	}
 }
 
-func TestLoadMeasurementsConfigFailsClosed(t *testing.T) {
-	var digests, rtmrs []string
-	_, err := LoadMeasurementsConfig(filepath.Join(t.TempDir(), "absent.json"),
-		"--measurements-config", "--cds-measurements", "--cds-rtmrs", &digests, &rtmrs)
-	if err == nil {
-		t.Fatal("a missing config loaded as no pinning")
-	}
-	if len(digests) != 0 {
-		t.Errorf("digests populated from a failed load: %v", digests)
+func TestImagePolicyFlagsRejectMixedSpellings(t *testing.T) {
+	names := []string{"image-policy-file", "measurements-config", "image-policy-json", "measurements-config-json"}
+	for _, first := range names {
+		for _, second := range names {
+			if first == second {
+				continue
+			}
+			t.Run(first+"+"+second, func(t *testing.T) {
+				fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+				var source ImagePolicySource
+				BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test")
+				err := fs.Parse([]string{"--" + first, "first", "--" + second, "second"})
+				if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+					t.Fatalf("ambiguous policy flags accepted: %v", err)
+				}
+			})
+		}
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		var source ImagePolicySource
+		BindImagePolicyFlags(fs, &source.File, &source.JSON, "", "test")
+		if err := fs.Parse([]string{"--" + first, ""}); err == nil {
+			t.Fatalf("explicit empty %s silently disabled pinning", first)
+		}
 	}
 }
 
-// An unset config leaves the flat flags exactly as the operator passed them.
-func TestLoadMeasurementsConfigUnsetLeavesFlagsAlone(t *testing.T) {
-	digests := []string{"00" + utilDigestA}
-	rtmrs := []string{"1=" + utilReg1}
-
-	set, err := LoadMeasurementsConfig("", "--measurements-config", "--cds-measurements", "--cds-rtmrs", &digests, &rtmrs)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+func TestImagePolicyFileFlagsKeepIndependentCDSSelection(t *testing.T) {
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	var peers, cds string
+	BindImagePolicyFlags(fs, &peers, nil, "", "mesh peers")
+	BindImagePolicyFlags(fs, &cds, nil, "cds-", "CDS")
+	if fs.Lookup("image-policy-json") != nil || fs.Lookup("measurements-config-json") != nil {
+		t.Fatal("file-only command unexpectedly exposed inline JSON")
 	}
-	if !set.Empty() {
-		t.Error("an unset config produced reference values")
+	if err := fs.Parse([]string{"--image-policy-file", "peers.json", "--cds-measurements-config", "cds.json"}); err != nil {
+		t.Fatal(err)
 	}
-	if len(digests) != 1 || len(rtmrs) != 1 {
-		t.Errorf("flat flags mutated: %v / %v", digests, rtmrs)
+	if peers != "peers.json" || cds != "cds.json" {
+		t.Fatal("separate CDS policy replaced the peer policy")
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 
@@ -29,14 +31,24 @@ import (
 // Var (not const) so tests can point it at a temp file.
 var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 
+// ErrNoOperatorKey is returned (wrapped) by the Load* functions when no
+// operator pubkey is staged at all: the VM was launched without an opkeydata
+// disk. It is deliberately distinct from fs.ErrNotExist so that no other
+// ENOENT on the way to a binding check is ever mistaken for a non-operator
+// boot.
+var ErrNoOperatorKey = errors.New("no operator pubkey staged")
+
 // readOperatorPubkey reads the operator public key the initrd staged off the
 // opkeydata disk. The bytes are exactly what the initrd hashed into the launch
-// binding, so runtimemeasure can re-derive the same digest. Absence means the
-// VM was launched without an operator key (no opkeydata disk).
+// binding, so runtimemeasure can re-derive the same digest. Absence is
+// reported as ErrNoOperatorKey; every other read failure is a hard error.
 func readOperatorPubkey() ([]byte, error) {
 	pub, err := os.ReadFile(operatorPubkeyPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s — was the VM launched with an operator key?", ErrNoOperatorKey, operatorPubkeyPath)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w — was the VM launched with an operator key?", operatorPubkeyPath, err)
+		return nil, fmt.Errorf("read %s: %w", operatorPubkeyPath, err)
 	}
 	if len(pub) == 0 {
 		return nil, fmt.Errorf("%s is empty", operatorPubkeyPath)
@@ -48,6 +60,16 @@ func readOperatorPubkey() ([]byte, error) {
 // attestation-api; on expiry the service fails start and systemd retries.
 const selfReportTimeout = 15 * time.Second
 
+// attestationReadyTimeout bounds remote.Client.WaitHealthy. attestation-api is a
+// Type=simple unit that fetches its certificate collateral over the network
+// before it binds its port, so an After= ordering alone lets a caller start
+// while the socket is still refusing connections. Package vars so tests can
+// shorten them.
+var (
+	attestationReadyTimeout  = 90 * time.Second
+	attestationReadyInterval = 2 * time.Second
+)
+
 // verifiedSelfReport returns this guest's own attestation as the local
 // attestation-api verified it.
 //
@@ -55,7 +77,19 @@ const selfReportTimeout = 15 * time.Second
 // from an unauthenticated field, so the report goes through /verify even though
 // the guest produced it. The anchor is a fresh nonce, which makes the report
 // non-replayable for free.
+//
+// One report answers every question this package asks about the guest: the
+// operator-key binding (LoadMeasuredOperatorKey) and its own launch
+// image identity. LoadMeasuredIdentity answers both
+// from one report so the guest attests once.
 func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetypes.VerificationResult, error) {
+	client := remote.NewClient(attestationAPIURL)
+	readyCtx, cancelReady := context.WithTimeout(ctx, attestationReadyTimeout)
+	err := client.WaitHealthy(readyCtx, attestationReadyInterval)
+	cancelReady()
+	if err != nil {
+		return nil, fmt.Errorf("attestation-api at %s not ready after %s: %w", attestationAPIURL, attestationReadyTimeout, err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
 	defer cancel()
 
@@ -69,7 +103,7 @@ func verifiedSelfReport(ctx context.Context, attestationAPIURL string) (*teetype
 	if err != nil {
 		return nil, fmt.Errorf("attest self: %w", err)
 	}
-	verified, err := remote.NewClient(attestationAPIURL).VerifyEvidence(ctx,
+	verified, err := client.VerifyEvidence(ctx,
 		resp.Envelope(), remote.Policy{ExpectedReportData: reportData[:sha512.Size384]})
 	if err != nil {
 		return nil, fmt.Errorf("verify self-report: %w", err)
@@ -110,4 +144,37 @@ func LoadMeasuredOperatorKey(ctx context.Context, attestationAPIURL string) ([]b
 		return nil, err
 	}
 	return pub, nil
+}
+
+// MeasuredIdentity separates the verified guest image from the operator-key
+// binding result. OperatorKey is authorized only when OperatorKeyErr is nil.
+type MeasuredIdentity struct {
+	OperatorKey    []byte
+	OperatorKeyErr error
+	Image          runtimemeasure.ImageIdentity
+}
+
+// LoadMeasuredIdentity checks the operator key and reads the guest image
+// identity from one verified self-report. Image is always resolved, even if the
+// key is missing or its binding fails; OperatorKeyErr records that failure.
+// The returned error is reserved for self-report, image, or platform failures.
+func LoadMeasuredIdentity(ctx context.Context, platform, attestationAPIURL string) (MeasuredIdentity, error) {
+	pub, pubErr := readOperatorPubkey()
+	report, err := verifiedSelfReport(ctx, attestationAPIURL)
+	if err != nil {
+		return MeasuredIdentity{}, err
+	}
+	if pubErr == nil {
+		if verr := runtimemeasure.VerifyBinding(report, pub, nil); verr != nil {
+			pub, pubErr = nil, verr
+		}
+	}
+	identity, err := runtimemeasure.IdentityFromResult(report)
+	if err != nil {
+		return MeasuredIdentity{}, err
+	}
+	if string(identity.Family()) != platform {
+		return MeasuredIdentity{}, fmt.Errorf("this image was built for platform %q but the verified self-report is from %q", platform, report.Platform)
+	}
+	return MeasuredIdentity{OperatorKey: pub, OperatorKeyErr: pubErr, Image: identity}, nil
 }

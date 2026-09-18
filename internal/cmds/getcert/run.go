@@ -34,7 +34,6 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -49,6 +48,8 @@ type config struct {
 	CDSURL                 string
 	CDSMeasurements        string
 	CDSRTMRs               string
+	MeasurementsConfig     string
+	MeasurementsConfigJSON string
 	AttestationApiURL      string
 	OutPath                string
 	CAOutPath              string
@@ -120,6 +121,7 @@ alongside a workload that uses the obtained certificate.`,
 	}
 
 	flags := cmd.Flags()
+	cmdsutil.BindImagePolicyFlags(flags, &cfg.MeasurementsConfig, &cfg.MeasurementsConfigJSON, "", "pins the CDS endpoint; excludes --cds-measurements and --cds-rtmrs")
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
 	flags.StringVar(&cfg.CDSRTMRs, "cds-rtmrs", "", "comma-separated TDX RTMR pins <index>=<sha384-hex> CDS's RA-TLS cert must additionally satisfy; ignored when CDS presents SNP evidence (empty = launch-digest pinning only)")
@@ -186,22 +188,25 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		return nil, fmt.Errorf("--cds-url must use https (RA-TLS); got scheme %q", parsed.Scheme)
 	}
 
-	measurements, err := refvalues.ParseHexMeasurements(cfg.CDSMeasurements)
+	pins, err := cdsPins(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("--cds-measurements: %w", err)
+		return nil, err
 	}
-	cmdsutil.WarnIfCDSUnpinned(len(measurements),
-		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
-	rtmrs, err := refvalues.ParseRTMRPinsString(cfg.CDSRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
-	}
-
-	client, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(pins, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}
 	return client, nil
+}
+
+func cdsPins(cfg config) (ratls.Pins, error) {
+	policy, err := (cmdsutil.ImagePolicySource{File: cfg.MeasurementsConfig, JSON: cfg.MeasurementsConfigJSON}).Load(
+		cmdsutil.LegacyPinsFromStrings(cfg.CDSMeasurements, cfg.CDSRTMRs, "cds-"))
+	if err != nil {
+		return ratls.Pins{}, err
+	}
+	cmdsutil.WarnIfCDSUnpinned(len(policy.Measurements)+len(policy.Images), "--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
+	return ratls.Pins(policy), nil
 }
 
 // obtainCertFn is a var so renewal-loop tests can observe attempts.

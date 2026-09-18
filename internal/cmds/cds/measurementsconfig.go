@@ -8,9 +8,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
-// resolveMeasurementsConfig loads --measurements-config and fills the flat
+// resolveMeasurementsConfig loads --image-policy-file and fills the flat
 // lists from it, so every gate that can only express a digest list keeps
 // pinning exactly what it pins today. The returned reference values carry the
 // whole tuples, for the gates that can match them.
@@ -18,10 +19,8 @@ func resolveMeasurementsConfig(cfg *config) (refvalues.ReferenceValues, error) {
 	if cfg.measurementsConfig == "" {
 		return refvalues.ReferenceValues{}, nil
 	}
-	if len(cfg.measurements) > 0 || len(cfg.rtmrs) > 0 {
-		return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
-	}
-	set, err := refvalues.Load(cfg.measurementsConfig)
+	set, err := (cmdsutil.ImagePolicySource{File: cfg.measurementsConfig}).LoadValues(
+		cmdsutil.LegacyPins{Measurements: cfg.measurements, RTMRs: cfg.rtmrs})
 	if err != nil {
 		return refvalues.ReferenceValues{}, err
 	}
@@ -29,7 +28,7 @@ func resolveMeasurementsConfig(cfg *config) (refvalues.ReferenceValues, error) {
 	// runtime. An empty platform is validateConfig's error to report.
 	if family, err := teetypes.ParseFamily(cfg.ratlsPlatform); err == nil && family != set.Family {
 		return refvalues.ReferenceValues{}, fmt.Errorf(
-			"--measurements-config declares tee %q but --ratls-platform is %q", set.Family, family)
+			"--image-policy-file declares tee %q but --ratls-platform is %q", set.Family, family)
 	}
 
 	hexDigests, common, uniform := set.Flatten()
@@ -37,26 +36,15 @@ func resolveMeasurementsConfig(cfg *config) (refvalues.ReferenceValues, error) {
 	if !uniform {
 		// Gates keyed on a single register set cannot express per-image
 		// tuples; say so rather than appearing to pin them.
-		slog.Warn("measurements config pins different registers per image: /attest matches whole images, but gates that take one register set (/attest-key) are digest-only",
+		slog.Warn("measurements config carries image or anchor pins that legacy flat diagnostics cannot express; /attest enforces the complete policy",
 			"images", len(set.Images))
 	}
-	for _, idx := range sortedIndices(common) {
-		cfg.rtmrs = append(cfg.rtmrs, fmt.Sprintf("%d=%x", idx, common[idx]))
-	}
+	cfg.rtmrs = refvalues.FormatRTMRPins(common)
 	if _, err := refvalues.ParseRTMRPins(cfg.rtmrs); err != nil {
-		return refvalues.ReferenceValues{}, fmt.Errorf("--measurements-config: %w", err)
+		return refvalues.ReferenceValues{}, fmt.Errorf("--image-policy-file: %w", err)
 	}
-	slog.Info("measurements config loaded", "tee", set.Family.String(), "images", len(set.Images))
+	slog.Info("measurements config loaded", "tee", set.Family, "images", len(set.Images))
 	return set, nil
-}
-
-func sortedIndices(m map[int][]byte) []int {
-	out := make([]int, 0, len(m))
-	for i := range m {
-		out = append(out, i)
-	}
-	sort.Ints(out)
-	return out
 }
 
 // servedFamily names the platform the served document declares. The flat flags
@@ -69,7 +57,7 @@ func servedFamily(ratlsPlatform string) teetypes.Family {
 }
 
 // measurementBytes decodes the flat allowlist back into digests for the
-// served document. Entries that are not hex never reached a gate either.
+// served document. Images that are not hex never reached a gate either.
 func measurementBytes(allowed map[string]bool) [][]byte {
 	out := make([][]byte, 0, len(allowed))
 	for m := range allowed {

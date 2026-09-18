@@ -20,7 +20,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -61,7 +60,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
 	f.StringSliceVar(&cfg.cdsRTMRs, "cds-rtmrs", nil, "TDX RTMR pin(s) <index>=<sha384-hex> CDS must additionally satisfy, repeatable/comma-separated; ignored when CDS presents SNP evidence (empty pins no registers)")
-	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "path to a measurements config listing the VM images this cluster runs, each matched as a whole image. Any listed image may serve as CDS. Cannot be combined with --cds-measurements or --cds-rtmrs")
+	cmdsutil.BindImagePolicyFlags(f, &cfg.measurementsConfig, nil, "", "pins the CDS endpoint; excludes --cds-measurements and --cds-rtmrs")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -130,25 +129,15 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Resolve before the flat fields are read: they feed the pin below.
-	pinned, err := cmdsutil.LoadMeasurementsConfig(cfg.measurementsConfig,
-		"--measurements-config", "--cds-measurements", "--cds-rtmrs",
-		&cfg.cdsMeasurements, &cfg.cdsRTMRs)
+	policy, err := (cmdsutil.ImagePolicySource{File: cfg.measurementsConfig}).Load(
+		cmdsutil.LegacyPins{Measurements: cfg.cdsMeasurements, RTMRs: cfg.cdsRTMRs, Prefix: "cds-"})
 	if err != nil {
 		return nil, err
 	}
-	measurements, err := refvalues.ParseHexMeasurementsList(cfg.cdsMeasurements)
-	if err != nil {
-		return nil, fmt.Errorf("--cds-measurements: %w", err)
-	}
-	if len(measurements) == 0 {
+	if len(policy.Measurements) == 0 && len(policy.Images) == 0 {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(cfg.cdsRTMRs)
-	if err != nil {
-		return nil, fmt.Errorf("--cds-rtmrs: %w", err)
-	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins{Measurements: measurements, RTMRs: rtmrs, Images: pinned.Images}, cfg.attestationAPIURL)
+	httpClient, err := ratls.NewVerifyingHTTPClient(ratls.Pins(policy), cfg.attestationAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

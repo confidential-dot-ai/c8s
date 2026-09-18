@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 )
 
 // installPins resolves the pins install fans into the chart, from either the
@@ -15,30 +15,25 @@ import (
 // components that match whole images, and the same values are also fanned out
 // flat for consumers that read a plain digest list, such as the NRI plugin.
 func installPins() (digests [][]byte, rtmrs map[int][]byte, helmArgs []string, err error) {
-	if installMeasurementsConfig == "" {
-		digests, err = refvalues.ParseHexMeasurementsList(installMeasurements)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("--measurements: %w", err)
-		}
-		rtmrs, err = refvalues.ParseRTMRPins(installRTMRs)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("--rtmrs: %w", err)
-		}
-		return digests, rtmrs, nil, nil
+	source := cmdsutil.ImagePolicySource{File: installMeasurementsConfig}
+	legacy := cmdsutil.LegacyPins{Measurements: installMeasurements, RTMRs: installRTMRs}
+	if !source.Set() {
+		policy, err := source.Load(legacy)
+		return policy.Measurements, policy.RTMRs, nil, err
 	}
-	if len(installMeasurements) > 0 || len(installRTMRs) > 0 {
-		return nil, nil, nil, fmt.Errorf("--measurements-config cannot be combined with --measurements or --rtmrs")
+	set, err := source.LoadValues(legacy)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// helm reads the path itself, so hand it one that does not depend on the
 	// working directory the install happened to run from.
 	path, err := filepath.Abs(installMeasurementsConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("--measurements-config: %w", err)
+		return nil, nil, nil, fmt.Errorf("--image-policy-file: %w", err)
 	}
-	set, err := refvalues.Load(path)
-	if err != nil {
-		return nil, nil, nil, err
+	if set.HasAnchors() {
+		return nil, nil, nil, fmt.Errorf("approver_key policies require the baked node launch flow; Helm installation cannot carry them to every NRI verifier")
 	}
 	common, uniform := set.CommonRTMRs()
 	if !uniform {
