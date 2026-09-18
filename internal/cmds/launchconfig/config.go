@@ -164,7 +164,14 @@ func Verify(ctx context.Context, cfg Config) (*Verified, error) {
 	if teetypes.NormalizePlatform(doc.Image.Platform) != platform {
 		return nil, fmt.Errorf("launch image platform does not match this boot")
 	}
-	digest := measured.Image.LaunchDigests()[0].Digest
+	if measured.Image == nil {
+		return nil, fmt.Errorf("verified self-report contains no image identity")
+	}
+	digests := measured.Image.LaunchDigests()
+	if len(digests) == 0 {
+		return nil, fmt.Errorf("verified self-report contains no launch digests")
+	}
+	digest := digests[0].Digest
 	if !bytes.Equal(mustDecodeHex(doc.Image.Measurement), digest[:]) {
 		return nil, fmt.Errorf("launch image measurement does not match this boot")
 	}
@@ -382,7 +389,10 @@ func (d *Document) validate() error {
 }
 
 func (d *Document) authorizeKey(pub []byte, key *ecdsa.PublicKey) error {
-	server, _ := parseLaunchKey(d.Server.OperatorPublicKey) // validated above
+	server, err := parseLaunchKey(d.Server.OperatorPublicKey)
+	if err != nil {
+		return fmt.Errorf("parse server operator public key: %w", err)
+	}
 	if d.Role == Server {
 		if !bytes.Equal(pub, []byte(d.Server.OperatorPublicKey)) {
 			return fmt.Errorf("server launch key does not match server.operatorPublicKey bytes")
