@@ -338,8 +338,9 @@ cert volume plus each opened volume at `<volume-dir>/<NAME>`:
 
 An opened volume classes as a `data` mount, whose `exact` rules sit below
 `/mnt/c8s-data/`, so pinning one means putting the volume dir there with
-`confidential.ai/c8s-volume-dir` and writing the rule as
-`{"destination": "/mnt/c8s-data/<NAME>", "kind": "data"}`.
+`confidential.ai/c8s-volume-dir`. Its rule,
+`{"destination": "/mnt/c8s-data/<NAME>", "kind": "data"}`, joins the cert
+volume's in the same `exact` policy.
 
 ## Consuming a volume
 
