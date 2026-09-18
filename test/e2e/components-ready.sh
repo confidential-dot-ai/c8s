@@ -68,7 +68,7 @@ fi
 if [ "${C8S_NODE_IMAGE:-}" = 1 ]; then
   ready=0
   for _ in $(seq 1 60); do
-    if c8s allowlist list --url "$C8S_ALLOWLIST_URL" --measurements-config "$C8S_MEASUREMENTS_CONFIG" >/dev/null 2>&1; then
+    if c8s allowlist list --url "$C8S_ALLOWLIST_URL" --image-policy-file "$C8S_MEASUREMENTS_CONFIG" >/dev/null 2>&1; then
       ready=1; break
     fi
     sleep 5
