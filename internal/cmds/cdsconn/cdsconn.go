@@ -176,14 +176,24 @@ func (o *Options) requirePinnedEndpoint() error {
 	if u, err := url.Parse(o.URL); err == nil && u.Scheme == "http" {
 		return nil
 	}
-	measurements, err := o.loadMeasurements()
+	pinned, err := o.Pinned()
 	if err != nil {
 		return err
 	}
-	if len(measurements) == 0 {
+	if !pinned {
 		return fmt.Errorf("refusing to authorize against an unpinned CDS: --measurements is empty, so any attested build would be accepted and this operator credential would be presented to it. Pass --measurements <endpoint build ID> (or --measurements-file); use the router value for a CDS-issued public TLS front door, the CDS value for a direct URL")
 	}
 	return nil
+}
+
+// Pinned reports whether --measurements or --measurements-file name at least
+// one trusted endpoint build.
+func (o *Options) Pinned() (bool, error) {
+	measurements, err := o.loadMeasurements()
+	if err != nil {
+		return false, err
+	}
+	return len(measurements) > 0, nil
 }
 
 func (o *Options) verifyFunc() localverify.VerifyFunc {

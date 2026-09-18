@@ -175,6 +175,31 @@ The write is refused with no `--mesh-ca`. `--force` writes without the check
 and says so on stderr; it governs the CA check only, and is unrelated to
 `--overwrite`, which governs replacing a value already at the path.
 
+### Reading the mesh CA bundle
+
+`c8s cds ca` reads the bundle over the same attested connection the write uses:
+
+```sh
+c8s cds ca --url "$CDS" --measurements "$M" --out mesh-ca.pem
+```
+
+`--measurements` is required — the CDS launch digest for a direct URL, the
+router's for a front door — and the SHA-256 of each certificate goes to stderr.
+Record it. The read proves an attested build at `$M` served these bytes, which
+is the bound the gate has too: comparing that digest against an earlier read, or
+against a copy taken another way, is what separates your CDS from another one at
+the same measurement.
+
+`GET /ca` carries every CA CDS still signs leaves against, newest first, and the
+gate wants all of them — so pin the whole bundle. Without `--out` it goes to
+stdout instead.
+
+CDS generates its mesh CA in process and a restart replaces it (see
+[operator.md](operator.md), "CDS is a singleton"), so read the bundle once CDS
+has settled. A bundle captured before a restart reads afterwards as the CDS
+serving a mesh CA that is not in `--mesh-ca` — the same refusal as the wrong
+CDS.
+
 ```
 PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 201 {"created": true}
