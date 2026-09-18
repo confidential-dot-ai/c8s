@@ -1,0 +1,165 @@
+package nodeservices
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"gopkg.in/yaml.v3"
+)
+
+func document(role launchconfig.Role) *launchconfig.Document {
+	return &launchconfig.Document{Role: role, Image: launchconfig.Image{Platform: "tdx"}, Server: launchconfig.ServerConfig{Address: "192.0.2.10"}, TLSSAN: "c8s.local"}
+}
+
+func TestAgentCannotRunServerServices(t *testing.T) {
+	for _, name := range []string{"cds", "get-cert", "cds-attest", "allowlist-proxy"} {
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err == nil {
+			t.Errorf("agent can run %s", name)
+		}
+	}
+	for _, name := range []string{"mesh", "mesh-sync", "attest-proxy"} {
+		if _, err := Arguments(name, document(launchconfig.Agent), "192.0.2.11"); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Arguments("arbitrary", document(launchconfig.Server), ""); err == nil {
+		t.Fatal("unknown service accepted")
+	}
+}
+
+func TestEveryCDSClientUsesServerPolicy(t *testing.T) {
+	for _, name := range []string{"mesh", "get-cert", "allowlist-proxy"} {
+		args, err := Arguments(name, document(launchconfig.Server), "192.0.2.10")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "--measurements-config=") || strings.HasPrefix(arg, "--cds-measurements-config=") {
+				if strings.HasSuffix(arg, "/cds.json") {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s has no complete server policy: %v", name, args)
+		}
+		if !slices.Contains(args, "--cds-url=https://192.0.2.10:30808") {
+			t.Errorf("%s ignores server endpoint", name)
+		}
+	}
+	for _, ip := range []string{"", "0.0.0.0", "127.0.0.1", "192.0.2.10 --other-flag"} {
+		if _, err := Arguments("mesh", document(launchconfig.Server), ip); err == nil {
+			t.Errorf("accepted node IP %q", ip)
+		}
+	}
+}
+
+const floor = "platform: tdx\nallowlist:\n  base:\n    schema: c8s.allowlist/v1\n    workloads:\n      system:\n        containers:\n          - digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n            command: {policy: any}\n            args: {policy: any}\n  pull:\n    url: https://127.0.0.1:30808\n    timeout: 30s\n    cds_measurements: []\npolicy:\n  mode: fail-closed\n  enforce_existing: true\n"
+const seed = `{"schema":"c8s.allowlist/v1","workloads":{"operator":{"containers":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`
+
+func prepareRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for name, data := range map[string]string{"image-policy.yaml": floor, "nginx.conf.in": "server_name c8s-node.invalid;\n", "allowlist-seed.json": seed} {
+		p := filepath.Join(root, "usr/lib/c8s", name)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestPreparePreservesFloorAndPinsServerBeforeRKE2(t *testing.T) {
+	for _, role := range []launchconfig.Role{launchconfig.Server, launchconfig.Agent} {
+		t.Run(string(role), func(t *testing.T) {
+			root := prepareRoot(t)
+			doc := document(role)
+			if err := Prepare(root, doc); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(root, "etc/nri/conf.d/image-policy.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, before map[string]any
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(floor), &before); err != nil {
+				t.Fatal(err)
+			}
+			ga := got["allowlist"].(map[string]any)
+			if !reflect.DeepEqual(got["policy"], before["policy"]) || !reflect.DeepEqual(ga["base"], before["allowlist"].(map[string]any)["base"]) {
+				t.Fatal("changed baked floor")
+			}
+			pull := ga["pull"].(map[string]any)
+			if pull["url"] != doc.CDSURL() || pull["cds_measurements_config"] != launchDir+"cds.json" || pull["timeout"] != "30s" {
+				t.Fatalf("bad pull config: %v", pull)
+			}
+			if _, exists := pull["cds_measurements"]; exists {
+				t.Fatal("flat pins retained")
+			}
+			_, err = os.Stat(filepath.Join(root, launchDir, "allowlist-seed.json"))
+			if role == launchconfig.Agent && !os.IsNotExist(err) {
+				t.Fatal("agent received server seed")
+			}
+			if role == launchconfig.Server && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPrepareCannotReplaceBakedWorkload(t *testing.T) {
+	root := prepareRoot(t)
+	doc := document(launchconfig.Server)
+	doc.Workloads = seed
+	if err := Prepare(root, doc); err == nil || !strings.Contains(err.Error(), "replaces a baked component") {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, launchDir, "allowlist-seed.json")); !os.IsNotExist(err) {
+		t.Fatal("published rejected seed")
+	}
+
+	doc.Workloads = strings.ReplaceAll(strings.ReplaceAll(seed, "operator", "application"), strings.Repeat("a", 64), strings.Repeat("b", 64))
+	if err := Prepare(root, doc); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, launchDir, "allowlist-seed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := allowlist.ParseJSON(data)
+	if err != nil || len(merged.Workloads) != 2 {
+		t.Fatalf("merged policy: %v %v", merged, err)
+	}
+}
+
+func TestPublishNodeIPHonorsAuthenticatedAddress(t *testing.T) {
+	root := t.TempDir()
+	doc := document(launchconfig.Agent)
+	doc.Node.IP = "192.0.2.22"
+	if err := PublishNodeIP(root, doc); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, nodeIPPath))
+	if err != nil || string(data) != "192.0.2.22\n" {
+		t.Fatalf("got %q, %v", data, err)
+	}
+	for _, ip := range []string{"0.0.0.0", "127.0.0.1", "::1"} {
+		doc.Node.IP = ip
+		if err := PublishNodeIP(t.TempDir(), doc); err == nil {
+			t.Errorf("accepted %s", ip)
+		}
+	}
+}

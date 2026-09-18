@@ -93,8 +93,8 @@ test-integration:
 test-integration-cluster:
 	./test/integration/cluster/run.sh
 
-# The byte-exact rke2-role.sh against real ISO9660 loop devices. Root (loop
-# mounts, writes /run/confos) — sudo on a disposable box.
+# The byte-exact launch script with device and c8s stubs in disposable Linux.
+# Needs Docker; host files are mounted read-only and no privileges are added.
 test-node-guest-image-role:
 	./node-guest-image/tests/rke2-role-test.sh
 
@@ -127,6 +127,12 @@ test-node-guest-image-psa-ready:
 # Needs only docker.
 test-node-guest-image-role-systemd:
 	./node-guest-image/tests/rke2-role-systemd-test.sh
+
+# Render the measured nginx config and exercise its production systemd unit.
+# Needs Docker, Go and Helm; CONFOS_RELEASE selects the Ubuntu base release.
+.PHONY: test-node-guest-image-nginx-systemd
+test-node-guest-image-nginx-systemd:
+	bash node-guest-image/tests/nginx-systemd-test.sh
 
 # Needs root (private mount namespace) and a ./confos checkout.
 test-node-guest-image-cloud-init:
