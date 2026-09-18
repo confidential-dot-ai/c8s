@@ -94,3 +94,22 @@ func TestWrapFlagBinary(t *testing.T) {
 		}
 	})
 }
+
+func TestIsRuncAlias(t *testing.T) {
+	tests := []struct {
+		argv0 string
+		want  bool
+	}{
+		{"/usr/local/bin/c8s-runc", true},
+		{"c8s-runc", true},
+		{"/opt/bin/10-c8s-runc", true},
+		{"/usr/local/bin/c8s", false},
+		{"/usr/local/bin/runc", false},
+		{"/usr/local/bin/nri-image-policy", false},
+	}
+	for _, tt := range tests {
+		if got := isRuncAlias(tt.argv0); got != tt.want {
+			t.Errorf("isRuncAlias(%q) = %v, want %v", tt.argv0, got, tt.want)
+		}
+	}
+}

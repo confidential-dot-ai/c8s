@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -98,6 +99,30 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
+}
+
+// ServeInBackground binds addr, serves handler on it from a goroutine and
+// shuts the server down when ctx is done. It returns the bound address, so
+// ":0" works in tests.
+//
+// The bind happens here, not in the goroutine. The sidecars use this for the
+// probe endpoints that replace exec probes on a locked node image: one that
+// failed to bind would leave the pod failing its probes with the cause buried
+// in a log line, while an error at startup crashes the container where the
+// kubelet reports it.
+func ServeInBackground(ctx context.Context, addr string, handler http.Handler, logger *slog.Logger) (net.Addr, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go ShutdownOnDone(ctx, srv, 5*time.Second)
+	go func() {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("listener failed", "addr", listener.Addr(), "error", err)
+		}
+	}()
+	return listener.Addr(), nil
 }
 
 // WarnIfCDSUnpinned warns when a sidecar talks to CDS without launch measurements.

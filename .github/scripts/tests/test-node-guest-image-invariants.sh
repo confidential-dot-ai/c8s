@@ -9,6 +9,10 @@ confos_dir=$(cd "$repo_dir/confos" && pwd -P)
 fixture_dir=$(mktemp -d)
 trap 'rm -rf -- "$fixture_dir"' EXIT
 cp -a "$repo_dir/node-guest-image" "$repo_dir/.github" "$fixture_dir/"
+# The gate also pins the runtime wrapper's compiled real-runc path against
+# mkosi.sync, so the fixture needs that package at its repo-relative path.
+mkdir -p "$fixture_dir/internal/cmds"
+cp -a "$repo_dir/internal/cmds/c8srunc" "$fixture_dir/internal/cmds/"
 mkdir -p "$fixture_dir/confos/mkosi/initrd/mkosi.extra"
 ln -s "$confos_dir/kernel" "$fixture_dir/confos/kernel"
 fixture_init="$fixture_dir/confos/mkosi/initrd/mkosi.extra/init"
