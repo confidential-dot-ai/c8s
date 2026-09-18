@@ -195,22 +195,22 @@ credentials remain in the separate root-only staging directory.
 The local unit and rendering checks validate these contracts. They do not
 replace booting the resulting image on the target TEE hardware.
 
-The staged TDX and SNP metal CI lanes require compatible image metadata in
-their respective ConfigMaps; both must set `launchConfigVersion=c8s-launch/v1`:
+The staged SNP metal CI lane requires compatible image metadata with
+`launchConfigVersion=c8s-launch/v1`:
 
 | ConfigMap | Additional required fields |
 |---|---|
-| `tdx-rke2-image-refs` | `image`, `rootPvc`, `mrtd`, `rtmr1`, `rtmr2`, `c8sRef` |
 | `snp-rke2-image-refs` | `image`, `rootPvc`, `manifestRef`, `igvmFile`, `igvmHookImage`, `smp`, `snpLaunchDigest`, `c8sRef` |
 
 The SNP lane requires digest-pinned OCI references for `image`, `manifestRef`
 and `igvmHookImage`, and a hook that sets HOST_DATA from the launch public key.
 Its `smp` is currently `4`; `snpLaunchDigest` must match that variant in the
 published `manifest.json`. The paired `c8sRef` identifies the image build.
-Changing the attester requires a new measured image. Automatic TDX acceptance
-instead reads the image identity and `launch_config_version=c8s-launch/v1`
-from the publication run's validated evidence; it does not read these
-ConfigMaps.
+Changing the attester requires a new measured image. The ordinary TDX lane
+resolves its published image and manifest from the selected source commit.
+Automatic TDX acceptance reads the image identity and
+`launch_config_version=c8s-launch/v1` from the publication run's validated
+evidence. Neither TDX path reads a refs ConfigMap.
 
 Before either platform boots, the lane builds the paired CLI and generates
 a fresh operator key and signed server launch document. The `opkeydata` disk

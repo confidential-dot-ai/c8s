@@ -8,7 +8,9 @@
 # The profile is produced with -coverpkg=./... so packages without their own
 # test files are still measured (a brand-new untested package counts as 0%,
 # not "absent"). CI compares the PR's total against the base branch's total
-# and fails if it decreased.
+# and fails if it decreased. Workflow tests execute shell/YAML fixtures, not
+# production Go, so they run in the normal test job rather than this measurement.
+# Use this same script for both head and base to keep the totals comparable.
 set -euo pipefail
 
 cmd="${1:-}"
@@ -36,7 +38,14 @@ percent() { # per-package coverage table from a coverprofile: "<pct> <stmts> <pk
 
 case "$cmd" in
 run)
-  go test ./... -count=1 -coverprofile="$profile" -coverpkg=./...
+  module=$(GOWORK=off go list -m)
+  packages=$(go list ./...)
+  test_packages=()
+  while IFS= read -r package; do
+    [ "$package" = "$module/test/workflows" ] || test_packages+=("$package")
+  done <<< "$packages"
+  [ "${#test_packages[@]}" -gt 0 ] || { echo "no Go packages to measure" >&2; exit 1; }
+  go test "${test_packages[@]}" -count=1 -coverprofile="$profile" -coverpkg=./...
   ;;
 total)
   percent "$profile" | awk '$3=="TOTAL" {print $1}'
