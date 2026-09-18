@@ -27,7 +27,7 @@ Layout:
   (boot-time platform probe, confos `--platform both`) evaluable later.
   The operator-key binding is platform-specific: TDX extends the key's
   hash into RTMR[3] at boot; SNP has no runtime-extend register, so the
-  launcher commits the hash into launch HOSTDATA instead, and cred-release
+  launcher commits the hash into launch HOST_DATA instead, and cred-release
   verifies its own report against it before serving.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
   `c8s-dev.config`), passed via `--kernel-config-fragment`.
