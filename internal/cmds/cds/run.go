@@ -202,7 +202,7 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
-	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs)
+	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs, cfg.kubeconfig)
 	if err != nil {
 		return err
 	}

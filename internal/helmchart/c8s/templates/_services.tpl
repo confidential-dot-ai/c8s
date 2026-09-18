@@ -1,7 +1,13 @@
 {{/* Services helpers. See ../helpers/services/README.md. */}}
 
+{{/* c8s.attestationApiSocketPresent is non-empty when a node-local attestation
+API socket exists: either the chart runs the API or the node image bakes it. */}}
+{{- define "c8s.attestationApiSocketPresent" -}}
+{{- if or .Values.attestationApi.enabled .Values.node.bakedServices -}}true{{- end -}}
+{{- end -}}
+
 {{- define "c8s.attestationApiURL" -}}
-{{- if .Values.attestationApi.enabled -}}
+{{- if include "c8s.attestationApiSocketPresent" . -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
@@ -13,7 +19,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketVolume" -}}
-{{- if .Values.attestationApi.enabled }}
+{{- if include "c8s.attestationApiSocketPresent" . }}
 - name: attestation-api-socket
   hostPath:
     path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
@@ -22,7 +28,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketMount" -}}
-{{- if .Values.attestationApi.enabled }}
+{{- if include "c8s.attestationApiSocketPresent" . }}
 - name: attestation-api-socket
   mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
   readOnly: true
@@ -30,7 +36,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "bare-metal") -}}
+{{- if and (not (include "c8s.attestationApiSocketPresent" .)) (eq .Values.attestationApi.cvmMode "bare-metal") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:

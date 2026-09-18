@@ -1,0 +1,21 @@
+[Unit]
+Description=Attest the measured node front door
+Requires=rke2-role.service attestation-api.service
+After=rke2-role.service attestation-api.service nri-node-ip.service c8s-get-cert.service
+ConditionPathExists=/run/confos/role-server
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/c8s node-services run cds-attest
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=630
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

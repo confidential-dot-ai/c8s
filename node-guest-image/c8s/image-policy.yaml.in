@@ -1,42 +1,8 @@
-# nri-image-policy boot config — the MEASURED boot-time base allowlist. TEMPLATE:
-# mkosi.sync renders this to etc/nri/conf.d/image-policy.yaml at build time,
-# substituting @CDS_DIGEST@/@CDS_IMAGE@ with the C8S_REF-resolved digests
-# (see render_nri_base). Edit this file, not the generated one.
-#
-# The plugin binary is baked at /opt/nri/plugins/10-nri-image-policy and
-# containerd launches it pre-registered (see the NRI drop-in under
-# /var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/). This file
-# is the config it boots with, before c8s is installed.
-#
-# TRUST POSTURE: this baked copy is measured, and the base allowlist below
-# stays as built — the RKE2 system digests in it are resolved here and nowhere
-# else.
-# `c8s install` runs the chart's installer in its baked form
-# (nriImagePolicy.baked), which writes the release's cds_measurements /
-# cds_rtmrs into this file — on the /etc/nri state overlay, declared in
-# mkosi.extra/usr/lib/confai/state.d/60-c8s.conf — and leaves every other key
-# alone. Expect one rke2-server restart from it when those pins change:
-# NRI does not respawn a pre-registered plugin, so the config reaches the
-# plugin only through containerd. The overlay is ephemeral, so each
-# boot starts from the pins below and the installer re-applies.
-#
-# Field names/semantics validated against the plugin's config loader
-# (c8s internal/cmds/nri-image-policy/config.go). Notable constraints:
-#   - allowlist.base MUST carry at least one workload when pull.url is
-#     set (cold-boot baseline) — validation fails otherwise and the plugin
-#     never registers, which with required_plugins blocks ALL container
-#     creation.
-#   - pull.url must be https, and attestation_api_url is then required.
-#   - empty cds_measurements = accept any RA-TLS-attested CDS (warns).
-
-# The CPU TEE this image boots on — rendered from the build's required
-# C8S_PLATFORM (no default; the sync hook refuses to render without it).
-#
-# It types the RA-TLS identity the admission inventory serves to CDS, and CDS
-# refuses a peer whose type disagrees with the evidence envelope the
-# attestation-api returns. The plugin defaults this to snp for backward
-# compatibility, so omitting it here denies every sandbox token on the node,
-# which denies every adopted workload a certificate.
+# Measured NRI bootstrap base allowlist. mkosi.sync pins the operator image and RKE2
+# system images at build time. Authenticated launch staging selects the CDS
+# endpoint and complete server image/key policy before containerd starts.
+# The immutable source remains /usr/lib/c8s/image-policy.yaml; the staged copy
+# under /etc/nri is writable only through the node's ephemeral state overlay.
 platform: "@PLATFORM@"
 
 plugin:
@@ -44,18 +10,18 @@ plugin:
 
 # The node-CVM admission inventory (c8s docs/ratls.md, "Sandbox identity").
 # get-cert dials this socket for its pod's digests before CDS will issue a
-# certificate. The installer only patches the CDS pins, so this section must be
-# baked in; without it the socket is never created and every adopted workload
+# certificate. Authenticated launch staging preserves this baked inventory
+# configuration; without it the socket is never created and every adopted workload
 # hangs waiting for a certificate that cannot be issued.
 workload_claims:
   socket_dir: "/var/run/nri-image-policy"
   # The plugin is launched by containerd on the host, so its /proc is the
   # host's — a caller PID from SO_PEERCRED resolves directly.
   proc_root: "/proc"
-  # Empty falls back to NodeIPFile (node-ip in socket_dir). On a Kubernetes-
-  # hosted install the chart's installer writes that from its own status.hostIP;
-  # the baked installer does not, so nri-node-ip.service writes it at boot
-  # instead. Without either, this resolves to 127.0.0.1 and the plugin refuses
+  # Empty falls back to NodeIPFile (node-ip in socket_dir). After authenticated
+  # launch staging, nri-node-ip.service publishes the node address before
+  # either RKE2 role starts. Without that file, this resolves to 127.0.0.1
+  # and the plugin refuses
   # to start with "inventory host is not a routable unicast address".
   advertise_host: ""
 
@@ -66,23 +32,23 @@ allowlist:
   # the chart — that base is the cluster admin's to choose.
   node_tcb: true
 
-  # Cold-boot base, in the allowlist document format: an entry whose
-  # generated system entries explicitly allow mounts and any command line.
-  # Base policies enforce all constraints at final admission, like served
-  # policies. CDS resolves from C8S_REF by mkosi.sync so it can start
-  # and serve the live allowlist. Installer and busybox invocations are
-  # admitted by argv-pinned entries in that served document, not this base.
+  # Cold-boot base, in the allowlist document format. Generated system
+  # entries explicitly allow mounts and any command line. Base policies
+  # enforce all constraints at final admission, like served policies.
+  # The operator/get-cert image resolves from C8S_REF by mkosi.sync. Core
+  # services are measured host binaries. The local-path busybox helper is
+  # admitted by argv-pinned entries in the served allowlist.
   # The generated block admits the baked RKE2 system images (static pods,
   # Cilium, CoreDNS, local-path-storage) by the digests containerd computes
   # when it imports the airgap bundles at boot — not registry digests.
   base:
     schema: c8s.allowlist/v1
     workloads:
-      cds:
-        label: "@CDS_IMAGE@"
+      operator:
+        label: "@OPERATOR_IMAGE@"
         containers:
-          - digest: "@CDS_DIGEST@"
-            image: "@CDS_IMAGE@"
+          - digest: "@OPERATOR_DIGEST@"
+            image: "@OPERATOR_IMAGE@"
             command: {policy: any}
             args: {policy: any}
             mounts: {policy: any}
@@ -305,21 +271,15 @@ allowlist:
             mounts: {policy: any}
       # END rke2 system images
   pull:
-    # CDS NodePort, node-local. No CDS is listening until c8s install; the
-    # pull loop retries and the plugin stays Ready on the base allowlist
-    # above.
+    # Authenticated launch staging replaces this endpoint with the server's
+    # CDS URL. The pull loop retries while the baked CDS service starts;
+    # the plugin stays Ready on the base allowlist above.
     url: "https://127.0.0.1:30808"
     # INVARIANT: equal to the chart's nriImagePolicy.refresh.interval.
     interval: "5s"
     timeout: "30s"
-    # The BAKED attestation-api (attest/attest-gpu profile, host service on
-    # :8400). The plugin runs in the host netns as a containerd child, so
-    # loopback reaches it.
     attestation_api_url: "http://127.0.0.1:8400"
-    # `c8s install --measurements` / `--image-policy-file` writes these; see
-    # TRUST POSTURE above. Empty = accept any RA-TLS-attested CDS measurement
-    # (logged), which is what every boot starts from.
-    cds_measurements: []
+    cds_measurements_config: "/run/confos/launch/cds.json"
 
 containerd:
   socket: "/run/k3s/containerd/containerd.sock"
