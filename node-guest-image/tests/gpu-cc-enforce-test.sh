@@ -1,6 +1,7 @@
 #!/bin/bash
 # Unit test for gpu-cc-enforce.sh: a GPU-less boot is a no-op, every CC-on
-# wording passes, and any GPU with CC off, an unparseable status, a dead
+# wording passes, and any GPU with CC off (checked per device, so one CC-off
+# GPU among several still fails the gate), an unparseable status, a dead
 # driver, or a failed/partial attestation fails the gate. Root-free: fakes
 # the PCI sysfs tree under a temp root and shadows nvidia-smi and curl with
 # stubs on PATH (jq is the real one).
@@ -27,15 +28,32 @@ set_vendor() { # set_vendor HEXID
     mkdir -p "$WORK/sys/bus/pci/devices/0000:0b:00.0"
     printf '%s' "$1" > "$WORK/sys/bus/pci/devices/0000:0b:00.0/vendor"
 }
-# stub_smi RC OUTPUT... — `nvidia-smi conf-compute -f` prints each OUTPUT
-# line and exits RC; `--query-gpu=uuid` lists $SMI_GPUS (default 1) GPUs.
+# stub_smi RC OUTPUT... — `nvidia-smi conf-compute -f` (no -i, the driver-
+# ready probe) prints every OUTPUT line and exits RC; `conf-compute -f -i N`
+# prints OUTPUT[N] (or OUTPUT[0] if N has no OUTPUT of its own, so a
+# SMI_GPUS override beyond the given OUTPUTs still reports CC on); both
+# `--query-gpu=index,uuid` and `--query-gpu=uuid` list $SMI_GPUS (default:
+# number of OUTPUTs) GPUs.
 stub_smi() {
     local rc=$1; shift
+    local n=$#
     {
         echo '#!/bin/sh'
         echo 'case "$1" in'
-        echo '--query-gpu=uuid) i=0; while [ $i -lt '"${SMI_GPUS:-1}"' ]; do echo "GPU-$i"; i=$((i+1)); done; exit 0 ;;'
+        echo '--query-gpu=index,uuid) i=0; while [ $i -lt '"${SMI_GPUS:-$n}"' ]; do echo "$i, GPU-$i"; i=$((i+1)); done; exit 0 ;;'
+        echo '--query-gpu=uuid) i=0; while [ $i -lt '"${SMI_GPUS:-$n}"' ]; do echo "GPU-$i"; i=$((i+1)); done; exit 0 ;;'
         echo 'esac'
+        echo 'if [ "$1 $2" = "conf-compute -f" ] && [ "$3" = "-i" ]; then'
+        echo '  case "$4" in'
+        local i=0 out
+        for out in "$@"; do
+            printf '  %s) echo "%s" ;;\n' "$i" "$out"
+            i=$((i+1))
+        done
+        printf '  *) echo "%s" ;;\n' "$1"
+        echo '  esac'
+        echo "  exit $rc"
+        echo 'fi'
         printf 'echo "%s"\n' "$@"
         echo "exit $rc"
     } > "$WORK/bin/nvidia-smi"
@@ -117,8 +135,9 @@ ok "fails" not run_enforce
 ok "names the cause" stderr_has "not in CC mode"
 
 CASE="one of two gpus off"
-stub_smi 0 "GPU 0: CC status: ON" "GPU 1: CC status: OFF"
+stub_smi 0 "CC status: ON" "CC status: OFF"
 ok "fails when any GPU is off" not run_enforce
+ok "names the offending GPU's index and uuid" stderr_has "GPU 1 (GPU-1)"
 
 CASE="unparseable status"
 stub_smi 0 "Confidential Compute is not supported on this device"

@@ -58,13 +58,25 @@ until status=$(nvidia-smi conf-compute -f 2>&1); do
 done
 
 # Driver 595 prints "CC status: ON"; older drivers "CC feature: ON". One line
-# per GPU with -i, one aggregate line without; either way every line must be
-# on, and at least one must exist.
-lines=$(printf '%s\n' "$status" | grep -iE 'cc (feature|status)[[:space:]]*:' || true)
-[ -n "$lines" ] || fail "cannot parse CC status from nvidia-smi: $status"
-if printf '%s\n' "$lines" | grep -qviE ':[[:space:]]*(on|enabled)[[:space:]]*$'; then
-    fail "GPU not in CC mode ($lines). Enable GPU CC mode on the host (nvidia_gpu_tools.py --set-cc-mode=on)"
-fi
+# per GPU with -i, one aggregate line without, so an aggregate check can miss
+# a single CC-off GPU among several. Query each index instead, and name the
+# offending index and uuid on failure.
+cc_gpu_list=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>&1) \
+    || fail "nvidia-smi --query-gpu failed: $cc_gpu_list"
+[ -n "$cc_gpu_list" ] || fail "nvidia-smi enumerates no GPU despite CC mode on"
+while read -r cc_gpu_line; do
+    cc_gpu_index=${cc_gpu_line%%,*}
+    cc_gpu_uuid=${cc_gpu_line#*, }
+    cc_status=$(nvidia-smi conf-compute -f -i "$cc_gpu_index" 2>&1) \
+        || fail "nvidia-smi conf-compute -f -i $cc_gpu_index failed: $cc_status"
+    cc_line=$(printf '%s\n' "$cc_status" | grep -iE 'cc (feature|status)[[:space:]]*:' || true)
+    [ -n "$cc_line" ] || fail "cannot parse CC status for GPU $cc_gpu_index ($cc_gpu_uuid): $cc_status"
+    if printf '%s\n' "$cc_line" | grep -qviE ':[[:space:]]*(on|enabled)[[:space:]]*$'; then
+        fail "GPU $cc_gpu_index ($cc_gpu_uuid) not in CC mode ($cc_line). Enable GPU CC mode on the host (nvidia_gpu_tools.py --set-cc-mode=on)"
+    fi
+done <<EOF
+$cc_gpu_list
+EOF
 echo "gpu-cc-enforce: all NVIDIA GPUs in CC mode"
 
 # Every GPU the driver enumerates must appear in the verified claims:
