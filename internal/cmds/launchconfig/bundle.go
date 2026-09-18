@@ -254,17 +254,14 @@ func writeSignedDocument(dir string, doc Document, key *ecdsa.PrivateKey, pub st
 			os.RemoveAll(dir)
 		}
 	}()
-	for _, f := range []struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}{{pubkeyFile, []byte(pub), 0o644}, {documentFile, data, 0o600}, {signatureFile, []byte(signature + "\n"), 0o600}} {
-		// The document carries the join tokens: operator-readable only.
-		if err := writeNew(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
-			return err
-		}
+	if err := writeNew(filepath.Join(dir, pubkeyFile), []byte(pub), 0o644); err != nil {
+		return err
 	}
-	return nil
+	// The document carries the join tokens: operator-readable only.
+	if err := writeNew(filepath.Join(dir, documentFile), data, 0o600); err != nil {
+		return err
+	}
+	return writeNew(filepath.Join(dir, signatureFile), []byte(signature+"\n"), 0o600)
 }
 
 func newLaunchKey(path string) (*ecdsa.PrivateKey, string, error) {
