@@ -183,6 +183,22 @@ func TestDeriveMountShorthand(t *testing.T) {
 	}
 }
 
+func TestDeriveWarnsWhenNoMountPolicyIsGiven(t *testing.T) {
+	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "deny") {
+		t.Fatalf("stderr = %q, want the deny default named", stderr)
+	}
+	if _, stderr, err = runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any"); err != nil {
+		t.Fatal(err)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q with --mounts", stderr)
+	}
+}
+
 func TestDeriveAcceptsABarePod(t *testing.T) {
 	pod := `{"kind":"Pod","spec":{"containers":[{"name":"c","image":"` + testImage + `","command":["sleep","inf"]}]}}`
 	got, err := runDerive(t, pod, "p", "-", "--env=any")
@@ -303,7 +319,7 @@ func TestDeriveRejectsPolicyForDroppedContainer(t *testing.T) {
 // An input with nothing c8s injected is derived without a report, so the
 // message only appears when it says something.
 func TestDeriveReportsNothingWhenNothingIsDropped(t *testing.T) {
-	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any")
+	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any", "--mounts=any")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}

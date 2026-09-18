@@ -179,6 +179,10 @@ derives the same entry as the manifest it was admitted from.`,
 			if mountsMode != "" && mountsMode != allowlist.PolicyAny && mountsMode != allowlist.PolicyDeny {
 				return fmt.Errorf("--mounts must be any or deny; use --mounts-file for exact rules")
 			}
+			if mountsMode == "" && mountsFile == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					`mounts: no policy given; every container is "deny", which admits platform mounts alone`)
+			}
 			var policies map[string]allowlist.EnvPolicy
 			var mountPolicies map[string]allowlist.MountPolicy
 			if mountsFile != "" {
