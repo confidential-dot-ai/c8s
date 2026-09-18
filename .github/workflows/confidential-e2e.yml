@@ -41,19 +41,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  e2e:
+  # A workflow_run-triggered run carries main's head at trigger time as its
+  # head_sha, and the publish is itself workflow_run-triggered, so
+  # workflow_run.head_sha here is NOT the commit the publish built. During a
+  # merge burst that tests a later commit whose images may not exist yet. The
+  # publish records what it built in its acceptance artifact; read that.
+  source:
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
        (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'workflow_run') &&
        (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      c8s_ref: ${{ steps.pick.outputs.c8s_ref }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.c8s_ref }}
+          PUBLISH_RUN: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_REF" ]; then
+            echo "c8s_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLISH_RUN/artifacts"             --jq '[.artifacts[] | select(.expired | not) | .name | select(startswith("node-image-acceptance-rke2-tdx-"))] | sort | last // ""')
+          if [ -z "$name" ]; then
+            # A manual node-image rebuild captures no evidence; test main's head
+            # as before, and the lane refuses the pair if its image is absent.
+            echo "::warning::publish run $PUBLISH_RUN has no acceptance artifact; testing ${HEAD_SHA:0:7}"
+            echo "c8s_ref=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run download "$PUBLISH_RUN" -R "$GITHUB_REPOSITORY" -n "$name" -D "$RUNNER_TEMP/acceptance"
+          sha=$(jq -er '.source_sha' "$RUNNER_TEMP/acceptance/acceptance.json")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::acceptance.json source_sha is not a commit: $sha"; exit 1; }
+          echo "publish run $PUBLISH_RUN built ${sha:0:7} (head at trigger was ${HEAD_SHA:0:7})"
+          echo "c8s_ref=$sha" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: source
     # Reusable lane pinned by commit SHA (bump deliberately when the lane changes);
     # the trailing @main tag is a human label only.
     uses: ./.github/workflows/e2e-c8s.yml
     with:
-      # Test the merge head. The metal lane installs the chart's own
-      # attestation-api DaemonSet + attest-proxy socket as the node-local
-      # endpoint, so the staged rke2 image needs no baked AA for cvmMode=bare-metal
-      # (#88).
-      c8s_ref: ${{ inputs.c8s_ref || github.event.workflow_run.head_sha }}
+      # The commit the publish built, installed on the node image built from
+      # it. The metal lane installs the chart's own attestation-api DaemonSet +
+      # attest-proxy socket as the node-local endpoint, so the staged rke2
+      # image needs no baked AA for cvmMode=bare-metal (#88).
+      c8s_ref: ${{ needs.source.outputs.c8s_ref }}
