@@ -81,10 +81,21 @@ const (
 	VolumeContainerName = "c8s-volume"
 )
 
+// CertWaitContainerName is the run-once init container injected beside
+// c8s-cert to hold the workload until the first certificate lands.
+const CertWaitContainerName = "c8s-cert-wait"
+
 // IsSidecarContainer reports whether name is one of the injected sidecars that
 // receive the inventory socket-directory mount.
 func IsSidecarContainer(name string) bool {
 	return name == CertContainerName || name == SecretContainerName || name == VolumeContainerName
+}
+
+// IsInjectedContainerName reports whether name is one the admission webhook
+// injects. Names are host-written, so it holds only over authored input;
+// runtime matching goes by digest and entrypoint (internal/secrets.WorkloadContainers).
+func IsInjectedContainerName(name string) bool {
+	return IsSidecarContainer(name) || name == CertWaitContainerName
 }
 
 // InventoryEndpoint is get-cert's compiled inventory endpoint on node-CVM: the

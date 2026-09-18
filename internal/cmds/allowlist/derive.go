@@ -10,6 +10,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // podTemplate is the slice of a Deployment/StatefulSet/DaemonSet/Pod we need.
@@ -56,6 +57,21 @@ func podSpecOf(data []byte) (podTemplate, error) {
 	return podTemplate{}, fmt.Errorf("%s carries no containers: expected a Pod or a workload with a pod template", kind)
 }
 
+// dropInjected removes the containers c8s's admission webhook adds and returns
+// their names.
+func dropInjected(cs []templateContainer) ([]templateContainer, []string) {
+	out := make([]templateContainer, 0, len(cs))
+	var dropped []string
+	for _, c := range cs {
+		if workloadclaims.IsInjectedContainerName(c.Name) {
+			dropped = append(dropped, c.Name)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, dropped
+}
+
 // argvPolicy renders one half of a container's argv policy.
 //
 // An empty argv is Deny, never Exact: Exact requires equality against a
@@ -89,6 +105,15 @@ func deriveContainers(cs []templateContainer) ([]allowlist.Container, error) {
 	return out, nil
 }
 
+// unknownContainerErr names a policy no derived container claimed. A dropped
+// container is visibly in the input, so it is not reported as unknown.
+func unknownContainerErr(kind, name string) error {
+	if workloadclaims.IsInjectedContainerName(name) {
+		return fmt.Errorf("%s policy names %q, a container c8s injects and derive drops", kind, name)
+	}
+	return fmt.Errorf("%s policy names unknown container %q", kind, name)
+}
+
 func newDeriveCmd(_ *options) *cobra.Command {
 	var secrets []string
 	var label string
@@ -113,14 +138,14 @@ launch environment, including image/runtime additions. Pod env/envFrom alone
 cannot establish it.
 
 Use --mounts-file with a JSON map of container names to mount policies to pin
-bind mounts for every init and main container. The pod spec alone cannot prove
-which sources are node-provided or how persistent storage is protected.
+bind mounts for every derived init and main container. The pod spec alone cannot
+prove which sources are node-provided or how persistent storage is protected.
 
 The entry pins argv, so it expires the moment a container command changes:
 re-derive and re-apply whenever the workload is edited.
 
-c8s injects its own sidecars and drops them before matching, so they are
-deliberately absent from the derived entry.`,
+Containers c8s injects are dropped and named on stderr, so an admitted pod
+derives the same entry as the manifest it was admitted from.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := readFileOrStdin(cmd, args[1])
@@ -130,6 +155,13 @@ deliberately absent from the derived entry.`,
 			spec, err := podSpecOf(data)
 			if err != nil {
 				return err
+			}
+			var dropped, mains []string
+			spec.InitContainers, dropped = dropInjected(spec.InitContainers)
+			spec.Containers, mains = dropInjected(spec.Containers)
+			dropped = append(dropped, mains...)
+			if len(dropped) > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "dropped %s: injected by c8s\n", strings.Join(dropped, ", "))
 			}
 			containers, err := deriveContainers(spec.Containers)
 			if err != nil {
@@ -196,12 +228,12 @@ deliberately absent from the derived entry.`,
 			}
 			for name := range policies {
 				if !used[name] {
-					return fmt.Errorf("env policy names unknown container %q", name)
+					return unknownContainerErr("env", name)
 				}
 			}
 			for name := range mountPolicies {
 				if !usedMounts[name] {
-					return fmt.Errorf("mount policy names unknown container %q", name)
+					return unknownContainerErr("mount", name)
 				}
 			}
 			w := allowlist.Workload{

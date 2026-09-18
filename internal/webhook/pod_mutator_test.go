@@ -1364,3 +1364,31 @@ func TestFetchersCarryCDSRTMRPins(t *testing.T) {
 		}
 	}
 }
+
+// The set of containers injection adds must equal what
+// workloadclaims.IsInjectedContainerName matches: `c8s allowlist derive` drops
+// exactly that set from an admitted pod, so a fifth injected container added
+// here without the predicate learning its name would be silently derived into
+// every workload entry.
+func TestInjectedContainersMatchThePublishedNameSet(t *testing.T) {
+	cfg := secretsConfig()
+	pod := podWithApp()
+	pod.Spec.InitContainers = []corev1.Container{{Name: "seed"}}
+	authored := map[string]bool{"app": true, "seed": true}
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	all := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+	if len(all) != len(authored)+4 {
+		t.Fatalf("containers = %d, want the 2 authored plus 4 injected: %+v", len(all), all)
+	}
+	for _, c := range all {
+		if workloadclaims.IsInjectedContainerName(c.Name) == authored[c.Name] {
+			t.Errorf("container %q: authored %v but IsInjectedContainerName %v; derive would drop the wrong set",
+				c.Name, authored[c.Name], workloadclaims.IsInjectedContainerName(c.Name))
+		}
+	}
+}

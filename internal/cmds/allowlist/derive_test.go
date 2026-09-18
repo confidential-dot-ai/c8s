@@ -34,20 +34,28 @@ func deployJSON() string {
 
 func runDerive(t *testing.T, stdin string, args ...string) (map[string]pkgallowlist.Workload, error) {
 	t.Helper()
+	got, _, err := runDeriveStderr(t, stdin, args...)
+	return got, err
+}
+
+// The entry goes to stdout and the dropped-container report to stderr, so the
+// two are kept apart here as they are when piping derive into apply.
+func runDeriveStderr(t *testing.T, stdin string, args ...string) (map[string]pkgallowlist.Workload, string, error) {
+	t.Helper()
 	cmd := newDeriveCmd(&options{})
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetErr(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
-		return nil, err
+		return nil, errOut.String(), err
 	}
 	var got map[string]pkgallowlist.Workload
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("derived output is not a workload map: %v\n%s", err, out.String())
 	}
-	return got, nil
+	return got, errOut.String(), nil
 }
 
 func TestDeriveCoversInitContainers(t *testing.T) {
@@ -160,4 +168,107 @@ func equalArgv(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// admittedPodJSON is a pod as the API server returns it after injection: the
+// authored init container and mains, plus the four containers c8s adds, one of
+// them on a floating tag.
+func admittedPodJSON() string {
+	return `{
+      "kind": "Pod",
+      "metadata": {"annotations": {"confidential.ai/c8s-injected": "true"}},
+      "spec": {
+        "initContainers": [
+          {"name": "c8s-cert", "image": "ghcr.io/confidential-dot-ai/c8s:v0.23.0",
+           "args": ["--san=c8s-busybox-secret.default.svc", "--cds-measurements=abc"]},
+          {"name": "c8s-cert-wait", "image": "` + testImage + `",
+           "command": ["/c8s", "probe-file", "--wait", "/tls/cert.pem"]},
+          {"name": "c8s-secret", "image": "` + testImage + `", "args": ["--measurements=abc"]},
+          {"name": "c8s-volume", "image": "` + testImage + `", "args": ["--open=vol"]},
+          {"name": "seed", "image": "` + testImage + `",
+           "command": ["sh", "-c", "cp -an /a/. /seed/"]}
+        ],
+        "containers": [
+          {"name": "app", "image": "` + testImage + `", "command": ["sleep", "inf"]}
+        ]}}`
+}
+
+func TestDeriveDropsInjectedContainers(t *testing.T) {
+	got, stderr, err := runDeriveStderr(t, admittedPodJSON(), "app", "-", "--env=any")
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	for _, name := range []string{"c8s-cert", "c8s-cert-wait", "c8s-secret", "c8s-volume"} {
+		if !strings.Contains(stderr, name) {
+			t.Errorf("stderr %q does not report dropping %q", stderr, name)
+		}
+	}
+	w := got["app"]
+	if len(w.InitContainers) != 1 {
+		t.Fatalf("initContainers = %d, want only the authored seed", len(w.InitContainers))
+	}
+	if !equalArgv(w.InitContainers[0].Command.Argv, []string{"sh", "-c", "cp -an /a/. /seed/"}) {
+		t.Errorf("init command = %v, want the seed argv", w.InitContainers[0].Command.Argv)
+	}
+	if len(w.Containers) != 1 {
+		t.Fatalf("containers = %d, want 1", len(w.Containers))
+	}
+}
+
+// The policy files describe only the containers that survive the drop, so an
+// operator is never asked to write a mount policy for c8s's own sidecars.
+func TestDeriveDropsInjectedBeforePolicyFiles(t *testing.T) {
+	dir := t.TempDir()
+	mounts := dir + "/mounts.json"
+	if err := os.WriteFile(mounts, []byte(`{"seed":{"policy":"deny"},"app":{"policy":"deny"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := dir + "/env.json"
+	if err := os.WriteFile(env, []byte(`{"seed":{"policy":"deny"},"app":{"policy":"any"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runDerive(t, admittedPodJSON(), "app", "-", "--env-file", env, "--mounts-file", mounts); err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+}
+
+func TestDeriveRejectsPolicyForDroppedContainer(t *testing.T) {
+	file := t.TempDir() + "/mounts.json"
+	data := `{"seed":{"policy":"deny"},"app":{"policy":"deny"},"c8s-cert":{"policy":"deny"}}`
+	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runDerive(t, admittedPodJSON(), "app", "-", "--env=any", "--mounts-file", file)
+	if err == nil {
+		t.Fatal("accepted a mount policy for a dropped container")
+	}
+	if !strings.Contains(err.Error(), "c8s injects") {
+		t.Errorf("error = %v, want it to name the injected container", err)
+	}
+}
+
+// An input with nothing c8s injected is derived without a report, so the
+// message only appears when it says something.
+func TestDeriveReportsNothingWhenNothingIsDropped(t *testing.T) {
+	_, stderr, err := runDeriveStderr(t, deployJSON(), "dynamo", "-", "--env=any")
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing reported", stderr)
+	}
+}
+
+func TestDeriveRejectsEnvPolicyForUnknownContainer(t *testing.T) {
+	file := t.TempDir() + "/env.json"
+	if err := os.WriteFile(file, []byte(`{"seed":{"policy":"deny"},"frontend":{"policy":"any"},"worker":{"policy":"any"},"ghost":{"policy":"any"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runDerive(t, deployJSON(), "dynamo", "-", "--env-file", file)
+	if err == nil {
+		t.Fatal("accepted an env policy for a container that is not there")
+	}
+	if !strings.Contains(err.Error(), `unknown container "ghost"`) {
+		t.Errorf("error = %v, want it to name the unknown container", err)
+	}
 }

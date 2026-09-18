@@ -147,7 +147,7 @@ const reservedCertContainerName = workloadclaims.CertContainerName
 // the workload until c8s-cert has written the initial cert (see
 // certWaitContainer). Operator-reserved like c8s-cert: a pod may not declare
 // its own container under it.
-const reservedCertWaitContainerName = "c8s-cert-wait"
+const reservedCertWaitContainerName = workloadclaims.CertWaitContainerName
 
 // Config tunes the injector.
 type Config struct {
@@ -1433,10 +1433,7 @@ func rejectReservedCertContainer(pod *corev1.Pod) error {
 }
 
 func isReservedCertName(name string) bool {
-	return name == reservedCertContainerName ||
-		name == reservedCertWaitContainerName ||
-		name == reservedSecretContainerName ||
-		name == reservedVolumeContainerName
+	return workloadclaims.IsInjectedContainerName(name)
 }
 
 // rejectReservedCertVolume denies a pod that pre-declares the reserved cert
