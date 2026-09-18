@@ -16,6 +16,9 @@ import (
 // Prepare writes only fixed service inputs. rootDir rebases paths for tests;
 // production calls it with an empty root after authenticating launch.yaml.
 func Prepare(rootDir string, d *launchconfig.Document) error {
+	if d == nil {
+		return fmt.Errorf("missing staged launch configuration")
+	}
 	path := func(name string) string { return filepath.Join(rootDir, name) }
 	read := func(name string) ([]byte, error) { return os.ReadFile(path(name)) }
 	write := func(name string, data []byte) error {
