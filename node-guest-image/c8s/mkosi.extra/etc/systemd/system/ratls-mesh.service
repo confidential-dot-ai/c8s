@@ -1,0 +1,24 @@
+[Unit]
+Description=Measured node RA-TLS mesh
+Requires=rke2-role.service attestation-api.service
+After=rke2-role.service attestation-api.service nri-node-ip.service rke2-server.service rke2-agent.service
+ConditionPathExists=|/run/confos/role-server
+ConditionPathExists=|/run/confos/role-agent
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -s /var/lib/rancher/rke2/agent/kubelet.kubeconfig ] && exit 0; sleep 5; done; exit 1'
+ExecStart=/usr/local/bin/c8s node-services run mesh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=630
+MemoryMax=128M
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

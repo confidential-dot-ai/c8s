@@ -25,9 +25,9 @@ func renderNodeImagePolicy(t *testing.T) string {
 	}
 	digest := func(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
 	repl := map[string]string{
-		"@CDS_DIGEST@": digest('b'),
-		"@CDS_IMAGE@":  "ghcr.io/confidential-dot-ai/cds@" + digest('b'),
-		"@PLATFORM@":   "snp",
+		"@OPERATOR_DIGEST@": digest('a'),
+		"@OPERATOR_IMAGE@":  "ghcr.io/confidential-dot-ai/c8s-operator@" + digest('a'),
+		"@PLATFORM@":        "snp",
 	}
 	out := string(body)
 	for k, v := range repl {
@@ -103,10 +103,10 @@ func TestNodeImageBootConfig_LoadsAndAdmitsSystemImages(t *testing.T) {
 		}
 	}
 
-	// The base allowlist is the generated system set plus the rendered CDS token.
+	// The base allowlist is the generated system set plus the rendered operator token.
 	// The exact count catches an entry a regen adds or drops.
 	if want := len(systemImages) + 1; len(cfg.Allowlist.Base.Workloads) != want {
-		t.Errorf("baked base allowlist has %d entries, want %d (%d system images + cds)",
+		t.Errorf("baked base allowlist has %d entries, want %d (%d system images + operator)",
 			len(cfg.Allowlist.Base.Workloads), want, len(systemImages))
 	}
 	for digest := range baseEntries {
