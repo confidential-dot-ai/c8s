@@ -30,8 +30,8 @@ import (
 )
 
 // testMeasurement is a syntactically valid SHA-384 launch measurement. Its
-// value is irrelevant: the injected verifier approves, so what these tests
-// exercise is what the command does once the endpoint's build has passed.
+// value is returned by the injected verifier, allowing image-policy tests
+// to check the endpoint pin before the command reads the CA.
 const testMeasurement = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // meshCA mints a self-signed CA certificate standing in for one CDS's mesh CA.
@@ -130,7 +130,9 @@ func run(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	approve := func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		match := true
-		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
+		result := &teetypes.VerificationResult{Platform: teetypes.PlatformAzSNP, SignatureValid: true, ReportDataMatch: &match}
+		result.Claims.LaunchDigest = testMeasurement
+		return result, nil
 	}
 	cmd := newCmd(approve)
 	var out, errb bytes.Buffer
@@ -301,4 +303,41 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestImagePolicyGatesCARead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		digest string
+		accept bool
+	}{
+		{"matching image", testMeasurement, true},
+		{"different image", strings.Repeat("ab", 48), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ca := meshCA(t, "cds-m")
+			seen, url := newAttestedCDS(t, http.StatusOK, servingPEM(ca))
+			policy := filepath.Join(t.TempDir(), "policy.json")
+			data := `{"schema_version":"1","tee":"sev-snp","measurements":[{"name":"cds","measurement":"` + tc.digest + `"}]}`
+			if err := os.WriteFile(policy, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, _, err := run(t, "--url", url, "--image-policy-file", policy)
+			if !tc.accept {
+				if err == nil || !strings.Contains(err.Error(), "endpoint identity") {
+					t.Fatalf("expected endpoint identity rejection, got %v", err)
+				}
+				if *seen != 0 || stdout != "" {
+					t.Fatalf("rejected image exposed a CA: requests=%d output=%q", *seen, stdout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read with matching image policy: %v", err)
+			}
+			if *seen != 1 || stdout != string(servingPEM(ca)) {
+				t.Fatalf("matching image did not return the served CA: requests=%d output=%q", *seen, stdout)
+			}
+		})
+	}
 }

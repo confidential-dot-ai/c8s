@@ -232,9 +232,9 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: base-total.txt
-          # -v2: entries below carry a one-decimal total, which the gate no
-          # longer compares against.
-          key: coverage-total-v2-${{ github.sha }}
+          # v3 measures Go execution separately from the shell/YAML workflow
+          # harness, matching the same head-script selection used for the base.
+          key: coverage-total-v3-${{ github.sha }}
 
       - name: Restore baseline total
         if: github.event_name == 'pull_request'
@@ -242,7 +242,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: base-total.txt
-          key: coverage-total-v2-${{ github.event.pull_request.base.sha }}
+          key: coverage-total-v3-${{ github.event.pull_request.base.sha }}
 
       # Fallback when the base commit's total is not cached (e.g. cache
       # evicted, or main's coverage run predates this workflow).

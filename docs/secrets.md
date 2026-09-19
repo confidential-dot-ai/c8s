@@ -183,8 +183,10 @@ and says so on stderr; it governs the CA check only, and is unrelated to
 c8s cds ca --url "$CDS" --measurements "$M" --out mesh-ca.pem
 ```
 
-`--measurements` is required — the CDS launch digest for a direct URL, the
-router's for a front door — and the SHA-256 of each certificate goes to stderr.
+Endpoint pins are required: use `--image-policy-file` for a complete image
+policy, or `--measurements` / `--measurements-file` for launch digests. Pin CDS
+for a direct URL or the router for a front door. The SHA-256 of each certificate
+goes to stderr.
 Record it. The read proves an attested build at `$M` served these bytes, which
 is the bound the gate has too: comparing that digest against an earlier read, or
 against a copy taken another way, is what separates your CDS from another one at

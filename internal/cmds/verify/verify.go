@@ -25,6 +25,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 
 	"github.com/confidential-dot-ai/attestation-go/remote"
 
@@ -202,12 +203,12 @@ responder chose).`,
 	f.StringVar(&cfg.fromFile, "from-file", "", "verify evidence from a saved PEM certificate or attestation-response JSON instead of dialing")
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE). On TDX this pins MRTD only, which covers just the TDVF firmware — use --image-manifest to pin the whole guest image instead (the two are mutually exclusive: the manifest already pins MRTD exactly)")
-	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
+	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "text file of allowed launch measurements, one hex digest per line; use --image-policy-file for complete JSON policies; excludes --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
 	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
-	f.StringVar(&cfg.measurementsConfig, "measurements-config", "", "measurements config listing the VM images this cluster runs. Pins the target to those images, and for kind=cds also fails unless the set the target serves at /measurements is exactly the same. Cannot be combined with --measurements, --measurements-file or --image-manifest")
+	cmdsutil.BindImagePolicyFlags(f, &cfg.measurementsConfig, nil, "", "pins complete target identities; for kind=cds also checks the served /measurements policy; excludes --measurements, --measurements-file and --image-manifest")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -493,7 +494,7 @@ type verifyPlan struct {
 	meshCA *x509.CertPool
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
-	// refValues is the parsed --measurements-config, empty when unset. It
+	// refValues is the parsed --image-policy-file, empty when unset. It
 	// both pins the target and is compared against what the target serves.
 	refValues refvalues.ReferenceValues
 }
@@ -525,33 +526,21 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	// failure rather than the typo it is. Refuse the pair up front, before any
 	// file is read, so a contradictory invocation is a usage error here just as
 	// it already is in the client-side verifier.
-	if cfg.measurementsConfig != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "" || cfg.imageManifest != "") {
-		return nil, fmt.Errorf("--measurements-config cannot be combined with --measurements, --measurements-file or --image-manifest: it already pins whole images, and a second allowlist beside it can only narrow or contradict that")
+	if cfg.measurementsConfig != "" && cfg.imageManifest != "" {
+		return nil, fmt.Errorf("--image-policy-file cannot be combined with --image-manifest: select one complete image policy")
 	}
 	if cfg.imageManifest != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "") {
 		used := allowlistFlagsUsed(cfg)
 		return nil, fmt.Errorf("%s cannot be combined with --image-manifest: the manifest pins MRTD exactly (together with RTMR[1] and RTMR[2] from the same build), so a launch-measurement allowlist beside it can only narrow that single digest or contradict it, and a contradiction is a policy no guest can ever satisfy. To pin this image, drop %s; to accept several firmware images instead, drop --image-manifest — which also gives up its RTMR[1]/RTMR[2] guest kernel and rootfs pins", used, used)
 	}
 
-	// Read once, here, like every other file-backed pin on this path.
-	var refValues refvalues.ReferenceValues
-	if cfg.measurementsConfig != "" {
-		loaded, err := refvalues.Load(cfg.measurementsConfig)
-		if err != nil {
-			return nil, err
-		}
-		refValues = loaded
+	// Read once, keeping complete image policies separate from digest lists.
+	refValues, err := (cmdsutil.ImagePolicySource{File: cfg.measurementsConfig}).LoadValues(
+		cmdsutil.MeasurementPins{Measurements: cfg.measurements, MeasurementsFile: cfg.measurementsFile})
+	if err != nil {
+		return nil, err
 	}
-
-	hexes := append([]string{}, cfg.measurements...)
-	if cfg.measurementsFile != "" {
-		data, err := os.ReadFile(cfg.measurementsFile)
-		if err != nil {
-			return nil, fmt.Errorf("read --measurements-file: %w", err)
-		}
-		hexes = append(hexes, strings.Split(string(data), "\n")...)
-	}
-	measurements, err := refvalues.ParseHexMeasurementsList(hexes)
+	measurements, err := cmdsutil.LoadMeasurements(cfg.measurements, cfg.measurementsFile)
 	if err != nil {
 		return nil, err
 	}
@@ -1265,7 +1254,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// An image manifest is a measurement pin too — a strictly stronger one
 	// than an allowlist — so a run pinned only by --image-manifest must not
 	// report itself as unpinned.
-	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil
+	pinned := len(plan.policy.Policy.Measurements) > 0 || plan.pins.image != nil || !plan.refValues.Empty()
 	oc := Outcome{
 		Backend:    "attestation-go",
 		VerifiedAt: time.Now().UTC(),
@@ -1301,6 +1290,29 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
 		return oc
+	}
+
+	fullImagePinned := plan.pins.image != nil
+	if !plan.refValues.Empty() {
+		if plan.refValues.Family != teetypes.NormalizePlatform(oc.Platform).Family() {
+			oc.Error = fmt.Sprintf("--image-policy-file is for %q but the evidence platform is %q", plan.refValues.Family, oc.Platform)
+			return oc
+		}
+		response := remote.VerifyResponse{Result: *result}
+		if err := remote.EnforceImages(response, plan.refValues.Images, teetypes.NormalizePlatform(oc.Platform)); err != nil {
+			oc.Error = fmt.Sprintf("--image-policy-file: %v", err)
+			return oc
+		}
+		// A TDX tuple covers the guest only when the matching entry pins both
+		// kernel and rootfs registers. A weak alternative must not borrow the
+		// completeness of an unrelated entry in the same policy.
+		for _, entry := range plan.refValues.Images {
+			if len(entry.RTMRs[1]) != 0 && len(entry.RTMRs[2]) != 0 &&
+				remote.EnforceImages(response, []remote.ImagePin{entry}, teetypes.NormalizePlatform(oc.Platform)) == nil {
+				fullImagePinned = true
+				break
+			}
+		}
 	}
 
 	if pinned {
@@ -1348,7 +1360,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// anchor) does not downgrade this: chosen by the responder, it anchors
 	// nothing the operator asked about — the same rule the JS verifier applies
 	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
+	if isTDX(oc.Platform) && pinned && !fullImagePinned {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
 		if plan.meshCA == nil {
 			oc.Verified = false

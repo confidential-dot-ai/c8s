@@ -33,8 +33,8 @@ import (
 // CDS against; one read from an unpinned endpoint is whatever answered, and
 // pinning it later proves only that the same thing answered twice.
 var errUnpinned = errors.New(
-	"refusing to read a mesh CA from an unpinned CDS: --measurements is empty, so any attested build would be accepted " +
-		"and its CA would become the anchor you pin. Pass --measurements <endpoint build ID> (or --measurements-file)")
+	"refusing to read a mesh CA from an unpinned CDS: no endpoint image is pinned, so any attested build would be accepted " +
+		"and its CA would become the anchor you pin. Pass --image-policy-file <policy.json>, --measurements <endpoint build ID>, or --measurements-file")
 
 // errPlaintext refuses a plaintext endpoint. The bundle distinguishes one CDS
 // from another and nothing over http attests to being either.
@@ -56,11 +56,12 @@ func newCmd(verify localverify.VerifyFunc) *cobra.Command {
 or to stdout. This is the anchor 'c8s secrets put --mesh-ca' and
 'c8s verify --mesh-ca' take.
 
-The read travels the attested connection those commands use, so --measurements
-is required: it is the CDS launch digest for a direct URL, the router's for a
-front door. A launch measurement identifies the image, not the instance, so the
-SHA-256 of each certificate is printed on stderr — record it, and compare it on
-a later read or against a copy obtained another way.
+The read travels the attested connection those commands use and requires endpoint
+pins: use --image-policy-file for a complete image policy, or --measurements
+(or --measurements-file) for launch digests. Pin CDS for a direct URL, or the
+router for a front door. A launch measurement identifies the image, not the
+instance, so the SHA-256 of each certificate is printed on stderr — record it,
+and compare it on a later read or against a copy obtained another way.
 
 CDS generates its mesh CA in process, so a restart replaces it and the bundle
 has to be read again. The bundle carries the CAs CDS still signs against, newest

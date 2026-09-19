@@ -198,9 +198,10 @@ func TestServerBoundsConnectionResources(t *testing.T) {
 	if maxConcurrentConns <= 0 {
 		t.Errorf("maxConcurrentConns = %d, want a positive accept cap", maxConcurrentConns)
 	}
-	// Run builds the server inline, so reflect the same settings here: these
-	// are the values a refactor must carry over.
 	srv := newServer(":0", nil, nil)
+	if srv.WriteTimeout <= srv.ReadTimeout+attestTimeout {
+		t.Errorf("WriteTimeout = %s leaves no response time after body read and attestation", srv.WriteTimeout)
+	}
 	if srv.MaxHeaderBytes <= 0 || srv.MaxHeaderBytes > 64<<10 {
 		t.Errorf("MaxHeaderBytes = %d, want a bound well under Go's 1MiB default", srv.MaxHeaderBytes)
 	}
@@ -209,6 +210,7 @@ func TestServerBoundsConnectionResources(t *testing.T) {
 		got  time.Duration
 	}{
 		{"ReadHeaderTimeout", srv.ReadHeaderTimeout},
+		{"ReadTimeout", srv.ReadTimeout},
 		{"WriteTimeout", srv.WriteTimeout},
 		{"IdleTimeout", srv.IdleTimeout},
 	} {

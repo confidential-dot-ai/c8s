@@ -63,6 +63,9 @@ type Options struct {
 	// sidecars additionally hold CDS to. Ignored for SNP evidence.
 	CDSRTMRs []string
 
+	// CDSMeasurementsConfigJSON retains the complete identity policy for injected clients.
+	CDSMeasurementsConfigJSON string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -227,17 +230,18 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
 		if err := webhook.Register(mgr, webhook.Config{
-			GetCertImage:          opts.GetCertImage,
-			CDSURL:                opts.CDSURL,
-			AttestationApiURL:     opts.AttestationApiURL,
-			CDSMeasurements:       opts.CDSMeasurements,
-			CDSRTMRs:              opts.CDSRTMRs,
-			CertFSGroup:           new(opts.CertFSGroup),
-			CertRenewInterval:     opts.CertRenewInterval,
-			GetCertRunAsUser:      new(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:     new(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot:   new(opts.GetCertRunAsNonRoot),
-			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
+			GetCertImage:              opts.GetCertImage,
+			CDSURL:                    opts.CDSURL,
+			AttestationApiURL:         opts.AttestationApiURL,
+			CDSMeasurements:           opts.CDSMeasurements,
+			CDSRTMRs:                  opts.CDSRTMRs,
+			CDSMeasurementsConfigJSON: opts.CDSMeasurementsConfigJSON,
+			CertFSGroup:               new(opts.CertFSGroup),
+			CertRenewInterval:         opts.CertRenewInterval,
+			GetCertRunAsUser:          new(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:         new(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:       new(opts.GetCertRunAsNonRoot),
+			WorkloadClaimsHostDir:     opts.WorkloadClaimsHostDir,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}
