@@ -169,18 +169,11 @@ func TestStageBothRolesAndPlatforms(t *testing.T) {
 					if !bytes.Contains(fragment, []byte("agent-token-file: "+agentTokenPath)) {
 						t.Fatal("server must configure the separate agent token")
 					}
-					manifest, err := os.ReadFile(cfg.path(runtimeManifestPath))
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !bytes.Contains(manifest, []byte("cds-url: https://10.0.0.1:30808")) || bytes.Contains(manifest, []byte(doc.RKE2.ServerToken)) {
-						t.Fatal("runtime ConfigMap must contain server discovery but no credentials")
-					}
+
 				} else {
 					requirePresent(t, cfg.path(agentMarker))
 					requireAbsent(t, cfg.path(serverMarker))
 					requireAbsent(t, cfg.path(serverTokenPath))
-					requireAbsent(t, cfg.path(runtimeManifestPath))
 					if !bytes.Contains(fragment, []byte("server: https://10.0.0.1:9345")) {
 						t.Fatal("agent does not join signed server")
 					}
@@ -320,7 +313,7 @@ func TestFailedRestagingClearsAuthorizationAndSecrets(t *testing.T) {
 	if err := Stage(context.Background(), cfg); err == nil {
 		t.Fatal("accepted tampered signature")
 	}
-	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, DefaultStagedPath, runtimeManifestPath, rke2FragmentPath} {
+	for _, path := range []string{serverMarker, agentMarker, serverTokenPath, agentTokenPath, DefaultStagedPath, rke2FragmentPath} {
 		requireAbsent(t, cfg.path(path))
 	}
 }
@@ -333,14 +326,14 @@ func TestWriteFailureCannotPublishRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(cfg.path("/var/lib/rancher/rke2"), 0o700); err != nil {
+	if err := os.MkdirAll(cfg.path("/etc/rancher/rke2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.path("/var/lib/rancher/rke2/server"), []byte("not a directory"), 0o600); err != nil {
+	if err := os.WriteFile(cfg.path("/etc/rancher/rke2/config.yaml.d"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := stageVerified(cfg, verified); err == nil {
-		t.Fatal("expected manifest output failure")
+		t.Fatal("expected RKE2 configuration output failure")
 	}
 	requireAbsent(t, cfg.path(serverMarker))
 	requireAbsent(t, cfg.path(agentMarker))

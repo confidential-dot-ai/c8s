@@ -1,5 +1,5 @@
-{{- if and .Values.node.bakedServices (or (ne .Values.attestationApi.cvmMode "bare-metal") .Values.attestationApi.enabled .Values.nriImagePolicy.enabled .Values.volumed.enabled) -}}
-{{- fail "node.bakedServices requires cvmMode=bare-metal and attestationApi, nriImagePolicy and volumed disabled: these services are owned by the measured image" -}}
+{{- if and .Values.node.baked (or (ne .Values.attestationApi.cvmMode "bare-metal") .Values.attestationApi.enabled .Values.nriImagePolicy.enabled .Values.volumed.enabled) -}}
+{{- fail "node.baked requires cvmMode=bare-metal and attestationApi, nriImagePolicy and volumed disabled: these services are owned by the measured image" -}}
 {{- end -}}
 {{- if not (has .Values.attestationApi.cvmMode (list "bare-metal" "gke" "aks")) -}}
 {{- fail (printf "attestationApi.cvmMode must be one of bare-metal, gke, aks (got %q)" .Values.attestationApi.cvmMode) -}}

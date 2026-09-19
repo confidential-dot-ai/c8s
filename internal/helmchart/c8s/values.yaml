@@ -1,8 +1,8 @@
-## The measured node image owns core service processes. Build-time rendering
-## retains Kubernetes workload integration and reads verified boot settings
-## from the c8s-node-runtime ConfigMap. Ordinary Helm installs leave this off.
+## Render Kubernetes core services into the measured node image at build time.
+## Signed launch policies are staged on each node at /run/c8s-node; the host
+## owns attestation, RKE2 and NRI. Ordinary Helm installs leave this off.
 node:
-  bakedServices: false
+  baked: false
 
 ## The c8s component image set: the single source the chart and `c8s install`
 ## both enumerate from, so adding a component is one edit here.

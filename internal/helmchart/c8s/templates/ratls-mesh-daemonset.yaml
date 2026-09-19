@@ -1,10 +1,10 @@
-{{- if and .Values.ratlsMesh.enabled (not .Values.node.bakedServices) }}
+{{- if .Values.ratlsMesh.enabled }}
 {{- $attestationApiURL := include "c8s.attestationApiURL" . -}}
 {{/*
   cds mode points a single --cds-url at the unified CDS, which serves both
   /attest and /ca.
 */}}
-{{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
+{{- $cdsURL := include "c8s.cdsURL" . -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
 {{- /*
 The release namespace is deliberately NOT excluded: router's egress to
@@ -75,7 +75,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        {{- if .Values.attestationApi.enabled }}
+        {{- if include "c8s.attestationApiSocketPresent" . }}
         # workloadclaims.InventorySocketGID: the attest-proxy's socket is
         # group-owned by it; the mesh runs as uid 1337 and needs the group to
         # connect.
@@ -88,6 +88,7 @@ spec:
         - operator: "Exists"
           effect: "NoSchedule"
       volumes:
+        {{- include "c8s.nodeConfigVolume" . | nindent 8 }}
         {{- if .Values.ratlsMesh.measurementsConfig }}
         - name: measurements-config
           configMap:
@@ -108,6 +109,7 @@ spec:
         - name: iptables-cleanup
           restartPolicy: Always
           image: {{ include "ratls-mesh.image" . }}
+          imagePullPolicy: {{ .Values.ratlsMesh.image.pullPolicy }}
           securityContext:
             runAsNonRoot: false
             readOnlyRootFilesystem: true
@@ -148,6 +150,7 @@ spec:
         - name: iptables-sync
           restartPolicy: Always
           image: {{ include "ratls-mesh.image" . }}
+          imagePullPolicy: {{ .Values.ratlsMesh.image.pullPolicy }}
           securityContext:
             runAsNonRoot: false
             readOnlyRootFilesystem: true
@@ -240,6 +243,7 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
+            {{- include "c8s.nodeConfigMount" . | nindent 12 }}
             {{- if .Values.ratlsMesh.measurementsConfig }}
             - name: measurements-config
               mountPath: /etc/c8s-measurements
@@ -270,7 +274,9 @@ spec:
             - --rotation-timeout
             - {{ .Values.ratlsMesh.rotationTimeout | quote }}
             {{- end }}
-            {{- if .Values.ratlsMesh.measurementsConfig }}
+            {{- if .Values.node.baked }}
+            - --image-policy-file=/run/c8s-node/peers.json
+            {{- else if .Values.ratlsMesh.measurementsConfig }}
             - --image-policy-file
             - /etc/c8s-measurements/ratls-mesh.json
             {{- else }}
@@ -308,7 +314,9 @@ spec:
             - {{ printf "ratls-mesh.%s.svc" .Release.Namespace | quote }}
             - --ca-poll-interval
             - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
-            {{- if not .Values.ratlsMesh.measurementsConfig }}
+            {{- if .Values.node.baked }}
+            - --cds-image-policy-file=/run/c8s-node/cds.json
+            {{- else if not .Values.ratlsMesh.measurementsConfig }}
             {{- with .Values.cds.measurements }}
             - --cds-measurements
             - {{ join "," . | quote }}

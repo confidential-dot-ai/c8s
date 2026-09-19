@@ -89,12 +89,22 @@ requires the matching hardware-launcher changes in #552. Land the complete
 stack together before publishing or deploying images from it.
 
 `c8s install` (including `--cvm-mode=bare-metal`) is for chart-managed clusters.
-The [measured node image](../node-guest-image/README.md) starts CDS, NRI,
-RA-TLS mesh and its TLS front door as baked services. Its Kubernetes operator,
-CRDs, webhook and admission policies are rendered from this same chart at
-**image build time**. RKE2 applies those manifests at boot; there is no c8s
-Helm installation job. `c8s install` refuses a cluster whose `c8s-system`
-namespace carries `confidential.ai/baked=true`.
+The [measured node image](../node-guest-image/README.md) runs CDS, the RA-TLS
+mesh, router and operator as Kubernetes workloads rendered from this chart
+at **image build time**. Their pinned container images are baked into the
+image too. RKE2 applies the manifests at boot; no guest Helm installation is
+needed. The local attester, signed-launch verification and NRI enforcement
+remain host services needed before those workloads can start. `c8s install`
+refuses a cluster whose `c8s-system` namespace carries `confidential.ai/baked=true`.
+
+Core Pods mount public signed identity inputs read-only from `/run/c8s-node`;
+they never mount the private launch directory. The measurement covers the
+initial manifests and images, while Kubernetes API changes remain subject to
+the existing trusted-cluster-administrator boundary. Changing core versions
+requires rebuilding and relaunching with updated signed image pins. The
+current schema does not support rolling upgrades across different measured
+images; CDS's ephemeral CA also requires certificate re-bootstrap when it
+restarts.
 
 ### Authenticated launch configuration
 
@@ -217,11 +227,29 @@ calls `runtimemeasure.VerifyBinding` for that same pin, so an image cannot
 borrow another entry's authorized key. c8s passes these complete pins through
 `remote.Policy.Images`; legacy flags that cannot carry anchors are refused
 where they would weaken enforcement.
-The server publishes only the CDS URL and server policy to the public
-`c8s-node-runtime` ConfigMap in `c8s-system` (`cds-url`, `cds.json`); join tokens
-and private keys do not enter that ConfigMap. The operator forwards the full
-server policy to injected workload helpers. NRI and host CDS clients use the
-same server policy directly from the staged files.
+Boot preparation copies the public identity policies to `/run/c8s-node`;
+core Pods mount that directory read-only without access to the private launch
+directory. The operator forwards the full server policy to injected workload
+helpers, which use the in-cluster CDS Service URL. NRI uses the same server
+policy from private staging and reaches CDS through the signed server
+address and NodePort. Join tokens and private keys never enter the public
+policy directory.
+
+Join tokens remain secret RKE2 enrollment credentials. The RA-TLS mesh protects
+selected pod traffic; it does not wrap the RKE2 supervisor on port `9345` or the
+Kubernetes API on port `6443`. A token holder with network access can attempt
+RKE2 enrollment without a c8s RA-TLS identity, including from a non-confidential
+pod. The server token carries server-enrollment authority; the separate agent
+token only permits agent enrollment. Neither token supplies the launch signing
+key or satisfies the image-and-role-key attestation policy. See
+[RKE2 token management](https://docs.rke2.io/security/token).
+
+Signed launch media authenticates configuration but does not encrypt it. An
+infrastructure operator able to read the launch ISO or outer-cluster Secret can
+read its join tokens; root-only staging protects them inside the guest. The
+current 64-hex tokens use RKE2's short-token format, which does not pin the
+cluster CA during initial enrollment. The signed server address alone does not
+authenticate that CA. See [RKE2 token formats](https://docs.rke2.io/security/token#token-format).
 
 ### Chart-managed defaults
 
@@ -438,27 +466,29 @@ With CDS a singleton:
 
 ### Operator-added allowlist entries across restarts
 
-For the measured node image, CDS stores its database at
-`/run/c8s-cds/allowlist.db`. Its systemd runtime directory survives service
-restarts, but a VM reboot loses it. The baked component seed and optional
-signed `workloads` document initialize the next boot; reapply any later
-operator changes. The CA signing key is in process memory and changes on a
-CDS process restart, so plan for certificate re-bootstrap. This image does
-not expose a persistent-volume switch in launch configuration.
+For the measured node image, CDS stores its database at `/data/allowlist.db`
+in the Pod's `emptyDir`. A container restart preserves that directory; Pod
+recreation or a VM reboot loses it. The baked component seed and optional
+signed `workloads` document initialize the new store; reapply any later
+operator changes. The CA signing key is in process memory and changes on
+any CDS process restart, so plan for certificate re-bootstrap even when the
+database survives. This image does not expose a persistent-volume switch in
+launch configuration.
 
 For chart-managed CDS:
 
-The same restart that re-bootstraps the mesh CA also resets the **served
-allowlist**. CDS seeds its store from the install seed at startup, then serves
-whatever an operator writes with `c8s allowlist add` or `apply`. With
-`cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
-restart (OOM, drain, upgrade, scale) drops every operator-added entry back to
-the install seed — workloads pulling those images are denied roughly one worker
-poll interval (~5s) later. CDS logs a warning at startup when persistence is
-off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
-(an RWO PVC); otherwise re-apply the entries after any CDS restart. The
-chart-seeded component entries are unaffected — they are re-seeded and, unlike
-dynamic entries, are also admitted from the plugin's base allowlist. The restart also resets the allowlist version counter, and
+Pod recreation also resets the **served allowlist**. CDS seeds its store
+from the install seed at startup, then serves whatever an operator writes
+with `c8s allowlist add` or `apply`. With `cds.persistence.enabled=false`
+(the default), that store is an `emptyDir`: it survives a container restart,
+but drain, upgrade or scale-down can recreate the Pod and lose every
+operator-added entry. CDS logs a warning at startup when persistence is off.
+To keep dynamic entries across Pod recreation set
+`cds.persistence.enabled=true` (an RWO PVC); otherwise re-apply the entries
+after the store is recreated. The chart-seeded component entries are
+unaffected — they are re-seeded and, unlike dynamic entries, are also admitted
+from the plugin's base allowlist. Recreating the store also resets the
+allowlist version counter, and
 every enforcer ignores a served version at or below the one it last applied
 (`docs/allowlist-and-capabilities.md`, "Refresh and anti-rollback"): a plugin
 that had applied version N stays on that policy until the restarted
