@@ -11,7 +11,7 @@ func TestNewCmdFlagDefaultsAndRequired(t *testing.T) {
 	}
 
 	flags := cmd.Flags()
-	for _, name := range []string{"cds-url", "attestation-api-url", "san"} {
+	for _, name := range []string{"cds-url", "attestation-api-url"} {
 		flag := flags.Lookup(name)
 		if flag == nil {
 			t.Fatalf("flag %q not registered", name)
@@ -25,6 +25,8 @@ func TestNewCmdFlagDefaultsAndRequired(t *testing.T) {
 		name string
 		want string
 	}{
+		{"san", ""},
+		{"san-file", ""},
 		{"discovery-public-tls-mode", "cds"},
 		{"reload-watch-interval", "1m0s"},
 		{"ca-watch-interval", "0s"},

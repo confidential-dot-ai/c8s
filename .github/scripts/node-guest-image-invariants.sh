@@ -58,15 +58,13 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI base allowlist is a template: its permissive workloads
-# carry @-token digests the sync fills with ref-resolved values; a hardcoded
-# sha256 would bake a stale digest the fail-closed plugin can't reconcile
-# with the ref. The marked block is exempt: systemfloor generates it from
-# the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI template contains only the generated RKE2 system floor.
+# The complete chart component seed is merged into it before containerd starts;
+# duplicating component digests here would drift from the rendered workloads.
 policy="$ngi/c8s/image-policy.yaml.in"
 [ -f "$policy" ] || { echo "::error::NRI base template $policy not found"; exit 1; }
 if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
-  echo "::error::$policy has a hardcoded base digest outside the generated system base; use the @CDS_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
+  echo "::error::$policy has a hardcoded base digest outside the generated system base; derive core component pins from the build-time chart seed"
   exit 1
 fi
 
@@ -299,5 +297,105 @@ grep -qE '^\s*apparmor\s*$' "$ngi/c8s/mkosi.conf" \
   || { echo "::error::$ngi/c8s/mkosi.conf must ship the apparmor package (apparmor_parser)"; exit 1; }
 grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/system-preset/50-rke2.preset" \
   || { echo "::error::50-rke2.preset must disable apparmor.service (only the parser is wanted)"; exit 1; }
+
+# The image renders Kubernetes integration from its staged binary at BUILD
+# time. It must not revive a c8s HelmChart or boot-time values merge.
+sync="$ngi/c8s/mkosi.sync"
+for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
+             '--kube-version "${RKE2_VERSION%%+*}"' \
+             'c8s-integration.yaml' '/usr/lib/c8s/allowlist-seed.json' \
+             '--cds-image-digest "$CDS_DIGEST"' '--ratls-mesh-image-digest "$MESH_DIGEST"' \
+             'c8s/airgap-images.sh' '"$out/images.txt"'; do
+  if ! grep -qF -- "$token" "$sync"; then
+    echo "::error::$sync must stage the measured node integration (missing: $token)"
+    exit 1
+  fi
+done
+for stale in "$ngi/c8s/c8s-chart.tdx.yaml.in" "$ngi/c8s/c8s-chart.snp.yaml.in" \
+             "$ngi/c8s/mkosi.extra/etc/systemd/system/c8s-chart-values.service" \
+             "$ngi/c8s/mkosi.extra/usr/local/bin/c8s-chart-values.sh" \
+             "$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/c8s-chart.yaml"; do
+  if [ -e "$stale" ]; then
+    echo "::error::obsolete c8s Helm bootstrap artifact remains: $stale"
+    exit 1
+  fi
+done
+if grep -qE 'render_chart_helmchart|helm-install-c8s' "$sync" "$preset"; then
+  echo "::error::node bootstrap must not install the c8s chart at runtime"
+  exit 1
+fi
+
+# A verified role is required for both RKE2 roles and every core service.
+# Conditions alone merely skip units; Requires= plus After= propagate a
+# verifier/preparation failure before evaluating the role condition.
+units="$ngi/c8s/mkosi.extra/etc/systemd/system"
+role="$units/rke2-role.service"
+role_sh="$ngi/c8s/mkosi.extra/usr/local/bin/rke2-role.sh"
+require_launch_dependency() {
+  local unit=$1
+  if ! grep -qE '^Requires=.*rke2-role[.]service' "$unit" \
+     || ! grep -qE '^After=.*rke2-role[.]service' "$unit"; then
+    echo "::error::$unit must require and start after authenticated launch staging"
+    exit 1
+  fi
+}
+for rke2_role in server agent; do
+  dropin="$units/rke2-$rke2_role.service.d/20-role.conf"
+  require_launch_dependency "$dropin"
+  if ! grep -qxF "ConditionPathExists=/run/confos/role-$rke2_role" "$dropin"; then
+    echo "::error::$dropin must gate on the authenticated $rke2_role verdict"
+    exit 1
+  fi
+done
+if ! grep -qE '^Requires=.*attestation-api[.]service' "$role" \
+   || ! grep -qE '^After=.*attestation-api[.]service' "$role"; then
+  echo "::error::$role must require the local attester before launch verification"
+  exit 1
+fi
+for token in 'blkid -L opkeydata' 'c8s launch-config stage' 'launch.yaml"' 'launch.yaml.sig"' 'c8s node-services prepare'; do
+  if ! grep -qF -- "$token" "$role_sh"; then
+    echo "::error::$role_sh lost mandatory authenticated launch staging ($token)"
+    exit 1
+  fi
+done
+if ! grep -qE '^timeout 10 mount -t iso9660 -o ro,nodev,nosuid,noexec ' "$role_sh"; then
+  echo "::error::$role_sh must bound the read-only opkeydata ISO mount with timeout 10"
+  exit 1
+fi
+if grep -qE 'joindata|defaulting to server|set_legacy_server_role' "$role_sh"; then
+  echo "::error::$role_sh must not select a role from unsigned data or a missing disk"
+  exit 1
+fi
+
+# Only attestation access, node inventory and credential release remain host
+# services. Core application lifecycle belongs to the baked Kubernetes chart.
+for service in attest-proxy nri-node-ip cred-release; do
+  require_launch_dependency "$units/$service.service"
+  if ! grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$preset must enable $service.service"
+    exit 1
+  fi
+done
+for service in cds ratls-mesh ratls-mesh-iptables c8s-get-cert cds-attest allowlist-proxy c8s-nginx; do
+  if [ -e "$units/$service.service" ] || grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$service must run from measured Kubernetes manifests, not a duplicate host unit"
+    exit 1
+  fi
+done
+if ! grep -qF 'ExecStart=/usr/local/bin/c8s attest-proxy ' "$units/attest-proxy.service"; then
+  echo "::error::host attestation access must retain its fixed proxy entrypoint"
+  exit 1
+fi
+
+# A host-accessible arbitrary REPORTDATA API would let a host borrow a real
+# node's attestation for its own keys. The finalize hook preserves the selected
+# confos attester configuration and verifies that its bind is now loopback.
+finalize="$ngi/c8s/mkosi.finalize"
+if [ ! -x "$finalize" ] \
+   || ! grep -qF 'bind = "127.0.0.1:8400"' "$finalize" \
+   || ! grep -qF '"$BUILDROOT/etc/attestation-api/config.toml"' "$finalize"; then
+  echo "::error::mkosi.finalize must force and verify the attester's loopback bind"
+  exit 1
+fi
 
 echo "all node-guest-image invariants hold at CONFOS_REF $CONFOS_REF"

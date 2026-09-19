@@ -61,7 +61,9 @@ spec:
             {{- /* The same measurements CDS is pinned to elsewhere: the
                    injected secret fetcher verifies CDS before handing it a
                    sandbox token and taking a value back. */}}
-            {{- if .Values.cds.measurementsConfig }}
+            {{- if .Values.node.baked }}
+            - --image-policy-file=/run/c8s-node/cds.json
+            {{- else if .Values.cds.measurementsConfig }}
             - --image-policy-file=/etc/c8s-measurements/cds.json
             {{- else }}
             {{- range .Values.cds.measurements }}
@@ -110,7 +112,8 @@ spec:
             # this emptyDir rather than the immutable image.
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.cds.measurementsConfig }}
+            {{- include "c8s.nodeConfigMount" . | nindent 12 }}
+            {{- if and (not .Values.node.baked) .Values.cds.measurementsConfig }}
             - name: measurements-config
               mountPath: /etc/c8s-measurements
               readOnly: true
@@ -118,7 +121,8 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if .Values.cds.measurementsConfig }}
+        {{- include "c8s.nodeConfigVolume" . | nindent 8 }}
+        {{- if and (not .Values.node.baked) .Values.cds.measurementsConfig }}
         - name: measurements-config
           configMap:
             name: {{ include "c8s.fullname" . }}-measurements

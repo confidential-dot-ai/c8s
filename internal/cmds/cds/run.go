@@ -49,6 +49,10 @@ func run(cfg config) error {
 	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
+	dnsPatterns, err := compileDNSPatterns(cfg.dnsSANPatterns, cfg.dnsSANFile)
+	if err != nil {
+		return err
+	}
 	// Resolve before validateConfig: the secrets predicate reads the flat
 	// lists, so a config-mode start must fill them first.
 	pinned, err := cmdsutil.LoadImagePolicyValues(cmdsutil.ImagePolicyValuesConfig{
@@ -153,11 +157,6 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("render /measurements document: %w", err)
 	}
-
-	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
-	if err != nil {
-		return err
-	}
 	cnPattern, err := compilePattern("--allowed-cn-pattern", cfg.allowedCNPattern)
 	if err != nil {
 		return err
@@ -201,7 +200,7 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
-	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs)
+	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs, cfg.kubeconfig)
 	if err != nil {
 		return err
 	}

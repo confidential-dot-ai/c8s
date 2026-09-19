@@ -1,7 +1,32 @@
 {{/* Services helpers. See ../helpers/services/README.md. */}}
 
+{{/* c8s.attestationApiSocketPresent is non-empty when a node-local attestation
+API socket exists: either the chart runs the API or the node image bakes it. */}}
+{{- define "c8s.attestationApiSocketPresent" -}}
+{{- if or .Values.attestationApi.enabled .Values.node.baked -}}true{{- end -}}
+{{- end -}}
+
+{{/* Public launch policy only: the token-bearing /run/confos/launch is never
+mounted into pods. Directory requires verified staging to have completed. */}}
+{{- define "c8s.nodeConfigVolume" -}}
+{{- if .Values.node.baked }}
+- name: node-config
+  hostPath:
+    path: /run/c8s-node
+    type: Directory
+{{- end }}
+{{- end -}}
+
+{{- define "c8s.nodeConfigMount" -}}
+{{- if .Values.node.baked }}
+- name: node-config
+  mountPath: /run/c8s-node
+  readOnly: true
+{{- end }}
+{{- end -}}
+
 {{- define "c8s.attestationApiURL" -}}
-{{- if .Values.attestationApi.enabled -}}
+{{- if include "c8s.attestationApiSocketPresent" . -}}
 unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
@@ -13,16 +38,16 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketVolume" -}}
-{{- if .Values.attestationApi.enabled }}
+{{- if include "c8s.attestationApiSocketPresent" . }}
 - name: attestation-api-socket
   hostPath:
     path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
-    type: DirectoryOrCreate
+    type: {{ ternary "Directory" "DirectoryOrCreate" .Values.node.baked }}
 {{- end }}
 {{- end -}}
 
 {{- define "c8s.attestationApiSocketMount" -}}
-{{- if .Values.attestationApi.enabled }}
+{{- if include "c8s.attestationApiSocketPresent" . }}
 - name: attestation-api-socket
   mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
   readOnly: true
@@ -30,7 +55,7 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "bare-metal") -}}
+{{- if and (not (include "c8s.attestationApiSocketPresent" .)) (eq .Values.attestationApi.cvmMode "bare-metal") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:
