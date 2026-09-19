@@ -440,8 +440,8 @@ jobs:
         run: .github/scripts/cidata-tripwire.sh
 
       - name: assert measured services and Kubernetes integration converged
-        # components-ready verifies c8s-node-runtime and the full server policy,
-        # then reaches the baked CDS service over authenticated discovery.
+        # components-ready checks every baked workload and its policy mounts,
+        # then verifies the CDS front door against the full server policy.
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
