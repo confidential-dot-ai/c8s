@@ -94,13 +94,14 @@ jobs:
       actions: read
     uses: ./.github/workflows/tdx-metal-e2e.yml
     with:
-      # Empty = the merge head, installed on the node image built from that
-      # same commit. Only that pair works: the node image's measured base
+      # The same commit the SNP leg tests, installed on the node image built
+      # from it. Only that pair works: the node image's measured base
       # allowlist (confidential-os-builder mkosi/base/mkosi.profiles/c8s/
       # image-policy.yaml.in) pins ONE cds digest, its own build's, and CDS is
       # what admits everything else, so a chart from any other commit has its
-      # CDS denied at container create and nothing converges. The
-      # merge-triggered e2e chains off the node-image publish, so the image
-      # exists when this runs. This is the only lane in either repo that runs
+      # CDS denied at container create and nothing converges. An empty ref
+      # would resolve to this run's checkout, main's head when the run
+      # started, which in a merge burst is a later commit than the one whose
+      # publish triggered us. This is the only lane in either repo that runs
       # nri-image-policy fail-closed on TDX and asserts a real admission denial.
-      c8s_ref: ''
+      c8s_ref: ${{ inputs.c8s_ref }}
