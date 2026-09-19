@@ -43,8 +43,8 @@
 #   C8S_NAME=...       output name (default c8s → output/c8s/)
 #   C8S_MEMORY=...     default-memory recorded in the manifest / used by
 #                      `confos run` (default 16G — etcd OOMs at the 4G default)
-#   C8S_REF=...        bake the c8s components (nri plugin + the CDS digest in
-#                      the NRI floor) from a specific c8s COMMIT (short SHA)
+#   C8S_REF=...        bake the host binary and core container images
+#                      from a specific c8s COMMIT (short SHA)
 #                      instead of the pin in the c8s profile's mkosi.sync,
 #                      which resolves nri-image-policy:<ref> and cds:<ref> to
 #                      digests. The images must be published first (c8s
@@ -52,9 +52,10 @@
 #                      Use to test an unmerged c8s build end-to-end.
 #   C8S_BINARY=...     pre-stage this locally built multi-command c8s binary
 #                      instead of pulling nri-image-policy:<C8S_REF>. The
-#                      operator image and NRI floor still resolve from
-#                      C8S_REF. The image repro gate builds the PR's own
-#                      binary this way; published images never set it.
+#                      core container images still resolve from C8S_REF and
+#                      must support the chart's commands. The image repro gate
+#                      builds the PR's host binary this way; published images
+#                      never set it.
 #   CONFOS_DIR=...     confos checkout to build with (default: sibling of this
 #                      repo's checkout).
 #   MODULE_SIG_KEY_PEM / MODULE_SIG_KEY

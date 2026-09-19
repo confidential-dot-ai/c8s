@@ -7,7 +7,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "bakedServices": { "type": "boolean" }
+        "baked": { "type": "boolean" }
       }
     },
     "cds": {

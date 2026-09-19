@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boot real systemd with production launch/core units and role conditions.
+# Boot real systemd with production host bootstrap units and role conditions.
 # The test replaces service payloads and device/verifier I/O only; dependency
 # ordering, Requires= failures, role selection and presets remain production.
 # Driver mode needs Docker; --inside runs only in its disposable container.
@@ -92,17 +92,9 @@ WantedBy=multi-user.target
 EOF
 done
 
-# Locate units by their concrete service entrypoints, so renaming a unit is
-# harmless but dropping a core service or bypassing its wrapper is detected.
-core_units=()
-for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy; do
-    mapfile -t files < <(grep -lE "^ExecStart=.*node-services run $command$" "$SOURCE_UNITS"/*.service)
-    [[ ${#files[@]} == 1 ]] || { echo "expected one production unit for $command" >&2; exit 2; }
-    core_units+=("${files[0]##*/}")
-done
-mapfile -t nginx_units < <(grep -lE '^ExecStart=.*/nginx ' "$SOURCE_UNITS"/*.service)
-[[ ${#nginx_units[@]} == 1 ]] || { echo "expected one production nginx unit" >&2; exit 2; }
-core_units+=("${nginx_units[0]##*/}" cred-release.service nri-node-ip.service)
+# Application services are Kubernetes workloads. These host services retain
+# the authenticated launch dependency before any pod can start.
+core_units=(attest-proxy.service cred-release.service nri-node-ip.service)
 
 for unit in "${core_units[@]}"; do
     install -D -m644 "$SOURCE_UNITS/$unit" "/etc/systemd/system/$unit"
@@ -131,8 +123,8 @@ scenario_reset() {
     systemd-tmpfiles --create /etc/tmpfiles.d/confos-rke2.conf
     # Paths mounted read-only by production hardening normally exist after
     # RKE2 initializes. Payload stubs need empty equivalents for its sandbox.
-    mkdir -p /etc/confai /etc/rancher/rke2 /run/c8s-tls /run/ratls-mesh \
-        /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/agent /var/log/nginx /var/lib/nginx
+    mkdir -p /etc/confai /etc/rancher/rke2 \
+        /var/lib/rancher/rke2/server/tls /var/lib/rancher/rke2/agent
 }
 
 CASE=presets

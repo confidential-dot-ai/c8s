@@ -67,6 +67,7 @@ func NewCmd() *cobra.Command {
 
 	flags.BoolVar(&cfg.sanValidation, "san-validation", true, "require CSR IP SANs to equal the request source IP (false rejects CSRs carrying IP SANs)")
 	flags.StringSliceVar(&cfg.dnsSANPatterns, "dns-san-pattern", nil, "regex a CSR's DNS SANs may match in full; repeatable, and a SAN passes if it matches any one. The chart always supplies the in-cluster Service DNS pattern and appends a public hostname when router fronts a routed domain. A CSR carrying DNS SANs is rejected when none are set.")
+	flags.StringVar(&cfg.dnsSANFile, "dns-san-file", "", "Path to a file containing one literal DNS SAN to allow in addition to --dns-san-pattern")
 	flags.StringVar(&cfg.allowedCNPattern, "allowed-cn-pattern", "", "regex the CSR Subject CN must match in full (empty disables)")
 	flags.DurationVar(&cfg.readinessInterval, "readiness-interval", 10*time.Second, "")
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
@@ -138,6 +139,7 @@ type config struct {
 	maxHeaderBytes      int
 	sanValidation       bool
 	dnsSANPatterns      []string
+	dnsSANFile          string
 	allowedCNPattern    string
 	readinessInterval   time.Duration
 	minCAValidity       time.Duration

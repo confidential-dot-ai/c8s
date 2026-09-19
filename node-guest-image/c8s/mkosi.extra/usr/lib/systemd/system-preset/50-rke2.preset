@@ -1,7 +1,5 @@
 # Presets are applied at image build time. Both RKE2 units are enabled;
 # the authenticated launch verdict selects exactly one at each boot.
-# The packaged nginx default must never open an unauthenticated listener.
-disable nginx.service
 enable containerd-data-disk.service
 enable models-disk.service
 enable nri-node-ip.service
@@ -20,13 +18,6 @@ enable systemd-timesyncd.service
 # which gpu-cc-enforce now orders after (NRAS JWT nbf).
 enable systemd-time-wait-sync.service
 enable cred-release.service
-enable cds.service
-enable ratls-mesh.service
-enable ratls-mesh-iptables.service
-enable c8s-get-cert.service
-enable cds-attest.service
-enable allowlist-proxy.service
-enable c8s-nginx.service
 enable attest-proxy.service
 # Check the running LSM and exercise a real policy before RKE2 can start.
 enable apparmor-enforce.service

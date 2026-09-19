@@ -1,34 +1,68 @@
 package nodeservices
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/confidential-dot-ai/attestation-go/refvalues"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/launchconfig"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"gopkg.in/yaml.v3"
 )
 
-// Prepare writes only fixed service inputs. rootDir rebases paths for tests;
-// production calls it with an empty root after authenticating launch.yaml.
+// Prepare publishes a fixed set of nonsecret workload inputs from the
+// verified launch document loaded by LoadStaged. rootDir rebases paths for tests.
+// The root bootstrap service owns these files; pods mount them read-only.
 func Prepare(rootDir string, d *launchconfig.Document) error {
-	if d == nil {
-		return fmt.Errorf("missing staged launch configuration")
+	if err := validateRole(d); err != nil {
+		return err
 	}
 	path := func(name string) string { return filepath.Join(rootDir, name) }
-	read := func(name string) ([]byte, error) { return os.ReadFile(path(name)) }
-	write := func(name string, data []byte) error {
-		p := path(name)
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+	outputs := make(map[string][]byte)
+	for _, name := range []string{"peers.json", "cds.json"} {
+		data, err := readPolicy(path(launchDir+name), d.Image.Platform, name == "cds.json")
+		if err != nil {
 			return err
 		}
-		return fileutil.WriteAtomic(p, data, 0600)
+		outputs[name] = data
 	}
-	data, err := read("/usr/lib/c8s/image-policy.yaml")
+	bakedData, err := os.ReadFile(path("/usr/lib/c8s/allowlist-seed.json"))
+	if err != nil {
+		return err
+	}
+	bakedSeed, err := allowlist.ParseJSON(bakedData)
+	if err != nil {
+		return fmt.Errorf("baked workload seed: %w", err)
+	}
+	if d.Role == launchconfig.Server {
+		if net.ParseIP(d.TLSSAN) != nil {
+			return fmt.Errorf("staged TLS SAN must be a DNS hostname")
+		}
+		if err := cmdsutil.ValidateDNSName(d.TLSSAN); err != nil {
+			return fmt.Errorf("staged TLS SAN: %w", err)
+		}
+		pub := []byte(d.Server.OperatorPublicKey)
+		if _, err := operatorauth.ParsePublicKeysPEM(pub); err != nil {
+			return fmt.Errorf("staged server operator key: %w", err)
+		}
+		seed, err := mergedSeed(bakedData, d.Workloads)
+		if err != nil {
+			return err
+		}
+		outputs["operator-pubkey"] = pub
+		outputs["allowlist-seed.json"] = seed
+		outputs["tls-san"] = []byte(d.TLSSAN + "\n")
+	}
+
+	data, err := os.ReadFile(path("/usr/lib/c8s/image-policy.yaml"))
 	if err != nil {
 		return err
 	}
@@ -44,6 +78,18 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 	if !ok {
 		return fmt.Errorf("baked NRI policy missing pull")
 	}
+	baseData, err := json.Marshal(a["base"])
+	if err != nil {
+		return fmt.Errorf("baked NRI base: %w", err)
+	}
+	base, err := allowlist.ParseJSON(baseData)
+	if err != nil {
+		return fmt.Errorf("baked NRI base: %w", err)
+	}
+	if err := mergeWorkloads(base, bakedSeed, true); err != nil {
+		return fmt.Errorf("merge chart seed into NRI base: %w", err)
+	}
+	a["base"] = base
 	pull["url"] = d.CDSURL()
 	pull["cds_measurements_config"] = launchDir + "cds.json"
 	delete(pull, "cds_measurements")
@@ -52,59 +98,102 @@ func Prepare(rootDir string, d *launchconfig.Document) error {
 	if err != nil {
 		return err
 	}
-	if err := write("/etc/nri/conf.d/image-policy.yaml", data); err != nil {
-		return err
-	}
-	if d.Role != launchconfig.Server {
-		return nil
-	}
 
-	data, err = read("/usr/lib/c8s/nginx.conf.in")
+	// Validate every input before publishing anything. RKE2 only starts after
+	// this preparation succeeds, so pods never observe partially staged input.
+	publicPath := path(PublicDir)
+	if err := os.MkdirAll(publicPath, 0755); err != nil {
+		return err
+	}
+	if err := os.Chmod(publicPath, 0755); err != nil {
+		return err
+	}
+	if d.Role == launchconfig.Agent {
+		for _, name := range []string{"operator-pubkey", "allowlist-seed.json", "tls-san"} {
+			if err := os.Remove(filepath.Join(publicPath, name)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	for name, data := range outputs {
+		if err := fileutil.WriteAtomic(filepath.Join(publicPath, name), data, 0644); err != nil {
+			return err
+		}
+	}
+	policyPath := path("/etc/nri/conf.d/image-policy.yaml")
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0755); err != nil {
+		return err
+	}
+	return fileutil.WriteAtomic(policyPath, data, 0600)
+}
+
+// readPolicy refuses partial pins even when the staged file parses. The
+// authenticated launcher emits an anchored tuple for every permitted role.
+func readPolicy(path, platform string, serverOnly bool) ([]byte, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !strings.Contains(string(data), "c8s-node.invalid") {
-		return fmt.Errorf("baked nginx template missing hostname")
-	}
-	if err := write(launchDir+"nginx.conf", []byte(strings.ReplaceAll(string(data), "c8s-node.invalid", d.TLSSAN))); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(path("/run/c8s-tls"), 0755); err != nil {
-		return err
-	}
-	data, err = read("/usr/lib/c8s/allowlist-seed.json")
+	pins, err := refvalues.Parse(data)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("staged identity policy %s: %w", path, err)
 	}
+	family, err := teetypes.ParseFamily(platform)
+	if err != nil || pins.Family != family || len(pins.Images) == 0 || (serverOnly && len(pins.Images) != 1) {
+		return nil, fmt.Errorf("staged identity policy %s has invalid family or image count", path)
+	}
+	for _, pin := range pins.Images {
+		if len(pin.Anchor) == 0 || (family == teetypes.FamilyTDX && (len(pin.RTMRs[1]) == 0 || len(pin.RTMRs[2]) == 0)) {
+			return nil, fmt.Errorf("staged identity policy %s requires complete image and operator pins", path)
+		}
+	}
+	return data, nil
+}
+
+func mergedSeed(data []byte, workloads string) ([]byte, error) {
 	seed, err := allowlist.ParseJSON(data)
 	if err != nil {
-		return fmt.Errorf("baked workload seed: %w", err)
+		return nil, fmt.Errorf("baked workload seed: %w", err)
 	}
-	if d.Workloads != "" {
-		extra, err := allowlist.ParseJSON([]byte(d.Workloads))
+	if workloads != "" {
+		extra, err := allowlist.ParseJSON([]byte(workloads))
 		if err != nil {
-			return fmt.Errorf("launch workloads: %w", err)
+			return nil, fmt.Errorf("launch workloads: %w", err)
 		}
-		for name, workload := range extra.Workloads {
-			if _, exists := seed.Workloads[name]; exists {
-				return fmt.Errorf("launch workload %q replaces a baked component", name)
+		if err := mergeWorkloads(seed, extra, false); err != nil {
+			return nil, fmt.Errorf("launch workloads: %w", err)
+		}
+	}
+	return seed.Canonical()
+}
+
+// allowIdentical is used only for the two measured bootstrap sources. Signed
+// tenant workloads may never replace a component, even with identical content.
+func mergeWorkloads(base, extra *allowlist.Allowlist, allowIdentical bool) error {
+	for name, workload := range extra.Workloads {
+		if existing, exists := base.Workloads[name]; exists {
+			if allowIdentical {
+				old, err := json.Marshal(existing)
+				if err != nil {
+					return err
+				}
+				incoming, err := json.Marshal(workload)
+				if err != nil {
+					return err
+				}
+				// Both inputs were normalized by ParseJSON. Compare every
+				// field, so a collision cannot loosen the measured policy.
+				if bytes.Equal(old, incoming) {
+					continue
+				}
 			}
-			seed.Workloads[name] = workload
+			return fmt.Errorf("workload %q replaces a baked component", name)
 		}
+		base.Workloads[name] = workload
 	}
-	// Normalize the combined document too: per-document validation alone would
-	// miss conflicting policies for one digest across the baked and launch sets.
-	data, err = json.Marshal(seed)
-	if err != nil {
-		return err
-	}
-	seed, err = allowlist.ParseJSON(data)
-	if err != nil {
+	// Validate the combined document as well as each individual input.
+	if err := base.Normalize(); err != nil {
 		return fmt.Errorf("combined workload policy: %w", err)
 	}
-	data, err = seed.Canonical()
-	if err != nil {
-		return err
-	}
-	return write(launchDir+"allowlist-seed.json", data)
+	return nil
 }

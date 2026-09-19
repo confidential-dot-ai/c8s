@@ -22,9 +22,11 @@ digest-pinned components when `bootstrapAllowlist.deriveComponents` is true,
 plus the CDS self-entry and enabled router nginx. Nginx is independently versioned
 and derives from its own image values. Argv-pinned components and RKE2
 containerd-prep images are seeded through `c8s.argvPinnedEntries`.
-With `node.bakedServices=true`, only the operator/get-cert image is derived;
-CDS, nginx and the other host services need no container image exemptions.
-The local-path helper remains argv-pinned in the seed for baked nodes.
+With `node.baked=true`, the same derivation covers the operator/get-cert,
+CDS, mesh and nginx images rendered into the measured guest. The host stages
+this seed merged with signed workload entries for CDS; the image also admits
+the core images in its NRI bootstrap floor. The local-path helper remains
+argv-pinned in the seed for baked nodes.
 
 `c8s.anyArgvDigests` extracts workload digests whose command, args, environment,
 and mount policies are all unconstrained. An omitted mount policy is `deny`

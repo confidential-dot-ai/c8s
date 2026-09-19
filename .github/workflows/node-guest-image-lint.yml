@@ -289,8 +289,8 @@ jobs:
       - name: Run the systemd-level harness
         run: make test-node-guest-image-role-systemd
 
-  nginx-systemd:
-    name: nginx logging and lifecycle (systemd)
+  baked-workloads:
+    name: rendered workloads and measured image archives
     needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -303,10 +303,12 @@ jobs:
         with:
           version: v3.14.4
 
-      - name: Check the nginx systemd harness
-        run: shellcheck -x -P SCRIPTDIR node-guest-image/tests/nginx-systemd-test.sh
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
-      - name: Run the production nginx unit and rendered configuration
-        env:
-          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
-        run: make test-node-guest-image-nginx-systemd
+      - name: Check the image archiver and offline fixture
+        run: shellcheck node-guest-image/c8s/airgap-images.sh node-guest-image/tests/airgap-images-test.sh
+
+      - name: Validate complete workloads and preserved image pins
+        run: |
+          go test -count=1 ./cmd/c8s -run TestNodeImage
+          make test-node-guest-image-airgap
