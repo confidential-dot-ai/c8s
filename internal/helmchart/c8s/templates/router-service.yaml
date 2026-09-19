@@ -1,9 +1,10 @@
-{{- if and .Values.router.enabled (not .Values.node.bakedServices) }}
+{{- if .Values.router.enabled }}
 {{- $svc := .Values.router.service }}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "router.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "router.labels" . | nindent 4 }}
   {{- with $svc.annotations }}

@@ -4,13 +4,17 @@
 {{- $root := .root -}}
 - name: c8s-cert
   image: {{ include "c8s.image" $root }}
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
   restartPolicy: Always
   args:
     - get-cert
     - --cds-url={{ include "c8s.cdsURL" $root }}
     - --attestation-api-url={{ include "c8s.attestationApiURL" $root }}
+    {{- if .sanFile }}
+    - --san-file={{ .sanFile }}
+    {{- else }}
     - --san={{ .san }}
+    {{- end }}
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
     {{- with .caOut }}
@@ -49,7 +53,7 @@
 # bypasses the ENTRYPOINT so the full path must match.
 - name: c8s-cert-wait
   image: {{ include "c8s.image" $root }}
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
   command:
     - /c8s
     - probe-file

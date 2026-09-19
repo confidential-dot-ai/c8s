@@ -429,14 +429,15 @@ func startRunServer(t *testing.T, cfg config) string {
 }
 
 // TestRun_LogsMeasurementPinning: with --measurements set, startup must log the
-// pinning-enabled line, not the UNSAFE empty-allowlist warning. The bad DNS
-// pattern exits startup right after that log line.
+// pinning-enabled line, not the UNSAFE empty-allowlist warning. DNS validation
+// succeeds first; a bad CN pattern stops startup after the pinning log.
 func TestRun_LogsMeasurementPinning(t *testing.T) {
 	api := newHealthyAttestationApi(t)
 	cfg := validRunConfig(t, api.URL)
 	cfg.logLevel = "info"
 	cfg.measurements = []string{strings.Repeat("ab", 48)}
-	cfg.dnsSANPatterns = []string{"("}
+	cfg.dnsSANPatterns = []string{`^service[.]example$`}
+	cfg.allowedCNPattern = "("
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -454,8 +455,8 @@ func TestRun_LogsMeasurementPinning(t *testing.T) {
 		t.Fatalf("read captured logs: %v", err)
 	}
 
-	if runErr == nil || !strings.Contains(runErr.Error(), "--dns-san-pattern") {
-		t.Fatalf("run() error = %v, want --dns-san-pattern failure", runErr)
+	if runErr == nil || !strings.Contains(runErr.Error(), "--allowed-cn-pattern") {
+		t.Fatalf("run() error = %v, want --allowed-cn-pattern failure", runErr)
 	}
 	if !strings.Contains(string(logged), "measurement pinning enabled") {
 		t.Fatalf("startup log missing pinning-enabled line:\n%s", logged)

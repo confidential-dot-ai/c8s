@@ -58,15 +58,13 @@ if grep -qx 'CONFIG_MODULES=y' "$ngi/kernel/c8s.config"; then
   fi
 fi
 
-# The baked NRI base allowlist is a template: its permissive workloads
-# carry @-token digests the sync fills with ref-resolved values; a hardcoded
-# sha256 would bake a stale digest the fail-closed plugin can't reconcile
-# with the ref. The marked block is exempt: systemfloor generates it from
-# the pinned RKE2 airgap bundles (see mkosi.sync).
+# The baked NRI template contains only the generated RKE2 system floor.
+# The complete chart component seed is merged into it before containerd starts;
+# duplicating component digests here would drift from the rendered workloads.
 policy="$ngi/c8s/image-policy.yaml.in"
 [ -f "$policy" ] || { echo "::error::NRI base template $policy not found"; exit 1; }
 if sed '/# BEGIN rke2 system images/,/# END rke2 system images/d' "$policy"               | grep -qE 'sha256:[a-f0-9]{64}'; then
-  echo "::error::$policy has a hardcoded base digest outside the generated system base; use the @OPERATOR_DIGEST@ token (rendered from C8S_REF by mkosi.sync)"
+  echo "::error::$policy has a hardcoded base digest outside the generated system base; derive core component pins from the build-time chart seed"
   exit 1
 fi
 
@@ -305,7 +303,9 @@ grep -qFx 'disable apparmor.service' "$ngi/c8s/mkosi.extra/usr/lib/systemd/syste
 sync="$ngi/c8s/mkosi.sync"
 for token in '"$C8S_TARGET" node-image render' '--image-digest "$OPERATOR_DIGEST"' \
              '--kube-version "${RKE2_VERSION%%+*}"' \
-             'c8s-integration.yaml' '/usr/lib/c8s/nginx.conf.in' '/usr/lib/c8s/allowlist-seed.json'; do
+             'c8s-integration.yaml' '/usr/lib/c8s/allowlist-seed.json' \
+             '--cds-image-digest "$CDS_DIGEST"' '--ratls-mesh-image-digest "$MESH_DIGEST"' \
+             'c8s/airgap-images.sh' '"$out/images.txt"'; do
   if ! grep -qF -- "$token" "$sync"; then
     echo "::error::$sync must stage the measured node integration (missing: $token)"
     exit 1
@@ -367,44 +367,25 @@ if grep -qE 'joindata|defaulting to server|set_legacy_server_role' "$role_sh"; t
   exit 1
 fi
 
-for command in cds mesh mesh-sync get-cert cds-attest allowlist-proxy attest-proxy; do
-  mapfile -t service_files < <(grep -lE "^ExecStart=.*node-services run $command$" "$units"/*.service)
-  if [ "${#service_files[@]}" != 1 ]; then
-    echo "::error::expected one baked systemd unit for node-services run $command"
+# Only attestation access, node inventory and credential release remain host
+# services. Core application lifecycle belongs to the baked Kubernetes chart.
+for service in attest-proxy nri-node-ip cred-release; do
+  require_launch_dependency "$units/$service.service"
+  if ! grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$preset must enable $service.service"
     exit 1
   fi
-  service=${service_files[0]}
-  require_launch_dependency "$service"
-  if ! grep -qxF "enable ${service##*/}" "$preset"; then
-    echo "::error::$preset must enable ${service##*/}"
-    exit 1
-  fi
-  case "$command" in
-    mesh|mesh-sync|attest-proxy)
-      if grep -qF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must run on both authenticated roles"
-        exit 1
-      fi ;;
-    *)
-      if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "$service"; then
-        echo "::error::$service must be server-only"
-        exit 1
-      fi ;;
-  esac
 done
-mapfile -t nginx_files < <(grep -lE '^ExecStart=.*/nginx ' "$units"/*.service)
-if [ "${#nginx_files[@]}" != 1 ]; then
-  echo "::error::expected one baked nginx service"
+for service in cds ratls-mesh ratls-mesh-iptables c8s-get-cert cds-attest allowlist-proxy c8s-nginx; do
+  if [ -e "$units/$service.service" ] || grep -qxF "enable $service.service" "$preset"; then
+    echo "::error::$service must run from measured Kubernetes manifests, not a duplicate host unit"
+    exit 1
+  fi
+done
+if ! grep -qF 'ExecStart=/usr/local/bin/c8s attest-proxy ' "$units/attest-proxy.service"; then
+  echo "::error::host attestation access must retain its fixed proxy entrypoint"
   exit 1
 fi
-require_launch_dependency "${nginx_files[0]}"
-if ! grep -qxF 'ConditionPathExists=/run/confos/role-server' "${nginx_files[0]}" \
-   || ! grep -qxF "enable ${nginx_files[0]##*/}" "$preset" \
-   || ! grep -qxF 'disable nginx.service' "$preset"; then
-  echo "::error::only the authenticated server nginx service may be enabled"
-  exit 1
-fi
-require_launch_dependency "$units/cred-release.service"
 
 # A host-accessible arbitrary REPORTDATA API would let a host borrow a real
 # node's attestation for its own keys. The finalize hook preserves the selected
