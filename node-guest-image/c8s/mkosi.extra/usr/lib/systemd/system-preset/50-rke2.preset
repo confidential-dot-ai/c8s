@@ -39,6 +39,9 @@ enable rke2-agent.service
 # operator and trip cred-release's JWT clock-skew check. Egress is via the
 # CVM's masquerade NAT.
 enable systemd-timesyncd.service
+# Makes time-sync.target block until the clock is actually synchronised,
+# which gpu-cc-enforce now orders after (NRAS JWT nbf).
+enable systemd-time-wait-sync.service
 # Attested operator credential release. Enabled always, but its
 # ConditionPathExists on the opkeydata disk means it only starts on operator
 # boots — a no-op on nodes launched without --operator-key.
