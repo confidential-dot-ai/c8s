@@ -74,6 +74,14 @@ while [ $# -gt 0 ]; do
     shift
 done
 ep=${url##*/}
+# Real curl reads the body from a file when the argument starts with @
+# (gpu-cc-enforce does this so an 8-GPU /verify bundle cannot exceed
+# ARG_MAX). Resolve it here, or the recorded request would be the
+# filename instead of the body and every request assertion would pass
+# vacuously.
+case "$data" in
+    @?*) data=$(cat "${data#@}") ;;
+esac
 [ -n "$data" ] && printf '%s' "$data" > "$API_DIR/$ep.req"
 [ -e "$API_DIR/$ep.code" ] || { echo "curl: (7) Failed to connect" >&2; exit 7; }
 code=$(cat "$API_DIR/$ep.code")

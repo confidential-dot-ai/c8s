@@ -91,9 +91,16 @@ gpu_count=$(printf '%s\n' "$gpu_uuids" | grep -c . || true)
 # with the status and body.
 post() {
     body=$(mktemp)
+    # The request JSON must NOT travel in argv: an 8-GPU /verify bundle exceeds
+    # ARG_MAX and curl dies with "Argument list too long", which fails the gate
+    # and powers the node off. Measured on b200-dev-1: 1 GPU fits, 8 does not.
+    # Feed it on stdin instead, which has no size limit.
+    req=$(mktemp)
+    printf '%s' "$2" > "$req"
     code=$(curl -sS -o "$body" -w '%{http_code}' -X POST \
-        -H 'content-type: application/json' --data-binary "$2" "$API$1" 2>&1) \
-        || { rm -f "$body"; fail "POST $1: $code"; }
+        -H 'content-type: application/json' --data-binary @"$req" "$API$1" 2>&1) \
+        || { rm -f "$body" "$req"; fail "POST $1: $code"; }
+    rm -f "$req"
     if [ "$code" != 200 ]; then
         resp=$(cat "$body"); rm -f "$body"
         fail "POST $1 returned $code: $resp"

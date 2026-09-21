@@ -7,8 +7,13 @@ Description=Refuse to start the node unless every NVIDIA GPU is in confidential-
 # The driver must be resident (persistenced) and the baked attestation-api
 # reachable; both are Wants, not Requires, so a GPU-less boot of a
 # composition without them is a no-op. Egress is needed for NRAS.
-After=nvidia-persistenced.service attestation-api.service network-online.target
-Wants=nvidia-persistenced.service attestation-api.service network-online.target
+# The NRAS token carries nbf=now. A CVM boots with an unsynchronised clock,
+# so attestation must not run until time-sync.target is reached, otherwise
+# /verify fails with 'JWT is not yet valid (nbf)' and FailureAction powers
+# the node off. Measured on b200-dev-1: GPUs pass the CC-mode check, then
+# /verify returns 422 on nbf.
+After=nvidia-persistenced.service attestation-api.service network-online.target time-sync.target
+Wants=nvidia-persistenced.service attestation-api.service network-online.target time-sync.target
 Before=nvidia-cc-ready.service rke2-server.service rke2-agent.service
 
 [Service]
