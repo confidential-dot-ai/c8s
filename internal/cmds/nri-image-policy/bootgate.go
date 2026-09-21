@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -37,22 +38,15 @@ type fatalAction func() error
 // disabled gate.
 type bootGate struct {
 	markerPath string
-	logger     loggerish
+	logger     *slog.Logger
 	powerOff   fatalAction
 	// exit ends the process when powering off is not available; a plugin that
 	// stays connected would keep admitting containers.
 	exit func(code int)
 }
 
-// loggerish is the slog surface the gate uses, so a test can capture it.
-type loggerish interface {
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Error(msg string, args ...any)
-}
-
 // newBootGate returns nil unless the configuration asks for the check.
-func newBootGate(cfg *config, logger loggerish) *bootGate {
+func newBootGate(cfg *config, logger *slog.Logger) *bootGate {
 	if !cfg.Policy.FatalExisting {
 		return nil
 	}
@@ -92,8 +86,8 @@ func (g *bootGate) check(ctx context.Context, p *plugin, pods []*api.PodSandbox,
 	// nothing ran before admission, so stopping it would prove nothing. Only
 	// the node image sets policy.fatal_existing; a hosted cluster re-checks
 	// what it finds against the allowlist and stops what fails (plugin.go).
-	for _, ctr := range logLines(ctx, p, pods, ctrs) {
-		g.logger.Error("container running before admission was in place", ctr...)
+	for _, attrs := range containerAttrs(ctx, p, pods, ctrs) {
+		g.logger.LogAttrs(ctx, slog.LevelError, "container running before admission was in place", attrs...)
 	}
 	g.fatal("containers were running when the image-policy plugin first registered")
 	return false
@@ -132,27 +126,28 @@ func (g *bootGate) claimBoot() (bool, error) {
 	return true, f.Close()
 }
 
-// logLines describes every running container for the operator's post-mortem:
-// what ran is the whole value of the log, since the node is about to stop.
-func logLines(ctx context.Context, p *plugin, pods []*api.PodSandbox, ctrs []*api.Container) [][]any {
+// containerAttrs describes every running container, one log record each, for
+// the operator's post-mortem: what ran is the whole value of the log, since
+// the node is about to stop.
+func containerAttrs(ctx context.Context, p *plugin, pods []*api.PodSandbox, ctrs []*api.Container) [][]slog.Attr {
 	podByID := make(map[string]*api.PodSandbox, len(pods))
 	for _, pod := range pods {
 		podByID[pod.GetId()] = pod
 	}
-	lines := make([][]any, 0, len(ctrs))
+	records := make([][]slog.Attr, 0, len(ctrs))
 	for _, ctr := range ctrs {
 		imageRef := ctr.GetAnnotations()[annotationImageName]
-		line := []any{
-			"container", ctr.GetName(),
-			"image", imageRef,
-			"digest", p.resolveDigest(ctx, imageRef),
+		attrs := []slog.Attr{
+			slog.String("container", ctr.GetName()),
+			slog.String("image", imageRef),
+			slog.String("digest", p.resolveDigest(ctx, imageRef)),
 		}
 		if pod := podByID[ctr.GetPodSandboxId()]; pod != nil {
-			line = append(line, "namespace", pod.GetNamespace(), "pod", pod.GetName())
+			attrs = append(attrs, slog.String("namespace", pod.GetNamespace()), slog.String("pod", pod.GetName()))
 		}
-		lines = append(lines, line)
+		records = append(records, attrs)
 	}
-	return lines
+	return records
 }
 
 // escalateOnRestart reports whether the startup check's denial should stop the
