@@ -361,8 +361,7 @@ for deploy in c8s-operator c8s-cds c8s-router; do
     kubectl -n "$NS" wait --for=condition=Available "deploy/$deploy" --timeout=180s \
         || fail "$deploy not Available"
 done
-kubectl -n "$NS" rollout status ds/c8s-ratls-mesh --timeout=240s || fail "ratls-mesh not ready"
-pass "operator, CDS, router and ratls-mesh all Ready after c8s install"
+pass "operator, CDS and router Ready after c8s install"
 
 kubectl get crd confidentialworkloads.confidential.ai >/dev/null || fail "ConfidentialWorkload CRD missing"
 kubectl get mutatingwebhookconfiguration c8s-pod-injector >/dev/null || fail "pod-injector webhook config missing"
@@ -613,6 +612,8 @@ base_inbound="$(mesh_metric "$inbound")"
 code="$(kubectl exec it-mesh-client -- curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://$POD_IP:8080/" || true)"
 [ "$code" = "200" ] || fail "pod-IP request to the cw workload failed (got $code); the mesh-wrapped path must work"
 await_metric_above "$inbound" "${base_inbound:-0}" "mesh inbound connection counter"
+kubectl -n "$NS" wait --for=condition=Ready pod/"$MESH_POD" --timeout=240s \
+    || fail "ratls-mesh not ready after verified pod interception"
 pass "pod-IP dial to the cw workload is mesh-wrapped (inbound counter moved)"
 
 # Service VIP over the cw pods: the mesh skips ClusterIPs by design, so the
