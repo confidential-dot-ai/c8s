@@ -707,6 +707,7 @@ func clusterKubectl(applied, extra string) string {
 "get nodes -l role=cds -o name") echo node/node-a ;;
 "get nodes -l confidential.ai/sev-snp=true -o name") echo node/node-a ;;
 "get nodes -o json") echo '{"items":[{"metadata":{"name":"node-a"},"spec":{"podCIDR":"10.42.0.0/24"},"status":{"addresses":[{"type":"InternalIP","address":"192.0.2.10"}]}}]}' ;;
+"get daemonsets --all-namespaces -o json") echo '{"items":[]}' ;;
 "get pods --all-namespaces -o json") echo '{"items":[]}' ;;
 "apply -f -") /bin/cat >> '` + applied + `' ;;
 esac`

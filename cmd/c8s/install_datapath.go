@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -20,23 +21,23 @@ func preflightMeshDatapath(ctx context.Context, values map[string]any) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "kubectl", "get", "pods", "--all-namespaces", "-o", "json").Output()
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "daemonsets", "--all-namespaces", "-o", "json").Output()
 	if err != nil {
-		return fmt.Errorf("inspect mesh node datapath: %w", err)
+		return fmt.Errorf("inspect mesh node datapath: %w", withStderr(err))
 	}
-	var pods corev1.PodList
-	if err := json.Unmarshal(out, &pods); err != nil {
-		return fmt.Errorf("decode mesh datapath pods: %w", err)
+	var agents appsv1.DaemonSetList
+	if err := json.Unmarshal(out, &agents); err != nil {
+		return fmt.Errorf("decode mesh datapath agents: %w", err)
 	}
-	for _, pod := range pods.Items {
-		if isCiliumAgent(pod) {
-			return fmt.Errorf("ratls-mesh cannot enforce traffic on Cilium (agent %s/%s): pod-to-pod traffic bypasses host PREROUTING and FORWARD, disabling RA-TLS interception and the confidential-workload guard; use a verified host-netfilter datapath before installing the mesh", pod.Namespace, pod.Name)
+	for _, agent := range agents.Items {
+		if isCiliumAgent(agent.Spec.Template) {
+			return fmt.Errorf("ratls-mesh cannot enforce traffic on Cilium (agent %s/%s): pod-to-pod traffic bypasses host PREROUTING and FORWARD, disabling RA-TLS interception and the confidential-workload guard; use a verified host-netfilter datapath before installing the mesh", agent.Namespace, agent.Name)
 		}
 	}
 	return nil
 }
 
-func isCiliumAgent(pod corev1.Pod) bool {
+func isCiliumAgent(pod corev1.PodTemplateSpec) bool {
 	if pod.Labels["k8s-app"] == "cilium" || pod.Labels["app.kubernetes.io/name"] == "cilium-agent" {
 		return true
 	}

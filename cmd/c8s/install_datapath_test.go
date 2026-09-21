@@ -10,21 +10,21 @@ import (
 
 func TestPreflightMeshDatapath(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		pods string
-		want string
+		name   string
+		agents string
+		want   string
 	}{
-		{"cilium label", `{"items":[{"metadata":{"namespace":"kube-system","name":"cilium-a","labels":{"k8s-app":"cilium"}}}]}`, "cannot enforce traffic on Cilium"},
-		{"renamed hardened agent", `{"items":[{"spec":{"containers":[{"image":"registry.example:5000/rancher/hardened-cilium:v1"}]}}]}`, "cannot enforce traffic on Cilium"},
-		{"digest agent", `{"items":[{"spec":{"containers":[{"image":"quay.io/cilium/cilium@sha256:abc"}]}}]}`, "cannot enforce traffic on Cilium"},
-		{"rke2 mirrored agent", `{"items":[{"spec":{"containers":[{"image":"rancher/mirrored-cilium-cilium:v1.19.6"}]}}]}`, "cannot enforce traffic on Cilium"},
-		{"operator only", `{"items":[{"spec":{"containers":[{"image":"quay.io/cilium/operator-generic:v1"}]}}]}`, ""},
-		{"canal", `{"items":[{"metadata":{"labels":{"k8s-app":"canal"}}}]}`, ""},
-		{"invalid response", `invalid`, "decode mesh datapath pods"},
+		{"cilium label", `{"items":[{"spec":{"template":{"metadata":{"namespace":"kube-system","name":"cilium-a","labels":{"k8s-app":"cilium"}}}}}]}`, "cannot enforce traffic on Cilium"},
+		{"renamed hardened agent", `{"items":[{"spec":{"template":{"spec":{"containers":[{"image":"registry.example:5000/rancher/hardened-cilium:v1"}]}}}}]}`, "cannot enforce traffic on Cilium"},
+		{"digest agent", `{"items":[{"spec":{"template":{"spec":{"containers":[{"image":"quay.io/cilium/cilium@sha256:abc"}]}}}}]}`, "cannot enforce traffic on Cilium"},
+		{"rke2 mirrored agent", `{"items":[{"spec":{"template":{"spec":{"containers":[{"image":"rancher/mirrored-cilium-cilium:v1.19.6"}]}}}}]}`, "cannot enforce traffic on Cilium"},
+		{"operator only", `{"items":[{"spec":{"template":{"spec":{"containers":[{"image":"quay.io/cilium/operator-generic:v1"}]}}}}]}`, ""},
+		{"canal", `{"items":[{"spec":{"template":{"metadata":{"labels":{"k8s-app":"canal"}}}}}]}`, ""},
+		{"invalid response", `invalid`, "decode mesh datapath agents"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeBin(t)
-			f.tool(t, "kubectl", "cat <<'JSON'\n"+tc.pods+"\nJSON")
+			f.tool(t, "kubectl", "cat <<'JSON'\n"+tc.agents+"\nJSON")
 			err := preflightMeshDatapath(context.Background(), map[string]any{"ratlsMesh": map[string]any{"enabled": true}})
 			if tc.want == "" && err != nil {
 				t.Fatal(err)
@@ -46,9 +46,9 @@ func TestPreflightMeshDatapath(t *testing.T) {
 	})
 	t.Run("inspection fails closed", func(t *testing.T) {
 		f := newFakeBin(t)
-		f.tool(t, "kubectl", "exit 1")
-		if err := preflightMeshDatapath(context.Background(), map[string]any{"ratlsMesh": map[string]any{"enabled": true}}); err == nil {
-			t.Fatal("accepted failed datapath inspection")
+		f.tool(t, "kubectl", "echo forbidden >&2; exit 1")
+		if err := preflightMeshDatapath(context.Background(), map[string]any{"ratlsMesh": map[string]any{"enabled": true}}); err == nil || !strings.Contains(err.Error(), "forbidden") {
+			t.Fatalf("error must explain failed datapath inspection: %v", err)
 		}
 	})
 }
