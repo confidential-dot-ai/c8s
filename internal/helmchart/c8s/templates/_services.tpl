@@ -47,7 +47,15 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.cdsURL" -}}
+{{- if .Values.ratlsMesh.enabled -}}
+https://{{ include "c8s.cdsMeshName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
+{{- else -}}
 https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
+{{- end -}}
+{{- end -}}
+
+{{- define "c8s.cdsMeshName" -}}
+{{ include "c8s.cdsName" . }}-mesh
 {{- end -}}
 
 {{- define "c8s.trustRootURL" -}}

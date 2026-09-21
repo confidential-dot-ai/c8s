@@ -270,3 +270,24 @@ spec:
       {{- if and (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
       nodePort: {{ .Values.cds.service.nodePort }}
       {{- end }}
+{{- if .Values.ratlsMesh.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "c8s.cdsMeshName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: cds
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: cds
+  ports:
+    - name: https
+      port: {{ .Values.cds.port }}
+      targetPort: https
+{{- end }}

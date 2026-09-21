@@ -180,7 +180,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	cert := routerGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert,
 		"get-cert",
-		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--cds-url=https://c8s-cds-mesh.c8s-system.svc:8443",
 		"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock",
 		"--san=c8s-router.c8s-system.svc",
 		"--out=/tls/cert.pem",
@@ -212,7 +212,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
 		"--get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator:dev",
-		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--cds-url=https://c8s-cds-mesh.c8s-system.svc:8443",
 		"--get-cert-renew-interval=2h",
 	} {
 		if !slices.Contains(args, want) {
@@ -1486,7 +1486,7 @@ func TestChartOperatorDialsTrustRootOverHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	const wantURL = "https://c8s-cds.c8s-system.svc:8443"
+	const wantURL = "https://c8s-cds-mesh.c8s-system.svc:8443"
 
 	operatorArgs := renderedOperatorArgs(t, out)
 	assertContainerHasArg(t, "operator", operatorArgs, "--cds-url="+wantURL)
@@ -4530,22 +4530,20 @@ func TestChartCDSIsInMemorySingleton(t *testing.T) {
 	}
 }
 
-// TestChartPointsClientsAtCDS proves the operator-injected get-cert and the
-// ratls-mesh daemonset both resolve their single --cds-url to the cds Service,
-// and the mesh runs in cds cert-mode — this locks that wiring.
 func TestChartPointsClientsAtCDS(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	const wantURL = "https://c8s-cds.c8s-system.svc:8443"
+	const wantURL = "https://c8s-cds-mesh.c8s-system.svc:8443"
 
 	operatorArgs := renderedOperatorArgs(t, out)
 	assertContainerHasArg(t, "operator", operatorArgs, "--cds-url="+wantURL)
 
 	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
-	if got, ok := containerArgValue(meshArgs, "--cds-url"); !ok || got != wantURL {
-		t.Fatalf("ratls-mesh --cds-url = (%q, %v), want %q\nargs: %v", got, ok, wantURL, meshArgs)
+	const wantBootstrapURL = "https://c8s-cds.c8s-system.svc:8443"
+	if got, ok := containerArgValue(meshArgs, "--cds-url"); !ok || got != wantBootstrapURL {
+		t.Fatalf("ratls-mesh --cds-url = (%q, %v), want %q\nargs: %v", got, ok, wantBootstrapURL, meshArgs)
 	}
 	if got, ok := containerArgValue(meshArgs, "--cert-mode"); !ok || got != "cds" {
 		t.Fatalf("ratls-mesh --cert-mode = (%q, %v), want cds\nargs: %v", got, ok, meshArgs)

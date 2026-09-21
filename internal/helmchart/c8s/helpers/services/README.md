@@ -23,8 +23,9 @@ against each consumer's node. The operator forwards the URL to tenant sidecars
 with the placeholder intact, so its own container must leave `HOST_IP` unset.
 `c8s.attestationApiConfig` takes a dict with `root` and renders the API's TOML.
 
-`c8s.cdsURL` builds the in-cluster CDS Service URL; `c8s.trustRootURL` delegates
-to it. `c8s.nriCDSURL` uses `nriImagePolicy.cds.url` when supplied, otherwise
+`c8s.cdsURL` targets the headless CDS mesh Service when `ratlsMesh.enabled=true`
+and the CDS Service otherwise; `c8s.trustRootURL` delegates to it.
+`c8s.nriCDSURL` uses `nriImagePolicy.cds.url` when supplied, otherwise
 `https://127.0.0.1:<cds.service.nodePort>` for the host plugin.
 
 `c8s.router.resolver` honors `router.nginx.resolver`. Otherwise `nriImagePolicy.distro=rke2`

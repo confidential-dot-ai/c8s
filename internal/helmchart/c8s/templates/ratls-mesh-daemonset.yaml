@@ -4,14 +4,12 @@
   cds mode points a single --cds-url at the unified CDS, which serves both
   /attest and /ca.
 */}}
-{{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
+{{- $cdsBootstrapURL := printf "https://%s.%s.svc:%d" (include "c8s.cdsName" .) .Release.Namespace (int .Values.cds.port) -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
 {{- /*
 The release namespace is deliberately NOT excluded: router's egress to
 workload pod IPs (via the operator-managed headless Services) must be
-interceptable so that hop gets attested mTLS. Control-plane traffic inside the
-release namespace dials Service VIPs, which are never in the pod-destination
-ipset, so it is unaffected either way.
+interceptable so that hop gets attested mTLS.
 */}}
 {{- $excludeSourceNamespaces := .Values.ratlsMesh.iptablesSync.excludeSourceNamespaces | uniq | join "," -}}
 {{- /*
@@ -303,7 +301,7 @@ spec:
             - --cert-mode
             - {{ $certMode | quote }}
             - --cds-url
-            - {{ $cdsURL | quote }}
+            - {{ $cdsBootstrapURL | quote }}
             - --cert-dns-san
             - {{ printf "ratls-mesh.%s.svc" .Release.Namespace | quote }}
             - --ca-poll-interval
