@@ -114,7 +114,7 @@ func approvingVerify(measurement []byte) localverify.VerifyFunc {
 
 // runCmdWith executes the allowlist command with an injected evidence verifier.
 func runCmdWith(verify localverify.VerifyFunc, args ...string) (string, string, error) {
-	cmd := newCmd(verify)
+	cmd := newCmd(verifierStub(verify))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

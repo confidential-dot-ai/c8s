@@ -106,9 +106,9 @@ func writeOperatorKey(t *testing.T) string {
 // run drives the command tree the way a shell would, with stdin supplied.
 func run(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	cmd := newCmd(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+	cmd := newCmd(verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return nil, nil
-	})
+	}))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

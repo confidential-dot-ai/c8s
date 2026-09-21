@@ -36,13 +36,13 @@ func TestPinVerifierPreservesEvidencePolicyAndCancellation(t *testing.T) {
 				Measurements: pins.Digests(),
 			}
 			called := false
-			o := Options{MeasurementsConfig: config, Verify: func(gotCtx context.Context, platform string, gotEvidence json.RawMessage, gotParams localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: config, Verifier: verifierStub(func(gotCtx context.Context, platform string, gotEvidence json.RawMessage, gotParams localverify.Params) (*teetypes.VerificationResult, error) {
 				called = true
 				if gotCtx != ctx || platform != "tdx" || !reflect.DeepEqual(gotEvidence, evidence) || !reflect.DeepEqual(gotParams, params) {
 					t.Fatal("verifier changed the context, evidence, or verification policy")
 				}
 				return nil, gotCtx.Err()
-			}}
+			})}
 			result, err := o.pinVerifier(pins).Verify(ctx, "tdx", evidence, params)
 			if !called || result != nil || !errors.Is(err, context.Canceled) {
 				t.Fatalf("called=%v, result=%v, error=%v; want canceled verification", called, result, err)
@@ -55,9 +55,9 @@ func TestPinVerifierPreservesCollateralErrors(t *testing.T) {
 	want := &localverify.CollateralError{Err: errors.New("collateral unavailable")}
 	for _, config := range []string{"", nodePolicyPath} {
 		t.Run(config, func(t *testing.T) {
-			o := Options{MeasurementsConfig: config, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: config, Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 				return nil, want
-			}}
+			})}
 			result, err := o.pinVerifier(refvalues.ReferenceValues{}).Verify(context.Background(), "tdx", nil, localverify.Params{})
 			var collateral *localverify.CollateralError
 			if result != nil || !errors.As(err, &collateral) || collateral != want {
@@ -101,9 +101,9 @@ func TestImagePinVerifierRejectsMixedEntries(t *testing.T) {
 				"rtmr_2": hex.EncodeToString(pins.Images[tc.registers].RTMRs[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
-			o := Options{MeasurementsConfig: nodePolicyPath, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: nodePolicyPath, Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 				return report, nil
-			}}
+			})}
 			result, err := o.pinVerifier(pins).Verify(context.Background(), "tdx", nil, localverify.Params{})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error=%v, want %v", err, tc.want)

@@ -46,9 +46,9 @@ func TestOperatorCLIVerifierRejectsAgentAndCrossedTuple(t *testing.T) {
 	pins := refvalues.ReferenceValues{Family: all.Family, Images: all.Images[:1]}
 	server := pins.Images[0]
 	var report *teetypes.VerificationResult
-	o := Options{MeasurementsConfig: nodePolicyPath, Verify: func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+	o := Options{MeasurementsConfig: nodePolicyPath, Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 		return report, nil
-	}}
+	})}
 	verify := o.pinVerifier(pins)
 	for _, test := range []struct {
 		name     string

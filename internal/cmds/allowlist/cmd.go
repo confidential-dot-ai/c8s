@@ -18,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -52,12 +51,12 @@ type options struct {
 
 // NewCmd returns the `c8s allowlist` command tree.
 func NewCmd() *cobra.Command {
-	return newCmd(localverify.Verify)
+	return newCmd(nil)
 }
 
 // newCmd is the injectable constructor behind NewCmd.
-func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{Verify: verify}
+func newCmd(verifier cdsconn.PinVerifier) *cobra.Command {
+	o := &options{Options: cdsconn.Options{Verifier: verifier}}
 	cmd := &cobra.Command{
 		Use:   "allowlist",
 		Short: "Manage the CDS image allowlist",

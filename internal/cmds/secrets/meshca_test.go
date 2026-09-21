@@ -149,7 +149,7 @@ func runAttested(t *testing.T, stdin string, args ...string) (stdout, stderr str
 		match := true
 		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
 	}
-	cmd := newCmd(approve)
+	cmd := newCmd(verifierStub(approve))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

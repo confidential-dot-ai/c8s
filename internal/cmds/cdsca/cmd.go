@@ -23,7 +23,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
@@ -43,11 +42,11 @@ var errPlaintext = errors.New(
 		"needs no bundle — the --mesh-ca gate exempts http endpoints")
 
 // NewCmd returns the `ca` subcommand.
-func NewCmd() *cobra.Command { return newCmd(localverify.Verify) }
+func NewCmd() *cobra.Command { return newCmd(nil) }
 
 // newCmd is the injectable constructor behind NewCmd.
-func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &cdsconn.Options{Verify: verify}
+func newCmd(verifier cdsconn.PinVerifier) *cobra.Command {
+	o := &cdsconn.Options{Verifier: verifier}
 	var out string
 	cmd := &cobra.Command{
 		Use:   "ca",

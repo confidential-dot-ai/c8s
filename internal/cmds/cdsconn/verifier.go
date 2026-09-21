@@ -18,17 +18,10 @@ type PinVerifier interface {
 
 // LocalVerifier verifies evidence in-process, including the launch-digest pins
 // in Params. Operator clients do not trust a remote service's unsigned verdict.
-type LocalVerifier struct {
-	// VerifyEvidence defaults to localverify.Verify; tests may supply a stub.
-	VerifyEvidence localverify.VerifyFunc
-}
+type LocalVerifier struct{}
 
-func (v LocalVerifier) Verify(ctx context.Context, platform string, evidence json.RawMessage, params localverify.Params) (*teetypes.VerificationResult, error) {
-	verify := v.VerifyEvidence
-	if verify == nil {
-		verify = localverify.Verify
-	}
-	return verify(ctx, platform, evidence, params)
+func (LocalVerifier) Verify(ctx context.Context, platform string, evidence json.RawMessage, params localverify.Params) (*teetypes.VerificationResult, error) {
+	return localverify.Verify(ctx, platform, evidence, params)
 }
 
 // ImagePinVerifier requires a complete image tuple on the verified claims,

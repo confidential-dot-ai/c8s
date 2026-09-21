@@ -43,9 +43,8 @@ type Options struct {
 	OperatorKey        string
 	Insecure           bool
 
-	// Verify is the evidence verifier; a stub in tests. Zero means
-	// localverify.Verify.
-	Verify localverify.VerifyFunc
+	// Verifier verifies endpoint evidence. Nil defaults to LocalVerifier.
+	Verifier PinVerifier
 }
 
 // BindFlags registers the connection and credential flags on a command's
@@ -139,7 +138,10 @@ func (o *Options) loadPins() (refvalues.ReferenceValues, error) {
 }
 
 func (o *Options) pinVerifier(pins refvalues.ReferenceValues) PinVerifier {
-	verify := LocalVerifier{VerifyEvidence: o.Verify}
+	verify := o.Verifier
+	if verify == nil {
+		verify = LocalVerifier{}
+	}
 	if o.MeasurementsConfig == "" {
 		return verify
 	}

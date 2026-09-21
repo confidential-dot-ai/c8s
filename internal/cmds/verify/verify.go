@@ -1346,29 +1346,28 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}
+
+		// What decides between rejecting an MRTD-only TDX verdict and warning
+		// about it is whether an operator-pinned CA anchor (--mesh-ca) stands next
+		// to the measurements. Without one the verdict is deployment-class — the
+		// measurement pins are the entire trust anchor — and an incomplete image
+		// policy is a hard failure. A responder-committed CA (attest-pq's derived
+		// anchor) does not downgrade this: chosen by the responder, it anchors
+		// nothing the operator asked about — the same rule the JS verifier applies
+		// to a deployment-class verdict.
+		if isTDX(oc.Platform) && !fullImagePinned {
+			const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
+			if plan.meshCA == nil {
+				oc.Error = mrtdOnly + " (with no pinned CA anchor this verdict is deployment-class — the measurement pins are the entire trust anchor — so an incomplete measurement policy is rejected; pin --mesh-ca to downgrade this to a warning)"
+				return oc
+			}
+			oc.Warnings = append(oc.Warnings, mrtdOnly)
+		}
 	}
 	if !applyRTMRPins(&oc, plan.pins, result) {
 		return oc
 	}
 	oc.Verified = true
-
-	// What decides between rejecting an MRTD-only TDX verdict and warning
-	// about it is whether an operator-pinned CA anchor (--mesh-ca) stands next
-	// to the measurements. Without one the verdict is deployment-class — the
-	// measurement pins are the entire trust anchor — and an incomplete image
-	// policy is a hard failure. A responder-committed CA (attest-pq's derived
-	// anchor) does not downgrade this: chosen by the responder, it anchors
-	// nothing the operator asked about — the same rule the JS verifier applies
-	// to a deployment-class verdict.
-	if isTDX(oc.Platform) && pinned && !fullImagePinned {
-		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
-		if plan.meshCA == nil {
-			oc.Verified = false
-			oc.Error = mrtdOnly + " (with no pinned CA anchor this verdict is deployment-class — the measurement pins are the entire trust anchor — so an incomplete measurement policy is rejected; pin --mesh-ca to downgrade this to a warning)"
-			return oc
-		}
-		oc.Warnings = append(oc.Warnings, mrtdOnly)
-	}
 
 	return oc
 }

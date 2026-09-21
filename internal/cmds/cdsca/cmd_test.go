@@ -134,7 +134,7 @@ func run(t *testing.T, args ...string) (stdout, stderr string, err error) {
 		result.Claims.LaunchDigest = testMeasurement
 		return result, nil
 	}
-	cmd := newCmd(approve)
+	cmd := newCmd(verifierStub(approve))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

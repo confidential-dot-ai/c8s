@@ -325,7 +325,7 @@ func TestSignerPrefersFlagOverEnv(t *testing.T) {
 	keyPath := writeOperatorKey(t, dir)
 	t.Setenv(cdsconn.EnvOperatorKey, filepath.Join(dir, "nonexistent.key"))
 
-	o := &options{OperatorKey: keyPath, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}
+	o := &options{Options: cdsconn.Options{OperatorKey: keyPath, Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}}
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("flag should take precedence over (broken) env, got %v", err)
 	}
@@ -336,7 +336,7 @@ func TestSignerFallsBackToEnv(t *testing.T) {
 	keyPath := writeOperatorKey(t, dir)
 	t.Setenv(cdsconn.EnvOperatorKey, keyPath)
 
-	o := &options{Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}} // no key flag
+	o := &options{Options: cdsconn.Options{Measurements: []string{"abababababababababababababababababababababababababababababababababababababababababababababababab"}}} // no key flag
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("env fallback should work, got %v", err)
 	}
@@ -369,7 +369,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	const warning = "no --measurements set"
-	base := options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verify: stubVerify, output: "text"}
+	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verifier: verifierStub(stubVerify)}, output: "text"}
 
 	t.Run("unpinned warns", func(t *testing.T) {
 		o := base
