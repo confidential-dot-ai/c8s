@@ -234,7 +234,7 @@ func TestClosedNamespaceRejectsSocketOperations(t *testing.T) {
 	if listener != nil || !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("closed namespace listener = %v, %v", listener, err)
 	}
-	conn, err := ns.DialLocal(context.Background(), netip.AddrPortFrom(podIP, 80))
+	conn, err := ns.DialLocal(context.Background(), netip.AddrPortFrom(podIP, 80), 30*time.Second)
 	if conn != nil || !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("closed namespace connection = %v, %v", conn, err)
 	}
