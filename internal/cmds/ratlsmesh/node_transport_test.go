@@ -75,7 +75,10 @@ func recordTransportVerification(config *tls.Config) <-chan error {
 	verify := config.VerifyPeerCertificate
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		err := verify(rawCerts, verifiedChains)
-		verdicts <- err
+		select {
+		case verdicts <- err:
+		default:
+		}
 		return err
 	}
 	return verdicts
@@ -98,14 +101,18 @@ func startTransportProxy(t *testing.T, p *Proxy) {
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan struct{})
 	p.onReady = func() { close(ready) }
-	done := make(chan error, 1)
-	go func() { done <- p.Run(ctx) }()
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = p.Run(ctx)
+		close(done)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
+		case <-done:
+			if runErr != nil {
+				t.Error(runErr)
 			}
 		case <-time.After(10 * time.Second):
 			t.Error("transport proxy did not stop")
@@ -113,6 +120,8 @@ func startTransportProxy(t *testing.T, p *Proxy) {
 	})
 	select {
 	case <-ready:
+	case <-done:
+		t.Fatalf("transport proxy stopped before readiness: %v", runErr)
 	case <-time.After(5 * time.Second):
 		t.Fatal("transport proxy listeners did not become ready")
 	}
