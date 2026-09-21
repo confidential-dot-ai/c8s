@@ -14,6 +14,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/attestation-go/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 )
 
 func TestPinVerifierPreservesEvidencePolicyAndCancellation(t *testing.T) {
@@ -36,7 +37,7 @@ func TestPinVerifierPreservesEvidencePolicyAndCancellation(t *testing.T) {
 				Measurements: pins.Digests(),
 			}
 			called := false
-			o := Options{MeasurementsConfig: config, Verifier: verifierStub(func(gotCtx context.Context, platform string, gotEvidence json.RawMessage, gotParams localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: config, Verifier: testutil.VerifierStub(func(gotCtx context.Context, platform string, gotEvidence json.RawMessage, gotParams localverify.Params) (*teetypes.VerificationResult, error) {
 				called = true
 				if gotCtx != ctx || platform != "tdx" || !reflect.DeepEqual(gotEvidence, evidence) || !reflect.DeepEqual(gotParams, params) {
 					t.Fatal("verifier changed the context, evidence, or verification policy")
@@ -55,7 +56,7 @@ func TestPinVerifierPreservesCollateralErrors(t *testing.T) {
 	want := &localverify.CollateralError{Err: errors.New("collateral unavailable")}
 	for _, config := range []string{"", nodePolicyPath} {
 		t.Run(config, func(t *testing.T) {
-			o := Options{MeasurementsConfig: config, Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: config, Verifier: testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 				return nil, want
 			})}
 			result, err := o.pinVerifier(refvalues.ReferenceValues{}).Verify(context.Background(), "tdx", nil, localverify.Params{})
@@ -101,7 +102,7 @@ func TestImagePinVerifierRejectsMixedEntries(t *testing.T) {
 				"rtmr_2": hex.EncodeToString(pins.Images[tc.registers].RTMRs[2]),
 				"rtmr_3": hex.EncodeToString(seed[:]),
 			}
-			o := Options{MeasurementsConfig: nodePolicyPath, Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+			o := Options{MeasurementsConfig: nodePolicyPath, Verifier: testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 				return report, nil
 			})}
 			result, err := o.pinVerifier(pins).Verify(context.Background(), "tdx", nil, localverify.Params{})

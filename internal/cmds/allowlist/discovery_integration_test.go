@@ -26,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/remote"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/internal/routerdiscovery"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -114,7 +115,7 @@ func approvingVerify(measurement []byte) localverify.VerifyFunc {
 
 // runCmdWith executes the allowlist command with an injected evidence verifier.
 func runCmdWith(verify localverify.VerifyFunc, args ...string) (string, string, error) {
-	cmd := newCmd(verifierStub(verify))
+	cmd := newCmd(testutil.VerifierStub(verify))
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

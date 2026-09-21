@@ -28,6 +28,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -369,7 +370,7 @@ func captureStderr(t *testing.T, fn func()) string {
 
 func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	const warning = "no --measurements set"
-	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verifier: verifierStub(stubVerify)}, output: "text"}
+	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verifier: testutil.VerifierStub(stubVerify)}, output: "text"}
 
 	t.Run("unpinned warns", func(t *testing.T) {
 		o := base

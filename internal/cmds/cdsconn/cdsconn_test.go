@@ -19,6 +19,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/testutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -59,7 +60,7 @@ func TestHTTPClientFallsBackToRATLS(t *testing.T) {
 	o := Options{
 		URL:     "https://" + closedAddr(t),
 		Timeout: time.Second,
-		Verifier: verifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+		Verifier: testutil.VerifierStub(func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
 			return nil, nil
 		}),
 	}
