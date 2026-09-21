@@ -43,26 +43,29 @@ type metrics struct {
 	// Sidecar counter values are mirrored as Gauges (not Counters) because
 	// they are snapshots of another process's counters; a sidecar restart
 	// would otherwise show up as an illegal Counter reset.
-	iptablesJumpViolations       prometheus.Gauge
-	iptablesJumpCheckErrors      prometheus.Gauge
-	iptablesIPSetOverflows       prometheus.Gauge
-	iptablesIPSetSyncFailures    prometheus.Gauge
-	iptablesPodIPSetMembers      prometheus.Gauge
-	iptablesCWIPSetMembers       prometheus.Gauge
-	iptablesCWIPSetShrinks       prometheus.Gauge
-	iptablesCWInboundDrops       prometheus.Gauge
-	iptablesCWPassthroughReturns prometheus.Gauge
-	iptablesMetricsTimestamp     prometheus.Gauge
-	resolverCacheSize            prometheus.Gauge
-	resolverLocalCIDRs           prometheus.Gauge
-	resolverLastEvent            prometheus.Gauge
-	certRotationFailures         prometheus.Counter
-	attestationFailures          prometheus.Counter
-	acceptErrors                 prometheus.Counter
-	tlsSessionResumptions        prometheus.Counter
-	measurementPinning           prometheus.Gauge
-	certPipelineHealthy          prometheus.Gauge
-	certExpiry                   *prometheus.GaugeVec
+	iptablesJumpViolations                prometheus.Gauge
+	iptablesJumpCheckErrors               prometheus.Gauge
+	iptablesIPSetOverflows                prometheus.Gauge
+	iptablesIPSetSyncFailures             prometheus.Gauge
+	iptablesPodIPSetMembers               prometheus.Gauge
+	iptablesCWIPSetMembers                prometheus.Gauge
+	iptablesCWIPSetShrinks                prometheus.Gauge
+	iptablesCWInboundDrops                prometheus.Gauge
+	iptablesCWPassthroughReturns          prometheus.Gauge
+	iptablesPreroutingInterceptedPackets  prometheus.Gauge
+	iptablesInterceptionCounterReadErrors prometheus.Gauge
+	iptablesInterceptionCountersReadAt    prometheus.Gauge
+	iptablesMetricsTimestamp              prometheus.Gauge
+	resolverCacheSize                     prometheus.Gauge
+	resolverLocalCIDRs                    prometheus.Gauge
+	resolverLastEvent                     prometheus.Gauge
+	certRotationFailures                  prometheus.Counter
+	attestationFailures                   prometheus.Counter
+	acceptErrors                          prometheus.Counter
+	tlsSessionResumptions                 prometheus.Counter
+	measurementPinning                    prometheus.Gauge
+	certPipelineHealthy                   prometheus.Gauge
+	certExpiry                            *prometheus.GaugeVec
 
 	tlsHandshakeDuration *prometheus.HistogramVec
 	connectionDuration   *prometheus.HistogramVec
@@ -168,6 +171,18 @@ func newMetrics() *metrics {
 	m.iptablesMetricsTimestamp = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_metrics_file_updated_at_seconds",
 		Help: "Unix-seconds timestamp of the last sidecar metrics snapshot the proxy successfully read; 0 = never read.",
+	})
+	m.iptablesPreroutingInterceptedPackets = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_prerouting_intercepted_packets_total",
+		Help: "Packets matched by pod-originated PREROUTING DNAT rules, summed across IP families. Resets when rules are reinstalled; failed reads retain the last successful count.",
+	})
+	m.iptablesInterceptionCounterReadErrors = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_interception_counter_read_errors_total",
+		Help: "Sidecar-reported failures reading interception packet counters, counted per IP family.",
+	})
+	m.iptablesInterceptionCountersReadAt = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_interception_counters_read_at_seconds",
+		Help: "Unix timestamp of the last successful interception counter read across both IP families; zero before success or after any read failure.",
 	})
 	m.resolverCacheSize = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_cache_entries",
@@ -344,6 +359,9 @@ func (m *metrics) refreshIptablesMetrics(path string) error {
 	m.iptablesCWIPSetShrinks.Set(float64(snap.CWIPSetShrinks))
 	m.iptablesCWInboundDrops.Set(float64(snap.CWInboundDrops))
 	m.iptablesCWPassthroughReturns.Set(float64(snap.CWPassthroughReturns))
+	m.iptablesPreroutingInterceptedPackets.Set(float64(snap.PreroutingInterceptedPackets))
+	m.iptablesInterceptionCounterReadErrors.Set(float64(snap.InterceptionCounterReadErrors))
+	m.iptablesInterceptionCountersReadAt.Set(float64(snap.InterceptionCountersReadAtUnixNano) / float64(time.Second))
 	if snap.UpdatedAtUnixNano > 0 {
 		m.iptablesMetricsTimestamp.Set(float64(snap.UpdatedAtUnixNano / int64(time.Second)))
 	}

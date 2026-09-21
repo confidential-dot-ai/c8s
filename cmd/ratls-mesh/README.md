@@ -95,6 +95,16 @@ traffic in `LOCAL_IN`/`LOCAL_OUT` without a nat-table DNAT, so a same-node
 VIP-to-cw-pod flow skips `FORWARD` and is not dropped. Verify with the e2e
 check on any cluster not running iptables-mode kube-proxy.
 
+| Datapath | Host mesh enforcement |
+|----------|-----------------------|
+| Shipped node guest: Cilium, kube-proxy replacement, BPF masquerading | Unsupported: pod-to-pod traffic bypasses interception and the guard; `c8s install` rejects detected Cilium agents when the mesh is enabled. |
+| Azure CNI or kubenet, iptables kube-proxy, host `FORWARD` traversal | Previously verified; run the enforcement e2e check against the deployed configuration. |
+| Other CNIs or kube-proxy modes | Require packet-counter evidence for interception and bypass drops. |
+
+Cilium WireGuard encrypts cross-node traffic with apiserver-distributed peer
+keys. That traffic has no attestation-bound mesh identity. This is an unsupported
+mesh deployment, even when all chains exist and guard counters stay at zero.
+
 What this defends: in-cluster plaintext bypass of confidential-workload
 pods — Services selecting cw pods, direct pod-IP dials from excluded or
 non-meshed sources, hostNetwork agents on other nodes. What it does not
@@ -233,6 +243,13 @@ GET :15021/ready   → 200 (ready) / 503 (not ready or shutting down)
 GET :15021/metrics → Prometheus text format
 ```
 
+With the host mesh's metrics file enabled, readiness also requires fresh,
+successfully read interception counters within three synchronization intervals.
+Each populated IP family requires at least one intercepted pod-originated
+packet. An idle node can remain
+unready until a pod-to-pod request supplies that evidence. A historical positive
+counter proves first use; the enforcement e2e test checks current behavior.
+
 ### Metrics
 
 All metrics are prefixed with `ratls_mesh_`. Key metrics:
@@ -255,6 +272,8 @@ are starting points; tune to your scrape interval and pod churn.
 
 | Signal | What it means | Suggested rule |
 |--------|---------------|----------------|
+| `ratls_mesh_iptables_prerouting_intercepted_packets_total == 0` with `ratls_mesh_iptables_pod_ipset_members > 0` | Pods are present without evidence of interception; generate a pod-to-pod request to distinguish inactivity from datapath bypass. | Critical after 5 minutes. |
+| `increase(ratls_mesh_iptables_interception_counter_read_errors_total[5m]) > 0` | Interception counters could not be read; retained values are historical. | Warn after 1 minute. |
 | `ratls_mesh_resolver_local_cidrs == 0` | `ValidateLocalDest` has no host pod-network CIDRs for the route cross-check, so inbound pod delivery is using Kubernetes `Pod.Status.HostIP` ownership. Expected briefly at startup and expected persistently on CNIs that expose pod IPs without a host-local pod CIDR, such as AKS with Azure CNI. | Warn after 2× `--resync-period` (default 60s) when this is unexpected for the cluster CNI. |
 | `rate(ratls_mesh_iptables_ipset_overflow_total[5m]) > 0` | Pod count exceeded `--ipset-maxelem`; the reconcile rejected the restore and the live ipset is stale. New pod IPs will not be intercepted until the operator bumps `iptablesSync.ipsetMaxElem`. | Page on any non-zero rate for 5+ minutes. |
 | `rate(ratls_mesh_iptables_jump_position_violations_total[5m])` | Watchdog confirmed our PREROUTING/OUTPUT jump was demoted out of position 1 — typically kube-proxy reinserting `KUBE-SERVICES` ahead of us. Occasional events are normal; a steady positive rate indicates a fight with kube-proxy. | Warn when rate > 1/min sustained for 10 min; tune `--watchdog-period` (default 2s) downward if necessary. |

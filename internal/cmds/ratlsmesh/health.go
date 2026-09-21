@@ -4,6 +4,7 @@ package ratlsmesh
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -35,6 +36,7 @@ type healthServer struct {
 	acceptErrorThreshold int64
 	readTimeout          time.Duration
 	writeTimeout         time.Duration
+	iptablesMetricsPath  string
 }
 
 func newHealthServer(m *metrics, serverCertMgr, clientCertMgr *ratls.CertManager, acceptErrorThreshold int64, readTimeout, writeTimeout time.Duration) *healthServer {
@@ -102,8 +104,44 @@ func (h *healthServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "accept loop degraded", http.StatusServiceUnavailable)
 		return
 	}
+	if err := h.interceptionReadiness(); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ready\n"))
+}
+
+func (h *healthServer) interceptionReadiness() error {
+	if h.iptablesMetricsPath == "" {
+		return nil
+	}
+	snapshot, err := readIptablesMetricsFile(h.iptablesMetricsPath)
+	if err != nil {
+		return errors.New("interception metrics unavailable")
+	}
+	now := time.Now()
+	maximumAge := time.Duration(snapshot.InterceptionEvidenceMaxAgeNano)
+	if !freshInterceptionEvidence(snapshot.UpdatedAtUnixNano, now, maximumAge) ||
+		!freshInterceptionEvidence(snapshot.InterceptionCountersReadAtUnixNano, now, maximumAge) {
+		return errors.New("interception counters have no recent successful read")
+	}
+	if !familyInterceptionObserved(snapshot.IPv4Interception) {
+		return errors.New("IPv4 pods present without observed PREROUTING interception")
+	}
+	if !familyInterceptionObserved(snapshot.IPv6Interception) {
+		return errors.New("IPv6 pods present without observed PREROUTING interception")
+	}
+	return nil
+}
+
+func familyInterceptionObserved(family interceptionFamilySnapshot) bool {
+	return family.PodIPSetMembers == 0 || family.PreroutingInterceptedPackets > 0
+}
+
+func freshInterceptionEvidence(timestamp int64, now time.Time, maximumAge time.Duration) bool {
+	age := now.Sub(time.Unix(0, timestamp))
+	return maximumAge > 0 && timestamp > 0 && age >= 0 && age <= maximumAge
 }
 
 // serve binds addr, or adopts the pre-bound ln when non-nil, and serves

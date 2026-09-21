@@ -1030,6 +1030,24 @@ func TestReconcilePodIPSetsWritesGuardSetsFirst(t *testing.T) {
 	}
 }
 
+func TestReconcilePodIPSetsPublishesFamilyMembership(t *testing.T) {
+	installFakeNetfilter(t)
+	store := cwPodStore(t)
+	if err := store.Add(&corev1.Pod{
+		Name: "ipv6", Namespace: "demo",
+		Status: corev1.PodStatus{HostIP: "10.0.0.1", PodIP: "fd00::9"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcilePodIPSets(store, []string{"10.0.0.1"}, nil, 100, testLogger()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := currentIptablesMetricsSnapshot()
+	if snapshot.IPv4Interception.PodIPSetMembers != 1 || snapshot.IPv6Interception.PodIPSetMembers != 1 {
+		t.Fatalf("family memberships: IPv4=%d IPv6=%d, want one each", snapshot.IPv4Interception.PodIPSetMembers, snapshot.IPv6Interception.PodIPSetMembers)
+	}
+}
+
 func TestReconcilePodIPSetsAttemptsEverySetWhenOneFails(t *testing.T) {
 	nf := installFakeNetfilter(t)
 	nf.set("ipset_restore_fail", "ipset v7.15: Kernel error received: Invalid argument")

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -52,9 +53,12 @@ func iptablesIPSetSyncFailures() int64 {
 // distinguish "no cw pods on this node" from "the cw pods stopped being
 // reported", and the shrink counter separates them.
 var (
-	lastPodIPSetMembers atomic.Int64
-	lastCWIPSetMembers  atomic.Int64
-	cwIPSetShrinkages   atomic.Int64
+	lastPodIPSetMembers            atomic.Int64
+	lastPodIPv4IPSetMembers        atomic.Int64
+	lastPodIPv6IPSetMembers        atomic.Int64
+	interceptionEvidenceMaxAgeNano atomic.Int64
+	lastCWIPSetMembers             atomic.Int64
+	cwIPSetShrinkages              atomic.Int64
 )
 
 func podIPSetMemberCount() int64 { return lastPodIPSetMembers.Load() }
@@ -84,6 +88,10 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if cfg.resyncPeriod <= 0 {
 		return fmt.Errorf("resync-period must be positive")
 	}
+	if cfg.resyncPeriod > time.Duration(math.MaxInt64/3) {
+		return fmt.Errorf("resync-period exceeds maximum %s", time.Duration(math.MaxInt64/3))
+	}
+	interceptionEvidenceMaxAgeNano.Store(int64(3 * cfg.resyncPeriod))
 	if cfg.watchdogPeriod <= 0 {
 		return fmt.Errorf("watchdog-period must be positive")
 	}
@@ -235,13 +243,16 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 		curr := stringSet(cwIPs)
 		_, _ = flushCWConntrack(logger, newMembers(prevCWIPs, curr))
 		prevCWIPs = curr
-		// Guard counters change only on packet hits, not pod events, so
+		// Packet counters change only on packet hits, not pod events, so
 		// refresh on the resync tick rather than every event-driven sync
 		// (which would fork iptables and take the xtables lock during
 		// churn, contending with kube-proxy and the jump watchdog).
 		if resync {
 			if err := refreshCWGuardCounters(); err != nil {
 				logger.Warn("cw guard counter read failed", "error", err)
+			}
+			if err := refreshInterceptionCounters(); err != nil {
+				logger.Warn("interception counter read failed", "error", err)
 			}
 		}
 		publishIptablesMetrics(logger)
@@ -336,6 +347,8 @@ func reconcilePodIPSets(store cache.Store, nodeIPs []string, excludedSourceNames
 		return nil, errors.Join(errs...)
 	}
 	recordIPSetMembership(logger, len(sets.allIPv4)+len(sets.allIPv6), len(sets.cwIPv4)+len(sets.cwIPv6))
+	lastPodIPv4IPSetMembers.Store(int64(len(sets.allIPv4)))
+	lastPodIPv6IPSetMembers.Store(int64(len(sets.allIPv6)))
 	logger.Debug("pod ipsets reconciled", "ipv4", len(sets.allIPv4), "ipv6", len(sets.allIPv6), "local_ipv4", len(sets.localIPv4), "local_ipv6", len(sets.localIPv6), "cw_ipv4", len(sets.cwIPv4), "cw_ipv6", len(sets.cwIPv6))
 	return append(append([]string{}, sets.cwIPv4...), sets.cwIPv6...), nil
 }

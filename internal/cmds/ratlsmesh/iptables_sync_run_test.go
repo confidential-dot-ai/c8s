@@ -4,6 +4,7 @@ package ratlsmesh
 
 import (
 	"context"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -58,6 +59,7 @@ func TestRunIptablesSyncValidationErrors(t *testing.T) {
 	}{
 		{"bad outbound port", func(c *iptablesSyncConfig) { c.outboundPort = 0 }, "", "out of range"},
 		{"bad resync period", func(c *iptablesSyncConfig) { c.resyncPeriod = 0 }, "", "resync-period must be positive"},
+		{"overflowing resync period", func(c *iptablesSyncConfig) { c.resyncPeriod = time.Duration(math.MaxInt64/3 + 1) }, "", "resync-period exceeds maximum"},
 		{"bad watchdog period", func(c *iptablesSyncConfig) { c.watchdogPeriod = -time.Second }, "", "watchdog-period must be positive"},
 		{"bad ipset maxelem", func(c *iptablesSyncConfig) { c.ipsetMaxElem = 0 }, "", "ipset-maxelem must be positive"},
 		{"missing node IP", func(c *iptablesSyncConfig) {}, "", "node IP required"},

@@ -490,6 +490,13 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 	}
 
 	init := ds.Spec.Template.Spec.InitContainers
+	proxy, ok := findContainer(ds.Spec.Template.Spec.Containers, "ratls-mesh")
+	if !ok || proxy.StartupProbe == nil || proxy.StartupProbe.HTTPGet == nil || proxy.StartupProbe.HTTPGet.Path != "/live" {
+		t.Fatal("proxy startup must use liveness so an idle datapath does not restart it")
+	}
+	if proxy.ReadinessProbe == nil || proxy.ReadinessProbe.HTTPGet == nil || proxy.ReadinessProbe.HTTPGet.Path != "/ready" {
+		t.Fatal("proxy readiness must check enforcement evidence")
+	}
 	if len(init) < 2 {
 		t.Fatalf("expected at least 2 initContainers (iptables-cleanup, iptables-sync); got %d", len(init))
 	}
@@ -1035,6 +1042,8 @@ func TestChartRATLSRoutingAlerts(t *testing.T) {
 	rule := findRATLSMeshPrometheusRule(t, out)
 
 	want := map[string]string{
+		"RATLSMeshNoPodInterception":              "ratls_mesh_iptables_prerouting_intercepted_packets_total == 0",
+		"RATLSMeshInterceptionCounterReadFailed":  "ratls_mesh_iptables_interception_counter_read_errors_total",
 		"RATLSMeshIptablesSyncWedged":             "ratls_mesh_iptables_metrics_file_updated_at_seconds",
 		"RATLSMeshLocalCIDRRouteCheckUnavailable": "ratls_mesh_resolver_local_cidrs == 0",
 		"RATLSMeshOutboundDirectDial":             `reason="host_addr"`,

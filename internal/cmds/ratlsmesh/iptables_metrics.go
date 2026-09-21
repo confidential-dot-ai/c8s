@@ -20,13 +20,24 @@ const defaultIptablesMetricsFile = "/tmp/ratls-iptables-metrics.json"
 // metrics published by the root iptables-sync sidecar through the shared /tmp.
 const iptablesMetricsFilePerm os.FileMode = 0o644
 
+type interceptionFamilySnapshot struct {
+	PodIPSetMembers              int64 `json:"pod_ipset_members"`
+	PreroutingInterceptedPackets int64 `json:"prerouting_intercepted_packets"`
+}
+
 type iptablesMetricsSnapshot struct {
-	JumpPositionViolations  int64 `json:"jump_position_violations"`
-	JumpPositionCheckErrors int64 `json:"jump_position_check_errors"`
-	IPSetOverflows          int64 `json:"ipset_overflows"`
-	IPSetSyncFailures       int64 `json:"ipset_sync_failures"`
-	CWInboundDrops          int64 `json:"cw_inbound_drops"`
-	CWPassthroughReturns    int64 `json:"cw_passthrough_returns"`
+	IPv4Interception                   interceptionFamilySnapshot `json:"ipv4_interception"`
+	IPv6Interception                   interceptionFamilySnapshot `json:"ipv6_interception"`
+	InterceptionEvidenceMaxAgeNano     int64                      `json:"interception_evidence_max_age_nano"`
+	JumpPositionViolations             int64                      `json:"jump_position_violations"`
+	JumpPositionCheckErrors            int64                      `json:"jump_position_check_errors"`
+	IPSetOverflows                     int64                      `json:"ipset_overflows"`
+	IPSetSyncFailures                  int64                      `json:"ipset_sync_failures"`
+	CWInboundDrops                     int64                      `json:"cw_inbound_drops"`
+	CWPassthroughReturns               int64                      `json:"cw_passthrough_returns"`
+	PreroutingInterceptedPackets       int64                      `json:"prerouting_intercepted_packets"`
+	InterceptionCounterReadErrors      int64                      `json:"interception_counter_read_errors"`
+	InterceptionCountersReadAtUnixNano int64                      `json:"interception_counters_read_at_unix_nano"`
 	// Membership is what the guard and the interception rules key on, so a set
 	// that empties is enforcement that stopped without anything failing. The
 	// sizes make the level observable; CWIPSetShrinks makes the transition
@@ -56,17 +67,31 @@ func configureIptablesMetricsFile(path string) {
 }
 
 func currentIptablesMetricsSnapshot() iptablesMetricsSnapshot {
+	ipv4Packets := preroutingIPv4InterceptedPackets.Load()
+	ipv6Packets := preroutingIPv6InterceptedPackets.Load()
 	return iptablesMetricsSnapshot{
-		JumpPositionViolations:  iptablesJumpPositionViolations(),
-		JumpPositionCheckErrors: iptablesJumpPositionCheckErrors(),
-		IPSetOverflows:          iptablesIPSetOverflows(),
-		IPSetSyncFailures:       iptablesIPSetSyncFailures(),
-		CWInboundDrops:          iptablesCWInboundDrops(),
-		CWPassthroughReturns:    iptablesCWPassthroughReturns(),
-		PodIPSetMembers:         podIPSetMemberCount(),
-		CWIPSetMembers:          cwIPSetMemberCount(),
-		CWIPSetShrinks:          cwIPSetShrinks(),
-		UpdatedAtUnixNano:       time.Now().UnixNano(),
+		IPv4Interception: interceptionFamilySnapshot{
+			PodIPSetMembers:              lastPodIPv4IPSetMembers.Load(),
+			PreroutingInterceptedPackets: ipv4Packets,
+		},
+		IPv6Interception: interceptionFamilySnapshot{
+			PodIPSetMembers:              lastPodIPv6IPSetMembers.Load(),
+			PreroutingInterceptedPackets: ipv6Packets,
+		},
+		InterceptionEvidenceMaxAgeNano:     interceptionEvidenceMaxAgeNano.Load(),
+		JumpPositionViolations:             iptablesJumpPositionViolations(),
+		JumpPositionCheckErrors:            iptablesJumpPositionCheckErrors(),
+		IPSetOverflows:                     iptablesIPSetOverflows(),
+		IPSetSyncFailures:                  iptablesIPSetSyncFailures(),
+		CWInboundDrops:                     iptablesCWInboundDrops(),
+		CWPassthroughReturns:               iptablesCWPassthroughReturns(),
+		PreroutingInterceptedPackets:       ipv4Packets + ipv6Packets,
+		InterceptionCounterReadErrors:      interceptionCounterReadErrors.Load(),
+		InterceptionCountersReadAtUnixNano: interceptionCountersReadAtUnixNano.Load(),
+		PodIPSetMembers:                    podIPSetMemberCount(),
+		CWIPSetMembers:                     cwIPSetMemberCount(),
+		CWIPSetShrinks:                     cwIPSetShrinks(),
+		UpdatedAtUnixNano:                  time.Now().UnixNano(),
 	}
 }
 

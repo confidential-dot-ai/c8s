@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/coreos/go-iptables/iptables"
 
@@ -347,6 +348,42 @@ func refreshCWGuardCounters() error {
 	}
 	cwInboundDrops.Store(int64(drops))
 	cwPassthroughReturns.Store(int64(returns))
+	return errors.Join(errs...)
+}
+
+var (
+	preroutingIPv4InterceptedPackets   atomic.Int64
+	preroutingIPv6InterceptedPackets   atomic.Int64
+	interceptionCounterReadErrors      atomic.Int64
+	interceptionCountersReadAtUnixNano atomic.Int64
+)
+
+func refreshInterceptionCounters() error {
+	var errs []error
+	for _, ipt := range iptablesClients() {
+		stats, err := ipt.StructuredStats("nat", preroutingChainName)
+		if err != nil {
+			interceptionCounterReadErrors.Add(1)
+			errs = append(errs, fmt.Errorf("read %s stats on %s: %w", preroutingChainName, iptablesLabel(ipt), err))
+			continue
+		}
+		var packets uint64
+		for _, rule := range stats {
+			if rule.Target == "DNAT" {
+				packets += rule.Packets
+			}
+		}
+		if familyForIPT(ipt) == iptablesFamilyIPv4 {
+			preroutingIPv4InterceptedPackets.Store(int64(packets))
+		} else {
+			preroutingIPv6InterceptedPackets.Store(int64(packets))
+		}
+	}
+	if len(errs) == 0 {
+		interceptionCountersReadAtUnixNano.Store(time.Now().UnixNano())
+	} else {
+		interceptionCountersReadAtUnixNano.Store(0)
+	}
 	return errors.Join(errs...)
 }
 

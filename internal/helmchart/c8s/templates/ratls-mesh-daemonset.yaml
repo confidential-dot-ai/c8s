@@ -348,7 +348,7 @@ spec:
               {{- toYaml .Values.ratlsMesh.resources.limits | nindent 14 }}
           startupProbe:
             httpGet:
-              path: /ready
+              path: /live
               port: {{ .Values.ratlsMesh.ports.health }}
             periodSeconds: {{ .Values.ratlsMesh.probes.startup.periodSeconds }}
             failureThreshold: {{ .Values.ratlsMesh.probes.startup.failureThreshold }}

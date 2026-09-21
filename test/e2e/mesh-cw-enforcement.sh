@@ -31,6 +31,7 @@
 #                        to a longer resync)
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
+command -v jq >/dev/null || fail "jq is required to verify the probe's RA-TLS access log"
 
 client_image="${CLIENT_IMAGE:-curlimages/curl:8.8.0@sha256:73e4d532ea62d7505c5865b517d3704966ffe916609bedc22af6833dc9969bcd}"
 client_uid="${CLIENT_UID:-100}"
@@ -38,6 +39,15 @@ excluded_ns="${EXCLUDED_NS:-kube-system}"
 health_port="${MESH_HEALTH_PORT:-15021}"
 mesh_ns="${MESH_NS:-c8s-system}"
 metric_wait="${METRIC_WAIT_SECONDS:-75}"
+
+if [ -n "${C8S_OPERATOR_KEY:-}" ]; then
+  : "${C8S_ALLOWLIST_URL:?needed alongside C8S_OPERATOR_KEY}"
+  : "${C8S_MEASUREMENTS:?needed alongside C8S_OPERATOR_KEY}"
+  [[ "$client_image" =~ @sha256:[0-9a-f]{64}$ ]] || fail "CLIENT_IMAGE must be digest-pinned for signed admission"
+  c8s allowlist add "${client_image#*@}" "$client_image" \
+    --url "$C8S_ALLOWLIST_URL" --measurements "$C8S_MEASUREMENTS" >/dev/null \
+    || fail "signed allowlist write rejected for the mesh probe image"
+fi
 
 [[ "$client_uid" =~ ^[1-9][0-9]*$ ]] \
   || fail "CLIENT_UID must be a positive numeric UID (got '$client_uid')"
@@ -48,7 +58,18 @@ excluded_pod="mesh-cw-check-excluded-$$"
 vip_svc="mesh-cw-check-vip-$$"
 
 cw_ns=""
+interception_probe_node=""
+interception_probe_rule=()
+egress_probe_rule=()
 cleanup() {
+  if [ "${#egress_probe_rule[@]}" -gt 0 ]; then
+    kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+      iptables -t filter -D RATLS-MESH-CW-EGRESS "${egress_probe_rule[@]}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$interception_probe_node" ]; then
+    kubectl exec -n "$mesh_ns" "$interception_probe_node" -c iptables-sync -- \
+      iptables -t nat -D RATLS-MESH-PREROUTING "${interception_probe_rule[@]}" >/dev/null 2>&1 || true
+  fi
   kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   kubectl delete pod "$excluded_pod" -n "$excluded_ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   [ -n "$cw_ns" ] && kubectl delete service "$vip_svc" -n "$cw_ns" --ignore-not-found >/dev/null 2>&1 || true
@@ -139,13 +160,46 @@ await_metric_above() {
 
 # --- positive: a pod-IP dial is mesh-wrapped --------------------------------
 
+client_ip=$(kubectl get pod "$client" -n "$ns" -o jsonpath='{.status.podIP}')
+interception_probe_node=$(kubectl get pods -n "$mesh_ns" -l app=c8s-ratls-mesh \
+  --field-selector="spec.nodeName=$client_node" -o jsonpath='{.items[0].metadata.name}')
+[ -n "$interception_probe_node" ] || fail "no mesh on client node $client_node"
+interception_probe_rule=(-s "$client_ip" -d "$cw_ip" -p tcp --sport 41001 --dport "$cw_port" \
+  -m comment --comment "$ns")
+kubectl exec -n "$mesh_ns" "$interception_probe_node" -c iptables-sync -- \
+  iptables -t nat -I RATLS-MESH-PREROUTING 1 "${interception_probe_rule[@]}"
+
 inbound='^ratls_mesh_connections_total.*direction="inbound"'
+intercepted='^ratls_mesh_iptables_prerouting_intercepted_packets_total'
+base_intercepted=$(metric_baseline "$client_node_ip" "$intercepted" "pod interception on $client_node")
 base_inbound=$(metric_baseline "$cw_node_ip" "$inbound" "mesh inbound connections on $cw_node")
 
-client_curl -o /dev/null --max-time 10 "http://${cw_ip}:${cw_port}/" \
+client_curl --local-port 41001 -o /dev/null --max-time 10 "http://${cw_ip}:${cw_port}/" \
   || fail "direct pod-IP request to $cw_ip:$cw_port failed (exit $?); the mesh-wrapped path must work"
 echo "ok: pod-IP request answered"
 
+probe_packets=$(kubectl exec -n "$mesh_ns" "$interception_probe_node" -c iptables-sync -- \
+  iptables -t nat -L RATLS-MESH-PREROUTING -n -v -x | \
+  awk -v marker="$ns" 'index($0, marker) {print $1}')
+[[ "$probe_packets" =~ ^[0-9]+$ ]] && [ "$probe_packets" -gt 0 ] \
+  || fail "the exact probe flow never entered the mesh interception chain"
+
+probe_has_ratls_delivery() {
+  kubectl logs -n "$mesh_ns" "$interception_probe_node" -c ratls-mesh --since=10m | \
+    jq -Rse --arg src "$client_ip:41001" --arg dst "$cw_ip:$cw_port" '
+      split("\n") | map(fromjson?) | any(.[];
+        .src == $src and .dst == $dst and .result == "success" and
+        (.dir == "outbound" or .dir == "outbound_same_node") and
+        .tls_handshake != null and .bytes_rev > 0)'
+}
+deadline=$((SECONDS + metric_wait))
+until probe_has_ratls_delivery; do
+  [ $SECONDS -lt $deadline ] || fail "no successful RA-TLS delivery log for the exact probe flow"
+  sleep 2
+done
+
+await_metric_above "$client_node_ip" "$intercepted" "$base_intercepted" \
+  "pod interception counter on $client_node moved"
 await_metric_above "$cw_node_ip" "$inbound" "$base_inbound" \
   "mesh inbound connections on $cw_node moved: the hop was wrapped, not plaintext"
 
@@ -265,4 +319,44 @@ cw_members=$(kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
 [ "${cw_members:-0}" -gt 0 ] || fail "ipset RATLS-MESH-CW-PODS on $cw_node holds no members while $cw_ns/$cw_pod is Running; the guard is not enforcing on any cw pod"
 echo "ok: cw ipset on $cw_node holds $cw_members member(s)"
 
-echo "PASS: workload path mesh-wrapped; VIP and excluded-source plaintext bypasses fail closed; egress DNS carve-out matchable"
+kubectl run cw-egress -n "$ns" --image="$client_image" --restart=Never \
+  --annotations=confidential.ai/cw=mesh-egress \
+  --overrides='{"spec":{"nodeName":"'"$cw_node"'","securityContext":{"runAsNonRoot":true,"runAsUser":'"$client_uid"',"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cw-egress","image":"'"$client_image"'","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  >/dev/null
+kubectl wait --for=condition=Ready pod/cw-egress -n "$ns" --timeout=120s >/dev/null
+egress_ip=$(kubectl get pod cw-egress -n "$ns" -o jsonpath='{.status.podIP}')
+deadline=$((SECONDS + metric_wait))
+until kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+    ipset test RATLS-MESH-CW-PODS "$egress_ip" >/dev/null 2>&1; do
+  [ $SECONDS -lt $deadline ] || fail "egress probe never entered cw guard membership"
+  sleep 2
+done
+
+kubectl exec -n "$ns" cw-egress -c cw-egress -- \
+  nslookup kubernetes.default.svc.cluster.local >/dev/null \
+  || fail "DNS query and reply failed from a guarded cw pod"
+
+cw_egress_drops() {
+  kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+    iptables -L RATLS-MESH-CW-EGRESS -n -v -x | \
+    awk '/DROP/ {sum += $1} END {print sum+0}'
+}
+base_egress_drops=$(cw_egress_drops)
+drop_position=$(kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+  iptables -L RATLS-MESH-CW-EGRESS -n --line-numbers | awk '$2 == "DROP" && /!tcp/ {print $1}')
+[[ "$drop_position" =~ ^[0-9]+$ ]] || fail "expected one non-TCP egress DROP rule"
+egress_probe_rule=(-s "$egress_ip" -d 192.0.2.1 -p udp --dport 69 -m comment --comment "$ns-egress")
+kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+  iptables -I RATLS-MESH-CW-EGRESS "$drop_position" "${egress_probe_rule[@]}"
+rc=0
+kubectl exec -n "$ns" cw-egress -c cw-egress -- \
+  curl -s --max-time 5 tftp://192.0.2.1/mesh-egress-probe >/dev/null || rc=$?
+[ "$rc" -eq 28 ] || fail "non-TCP cw egress returned $rc, expected DROP timeout (28)"
+egress_probe_packets=$(kubectl exec -n "$mesh_ns" "$mesh_pod" -c iptables-sync -- \
+  iptables -L RATLS-MESH-CW-EGRESS -n -v -x | \
+  awk -v marker="$ns-egress" 'index($0, marker) {print $1}')
+[[ "$egress_probe_packets" =~ ^[0-9]+$ ]] && [ "$egress_probe_packets" -gt 0 ] \
+  || fail "the exact UDP probe never reached the non-TCP DROP rule"
+[ "$(cw_egress_drops)" -gt "$base_egress_drops" ] || fail "cw non-TCP egress drop counter did not increment"
+
+echo "PASS: pod-IP interception, VIP and excluded-source drops, DNS replies and non-TCP egress drops"

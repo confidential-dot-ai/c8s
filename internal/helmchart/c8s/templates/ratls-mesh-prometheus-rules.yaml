@@ -12,6 +12,30 @@ spec:
   groups:
     - name: ratls-mesh.rules
       rules:
+        - alert: RATLSMeshNoPodInterception
+          expr: |
+            ratls_mesh_iptables_prerouting_intercepted_packets_total == 0
+            and ratls_mesh_iptables_pod_ipset_members > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RA-TLS mesh has no pod interception evidence on {{`{{ $labels.instance }}`}}"
+            description: >-
+              Pods are present but host PREROUTING has intercepted no packets.
+              Generate a pod-to-pod request and verify the counter increments.
+              Cilium's pod datapath bypasses this interception and the host
+              FORWARD guard; rule presence does not establish enforcement.
+
+        - alert: RATLSMeshInterceptionCounterReadFailed
+          expr: increase(ratls_mesh_iptables_interception_counter_read_errors_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RA-TLS mesh interception counters cannot be read on {{`{{ $labels.instance }}`}}"
+            description: "Check iptables-sync logs; preserved counter values do not establish current enforcement."
+
         - alert: RATLSMeshResolverStale
           expr: |
             (time() - ratls_mesh_resolver_last_event_timestamp_seconds) > 300

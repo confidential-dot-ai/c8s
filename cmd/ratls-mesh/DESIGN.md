@@ -2,6 +2,15 @@
 
 Transparent L4 proxy that replaces Istio ambient mTLS with hardware-attested (AMD SEV-SNP) mTLS between Kubernetes nodes. One DaemonSet pod per node — all pods on a node share the same TEE identity.
 
+The host mesh requires pod traffic to traverse host netfilter and kube-proxy
+to use iptables mode. The shipped Cilium guest bypasses these hooks for
+pod-to-pod traffic; this configuration provides neither mesh interception nor
+the cw guard. Its cross-node WireGuard peer identity is rooted in apiserver
+admission, not attestation. See the README datapath matrix and enforcement test.
+Installation rejects detected Cilium agents, and host-mesh readiness requires
+fresh interception-counter evidence once pods are present. First-use evidence
+does not prove continued enforcement after a datapath change.
+
 ## Architecture
 
 ```

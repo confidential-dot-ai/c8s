@@ -1088,6 +1088,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return err
 		}
+		if err := preflightMeshDatapath(cmd.Context(), values); err != nil {
+			return err
+		}
 
 		// Fail fast when the policy this install renders would deny the
 		// cluster's own platform pods: registering the plugin restarts

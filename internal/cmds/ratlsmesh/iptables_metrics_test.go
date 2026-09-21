@@ -16,10 +16,13 @@ import (
 func TestIptablesMetricsFileRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ratls-iptables-metrics.json")
 	want := iptablesMetricsSnapshot{
-		JumpPositionViolations:  7,
-		JumpPositionCheckErrors: 3,
-		IPSetOverflows:          2,
-		UpdatedAtUnixNano:       time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC).UnixNano(),
+		IPv4Interception:               interceptionFamilySnapshot{PodIPSetMembers: 3, PreroutingInterceptedPackets: 11},
+		IPv6Interception:               interceptionFamilySnapshot{PodIPSetMembers: 3, PreroutingInterceptedPackets: 0},
+		InterceptionEvidenceMaxAgeNano: int64(15 * time.Minute),
+		JumpPositionViolations:         7,
+		JumpPositionCheckErrors:        3,
+		IPSetOverflows:                 2,
+		UpdatedAtUnixNano:              time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC).UnixNano(),
 	}
 
 	if err := writeIptablesMetricsFile(path, want); err != nil {
@@ -70,12 +73,15 @@ func TestMetricsRefreshesIptablesSidecarCounters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ratls-iptables-metrics.json")
 	stamp := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
 	if err := writeIptablesMetricsFile(path, iptablesMetricsSnapshot{
-		JumpPositionViolations:  11,
-		JumpPositionCheckErrors: 5,
-		IPSetOverflows:          4,
-		CWInboundDrops:          9,
-		CWPassthroughReturns:    13,
-		UpdatedAtUnixNano:       stamp.UnixNano(),
+		JumpPositionViolations:             11,
+		JumpPositionCheckErrors:            5,
+		IPSetOverflows:                     4,
+		CWInboundDrops:                     9,
+		CWPassthroughReturns:               13,
+		PreroutingInterceptedPackets:       23,
+		InterceptionCounterReadErrors:      2,
+		InterceptionCountersReadAtUnixNano: stamp.UnixNano(),
+		UpdatedAtUnixNano:                  stamp.UnixNano(),
 	}); err != nil {
 		t.Fatalf("writeIptablesMetricsFile: %v", err)
 	}
@@ -99,6 +105,15 @@ func TestMetricsRefreshesIptablesSidecarCounters(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.iptablesCWPassthroughReturns); got != 13 {
 		t.Errorf("iptablesCWPassthroughReturns = %v, want 13", got)
+	}
+	if got := testutil.ToFloat64(m.iptablesPreroutingInterceptedPackets); got != 23 {
+		t.Errorf("iptablesPreroutingInterceptedPackets = %v, want 23", got)
+	}
+	if got := testutil.ToFloat64(m.iptablesInterceptionCounterReadErrors); got != 2 {
+		t.Errorf("iptablesInterceptionCounterReadErrors = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.iptablesInterceptionCountersReadAt); got != float64(stamp.Unix()) {
+		t.Errorf("iptablesInterceptionCountersReadAt = %v, want %d", got, stamp.Unix())
 	}
 	if got := testutil.ToFloat64(m.iptablesMetricsTimestamp); got != float64(stamp.Unix()) {
 		t.Errorf("iptablesMetricsTimestamp = %v, want %d", got, stamp.Unix())

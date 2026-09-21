@@ -340,6 +340,7 @@ func (e hostMesh) configure(r *meshRuntime) *Proxy {
 		r.metrics.certModeConfigured.Store(1)
 	}
 	r.health = newHealthServer(r.metrics, r.serverCertMgr, r.clientCertMgr, c.acceptErrThreshold, c.healthReadTimeout, c.healthWriteTimeout)
+	r.health.iptablesMetricsPath = c.iptablesMetricsFile
 	r.healthPort, r.healthListener = c.healthPort, c.listeners.health
 	var connSem chan struct{}
 	if c.maxConns > 0 {
