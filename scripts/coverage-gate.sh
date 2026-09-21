@@ -39,7 +39,10 @@ run)
   # Workflow tests exercise external tools and run in the required test job.
   packages=$(go list ./... | grep -Fxv 'github.com/confidential-dot-ai/c8s/test/workflows')
   mapfile -t packages <<< "$packages"
-  go test "${packages[@]}" -count=1 -coverprofile="$profile" -coverpkg=./...
+  go test "${packages[@]}" -count=1 -coverprofile="$profile" -covermode=atomic -coverpkg=./...
+  if [[ ${GITHUB_ACTIONS:-} == true && -f internal/meshnetns/guard_linux.go ]]; then
+    "$(dirname "${BASH_SOURCE[0]}")/mesh-guard-coverage.sh" "$profile"
+  fi
   ;;
 total)
   percent "$profile" | awk '$3=="TOTAL" {print $1}'
