@@ -4,6 +4,7 @@ package meshnetns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -115,6 +117,9 @@ func TestGuardCountsPodTCPAndNonTCPDrops(t *testing.T) {
 			}
 			defer conn.Close()
 			_, err = conn.Write([]byte("denied"))
+			if errors.Is(err, syscall.EPERM) {
+				return nil
+			}
 			return err
 		}); err != nil {
 			t.Fatal(err)
