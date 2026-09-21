@@ -24,9 +24,8 @@ type guardChain struct {
 	rules []string
 }
 
-type guardTable struct {
+type guardFilter struct {
 	binary string
-	table  string
 	chains []string
 	rules  string
 }
@@ -67,7 +66,7 @@ func validGuardAddress(addr netip.Addr) bool {
 	return addr.Is4() && addr.IsGlobalUnicast()
 }
 
-func guardRules(config GuardConfig) ([]guardTable, error) {
+func guardRules(config GuardConfig) ([]guardFilter, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
@@ -79,45 +78,36 @@ func guardRules(config GuardConfig) ([]guardTable, error) {
 	output := []string{
 		"-m mark --mark " + mark + " ! -o lo -j DROP",
 		"-o lo -j ACCEPT",
-		"-p tcp -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 	}
-	nat := []string{"-m mark --mark " + mark + " -j RETURN", "-o lo -j RETURN"}
 	for _, dns := range config.DNS {
 		for _, protocol := range []string{"udp", "tcp"} {
 			match := "-d " + dns.String() + " -p " + protocol + " --dport 53"
 			output = append(output, match+" -j ACCEPT")
-			nat = append(nat, match+" -j RETURN")
 		}
 	}
 	for _, api := range config.API {
 		match := "-d " + api.Addr().String() + " -p tcp --dport " + strconv.Itoa(int(api.Port()))
 		output = append(output, match+" -j ACCEPT")
-		nat = append(nat, match+" -j RETURN")
 	}
 	for _, cidr := range config.PodCIDRs {
 		match := "-d " + cidr.String() + " -p tcp"
 		output = append(output, match+" -j DROP")
-		nat = append(nat, match+" -j REDIRECT --to-ports 15001")
 	}
 	for _, cidr := range config.ServiceCIDRs {
 		output = append(output, "-d "+cidr.String()+" -j DROP")
 	}
 	input = append(input, "-j DROP")
-	output = append(output, "! -p tcp -j DROP")
-	return []guardTable{
-		newFilterGuard("iptables", input, output),
-		newFilterGuard("ip6tables", []string{"-i lo -j ACCEPT", "-j DROP"}, []string{"-o lo -j ACCEPT", "-j DROP"}),
-		newGuardTable("iptables", "nat", guardChain{"OUTPUT", nat}),
+	output = append(output, "-p tcp -j ACCEPT", "-j DROP")
+	return []guardFilter{
+		newGuardFilter("iptables", input, output),
+		newGuardFilter("ip6tables", []string{"-i lo -j ACCEPT", "-j DROP"}, []string{"-o lo -j ACCEPT", "-j DROP"}),
 	}, nil
 }
 
-func newFilterGuard(binary string, input, output []string) guardTable {
-	return newGuardTable(binary, "filter", guardChain{"INPUT", input}, guardChain{"OUTPUT", output}, guardChain{"FORWARD", []string{"-j DROP"}})
-}
-
-func newGuardTable(binary, table string, directions ...guardChain) guardTable {
+func newGuardFilter(binary string, input, output []string) guardFilter {
+	directions := []guardChain{{"INPUT", input}, {"OUTPUT", output}, {"FORWARD", []string{"-j DROP"}}}
 	var rules strings.Builder
-	fmt.Fprintf(&rules, "*%s\n", table)
+	rules.WriteString("*filter\n")
 	var chains []string
 	for _, direction := range directions {
 		chains = append(chains, direction.name)
@@ -128,35 +118,35 @@ func newGuardTable(binary, table string, directions ...guardChain) guardTable {
 		}
 	}
 	rules.WriteString("COMMIT\n")
-	return guardTable{binary: binary, table: table, chains: chains, rules: rules.String()}
+	return guardFilter{binary: binary, chains: chains, rules: rules.String()}
 }
 
 // InstallGuard must finish before any application or certificate-init container starts.
 func (n *Namespace) InstallGuard(ctx context.Context, config GuardConfig) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	tables, err := guardRules(config)
+	filters, err := guardRules(config)
 	if err != nil {
 		return err
 	}
 	return n.Do(func() error {
-		for _, table := range tables {
-			command := exec.CommandContext(ctx, table.binary+"-restore", "--wait", "5", "--noflush")
-			command.Stdin = strings.NewReader(table.rules)
+		for _, filter := range filters {
+			command := exec.CommandContext(ctx, filter.binary+"-restore", "--wait", "5", "--noflush")
+			command.Stdin = strings.NewReader(filter.rules)
 			if output, err := command.CombinedOutput(); err != nil {
-				return fmt.Errorf("install %s %s guard: %w: %s", table.binary, table.table, err, output)
+				return fmt.Errorf("install %s filter guard: %w: %s", filter.binary, err, output)
 			}
-			for _, chain := range table.chains {
-				args := []string{"--wait", "5", "-t", table.table, "-C", chain, "-j", "C8S-MESH-" + chain}
-				if exec.CommandContext(ctx, table.binary, args...).Run() == nil {
-					if err := requireFirstGuardJump(ctx, table, chain); err != nil {
+			for _, chain := range filter.chains {
+				args := []string{"--wait", "5", "-t", "filter", "-C", chain, "-j", "C8S-MESH-" + chain}
+				if exec.CommandContext(ctx, filter.binary, args...).Run() == nil {
+					if err := requireFirstGuardJump(ctx, filter, chain); err != nil {
 						return err
 					}
 					continue
 				}
-				args = []string{"--wait", "5", "-t", table.table, "-I", chain, "1", "-j", "C8S-MESH-" + chain}
-				if output, err := exec.CommandContext(ctx, table.binary, args...).CombinedOutput(); err != nil {
-					return fmt.Errorf("attach %s %s guard: %w: %s", table.table, chain, err, output)
+				args = []string{"--wait", "5", "-t", "filter", "-I", chain, "1", "-j", "C8S-MESH-" + chain}
+				if output, err := exec.CommandContext(ctx, filter.binary, args...).CombinedOutput(); err != nil {
+					return fmt.Errorf("attach filter %s guard: %w: %s", chain, err, output)
 				}
 			}
 		}
@@ -164,15 +154,15 @@ func (n *Namespace) InstallGuard(ctx context.Context, config GuardConfig) error 
 	})
 }
 
-func requireFirstGuardJump(ctx context.Context, table guardTable, chain string) error {
-	args := []string{"--wait", "5", "-t", table.table, "-S", chain, "1"}
-	output, err := exec.CommandContext(ctx, table.binary, args...).CombinedOutput()
+func requireFirstGuardJump(ctx context.Context, filter guardFilter, chain string) error {
+	args := []string{"--wait", "5", "-t", "filter", "-S", chain, "1"}
+	output, err := exec.CommandContext(ctx, filter.binary, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("read %s %s first rule: %w: %s", table.table, chain, err, output)
+		return fmt.Errorf("read filter %s first rule: %w: %s", chain, err, output)
 	}
 	want := "-A " + chain + " -j C8S-MESH-" + chain
 	if strings.TrimSpace(string(output)) != want {
-		return fmt.Errorf("%s %s %s guard jump must be first; remove preceding rules before starting containers", table.binary, table.table, chain)
+		return fmt.Errorf("%s filter %s guard jump must be first; remove preceding rules before starting containers", filter.binary, chain)
 	}
 	return nil
 }

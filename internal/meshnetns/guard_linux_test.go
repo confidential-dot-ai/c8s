@@ -51,7 +51,7 @@ func TestGuardRequiresValidServiceCIDRs(t *testing.T) {
 	}
 }
 
-func TestGuardCapturesTCPAndCountsNonTCPDrops(t *testing.T) {
+func TestGuardCountsPodTCPAndNonTCPDrops(t *testing.T) {
 	ns := newTestNamespace(t)
 	for _, binary := range []string{"ip", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"} {
 		if _, err := exec.LookPath(binary); err != nil {
@@ -78,11 +78,6 @@ func TestGuardCapturesTCPAndCountsNonTCPDrops(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	capture, err := ns.ListenTCP(ctx, netip.MustParseAddrPort("127.0.0.1:15001"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer capture.Close()
 	config := GuardConfig{
 		PodCIDRs:     []netip.Prefix{netip.MustParsePrefix("10.52.0.0/16")},
 		ServiceCIDRs: []netip.Prefix{netip.MustParsePrefix("10.53.0.0/16")},
@@ -92,27 +87,27 @@ func TestGuardCapturesTCPAndCountsNonTCPDrops(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	beforeTCP := guardDropPackets(t, ns, "iptables")
 	if err := ns.Do(func() error {
-		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp4", "10.52.0.99:8080")
-		if err != nil {
-			return err
+		probeCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp4", "10.52.0.99:8080")
+		if err == nil {
+			conn.Close()
+			return fmt.Errorf("pod TCP bypass connected")
 		}
-		return conn.Close()
+		return nil
 	}); err != nil {
-		t.Fatalf("pod TCP was not redirected: %v", err)
-	}
-	if err := capture.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := capture.Accept()
-	if err != nil {
-		t.Fatalf("capture did not receive redirected TCP: %v", err)
+	if guardDropPackets(t, ns, "iptables") <= beforeTCP {
+		t.Fatal("pod TCP SYN was not counted as dropped")
 	}
-	accepted.Close()
 	for _, probe := range []struct{ network, address, binary string }{
 		{"udp4", "192.0.2.1:69", "iptables"},
 		{"udp6", "[fd00::99]:69", "ip6tables"},
 	} {
+		before := guardDropPackets(t, ns, probe.binary)
 		if err := ns.Do(func() error {
 			conn, err := net.Dial(probe.network, probe.address)
 			if err != nil {
@@ -124,8 +119,8 @@ func TestGuardCapturesTCPAndCountsNonTCPDrops(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if count := guardDropPackets(t, ns, probe.binary); count < 1 {
-			t.Fatalf("%s non-TCP drops = %d, want at least 1", probe.network, count)
+		if count := guardDropPackets(t, ns, probe.binary); count <= before {
+			t.Fatalf("%s non-TCP drops = %d, want more than %d", probe.network, count, before)
 		}
 	}
 	before := guardDropPackets(t, ns, "iptables")
