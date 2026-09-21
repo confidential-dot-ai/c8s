@@ -160,7 +160,7 @@ func TestInboundHeaderAtSizeLimitAccepted(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	header := backend + "\n"
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		serverTLS:         serverTLS,
 		destHeaderTimeout: 5 * time.Second,
 		maxDestHeaderSize: len(header),
@@ -217,7 +217,7 @@ func TestOutboundDialFailureClassifiedAsTLSError(t *testing.T) {
 	m := testMetrics()
 	var logBuf syncBuffer
 	_, clientTLS := testTLSConfigs(t)
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      "1.1.1.1",
 		inboundPort: 1, // refused: nothing listens on port 1
 		clientTLS:   clientTLS,
@@ -287,7 +287,7 @@ func startProxyRun(t *testing.T, mutate func(*Proxy)) *proxyRunFixture {
 	logBuf := &syncBuffer{}
 	ready := make(chan struct{})
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		outboundAddr: outLn.Addr().String(),
 		inboundAddr:  inLn.Addr().String(),
 		outboundLn:   outLn,
@@ -556,7 +556,7 @@ func TestServeConnectionLimits(t *testing.T) {
 				sem = make(chan struct{}, tc.sem)
 			}
 			ready := make(chan struct{})
-			p := &Proxy{
+			p := &Proxy{delivery: hostNetworkDelivery{},
 				outboundAddr: outLn.Addr().String(),
 				inboundAddr:  inLn.Addr().String(),
 				outboundLn:   outLn,

@@ -47,12 +47,12 @@ type Proxy struct {
 	nodeIP      string
 	inboundPort int
 	resolver    Resolver
+	delivery    localDelivery
 	origDstFunc func(net.Conn) (string, error)
 	logger      *slog.Logger
 	metrics     *metrics
 	accessLog   bool
 
-	dialTimeout       time.Duration
 	tlsDialTimeout    time.Duration
 	destHeaderTimeout time.Duration
 	drainTimeout      time.Duration
@@ -516,10 +516,7 @@ func (p *Proxy) handleInbound(ctx context.Context, downstream net.Conn) {
 	}
 
 	pipeStart := time.Now()
-	upstream, err := (&net.Dialer{
-		Timeout:   durOrDefault(p.dialTimeout, 5*time.Second),
-		KeepAlive: durOrDefault(p.keepAlive, 30*time.Second),
-	}).DialContext(ctx, "tcp", dst)
+	upstream, err := p.delivery.DialContext(ctx, dst)
 	if err != nil {
 		p.metrics.dialFailures.Inc()
 		log.Warn("local pod dial failed", "dst", dst, "error", err)

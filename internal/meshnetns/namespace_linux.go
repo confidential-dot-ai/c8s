@@ -21,6 +21,8 @@ import (
 
 const MeshMark = 0xc850
 
+var ErrNotNetworkNamespace = errors.New("not a mounted network namespace")
+
 type Namespace struct {
 	mu sync.Mutex
 	fd netns.NsHandle
@@ -44,14 +46,14 @@ func validatePodNamespace(fd int) error {
 		return err
 	}
 	if fs.Type != unix.NSFS_MAGIC {
-		return errors.New("pod namespace is not an nsfs mount")
+		return ErrNotNetworkNamespace
 	}
 	kind, err := unix.IoctlRetInt(fd, unix.NS_GET_NSTYPE)
 	if err != nil {
 		return err
 	}
 	if kind != unix.CLONE_NEWNET {
-		return errors.New("pod namespace is not a network namespace")
+		return ErrNotNetworkNamespace
 	}
 	host, err := netns.GetFromPath("/proc/self/ns/net")
 	if err != nil {
@@ -169,7 +171,12 @@ func (n *Namespace) ListenTCP(ctx context.Context, addr netip.AddrPort) (net.Lis
 	return listener, err
 }
 
-func (n *Namespace) DialLocal(ctx context.Context, dest netip.AddrPort) (net.Conn, error) {
+func (n *Namespace) DialLocal(ctx context.Context, dest netip.AddrPort, keepAlive time.Duration) (net.Conn, error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	if !validPodAddress(dest.Addr()) || dest.Port() == 0 {
 		return nil, errors.New("local delivery requires a pod address and nonzero port")
 	}
@@ -182,7 +189,7 @@ func (n *Namespace) DialLocal(ctx context.Context, dest netip.AddrPort) (net.Con
 		if !owns {
 			return errors.New("destination is not owned by pod namespace")
 		}
-		dialer := net.Dialer{Timeout: 5 * time.Second, Control: confineLocalSocket}
+		dialer := net.Dialer{KeepAlive: keepAlive, Control: confineLocalSocket}
 		conn, err = dialer.DialContext(ctx, tcpNetwork(dest.Addr()), dest.String())
 		return err
 	})

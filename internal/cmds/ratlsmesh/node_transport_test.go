@@ -129,7 +129,7 @@ func startTransportProxy(t *testing.T, p *Proxy) {
 
 func transportProxy(t *testing.T, serverTLS, clientTLS *tls.Config) *Proxy {
 	t.Helper()
-	return &Proxy{
+	return &Proxy{delivery: hostNetworkDelivery{},
 		outboundLn: transportListener(t), inboundLn: transportListener(t),
 		serverTLS: serverTLS, clientTLS: clientTLS,
 		resolver: transportResolver{localPodIP: "127.0.0.1"},

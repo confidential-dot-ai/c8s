@@ -61,7 +61,7 @@ func TestRejectsInvalidAddressesBeforeEnteringNamespace(t *testing.T) {
 			if _, err := ns.OwnsAddress(ip); err == nil || errors.Is(err, os.ErrClosed) {
 				t.Fatalf("address was not rejected before namespace entry: %v", err)
 			}
-			if _, err := ns.DialLocal(context.Background(), netip.AddrPortFrom(ip, 80)); err == nil || errors.Is(err, os.ErrClosed) {
+			if _, err := ns.DialLocal(context.Background(), netip.AddrPortFrom(ip, 80), 30*time.Second); err == nil || errors.Is(err, os.ErrClosed) {
 				t.Fatalf("dial address was not rejected: %v", err)
 			}
 		})
@@ -116,12 +116,12 @@ func TestNamespaceLocalDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	conn, err := ns.DialLocal(ctx, netip.MustParseAddrPort(listener.Addr().String()))
+	conn, err := ns.DialLocal(ctx, netip.MustParseAddrPort(listener.Addr().String()), 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	conn.Close()
-	if _, err := ns.DialLocal(ctx, netip.MustParseAddrPort("10.123.0.3:80")); err == nil {
+	if _, err := ns.DialLocal(ctx, netip.MustParseAddrPort("10.123.0.3:80"), 30*time.Second); err == nil {
 		t.Fatal("delivered to an address outside the namespace")
 	}
 	if err := ns.Close(); err != nil {

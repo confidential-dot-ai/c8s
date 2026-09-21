@@ -218,7 +218,7 @@ func TestInboundHandler(t *testing.T) {
 	backend := startBackend(t, "backend")
 	serverTLS, clientTLS := testTLSConfigs(t)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		inboundAddr: "127.0.0.1:0",
 		serverTLS:   serverTLS,
 		resolver:    &staticResolver{nodeIP: "127.0.0.1"},
@@ -283,7 +283,7 @@ func TestOutboundLocal(t *testing.T) {
 	var inboundPort int
 	fmt.Sscanf(inboundPortStr, "%d", &inboundPort)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      host,
 		inboundPort: inboundPort,
 		serverTLS:   serverTLS,
@@ -359,7 +359,7 @@ func TestEndToEnd(t *testing.T) {
 	node2TLSLn := tls.NewListener(node2Ln, serverTLS)
 	_, node2PortStr, _ := net.SplitHostPort(node2Ln.Addr().String())
 
-	node2 := &Proxy{logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
+	node2 := &Proxy{delivery: hostNetworkDelivery{}, logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
 	ctx := t.Context()
 
 	go func() {
@@ -376,7 +376,7 @@ func TestEndToEnd(t *testing.T) {
 	var node2Port int
 	fmt.Sscanf(node2PortStr, "%d", &node2Port)
 
-	node1 := &Proxy{
+	node1 := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      "1.1.1.1", // Different from backend host → treated as remote.
 		inboundPort: node2Port,
 		clientTLS:   clientTLS,
@@ -436,7 +436,7 @@ func TestConcurrentConnections(t *testing.T) {
 	defer inboundLn.Close()
 	tlsLn := tls.NewListener(inboundLn, serverTLS)
 
-	p := &Proxy{logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
+	p := &Proxy{delivery: hostNetworkDelivery{}, logger: testLogger(), metrics: testMetrics(), resolver: &staticResolver{nodeIP: "127.0.0.1"}}
 	ctx := t.Context()
 
 	go func() {
@@ -492,7 +492,7 @@ func TestConcurrentConnections(t *testing.T) {
 func TestDestHeaderTimeout(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		inboundAddr:       "127.0.0.1:0",
 		serverTLS:         serverTLS,
 		destHeaderTimeout: 200 * time.Millisecond,
@@ -539,7 +539,7 @@ func TestDestHeaderTimeout(t *testing.T) {
 func TestInvalidDestination(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		inboundAddr:       "127.0.0.1:0",
 		serverTLS:         serverTLS,
 		destHeaderTimeout: 5 * time.Second,
@@ -588,7 +588,7 @@ func TestGracefulDrain(t *testing.T) {
 	backend := startBackend(t, "drain")
 	serverTLS, clientTLS := testTLSConfigs(t)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		inboundAddr:  "127.0.0.1:0",
 		serverTLS:    serverTLS,
 		drainTimeout: 5 * time.Second,
@@ -685,7 +685,7 @@ func TestStaticResolver(t *testing.T) {
 
 func TestIPv6RemoteAddr(t *testing.T) {
 	// Verify that IPv6 node IPs produce valid host:port addresses.
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		inboundPort: 15006,
 		nodeIP:      "2001:db8::1",
 		resolver:    &staticResolver{nodeIP: "1.1.1.1"}, // force remote path
@@ -717,7 +717,7 @@ func TestConnectionLimit(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		serverTLS: serverTLS,
 		resolver:  &staticResolver{nodeIP: "127.0.0.1"},
 		logger:    testLogger(),
@@ -830,7 +830,7 @@ func TestIdleTimeout(t *testing.T) {
 
 func TestRouteErrorMetrics(t *testing.T) {
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      "10.0.0.1",
 		inboundPort: 15006,
 		resolver:    &staticResolver{nodeIP: "10.0.0.1"},
@@ -872,7 +872,7 @@ func TestRouteErrorMetrics(t *testing.T) {
 
 func TestOutboundRejectsNonPodOriginalDestination(t *testing.T) {
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      "10.0.0.1",
 		inboundPort: 15006,
 		resolver:    &rejectResolver{},
@@ -926,7 +926,7 @@ func TestDestHeaderReadErrorMetrics(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		serverTLS:         serverTLS,
 		destHeaderTimeout: 5 * time.Second,
 		resolver:          &staticResolver{nodeIP: "127.0.0.1"},
@@ -972,7 +972,7 @@ func TestReadinessOnShutdown(t *testing.T) {
 	m := testMetrics()
 	health := newHealthServer(m, nil, nil, 10, 5*time.Second, 10*time.Second)
 
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		outboundAddr: "127.0.0.1:0",
 		inboundAddr:  "127.0.0.1:0",
 		logger:       testLogger(),
@@ -1003,7 +1003,7 @@ func TestReadinessOnShutdown(t *testing.T) {
 // error instead of dropping it.
 func TestRunReturnsListenError(t *testing.T) {
 	held := bindLoopback(t)
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		outboundAddr: held.Addr().String(),
 		inboundAddr:  "127.0.0.1:0",
 		logger:       testLogger(),
@@ -1031,7 +1031,7 @@ func TestMetricsAccounting(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		serverTLS: serverTLS,
 		resolver:  &staticResolver{nodeIP: "127.0.0.1"},
 		logger:    testLogger(),
@@ -1080,12 +1080,12 @@ func TestInboundDialFailureMetrics(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
-		serverTLS:   serverTLS,
-		resolver:    &staticResolver{nodeIP: "127.0.0.1"},
-		dialTimeout: 100 * time.Millisecond,
-		logger:      testLogger(),
-		metrics:     m,
+	p := &Proxy{delivery: hostNetworkDelivery{timeout: 100 * time.Millisecond},
+		serverTLS: serverTLS,
+		resolver:  &staticResolver{nodeIP: "127.0.0.1"},
+
+		logger:  testLogger(),
+		metrics: m,
 	}
 
 	ctx := t.Context()
@@ -1124,7 +1124,7 @@ func TestRATLSDialFailureMetrics(t *testing.T) {
 	_, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		nodeIP:      "1.1.1.1",
 		inboundPort: 15006,
 		clientTLS:   clientTLS,
@@ -1176,7 +1176,7 @@ func TestRATLSDialFailureMetrics(t *testing.T) {
 func TestAcceptLoopBackoff(t *testing.T) {
 	m := testMetrics()
 	ready := make(chan struct{})
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		outboundAddr: "127.0.0.1:0",
 		inboundAddr:  "127.0.0.1:0",
 		logger:       testLogger(),
@@ -1226,7 +1226,7 @@ func TestInboundDestRejected(t *testing.T) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
-	p := &Proxy{
+	p := &Proxy{delivery: hostNetworkDelivery{},
 		serverTLS:         serverTLS,
 		destHeaderTimeout: 5 * time.Second,
 		resolver:          &rejectResolver{},
