@@ -34,13 +34,6 @@ type podNamespaceDelivery struct {
 	keepAlive time.Duration
 }
 
-func newLocalDelivery(directory string, timeout, keepAlive time.Duration) localDelivery {
-	if directory == "" {
-		return hostNetworkDelivery{timeout: timeout, keepAlive: keepAlive}
-	}
-	return podNamespaceDelivery{directory: directory, timeout: timeout, keepAlive: keepAlive}
-}
-
 func (d podNamespaceDelivery) DialContext(ctx context.Context, destination string) (net.Conn, error) {
 	address, err := netip.ParseAddrPort(destination)
 	if err != nil || address.Port() == 0 || !address.Addr().IsGlobalUnicast() {
@@ -82,11 +75,12 @@ func (d podNamespaceDelivery) findNamespace(ctx context.Context, address netip.A
 			return match, fmt.Errorf("open runtime namespace %q: %w", entry.Name(), openErr)
 		}
 		owns, inspectErr := namespace.OwnsAddress(address)
-		if inspectErr != nil || !owns {
+		if inspectErr != nil {
 			namespace.Close()
-			if inspectErr != nil {
-				return match, fmt.Errorf("inspect runtime namespace: %w", inspectErr)
-			}
+			return match, fmt.Errorf("inspect runtime namespace: %w", inspectErr)
+		}
+		if !owns {
+			namespace.Close()
 			continue
 		}
 		if match != nil {

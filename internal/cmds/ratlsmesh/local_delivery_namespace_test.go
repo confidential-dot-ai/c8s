@@ -37,7 +37,7 @@ func TestPodNamespaceDeliveryConnectsToPodInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	delivery := newLocalDelivery(directory, time.Second, 43*time.Second)
+	delivery := podNamespaceDelivery{directory: directory, timeout: time.Second, keepAlive: 43 * time.Second}
 	conn, err := delivery.DialContext(ctx, listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)

@@ -12,7 +12,7 @@ import (
 )
 
 func TestNamespaceDeliveryRejectsMissingLocalDestination(t *testing.T) {
-	delivery := newLocalDelivery(t.TempDir(), time.Second, time.Second)
+	delivery := podNamespaceDelivery{directory: t.TempDir(), timeout: time.Second, keepAlive: time.Second}
 	for _, destination := range []string{"10.52.0.2:8080", "[fd00::2]:8080", "127.0.0.1:8080", "example.com:8080", "10.52.0.2:0", "bad"} {
 		t.Run(destination, func(t *testing.T) {
 			conn, err := delivery.DialContext(t.Context(), destination)
