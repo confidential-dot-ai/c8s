@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/refvalues"
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
@@ -264,22 +263,12 @@ func (cfg pullConfig) cdsPins() (ratls.Pins, error) {
 	if err := cfg.validatePolicyInputs(); err != nil {
 		return ratls.Pins{}, err
 	}
-	if cfg.CDSMeasurementsConfig != "" {
-		set, err := refvalues.Load(cfg.CDSMeasurementsConfig)
-		if err != nil {
-			return ratls.Pins{}, err
-		}
-		return ratls.Pins(set.Policy()), nil
-	}
-	measurements, err := refvalues.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	policy, err := (cmdsutil.ImagePolicySource{File: cfg.CDSMeasurementsConfig}).Load(
+		cmdsutil.MeasurementPins{Measurements: cfg.CDSMeasurements, RTMRs: cfg.CDSRTMRs, Prefix: "cds-"})
 	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("parse CDS measurements: %w", err)
+		return ratls.Pins{}, fmt.Errorf("allowlist.pull: %w", err)
 	}
-	rtmrs, err := refvalues.ParseRTMRPins(cfg.CDSRTMRs)
-	if err != nil {
-		return ratls.Pins{}, fmt.Errorf("parse CDS RTMR pins: %w", err)
-	}
-	return ratls.Pins{Measurements: measurements, RTMRs: rtmrs}, nil
+	return ratls.Pins(policy), nil
 }
 
 type pullArgs struct {

@@ -492,9 +492,13 @@ files; `--cds-image-policy-file` selects the CDS-only policy for `ratls-mesh`.
 image has identical RTMR pins and no `approver_key`. The Helm NRI installer
 configures CDS trust through a digest list and one shared register set, so
 these commands reject policies whose per-image register or launch-key
-constraints would be lost. Operator-key-bound policies require the baked node
-launch flow. CDS, mesh, and workload helpers that receive a complete image
-policy enforce its per-image tuples directly.
+constraints would be lost. Direct Helm installs with `cds.measurementsConfig`
+must also supply equivalent `cds.measurements` and `cds.rtmrs`; the chart
+rejects missing or mismatched pins while its NRI installer is enabled.
+Operator-key-bound policies require the baked node launch flow, which manages
+NRI separately with `nriImagePolicy.enabled=false`. CDS, mesh, and workload
+helpers that receive a complete image policy enforce its per-image tuples
+directly.
 
 ### Trust gate: `c8s get-kubeconfig`
 

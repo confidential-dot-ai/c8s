@@ -608,7 +608,7 @@ func TestValidateRejectsBadCDSRTMRs(t *testing.T) {
 func TestAllowlistPullHTTPClientRejectsBadRTMRs(t *testing.T) {
 	cfg := validConfig().Allowlist.Pull
 	cfg.CDSRTMRs = []string{"1=zz"}
-	if _, err := allowlistPullHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "RTMR") {
+	if _, err := allowlistPullHTTPClient(cfg); err == nil || !strings.Contains(err.Error(), "--cds-rtmrs") {
 		t.Fatalf("err = %v, want an RTMR parse failure", err)
 	}
 }
