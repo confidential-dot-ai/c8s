@@ -62,7 +62,7 @@ ep=${url##*/}
 # filename instead of the body and every request assertion would pass
 # vacuously.
 case "$data" in
-    @*) data=$(cat "${data#@}") ;;
+    @?*) data=$(cat "${data#@}") ;;
 esac
 [ -n "$data" ] && printf '%s' "$data" > "$API_DIR/$ep.req"
 [ -e "$API_DIR/$ep.code" ] || { echo "curl: (7) Failed to connect" >&2; exit 7; }
