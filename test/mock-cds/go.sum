@@ -1,3 +1,5 @@
+github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
+github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/confidential-dot-ai/attestation-go v0.7.2 h1:T+dEc8nMSBP/2rXtvoKHRqf/haGzcBs6T2KAlPgI1fg=
 github.com/confidential-dot-ai/attestation-go v0.7.2/go.mod h1:Gq3OlB5c1PxtRnfkG/CORHus9V2g1wUphcV43E2JDEA=
 github.com/fxamacker/cbor/v2 v2.9.4 h1:xwjVlxEMR3S605oUlgBjKLTTeGFciYPGYCtF/35LKGo=

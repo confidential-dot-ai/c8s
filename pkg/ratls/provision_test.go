@@ -249,7 +249,7 @@ func TestBackgroundProvisionDropsResultWhenNewerCertLanded(t *testing.T) {
 	rotationDone := make(chan struct{})
 	go func() {
 		defer close(rotationDone)
-		s.backgroundProvision(provider, spawnRotateAt)
+		s.backgroundProvision(context.Background(), provider, 0)
 	}()
 
 	<-provider.entered
@@ -258,6 +258,7 @@ func TestBackgroundProvisionDropsResultWhenNewerCertLanded(t *testing.T) {
 	s.mu.Lock()
 	s.cert = newer
 	s.rotateAt = time.Now().Add(30 * time.Minute)
+	s.revision++
 	s.mu.Unlock()
 
 	close(provider.release)
@@ -368,10 +369,10 @@ func TestSyncProvisionSuccessClearsTheNegativeCache(t *testing.T) {
 	working := &mockProvider{cert: fresh, ttl: time.Hour}
 	s.mu.Lock()
 	s.provider = working
-	spawnRotateAt := s.rotateAt
+	revision := s.revision
 	s.mu.Unlock()
 	s.rotating.Store(true)
-	s.backgroundProvision(working, spawnRotateAt)
+	s.backgroundProvision(context.Background(), working, revision)
 
 	// Back into the fail-closed path with a provider that works.
 	s.mu.Lock()
